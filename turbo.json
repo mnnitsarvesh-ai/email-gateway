@@ -53,7 +53,8 @@
         "$TURBO_ROOT$/tooling/**",
         "$TURBO_ROOT$/{services,packages}/*/{package.json,tsconfig*.json}",
         "!$TURBO_ROOT$/tooling/**/node_modules/**",
-        "!$TURBO_ROOT$/tooling/**/dist/**"
+        "!$TURBO_ROOT$/tooling/**/dist/**",
+        "!$TURBO_ROOT$/tooling/**/.turbo/**"
       ]
     }
   }
