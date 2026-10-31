@@ -177,3 +177,7 @@ pnpm test:e2e                                       # no-op placeholder, uncache
 **AC-17 exemption.** `pnpm turbo run test --filter=ingest-service` names a not-yet-existing service and is exempt from the command-resolution test.
 
 **AC-19 grep result.** No script, `.github/`, `tooling/` or `scripts/` file invokes the forbidden commands. The only files that name them are the detection test sources in `tooling/repo-checks/test/`, which are excluded from their own scan.
+
+## QA report
+
+[docs/qa/001-report.md](../qa/001-report.md): PASS WITH ISSUES (1 high: sibling-service relative import not blocked; AC-11/12/15c partly CI-only).

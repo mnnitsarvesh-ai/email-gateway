@@ -13,6 +13,14 @@ interface PkgJson {
   packageManager?: string;
 }
 
+interface WfStep {
+  uses?: string;
+  run?: string;
+  if?: string;
+  with?: Record<string, unknown>;
+  'continue-on-error'?: unknown;
+}
+
 const rootPkg = readJson('package.json') as PkgJson;
 
 function workspaceDirs(): string[] {
@@ -29,7 +37,23 @@ function workspaceDirs(): string[] {
 }
 
 describe('AC-2 engines', () => {
-  it('pins node >=24 <25 with engine-strict', () => {
+  it('AC-2: pnpm install fails with an engines error on a Node outside >=24 <25', () => {
+    // pnpm's `node-version` setting overrides the Node version used for the engines check, so this
+    // is deterministic on any host Node. Real root package.json and .npmrc, copied to a scratch dir.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'eng-'));
+    try {
+      fs.copyFileSync(path.join(repoRoot, 'package.json'), path.join(dir, 'package.json'));
+      fs.copyFileSync(path.join(repoRoot, '.npmrc'), path.join(dir, '.npmrc'));
+      for (const v of ['22.0.0', '25.0.0', '23.9.0']) {
+        const r = spawnSync('pnpm', ['install', '--offline', `--config.node-version=${v}`], { cwd: dir, encoding: 'utf8' });
+        expect(r.status, `node ${v}`).not.toBe(0);
+        expect(r.stdout + r.stderr, `node ${v}`).toContain('ERR_PNPM_UNSUPPORTED_ENGINE');
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  it('AC-2: pins node >=24 <25 with engine-strict', () => {
     expect(rootPkg.engines?.['node']).toBe('>=24 <25');
     expect(read('.npmrc')).toMatch(/^engine-strict=true$/m);
     expect(read('.node-version').trim()).toBe('24');
@@ -38,7 +62,7 @@ describe('AC-2 engines', () => {
 
 describe('AC-3 tsconfig', () => {
   const base = (readJson('tsconfig.base.json') as { compilerOptions: Record<string, unknown> }).compilerOptions;
-  it('base has the strict options', () => {
+  it('AC-3: base has the strict options', () => {
     expect(base).toMatchObject({
       strict: true,
       noUncheckedIndexedAccess: true,
@@ -50,7 +74,7 @@ describe('AC-3 tsconfig', () => {
       moduleResolution: 'NodeNext',
     });
   });
-  it('every workspace tsconfig*.json (and fixtures) extends the base', () => {
+  it('AC-3: every workspace tsconfig*.json (and fixtures) extends the base', () => {
     const files = [
       ...workspaceDirs().flatMap((d) => walk(d)),
     ].filter((f) => /(^|\/)tsconfig[^/]*\.json$/.test(f));
@@ -76,34 +100,43 @@ describe('AC-11 / AC-13 CI workflow', () => {
   const raw = read('.github/workflows/ci.yml');
   const wf = parse(raw) as {
     permissions?: Record<string, string>;
-    jobs: Record<string, { steps: { uses?: string; run?: string; with?: Record<string, string> }[]; permissions?: unknown }>;
+    jobs: Record<string, { steps: WfStep[]; permissions?: unknown }>;
   };
-  it('defines verify, secrets, terraform', () => {
+  it('AC-11: defines verify, secrets, terraform with pinned Node/pnpm and cached store and .turbo', () => {
+    const steps = (job: string): WfStep[] => wf.jobs[job]?.steps ?? [];
     expect(Object.keys(wf.jobs)).toEqual(expect.arrayContaining(['verify', 'secrets', 'terraform']));
-    const verify = JSON.stringify(wf.jobs['verify']);
-    expect(verify).toContain('pnpm install --frozen-lockfile');
-    expect(verify).toContain('pnpm turbo run build lint typecheck test');
-    expect(verify).toContain('.node-version');
-    expect(verify).toContain('pnpm/action-setup');
-    expect(verify).toContain('.turbo');
-    expect(verify).toContain('cache');
     expect(JSON.stringify(wf.jobs['secrets'])).toContain('.gitleaks.toml');
-    const tf = JSON.stringify(wf.jobs['terraform']);
-    expect(tf).toContain('terraform fmt -check -recursive infra/terraform');
-    expect(tf).toContain('infra/');
+    const setupNode = steps('verify').find((s) => s.uses?.startsWith('actions/setup-node@'));
+    expect(setupNode?.with?.['node-version-file']).toBe('.node-version');
+    expect(setupNode?.with?.['cache']).toBe('pnpm');
+    expect(steps('verify').some((s) => s.uses?.startsWith('pnpm/action-setup@'))).toBe(true);
+    const turboCache = steps('verify').find((s) => s.uses?.startsWith('actions/cache@'));
+    expect(turboCache?.with?.['path']).toBe('.turbo');
+    const runs = steps('verify').map((s) => s.run);
+    expect(runs).toContain('pnpm install --frozen-lockfile');
+    expect(runs).toContain('pnpm turbo run build lint typecheck test');
+    // gitleaks job must fail on any finding: no continue-on-error anywhere, no zero exit-code override.
+    const gl = JSON.stringify(wf.jobs['secrets']);
+    expect(gl).not.toMatch(/continue-on-error|--exit-code[ =]0|\|\|\s*true/);
+    expect(gl).toMatch(/gitleaks[^"]*detect/);
+    for (const j of Object.values(wf.jobs)) for (const s of j.steps) expect(s['continue-on-error']).toBeUndefined();
+    // terraform job: fmt step is conditional on an infra/ change check.
+    const fmt = steps('terraform').find((s) => s.run?.includes('terraform fmt -check -recursive infra/terraform'));
+    expect(fmt?.if ?? '').toContain('infra');
+    expect(JSON.stringify(steps('terraform'))).toContain('git diff --name-only');
   });
-  it('pins third-party actions to a commit SHA', () => {
+  it('AC-11: pins third-party actions to a commit SHA (design note)', () => {
     const uses = [...raw.matchAll(/uses:\s*(\S+)/g)].map((m) => m[1] ?? '');
     expect(uses.length).toBeGreaterThan(0);
     for (const u of uses) expect(u).toMatch(/@[0-9a-f]{40}$/);
   });
-  it('is actionlint clean', (ctx) => {
+  it('AC-11: workflow is actionlint clean (CI only: actionlint not installed locally)', (ctx) => {
     if (!which('actionlint')) ctx.skip();
     const r = spawnSync('actionlint', [path.join(repoRoot, '.github/workflows/ci.yml')], { encoding: 'utf8' });
     expect(r.stdout + r.stderr).toBe('');
     expect(r.status).toBe(0);
   });
-  it('has no credentials, deploy, or forbidden commands (AC-13)', () => {
+  it('AC-13: has no credentials, deploy, or forbidden commands', () => {
     expect(wf.permissions).toEqual({ contents: 'read' });
     for (const job of Object.values(wf.jobs)) expect(job.permissions).toBeUndefined();
     expect(raw).not.toContain('id-token');
@@ -122,7 +155,7 @@ describe('AC-12 gitleaks', () => {
     for (let i = 0; i < 16; i++) s += alphabet[Math.floor(Math.random() * alphabet.length)] ?? 'A';
     return `AKIA${s.replace(/EXAMPLE/g, 'ZZZZZZZ')}`;
   };
-  it('detects a generated fake secret outside version control', (ctx) => {
+  it('AC-12: detects a generated fake secret outside version control (CI only: gitleaks not installed locally)', (ctx) => {
     if (!which('gitleaks')) ctx.skip();
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gl-'));
     try {
@@ -133,7 +166,7 @@ describe('AC-12 gitleaks', () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
-  it('the working tree (incl. .env.example) is clean', (ctx) => {
+  it('AC-12: the working tree (incl. .env.example) is clean (CI only: gitleaks not installed locally)', (ctx) => {
     if (!which('gitleaks')) ctx.skip();
     const r = spawnSync('gitleaks', ['detect', '--no-git', '--source', repoRoot, '--config', path.join(repoRoot, '.gitleaks.toml')], {
       encoding: 'utf8',
@@ -144,19 +177,19 @@ describe('AC-12 gitleaks', () => {
 
 describe('AC-14 / AC-15 ignore rules and tracked files', () => {
   const ignored = ['.env', '.env.local', 'x.pem', 'x.key', 'a.tfstate', 'a.tfstate.backup', '.terraform/x', 'x.tfvars', 'test/e2e/.artifacts/x'];
-  it.each(ignored)('%s is ignored', (p) => {
+  it.each(ignored)('AC-14: %s is ignored', (p) => {
     expect(git('check-ignore', '-q', p).status).toBe(0);
   });
-  it.each(['x.tfvars.example', '.env.example'])('%s is not ignored', (p) => {
+  it.each(['x.tfvars.example', '.env.example'])('AC-14: %s is not ignored', (p) => {
     expect(git('check-ignore', '-q', p).status).toBe(1);
   });
-  it('.env.example is tracked, and no secrets files are tracked', () => {
+  it('AC-15a/b: .env.example is tracked, and no secrets files are tracked', () => {
     expect(git('ls-files', '.env.example').stdout.trim()).toBe('.env.example');
     const tracked = git('ls-files').stdout.split('\n').filter(Boolean);
     const bad = tracked.filter((f) => /(^|\/)\.env$|(^|\/)\.env\.local$|\.pem$|\.key$|\.tfstate/.test(f));
     expect(bad).toEqual([]);
   });
-  it('dbmate (direct) fails naming DATABASE_URL without a default host', () => {
+  it('AC-15d: dbmate (direct) fails naming DATABASE_URL without a default host', () => {
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'dbm-'));
     try {
       const r = spawnSync(path.join(repoRoot, 'node_modules', '.bin', 'dbmate'), ['--migrations-dir', 'db/migrations', 'up'], {
@@ -170,7 +203,7 @@ describe('AC-14 / AC-15 ignore rules and tracked files', () => {
       fs.rmSync(cwd, { recursive: true, force: true });
     }
   });
-  it('pnpm dbmate up fails naming DATABASE_URL', (ctx) => {
+  it('AC-15d: pnpm dbmate up fails naming DATABASE_URL', (ctx) => {
     if (fs.existsSync(path.join(repoRoot, '.env'))) ctx.skip();
     const r = spawnSync('pnpm', ['dbmate', 'up'], { cwd: repoRoot, env: cleanDbEnv(), encoding: 'utf8' });
     expect(r.status).not.toBe(0);
@@ -184,11 +217,11 @@ describe('AC-16 test:e2e is opt-in and uncached', () => {
     expect(r.status, r.stderr).toBe(0);
     return JSON.parse(r.stdout) as ReturnType<typeof dry>;
   }
-  it('default pipeline has no test:e2e task', () => {
+  it('AC-16: default pipeline has no test:e2e task', () => {
     const ids = dry(['build', 'lint', 'typecheck', 'test']).tasks.map((t) => t.taskId);
     expect(ids.filter((i) => i.endsWith('#test:e2e'))).toEqual([]);
   });
-  it('test:e2e has cache disabled', () => {
+  it('AC-16: test:e2e has cache disabled', () => {
     const tasks = dry(['test:e2e']).tasks;
     expect(tasks.length).toBeGreaterThan(0);
     for (const t of tasks) expect(t.resolvedTaskDefinition.cache).toBe(false);
@@ -199,7 +232,7 @@ describe('AC-17 / AC-20 CLAUDE.md', () => {
   const md = read('CLAUDE.md');
   // Exempt: names a service that does not exist yet.
   const EXEMPT = /--filter=ingest-service/;
-  it('every pnpm/turbo command in "Commands" resolves', () => {
+  it('AC-17: every pnpm/turbo command in "Commands" resolves', () => {
     const section = /## Commands[\s\S]*?```sh\n([\s\S]*?)```/.exec(md)?.[1] ?? '';
     const lines = section.split('\n').map((l) => l.replace(/#.*$/, '').trim()).filter((l) => /^pnpm\b/.test(l));
     expect(lines.length).toBeGreaterThan(0);
@@ -217,7 +250,7 @@ describe('AC-17 / AC-20 CLAUDE.md', () => {
       }
     }
   });
-  it('Repo layout lists tooling/ and test/e2e', () => {
+  it('AC-20: Repo layout lists tooling/ and test/e2e', () => {
     const layout = /## Repo layout[\s\S]*?(?=\n## )/.exec(md)?.[0] ?? '';
     expect(layout).toContain('tooling/');
     expect(layout).toContain('lint-fixtures');
@@ -227,7 +260,7 @@ describe('AC-17 / AC-20 CLAUDE.md', () => {
 });
 
 describe('AC-18 pins', () => {
-  it('exact pnpm 10.x.y and turbo 2.x.y, lockfile present', () => {
+  it('AC-18: exact pnpm 10.x.y and turbo 2.x.y, lockfile present', () => {
     expect(rootPkg.packageManager).toMatch(/^pnpm@10\.\d+\.\d+$/);
     expect(rootPkg.devDependencies?.['turbo']).toMatch(/^2\.\d+\.\d+$/);
     expect(fs.existsSync(path.join(repoRoot, 'pnpm-lock.yaml'))).toBe(true);
@@ -236,7 +269,7 @@ describe('AC-18 pins', () => {
 });
 
 describe('AC-19 forbidden commands', () => {
-  it('no script or tooling file invokes terraform apply, kubectl, aws CLI or git push', () => {
+  it('AC-19: no script or tooling file invokes terraform apply, kubectl, aws CLI or git push', () => {
     const files = ['.github', 'tooling', 'scripts'].flatMap(walk).filter((f) => !/\.(png|jpg|lock)$/.test(f))
       // This directory necessarily names the forbidden commands in order to detect them.
       .filter((f) => !f.startsWith('tooling/repo-checks/test/'));
@@ -251,5 +284,22 @@ describe('AC-19 forbidden commands', () => {
       for (const { label, re } of FORBIDDEN) if (re.test(scripts)) hits.push(`${p}: ${label}`);
     }
     expect(hits).toEqual([]);
+  });
+});
+
+describe('AC-9 / AC-4 / AC-10 wiring', () => {
+  it('AC-9: the workspace guard is wired into the root-run lint (so CI runs it)', () => {
+    const guardPkg = readJson('tooling/workspace-guard/package.json') as PkgJson;
+    expect(guardPkg.scripts?.['lint']).toMatch(/src\/cli\.ts/);
+    const turbo = readJson('turbo.json') as { tasks: Record<string, { inputs?: string[] }> };
+    expect(turbo.tasks['@esg/workspace-guard#lint']?.inputs).toEqual(
+      expect.arrayContaining(['$TURBO_ROOT$/pnpm-workspace.yaml', '$TURBO_ROOT$/{services,packages,tooling}/*/package.json']),
+    );
+  });
+  it('AC-10: bad fixtures are excluded from the normal lint and typecheck', () => {
+    expect(read('eslint.config.mjs')).toContain('tooling/lint-fixtures/fixtures/**');
+    expect(read('eslint.config.mjs')).toContain('tooling/workspace-guard/fixtures/**');
+    const tsconfig = JSON.parse(read('tooling/lint-fixtures/tsconfig.json')) as { exclude?: string[]; include?: string[] };
+    expect(JSON.stringify([tsconfig.exclude, tsconfig.include])).toContain('fixtures');
   });
 });
