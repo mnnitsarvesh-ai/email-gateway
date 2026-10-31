@@ -1,0 +1,60 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**"]
+    },
+    "typecheck": {
+      "dependsOn": ["^build"]
+    },
+    "lint": {},
+    "test": {
+      "dependsOn": ["^build"]
+    },
+    "test:e2e": {
+      "cache": false
+    },
+    "@esg/workspace-guard#lint": {
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/pnpm-workspace.yaml",
+        "$TURBO_ROOT$/{services,packages,tooling}/*/package.json",
+        "$TURBO_ROOT$/db/package.json",
+        "$TURBO_ROOT$/test/e2e/package.json"
+      ]
+    },
+    "@esg/workspace-guard#test": {
+      "dependsOn": ["^build"],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/pnpm-workspace.yaml",
+        "$TURBO_ROOT$/{services,packages,tooling}/*/package.json",
+        "$TURBO_ROOT$/db/package.json",
+        "$TURBO_ROOT$/test/e2e/package.json"
+      ]
+    },
+    "@esg/repo-checks#test": {
+      "dependsOn": ["^build"],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/package.json",
+        "$TURBO_ROOT$/turbo.json",
+        "$TURBO_ROOT$/CLAUDE.md",
+        "$TURBO_ROOT$/.gitignore",
+        "$TURBO_ROOT$/.gitleaks.toml",
+        "$TURBO_ROOT$/.env.example",
+        "$TURBO_ROOT$/.npmrc",
+        "$TURBO_ROOT$/.node-version",
+        "$TURBO_ROOT$/tsconfig.base.json",
+        "$TURBO_ROOT$/pnpm-workspace.yaml",
+        "$TURBO_ROOT$/.github/**",
+        "$TURBO_ROOT$/scripts/**",
+        "$TURBO_ROOT$/tooling/**",
+        "$TURBO_ROOT$/{services,packages}/*/{package.json,tsconfig*.json}",
+        "!$TURBO_ROOT$/tooling/**/node_modules/**",
+        "!$TURBO_ROOT$/tooling/**/dist/**"
+      ]
+    }
+  }
+}

@@ -1,0 +1,16 @@
+packages:
+  - services/*
+  - packages/*
+  - db
+  - test/e2e
+  - tooling/*
+
+# Single source of truth for shared dev-tool versions (exact pins, no ranges).
+catalog:
+  "@eslint/js": 10.0.1
+  "@types/node": 24.19.2
+  eslint: 10.14.0
+  typescript: 6.0.3
+  typescript-eslint: 8.72.1
+  vitest: 4.1.12
+  yaml: 2.8.1
