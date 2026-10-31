@@ -133,3 +133,47 @@ AC-20 Given `CLAUDE.md` "Repo layout", when inspected, then it lists `tooling/` 
    - This item does not block implementation, so the task is marked `ready`; it only limits how AC-15 is verified.
 3. **Pinned versions.** *Recommendation:* the latest pnpm 10.x and Turborepo 2.x at implementation time, recorded as exact versions in `package.json` and upgraded through Renovate or Dependabot later.
    **Proceeding with default — pending Sarvesh confirmation.** The implementer records the exact versions chosen in the Implementation summary.
+
+## Implementation summary
+
+Implemented by devops-engineer on branch `task/001` (local commits only).
+
+**Versions chosen (exact pins).** pnpm 10.34.9 (`packageManager`; pnpm 12 exists but the task requires 10.x), turbo 2.11.10, dbmate 2.37.0, Node 24 (verified with 24.22.2), eslint 10.14.0, @eslint/js 10.0.1, typescript-eslint 8.72.1, typescript 6.0.3, vitest 4.1.12, @types/node 24.19.2, yaml 2.8.1. Dev-tool versions are single-sourced in the `catalog:` block of `pnpm-workspace.yaml`. TypeScript is 6.0.3, not 7.x, because typescript-eslint 8.72.1 peers on `typescript <6.1.0`.
+
+**Files.**
+- Root: `package.json`, `.npmrc`, `.node-version`, `pnpm-workspace.yaml`, `pnpm-lock.yaml`, `turbo.json`, `tsconfig.base.json`, `.gitignore`, `.gitleaks.toml`, `.env.example` (Write tool only, never read back), `eslint.config.mjs`, `db/migrations/.gitkeep`, `.github/workflows/ci.yml`.
+- `tooling/eslint-config` (`@esg/eslint-config`): `createConfig({ root })`, `CONTROL_PLANE_DB_CONSUMERS` (single definition), `index.d.mts`.
+- `tooling/workspace-guard` (`@esg/workspace-guard`): `src/guard.ts`, `src/cli.ts` (Node 24 type stripping), `fixtures/bad-repo`, vitest suite. Its `lint` script also runs the guard on the real repo.
+- `tooling/lint-fixtures` (`@esg/lint-fixtures`): bad mini-repo in `fixtures/`, `src/index.ts` (fixture package so `build` exists), no-op `test:e2e` script, vitest tests for AC-4..AC-8 and AC-10 negative control.
+- `tooling/repo-checks` (`@esg/repo-checks`, added beyond the design notes): vitest tests for AC-2, 3, 11-20.
+- `CLAUDE.md`: "Repo layout" lists `tooling/` (+ its four workspaces) and `test/e2e/`; "Commands" updated.
+
+**Deviations from design notes.**
+1. Added the `tooling/repo-checks` workspace to host repo-level AC tests (AC-2/3/11-20). Reason: they need a home that runs under `pnpm turbo run test`. It has a package-specific `#test` task with explicit `inputs` so changes to CI, CLAUDE.md, .gitignore and so on invalidate the cache.
+2. `secrets` job runs the pinned gitleaks Docker image (`ghcr.io/gitleaks/gitleaks:v8.23.1`) instead of `gitleaks/gitleaks-action`. Reason: the action needs a licence secret for organisations, which would violate AC-13 (no `secrets.*` other than `GITHUB_TOKEN`).
+3. `terraform` job path filter is a step-level `git diff` check on `infra/` (job-level filtering is not available with workflow `paths`, which would also skip the other jobs).
+4. `.gitleaks.toml` allowlists only the gitignored `node_modules`, `.turbo`, `dist` and `coverage` directories, so a `--no-git` working-tree scan stays meaningful and fast. Tracked files have no allowlist.
+5. Control-plane exclusion is built as one config object per service directory (api gets no control-plane restriction) plus a base `services/**` group, rather than `ignores` with `/**` appended to the constant. The constant is still the only list and is consumed as `services/<dir>` membership.
+6. `tooling/eslint-config/index.d.mts` is hand-written so typed test code can import the `.mjs` factory.
+7. The relative-escape regex follows the design note exactly. Known limitation (as the note says): `../../b/src/x` between sibling services is only caught when the path contains a `services|packages|tooling|db|test/e2e` segment.
+8. Root `lint` and the other root scripts delegate to `turbo run`; each workspace runs `eslint .` itself, which finds the root `eslint.config.mjs`.
+
+**How to run.** Needs Node 24 and pnpm 10.34.9 (pnpm auto-selects it from `packageManager`).
+```sh
+pnpm install --frozen-lockfile
+pnpm turbo run build lint typecheck test
+pnpm turbo run test --filter=@esg/lint-fixtures     # boundary / strictness fixtures
+pnpm test:e2e                                       # no-op placeholder, uncached
+```
+
+**Local results.** `pnpm turbo run build lint typecheck test`: 12 tasks successful. Tests: workspace-guard 2 passed, lint-fixtures 16 passed, repo-checks 26 passed and 3 skipped. A second run reports 12/12 cached, `FULL TURBO`. AC-2: `pnpm install` under Node 22 fails with `ERR_PNPM_UNSUPPORTED_ENGINE` (expected `>=24 <25`). AC-15d: `pnpm dbmate up` without `DATABASE_URL` exits non-zero naming `DATABASE_URL` (tested).
+
+**ACs that need CI to verify (binary not installed locally, nothing installed system-wide).**
+- AC-11 `actionlint` clean: test skips locally; YAML structure, SHA pins, jobs and caching are asserted locally.
+- AC-12 gitleaks fake-secret detection and clean working tree (also covers `.env.example` placeholders-only, AC-15c): both tests skip locally when `gitleaks` is missing.
+- The `terraform fmt` step itself (AC-11 `terraform` job), since `terraform` is not installed.
+- Action SHAs and the `gitleaks:v8.23.1` and `terraform_version: 1.9.8` pins were chosen from `git ls-remote` and memory, and have not been run on GitHub.
+
+**AC-17 exemption.** `pnpm turbo run test --filter=ingest-service` names a not-yet-existing service and is exempt from the command-resolution test.
+
+**AC-19 grep result.** No script, `.github/`, `tooling/` or `scripts/` file invokes the forbidden commands. The only files that name them are the detection test sources in `tooling/repo-checks/test/`, which are excluded from their own scan.
