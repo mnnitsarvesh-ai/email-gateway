@@ -1,1 +1,0 @@
-{ "name": "@bad/t1", "private": true, "devDependencies": { "x": "link:../../services/svc-b" } }

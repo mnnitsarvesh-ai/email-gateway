@@ -1,5 +1,0 @@
-{
-  "extends": "../../tsconfig.base.json",
-  "compilerOptions": { "rootDir": ".", "noEmit": true, "allowImportingTsExtensions": true, "declaration": false, "types": ["node"] },
-  "include": ["test", "vitest.config.ts"]
-}

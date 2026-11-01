@@ -1,7 +1,0 @@
-title = "email-gateway gitleaks config"
-
-[extend]
-useDefault = true
-
-# No allowlists, on purpose: any finding fails CI (hard rule 9), in tracked files and history alike.
-# Placeholders in .env.example must not look like secrets.

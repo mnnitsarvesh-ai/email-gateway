@@ -1,6 +1,0 @@
-packages:
-  - services/*
-  - packages/*
-  - tooling/*
-catalog:
-  viaCatalog: link:services/svc-b

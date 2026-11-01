@@ -1,1 +1,0 @@
-export { createRequire } from 'module';
