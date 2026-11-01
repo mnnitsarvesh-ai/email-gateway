@@ -1,5 +1,5 @@
 # QA report: 001 (monorepo scaffold, lint boundaries, CI)
-Verdict: PASS WITH ISSUES (re-tested after round 1, see the end of this report; issue 1 below is closed)
+Verdict: FAIL on AC-1 after round 2 (see "Round 2 re-test" at the end; issue 1 below and all round 1 gaps are closed)
 
 Environment: Node 24.22.2, pnpm 10.34.9, turbo 2.11.10. `gitleaks`, `actionlint` and `terraform` are not installed locally, so ACs that need them are marked CI only, not PASS.
 
@@ -110,3 +110,33 @@ Added fixtures `fixtures/services/a/src/dynamic-nonliteral.ts` and `create-requi
 
 ## CI only (unchanged)
 AC-11 actionlint and `terraform fmt`; AC-12 gitleaks (both tests); AC-15c. The new gitleaks image digest pin, `:ro` mount and `persist-credentials: false` have not run on GitHub.
+
+---
+
+# Round 2 re-test (commits 1feed36..c28dc4d)
+Final verdict: **FAIL** (one AC regression: AC-1). Everything else in round 1 and 2 is fixed or accepted as low risk. Once the one-line turbo fix below lands, the verdict becomes PASS WITH ISSUES (CI-only items and the low notes remain).
+
+## AC-1 regression (blocking)
+**High. A second `pnpm turbo run build lint typecheck test` is not a full cache hit on a fresh checkout.** Repro (Node 24, empty `TURBO_CACHE_DIR`, `node_modules`/`.turbo`/`dist` removed): run 1 gives 12 executed, 0 cached. Run 2 gives 12 executed, 0 cached (not `FULL TURBO`). Run 3 gives 12/12 cached. Cause: round 2 item 7 changed `globalDependencies` to `tooling/eslint-config/**` with only `!tooling/eslint-config/node_modules/**` excluded (`turbo.json:7-8`). Run 1 writes `tooling/eslint-config/.turbo/turbo-lint.log` and `turbo-typecheck.log`, which then become global hash inputs (`turbo run ... --dry=json` shows `globalCacheInputs.files` growing from 8 to 10 files after run 1), so every task hash changes. AC-1 requires the immediate second run to be all cache hits. Fix: add `"!tooling/eslint-config/.turbo/**"` (and `dist/**`). Marker test: `tooling/repo-checks/test/repo.test.ts` "RT2-1 (gap)" (an `it.fails`, so the suite stays green; remove `.fails` after the fix).
+
+## Verified fixed
+Cold run: 12 successful, 0 cached; workspace-guard 6, lint-fixtures 46, repo-checks 106 passed (3 skipped: gitleaks x2, actionlint). All round 1 `it.fails` markers are now normal passing tests.
+
+**`esg/import-boundaries`** (temporary workspaces, all reverted). Flagged: `import(variable)`, absolute `/etc/passwd`, `file:` URL, `C:\` path, static and export-from absolute/`file:` specifiers, `.join(...)` specifier, `createRequire` as named import, alias import, namespace `m.createRequire`, `require('node:module').createRequire`, `process.getBuiltinModule('module' | 'node:module' | variable)`, destructured `getBuiltinModule('node:module')`, `new URL('../../b/...', import.meta.url)` (plain, template literal, `.href`, inside `fileURLToPath`, inside `readFileSync`), non-literal import in `packages/`. No false positives on: `./local.js` static, `import('./local.js')` (plain and template), `new URL('./data.json', import.meta.url)`, `new URL('../src/data.json', import.meta.url)` (stays inside the workspace), `new URL('https://...')`, `import('node:fs')`, `import('@esg/x')`, `process.getBuiltinModule('node:fs')`, a self-import by package name, an object with a `createRequire` property name only. Note: `createRequire` is also banned in `services/api` (by design, `services/**`).
+
+**dbmate wrapper** (fake URLs; the only network attempts were to `localhost:1` and one `.invalid` host). Flags: every `-`-prefixed argument outside the allowlist is rejected, including `-url`, `-env`, `-env-file=`, `--url=`, `--`, and a flag after the subcommand. Subcommands: `load`, empty, `UP`, extra positional and `new` with path characters are rejected; `new add_users`, `up`, `status`, `dump`, `wait`, `--wait`, `--wait-timeout=5s` pass. `drop`/`create` need `ESG_DBMATE_ALLOW_DROP=1`; with it set and a fake `localhost:1` URL, `drop` ran as far as a refused connection (no database exists). Scheme: `postgres:`, `mysql+srv:` rejected. Query: `host`, `socket`, `tls`, `allowAllFiles`, `PARSETIME`, `%68ost`, `;host`, `&&host` rejected; `parseTime`, `charset` pass. Hosts: `localhost`, `127.0.0.1`, `[::1]`, `mysql`, `mysql-writer` pass; `MySQL`, `mysql.`, `localhost.`, `127.0.0.1.`, `0x7f.0.0.1`, `[::ffff:127.0.0.1]`, `localhost,prod.invalid`, `mysql-primary`, `prod-rds-cluster-abc`, userinfo tricks (`\@`, `:3306@`, `?@`, `mysql:u@host`) rejected. Parser differential (Node `URL` vs Go dbmate): fragments (`#@prod.invalid`, `#host=...`) and `%3F` were run through the real dbmate and it dialled only localhost (or failed to parse); no differential found. `DBMATE_URL` and `DBMATE_MIGRATIONS_DIR` in the environment had no effect (stripped).
+
+**workspace-guard.** Violations caught (exit 1): `overrides`, `pnpm.overrides`, `resolutions` (including `**/foo` and scoped keys) pointing at a service by `link:` or alias; absolute `link:`/`file:`; bare `file:`; trailing slash and `..//` paths; `file:` to a `package.json`; `workspace:` path; optional and peer dependencies; `injected`; root `pnpm-workspace.yaml` `overrides`, `catalog` and `catalogs` (`link:` and `npm:` alias); package to service and package to tooling. Legit service to package/tooling and package to package: exit 0, no false positive.
+
+**Symlink repo-check.** A tracked symlink (`git add -f`) fails "no tracked symlinks"; an untracked one is ignored (fine: only tracked files reach CI).
+
+**.gitignore.** `tfplan`, `id_ed25519*`, `id_ecdsa*`, `.aws/`, `.kube/`, `.pgpass`, `.netrc`, `*.keystore` all ignored. Not falsely ignored: `.env.example`, `x.tfvars.example`, `infra/terraform/*.tf`, `.terraform.lock.hcl`, `docs/tfplan-notes.md`, `tfplan.md`, `src/aws/client.ts`, `src/kube/x.ts`, `src/netrc.ts`.
+
+## Remaining low-severity gaps (not blocking; not turned into tests)
+- Low: `const { createRequire } = require('node:module')` (destructuring a `require` of the module) is not flagged; only the member-access form is (`tooling/eslint-config/import-boundaries.mjs`, MemberExpression handler). `require` does not exist in ESM packages, which are the repo norm.
+- Low: `process['getBuiltinModule']('module')` (computed member) is not flagged (`import-boundaries.mjs`, `c.computed` guard).
+- Low: `new URL(variable, import.meta.url)` and `module.register('../../b/src/x.js', import.meta.url)` are not flagged. They do not import code through the normal loader paths, so the practical risk is small.
+- Info: the symlink import-escape case (round 1 issue 4) is covered by the tracked-symlink repo-check, not by the lint rule.
+
+## CI only (unchanged)
+AC-11 actionlint and `terraform fmt`; AC-12 gitleaks (both tests); AC-15c. The gitleaks digest pin, `:ro` mount and `persist-credentials: false` have not run on GitHub.

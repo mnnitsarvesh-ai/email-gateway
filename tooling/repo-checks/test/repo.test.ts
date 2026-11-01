@@ -488,3 +488,21 @@ describe('AC-9 / AC-4 / AC-10 wiring', () => {
     expect(JSON.stringify([tsconfig.exclude, tsconfig.include])).toContain('fixtures');
   });
 });
+
+describe('AC-1 cache stability (QA round 2)', () => {
+  // A second `pnpm turbo run ...` must be FULL TURBO. A glob in globalDependencies that also matches
+  // turbo's own log files (<ws>/.turbo/*.log) or build output makes run 2 a cache miss, because run 1
+  // creates those files. Deterministic static check (a dry-run based check would depend on task timing).
+  it.fails('RT2-1 (gap): every globalDependencies glob that covers a directory excludes .turbo, dist and node_modules', () => {
+    const turbo = readJson('turbo.json') as { globalDependencies?: string[] };
+    const globs = turbo.globalDependencies ?? [];
+    const broad = globs.filter((g) => g.endsWith('/**') && !g.startsWith('!'));
+    expect(broad.length).toBeGreaterThan(0);
+    for (const g of broad) {
+      const base = g.slice(0, -3);
+      for (const dir of ['.turbo', 'dist', 'node_modules']) {
+        expect(globs, `${g} must be paired with !${base}/${dir}/**`).toContain(`!${base}/${dir}/**`);
+      }
+    }
+  });
+});
