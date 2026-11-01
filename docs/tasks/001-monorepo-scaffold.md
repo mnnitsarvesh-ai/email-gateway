@@ -205,3 +205,25 @@ Commits: A=869ef83 (lint rule), B=d4dcada (workspace-guard), C=39c6b87 (turbo), 
 | 15 | B. No-op `rewriteRelativeImportExtensions: false` removed. |
 
 Local results after round 1 (cold run with an empty TURBO_CACHE_DIR, then warm): 12/12 tasks succeed; workspace-guard 4 passed, lint-fixtures 32 passed, repo-checks 60 passed and 3 skipped (gitleaks x2, actionlint, not installed locally). Warm run: 12/12 cached, FULL TURBO.
+
+### Round 2 fixes
+
+Correction to the Round 1 table: item 8 said `tfplan` was covered. Only `*.tfplan` was; bare `tfplan` is ignored from round 2.
+
+| # | Status |
+|---|---|
+| 1a | `esg/import-boundaries` reports any `import()`, `require()`, `require.resolve()` or `createRequire()()` whose argument is not a static string (variable, concatenation, template with expressions, `.join`). Fixtures for each. |
+| 1b | Absolute (`/`, `C:\`) and `file:` specifiers are reported in static, export-from and dynamic forms. Fixtures for each. |
+| 1c | `createRequire` banned in `services/**` and `packages/**`: named import from `module`/`node:module`, `.createRequire` member access (namespace import), and `process.getBuiltinModule` with a non-literal or `module` argument. This closes the aliased `r('../../b')` case. |
+| 1d | `new URL('<relative literal>', import.meta.url)` outside the workspace is reported. Positive fixtures (`import('./local.js')`, `new URL('./data.json', import.meta.url)`) pass. |
+| 2 | `scripts/dbmate.mjs`: every `-`-prefixed argument is rejected unless on the allowlist (`--no-dump-schema`, `--wait`, `--wait-timeout=<n>`, plus `--check-only` first); subcommand allowlist `new up migrate rollback status dump wait`; `drop` and `create` need `ESG_DBMATE_ALLOW_DROP=1`; `mysql:` scheme only; query parameters allowlisted (so `host`, `socket`, `unix_socket`, `tls` are rejected); hosts limited to `localhost`, `127.0.0.1`, `::1` and the constant `mysql`, `mysql-writer`, `mysql-replica` (to align with compose in task 003); `DBMATE_*` variables are stripped from the child environment. The `.env.local` claim was corrected by removing it: the wrapper (and the `package.json` script) no longer load any env file; export `DATABASE_URL` in the shell. Tests cover `-url`, `-env`, `-env-file=`, `?host=`, a dotless `prod-rds-cluster-abc`, and `drop` without the opt-in. |
+| 3 | Repo-check: no tracked mode 120000 entries. |
+| 4 | workspace-guard resolves absolute `link:`/`file:` paths (relative to the scanned root), bare `file:services/b`-style paths and trailing-slash paths, and inspects `overrides`, `pnpm.overrides`, `resolutions` (workspace package.json files) plus root `pnpm-workspace.yaml` `overrides` and `catalog(s)`. Fixture `links-repo` and an absolute-path test. A bare `file:` path resolves relative to the dependent's directory, as pnpm does. |
+| 5 | `.gitignore` adds bare `tfplan`, `id_ed25519*`, `id_ecdsa*`, `.aws/`, `.kube/`, `.pgpass`, `.netrc`, `*.keystore`; AC-14 test extended. |
+| 6 | The rootDir and ESLint-config repo-checks now exclude only `tooling/lint-fixtures/fixtures/` and `tooling/workspace-guard/fixtures/`. |
+| 7 | turbo `globalDependencies` uses `tooling/eslint-config/**` with `!tooling/eslint-config/node_modules/**`. |
+| 8 | `minimumReleaseAge: 4320` added: the string is present in the pinned pnpm 10.34.9 bundle, and a frozen-lockfile install is unaffected. `packageManager` now carries `+sha512.<hex>`: the hex is the base64 `dist.integrity` of pnpm@10.34.9 from the npm registry converted to hex (not invented). AC-18's regex accepts the optional suffix. |
+
+Remaining `it.fails`: none. All of QA's round 1 gap tests (2 in lint-fixtures, RT1-3/4/5 in repo-checks) are now normal passing tests.
+
+Note: Node itself consumes `--env-file=<path>` anywhere on the command line, even after the script name. A mistaken `pnpm dbmate up --env-file=x` therefore fails in Node (or loads that file) before the wrapper runs; the wrapper still rejects the flag if Node gets that far.
