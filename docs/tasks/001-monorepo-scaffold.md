@@ -181,3 +181,27 @@ pnpm test:e2e                                       # no-op placeholder, uncache
 ## QA report
 
 [docs/qa/001-report.md](../qa/001-report.md): PASS WITH ISSUES (1 high: sibling-service relative import not blocked; AC-11/12/15c partly CI-only).
+
+### Round 1 fixes
+
+Commits: A=869ef83 (lint rule), B=d4dcada (workspace-guard), C=39c6b87 (turbo), D=b34fe88 (CI/gitleaks), E=a73a0ce (gitignore, pnpm, dbmate wrapper), F=cc2d47f (repo-checks tests, CLAUDE.md).
+
+| # | Status |
+|---|---|
+| 1 | A, F. New local rule `esg/import-boundaries` (`tooling/eslint-config/import-boundaries.mjs`) resolves every relative specifier against the file's workspace root, replacing `RELATIVE_ESCAPE_REGEX`. Sibling, `./../` and in-workspace `../db/client` fixtures; QA's `it.fails` test is now a normal test. Second layer: `rootDir` and `include` in every workspace tsconfig, asserted by a repo-check. |
+| 2 | A. Same rule covers `import()`, `require()`, `require.resolve`, `createRequire(...)()`, TS import types and `import = require` with literal specifiers, for service names, control-plane subpaths and relative escapes, with fixtures. |
+| 3 | A. Control-plane regex `^@esg/(db\|config)/.*control-plane` (static via `no-restricted-imports`, dynamic via the local rule); applied to services (except `services/api`), packages, db, test/e2e and tooling. `CONTROL_PLANE_DB_CONSUMERS` stays the single source. |
+| 4 | A. `reportUnusedDisableDirectives: 'error'` and, stronger than the requested plugin, `noInlineConfig: true` in all governed workspaces, so no directive can disable any rule there (no new dependency). Fixtures prove `eslint-disable-next-line` and a blanket `eslint-disable` do not hide violations. |
+| 5 | F. Repo-check: the root `eslint.config.mjs` is the only ESLint config (fs walk and `git ls-files`). `--config` in workspace scripts was not used: with `-c`, flat-config globs resolve against the workspace cwd, not the root. |
+| 6 | C. `globalDependencies` for eslint.config.mjs, tsconfig.base.json, pnpm-workspace.yaml and the eslint-config files; `lint` inputs include `services/*/package.json`; `@esg/lint-fixtures#test` inputs include tsconfig.base.json and the eslint-config; repo-checks inputs now include db/, test/e2e, infra/ and deploy/ (it walks db and test/e2e tsconfigs). |
+| 7 | D, F. Allowlist removed from `.gitleaks.toml`; the working-tree test scans a copy of `git ls-files -co --exclude-standard` instead; repo-check that no node_modules/dist/coverage/.turbo path is tracked. Image pinned `ghcr.io/gitleaks/gitleaks@sha256:a695fbce...dbb9` (v8.23.1 multi-arch index); digest read from the `Docker-Content-Digest` header of an anonymous registry manifest request (no docker needed). Repo mounted `:ro`, run with `--user "$(id -u):$(id -g)"`, `persist-credentials: false` on every checkout. Not run on GitHub. |
+| 8 | E, F. `.env*` with `!.env.example`, plus tfvars.json, tfplan, p12, pfx, jks, id_rsa*, kubeconfig; redundant `!*.tfvars.example` dropped; AC-14 test extended. |
+| 9 | B. Targets resolved by `npm:`/`workspace:<name>@` aliases and `link:`/`file:`/`workspace:` paths; root package.json checked; fixtures `alias-repo` and `root-repo`. |
+| 10 | D. `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`. |
+| 11 | F. Patterns accept flags before the subcommand; only `helpers.ts` is excluded; scope widened to root files, services, packages, infra, deploy, db, test, .github, tooling, scripts. |
+| 12 | A. JS file globs include `.jsx` (TSX was already in the TS globs). |
+| 13 | E. `strictDepBuilds: true` and `onlyBuiltDependencies: []`. `minimumReleaseAge` not added: not verified for pinned pnpm 10.34.9. |
+| 14 | E, F. `pnpm dbmate` runs `scripts/dbmate.mjs` (loads gitignored `.env.local` if present). It refuses unless the host is localhost, 127.0.0.1, ::1 or a dotless service name, and rejects `--url`, `-e`, `--env-file` overrides. AC-15d still holds. |
+| 15 | B. No-op `rewriteRelativeImportExtensions: false` removed. |
+
+Local results after round 1 (cold run with an empty TURBO_CACHE_DIR, then warm): 12/12 tasks succeed; workspace-guard 4 passed, lint-fixtures 32 passed, repo-checks 60 passed and 3 skipped (gitleaks x2, actionlint, not installed locally). Warm run: 12/12 cached, FULL TURBO.
