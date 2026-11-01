@@ -1,5 +1,14 @@
 {
   "$schema": "https://turborepo.com/schema.json",
+  "globalDependencies": [
+    "eslint.config.mjs",
+    "tsconfig.base.json",
+    "pnpm-workspace.yaml",
+    "tooling/eslint-config/index.mjs",
+    "tooling/eslint-config/import-boundaries.mjs",
+    "tooling/eslint-config/index.d.mts",
+    "tooling/eslint-config/package.json"
+  ],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
@@ -8,7 +17,9 @@
     "typecheck": {
       "dependsOn": ["^build"]
     },
-    "lint": {},
+    "lint": {
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/services/*/package.json"]
+    },
     "test": {
       "dependsOn": ["^build"]
     },
@@ -19,6 +30,7 @@
       "inputs": [
         "$TURBO_DEFAULT$",
         "$TURBO_ROOT$/pnpm-workspace.yaml",
+        "$TURBO_ROOT$/package.json",
         "$TURBO_ROOT$/{services,packages,tooling}/*/package.json",
         "$TURBO_ROOT$/db/package.json",
         "$TURBO_ROOT$/test/e2e/package.json"
@@ -29,9 +41,21 @@
       "inputs": [
         "$TURBO_DEFAULT$",
         "$TURBO_ROOT$/pnpm-workspace.yaml",
+        "$TURBO_ROOT$/package.json",
         "$TURBO_ROOT$/{services,packages,tooling}/*/package.json",
         "$TURBO_ROOT$/db/package.json",
         "$TURBO_ROOT$/test/e2e/package.json"
+      ]
+    },
+    "@esg/lint-fixtures#test": {
+      "dependsOn": ["^build"],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/tsconfig.base.json",
+        "$TURBO_ROOT$/eslint.config.mjs",
+        "$TURBO_ROOT$/tooling/eslint-config/*.mjs",
+        "$TURBO_ROOT$/tooling/eslint-config/*.d.mts",
+        "$TURBO_ROOT$/tooling/eslint-config/package.json"
       ]
     },
     "@esg/repo-checks#test": {
@@ -48,13 +72,16 @@
         "$TURBO_ROOT$/.node-version",
         "$TURBO_ROOT$/tsconfig.base.json",
         "$TURBO_ROOT$/pnpm-workspace.yaml",
+        "$TURBO_ROOT$/eslint.config.mjs",
         "$TURBO_ROOT$/.github/**",
         "$TURBO_ROOT$/scripts/**",
         "$TURBO_ROOT$/tooling/**",
-        "$TURBO_ROOT$/{services,packages}/*/{package.json,tsconfig*.json}",
-        "!$TURBO_ROOT$/tooling/**/node_modules/**",
-        "!$TURBO_ROOT$/tooling/**/dist/**",
-        "!$TURBO_ROOT$/tooling/**/.turbo/**"
+        "$TURBO_ROOT$/{services,packages}/**/{package.json,tsconfig*.json,eslint.config.*}",
+        "$TURBO_ROOT$/{db,test/e2e}/**/{package.json,tsconfig*.json,eslint.config.*}",
+        "$TURBO_ROOT$/{infra,deploy}/**",
+        "!$TURBO_ROOT$/**/node_modules/**",
+        "!$TURBO_ROOT$/**/dist/**",
+        "!$TURBO_ROOT$/**/.turbo/**"
       ]
     }
   }
