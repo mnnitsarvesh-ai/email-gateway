@@ -5,7 +5,9 @@
     "tsconfig.base.json",
     "pnpm-workspace.yaml",
     "tooling/eslint-config/**",
-    "!tooling/eslint-config/node_modules/**"
+    "!tooling/eslint-config/node_modules/**",
+    "!tooling/eslint-config/.turbo/**",
+    "!tooling/eslint-config/dist/**"
   ],
   "tasks": {
     "build": {

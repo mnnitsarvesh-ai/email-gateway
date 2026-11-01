@@ -366,6 +366,22 @@ describe('guarded dbmate wrapper', () => {
   it('the root script uses the wrapper', () => {
     expect(rootPkg.scripts?.['dbmate']).toContain('scripts/dbmate.mjs');
   });
+  it('always points dbmate at /dev/null for env files so ./.env is never auto-loaded', () => {
+    const r = run(LOCAL);
+    expect(r.stdout).toContain('--env-file=/dev/null');
+  });
+  it('a real run with a poisoned ./.env in cwd ignores it (fails on connection, not on env parsing)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dbm-env-'));
+    try {
+      fs.writeFileSync(path.join(dir, '.env'), 'DATABASE_URL=mysql://u:p@evil.invalid/d\n');
+      const env = { ...cleanDbEnv(), DATABASE_URL: 'mysql://u:p@127.0.0.1:1/d' };
+      const r = spawnSync(process.execPath, [wrapper, 'status'], { env, encoding: 'utf8', cwd: dir });
+      expect(r.status).not.toBe(0);
+      expect(r.stdout + r.stderr).not.toContain('evil.invalid');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
   it('does not claim to read .env.local', () => {
     expect(read('scripts/dbmate.mjs')).not.toMatch(/env-file-if-exists/);
     expect(rootPkg.scripts?.['dbmate']).not.toContain('env-file');
@@ -493,7 +509,7 @@ describe('AC-1 cache stability (QA round 2)', () => {
   // A second `pnpm turbo run ...` must be FULL TURBO. A glob in globalDependencies that also matches
   // turbo's own log files (<ws>/.turbo/*.log) or build output makes run 2 a cache miss, because run 1
   // creates those files. Deterministic static check (a dry-run based check would depend on task timing).
-  it.fails('RT2-1 (gap): every globalDependencies glob that covers a directory excludes .turbo, dist and node_modules', () => {
+  it('RT2-1: every globalDependencies glob that covers a directory excludes .turbo, dist and node_modules', () => {
     const turbo = readJson('turbo.json') as { globalDependencies?: string[] };
     const globs = turbo.globalDependencies ?? [];
     const broad = globs.filter((g) => g.endsWith('/**') && !g.startsWith('!'));
