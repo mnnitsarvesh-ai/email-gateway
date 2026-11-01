@@ -1,0 +1,34 @@
+node_modules
+dist
+.turbo
+coverage
+.DS_Store
+
+# secrets and local env (hard rule 9)
+.env*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+id_rsa*
+id_ed25519*
+id_ecdsa*
+*.keystore
+kubeconfig
+.aws/
+.kube/
+.pgpass
+.netrc
+
+# terraform
+**/*.tfstate*
+**/.terraform/
+*.tfvars
+*.tfvars.json
+*.tfplan
+tfplan
+
+# e2e artifacts
+test/e2e/.artifacts/

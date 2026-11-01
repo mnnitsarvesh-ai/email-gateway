@@ -1,0 +1,1 @@
+{ "name": "@bad/svc-a", "private": true, "dependencies": { "@bad/svc-b": "workspace:*" } }

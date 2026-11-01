@@ -1,0 +1,1 @@
+{ "name": "@bad/p1", "private": true, "dependencies": { "innocent": "npm:@bad/svc-b@1.0.0" } }

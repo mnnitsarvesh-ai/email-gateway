@@ -133,3 +133,109 @@ AC-20 Given `CLAUDE.md` "Repo layout", when inspected, then it lists `tooling/` 
    - This item does not block implementation, so the task is marked `ready`; it only limits how AC-15 is verified.
 3. **Pinned versions.** *Recommendation:* the latest pnpm 10.x and Turborepo 2.x at implementation time, recorded as exact versions in `package.json` and upgraded through Renovate or Dependabot later.
    **Proceeding with default — pending Sarvesh confirmation.** The implementer records the exact versions chosen in the Implementation summary.
+
+## Implementation summary
+
+Implemented by devops-engineer on branch `task/001` (local commits only).
+
+**Versions chosen (exact pins).** pnpm 10.34.9 (`packageManager`; pnpm 12 exists but the task requires 10.x), turbo 2.11.10, dbmate 2.37.0, Node 24 (verified with 24.22.2), eslint 10.14.0, @eslint/js 10.0.1, typescript-eslint 8.72.1, typescript 6.0.3, vitest 4.1.12, @types/node 24.19.2, yaml 2.8.1. Dev-tool versions are single-sourced in the `catalog:` block of `pnpm-workspace.yaml`. TypeScript is 6.0.3, not 7.x, because typescript-eslint 8.72.1 peers on `typescript <6.1.0`.
+
+**Files.**
+- Root: `package.json`, `.npmrc`, `.node-version`, `pnpm-workspace.yaml`, `pnpm-lock.yaml`, `turbo.json`, `tsconfig.base.json`, `.gitignore`, `.gitleaks.toml`, `.env.example` (Write tool only, never read back), `eslint.config.mjs`, `db/migrations/.gitkeep`, `.github/workflows/ci.yml`.
+- `tooling/eslint-config` (`@esg/eslint-config`): `createConfig({ root })`, `CONTROL_PLANE_DB_CONSUMERS` (single definition), `index.d.mts`.
+- `tooling/workspace-guard` (`@esg/workspace-guard`): `src/guard.ts`, `src/cli.ts` (Node 24 type stripping), `fixtures/bad-repo`, vitest suite. Its `lint` script also runs the guard on the real repo.
+- `tooling/lint-fixtures` (`@esg/lint-fixtures`): bad mini-repo in `fixtures/`, `src/index.ts` (fixture package so `build` exists), no-op `test:e2e` script, vitest tests for AC-4..AC-8 and AC-10 negative control.
+- `tooling/repo-checks` (`@esg/repo-checks`, added beyond the design notes): vitest tests for AC-2, 3, 11-20.
+- `CLAUDE.md`: "Repo layout" lists `tooling/` (+ its four workspaces) and `test/e2e/`; "Commands" updated.
+
+**Deviations from design notes.**
+1. Added the `tooling/repo-checks` workspace to host repo-level AC tests (AC-2/3/11-20). Reason: they need a home that runs under `pnpm turbo run test`. It has a package-specific `#test` task with explicit `inputs` so changes to CI, CLAUDE.md, .gitignore and so on invalidate the cache.
+2. `secrets` job runs the pinned gitleaks Docker image (`ghcr.io/gitleaks/gitleaks:v8.23.1`) instead of `gitleaks/gitleaks-action`. Reason: the action needs a licence secret for organisations, which would violate AC-13 (no `secrets.*` other than `GITHUB_TOKEN`).
+3. `terraform` job path filter is a step-level `git diff` check on `infra/` (job-level filtering is not available with workflow `paths`, which would also skip the other jobs).
+4. `.gitleaks.toml` allowlists only the gitignored `node_modules`, `.turbo`, `dist` and `coverage` directories, so a `--no-git` working-tree scan stays meaningful and fast. Tracked files have no allowlist.
+5. Control-plane exclusion is built as one config object per service directory (api gets no control-plane restriction) plus a base `services/**` group, rather than `ignores` with `/**` appended to the constant. The constant is still the only list and is consumed as `services/<dir>` membership.
+6. `tooling/eslint-config/index.d.mts` is hand-written so typed test code can import the `.mjs` factory.
+7. The relative-escape regex follows the design note exactly. Known limitation (as the note says): `../../b/src/x` between sibling services is only caught when the path contains a `services|packages|tooling|db|test/e2e` segment.
+8. Root `lint` and the other root scripts delegate to `turbo run`; each workspace runs `eslint .` itself, which finds the root `eslint.config.mjs`.
+
+**How to run.** Needs Node 24 and pnpm 10.34.9 (pnpm auto-selects it from `packageManager`).
+```sh
+pnpm install --frozen-lockfile
+pnpm turbo run build lint typecheck test
+pnpm turbo run test --filter=@esg/lint-fixtures     # boundary / strictness fixtures
+pnpm test:e2e                                       # no-op placeholder, uncached
+```
+
+**Local results.** `pnpm turbo run build lint typecheck test`: 12 tasks successful. Tests: workspace-guard 2 passed, lint-fixtures 16 passed, repo-checks 26 passed and 3 skipped. A second run reports 12/12 cached, `FULL TURBO`. AC-2: `pnpm install` under Node 22 fails with `ERR_PNPM_UNSUPPORTED_ENGINE` (expected `>=24 <25`). AC-15d: `pnpm dbmate up` without `DATABASE_URL` exits non-zero naming `DATABASE_URL` (tested).
+
+**ACs that need CI to verify (binary not installed locally, nothing installed system-wide).**
+- AC-11 `actionlint` clean: test skips locally; YAML structure, SHA pins, jobs and caching are asserted locally.
+- AC-12 gitleaks fake-secret detection and clean working tree (also covers `.env.example` placeholders-only, AC-15c): both tests skip locally when `gitleaks` is missing.
+- The `terraform fmt` step itself (AC-11 `terraform` job), since `terraform` is not installed.
+- Action SHAs and the `gitleaks:v8.23.1` and `terraform_version: 1.9.8` pins were chosen from `git ls-remote` and memory, and have not been run on GitHub.
+
+**AC-17 exemption.** `pnpm turbo run test --filter=ingest-service` names a not-yet-existing service and is exempt from the command-resolution test.
+
+**AC-19 grep result.** No script, `.github/`, `tooling/` or `scripts/` file invokes the forbidden commands. The only files that name them are the detection test sources in `tooling/repo-checks/test/`, which are excluded from their own scan.
+
+## QA report
+
+[docs/qa/001-report.md](../qa/001-report.md): PASS WITH ISSUES (1 high: sibling-service relative import not blocked; AC-11/12/15c partly CI-only).
+
+### Round 1 fixes
+
+Commits: A=869ef83 (lint rule), B=d4dcada (workspace-guard), C=39c6b87 (turbo), D=b34fe88 (CI/gitleaks), E=a73a0ce (gitignore, pnpm, dbmate wrapper), F=cc2d47f (repo-checks tests, CLAUDE.md).
+
+| # | Status |
+|---|---|
+| 1 | A, F. New local rule `esg/import-boundaries` (`tooling/eslint-config/import-boundaries.mjs`) resolves every relative specifier against the file's workspace root, replacing `RELATIVE_ESCAPE_REGEX`. Sibling, `./../` and in-workspace `../db/client` fixtures; QA's `it.fails` test is now a normal test. Second layer: `rootDir` and `include` in every workspace tsconfig, asserted by a repo-check. |
+| 2 | A. Same rule covers `import()`, `require()`, `require.resolve`, `createRequire(...)()`, TS import types and `import = require` with literal specifiers, for service names, control-plane subpaths and relative escapes, with fixtures. |
+| 3 | A. Control-plane regex `^@esg/(db\|config)/.*control-plane` (static via `no-restricted-imports`, dynamic via the local rule); applied to services (except `services/api`), packages, db, test/e2e and tooling. `CONTROL_PLANE_DB_CONSUMERS` stays the single source. |
+| 4 | A. `reportUnusedDisableDirectives: 'error'` and, stronger than the requested plugin, `noInlineConfig: true` in all governed workspaces, so no directive can disable any rule there (no new dependency). Fixtures prove `eslint-disable-next-line` and a blanket `eslint-disable` do not hide violations. |
+| 5 | F. Repo-check: the root `eslint.config.mjs` is the only ESLint config (fs walk and `git ls-files`). `--config` in workspace scripts was not used: with `-c`, flat-config globs resolve against the workspace cwd, not the root. |
+| 6 | C. `globalDependencies` for eslint.config.mjs, tsconfig.base.json, pnpm-workspace.yaml and the eslint-config files; `lint` inputs include `services/*/package.json`; `@esg/lint-fixtures#test` inputs include tsconfig.base.json and the eslint-config; repo-checks inputs now include db/, test/e2e, infra/ and deploy/ (it walks db and test/e2e tsconfigs). |
+| 7 | D, F. Allowlist removed from `.gitleaks.toml`; the working-tree test scans a copy of `git ls-files -co --exclude-standard` instead; repo-check that no node_modules/dist/coverage/.turbo path is tracked. Image pinned `ghcr.io/gitleaks/gitleaks@sha256:a695fbce...dbb9` (v8.23.1 multi-arch index); digest read from the `Docker-Content-Digest` header of an anonymous registry manifest request (no docker needed). Repo mounted `:ro`, run with `--user "$(id -u):$(id -g)"`, `persist-credentials: false` on every checkout. Not run on GitHub. |
+| 8 | E, F. `.env*` with `!.env.example`, plus tfvars.json, tfplan, p12, pfx, jks, id_rsa*, kubeconfig; redundant `!*.tfvars.example` dropped; AC-14 test extended. |
+| 9 | B. Targets resolved by `npm:`/`workspace:<name>@` aliases and `link:`/`file:`/`workspace:` paths; root package.json checked; fixtures `alias-repo` and `root-repo`. |
+| 10 | D. `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`. |
+| 11 | F. Patterns accept flags before the subcommand; only `helpers.ts` is excluded; scope widened to root files, services, packages, infra, deploy, db, test, .github, tooling, scripts. |
+| 12 | A. JS file globs include `.jsx` (TSX was already in the TS globs). |
+| 13 | E. `strictDepBuilds: true` and `onlyBuiltDependencies: []`. `minimumReleaseAge` not added: not verified for pinned pnpm 10.34.9. |
+| 14 | E, F. `pnpm dbmate` runs `scripts/dbmate.mjs` (loads gitignored `.env.local` if present). It refuses unless the host is localhost, 127.0.0.1, ::1 or a dotless service name, and rejects `--url`, `-e`, `--env-file` overrides. AC-15d still holds. |
+| 15 | B. No-op `rewriteRelativeImportExtensions: false` removed. |
+
+Local results after round 1 (cold run with an empty TURBO_CACHE_DIR, then warm): 12/12 tasks succeed; workspace-guard 4 passed, lint-fixtures 32 passed, repo-checks 60 passed and 3 skipped (gitleaks x2, actionlint, not installed locally). Warm run: 12/12 cached, FULL TURBO.
+
+### Round 2 fixes
+
+Correction to the Round 1 table: item 8 said `tfplan` was covered. Only `*.tfplan` was; bare `tfplan` is ignored from round 2.
+
+| # | Status |
+|---|---|
+| 1a | `esg/import-boundaries` reports any `import()`, `require()`, `require.resolve()` or `createRequire()()` whose argument is not a static string (variable, concatenation, template with expressions, `.join`). Fixtures for each. |
+| 1b | Absolute (`/`, `C:\`) and `file:` specifiers are reported in static, export-from and dynamic forms. Fixtures for each. |
+| 1c | `createRequire` banned in `services/**` and `packages/**`: named import from `module`/`node:module`, `.createRequire` member access (namespace import), and `process.getBuiltinModule` with a non-literal or `module` argument. This closes the aliased `r('../../b')` case. |
+| 1d | `new URL('<relative literal>', import.meta.url)` outside the workspace is reported. Positive fixtures (`import('./local.js')`, `new URL('./data.json', import.meta.url)`) pass. |
+| 2 | `scripts/dbmate.mjs`: every `-`-prefixed argument is rejected unless on the allowlist (`--no-dump-schema`, `--wait`, `--wait-timeout=<n>`, plus `--check-only` first); subcommand allowlist `new up migrate rollback status dump wait`; `drop` and `create` need `ESG_DBMATE_ALLOW_DROP=1`; `mysql:` scheme only; query parameters allowlisted (so `host`, `socket`, `unix_socket`, `tls` are rejected); hosts limited to `localhost`, `127.0.0.1`, `::1` and the constant `mysql`, `mysql-writer`, `mysql-replica` (to align with compose in task 003); `DBMATE_*` variables are stripped from the child environment. The `.env.local` claim was corrected by removing it: the wrapper (and the `package.json` script) no longer load any env file; export `DATABASE_URL` in the shell. Tests cover `-url`, `-env`, `-env-file=`, `?host=`, a dotless `prod-rds-cluster-abc`, and `drop` without the opt-in. |
+| 3 | Repo-check: no tracked mode 120000 entries. |
+| 4 | workspace-guard resolves absolute `link:`/`file:` paths (relative to the scanned root), bare `file:services/b`-style paths and trailing-slash paths, and inspects `overrides`, `pnpm.overrides`, `resolutions` (workspace package.json files) plus root `pnpm-workspace.yaml` `overrides` and `catalog(s)`. Fixture `links-repo` and an absolute-path test. A bare `file:` path resolves relative to the dependent's directory, as pnpm does. |
+| 5 | `.gitignore` adds bare `tfplan`, `id_ed25519*`, `id_ecdsa*`, `.aws/`, `.kube/`, `.pgpass`, `.netrc`, `*.keystore`; AC-14 test extended. |
+| 6 | The rootDir and ESLint-config repo-checks now exclude only `tooling/lint-fixtures/fixtures/` and `tooling/workspace-guard/fixtures/`. |
+| 7 | turbo `globalDependencies` uses `tooling/eslint-config/**` with `!tooling/eslint-config/node_modules/**`. |
+| 8 | `minimumReleaseAge: 4320` added: the string is present in the pinned pnpm 10.34.9 bundle, and a frozen-lockfile install is unaffected. `packageManager` now carries `+sha512.<hex>`: the hex is the base64 `dist.integrity` of pnpm@10.34.9 from the npm registry converted to hex (not invented). AC-18's regex accepts the optional suffix. |
+
+Remaining `it.fails`: none. All of QA's round 1 gap tests (2 in lint-fixtures, RT1-3/4/5 in repo-checks) are now normal passing tests.
+
+Note: Node itself consumes `--env-file=<path>` anywhere on the command line, even after the script name. A mistaken `pnpm dbmate up --env-file=x` therefore fails in Node (or loads that file) before the wrapper runs; the wrapper still rejects the flag if Node gets that far.
+
+### Round 3 fixes
+
+| # | Status |
+|---|---|
+| 1 | `globalDependencies` now also excludes `tooling/eslint-config/.turbo/**` and `tooling/eslint-config/dist/**`, so turbo's own logs no longer change the global hash. All other input globs checked: `repo-checks#test` already excludes `**/node_modules`, `**/dist` and `**/.turbo`; the workspace-guard, lint and lint-fixtures inputs list only `package.json`, config and `*.mjs`/`*.d.mts` files or use `$TURBO_DEFAULT$` (which skips gitignored files). QA's `RT2-1` is a normal passing test. Cold sequence (empty `TURBO_CACHE_DIR`; every `node_modules`, `.turbo` and `dist` deleted; frozen install): run 1 executed 12 of 12 (0 cached), run 2 was 12 of 12 cached, `FULL TURBO`. |
+| 2 | Identifier-tracking `createRequire` handlers removed. In `services/**` and `packages/**` the specifiers `module` and `node:module` are banned in every form (static import, export-from, `import()`, `require()`), and `process.getBuiltinModule('module'\|'node:module')`, including `process['getBuiltinModule']` and non-literal arguments. New fixtures: `require('node:module')` destructuring, `await import('node:module')`, `import m from 'node:module'`, `export { createRequire } from 'module'`, `process['getBuiltinModule']('module')`, `process.getBuiltinModule('node:module')`. Existing createRequire fixtures kept. |
+| 3 | The wrapper passes `--env-file=/dev/null` to dbmate (callers still cannot pass env-file flags). Tests: the check-only output shows the flag, and a real run with a poisoned `./.env` in cwd fails on the connection to 127.0.0.1:1 without ever mentioning the `.env` host. |
+
+Deferred to the task 011 threat model, as instructed: Worker/fork/spawn paths, `new URL(variable)`, `module.register`, `.cjs` `module.require`, port pinning, DNS resolution of compose names.
+
+Final local results: workspace-guard 6 passed, lint-fixtures 52 passed, repo-checks 109 passed and 3 skipped (gitleaks x2 and actionlint, not installed locally). No `it.fails` remain.

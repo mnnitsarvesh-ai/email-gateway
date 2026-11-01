@@ -1,0 +1,1 @@
+{ "name": "@bad/t2", "private": true, "resolutions": { "something": "npm:@bad/svc-b@1.0.0" } }

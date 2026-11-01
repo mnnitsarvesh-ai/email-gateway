@@ -1,0 +1,1 @@
+{ "name": "@bad/pkg-a", "private": true, "devDependencies": { "@bad/svc-b": "workspace:*" } }

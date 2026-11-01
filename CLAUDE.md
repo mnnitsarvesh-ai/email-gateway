@@ -112,6 +112,13 @@ infra/helm/          charts and per-deployment values (saas, dedicated-<name>)
 deploy/local/        docker compose for local dev (Postfix, Rspamd, ClamAV, RabbitMQ,
                      MySQL, Redis, MinIO, OpenSearch, ClickHouse)
 db/migrations/       dbmate migrations (MySQL)
+scripts/             repo scripts (guarded dbmate wrapper)
+test/e2e/            end-to-end tests against deploy/local (opt-in: pnpm test:e2e)
+tooling/             build and lint tooling (workspaces, @esg/*)
+  eslint-config/       shared flat ESLint config; boundary + control-plane rules
+  workspace-guard/     fails on package.json deps from/onto services
+  lint-fixtures/       deliberately bad fixtures + vitest proving lint/TS rules
+  repo-checks/         repo-level checks (CI, gitignore, CLAUDE.md commands, pins)
 docs/                ADRs, runbooks, design notes
   adr/decisions.md
 ```
@@ -120,14 +127,15 @@ When a new service or package is added, update this tree.
 
 ## Commands
 
-These are the target commands. Update this section when scaffolding lands if any of them change.
+Requires Node 24 (`.node-version`) and the pinned pnpm (`packageManager`). Commands naming a service that doesn't exist yet (`--filter=ingest-service`) are exempt from the repo-checks command test.
 
 ```sh
 pnpm install
 pnpm turbo run build lint typecheck test       # all must pass before review
 pnpm turbo run test --filter=ingest-service    # one service
+pnpm test:e2e                                  # opt-in, uncached; needs deploy/local up
 docker compose -f deploy/local/compose.yaml up -d
-pnpm dbmate up                                 # local MySQL only
+pnpm dbmate up                                 # local MySQL only (refuses non-local hosts)
 swaks --server localhost:2525 --to user@tenant-a.test --from x@ext.test   # inbound smoke test
 ```
 
