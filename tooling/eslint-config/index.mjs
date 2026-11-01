@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
+import { CONTROL_PLANE_REGEX_SOURCE, importBoundaries } from './import-boundaries.mjs';
 
 /**
  * Workspaces allowed to import the control-plane DB / config entry points
@@ -12,16 +13,8 @@ import tseslint from 'typescript-eslint';
 export const CONTROL_PLANE_DB_CONSUMERS = ['services/api'];
 
 const TS_FILES = ['**/*.{ts,tsx,mts,cts}'];
-const JS_FILES = ['**/*.{js,mjs,cjs}'];
-
-const CONTROL_PLANE_ENTRIES = ['@esg/db/control-plane', '@esg/config/control-plane'];
-
-/**
- * Relative imports that leave the current workspace. Trade-off: a workspace may
- * not name an internal folder `services/`, `packages/`, `tooling/`, `db/` or
- * `test/e2e/` and reach it with `../`; use a sibling path or the package name.
- */
-const RELATIVE_ESCAPE_REGEX = '^(\\.\\./)+(.*/)?(services|packages|tooling|db|test/e2e)/';
+const JS_FILES = ['**/*.{js,jsx,mjs,cjs}'];
+const ALL_FILES = [...TS_FILES, ...JS_FILES];
 
 /** @param {string} dir @returns {string[]} */
 function listDirs(dir) {
@@ -49,35 +42,22 @@ function readServices(root) {
 
 /**
  * One `no-restricted-imports` option object per file group (ESLint replaces,
- * not merges, the option across matching config objects).
+ * not merges, the option across matching config objects). Covers static imports by
+ * package name; relative, dynamic and require() forms are handled by `esg/import-boundaries`.
  * @param {{ blockedServices: string[], controlPlane: boolean }} opts
  */
 function restrictions({ blockedServices, controlPlane }) {
+  const boundaryMessage =
+    '[boundary] Services must not be imported by other workspaces (hard rule 8). Move shared code to a package under packages/.';
   /** @type {{ name: string, message: string }[]} */
-  const paths = blockedServices.map((name) => ({
-    name,
-    message: `[boundary] Services must not be imported by other workspaces (hard rule 8). Move shared code to a package under packages/.`,
-  }));
+  const paths = blockedServices.map((name) => ({ name, message: boundaryMessage }));
   /** @type {({ group: string[], message: string } | { regex: string, message: string })[]} */
-  const patterns = blockedServices.map((name) => ({
-    group: [`${name}/*`],
-    message: `[boundary] Services must not be imported by other workspaces (hard rule 8). Move shared code to a package under packages/.`,
-  }));
-  patterns.push({
-    regex: RELATIVE_ESCAPE_REGEX,
-    message: '[boundary] Relative import leaves this workspace. Import the package by name (@esg/<name>) instead.',
-  });
+  const patterns = blockedServices.map((name) => ({ group: [`${name}/*`], message: boundaryMessage }));
   if (controlPlane) {
-    for (const name of CONTROL_PLANE_ENTRIES) {
-      paths.push({
-        name,
-        message: `[control-plane] ${name} is reserved for ${CONTROL_PLANE_DB_CONSUMERS.join(', ')} (hard rule 2). Data-plane services use the writer connection; the portal talks only to api.`,
-      });
-      patterns.push({
-        group: [`${name}/*`],
-        message: `[control-plane] ${name} is reserved for ${CONTROL_PLANE_DB_CONSUMERS.join(', ')} (hard rule 2).`,
-      });
-    }
+    patterns.push({
+      regex: CONTROL_PLANE_REGEX_SOURCE,
+      message: `[control-plane] The control-plane entry points of @esg/db and @esg/config are reserved for ${CONTROL_PLANE_DB_CONSUMERS.join(', ')} (hard rule 2). Data-plane code uses the writer connection; the portal talks only to api.`,
+    });
   }
   return ['error', { paths, patterns }];
 }
@@ -93,9 +73,15 @@ export function createConfig({ root }) {
   const isControlPlaneConsumer = (/** @type {string} */ dir) =>
     CONTROL_PLANE_DB_CONSUMERS.includes(`services/${dir}`);
 
+  const GOVERNED = ['services/**', 'packages/**', 'db/**', 'test/e2e/**', 'tooling/**'];
+  const NO_INLINE = { noInlineConfig: true };
+
   /** @type {import('eslint').Linter.Config[]} */
   const config = [
-    { ...js.configs.recommended, files: [...TS_FILES, ...JS_FILES] },
+    { linterOptions: { reportUnusedDisableDirectives: 'error' } },
+    // Inline directives cannot switch off the boundary rules in governed workspaces.
+    { files: GOVERNED, linterOptions: NO_INLINE },
+    { ...js.configs.recommended, files: ALL_FILES },
     ...tseslint.configs.strictTypeChecked.map((c) => ({ ...c, files: TS_FILES })),
     {
       files: TS_FILES,
@@ -111,7 +97,18 @@ export function createConfig({ root }) {
       },
     },
     { ...tseslint.configs.disableTypeChecked, files: JS_FILES },
-    // Cross-service boundary (hard rule 8) and writer-only data plane (hard rule 2).
+    // Local rule: relative escapes (all forms), dynamic import()/require of services and control plane.
+    {
+      files: ALL_FILES,
+      plugins: { esg: { rules: { 'import-boundaries': importBoundaries } } },
+      rules: {
+        'esg/import-boundaries': [
+          'error',
+          { root, services, controlPlaneAllow: CONTROL_PLANE_DB_CONSUMERS },
+        ],
+      },
+    },
+    // Static name-based boundary (hard rule 8) and writer-only data plane (hard rule 2).
     // Base group for any file under services/** (covers a service dir that has no package.json yet).
     {
       files: ['services/**'],
@@ -128,8 +125,8 @@ export function createConfig({ root }) {
       },
     })),
     {
-      files: ['packages/**', 'db/**', 'test/e2e/**'],
-      rules: { 'no-restricted-imports': restrictions({ blockedServices: allServiceNames, controlPlane: false }) },
+      files: ['packages/**', 'db/**', 'test/e2e/**', 'tooling/**'],
+      rules: { 'no-restricted-imports': restrictions({ blockedServices: allServiceNames, controlPlane: true }) },
     },
   ];
   return config;

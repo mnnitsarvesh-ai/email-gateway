@@ -1,11 +1,12 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
+    "rootDir": ".",
     "allowJs": true,
     "checkJs": true,
     "noEmit": true,
     "declaration": false,
     "types": ["node"]
   },
-  "include": ["index.mjs", "index.d.mts"]
+  "include": ["index.mjs", "import-boundaries.mjs", "index.d.mts"]
 }

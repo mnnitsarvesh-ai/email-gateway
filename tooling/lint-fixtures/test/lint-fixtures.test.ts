@@ -45,18 +45,76 @@ describe('lint fixtures', () => {
   });
 
   describe('AC-6 cross-service imports', () => {
-    it.each(['services/a/src/by-name.ts', 'services/a/src/by-relative.ts'])('AC-6: %s fails the boundary rule', async (file) => {
-      const m = only(await lint(eslint, file), 'no-restricted-imports');
+    it('AC-6: static import by package name fails no-restricted-imports [boundary]', async () => {
+      const m = only(await lint(eslint, 'services/a/src/by-name.ts'), 'no-restricted-imports');
       expect(m).toHaveLength(1);
       expect(m[0]?.message).toContain('[boundary]');
       expect(m[0]?.message).not.toContain('[control-plane]');
       expect(m[0]?.severity).toBe(2);
     });
-    // KNOWN GAP (QA issue #1): a sibling-service relative import (`../../b/src/x.js`) contains no
-    // services|packages|... segment, so the relative-escape regex misses it. `it.fails` documents the
-    // gap and turns red the day it is fixed, prompting removal of `.fails`.
-    it.fails('AC-6 (gap): sibling relative import ../../b/src/x.js should fail the boundary rule', async () => {
-      const m = only(await lint(eslint, 'services/a/src/by-sibling-relative.ts'), 'no-restricted-imports');
+    it.each([
+      'services/a/src/by-relative.ts',
+      'services/a/src/by-sibling-relative.ts',
+      'services/a/src/by-dot-relative.ts',
+    ])('AC-6: relative escape %s fails esg/import-boundaries [boundary]', async (file) => {
+      const m = only(await lint(eslint, file), 'esg/import-boundaries');
+      expect(m).toHaveLength(1);
+      expect(m[0]?.message).toContain('[boundary]');
+      expect(m[0]?.severity).toBe(2);
+    });
+    it('AC-6: a legitimate in-workspace ../db/client import passes', async () => {
+      const m = await lint(eslint, 'services/a/src/db/legit-relative.ts');
+      expect(only(m, 'esg/import-boundaries')).toHaveLength(0);
+      expect(only(m, 'no-restricted-imports')).toHaveLength(0);
+    });
+  });
+
+  describe('dynamic import(), require() and createRequire()()', () => {
+    it.each([
+      'services/a/src/dynamic-name.ts',
+      'services/a/src/dynamic-relative.ts',
+      'services/a/src/require-name.ts',
+      'services/a/src/create-require.ts',
+      'packages/x/src/dynamic-service.ts',
+    ])('%s fails [boundary]', async (file) => {
+      const m = only(await lint(eslint, file), 'esg/import-boundaries');
+      expect(m).toHaveLength(1);
+      expect(m[0]?.message).toContain('[boundary]');
+    });
+    it.each(['dynamic-control-plane.ts', 'require-control-plane.ts'])(
+      'ingest-like/%s fails [control-plane]',
+      async (f) => {
+        const m = only(await lint(eslint, `services/ingest-like/src/${f}`), 'esg/import-boundaries');
+        expect(m).toHaveLength(1);
+        expect(m[0]?.message).toContain('[control-plane]');
+      },
+    );
+    it('api may dynamically import the control plane', async () => {
+      expect(only(await lint(eslint, 'services/api/src/dynamic-control-plane.ts'), 'esg/import-boundaries')).toHaveLength(0);
+    });
+  });
+
+  describe('deep control-plane paths and re-exports', () => {
+    it('deep path @esg/db/dist/control-plane/... is blocked', async () => {
+      const m = only(await lint(eslint, 'services/ingest-like/src/deep-control-plane.ts'), 'no-restricted-imports');
+      expect(m).toHaveLength(1);
+      expect(m[0]?.message).toContain('[control-plane]');
+    });
+    it('a package re-exporting the control-plane entry is blocked', async () => {
+      const m = only(await lint(eslint, 'packages/x/src/control-plane.ts'), 'no-restricted-imports');
+      expect(m).toHaveLength(1);
+      expect(m[0]?.message).toContain('[control-plane]');
+    });
+  });
+
+  describe('inline disables', () => {
+    it('cannot switch off the static boundary rule', async () => {
+      const m = only(await lint(eslint, 'services/a/src/inline-disable.ts'), 'no-restricted-imports');
+      expect(m).toHaveLength(1);
+      expect(m[0]?.severity).toBe(2);
+    });
+    it('a blanket eslint-disable cannot switch off the relative-escape rule', async () => {
+      const m = only(await lint(eslint, 'services/a/src/blanket-disable.ts'), 'esg/import-boundaries');
       expect(m).toHaveLength(1);
     });
   });
@@ -64,13 +122,20 @@ describe('lint fixtures', () => {
   describe('AC-7 packages and e2e', () => {
     it.each([
       'packages/x/src/imports-service.ts',
-      'packages/x/src/relative-escape.ts',
       'test/e2e/src/imports-service.ts',
     ])('AC-7: %s fails the boundary rule', async (file) => {
       const m = only(await lint(eslint, file), 'no-restricted-imports');
       expect(m).toHaveLength(1);
       expect(m[0]?.message).toContain('[boundary]');
       expect(m[0]?.severity).toBe(2);
+    });
+  });
+
+  describe('AC-7 relative escape from a package', () => {
+    it('AC-7: packages/x relative escape fails esg/import-boundaries', async () => {
+      const m = only(await lint(eslint, 'packages/x/src/relative-escape.ts'), 'esg/import-boundaries');
+      expect(m).toHaveLength(1);
+      expect(m[0]?.message).toContain('[boundary]');
     });
   });
 
@@ -98,7 +163,16 @@ describe('lint fixtures', () => {
         const rules = Object.fromEntries(Object.entries(c.rules).filter(([name]) => name !== 'no-restricted-imports'));
         return { ...c, rules };
       });
-      const m = only(await lint(makeEslint(stripped), 'services/a/src/by-name.ts'), 'no-restricted-imports');
+      const eslintStripped = makeEslint(stripped);
+      expect(only(await lint(eslintStripped, 'services/a/src/by-name.ts'), 'no-restricted-imports')).toHaveLength(0);
+    });
+    it('AC-10: negative control: without the local rule the relative escape is not flagged', async () => {
+      const stripped = createConfig({ root: fixturesRoot }).map((c) => {
+        if (!c.rules) return c;
+        const rules = Object.fromEntries(Object.entries(c.rules).filter(([name]) => name !== 'esg/import-boundaries'));
+        return { ...c, rules };
+      });
+      const m = only(await lint(makeEslint(stripped), 'services/a/src/by-sibling-relative.ts'), 'esg/import-boundaries');
       expect(m).toHaveLength(0);
     });
   });
