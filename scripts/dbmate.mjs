@@ -74,8 +74,12 @@ if (![...LOCAL_HOSTS, ...COMPOSE_SERVICE_HOSTS].includes(host)) {
   fail(`refusing host "${host}" (allowed: ${[...LOCAL_HOSTS, ...COMPOSE_SERVICE_HOSTS].join(', ')}).`);
 }
 
+// dbmate auto-loads ./.env unless told otherwise; point it at an empty file so only the
+// guarded process environment is used. Callers cannot pass --env-file themselves (see above).
+const dbmateArgs = ['--env-file=/dev/null', '--migrations-dir', 'db/migrations', ...args];
+
 if (checkOnly) {
-  console.log('dbmate guard: ok');
+  console.log(`dbmate guard: ok (dbmate ${dbmateArgs.join(' ')})`);
   process.exit(0);
 }
 
@@ -85,5 +89,5 @@ for (const [k, v] of Object.entries(process.env)) {
   if (!k.startsWith('DBMATE_')) env[k] = v;
 }
 const bin = path.join(import.meta.dirname, '..', 'node_modules', '.bin', 'dbmate');
-const r = spawnSync(bin, ['--migrations-dir', 'db/migrations', ...args], { stdio: 'inherit', env });
+const r = spawnSync(bin, dbmateArgs, { stdio: 'inherit', env });
 process.exit(r.status ?? 1);
