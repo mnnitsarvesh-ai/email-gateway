@@ -13,7 +13,14 @@ coverage
 *.pfx
 *.jks
 id_rsa*
+id_ed25519*
+id_ecdsa*
+*.keystore
 kubeconfig
+.aws/
+.kube/
+.pgpass
+.netrc
 
 # terraform
 **/*.tfstate*
@@ -21,6 +28,7 @@ kubeconfig
 *.tfvars
 *.tfvars.json
 *.tfplan
+tfplan
 
 # e2e artifacts
 test/e2e/.artifacts/

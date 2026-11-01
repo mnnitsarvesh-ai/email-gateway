@@ -100,7 +100,7 @@ describe('workspace tsconfig confinement (hard rule 8, second layer)', () => {
   it('every workspace tsconfig sets rootDir inside its own workspace and an include', () => {
     const files = workspaceDirs()
       .flatMap((d) => walk(d))
-      .filter((f) => /(^|\/)tsconfig[^/]*\.json$/.test(f) && !f.includes('/fixtures/'));
+      .filter((f) => /(^|\/)tsconfig[^/]*\.json$/.test(f) && !/^tooling\/(lint-fixtures|workspace-guard)\/fixtures\//.test(f));
     expect(files.length).toBeGreaterThan(0);
     const problems: string[] = [];
     for (const f of files) {
@@ -123,7 +123,7 @@ describe('ESLint config integrity', () => {
   it('the root eslint.config.mjs is the only ESLint config (no nested override)', () => {
     const all = walk('.')
       .filter((f) => /(^|\/)(eslint\.config\.[cm]?[jt]s|\.eslintrc[^/]*)$/.test(f))
-      .filter((f) => !f.includes('/fixtures/'));
+      .filter((f) => !/^tooling\/(lint-fixtures|workspace-guard)\/fixtures\//.test(f));
     expect(all).toEqual(['eslint.config.mjs']);
     const tracked = git('ls-files').stdout.split('\n').filter((f) => /(^|\/)(eslint\.config\.[cm]?[jt]s|\.eslintrc[^/]*)$/.test(f));
     expect(tracked.filter((f) => f !== 'eslint.config.mjs')).toEqual([]);
@@ -246,7 +246,7 @@ describe('AC-14 / AC-15 ignore rules and tracked files', () => {
   const ignored = [
     '.env', '.env.local', '.env.production', 'x.pem', 'x.key', 'a.tfstate', 'a.tfstate.backup', '.terraform/x', 'x.tfvars',
     'test/e2e/.artifacts/x', 'x.tfvars.json', 'x.tfplan', 'x.p12', 'x.pfx', 'x.jks', 'id_rsa', 'id_rsa.pub', 'kubeconfig',
-    'services/a/.env.local',
+    'services/a/.env.local', 'tfplan', 'id_ed25519', 'id_ed25519.pub', 'id_ecdsa', '.aws/credentials', '.kube/config', '.pgpass', '.netrc', 'x.keystore',
   ];
   it.each(ignored)('AC-14: %s is ignored', (p) => {
     expect(git('check-ignore', '-q', p).status).toBe(0);
@@ -279,7 +279,7 @@ describe('AC-14 / AC-15 ignore rules and tracked files', () => {
     }
   });
   it('AC-15d: pnpm dbmate up fails naming DATABASE_URL', (ctx) => {
-    if (fs.existsSync(path.join(repoRoot, '.env')) || fs.existsSync(path.join(repoRoot, '.env.local'))) ctx.skip();
+    if (fs.existsSync(path.join(repoRoot, '.env'))) ctx.skip();
     const r = spawnSync('pnpm', ['dbmate', 'up'], { cwd: repoRoot, env: cleanDbEnv(), encoding: 'utf8' });
     expect(r.status).not.toBe(0);
     expect(r.stdout + r.stderr).toContain('DATABASE_URL');
@@ -288,28 +288,39 @@ describe('AC-14 / AC-15 ignore rules and tracked files', () => {
 
 describe('guarded dbmate wrapper', () => {
   const wrapper = path.join(repoRoot, 'scripts', 'dbmate.mjs');
-  const run = (url: string | undefined, ...args: string[]) => {
-    const env = cleanDbEnv();
+  const runRaw = (url: string | undefined, extraEnv: Record<string, string>, ...args: string[]) => {
+    const env = { ...cleanDbEnv(), ...extraEnv };
     if (url !== undefined) env['DATABASE_URL'] = url;
     return spawnSync(process.execPath, [wrapper, '--check-only', ...args], { env, encoding: 'utf8', cwd: os.tmpdir() });
   };
-  // QA round 1 known gaps: dbmate (Go flag parsing) accepts single-dash flags, so these override DATABASE_URL.
-  it.fails.each([['-url', 'mysql://u@prod.invalid/d'], ['-url=mysql://u@prod.invalid/d'], ['-env', 'OTHER'], ['-env-file=x']])(
-    'RT1-3 (gap): wrapper refuses single-dash override %s',
-    (...args) => {
-      expect(run('mysql://u:p@localhost/d', ...args).status).not.toBe(0);
+  const run = (url: string | undefined, ...args: string[]) => runRaw(url, {}, 'up', ...args);
+  const LOCAL = 'mysql://u:p@localhost/d';
+
+  it.each(['-url', '-url=mysql://u@prod.invalid/d', '-env', '-env-file=x', '-e', '-u', '--url=mysql://u:p@localhost/d', '--env-file=.env', '--env', '--', '-d'])(
+    'refuses the override flag %s',
+    (flag) => {
+      const r = run(LOCAL, flag);
+      expect(r.status).not.toBe(0);
+      expect(r.stderr).toContain('not allowed');
     },
   );
-  it.fails('RT1-4 (gap): wrapper refuses a ?host= override in DATABASE_URL', () => {
-    expect(run('postgres://u:p@localhost/d?host=prod.invalid').status).not.toBe(0);
+  it.each(['--no-dump-schema', '--wait', '--wait-timeout=30s'])('allows the flag %s', (flag) => {
+    expect(run(LOCAL, flag).status).toBe(0);
   });
-  it.fails.each(['tfplan', 'id_ed25519', '.aws/credentials', '.kube/config', '.pgpass', '.netrc', 'x.keystore'])(
-    'RT1-5 (gap): .gitignore covers %s',
-    (p) => {
-      expect(git('check-ignore', '-q', p).status).toBe(0);
-    },
-  );
-  it.each(['mysql://u:p@localhost:3306/d', 'mysql://u:p@127.0.0.1/d', 'mysql://u:p@[::1]:3306/d', 'mysql://u:p@mysql:3306/d'])(
+  it.each(['postgres://u:p@localhost/d', 'mysql+x://u:p@localhost/d', 'http://localhost/d'])('refuses scheme in %s', (u) => {
+    const r = run(u);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('scheme');
+  });
+  it.each(['?host=prod.invalid', '?socket=/tmp/x', '?unix_socket=/tmp/x', '?host=', '?tls=skip-verify'])('refuses query %s', (q) => {
+    const r = run(`mysql://u:p@localhost/d${q}`);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('query parameter');
+  });
+  it('allows an allowlisted query parameter', () => {
+    expect(run('mysql://u:p@localhost/d?parseTime=true&charset=utf8mb4').status).toBe(0);
+  });
+  it.each(['mysql://u:p@localhost:3306/d', 'mysql://u:p@127.0.0.1/d', 'mysql://u:p@[::1]:3306/d', 'mysql://u:p@mysql:3306/d', 'mysql://u:p@mysql-writer/d', 'mysql://u:p@mysql-replica/d'])(
     'allows %s',
     (u) => {
       expect(run(u).status).toBe(0);
@@ -318,7 +329,9 @@ describe('guarded dbmate wrapper', () => {
   it.each([
     'mysql://u:p@db.example.com/d',
     'mysql://u:p@10.0.0.5/d',
+    'mysql://u:p@prod-rds-cluster-abc/d',
     'mysql://u:p@writer.cluster-abc.ap-south-1.rds.amazonaws.com/d',
+    'mysql://u:p@/d',
   ])('refuses %s', (u) => {
     const r = run(u);
     expect(r.status).not.toBe(0);
@@ -330,12 +343,36 @@ describe('guarded dbmate wrapper', () => {
     expect(r.status).not.toBe(0);
     expect(r.stderr).toContain('DATABASE_URL');
   });
-  it.each(['--url=mysql://u:p@localhost/d', '-u', '--env-file=.env', '--env'])('refuses the %s override flag', (flag) => {
-    const r = run('mysql://u:p@localhost/d', flag);
-    expect(r.status).not.toBe(0);
+  it.each(['new', 'up', 'migrate', 'rollback', 'status', 'dump', 'wait'])('allows subcommand %s', (c) => {
+    expect(runRaw(LOCAL, {}, ...(c === 'new' ? [c, 'add_table'] : [c])).status).toBe(0);
+  });
+  it.each(['drop', 'create'])('%s needs the explicit opt-in', (c) => {
+    const denied = runRaw(LOCAL, {}, c);
+    expect(denied.status).not.toBe(0);
+    expect(denied.stderr).toContain('ESG_DBMATE_ALLOW_DROP=1');
+    expect(runRaw(LOCAL, { ESG_DBMATE_ALLOW_DROP: '1' }, c).status).toBe(0);
+  });
+  it.each(['load', 'bogus'])('refuses subcommand %s', (c) => {
+    expect(runRaw(LOCAL, {}, c).status).not.toBe(0);
+  });
+  it('refuses a missing subcommand and extra positionals', () => {
+    expect(runRaw(LOCAL, {}).status).not.toBe(0);
+    expect(runRaw(LOCAL, {}, 'up', 'extra').status).not.toBe(0);
+    expect(runRaw(LOCAL, {}, 'new', '../evil').status).not.toBe(0);
   });
   it('the root script uses the wrapper', () => {
     expect(rootPkg.scripts?.['dbmate']).toContain('scripts/dbmate.mjs');
+  });
+  it('does not claim to read .env.local', () => {
+    expect(read('scripts/dbmate.mjs')).not.toMatch(/env-file-if-exists/);
+    expect(rootPkg.scripts?.['dbmate']).not.toContain('env-file');
+  });
+});
+
+describe('no tracked symlinks', () => {
+  it('git ls-files -s lists no mode 120000 entries', () => {
+    const modes = git('ls-files', '-s').stdout.split('\n').filter(Boolean).map((l) => l.split(' ')[0]);
+    expect(modes.filter((m) => m === '120000')).toEqual([]);
   });
 });
 
@@ -397,7 +434,7 @@ describe('AC-17 / AC-20 CLAUDE.md', () => {
 
 describe('AC-18 pins', () => {
   it('AC-18: exact pnpm 10.x.y and turbo 2.x.y, lockfile present', () => {
-    expect(rootPkg.packageManager).toMatch(/^pnpm@10\.\d+\.\d+$/);
+    expect(rootPkg.packageManager).toMatch(/^pnpm@10\.\d+\.\d+(\+sha512\.[0-9a-f]{128})?$/);
     expect(rootPkg.devDependencies?.['turbo']).toMatch(/^2\.\d+\.\d+$/);
     expect(fs.existsSync(path.join(repoRoot, 'pnpm-lock.yaml'))).toBe(true);
     expect(git('ls-files', 'pnpm-lock.yaml').stdout.trim()).toBe('pnpm-lock.yaml');

@@ -9,6 +9,8 @@ packages:
 strictDepBuilds: true
 # Dependencies allowed to run build scripts (dbmate ships its binary via optional deps, no scripts).
 onlyBuiltDependencies: []
+# Do not resolve versions published less than 3 days ago (minutes). Lockfile installs are unaffected.
+minimumReleaseAge: 4320
 
 # Single source of truth for shared dev-tool versions (exact pins, no ranges).
 catalog:

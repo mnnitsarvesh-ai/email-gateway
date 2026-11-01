@@ -4,10 +4,8 @@
     "eslint.config.mjs",
     "tsconfig.base.json",
     "pnpm-workspace.yaml",
-    "tooling/eslint-config/index.mjs",
-    "tooling/eslint-config/import-boundaries.mjs",
-    "tooling/eslint-config/index.d.mts",
-    "tooling/eslint-config/package.json"
+    "tooling/eslint-config/**",
+    "!tooling/eslint-config/node_modules/**"
   ],
   "tasks": {
     "build": {
