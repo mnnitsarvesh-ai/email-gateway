@@ -3,14 +3,5 @@ title = "email-gateway gitleaks config"
 [extend]
 useDefault = true
 
-# Any finding fails CI (hard rule 9). The only allowlisted paths are untracked,
-# gitignored build/dependency output that is scanned by `--no-git` runs of a
-# working tree; none of it is ever committed.
-[allowlist]
-description = "gitignored dependency and build output"
-paths = [
-  '''(^|/)node_modules/''',
-  '''(^|/)\.turbo/''',
-  '''(^|/)dist/''',
-  '''(^|/)coverage/''',
-]
+# No allowlists, on purpose: any finding fails CI (hard rule 9), in tracked files and history alike.
+# Placeholders in .env.example must not look like secrets.
