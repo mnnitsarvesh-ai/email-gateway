@@ -1,0 +1,1 @@
+{ "name": "@bad/p1", "private": true, "dependencies": { "a": "file:../../services/svc-b" } }

@@ -1,0 +1,1 @@
+{ "name": "@bad/t1", "private": true, "pnpm": { "overrides": { "something": "link:../../services/svc-b" } } }

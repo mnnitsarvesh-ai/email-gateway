@@ -1,0 +1,1 @@
+{ "name": "@bad/t3", "private": true, "overrides": { "something": "workspace:../../services/svc-b" } }
