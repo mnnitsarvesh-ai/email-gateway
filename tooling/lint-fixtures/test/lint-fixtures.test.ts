@@ -159,6 +159,12 @@ describe('lint fixtures', () => {
     });
   });
 
+  describe('round 3 QA gap', () => {
+    it.fails('RT3-1 (gap): destructured/aliased process.getBuiltinModule("node:module") is flagged', async () => {
+      expect((await lint(eslint, 'services/a/src/builtin-alias.ts')).filter((m) => (m.message || '').includes('[boundary]'))).toHaveLength(1);
+    });
+  });
+
   describe('inline disables', () => {
     it('cannot switch off the static boundary rule', async () => {
       const m = only(await lint(eslint, 'services/a/src/inline-disable.ts'), 'no-restricted-imports');

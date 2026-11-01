@@ -1,5 +1,5 @@
 # QA report: 001 (monorepo scaffold, lint boundaries, CI)
-Verdict: FAIL on AC-1 after round 2 (see "Round 2 re-test" at the end; issue 1 below and all round 1 gaps are closed)
+Verdict: PASS WITH ISSUES (final, after round 3; see "Round 3 re-test" at the end)
 
 Environment: Node 24.22.2, pnpm 10.34.9, turbo 2.11.10. `gitleaks`, `actionlint` and `terraform` are not installed locally, so ACs that need them are marked CI only, not PASS.
 
@@ -137,6 +137,35 @@ Cold run: 12 successful, 0 cached; workspace-guard 6, lint-fixtures 46, repo-che
 - Low: `process['getBuiltinModule']('module')` (computed member) is not flagged (`import-boundaries.mjs`, `c.computed` guard).
 - Low: `new URL(variable, import.meta.url)` and `module.register('../../b/src/x.js', import.meta.url)` are not flagged. They do not import code through the normal loader paths, so the practical risk is small.
 - Info: the symlink import-escape case (round 1 issue 4) is covered by the tracked-symlink repo-check, not by the lint rule.
+
+## CI only (unchanged)
+AC-11 actionlint and `terraform fmt`; AC-12 gitleaks (both tests); AC-15c. The gitleaks digest pin, `:ro` mount and `persist-credentials: false` have not run on GitHub.
+
+---
+
+# Round 3 re-test (commits 40130f2..1475898)
+Final verdict: **PASS WITH ISSUES.** All 20 ACs are met locally except the CI-only parts. The AC-1 regression is fixed. One low-severity gap remains (aliased `getBuiltinModule`), recorded as an `it.fails` marker.
+
+## AC-1 cold sequence (verified)
+Empty `TURBO_CACHE_DIR`; every `node_modules`, `.turbo` and `dist` deleted; `pnpm install --frozen-lockfile`. Run 1: 12 executed, 0 cached. Run 2: 12/12 cached, `FULL TURBO`. Run 3: the same. `turbo.json:7-10` now excludes `tooling/eslint-config/.turbo/**` and `dist/**`. `RT2-1` is a normal passing test. Tests: workspace-guard 6, lint-fixtures 52, repo-checks 109 passed (3 skipped: gitleaks x2, actionlint, CI only).
+
+## `module` / `node:module` blanket ban in `services/**` and `packages/**`
+Flagged: static import (named, default, namespace, side-effect), `export { } from`, `export * from`, `import()` (also template literal and `await`), `typeof import()`, `import = require`, `require('node:module')` and its destructuring, `require.resolve('module')`, `process.getBuiltinModule('module' | 'node:module')` (plain, template literal, computed `process['getBuiltinModule']`, optional call `?.()`, `globalThis.process.`, via an alias of `process` such as `const p = process; p.getBuiltinModule(...)`, non-literal argument).
+Not flagged (Low gap, marker `RT3-1` in `tooling/lint-fixtures/test/lint-fixtures.test.ts`, fixture `builtin-alias.ts`):
+- `const { getBuiltinModule } = process; getBuiltinModule('node:module')`
+- `const g = process.getBuiltinModule; g('module')`
+- `process['getBuiltinModule'].bind(process)('node:module')` and `.call(process, 'node:module')`
+- `(process as any)[key]('node:module')` with a variable key
+Suggested fix: flag any reference to the name `getBuiltinModule` (member access, destructuring, identifier) in services and packages, and any computed member call on `process`. Rule: `tooling/eslint-config/import-boundaries.mjs`.
+Allowed in `tooling/**` (not governed): confirmed.
+No false positives: `node:fs` import, `process.getBuiltinModule('node:fs')`, `module-x`, `@esg/module-x`, `node-module`, `modules`, `node:modules`, `modul`, a local `./module.js`, an object property named `getBuiltinModule`, and strings `'module'` / `'node:module'` in arrays.
+
+## dbmate `--env-file=/dev/null`
+The wrapper passes `--env-file=/dev/null` first (`scripts/dbmate.mjs:79`; `--check-only` prints the full command). With a poisoned `.env` in the cwd (and in the repo root via `pnpm dbmate`) and a local `DATABASE_URL`, dbmate dialled only `127.0.0.1:1` (connection refused); with `DATABASE_URL` unset the wrapper refused and never touched the `.env` host. A caller-supplied `status --env-file=.env` fails in Node ("node: .env: not found") before the wrapper, as noted in round 2. `DBMATE_ENV_FILE` in the environment had no effect. Fake URLs only. The test `.env` files were removed afterwards.
+
+## Remaining issues
+1. **Low. Aliased `getBuiltinModule`** (see above). `process.getBuiltinModule('node:module')` reached through a destructured or bound alias bypasses the ban (`tooling/eslint-config/import-boundaries.mjs`, CallExpression handler). Marker test `RT3-1`.
+2. Deferred to the task 011 threat model by the implementer: Worker/fork/spawn paths, `new URL(variable)`, `module.register`, `.cjs` `module.require`.
 
 ## CI only (unchanged)
 AC-11 actionlint and `terraform fmt`; AC-12 gitleaks (both tests); AC-15c. The gitleaks digest pin, `:ro` mount and `persist-credentials: false` have not run on GitHub.
