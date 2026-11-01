@@ -1,0 +1,1 @@
+{ "name": "@bad/t2", "private": true, "devDependencies": { "y": "file:../../services/svc-b" } }
