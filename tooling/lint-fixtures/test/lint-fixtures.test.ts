@@ -133,14 +133,20 @@ describe('lint fixtures', () => {
       'services/a/src/create-require-alias.ts',
       'packages/x/src/create-require-import.ts',
       'packages/x/src/create-require-namespace.ts',
-    ])('createRequire is banned in %s', async (file) => {
+      'services/a/src/module-require-destructure.ts',
+      'services/a/src/module-dynamic-import.ts',
+      'services/a/src/module-default-import.ts',
+      'services/a/src/module-export-from.ts',
+      'services/a/src/module-get-builtin.ts',
+      'packages/x/src/module-get-builtin-dot.ts',
+    ])('module / node:module is banned in %s', async (file) => {
       const m = await ruleMsgs(file);
       expect(m.length).toBeGreaterThanOrEqual(1);
-      expect(m.every((x) => x.message.includes('createRequire is banned'))).toBe(true);
+      expect(m.every((x) => x.message.includes('module and node:module specifiers are banned'))).toBe(true);
     });
     it('createRequire()() with a relative escape reports both the ban and the escape', async () => {
       const m = await ruleMsgs('services/a/src/create-require.ts');
-      expect(m.some((x) => x.message.includes('createRequire is banned'))).toBe(true);
+      expect(m.some((x) => x.message.includes('are banned'))).toBe(true);
       expect(m.some((x) => x.message.includes('leaves workspace'))).toBe(true);
     });
     it('new URL(relative, import.meta.url) outside the workspace is reported', async () => {

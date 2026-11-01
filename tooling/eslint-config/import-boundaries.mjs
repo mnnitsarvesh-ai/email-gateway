@@ -93,6 +93,11 @@ export const importBoundaries = {
     const own = opts.services.find((s) => `services/${s.dir}` === ws)?.name;
     const controlPlaneAllowed = opts.controlPlaneAllow.some((a) => ws === a || ws.startsWith(`${a}/`));
 
+    const banModule = /^(services|packages)\//.test(ws);
+    const MODULE_MESSAGE =
+      '[boundary] The module and node:module specifiers are banned in services/ and packages/: createRequire and friends hide specifiers from the boundary check (hard rule 8).';
+    const isModuleSpec = (/** @type {string | undefined} */ v) => v === 'module' || v === 'node:module';
+
     /**
      * @param {any} node
      * @param {string | undefined} spec
@@ -106,6 +111,10 @@ export const importBoundaries = {
             message: '[boundary] import()/require() needs a static string specifier; a computed one cannot be checked against workspace boundaries (hard rule 8).',
           });
         }
+        return;
+      }
+      if (banModule && isModuleSpec(spec)) {
+        context.report({ node, message: MODULE_MESSAGE });
         return;
       }
       if (isAbsoluteSpec(spec)) {
@@ -144,27 +153,8 @@ export const importBoundaries = {
       }
     }
 
-    const banCreateRequire = /^(services|packages)\//.test(ws);
-    const CREATE_REQUIRE_MESSAGE =
-      '[boundary] createRequire is banned in services/ and packages/: it hides specifiers from the boundary check (hard rule 8).';
-    const isModuleSpec = (/** @type {string | undefined} */ v) => v === 'module' || v === 'node:module';
-
     return {
-      ImportDeclaration: (/** @type {any} */ n) => {
-        check(n, literal(n.source), false);
-        if (banCreateRequire && isModuleSpec(literal(n.source))) {
-          for (const sp of n.specifiers) {
-            if (sp.type === 'ImportSpecifier' && (sp.imported.name ?? sp.imported.value) === 'createRequire') {
-              context.report({ node: sp, message: CREATE_REQUIRE_MESSAGE });
-            }
-          }
-        }
-      },
-      MemberExpression: (/** @type {any} */ n) => {
-        if (banCreateRequire && !n.computed && n.property.type === 'Identifier' && n.property.name === 'createRequire') {
-          context.report({ node: n, message: CREATE_REQUIRE_MESSAGE });
-        }
-      },
+      ImportDeclaration: (/** @type {any} */ n) => check(n, literal(n.source), false),
       NewExpression: (/** @type {any} */ n) => {
         if (n.callee.type !== 'Identifier' || n.callee.name !== 'URL' || n.arguments.length < 2) return;
         const base = n.arguments[1];
@@ -187,15 +177,13 @@ export const importBoundaries = {
       TSExternalModuleReference: (/** @type {any} */ n) => check(n, literal(n.expression), true),
       CallExpression: (/** @type {any} */ n) => {
         if (isRequireCallee(n.callee) && n.arguments.length > 0) check(n, literal(n.arguments[0]), true);
+        // process.getBuiltinModule('module') and process['getBuiltinModule']('module'), or a computed argument.
         const c = n.callee;
-        if (
-          banCreateRequire &&
-          c.type === 'MemberExpression' &&
-          !c.computed &&
-          c.property.name === 'getBuiltinModule' &&
-          (literal(n.arguments[0]) === undefined || isModuleSpec(literal(n.arguments[0])))
-        ) {
-          context.report({ node: n, message: CREATE_REQUIRE_MESSAGE });
+        if (banModule && c.type === 'MemberExpression') {
+          const name = c.computed ? literal(c.property) : c.property.name;
+          if (name === 'getBuiltinModule' && (literal(n.arguments[0]) === undefined || isModuleSpec(literal(n.arguments[0])))) {
+            context.report({ node: n, message: MODULE_MESSAGE });
+          }
         }
       },
     };
