@@ -107,6 +107,16 @@ describe('lint fixtures', () => {
     });
   });
 
+  // QA round 1 known gaps (it.fails: red the day they are fixed, then drop `.fails`).
+  describe('round 1 QA gaps', () => {
+    it.fails('RT1-1 (gap): non-literal import(variable) leaving the workspace is flagged', async () => {
+      expect(only(await lint(eslint, 'services/a/src/dynamic-nonliteral.ts'), 'esg/import-boundaries')).toHaveLength(1);
+    });
+    it.fails('RT1-2 (gap): aliased createRequire result r(...) leaving the workspace is flagged', async () => {
+      expect(only(await lint(eslint, 'services/a/src/create-require-alias.ts'), 'esg/import-boundaries')).toHaveLength(1);
+    });
+  });
+
   describe('inline disables', () => {
     it('cannot switch off the static boundary rule', async () => {
       const m = only(await lint(eslint, 'services/a/src/inline-disable.ts'), 'no-restricted-imports');

@@ -1,5 +1,5 @@
 # QA report: 001 (monorepo scaffold, lint boundaries, CI)
-Verdict: PASS WITH ISSUES
+Verdict: PASS WITH ISSUES (re-tested after round 1, see the end of this report; issue 1 below is closed)
 
 Environment: Node 24.22.2, pnpm 10.34.9, turbo 2.11.10. `gitleaks`, `actionlint` and `terraform` are not installed locally, so ACs that need them are marked CI only, not PASS.
 
@@ -63,3 +63,50 @@ Not applicable.
 - AC-11: actionlint clean; the `terraform fmt` step.
 - AC-12: gitleaks detects a fake secret; the working tree is clean.
 - AC-15c: gitleaks over the working tree, which includes `.env.example`.
+
+---
+
+# Round 1 re-test (commits 869ef83..e24e7fd)
+Verdict: PASS WITH ISSUES. All 20 ACs are met locally, except those marked CI only. The sibling-import gap (issue 1) is closed. No high-severity issue remains. Four medium/low gaps remain; each is recorded as an `it.fails` test, so it turns red when fixed.
+
+Cold run (empty `TURBO_CACHE_DIR`, `node_modules`/`.turbo`/`dist` removed, Node 24.22.2): `pnpm install --frozen-lockfile && pnpm turbo run build lint typecheck test` gave 12 successful, 0 cached. Warm run: 12/12 cached, `FULL TURBO`. Tests: workspace-guard 4, lint-fixtures 32, repo-checks 60 passed (3 skipped: gitleaks x2, actionlint, CI only). After my additions: lint-fixtures 32 passed + 2 expected fail, repo-checks 60 passed + 12 expected fail.
+
+## Earlier break attempts, re-run (temporary workspaces, all reverted)
+Sibling `../../b/src/x.js`, `import()` literal, `require('@esg/b')`, `require.resolve`, `createRequire(...)(...)`, `export * from` (relative and by name), `export {..} from`, `import b = require(...)` (relative and by name), `typeof import()`, `.tsx`, `.jsx`, `.mjs`, `.mts`, side-effect `import '../..'`: all caught by `esg/import-boundaries` or `no-restricted-imports`. Control-plane via `@esg/db/dist/control-plane/...`, `@esg/config/control-plane/x`, `import('@esg/db/control-plane')`: caught. Inline disables (`/* eslint-disable */`, `-next-line` naming both rules, `-line`): do not hide anything. Temporary `any`, unchecked index, service-to-service package.json: all still caught.
+
+## Attempts to defeat `esg/import-boundaries`
+| Attempt | Result |
+|---|---|
+| `import(\`../../b/src/x.js\`)` (template, no expressions) | caught |
+| `import(\`../../b/src/${'x'}.js\`)`, `import(variable)`, `import('../../b/' + 'src/x.js')`, `import('@esg/db/' + 'control-plane')` | NOT caught (issue 2) |
+| `const r = createRequire(import.meta.url); r('../../b/src/x.js')` | NOT caught (issue 3) |
+| Symlink `services/a/src/link -> ../../b/src`, then `import './link/x.js'` | NOT caught (issue 4) |
+| `.cjs` file with ESM syntax | parse error, so not a bypass |
+
+## workspace-guard
+Fixtures `bad-repo`, `alias-repo` (`npm:`, `workspace:<name>@`, `link:`, `file:`) and `root-repo` each exit 1 naming both workspaces. My own temporary repo: `workspace:../b`, `file:../b`, `link:./../b`, `npm:@x/b`, range `*`, root devDependency, package-to-service by `link:`: all exit 1. Not caught: `pnpm.overrides` / `overrides` entries pointing at a service by `link:` or alias, in a workspace or root package.json (issue 5).
+
+## dbmate wrapper (fake URLs only; the only network attempt was a `.invalid` host)
+Allowed: localhost, 127.0.0.1, `[::1]`, `mysql`, `LOCALHOST`. Refused: `db.example.com`, `10.0.0.5`, `localhost.evil.com`, `localhost@evil.com`, `0.0.0.0`, `2130706433`, `127.1`, invalid URL, unset URL. `--url`, `--url=`, `-u`, `-e` refused; `--env-file` fails closed (Node errors out). Bypasses:
+- `-url`, `-url=...`, `-env`, `-env-file=...` (single dash) pass the wrapper. Confirmed that dbmate honours them: `dbmate -url mysql://u:p@qa-fake-host.invalid:1/db status` with a localhost DATABASE_URL set tried to resolve `qa-fake-host.invalid` (issue 6).
+- `?host=` query parameter in DATABASE_URL passes the host check (issue 6).
+- Any single-label host passes, including real internal names such as `prod-rds-cluster-abc`; this is by design but worth knowing.
+- `scripts/dbmate.mjs:3,27` and the round 1 table say `.env.local` is loaded; the wrapper does not load it. Documentation mismatch only (issue 7).
+
+## .gitignore
+Ignored as required: `.env`, `.env.*` and nested ones, `.envrc`, pem, key, p12, pfx, jks, `id_rsa*`, kubeconfig, tfstate variants, `.terraform/`, tfvars, tfvars.json, `*.tfplan`, `test/e2e/.artifacts/`. Not ignored: `.env.example`, `x.tfvars.example`. Not ignored but arguably should be (issue 8): bare `tfplan` (the round 1 table says it was added; only `*.tfplan` is), `id_ed25519`, `.aws/credentials`, `.kube/config`, `.pgpass`, `.netrc`, `*.keystore`.
+
+## Issues found in round 1 re-test
+2. **Medium. Non-literal dynamic imports are not checked** (hard rule 8, and 2). Repro: `const p='../../b/src/x.js'; export const q = import(p);` in `services/a/src`. No error. Also `import(\`../../b/${n}\`)`, string concatenation, and `import('@esg/db/' + 'control-plane')`. Suggested fix: forbid non-literal `import()` / `require()` arguments with `no-restricted-syntax` in governed workspaces. Rule: `tooling/eslint-config/import-boundaries.mjs:41-47` (`literal()` returns undefined). Test: RT1-1.
+3. **Low. Aliased `createRequire` result.** `const r = createRequire(import.meta.url); r('../../b/src/x.js')` is not flagged; only the direct `createRequire(...)(...)` form is (`import-boundaries.mjs:52-66`). Test: RT1-2.
+4. **Low. Symlinks.** `workspaceOf` and the escape check work on path strings, not realpaths (`import-boundaries.mjs:21-29,95-98`), so a symlink inside a workspace that points at another workspace is invisible. Unlikely in practice; git can track symlinks, so a code-review item.
+5. **Low. workspace-guard ignores `overrides` / `pnpm.overrides`.** Repro: service `a` with `"pnpm":{"overrides":{"foo":"link:../b"}}` gives exit 0. `tooling/workspace-guard/src/guard.ts:48-60` reads only the four dependency fields.
+6. **Medium. dbmate wrapper bypasses.** Repro: `DATABASE_URL=mysql://u:p@localhost/d node scripts/dbmate.mjs --check-only -url mysql://u@prod.invalid/d` exits 0 (and the real `pnpm dbmate -url ...` passes through to dbmate, which uses it). Same for `-env`, `-env-file=` and `?host=` in the URL. Defeats the "local only" guard at `scripts/dbmate.mjs:10,18-21`. Fix: also reject single-dash forms (normalise leading dashes and case before comparing), reject any query parameter named `host`/`socket`, and consider an allow-list of dbmate commands and flags. Tests: RT1-3, RT1-4.
+7. **Info. `.env.local` is documented but never loaded** by `scripts/dbmate.mjs:3,27`.
+8. **Low. `.gitignore` gaps** listed above (gitleaks is the backstop). Test: RT1-5.
+
+## Test changes in this round
+Added fixtures `fixtures/services/a/src/dynamic-nonliteral.ts` and `create-require-alias.ts`; `it.fails` tests RT1-1 to RT1-5 (cannot be fixed by QA; they are red-when-fixed markers). The earlier AC-6 sibling `it.fails` is gone; the implementer turned it into a normal passing test.
+
+## CI only (unchanged)
+AC-11 actionlint and `terraform fmt`; AC-12 gitleaks (both tests); AC-15c. The new gitleaks image digest pin, `:ro` mount and `persist-credentials: false` have not run on GitHub.

@@ -293,6 +293,22 @@ describe('guarded dbmate wrapper', () => {
     if (url !== undefined) env['DATABASE_URL'] = url;
     return spawnSync(process.execPath, [wrapper, '--check-only', ...args], { env, encoding: 'utf8', cwd: os.tmpdir() });
   };
+  // QA round 1 known gaps: dbmate (Go flag parsing) accepts single-dash flags, so these override DATABASE_URL.
+  it.fails.each([['-url', 'mysql://u@prod.invalid/d'], ['-url=mysql://u@prod.invalid/d'], ['-env', 'OTHER'], ['-env-file=x']])(
+    'RT1-3 (gap): wrapper refuses single-dash override %s',
+    (...args) => {
+      expect(run('mysql://u:p@localhost/d', ...args).status).not.toBe(0);
+    },
+  );
+  it.fails('RT1-4 (gap): wrapper refuses a ?host= override in DATABASE_URL', () => {
+    expect(run('postgres://u:p@localhost/d?host=prod.invalid').status).not.toBe(0);
+  });
+  it.fails.each(['tfplan', 'id_ed25519', '.aws/credentials', '.kube/config', '.pgpass', '.netrc', 'x.keystore'])(
+    'RT1-5 (gap): .gitignore covers %s',
+    (p) => {
+      expect(git('check-ignore', '-q', p).status).toBe(0);
+    },
+  );
   it.each(['mysql://u:p@localhost:3306/d', 'mysql://u:p@127.0.0.1/d', 'mysql://u:p@[::1]:3306/d', 'mysql://u:p@mysql:3306/d'])(
     'allows %s',
     (u) => {
