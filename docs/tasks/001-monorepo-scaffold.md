@@ -227,3 +227,15 @@ Correction to the Round 1 table: item 8 said `tfplan` was covered. Only `*.tfpla
 Remaining `it.fails`: none. All of QA's round 1 gap tests (2 in lint-fixtures, RT1-3/4/5 in repo-checks) are now normal passing tests.
 
 Note: Node itself consumes `--env-file=<path>` anywhere on the command line, even after the script name. A mistaken `pnpm dbmate up --env-file=x` therefore fails in Node (or loads that file) before the wrapper runs; the wrapper still rejects the flag if Node gets that far.
+
+### Round 3 fixes
+
+| # | Status |
+|---|---|
+| 1 | `globalDependencies` now also excludes `tooling/eslint-config/.turbo/**` and `tooling/eslint-config/dist/**`, so turbo's own logs no longer change the global hash. All other input globs checked: `repo-checks#test` already excludes `**/node_modules`, `**/dist` and `**/.turbo`; the workspace-guard, lint and lint-fixtures inputs list only `package.json`, config and `*.mjs`/`*.d.mts` files or use `$TURBO_DEFAULT$` (which skips gitignored files). QA's `RT2-1` is a normal passing test. Cold sequence (empty `TURBO_CACHE_DIR`; every `node_modules`, `.turbo` and `dist` deleted; frozen install): run 1 executed 12 of 12 (0 cached), run 2 was 12 of 12 cached, `FULL TURBO`. |
+| 2 | Identifier-tracking `createRequire` handlers removed. In `services/**` and `packages/**` the specifiers `module` and `node:module` are banned in every form (static import, export-from, `import()`, `require()`), and `process.getBuiltinModule('module'\|'node:module')`, including `process['getBuiltinModule']` and non-literal arguments. New fixtures: `require('node:module')` destructuring, `await import('node:module')`, `import m from 'node:module'`, `export { createRequire } from 'module'`, `process['getBuiltinModule']('module')`, `process.getBuiltinModule('node:module')`. Existing createRequire fixtures kept. |
+| 3 | The wrapper passes `--env-file=/dev/null` to dbmate (callers still cannot pass env-file flags). Tests: the check-only output shows the flag, and a real run with a poisoned `./.env` in cwd fails on the connection to 127.0.0.1:1 without ever mentioning the `.env` host. |
+
+Deferred to the task 011 threat model, as instructed: Worker/fork/spawn paths, `new URL(variable)`, `module.register`, `.cjs` `module.require`, port pinning, DNS resolution of compose names.
+
+Final local results: workspace-guard 6 passed, lint-fixtures 52 passed, repo-checks 109 passed and 3 skipped (gitleaks x2 and actionlint, not installed locally). No `it.fails` remain.
