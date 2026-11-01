@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
-import { FORBIDDEN, cleanDbEnv, git, read, readJson, repoRoot, walk, which } from './helpers.ts';
+import { FORBIDDEN, cleanDbEnv, git, read, readJson, repoRoot, rootFiles, walk, which } from './helpers.ts';
 
 interface PkgJson {
   scripts?: Record<string, string>;
@@ -96,6 +96,45 @@ describe('AC-3 tsconfig', () => {
   });
 });
 
+describe('workspace tsconfig confinement (hard rule 8, second layer)', () => {
+  it('every workspace tsconfig sets rootDir inside its own workspace and an include', () => {
+    const files = workspaceDirs()
+      .flatMap((d) => walk(d))
+      .filter((f) => /(^|\/)tsconfig[^/]*\.json$/.test(f) && !f.includes('/fixtures/'));
+    expect(files.length).toBeGreaterThan(0);
+    const problems: string[] = [];
+    for (const f of files) {
+      const ws = workspaceDirs().find((d) => f.startsWith(`${d}/`)) ?? '';
+      const cfg = JSON.parse(read(f)) as { compilerOptions?: { rootDir?: string }; include?: string[]; files?: string[] };
+      const rootDir = cfg.compilerOptions?.rootDir;
+      if (rootDir === undefined) {
+        problems.push(`${f}: no rootDir`);
+        continue;
+      }
+      const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(f), rootDir));
+      if (resolved !== ws && !resolved.startsWith(`${ws}/`)) problems.push(`${f}: rootDir escapes ${ws}`);
+      if (!cfg.include && !cfg.files) problems.push(`${f}: no include/files`);
+    }
+    expect(problems).toEqual([]);
+  });
+});
+
+describe('ESLint config integrity', () => {
+  it('the root eslint.config.mjs is the only ESLint config (no nested override)', () => {
+    const all = walk('.')
+      .filter((f) => /(^|\/)(eslint\.config\.[cm]?[jt]s|\.eslintrc[^/]*)$/.test(f))
+      .filter((f) => !f.includes('/fixtures/'));
+    expect(all).toEqual(['eslint.config.mjs']);
+    const tracked = git('ls-files').stdout.split('\n').filter((f) => /(^|\/)(eslint\.config\.[cm]?[jt]s|\.eslintrc[^/]*)$/.test(f));
+    expect(tracked.filter((f) => f !== 'eslint.config.mjs')).toEqual([]);
+  });
+  it('no source file disables lint rules inline in governed workspaces', () => {
+    // noInlineConfig is set in the shared config; this guards the setting itself.
+    expect(read('tooling/eslint-config/index.mjs')).toContain('noInlineConfig: true');
+    expect(read('tooling/eslint-config/index.mjs')).toContain("reportUnusedDisableDirectives: 'error'");
+  });
+});
+
 describe('AC-11 / AC-13 CI workflow', () => {
   const raw = read('.github/workflows/ci.yml');
   const wf = parse(raw) as {
@@ -124,6 +163,18 @@ describe('AC-11 / AC-13 CI workflow', () => {
     const fmt = steps('terraform').find((s) => s.run?.includes('terraform fmt -check -recursive infra/terraform'));
     expect(fmt?.if ?? '').toContain('infra');
     expect(JSON.stringify(steps('terraform'))).toContain('git diff --name-only');
+  });
+  it('CI hardening: checkouts drop credentials, gitleaks image pinned by digest and mounted read-only', () => {
+    for (const j of Object.values(wf.jobs)) {
+      for (const st of j.steps.filter((x) => x.uses?.startsWith('actions/checkout@'))) {
+        expect(st.with?.['persist-credentials']).toBe(false);
+      }
+    }
+    const gl = JSON.stringify(wf.jobs['secrets']);
+    expect(gl).toMatch(/ghcr\.io\/gitleaks\/gitleaks@sha256:[0-9a-f]{64}/);
+    expect(gl).toContain(':/repo:ro');
+    expect(gl).toContain('--user');
+    expect(raw).toContain("cancel-in-progress: ${{ github.event_name == 'pull_request' }}");
   });
   it('AC-11: pins third-party actions to a commit SHA (design note)', () => {
     const uses = [...raw.matchAll(/uses:\s*(\S+)/g)].map((m) => m[1] ?? '');
@@ -168,25 +219,49 @@ describe('AC-12 gitleaks', () => {
   });
   it('AC-12: the working tree (incl. .env.example) is clean (CI only: gitleaks not installed locally)', (ctx) => {
     if (!which('gitleaks')) ctx.skip();
-    const r = spawnSync('gitleaks', ['detect', '--no-git', '--source', repoRoot, '--config', path.join(repoRoot, '.gitleaks.toml')], {
-      encoding: 'utf8',
-    });
-    expect(r.status, r.stdout + r.stderr).toBe(0);
+    // Scan a copy of tracked + untracked-not-ignored files, so gitignored node_modules/dist are never
+    // scanned and the config needs no allowlist.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gl-tree-'));
+    try {
+      for (const f of git('ls-files', '-co', '--exclude-standard').stdout.split('\n').filter(Boolean)) {
+        const src = path.join(repoRoot, f);
+        if (!fs.existsSync(src)) continue;
+        fs.mkdirSync(path.dirname(path.join(dir, f)), { recursive: true });
+        fs.copyFileSync(src, path.join(dir, f));
+      }
+      const r = spawnSync('gitleaks', ['detect', '--no-git', '--source', dir, '--config', path.join(repoRoot, '.gitleaks.toml')], {
+        encoding: 'utf8',
+      });
+      expect(r.status, r.stdout + r.stderr).toBe(0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  it('the gitleaks config has no allowlist', () => {
+    expect(read('.gitleaks.toml')).not.toMatch(/^\s*\[+allowlists?\]/m);
   });
 });
 
 describe('AC-14 / AC-15 ignore rules and tracked files', () => {
-  const ignored = ['.env', '.env.local', 'x.pem', 'x.key', 'a.tfstate', 'a.tfstate.backup', '.terraform/x', 'x.tfvars', 'test/e2e/.artifacts/x'];
+  const ignored = [
+    '.env', '.env.local', '.env.production', 'x.pem', 'x.key', 'a.tfstate', 'a.tfstate.backup', '.terraform/x', 'x.tfvars',
+    'test/e2e/.artifacts/x', 'x.tfvars.json', 'x.tfplan', 'x.p12', 'x.pfx', 'x.jks', 'id_rsa', 'id_rsa.pub', 'kubeconfig',
+    'services/a/.env.local',
+  ];
   it.each(ignored)('AC-14: %s is ignored', (p) => {
     expect(git('check-ignore', '-q', p).status).toBe(0);
   });
   it.each(['x.tfvars.example', '.env.example'])('AC-14: %s is not ignored', (p) => {
     expect(git('check-ignore', '-q', p).status).toBe(1);
   });
+  it('no dependency or build output is tracked', () => {
+    const tracked = git('ls-files').stdout.split('\n').filter(Boolean);
+    expect(tracked.filter((f) => /(^|\/)(node_modules|dist|coverage|\.turbo)\//.test(f))).toEqual([]);
+  });
   it('AC-15a/b: .env.example is tracked, and no secrets files are tracked', () => {
     expect(git('ls-files', '.env.example').stdout.trim()).toBe('.env.example');
     const tracked = git('ls-files').stdout.split('\n').filter(Boolean);
-    const bad = tracked.filter((f) => /(^|\/)\.env$|(^|\/)\.env\.local$|\.pem$|\.key$|\.tfstate/.test(f));
+    const bad = tracked.filter((f) => /(^|\/)\.env(\.(?!example$).*)?$|\.pem$|\.key$|\.tfstate|\.p12$|\.pfx$|\.jks$|(^|\/)id_rsa|(^|\/)kubeconfig$/.test(f));
     expect(bad).toEqual([]);
   });
   it('AC-15d: dbmate (direct) fails naming DATABASE_URL without a default host', () => {
@@ -204,10 +279,55 @@ describe('AC-14 / AC-15 ignore rules and tracked files', () => {
     }
   });
   it('AC-15d: pnpm dbmate up fails naming DATABASE_URL', (ctx) => {
-    if (fs.existsSync(path.join(repoRoot, '.env'))) ctx.skip();
+    if (fs.existsSync(path.join(repoRoot, '.env')) || fs.existsSync(path.join(repoRoot, '.env.local'))) ctx.skip();
     const r = spawnSync('pnpm', ['dbmate', 'up'], { cwd: repoRoot, env: cleanDbEnv(), encoding: 'utf8' });
     expect(r.status).not.toBe(0);
     expect(r.stdout + r.stderr).toContain('DATABASE_URL');
+  });
+});
+
+describe('guarded dbmate wrapper', () => {
+  const wrapper = path.join(repoRoot, 'scripts', 'dbmate.mjs');
+  const run = (url: string | undefined, ...args: string[]) => {
+    const env = cleanDbEnv();
+    if (url !== undefined) env['DATABASE_URL'] = url;
+    return spawnSync(process.execPath, [wrapper, '--check-only', ...args], { env, encoding: 'utf8', cwd: os.tmpdir() });
+  };
+  it.each(['mysql://u:p@localhost:3306/d', 'mysql://u:p@127.0.0.1/d', 'mysql://u:p@[::1]:3306/d', 'mysql://u:p@mysql:3306/d'])(
+    'allows %s',
+    (u) => {
+      expect(run(u).status).toBe(0);
+    },
+  );
+  it.each([
+    'mysql://u:p@db.example.com/d',
+    'mysql://u:p@10.0.0.5/d',
+    'mysql://u:p@writer.cluster-abc.ap-south-1.rds.amazonaws.com/d',
+  ])('refuses %s', (u) => {
+    const r = run(u);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('refusing host');
+    expect(r.stderr).not.toContain(':p@');
+  });
+  it('refuses when DATABASE_URL is unset, naming it', () => {
+    const r = run(undefined);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('DATABASE_URL');
+  });
+  it.each(['--url=mysql://u:p@localhost/d', '-u', '--env-file=.env', '--env'])('refuses the %s override flag', (flag) => {
+    const r = run('mysql://u:p@localhost/d', flag);
+    expect(r.status).not.toBe(0);
+  });
+  it('the root script uses the wrapper', () => {
+    expect(rootPkg.scripts?.['dbmate']).toContain('scripts/dbmate.mjs');
+  });
+});
+
+describe('pnpm install hardening', () => {
+  it('strictDepBuilds is on with an explicit onlyBuiltDependencies list', () => {
+    const ws = parse(read('pnpm-workspace.yaml')) as { strictDepBuilds?: boolean; onlyBuiltDependencies?: string[] };
+    expect(ws.strictDepBuilds).toBe(true);
+    expect(Array.isArray(ws.onlyBuiltDependencies)).toBe(true);
   });
 });
 
@@ -269,10 +389,12 @@ describe('AC-18 pins', () => {
 });
 
 describe('AC-19 forbidden commands', () => {
-  it('AC-19: no script or tooling file invokes terraform apply, kubectl, aws CLI or git push', () => {
-    const files = ['.github', 'tooling', 'scripts'].flatMap(walk).filter((f) => !/\.(png|jpg|lock)$/.test(f))
-      // This directory necessarily names the forbidden commands in order to detect them.
-      .filter((f) => !f.startsWith('tooling/repo-checks/test/'));
+  it('AC-19: nothing in scripts, CI, tooling, services, packages, infra, deploy, db or the root runs a forbidden command', () => {
+    const scanned = ['.github', 'tooling', 'scripts', 'services', 'packages', 'infra', 'deploy', 'db', 'test'].flatMap(walk);
+    const files = [...scanned, ...rootFiles()]
+      .filter((f) => !/\.(png|jpg|lock)$/.test(f))
+      // helpers.ts necessarily names the forbidden commands in order to detect them.
+      .filter((f) => f !== 'tooling/repo-checks/test/helpers.ts');
     const hits: string[] = [];
     for (const f of files) {
       const text = read(f);
@@ -284,6 +406,13 @@ describe('AC-19 forbidden commands', () => {
       for (const { label, re } of FORBIDDEN) if (re.test(scripts)) hits.push(`${p}: ${label}`);
     }
     expect(hits).toEqual([]);
+  });
+  it('detects flags placed before the subcommand', () => {
+    const tf = FORBIDDEN[0]?.re;
+    const cmd = ['terra', 'form -chdir=x app', 'ly'].join('');
+    expect(tf?.test(cmd)).toBe(true);
+    const gp = FORBIDDEN[2]?.re;
+    expect(gp?.test(['git -C x pu', 'sh origin'].join(''))).toBe(true);
   });
 });
 

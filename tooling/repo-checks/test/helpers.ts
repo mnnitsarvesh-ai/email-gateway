@@ -52,8 +52,16 @@ export function cleanDbEnv(): NodeJS.ProcessEnv {
  * does not match its own scan (AC-13, AC-19).
  */
 export const FORBIDDEN: { label: string; re: RegExp }[] = [
-  { label: 'terraform apply/destroy', re: new RegExp(['terra', 'form\\s+(apply|destroy)'].join('')) },
+  { label: 'terraform apply/destroy', re: new RegExp(['\\bterra', 'form\\b[^\\n;&|]*\\b(apply|destroy)\\b'].join('')) },
   { label: 'kubectl', re: new RegExp(['\\bkube', 'ctl\\b'].join('')) },
-  { label: 'git push', re: new RegExp(['\\bgit\\s+pu', 'sh\\b'].join('')) },
-  { label: 'aws cli', re: new RegExp(['(^|[\\s;&|(`"\'])a', 'ws\\s+[a-z0-9-]+'].join('')) },
+  { label: 'git push', re: new RegExp(['\\bgit\\b[^\\n;&|]*\\bpu', 'sh\\b'].join('')) },
+  { label: 'aws cli', re: new RegExp(['(^|[\\s;&|(`"\'])a', 'ws(\\s+-\\S+)*\\s+[a-z0-9-]+'].join('')) },
 ];
+
+/** Files at the repo root that are scanned for forbidden commands (never .env*, which agents must not read). */
+export function rootFiles(): string[] {
+  return fs
+    .readdirSync(repoRoot, { withFileTypes: true })
+    .filter((e) => e.isFile() && !e.name.startsWith('.env') && e.name !== 'CLAUDE.md' && e.name !== 'pnpm-lock.yaml')
+    .map((e) => e.name);
+}

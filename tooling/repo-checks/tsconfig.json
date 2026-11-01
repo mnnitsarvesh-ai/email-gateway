@@ -1,5 +1,5 @@
 {
   "extends": "../../tsconfig.base.json",
-  "compilerOptions": { "noEmit": true, "allowImportingTsExtensions": true, "declaration": false, "types": ["node"] },
+  "compilerOptions": { "rootDir": ".", "noEmit": true, "allowImportingTsExtensions": true, "declaration": false, "types": ["node"] },
   "include": ["test", "vitest.config.ts"]
 }
