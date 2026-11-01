@@ -11,7 +11,7 @@
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
     "test:e2e": "turbo run test:e2e",
-    "dbmate": "dbmate --migrations-dir db/migrations"
+    "dbmate": "node --env-file-if-exists=.env.local scripts/dbmate.mjs"
   },
   "devDependencies": {
     "@esg/eslint-config": "workspace:*",

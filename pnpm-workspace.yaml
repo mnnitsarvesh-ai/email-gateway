@@ -5,6 +5,11 @@ packages:
   - test/e2e
   - tooling/*
 
+# Refuse to install if a dependency has an unreviewed build script.
+strictDepBuilds: true
+# Dependencies allowed to run build scripts (dbmate ships its binary via optional deps, no scripts).
+onlyBuiltDependencies: []
+
 # Single source of truth for shared dev-tool versions (exact pins, no ranges).
 catalog:
   "@eslint/js": 10.0.1
