@@ -20,9 +20,11 @@ Tick a box only when the item is done. Where an agent needs the result (an ARN, 
 
 ## Phase 0: Foundations (weeks 1–3)
 
-- [ ] **Create the git remote and push `main`.** Choose the CI platform (task 001, NEEDS SARVESH). Set branch protection on `main` (required CI checks, no direct pushes, your review required).
+- [x] **Create the git remote and push `main`.** GitHub Actions chosen (2026-11-01).
+- [ ] **Set branch protection** on `main` (required CI checks, no direct pushes, your review required).
 - [ ] **Agent permissions in `.claude/settings.json`.**
-  - Allow reading `**/.env.example`. It's currently blocked by the `Read(**/.env.*)` deny rule (task 001).
+  - [x] Allow reading `**/.env.example` (done 2026-11-01; real env files stay denied by explicit patterns).
+  - [x] Narrow `Bash(pnpm *)` to install/turbo/build/lint/typecheck/test/dbmate (done 2026-11-01).
   - Decide whether `terraform init -backend=false`, `terraform test` and `tflint` should be allowed without a prompt for devops-engineer (task 010).
 - [ ] **Decide Phase 0 NEEDS SARVESH items.** Package names, table name, cross-tenant system queries, ADR-026 and ADR-027, MinIO image, max message size, log address policy, KMS granularity, corpus sources, ClickHouse hosting, Valkey vs Redis, dedicated account topology, TLS posture, outbound IP strategy, operator break-glass policy. The full list is in each task.
 - [ ] **Install local tooling** on your machine: Docker Desktop (or OrbStack), Node 24, pnpm, swaks, Terraform ≥ 1.7.

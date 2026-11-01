@@ -126,13 +126,11 @@ AC-20 Given `CLAUDE.md` "Repo layout", when inspected, then it lists `tooling/` 
 ## NEEDS SARVESH
 
 1. **CI platform.** There is no git remote yet. Options: GitHub Actions, GitLab CI or Bitbucket Pipelines. *Recommendation:* GitHub Actions. It has the widest tooling support, gitleaks, terraform and helm actions, and OIDC to AWS later.
-   **Proceeding with default — pending Sarvesh confirmation.** Sarvesh said to proceed with the recommended defaults. If he later picks another platform, only `.github/workflows/ci.yml` is rewritten; nothing else in this task depends on it.
-2. **Agents can't read `.env.example`.** `.claude/settings.json` denies `Read(**/.env.*)`, which also matches `.env.example`. That file is committed and contains placeholders only. *Options:* add an allow rule for `Read(**/.env.example)`, or rename the file to `env.example`. Only Sarvesh can change the settings. **Still open.** Until it is resolved:
-   - No agent works around the deny rule. The implementer creates `.env.example` with the Write tool only. Nobody reads it back with Read or with any shell command (`cat`, `grep`, `head`, `sed`, editors, and so on).
-   - Verification of "placeholders only" is `gitleaks` over the working tree (AC-12 and the `secrets` job), which scans the file without an agent reading it.
-   - This item does not block implementation, so the task is marked `ready`; it only limits how AC-15 is verified.
+   **Decided by Sarvesh (2026-11-01): GitHub Actions.**
+2. **Agents can't read `.env.example`.** `.claude/settings.json` denies `Read(**/.env.*)`, which also matches `.env.example`. That file is committed and contains placeholders only.
+   **Resolved by Sarvesh (2026-11-01):** `.claude/settings.json` now allows `Read(**/.env.example)`. The broad `Read(**/.env.*)` deny was replaced with explicit patterns for real env files (`.env`, `.env.local`, `.env.*.local`, and `.env.dev*`/`prod*`/`stag*`/`test*`/`qa*`/`uat*`/`ci*`/`secret*`), because deny rules take precedence over allow rules.
 3. **Pinned versions.** *Recommendation:* the latest pnpm 10.x and Turborepo 2.x at implementation time, recorded as exact versions in `package.json` and upgraded through Renovate or Dependabot later.
-   **Proceeding with default — pending Sarvesh confirmation.** The implementer records the exact versions chosen in the Implementation summary.
+   **Decided by Sarvesh (2026-11-01):** pnpm 10.x and Turborepo 2.x, pinned exactly (pnpm 10.34.9, turbo 2.11.10 at implementation time).
 
 ## Implementation summary
 
