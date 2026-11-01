@@ -2,7 +2,7 @@
 
 Owner agent: devops-engineer
 Depends on: none
-Status: ready
+Status: done
 Branch: task/001
 Phase: 0
 
