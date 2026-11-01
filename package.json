@@ -1,0 +1,41 @@
+{
+  "name": "email-gateway",
+  "private": true,
+  "description": "Multi-tenant Email Security Gateway monorepo",
+  "packageManager": "pnpm@9.15.9",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev --parallel",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "test:e2e": "turbo run test:e2e",
+    "test:integration": "pnpm --filter @email-gateway/integration-tests run test",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "db:generate": "pnpm --filter @email-gateway/database run generate",
+    "db:migrate": "pnpm --filter @email-gateway/database run migrate:deploy",
+    "db:migrate:dev": "pnpm --filter @email-gateway/database run migrate:dev",
+    "db:status": "pnpm --filter @email-gateway/database run migrate:status",
+    "env:init": "node scripts/init-env.mjs",
+    "infra:up": "docker compose up -d --wait",
+    "infra:down": "docker compose down",
+    "stack:up": "docker compose --profile apps up -d --build --wait",
+    "stack:down": "docker compose --profile apps --profile analytics --profile observability down"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.36.0",
+    "@types/node": "^22.18.0",
+    "eslint": "^9.36.0",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^16.4.0",
+    "prettier": "^3.6.2",
+    "turbo": "^2.5.8",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.44.0",
+    "vitest": "^3.2.4"
+  }
+}

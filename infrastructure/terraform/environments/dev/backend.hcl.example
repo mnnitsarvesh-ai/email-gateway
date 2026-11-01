@@ -1,0 +1,5 @@
+bucket       = "replace-with-state-bucket"
+key          = "email-gateway/dev/terraform.tfstate"
+region       = "ap-south-1"
+use_lockfile = true
+encrypt      = true

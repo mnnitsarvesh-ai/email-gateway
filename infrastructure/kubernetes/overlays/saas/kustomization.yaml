@@ -1,0 +1,10 @@
+# Shared multi-tenant SaaS deployment.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources: [../../base]
+configMapGenerator:
+  - name: email-gateway-config
+    behavior: merge
+    literals:
+      - APP_ENV=production
+      - DEPLOYMENT_MODE=saas

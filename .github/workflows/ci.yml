@@ -1,0 +1,127 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+  TURBO_TELEMETRY_DISABLED: '1'
+  NEXT_TELEMETRY_DISABLED: '1'
+
+jobs:
+  quality:
+    name: Lint, typecheck, unit & e2e tests, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm format:check
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm test:e2e
+      - run: pnpm build
+
+  migrations:
+    name: Migrations apply cleanly and match the schema
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: ci-only-root
+          MYSQL_DATABASE: email_gateway
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -pci-only-root"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    env:
+      # Throwaway CI database; not a secret.
+      DATABASE_URL: mysql://root:ci-only-root@127.0.0.1:3306/email_gateway
+      MIGRATION_DATABASE_URL: mysql://root:ci-only-root@127.0.0.1:3306/email_gateway
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Apply migrations
+        run: pnpm db:migrate
+      - name: Fail if schema.prisma has changes without a migration
+        working-directory: packages/database
+        run: >-
+          node node_modules/prisma/build/index.js migrate diff
+          --from-url "$MIGRATION_DATABASE_URL"
+          --to-schema-datamodel prisma/schema.prisma
+          --exit-code
+
+  iac:
+    name: Validate Terraform, Kubernetes and Compose
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@v3
+      - name: terraform fmt
+        run: terraform fmt -check -recursive infrastructure/terraform
+      - name: terraform validate
+        working-directory: infrastructure/terraform/environments/dev
+        run: terraform init -backend=false -input=false && terraform validate
+      - name: Render Kustomize overlays
+        run: |
+          kubectl kustomize infrastructure/kubernetes/overlays/saas > /dev/null
+          kubectl kustomize infrastructure/kubernetes/overlays/dedicated > /dev/null
+      - name: Validate docker-compose.yml
+        run: cp .env.example .env && docker compose --profile apps --profile analytics --profile observability config -q
+
+  stack:
+    name: Docker Compose stack + integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    needs: [quality]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Generate ephemeral credentials
+        run: pnpm env:init
+      - name: Start infrastructure and application services
+        run: docker compose --profile apps up -d --build --wait --wait-timeout 900
+      - name: Integration tests
+        run: pnpm test:integration
+      - name: Service logs
+        if: failure()
+        run: docker compose --profile apps logs --no-color --tail 200
+      - name: Tear down
+        if: always()
+        run: docker compose --profile apps down -v

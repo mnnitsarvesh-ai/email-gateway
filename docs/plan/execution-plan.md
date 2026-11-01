@@ -1,0 +1,75 @@
+# Execution plan
+
+This plan maps every prompt in the product brief to a delivery step, ordered by dependency. Each step follows the same loop: **inspect → plan → implement → test → review → commit**. A step is complete only when its migrations run, its tests pass and its docs are updated. Anything that cannot be verified locally is listed as such, never marked done.
+
+## How the work is executed
+
+- **Orchestration:** one multi-agent workflow per step (or per pair of small steps). The main session stays in the loop and reads each workflow's result before starting the next.
+- **Agents inside a step:**
+  1. An **architect** agent inspects the repository and writes a design note under `docs/plan/steps/`.
+  2. **Implementer** agents work on disjoint areas. Anything that touches shared files (`schema.prisma`, `app.module.ts`, `packages/*`) is sequenced, never parallel.
+  3. A **verifier** runs migrations, lint, typecheck, unit, e2e and integration tests and fixes failures.
+  4. **Adversarial reviewers** (security, correctness and tenant-isolation lenses) review the diff, and confirmed findings are fixed.
+- **Commits:** one or more commits per step on the `build/platform` branch. Nothing is pushed without approval.
+
+## Cross-cutting decision: read/write database split
+
+| Concern | Decision |
+|---|---|
+| Topology | MySQL 8.4 **primary (writer)** plus **replica (reader)** using GTID-based asynchronous replication. Local Compose runs both; production uses RDS/Aurora writer and reader endpoints |
+| Connections | `DATABASE_URL` → writer, `DATABASE_READ_URL` → reader. `packages/common` exposes `PrismaService` (writer) and `PrismaReadService` (reader) |
+| Data plane | Ingestion, scanning, policy, delivery and quarantine actions use the **writer only**, so replica lag can never affect a mail decision |
+| Control plane | Lists, search, reports, dashboards and usage use the **reader**. Read-after-write paths (for example, return-after-create) use the writer |
+| Lag safety | Reader readiness checks report replica lag (`Seconds_Behind_Source`). Above a threshold, reads fall back to the writer and the fallback is logged |
+| Accounts | Reader account has `SELECT` only. Writer runtime account has DML only. Migrations use the DDL account |
+
+## Steps
+
+| # | Step (brief prompt) | Main outputs | Verifiable locally? |
+|---|---|---|---|
+| 0.1 | Foundation | Monorepo, Compose, health, CI, ADRs | Yes, done |
+| 0.2 | Architecture documentation | 15 Mermaid diagrams, contracts, data ownership, failure handling | Yes |
+| 1.1 | Complete MySQL schema + **read/write split** | ~60 tables, partition plan, identity registry, ER diagram, seeds, indexing/retention/backup docs, DB perf test | Yes (perf at reduced scale) |
+| 1.2 | Tenant management | Organizations API, settings, features, limits, usage, deletion workflow, isolation tests | Yes |
+| 1.3 | Authentication + RBAC | Argon2id, JWT access/refresh rotation, MFA (TOTP), sessions, invitations, API keys, 8 default roles, guards | Yes |
+| 2.1 | Domain onboarding | DNS verification, MX/SPF/DKIM/DMARC generation and checks, DKIM rotation, background jobs | Yes (DNS against a local test resolver) |
+| 2.2 | Postfix SMTP gateway | Inbound/outbound Postfix, master.cf, transport maps, LMTP ingestion, policy adapter, DKIM signing, swaks/smtp-source tests | Yes |
+| 2.3 | Routing (in/out/internal) | Direction resolution, per-recipient split, loop prevention, delivery tracking | Yes (with local sink MTAs) |
+| 3.1 | Ingestion + MIME | Safe MIME parsing, S3 storage, hashes, outbox, idempotent ingest | Yes |
+| 3.2 | RabbitMQ architecture | Exchanges/queues per brief, retry with backoff, DLQ, replay, reconciliation | Yes |
+| 3.3 | Message lifecycle | State machine, atomic transitions, history, concurrency tests | Yes |
+| 4.1 | Rspamd adapter | Normalized verdicts, circuit breaker, Redis cache, metrics | Yes |
+| 4.2 | Attachments: ClamAV + YARA | File-type detection, archive limits, hash cache, EICAR tests | Yes |
+| 4.3 | URL protection | Extraction, normalization, SSRF-safe resolution, rewriting, click-time service | Yes (no external reputation feeds) |
+| 4.4 | Phishing/BEC | Deterministic rules with reason codes; optional LLM layer behind a flag | Rules yes; the LLM layer needs an API key |
+| 4.5 | DLP | Detectors with checksums, dictionaries, masking, encrypted evidence | Yes |
+| 4.6 | Sandbox | Orchestration, isolation contract, threat model; execution **disabled** until a VM-isolated runner exists | Orchestration only. Real isolation needs Firecracker/gVisor infrastructure |
+| 5.1 | Risk scoring | Weighted, versioned, explainable scoring | Yes |
+| 5.2 | Policy engine | Constrained DSL, versioning, dry-run, publish/rollback | Yes |
+| 5.3 | Quarantine | Release with re-validation, approvals, audit | Yes |
+| 6.1 | Complete REST API | `/api/v1` modules, pagination, idempotency, rate limits | Yes |
+| 6.2 | Webhooks + notifications | HMAC-signed webhooks, retries, digests | Yes |
+| 7.1–7.3 | Admin portal | Design system, 22 pages, explorer, policy builder | Yes |
+| 8.1 | Archiving | Retention, legal hold, search, export | Yes (S3 Object Lock is AWS-only) |
+| 8.2 | M365 / Google Workspace | Connector config, validation, setup wizard | Code and tests yes; live tenants need customer credentials |
+| 8.3 | Deployment manager | Registry, provisioning workflows, Helm/GitOps | Code yes; real provisioning needs AWS |
+| 9.1–9.2 | Performance + chaos | Load generators, k6, failure injection, reports | Harness yes. **300 msg/s targets need production-class hardware.** Laptop results are reported as baselines only |
+| 10.1 | AWS Mumbai (Terraform) | Full module set, cost model | `terraform validate` only. `apply` needs AWS credentials and approval |
+| 10.2 | Hyderabad DR | Warm standby IaC, runbooks, reconciliation | Design only. RPO/RTO cannot be claimed without a real regional test |
+| 10.3 | Monitoring | Prometheus rules, Grafana dashboards, Loki, Alertmanager | Yes, locally |
+| 14.1 | Full audit | Independent multi-lens review, remediation, readiness report | Yes |
+
+## Release checkpoints
+
+- **MVP 1** after 2.2 + 3.1–3.3 + 4.1: domain onboarding → Postfix → durable storage → MySQL metadata → RabbitMQ event → Rspamd verdict.
+- **MVP 2** after 4.2, 4.3, 5.3, 2.3.
+- **V1** after 5.x, 6.x, 7.x.
+- **V1.5 / V2** after 4.4–4.6 and 8.x–10.x.
+
+## Known external dependencies (cannot be completed from this workstation)
+
+- AWS account access for Terraform apply, the DR test and S3 Object Lock.
+- Microsoft 365 and Google Workspace test tenants.
+- An LLM API key (optional BEC analysis layer).
+- VM-level sandbox isolation (Firecracker/Kata) for executing unknown files.
+- Production-class load-test hardware for the 300/500 msg/s and 1,000-connection targets.

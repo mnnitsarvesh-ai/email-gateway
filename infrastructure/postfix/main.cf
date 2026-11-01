@@ -1,0 +1,72 @@
+# Inbound MX for the Email Security Gateway (local development profile).
+# Environment-specific values are applied by entrypoint.sh with `postconf -e`.
+
+compatibility_level = 3.6
+maillog_file = /dev/stdout
+smtpd_banner = $myhostname ESMTP
+biff = no
+append_dot_mydomain = no
+readme_directory = no
+
+# --- Identity --------------------------------------------------------------
+myhostname = mx.gateway.local
+mydestination =
+inet_interfaces = all
+inet_protocols = ipv4
+
+# The gateway relays mail for tenant domains; it never delivers locally.
+local_recipient_maps =
+local_transport = error:5.1.1 local delivery is disabled
+alias_maps =
+alias_database =
+
+# --- Relay / tenant domains -------------------------------------------------
+# relay_domains and relay_transport are set from the environment by the entrypoint.
+# Production: relay_domains comes from the Domain Management Service (verified tenant domains)
+# and relay_transport hands mail to the Email Ingestion Service over LMTP.
+relay_recipient_maps =
+mynetworks = 127.0.0.0/8
+
+# --- Limits ---------------------------------------------------------------
+message_size_limit = 52428800
+smtpd_recipient_limit = 100
+smtpd_client_connection_count_limit = 50
+smtpd_client_connection_rate_limit = 100
+anvil_rate_time_unit = 60s
+smtpd_timeout = 60s
+
+# --- In-session checks (pre-queue) ----------------------------------------
+# Only two components may reject or defer during the SMTP session:
+#  1. smtp-adapter via the policy delegation protocol (recipient/tenant/rate-limit checks)
+#  2. Rspamd via milter
+# Both fail CLOSED to a 4xx tempfail, never to accept-all.
+smtpd_helo_required = yes
+disable_vrfy_command = yes
+strict_rfc821_envelopes = yes
+# Relay control is permanent (5xx): the compatibility-level default would only defer (454),
+# inviting open-relay probes to retry.
+smtpd_relay_restrictions = permit_mynetworks, reject_unauth_destination
+smtpd_recipient_restrictions =
+    reject_non_fqdn_recipient,
+    reject_non_fqdn_sender,
+    reject_unauth_destination,
+    check_policy_service inet:smtp-adapter:10040
+smtpd_policy_service_timeout = 10s
+smtpd_policy_service_max_idle = 300s
+smtpd_policy_service_default_action = DEFER_IF_PERMIT 4.3.5 Policy service unavailable
+
+smtpd_milters = inet:rspamd:11332
+non_smtpd_milters = $smtpd_milters
+milter_protocol = 6
+milter_default_action = tempfail
+milter_mail_macros = i {mail_addr} {client_addr} {client_name} {auth_authen}
+milter_connect_timeout = 10s
+milter_content_timeout = 60s
+
+# --- TLS (opportunistic). Local dev uses the Debian snakeoil certificate. ------
+smtpd_tls_security_level = may
+smtpd_tls_cert_file = /etc/ssl/certs/ssl-cert-snakeoil.pem
+smtpd_tls_key_file = /etc/ssl/private/ssl-cert-snakeoil.key
+smtpd_tls_protocols = >=TLSv1.2
+smtpd_tls_loglevel = 1
+smtp_tls_security_level = may

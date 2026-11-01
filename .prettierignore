@@ -1,0 +1,10 @@
+pnpm-lock.yaml
+**/dist
+**/.next
+**/coverage
+**/migrations/**/*.sql
+infrastructure/**/*.cf
+infrastructure/rspamd/**
+infrastructure/clamav/**
+infrastructure/mysql/**
+infrastructure/rabbitmq/**

@@ -1,0 +1,510 @@
+# Local development stack.
+#
+#   pnpm env:init                                   # once: create .env with random secrets
+#   docker compose up -d --wait                     # infrastructure only (default)
+#   docker compose --profile apps up -d --build --wait     # + migrations and all services
+#   docker compose --profile analytics up -d --wait        # + OpenSearch, ClickHouse
+#   docker compose --profile observability up -d --wait    # + OTel Collector, Prometheus, Grafana
+#
+# Every published port binds to 127.0.0.1 only. Credentials come from .env (never defaults).
+
+name: ${COMPOSE_PROJECT_NAME:-email-gateway}
+
+x-node-service: &node-service
+  restart: unless-stopped
+  profiles: [apps]
+  depends_on: &app-deps
+    db-migrate: { condition: service_completed_successfully }
+    rabbitmq: { condition: service_healthy }
+    redis: { condition: service_healthy }
+    minio-init: { condition: service_completed_successfully }
+
+x-node-env: &node-env
+  NODE_ENV: production
+  APP_ENV: local
+  DEPLOYMENT_MODE: ${DEPLOYMENT_MODE:-saas}
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  SERVICE_VERSION: ${SERVICE_VERSION:-0.1.0-local}
+  HTTP_HOST: 0.0.0.0
+  DATABASE_URL: mysql://${MYSQL_APP_USER:?}:${MYSQL_APP_PASSWORD:?}@mysql:3306/${MYSQL_DATABASE:?}
+  RABBITMQ_URL: amqp://${RABBITMQ_USER:?}:${RABBITMQ_PASSWORD:?}@rabbitmq:5672
+  REDIS_URL: redis://:${REDIS_PASSWORD:?}@redis:6379/0
+  S3_REGION: ${S3_REGION:-ap-south-1}
+  S3_ENDPOINT: http://minio:9000
+  S3_FORCE_PATH_STYLE: 'true'
+  S3_BUCKET_MAIL: ${S3_BUCKET_MAIL:?}
+  S3_BUCKET_ARCHIVE: ${S3_BUCKET_ARCHIVE:?}
+  S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:?}
+  S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?}
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+
+x-node-healthcheck: &node-healthcheck
+  interval: 10s
+  timeout: 5s
+  start_period: 20s
+  retries: 6
+
+services:
+  # ---------------------------------------------------------------- data stores
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?run pnpm env:init}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:?}
+      MYSQL_APP_USER: ${MYSQL_APP_USER:?}
+      MYSQL_APP_PASSWORD: ${MYSQL_APP_PASSWORD:?}
+      MYSQL_MIGRATOR_USER: ${MYSQL_MIGRATOR_USER:?}
+      MYSQL_MIGRATOR_PASSWORD: ${MYSQL_MIGRATOR_PASSWORD:?}
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./infrastructure/mysql/conf.d:/etc/mysql/conf.d:ro
+      - ./infrastructure/mysql/init:/docker-entrypoint-initdb.d:ro
+    ports: ['127.0.0.1:${MYSQL_HOST_PORT:-3306}:3306']
+    healthcheck:
+      # Probe as the runtime user over TCP so "healthy" means the init script has finished.
+      test:
+        [
+          'CMD-SHELL',
+          'MYSQL_PWD="$$MYSQL_APP_PASSWORD" mysql -h 127.0.0.1 -u"$$MYSQL_APP_USER" -e "SELECT 1" "$$MYSQL_DATABASE"',
+        ]
+      interval: 5s
+      timeout: 5s
+      start_period: 60s
+      retries: 20
+
+  rabbitmq:
+    image: rabbitmq:4.1-management-alpine
+    restart: unless-stopped
+    hostname: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:?}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?}
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+      - ./infrastructure/rabbitmq/rabbitmq.conf:/etc/rabbitmq/conf.d/20-gateway.conf:ro
+    ports:
+      [
+        '127.0.0.1:${RABBITMQ_HOST_PORT:-5672}:5672',
+        '127.0.0.1:${RABBITMQ_MGMT_HOST_PORT:-15672}:15672',
+      ]
+    healthcheck:
+      test: ['CMD', 'rabbitmq-diagnostics', '-q', 'check_port_connectivity']
+      interval: 10s
+      timeout: 10s
+      start_period: 30s
+      retries: 10
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command:
+      [
+        'redis-server',
+        '--requirepass',
+        '${REDIS_PASSWORD:?}',
+        '--appendonly',
+        'yes',
+        '--maxmemory-policy',
+        'noeviction',
+      ]
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?}
+    volumes: ['redis-data:/data']
+    ports: ['127.0.0.1:${REDIS_HOST_PORT:-6379}:6379']
+    healthcheck:
+      test: ['CMD-SHELL', 'redis-cli ping | grep -q PONG']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    # Official MinIO images are no longer published; Chainguard's build is pinned by digest.
+    # The -dev variant ships `mc` and `wget`, used for the health check and bucket bootstrap.
+    image: chainguard/minio:latest-dev@sha256:3c8e026303ca4444b464f0987d7010d9654016f8b60612b480fdd567de4233c3
+    restart: unless-stopped
+    entrypoint: ['minio']
+    command: ['server', '/data', '--console-address', ':9001']
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?}
+    volumes: ['minio-data:/data']
+    ports:
+      ['127.0.0.1:${MINIO_HOST_PORT:-9000}:9000', '127.0.0.1:${MINIO_CONSOLE_HOST_PORT:-9001}:9001']
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://127.0.0.1:9000/minio/health/ready']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio-init:
+    image: chainguard/minio:latest-dev@sha256:3c8e026303ca4444b464f0987d7010d9654016f8b60612b480fdd567de4233c3
+    entrypoint: ['/bin/sh', '/init-buckets.sh']
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?}
+      S3_BUCKET_MAIL: ${S3_BUCKET_MAIL:?}
+      S3_BUCKET_ARCHIVE: ${S3_BUCKET_ARCHIVE:?}
+      MC_CONFIG_DIR: /tmp/mc
+    volumes: ['./infrastructure/minio/init-buckets.sh:/init-buckets.sh:ro']
+    depends_on:
+      minio: { condition: service_healthy }
+    restart: 'no'
+
+  # ---------------------------------------------------------------- mail plane
+  rspamd:
+    image: rspamd/rspamd:3.12
+    restart: unless-stopped
+    entrypoint: ['/bin/sh', '/opt/rspamd/entrypoint.sh']
+    environment:
+      REDIS_SERVERS: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?}
+    tmpfs:
+      - /etc/rspamd/local.d:uid=11333,gid=11333,mode=0750
+    volumes:
+      - ./infrastructure/rspamd/entrypoint.sh:/opt/rspamd/entrypoint.sh:ro
+      - ./infrastructure/rspamd/local.d:/opt/rspamd/local.d:ro
+      - rspamd-data:/var/lib/rspamd
+    ports:
+      [
+        '127.0.0.1:${RSPAMD_HOST_PORT:-11333}:11333',
+        '127.0.0.1:${RSPAMD_CONTROLLER_HOST_PORT:-11334}:11334',
+      ]
+    depends_on:
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ['CMD', 'rspamc', '-h', '127.0.0.1:11334', 'stat']
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 10
+
+  clamav:
+    image: clamav/clamav-debian:1.4
+    restart: unless-stopped
+    volumes:
+      - clamav-db:/var/lib/clamav
+      - ./infrastructure/clamav/clamd.conf:/etc/clamav/clamd.conf:ro
+    ports: ['127.0.0.1:${CLAMAV_HOST_PORT:-3310}:3310']
+    # The image ships its own health check (clamdcheck.sh). First start downloads ~300 MB of
+    # signatures, so allow a long start period; later starts reuse the clamav-db volume.
+    healthcheck:
+      test: ['CMD-SHELL', 'clamdcheck.sh']
+      interval: 30s
+      timeout: 10s
+      start_period: 10m
+      retries: 5
+
+  postfix:
+    build: ./infrastructure/postfix
+    image: email-gateway/postfix:local
+    restart: unless-stopped
+    hostname: mx
+    environment:
+      POSTFIX_MYHOSTNAME: ${POSTFIX_MYHOSTNAME:-mx.gateway.local}
+      POSTFIX_RELAY_DOMAINS: ${POSTFIX_RELAY_DOMAINS:-gateway.test}
+    volumes: ['postfix-spool:/var/spool/postfix']
+    ports: ['127.0.0.1:${SMTP_HOST_PORT:-2525}:25']
+    depends_on:
+      rspamd: { condition: service_healthy }
+
+  # ---------------------------------------------------------------- applications (profile: apps)
+  db-migrate:
+    profiles: [apps]
+    build:
+      context: .
+      dockerfile: infrastructure/docker/node-service.Dockerfile
+      args: { APP: database }
+    image: email-gateway/db-migrate:local
+    command: ['node', 'node_modules/prisma/build/index.js', 'migrate', 'deploy']
+    environment:
+      DATABASE_URL: mysql://${MYSQL_MIGRATOR_USER:?}:${MYSQL_MIGRATOR_PASSWORD:?}@mysql:3306/${MYSQL_DATABASE:?}
+      MIGRATION_DATABASE_URL: mysql://${MYSQL_MIGRATOR_USER:?}:${MYSQL_MIGRATOR_PASSWORD:?}@mysql:3306/${MYSQL_DATABASE:?}
+    depends_on:
+      mysql: { condition: service_healthy }
+    restart: 'no'
+
+  api:
+    <<: *node-service
+    build:
+      { context: ., dockerfile: infrastructure/docker/node-service.Dockerfile, args: { APP: api } }
+    image: email-gateway/api:local
+    environment:
+      <<: *node-env
+      HTTP_PORT: 3000
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3001}
+    ports: ['127.0.0.1:${API_HOST_PORT:-3000}:3000']
+    healthcheck:
+      <<: *node-healthcheck
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3000/health/ready').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))",
+        ]
+
+  smtp-adapter:
+    <<: *node-service
+    build:
+      {
+        context: .,
+        dockerfile: infrastructure/docker/node-service.Dockerfile,
+        args: { APP: smtp-adapter },
+      }
+    image: email-gateway/smtp-adapter:local
+    environment:
+      <<: *node-env
+      HTTP_PORT: 3010
+      POLICY_PORT: 10040
+    ports: ['127.0.0.1:${SMTP_ADAPTER_HOST_PORT:-3010}:3010']
+    healthcheck:
+      <<: *node-healthcheck
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3010/health/ready').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))",
+        ]
+
+  email-worker:
+    <<: *node-service
+    build:
+      {
+        context: .,
+        dockerfile: infrastructure/docker/node-service.Dockerfile,
+        args: { APP: email-worker },
+      }
+    image: email-gateway/email-worker:local
+    environment:
+      <<: *node-env
+      HTTP_PORT: 3020
+      RSPAMD_URL: http://rspamd:11333
+      CLAMAV_HOST: clamav
+      CLAMAV_PORT: 3310
+    ports: ['127.0.0.1:${EMAIL_WORKER_HOST_PORT:-3020}:3020']
+    healthcheck:
+      <<: *node-healthcheck
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3020/health/ready').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))",
+        ]
+
+  policy-engine:
+    <<: *node-service
+    build:
+      {
+        context: .,
+        dockerfile: infrastructure/docker/node-service.Dockerfile,
+        args: { APP: policy-engine },
+      }
+    image: email-gateway/policy-engine:local
+    environment:
+      <<: *node-env
+      HTTP_PORT: 3030
+    ports: ['127.0.0.1:${POLICY_ENGINE_HOST_PORT:-3030}:3030']
+    healthcheck:
+      <<: *node-healthcheck
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3030/health/ready').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))",
+        ]
+
+  delivery-worker:
+    <<: *node-service
+    build:
+      {
+        context: .,
+        dockerfile: infrastructure/docker/node-service.Dockerfile,
+        args: { APP: delivery-worker },
+      }
+    image: email-gateway/delivery-worker:local
+    environment:
+      <<: *node-env
+      HTTP_PORT: 3040
+    ports: ['127.0.0.1:${DELIVERY_WORKER_HOST_PORT:-3040}:3040']
+    healthcheck:
+      <<: *node-healthcheck
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3040/health/ready').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))",
+        ]
+
+  notification-worker:
+    <<: *node-service
+    build:
+      {
+        context: .,
+        dockerfile: infrastructure/docker/node-service.Dockerfile,
+        args: { APP: notification-worker },
+      }
+    image: email-gateway/notification-worker:local
+    environment:
+      <<: *node-env
+      HTTP_PORT: 3050
+    ports: ['127.0.0.1:${NOTIFICATION_WORKER_HOST_PORT:-3050}:3050']
+    healthcheck:
+      <<: *node-healthcheck
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3050/health/ready').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))",
+        ]
+
+  archive-worker:
+    <<: *node-service
+    build:
+      {
+        context: .,
+        dockerfile: infrastructure/docker/node-service.Dockerfile,
+        args: { APP: archive-worker },
+      }
+    image: email-gateway/archive-worker:local
+    environment:
+      <<: *node-env
+      HTTP_PORT: 3060
+    ports: ['127.0.0.1:${ARCHIVE_WORKER_HOST_PORT:-3060}:3060']
+    healthcheck:
+      <<: *node-healthcheck
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3060/health/ready').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))",
+        ]
+
+  admin-portal:
+    profiles: [apps]
+    restart: unless-stopped
+    build: { context: ., dockerfile: infrastructure/docker/admin-portal.Dockerfile }
+    image: email-gateway/admin-portal:local
+    environment:
+      API_INTERNAL_URL: http://api:3000
+    ports: ['127.0.0.1:${ADMIN_PORTAL_HOST_PORT:-3001}:3001']
+    depends_on:
+      api: { condition: service_healthy }
+    healthcheck:
+      <<: *node-healthcheck
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3001/api/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))",
+        ]
+
+  # ---------------------------------------------------------------- search & analytics (profile: analytics)
+  opensearch:
+    profiles: [analytics]
+    image: opensearchproject/opensearch:2.19.3
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      bootstrap.memory_lock: 'true'
+      OPENSEARCH_JAVA_OPTS: -Xms512m -Xmx512m
+      # Local development only. Staging/production use Amazon OpenSearch with fine-grained access control.
+      DISABLE_SECURITY_PLUGIN: 'true'
+      DISABLE_INSTALL_DEMO_CONFIG: 'true'
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile: { soft: 65536, hard: 65536 }
+    volumes: ['opensearch-data:/usr/share/opensearch/data']
+    ports: ['127.0.0.1:${OPENSEARCH_HOST_PORT:-9200}:9200']
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          "curl -fsS 'http://127.0.0.1:9200/_cluster/health?wait_for_status=yellow&timeout=5s' >/dev/null",
+        ]
+      interval: 10s
+      timeout: 10s
+      start_period: 60s
+      retries: 12
+
+  clickhouse:
+    profiles: [analytics]
+    image: clickhouse/clickhouse-server:25.8
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:?}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?}
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:?}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 0
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    volumes: ['clickhouse-data:/var/lib/clickhouse']
+    ports: ['127.0.0.1:${CLICKHOUSE_HOST_PORT:-8123}:8123']
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q -O /dev/null http://127.0.0.1:8123/ping']
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 10
+
+  # ---------------------------------------------------------------- observability (profile: observability)
+  otel-collector:
+    profiles: [observability]
+    image: otel/opentelemetry-collector-contrib:0.135.0
+    restart: unless-stopped
+    command: ['--config=/etc/otelcol/config.yaml']
+    volumes: ['./infrastructure/monitoring/otel-collector.yaml:/etc/otelcol/config.yaml:ro']
+    ports: ['127.0.0.1:${OTEL_HTTP_HOST_PORT:-4318}:4318']
+
+  prometheus:
+    profiles: [observability]
+    image: prom/prometheus:v3.6.0
+    restart: unless-stopped
+    volumes:
+      - ./infrastructure/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports: ['127.0.0.1:${PROMETHEUS_HOST_PORT:-9090}:9090']
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://127.0.0.1:9090/-/ready']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  grafana:
+    profiles: [observability]
+    image: grafana/grafana:12.2.0
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?}
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+      GF_ANALYTICS_REPORTING_ENABLED: 'false'
+    volumes:
+      - ./infrastructure/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    ports: ['127.0.0.1:${GRAFANA_HOST_PORT:-3100}:3000']
+    depends_on: [prometheus]
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q -O /dev/null http://127.0.0.1:3000/api/health']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  mysql-data:
+  rabbitmq-data:
+  redis-data:
+  minio-data:
+  rspamd-data:
+  clamav-db:
+  postfix-spool:
+  opensearch-data:
+  clickhouse-data:
+  prometheus-data:
+  grafana-data:

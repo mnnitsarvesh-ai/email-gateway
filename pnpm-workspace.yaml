@@ -1,0 +1,17 @@
+packages:
+  - apps/*
+  - packages/*
+  - tests
+
+# Refuse packages published less than 7 days ago (supply-chain hygiene).
+minimumReleaseAge: 10080
+
+onlyBuiltDependencies:
+  - '@prisma/client'
+  - '@prisma/engines'
+  - '@swc/core'
+  - '@tailwindcss/oxide'
+  - esbuild
+  - prisma
+  - sharp
+  - unrs-resolver

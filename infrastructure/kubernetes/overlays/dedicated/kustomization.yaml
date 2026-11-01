@@ -1,0 +1,19 @@
+# Single-tenant dedicated deployment: same images, smaller footprint, config-only differences.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources: [../../base]
+configMapGenerator:
+  - name: email-gateway-config
+    behavior: merge
+    literals:
+      - APP_ENV=production
+      - DEPLOYMENT_MODE=dedicated
+patches:
+  - target: { kind: HorizontalPodAutoscaler }
+    patch: |-
+      - op: replace
+        path: /spec/minReplicas
+        value: 1
+      - op: replace
+        path: /spec/maxReplicas
+        value: 4

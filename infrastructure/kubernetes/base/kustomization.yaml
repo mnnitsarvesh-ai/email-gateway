@@ -1,0 +1,17 @@
+# Base manifests for the Node services. Stateful infrastructure (MySQL, RabbitMQ, Redis,
+# OpenSearch, ClickHouse, S3) is managed by Terraform as AWS services, and Postfix runs on
+# EC2 Auto Scaling Groups; neither is deployed here.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: email-gateway
+resources:
+  - namespace.yaml
+  - config.yaml
+  - api.yaml
+  - smtp-adapter.yaml
+  - email-worker.yaml
+  - policy-engine.yaml
+  - delivery-worker.yaml
+  - notification-worker.yaml
+  - archive-worker.yaml
+  - admin-portal.yaml
