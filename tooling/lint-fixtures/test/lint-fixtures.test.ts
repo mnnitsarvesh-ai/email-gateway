@@ -74,7 +74,6 @@ describe('lint fixtures', () => {
       'services/a/src/dynamic-name.ts',
       'services/a/src/dynamic-relative.ts',
       'services/a/src/require-name.ts',
-      'services/a/src/create-require.ts',
       'packages/x/src/dynamic-service.ts',
     ])('%s fails [boundary]', async (file) => {
       const m = only(await lint(eslint, file), 'esg/import-boundaries');
@@ -107,13 +106,50 @@ describe('lint fixtures', () => {
     });
   });
 
-  // QA round 1 known gaps (it.fails: red the day they are fixed, then drop `.fails`).
-  describe('round 1 QA gaps', () => {
-    it.fails('RT1-1 (gap): non-literal import(variable) leaving the workspace is flagged', async () => {
-      expect(only(await lint(eslint, 'services/a/src/dynamic-nonliteral.ts'), 'esg/import-boundaries')).toHaveLength(1);
+  describe('round 2: non-static, absolute, createRequire, new URL', () => {
+    const ruleMsgs = async (file: string): Promise<Linter.LintMessage[]> =>
+      only(await lint(eslint, file), 'esg/import-boundaries');
+    it.each([
+      'services/a/src/dynamic-nonliteral.ts',
+      'services/a/src/dynamic-concat.ts',
+      'services/a/src/dynamic-template-expr.ts',
+      'services/a/src/require-join.ts',
+    ])('non-static specifier in %s is reported', async (file) => {
+      const m = await ruleMsgs(file);
+      expect(m).toHaveLength(1);
+      expect(m[0]?.message).toContain('static string specifier');
     });
-    it.fails('RT1-2 (gap): aliased createRequire result r(...) leaving the workspace is flagged', async () => {
-      expect(only(await lint(eslint, 'services/a/src/create-require-alias.ts'), 'esg/import-boundaries')).toHaveLength(1);
+    it.each([
+      'services/a/src/absolute-static.ts',
+      'services/a/src/absolute-export.ts',
+      'services/a/src/absolute-windows.ts',
+      'services/a/src/file-url-dynamic.ts',
+    ])('absolute or file: specifier in %s is reported', async (file) => {
+      const m = await ruleMsgs(file);
+      expect(m).toHaveLength(1);
+      expect(m[0]?.message).toContain('Absolute or file:');
+    });
+    it.each([
+      'services/a/src/create-require-alias.ts',
+      'packages/x/src/create-require-import.ts',
+      'packages/x/src/create-require-namespace.ts',
+    ])('createRequire is banned in %s', async (file) => {
+      const m = await ruleMsgs(file);
+      expect(m.length).toBeGreaterThanOrEqual(1);
+      expect(m.every((x) => x.message.includes('createRequire is banned'))).toBe(true);
+    });
+    it('createRequire()() with a relative escape reports both the ban and the escape', async () => {
+      const m = await ruleMsgs('services/a/src/create-require.ts');
+      expect(m.some((x) => x.message.includes('createRequire is banned'))).toBe(true);
+      expect(m.some((x) => x.message.includes('leaves workspace'))).toBe(true);
+    });
+    it('new URL(relative, import.meta.url) outside the workspace is reported', async () => {
+      const m = await ruleMsgs('services/a/src/new-url-escape.ts');
+      expect(m).toHaveLength(1);
+      expect(m[0]?.message).toContain('import.meta.url');
+    });
+    it.each(['services/a/src/dynamic-ok.ts', 'services/a/src/new-url-ok.ts'])('positive: %s passes', async (file) => {
+      expect(await ruleMsgs(file)).toHaveLength(0);
     });
   });
 

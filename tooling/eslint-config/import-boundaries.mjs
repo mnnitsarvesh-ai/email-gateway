@@ -34,6 +34,11 @@ function isRelative(spec) {
   return spec === '.' || spec === '..' || spec.startsWith('./') || spec.startsWith('../');
 }
 
+/** @param {string} spec */
+function isAbsoluteSpec(spec) {
+  return spec.startsWith('/') || spec.startsWith('file:') || /^[A-Za-z]:[\\/]/.test(spec);
+}
+
 /**
  * Literal string value of a specifier expression, or undefined when not literal.
  * @param {any} node
@@ -94,7 +99,22 @@ export const importBoundaries = {
      * @param {boolean} dynamic
      */
     function check(node, spec, dynamic) {
-      if (spec === undefined) return;
+      if (spec === undefined) {
+        if (dynamic) {
+          context.report({
+            node,
+            message: '[boundary] import()/require() needs a static string specifier; a computed one cannot be checked against workspace boundaries (hard rule 8).',
+          });
+        }
+        return;
+      }
+      if (isAbsoluteSpec(spec)) {
+        context.report({
+          node,
+          message: `[boundary] Absolute or file: specifier "${spec}" is not allowed; import a package by name or a relative path inside the workspace (hard rule 8).`,
+        });
+        return;
+      }
       if (isRelative(spec)) {
         const target = path.resolve(path.dirname(context.filename), spec);
         const rel = path.relative(path.join(opts.root, ws ?? ''), target);
@@ -124,8 +144,40 @@ export const importBoundaries = {
       }
     }
 
+    const banCreateRequire = /^(services|packages)\//.test(ws);
+    const CREATE_REQUIRE_MESSAGE =
+      '[boundary] createRequire is banned in services/ and packages/: it hides specifiers from the boundary check (hard rule 8).';
+    const isModuleSpec = (/** @type {string | undefined} */ v) => v === 'module' || v === 'node:module';
+
     return {
-      ImportDeclaration: (/** @type {any} */ n) => check(n, literal(n.source), false),
+      ImportDeclaration: (/** @type {any} */ n) => {
+        check(n, literal(n.source), false);
+        if (banCreateRequire && isModuleSpec(literal(n.source))) {
+          for (const sp of n.specifiers) {
+            if (sp.type === 'ImportSpecifier' && (sp.imported.name ?? sp.imported.value) === 'createRequire') {
+              context.report({ node: sp, message: CREATE_REQUIRE_MESSAGE });
+            }
+          }
+        }
+      },
+      MemberExpression: (/** @type {any} */ n) => {
+        if (banCreateRequire && !n.computed && n.property.type === 'Identifier' && n.property.name === 'createRequire') {
+          context.report({ node: n, message: CREATE_REQUIRE_MESSAGE });
+        }
+      },
+      NewExpression: (/** @type {any} */ n) => {
+        if (n.callee.type !== 'Identifier' || n.callee.name !== 'URL' || n.arguments.length < 2) return;
+        const base = n.arguments[1];
+        const isImportMetaUrl =
+          base.type === 'MemberExpression' && base.object.type === 'MetaProperty' && base.property.name === 'url';
+        const spec = literal(n.arguments[0]);
+        if (!isImportMetaUrl || spec === undefined || !isRelative(spec)) return;
+        const target = path.resolve(path.dirname(context.filename), spec);
+        const rel = path.relative(path.join(opts.root, ws ?? ''), target);
+        if (rel.startsWith('..') || path.isAbsolute(rel)) {
+          context.report({ node: n, message: `[boundary] new URL("${spec}", import.meta.url) points outside workspace ${ws ?? ''} (hard rule 8).` });
+        }
+      },
       ExportNamedDeclaration: (/** @type {any} */ n) => {
         if (n.source) check(n, literal(n.source), false);
       },
@@ -135,6 +187,16 @@ export const importBoundaries = {
       TSExternalModuleReference: (/** @type {any} */ n) => check(n, literal(n.expression), true),
       CallExpression: (/** @type {any} */ n) => {
         if (isRequireCallee(n.callee) && n.arguments.length > 0) check(n, literal(n.arguments[0]), true);
+        const c = n.callee;
+        if (
+          banCreateRequire &&
+          c.type === 'MemberExpression' &&
+          !c.computed &&
+          c.property.name === 'getBuiltinModule' &&
+          (literal(n.arguments[0]) === undefined || isModuleSpec(literal(n.arguments[0])))
+        ) {
+          context.report({ node: n, message: CREATE_REQUIRE_MESSAGE });
+        }
       },
     };
   },
