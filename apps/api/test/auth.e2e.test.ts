@@ -29,9 +29,11 @@ import { SessionService } from '../src/modules/auth/services/session.service';
 import { TokenService } from '../src/modules/auth/services/token.service';
 import { InMemoryKeyValueStore } from './support/in-memory-key-value-store';
 import { RecordingEmailSender } from './support/recording-email-sender';
+import { TEST_DOMAIN_ENV } from './support/test-env';
 
 const secret = randomBytes(32).toString('hex');
 const config = loadApiConfig({
+  ...TEST_DOMAIN_ENV,
   NODE_ENV: 'test',
   HTTP_PORT: '3000',
   DATABASE_URL: 'mysql://test:test@localhost:3306/test',

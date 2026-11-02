@@ -3,8 +3,10 @@ import { loadApiConfig } from '../config';
 import { createEmailSender } from './email-sender.factory';
 import { LogEmailSender } from './log-email-sender';
 import { SmtpEmailSender } from './smtp-email-sender';
+import { TEST_DOMAIN_ENV } from '../../test/support/test-env';
 
 const env = {
+  ...TEST_DOMAIN_ENV,
   DATABASE_URL: 'mysql://u:p@mysql:3306/db',
   REDIS_URL: 'redis://redis:6379',
   S3_REGION: 'ap-south-1',

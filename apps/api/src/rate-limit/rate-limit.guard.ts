@@ -9,6 +9,7 @@ import {
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import type { Request, Response } from 'express';
+import type { AuthenticatedRequest } from '../auth-contracts/request';
 import { sha256Hex } from '../crypto/tokens';
 import { clientIp } from '../http/client-ip';
 import { KeyValueStore } from '../kv/key-value-store';
@@ -39,6 +40,15 @@ export function rateLimitIdentifier(req: Request, options: RateLimitOptions): st
       return bodyIdentifier(req, options.bodyField);
     case 'ip+body':
       return `${ip}:${bodyIdentifier(req, options.bodyField) ?? '-'}`;
+    case 'principal': {
+      // Set by the global authentication guard, which runs before route guards. A route
+      // reached without one (public route, wiring error) is counted per IP instead.
+      const principal = (req as AuthenticatedRequest).principal;
+      if (!principal) return `ip:${ip}`;
+      return principal.kind === 'user'
+        ? `user:${principal.userPublicId}`
+        : `api_key:${principal.apiKeyPublicId}`;
+    }
   }
 }
 

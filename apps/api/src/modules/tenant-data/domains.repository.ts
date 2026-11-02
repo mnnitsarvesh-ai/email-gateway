@@ -20,8 +20,9 @@ const domainSelect = {
 export type DomainRecord = Prisma.DomainGetPayload<{ select: typeof domainSelect }>;
 
 /**
- * Read-only, tenant-scoped access to `domains` (D9, §10) for later steps (domain management is
- * step 2.1). Lookups by public id include the organization; lists use the replica.
+ * Read-only, tenant-scoped access to `domains` (D9, §10) for later steps (domain management
+ * lives in the domains module, step 2.1). Lookups by public id include the organization; lists
+ * use the replica. Soft-deleted domains (status `deleted`) are never returned.
  */
 @Injectable()
 export class DomainsRepository {
@@ -33,7 +34,7 @@ export class DomainsRepository {
   /** The scope's domain with this public id, or null (another tenant's domain is null too). */
   async findByPublicId(scope: TenantScope, publicId: string): Promise<DomainRecord | null> {
     return this.prisma.domain.findFirst({
-      where: tenantWhere(scope, { publicId }),
+      where: tenantWhere(scope, { publicId, status: { not: 'deleted' as const } }),
       select: domainSelect,
     });
   }
@@ -42,6 +43,7 @@ export class DomainsRepository {
   async list(scope: TenantScope, page: IdPageWindow): Promise<DomainRecord[]> {
     return this.reader.client.domain.findMany({
       where: tenantWhere(scope, {
+        status: { not: 'deleted' as const },
         ...(page.beforeId !== undefined && { id: { lt: page.beforeId } }),
       }),
       select: domainSelect,

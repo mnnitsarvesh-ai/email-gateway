@@ -8,6 +8,8 @@
  *   (`uniqueIp()`), and `AUTH_BACKGROUND_JOBS_ENABLED=false`.
  * - `EmailSender` is always a `RecordingEmailSender`: tests never send real email (D13).
  * - Logs go to an in-memory buffer (`logs`) so tests can assert that secrets never appear.
+ * - The server listens on an ephemeral 127.0.0.1 port for the app's lifetime, so concurrent
+ *   requests (`Promise.all`) are safe.
  */
 import { Writable } from 'node:stream';
 import type { INestApplication } from '@nestjs/common';
@@ -45,6 +47,7 @@ export async function createIntegrationApp(
     ...process.env,
     HTTP_TRUST_PROXY: '1',
     AUTH_BACKGROUND_JOBS_ENABLED: 'false',
+    DOMAIN_BACKGROUND_JOBS_ENABLED: 'false',
     ...envOverrides,
   });
   const emails = new RecordingEmailSender();
@@ -64,7 +67,10 @@ export async function createIntegrationApp(
   const app = moduleRef.createNestApplication({ logger: new NestPinoLogger(logger) });
   configureHttpApp(app, logger);
   configureApiApp(app, config);
-  await app.init();
+  // Listen up front on an ephemeral loopback port. Otherwise supertest starts a shared listener
+  // per request batch and closes it when the batch settles; a request created while that
+  // listener is closing never starts (a hung test).
+  await app.listen(0, '127.0.0.1');
 
   const prisma = app.get(PrismaService);
   const platform = await prisma.organization.findUnique({

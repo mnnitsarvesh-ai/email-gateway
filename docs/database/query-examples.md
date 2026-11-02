@@ -216,10 +216,12 @@ Prisma: `auditLog.findMany({ where: { organizationId, createdAt: { gte: from, lt
 ## Q13: Tenant resolution by recipient domain (mail path)
 
 ```sql
-SELECT id, organization_id, inbound_enabled FROM domains WHERE verified_name = ? AND inbound_enabled = 1;
+SELECT d.id, d.public_id, d.organization_id, d.name, d.status, d.inbound_enabled, d.outbound_enabled, o.status
+  FROM domains d JOIN organizations o ON o.id = d.organization_id
+ WHERE d.verified_name = ?;   -- then require d.status = 'active' AND o.status = 'active'
 ```
 
-Prisma: `domain.findUnique({ where: { verifiedName: name } })`, then require `inboundEnabled`. `verified_name` is a MySQL generated column (`name` while `status = 'verified'`, otherwise NULL) with a unique index, so the lookup is a `const` single-row read and **only the verified owner** can match: several organizations may hold a pending claim on the same `name` (unique per `(organization_id, name)`), and a pending claim never resolves a tenant. Never resolve a tenant with `WHERE name = ?`. It runs for every SMTP transaction, so the ingestion step (3.x) can cache it in Redis.
+Use `resolveActiveDomain(writer, rawName)` from `@email-gateway/database` (step 2.1 D13): it normalizes the name like the api stores it (`normalizeDomainName`: case, trailing dot, IDN), runs `domain.findUnique({ where: { verifiedName } })` with the organization's status, and returns the owner only when the domain is `active` and the organization is `active`. `verified_name` is a MySQL generated column (`name` while `status` is `verified`, `active` or `suspended`, otherwise NULL) with a unique index, so the lookup is a `const` single-row read and **only the owner** can match: several organizations may hold a pending claim on the same `name` (unique per `(organization_id, live_name)`), and a pending claim never resolves a tenant. Never resolve a tenant with `WHERE name = ?`. Callers then check `inbound_enabled` / `outbound_enabled` for the direction. It runs for every SMTP transaction, so the ingestion step (3.x) can cache it in Redis.
 
 ## Q14: Suppression check
 

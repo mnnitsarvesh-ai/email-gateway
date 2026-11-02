@@ -10,6 +10,14 @@ import {
   validateNotifySmtpConfig,
 } from '@email-gateway/config';
 import { z } from 'zod';
+import {
+  checkDohUrl,
+  type DohUrlProblem,
+  isDnsName,
+  normalizeDnsName,
+  parseDnsServer,
+  splitList,
+} from './dns/dns-names';
 
 const int = (min: number, max = Number.MAX_SAFE_INTEGER) =>
   z.coerce.number().int().min(min).max(max);
@@ -70,6 +78,196 @@ const authConfigShape = {
     .default('http://localhost:3001'),
 };
 
+/** Comma-separated list; empty means none. */
+const list = z.string().default('').transform(splitList);
+
+/** Comma list of DNS names (normalized: lower-case, no trailing dot). */
+const dnsNameList = (allowUnderscore: boolean) =>
+  z
+    .string()
+    .default('')
+    .transform((value, ctx) => {
+      const names = splitList(value).map(normalizeDnsName);
+      if (names.some((name) => !isDnsName(name, { allowUnderscore }))) {
+        ctx.addIssue({ code: 'custom', message: 'must be a comma-separated list of DNS names' });
+        return z.NEVER;
+      }
+      return names;
+    });
+
+/** RFC 7489 §6.2 report URI: `mailto:<address>` with an optional `!<size>[kmgt]` limit. */
+const MAILTO = /^mailto:([^@\s,!;]+)@([^@\s,!;]+)(?:![0-9]+[kmgt]?)?$/i;
+const mailtoList = z
+  .string()
+  .default('')
+  .transform((value, ctx) => {
+    const uris = splitList(value);
+    const bad = uris.some((uri) => {
+      const match = MAILTO.exec(uri);
+      return !match || !isDnsName(normalizeDnsName(match[2]!));
+    });
+    if (bad) {
+      ctx.addIssue({ code: 'custom', message: 'must be a comma-separated list of mailto: URIs' });
+      return z.NEVER;
+    }
+    return uris;
+  });
+
+export interface GatewayMxHost {
+  priority: number;
+  host: string;
+}
+
+/** `GATEWAY_MX_HOSTS`: `priority:host[,priority:host…]`, at least one entry, no duplicate host. */
+const gatewayMxHosts = z.string().transform((value, ctx): GatewayMxHost[] => {
+  const entries = splitList(value);
+  const hosts: GatewayMxHost[] = [];
+  for (const entry of entries) {
+    const match = /^(\d{1,5}):(.+)$/.exec(entry);
+    const priority = match ? Number(match[1]) : NaN;
+    const host = match ? normalizeDnsName(match[2]!) : '';
+    if (!match || priority > 65535 || !isDnsName(host)) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'must be a comma-separated list of priority:host (priority 0-65535)',
+      });
+      return z.NEVER;
+    }
+    hosts.push({ priority, host });
+  }
+  if (hosts.length === 0) {
+    ctx.addIssue({ code: 'custom', message: 'must name at least one priority:host entry' });
+    return z.NEVER;
+  }
+  if (new Set(hosts.map((h) => h.host)).size !== hosts.length) {
+    ctx.addIssue({ code: 'custom', message: 'must not list the same host twice' });
+    return z.NEVER;
+  }
+  return hosts;
+});
+
+/** Domain onboarding and DNS resolution (design D16 of step 2.1, ADR-0017). */
+const domainConfigShape = {
+  /** `system`: node:dns (c-ares) against DNS_SERVERS or the host's resolvers. `doh`: RFC 8484. */
+  DNS_RESOLVER_MODE: z.enum(['system', 'doh']).default('system'),
+  /** System mode upstreams: `ip`, `ip:port`, `[ipv6]:port`. Empty: the host's resolvers. */
+  DNS_SERVERS: list,
+  DNS_DOH_URL: z.string().default('https://cloudflare-dns.com/dns-query'),
+  /** Per try. */
+  DNS_TIMEOUT_MS: int(100, 10000).default(2500),
+  DNS_TRIES: int(1, 5).default(2),
+  /** Extra upstreams (same kind as the mode) queried only to check MX propagation. */
+  DNS_PROPAGATION_UPSTREAMS: list,
+  /** Cap for cached positive answers; 0 disables the DNS cache. */
+  DNS_CACHE_MAX_TTL_SECONDS: int(0, 3600).default(300),
+  /** Cap for cached NXDOMAIN/NODATA (and system-mode answers, which carry no TTL). */
+  DNS_CACHE_NEGATIVE_TTL_SECONDS: int(0, 900).default(60),
+  /** Where customers point their MX. Required: no default. */
+  GATEWAY_MX_HOSTS: gatewayMxHosts,
+  /** Host of the platform SPF record customers include. Required: no default. */
+  GATEWAY_SPF_INCLUDE: z.string().transform((value, ctx) => {
+    const name = normalizeDnsName(value);
+    if (!isDnsName(name, { allowUnderscore: true })) {
+      ctx.addIssue({ code: 'custom', message: 'must be a DNS name' });
+      return z.NEVER;
+    }
+    return name;
+  }),
+  GATEWAY_DMARC_RUA: mailtoList,
+  GATEWAY_DMARC_RUF: mailtoList,
+  DOMAIN_VERIFICATION_LABEL: z
+    .string()
+    .regex(/^_[a-z0-9][a-z0-9-]{0,61}$/, 'must match ^_[a-z0-9][a-z0-9-]{0,61}$')
+    .default('_emailgateway-verify'),
+  DOMAIN_VERIFICATION_TTL_DAYS: int(1, 30).default(7),
+  /** Names customers may not onboard (equal to or under any entry), besides the gateway's own. */
+  DOMAIN_RESERVED_SUFFIXES: dnsNameList(false),
+  /** Scheduled verification / re-verification / DKIM retirement. Disabled in tests. */
+  DOMAIN_BACKGROUND_JOBS_ENABLED: bool.default(true),
+  DOMAIN_JOBS_INTERVAL_SECONDS: int(5, 3600).default(30),
+  DOMAIN_CHECK_BATCH_SIZE: int(1, 500).default(50),
+  DOMAIN_CHECK_CONCURRENCY: int(1, 32).default(4),
+  /** Overall deadline for one domain's queries; must cover DNS_TIMEOUT_MS × DNS_TRIES. */
+  DOMAIN_CHECK_DEADLINE_MS: int(1000, 60000).default(15000),
+  DOMAIN_RETRY_BASE_SECONDS: int(5, 3600).default(60),
+  DOMAIN_RETRY_MAX_SECONDS: int(5, 86400).default(3600),
+  DOMAIN_RECHECK_INCOMPLETE_SECONDS: int(60, 86400).default(1800),
+  DOMAIN_RECHECK_INTERVAL_SECONDS: int(3600, 604800).default(86400),
+  DKIM_ROTATION_OVERLAP_DAYS: int(1, 90).default(7),
+};
+
+const DOH_URL_MESSAGES: Record<DohUrlProblem, string> = {
+  invalid: 'must be an absolute http(s) URL without a fragment',
+  insecure: 'must be an https:// URL unless APP_ENV is local or ci',
+  credentials: 'must not contain credentials (userinfo)',
+};
+
+/** Cross-field rules of the domain/DNS keys (D16). Messages name keys, never values. */
+function validateDomainConfig(
+  cfg: {
+    APP_ENV: string;
+    DNS_RESOLVER_MODE: 'system' | 'doh';
+    DNS_SERVERS: string[];
+    DNS_DOH_URL: string;
+    DNS_TIMEOUT_MS: number;
+    DNS_TRIES: number;
+    DNS_PROPAGATION_UPSTREAMS: string[];
+    DOMAIN_CHECK_DEADLINE_MS: number;
+    DOMAIN_RETRY_BASE_SECONDS: number;
+    DOMAIN_RETRY_MAX_SECONDS: number;
+  },
+  ctx: z.RefinementCtx,
+): void {
+  const allowHttp = cfg.APP_ENV === 'local' || cfg.APP_ENV === 'ci';
+  if (cfg.DNS_SERVERS.some((entry) => parseDnsServer(entry) === null)) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['DNS_SERVERS'],
+      message: 'must be a comma-separated list of ip, ip:port or [ipv6]:port',
+    });
+  }
+  const dohProblem = checkDohUrl(cfg.DNS_DOH_URL, allowHttp);
+  if (dohProblem) {
+    ctx.addIssue({ code: 'custom', path: ['DNS_DOH_URL'], message: DOH_URL_MESSAGES[dohProblem] });
+  }
+  for (const entry of cfg.DNS_PROPAGATION_UPSTREAMS) {
+    if (cfg.DNS_RESOLVER_MODE === 'system') {
+      if (parseDnsServer(entry) === null) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['DNS_PROPAGATION_UPSTREAMS'],
+          message: 'must list ip, ip:port or [ipv6]:port entries when DNS_RESOLVER_MODE is system',
+        });
+        break;
+      }
+    } else {
+      const problem = checkDohUrl(entry, allowHttp);
+      if (problem) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['DNS_PROPAGATION_UPSTREAMS'],
+          message: `entries ${DOH_URL_MESSAGES[problem]} when DNS_RESOLVER_MODE is doh`,
+        });
+        break;
+      }
+    }
+  }
+  if (cfg.DOMAIN_CHECK_DEADLINE_MS < cfg.DNS_TIMEOUT_MS * cfg.DNS_TRIES) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['DOMAIN_CHECK_DEADLINE_MS'],
+      message: 'must be greater than or equal to DNS_TIMEOUT_MS × DNS_TRIES',
+    });
+  }
+  if (cfg.DOMAIN_RETRY_MAX_SECONDS < cfg.DOMAIN_RETRY_BASE_SECONDS) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['DOMAIN_RETRY_MAX_SECONDS'],
+      message: 'must be greater than or equal to DOMAIN_RETRY_BASE_SECONDS',
+    });
+  }
+}
+
 export const apiConfigSchema = baseConfigSchema
   .extend(httpConfigSchema(3000).shape)
   .extend(databaseConfigSchema.shape)
@@ -79,6 +277,7 @@ export const apiConfigSchema = baseConfigSchema
   .extend(s3ConfigSchema.shape)
   .extend(notifySmtpFieldsSchema.shape)
   .extend(authConfigShape)
+  .extend(domainConfigShape)
   .extend({
     /** Comma-separated allow-list of admin portal origins. */
     CORS_ORIGINS: z
@@ -93,6 +292,7 @@ export const apiConfigSchema = baseConfigSchema
   })
   .superRefine((cfg, ctx) => {
     validateNotifySmtpConfig(cfg, ctx);
+    validateDomainConfig(cfg, ctx);
     if (cfg.AUTH_SESSION_MAX_AGE_SECONDS < cfg.AUTH_REFRESH_TOKEN_TTL_SECONDS) {
       ctx.addIssue({
         code: 'custom',

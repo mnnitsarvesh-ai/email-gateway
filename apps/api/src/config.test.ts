@@ -1,11 +1,13 @@
 import { randomBytes } from 'node:crypto';
 import { ConfigValidationError } from '@email-gateway/config';
 import { describe, expect, it } from 'vitest';
+import { TEST_DOMAIN_ENV } from '../test/support/test-env';
 import { loadApiConfig } from './config';
 
 const hex64 = () => randomBytes(32).toString('hex');
 
 const valid = {
+  ...TEST_DOMAIN_ENV,
   HTTP_PORT: '3000',
   DATABASE_URL: 'mysql://u:p@mysql:3306/email_gateway',
   REDIS_URL: 'redis://redis:6379',
@@ -251,5 +253,216 @@ describe('loadApiConfig: transactional email relay (NOTIFY_SMTP_*)', () => {
     });
     expect(message).toContain('NOTIFY_SMTP_SECURE');
     expect(message).not.toContain('RelayPasswordValue');
+  });
+});
+
+describe('loadApiConfig: domain onboarding and DNS (D16)', () => {
+  const domainEnv = { ...valid, DOMAIN_BACKGROUND_JOBS_ENABLED: undefined };
+
+  it('applies the documented defaults', () => {
+    const cfg = loadApiConfig(domainEnv);
+    expect(cfg).toMatchObject({
+      DNS_RESOLVER_MODE: 'system',
+      DNS_SERVERS: [],
+      DNS_DOH_URL: 'https://cloudflare-dns.com/dns-query',
+      DNS_TIMEOUT_MS: 2500,
+      DNS_TRIES: 2,
+      DNS_PROPAGATION_UPSTREAMS: [],
+      DNS_CACHE_MAX_TTL_SECONDS: 300,
+      DNS_CACHE_NEGATIVE_TTL_SECONDS: 60,
+      GATEWAY_DMARC_RUA: [],
+      GATEWAY_DMARC_RUF: [],
+      DOMAIN_VERIFICATION_LABEL: '_emailgateway-verify',
+      DOMAIN_VERIFICATION_TTL_DAYS: 7,
+      DOMAIN_RESERVED_SUFFIXES: [],
+      DOMAIN_BACKGROUND_JOBS_ENABLED: true,
+      DOMAIN_JOBS_INTERVAL_SECONDS: 30,
+      DOMAIN_CHECK_BATCH_SIZE: 50,
+      DOMAIN_CHECK_CONCURRENCY: 4,
+      DOMAIN_CHECK_DEADLINE_MS: 15000,
+      DOMAIN_RETRY_BASE_SECONDS: 60,
+      DOMAIN_RETRY_MAX_SECONDS: 3600,
+      DOMAIN_RECHECK_INCOMPLETE_SECONDS: 1800,
+      DOMAIN_RECHECK_INTERVAL_SECONDS: 86400,
+      DKIM_ROTATION_OVERLAP_DAYS: 7,
+    });
+  });
+
+  it('parses the gateway MX hosts and SPF include (normalized)', () => {
+    const cfg = loadApiConfig({
+      ...valid,
+      GATEWAY_MX_HOSTS: '10:MX1.Mail-Gateway.test., 20:mx2.mail-gateway.test',
+      GATEWAY_SPF_INCLUDE: '_SPF.mail-gateway.test.',
+    });
+    expect(cfg.GATEWAY_MX_HOSTS).toEqual([
+      { priority: 10, host: 'mx1.mail-gateway.test' },
+      { priority: 20, host: 'mx2.mail-gateway.test' },
+    ]);
+    expect(cfg.GATEWAY_SPF_INCLUDE).toBe('_spf.mail-gateway.test');
+    expect(cfg.DOMAIN_BACKGROUND_JOBS_ENABLED).toBe(false);
+  });
+
+  it.each(['GATEWAY_MX_HOSTS', 'GATEWAY_SPF_INCLUDE'])('requires %s (no default)', (key) => {
+    expect(rejection({ ...valid, [key]: undefined })).toContain(key);
+    expect(rejection({ ...valid, [key]: '' })).toContain(key);
+  });
+
+  it('parses server lists, DMARC report URIs and reserved suffixes', () => {
+    const cfg = loadApiConfig({
+      ...valid,
+      DNS_SERVERS: '10.0.0.2, 127.0.0.1:5353,[::1]:5353,2001:db8::1',
+      DNS_PROPAGATION_UPSTREAMS: '1.1.1.1,8.8.8.8:53',
+      GATEWAY_DMARC_RUA: 'mailto:dmarc@mail-gateway.test, mailto:agg@reports.mail-gateway.test!10m',
+      GATEWAY_DMARC_RUF: 'mailto:forensic@mail-gateway.test',
+      DOMAIN_RESERVED_SUFFIXES: 'Mail-Gateway.test, internal.example.com.',
+    });
+    expect(cfg.DNS_SERVERS).toEqual(['10.0.0.2', '127.0.0.1:5353', '[::1]:5353', '2001:db8::1']);
+    expect(cfg.DNS_PROPAGATION_UPSTREAMS).toEqual(['1.1.1.1', '8.8.8.8:53']);
+    expect(cfg.GATEWAY_DMARC_RUA).toEqual([
+      'mailto:dmarc@mail-gateway.test',
+      'mailto:agg@reports.mail-gateway.test!10m',
+    ]);
+    expect(cfg.GATEWAY_DMARC_RUF).toEqual(['mailto:forensic@mail-gateway.test']);
+    expect(cfg.DOMAIN_RESERVED_SUFFIXES).toEqual(['mail-gateway.test', 'internal.example.com']);
+  });
+
+  it('accepts DoH URLs as propagation upstreams in doh mode', () => {
+    const cfg = loadApiConfig({
+      ...valid,
+      DNS_RESOLVER_MODE: 'doh',
+      DNS_DOH_URL: 'https://dns.example.net/dns-query',
+      DNS_PROPAGATION_UPSTREAMS: 'https://dns.google/dns-query,https://dns.quad9.net/dns-query',
+    });
+    expect(cfg.DNS_PROPAGATION_UPSTREAMS).toEqual([
+      'https://dns.google/dns-query',
+      'https://dns.quad9.net/dns-query',
+    ]);
+  });
+
+  it('rejects server addresses in doh mode and URLs in system mode', () => {
+    expect(
+      rejection({ ...valid, DNS_RESOLVER_MODE: 'doh', DNS_PROPAGATION_UPSTREAMS: '1.1.1.1' }),
+    ).toContain('DNS_PROPAGATION_UPSTREAMS');
+    expect(
+      rejection({ ...valid, DNS_PROPAGATION_UPSTREAMS: 'https://dns.google/dns-query' }),
+    ).toContain('DNS_PROPAGATION_UPSTREAMS');
+  });
+
+  it('accepts http DoH URLs only when APP_ENV is local or ci', () => {
+    for (const appEnv of ['local', 'ci']) {
+      expect(
+        loadApiConfig({
+          ...valid,
+          APP_ENV: appEnv,
+          DNS_DOH_URL: 'http://127.0.0.1:8053/dns-query',
+        }).DNS_DOH_URL,
+      ).toBe('http://127.0.0.1:8053/dns-query');
+    }
+    for (const appEnv of ['staging', 'production']) {
+      const message = rejection({
+        ...valid,
+        APP_ENV: appEnv,
+        PORTAL_PUBLIC_URL: 'https://portal.example.com',
+        DNS_DOH_URL: 'http://doh-internal.example.net/dns-query',
+      });
+      expect(message).toContain('DNS_DOH_URL');
+      expect(message).not.toContain('doh-internal');
+    }
+    expect(
+      rejection({
+        ...valid,
+        APP_ENV: 'production',
+        PORTAL_PUBLIC_URL: 'https://portal.example.com',
+        DNS_RESOLVER_MODE: 'doh',
+        DNS_PROPAGATION_UPSTREAMS: 'http://doh-internal.example.net/dns-query',
+      }),
+    ).toContain('DNS_PROPAGATION_UPSTREAMS');
+  });
+
+  it('rejects DoH URLs with credentials without echoing them', () => {
+    const message = rejection({
+      ...valid,
+      DNS_DOH_URL: 'https://doh-user:DoHPassw0rdValue@dns.example.net/dns-query',
+    });
+    expect(message).toContain('DNS_DOH_URL');
+    expect(message).not.toContain('DoHPassw0rdValue');
+  });
+
+  it.each([
+    ['DNS_RESOLVER_MODE', 'dot'],
+    ['DNS_SERVERS', 'dns.example.net'],
+    ['DNS_SERVERS', '10.0.0.1:99999'],
+    ['DNS_SERVERS', '[10.0.0.1]:53'],
+    ['DNS_SERVERS', '::1:53x'],
+    ['DNS_DOH_URL', 'not a url'],
+    ['DNS_DOH_URL', 'ftp://dns.example.net/dns-query'],
+    ['DNS_TIMEOUT_MS', '99'],
+    ['DNS_TIMEOUT_MS', '10001'],
+    ['DNS_TRIES', '0'],
+    ['DNS_TRIES', '6'],
+    ['DNS_CACHE_MAX_TTL_SECONDS', '3601'],
+    ['DNS_CACHE_NEGATIVE_TTL_SECONDS', '901'],
+    ['GATEWAY_MX_HOSTS', 'mx1.mail-gateway.test'],
+    ['GATEWAY_MX_HOSTS', '70000:mx1.mail-gateway.test'],
+    ['GATEWAY_MX_HOSTS', '10:mx_1.mail-gateway.test'],
+    ['GATEWAY_MX_HOSTS', '10:localhost'],
+    ['GATEWAY_MX_HOSTS', '10:mx1.mail-gateway.test,20:MX1.mail-gateway.test'],
+    ['GATEWAY_MX_HOSTS', ','],
+    ['GATEWAY_SPF_INCLUDE', 'not a name'],
+    ['GATEWAY_SPF_INCLUDE', '10.0.0.1'],
+    ['GATEWAY_DMARC_RUA', 'dmarc-reports@mail-gateway.test'],
+    ['GATEWAY_DMARC_RUA', 'mailto:no-at-sign'],
+    ['GATEWAY_DMARC_RUF', 'https://reports.mail-gateway.test'],
+    ['DOMAIN_VERIFICATION_LABEL', 'emailgateway-verify'],
+    ['DOMAIN_VERIFICATION_LABEL', '_Upper'],
+    ['DOMAIN_VERIFICATION_TTL_DAYS', '0'],
+    ['DOMAIN_VERIFICATION_TTL_DAYS', '31'],
+    ['DOMAIN_RESERVED_SUFFIXES', 'ok.example.com,bad_name'],
+    ['DOMAIN_BACKGROUND_JOBS_ENABLED', 'yes'],
+    ['DOMAIN_JOBS_INTERVAL_SECONDS', '4'],
+    ['DOMAIN_CHECK_BATCH_SIZE', '501'],
+    ['DOMAIN_CHECK_CONCURRENCY', '33'],
+    ['DOMAIN_CHECK_DEADLINE_MS', '999'],
+    ['DOMAIN_CHECK_DEADLINE_MS', '60001'],
+    ['DOMAIN_RETRY_BASE_SECONDS', '4'],
+    ['DOMAIN_RETRY_MAX_SECONDS', '86401'],
+    ['DOMAIN_RECHECK_INCOMPLETE_SECONDS', '59'],
+    ['DOMAIN_RECHECK_INTERVAL_SECONDS', '3599'],
+    ['DKIM_ROTATION_OVERLAP_DAYS', '91'],
+  ])('rejects %s=%s without echoing the value', (key, value) => {
+    const message = rejection({ ...valid, [key]: value });
+    expect(message).toContain(key);
+    expect(message).not.toContain(value);
+  });
+
+  it('requires the check deadline to cover every DNS try', () => {
+    expect(
+      rejection({
+        ...valid,
+        DNS_TIMEOUT_MS: '5000',
+        DNS_TRIES: '3',
+        DOMAIN_CHECK_DEADLINE_MS: '14999',
+      }),
+    ).toContain('DOMAIN_CHECK_DEADLINE_MS');
+    expect(
+      loadApiConfig({
+        ...valid,
+        DNS_TIMEOUT_MS: '5000',
+        DNS_TRIES: '3',
+        DOMAIN_CHECK_DEADLINE_MS: '15000',
+      }).DOMAIN_CHECK_DEADLINE_MS,
+    ).toBe(15000);
+  });
+
+  it('requires the retry cap to be at least the retry base', () => {
+    expect(
+      rejection({ ...valid, DOMAIN_RETRY_BASE_SECONDS: '600', DOMAIN_RETRY_MAX_SECONDS: '300' }),
+    ).toContain('DOMAIN_RETRY_MAX_SECONDS');
+  });
+
+  it('allows disabling the DNS cache', () => {
+    expect(
+      loadApiConfig({ ...valid, DNS_CACHE_MAX_TTL_SECONDS: '0' }).DNS_CACHE_MAX_TTL_SECONDS,
+    ).toBe(0);
   });
 });

@@ -2,7 +2,8 @@
  * Database fixtures for the API integration suites (WP3, reused by WP4/WP5). Every name is
  * unique per call, so suites can run against a shared, seeded database. `cleanup()` deletes what
  * the fixtures created (and what tests registered) in foreign-key-safe order; it never touches
- * the seeded platform organization itself, and `audit_logs` rows stay (append-only by policy).
+ * the seeded platform organization itself, and `audit_logs` and `message_outbox` rows stay
+ * (append-only by policy). Domains of the fixture organizations are deleted with them.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
 import {
@@ -14,6 +15,7 @@ import {
 } from '@email-gateway/database';
 import { PasswordHasher } from '../../src/crypto/password-hasher';
 import { SecretBox } from '../../src/crypto/secret-box';
+import { generateApiKey, TokenHasher } from '../../src/crypto/tokens';
 import { generateTotpSecret, totpCode, totpStep } from '../../src/crypto/totp';
 import type { IntegrationApp } from './app';
 
@@ -243,6 +245,42 @@ export class Fixtures {
     }
   }
 
+  /** An API key of the organization with the given scopes (valid for a day); returns the key. */
+  async createApiKey(org: FixtureOrganization, scopes: string[]): Promise<string> {
+    const { key, prefix } = generateApiKey();
+    await this.prisma.apiKey.create({
+      data: {
+        organizationId: org.id,
+        name: `it-${prefix}`,
+        keyPrefix: prefix,
+        keyHash: this.ctx.get(TokenHasher).hmacHex(key),
+        scopes,
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      },
+    });
+    return key;
+  }
+
+  /** A custom role of the organization with exactly these permissions; returns its key. */
+  async createCustomRole(org: FixtureOrganization, permissions: string[]): Promise<string> {
+    const key = `custom_${uniqueSuffix()}`;
+    const found = await this.prisma.permission.findMany({
+      where: { key: { in: permissions } },
+      select: { id: true },
+    });
+    if (found.length !== permissions.length) throw new Error('Unknown permission');
+    await this.prisma.role.create({
+      data: {
+        organizationId: org.id,
+        key,
+        name: `Custom ${key}`,
+        isSystem: false,
+        permissions: { create: found.map((p) => ({ permissionId: p.id })) },
+      },
+    });
+    return key;
+  }
+
   /** Tracks an organization created through the API so `cleanup` removes it. */
   trackOrganization(id: bigint): void {
     this.organizations.add(id);
@@ -275,6 +313,9 @@ export class Fixtures {
     await p.apiKey.deleteMany({
       where: { OR: [{ organizationId: { in: orgs } }, { createdByUserId: { in: users } }] },
     });
+    // Domains (step 2.1) of the fixture organizations, deleted ones included; verifications,
+    // DNS records, DKIM keys, MX observations and settings cascade. Outbox and audit rows stay.
+    await p.domain.deleteMany({ where: { organizationId: { in: orgs } } });
     await p.userRole.deleteMany({ where: byOrgOrUser });
     await p.role.deleteMany({ where: { organizationId: { in: orgs } } });
     await p.user.deleteMany({

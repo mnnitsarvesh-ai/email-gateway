@@ -18,8 +18,10 @@ import { RedisKeyValueStore } from './kv/redis-key-value-store';
 import { RateLimitGuard } from './rate-limit/rate-limit.guard';
 import { OrganizationFeaturesService } from './tenancy/organization-features.service';
 import { OrganizationLimitsService } from './tenancy/organization-limits.service';
+import { TEST_DOMAIN_ENV } from '../test/support/test-env';
 
 const config = loadApiConfig({
+  ...TEST_DOMAIN_ENV,
   DATABASE_URL: 'mysql://u:p@mysql:3306/db',
   REDIS_URL: 'redis://redis:6379',
   S3_REGION: 'ap-south-1',

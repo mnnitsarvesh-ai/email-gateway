@@ -7,8 +7,11 @@ export interface RateLimitOptions {
   /** Requests allowed per window. */
   limit: number;
   windowSeconds: number;
-  /** What identifies the caller: client IP, a body field (e.g. the email), or both. */
-  by: 'ip' | 'ip+body' | 'body';
+  /**
+   * What identifies the caller: client IP, a body field (e.g. the email), both, or the
+   * authenticated principal (user or API key; global authentication runs before this guard).
+   */
+  by: 'ip' | 'ip+body' | 'body' | 'principal';
   /** Body field for `body` / `ip+body`; compared lower-cased and trimmed, stored as SHA-256. */
   bodyField?: string;
 }
@@ -23,7 +26,7 @@ export function assertRateLimitOptions(options: RateLimitOptions): void {
   if (!Number.isSafeInteger(options.windowSeconds) || options.windowSeconds < 1) {
     throw new Error(`Rate limit ${options.bucket}: windowSeconds must be a positive integer`);
   }
-  if (options.by !== 'ip' && !options.bodyField) {
+  if ((options.by === 'body' || options.by === 'ip+body') && !options.bodyField) {
     throw new Error(`Rate limit ${options.bucket}: by=${options.by} needs bodyField`);
   }
 }

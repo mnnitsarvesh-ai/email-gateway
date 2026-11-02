@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { type Prisma, type PrismaClient } from '@prisma/client';
+import { type DomainStatus, type Prisma, type PrismaClient } from '@prisma/client';
 import {
   DEMO,
   PERMISSIONS,
@@ -22,6 +22,14 @@ import {
 type Tx = Prisma.TransactionClient;
 
 const TX_OPTIONS = { timeout: 60_000, maxWait: 10_000 } as const;
+
+/** Statuses the api's domain-check job keeps checking (step 2.1 D11); never NULL-scheduled. */
+const CHECKED_DOMAIN_STATUSES: ReadonlySet<DomainStatus> = new Set([
+  'pending_verification',
+  'verified',
+  'active',
+  'suspended',
+]);
 
 export interface CatalogOptions {
   /** `organization_deployments.environment` of the platform org; default APP_ENV or `local`. */
@@ -359,23 +367,59 @@ export async function seedDemo(
     if (owner && owner.organizationId !== organizationId) {
       throw new Error(`Domain ${DEMO.domain} already belongs to another organization`);
     }
+    // The organization's live (non-deleted) row for the name; a deleted demo row stays history.
     const existingDomain = await tx.domain.findUnique({
-      where: { organizationId_name: { organizationId, name: DEMO.domain } },
-      select: { id: true, organizationId: true },
+      where: { organizationId_liveName: { organizationId, liveName: DEMO.domain } },
+      select: { id: true, status: true, verifiedAt: true, activatedAt: true, nextCheckAt: true },
     });
-    const domain =
-      existingDomain ??
-      (await tx.domain.create({
+    const now = new Date();
+    let domainId: bigint;
+    if (!existingDomain) {
+      // Step 2.1: the demo domain is active (verified + activated), so it resolves on the mail path.
+      const created = await tx.domain.create({
         data: {
           organizationId,
           name: DEMO.domain,
-          status: 'verified',
+          status: 'active',
           inboundEnabled: true,
-          verifiedAt: new Date(),
+          verifiedAt: now,
+          activatedAt: now,
+          statusChangedAt: now,
+          // Due at once: the api's domain-check job materializes its ownership record, DKIM key
+          // and DNS record rows (step 2.1 D12), then rechecks it on the D11 schedule.
+          nextCheckAt: now,
         },
-        select: { id: true, organizationId: true },
-      }));
-    const domainId = domain.id;
+        select: { id: true },
+      });
+      domainId = created.id;
+    } else {
+      domainId = existingDomain.id;
+      // A demo row seeded before step 2.1 is `verified`: move only that row to `active`, once.
+      // Any other status (suspended or failed by a developer) is left alone.
+      if (existingDomain.status === 'verified') {
+        await tx.domain.updateMany({
+          where: { id: domainId, status: 'verified' },
+          data: {
+            status: 'active',
+            activatedAt: existingDomain.activatedAt ?? now,
+            verifiedAt: existingDomain.verifiedAt ?? now,
+            statusChangedAt: now,
+          },
+        });
+      }
+      // A demo row seeded before step 2.1 was never scheduled: make it due (D11, D12). A row
+      // the domain-check job already scheduled keeps its time; checks never stop for a checked
+      // status, so a NULL here means "never scheduled".
+      if (
+        existingDomain.nextCheckAt === null &&
+        CHECKED_DOMAIN_STATUSES.has(existingDomain.status)
+      ) {
+        await tx.domain.updateMany({
+          where: { id: domainId, nextCheckAt: null },
+          data: { nextCheckAt: now },
+        });
+      }
+    }
     await tx.domainSetting.upsert({
       where: { domainId },
       create: {

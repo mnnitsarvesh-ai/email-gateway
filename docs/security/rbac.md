@@ -27,6 +27,7 @@ The `permissions` table is seeded from `PERMISSIONS` in `packages/database/src/s
 | `session:manage`             | View and revoke other users' sessions                            |
 | `domain:read`                | View domains, DNS records and mail servers                       |
 | `domain:manage`              | Add, verify and configure domains                                |
+| `domain:dkim_rotate`         | Rotate DKIM signing keys of domains (step 2.1)                   |
 | `policy:read`                | View email policies and exceptions                               |
 | `policy:manage`              | Create and edit draft policies and exceptions                    |
 | `policy:publish`             | Publish and roll back policy versions                            |
@@ -80,6 +81,7 @@ Generated from the seed catalog (`SYSTEM_ROLES`); if the catalog changes, regene
 | `session:manage`             |  ✓  |     |  ✓  |     |     |     |     |     |
 | `domain:read`                |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |  ✓  |  ✓  |
 | `domain:manage`              |  ✓  |     |  ✓  |  ✓  |     |     |     |     |
+| `domain:dkim_rotate`         |  ✓  |     |  ✓  |  ✓  |     |     |     |     |
 | `policy:read`                |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |  ✓  |  ✓  |
 | `policy:manage`              |  ✓  |     |  ✓  |     |  ✓  |     |     |     |
 | `policy:publish`             |  ✓  |     |  ✓  |     |     |     |     |     |
@@ -101,6 +103,21 @@ Generated from the seed catalog (`SYSTEM_ROLES`); if the catalog changes, regene
 | `platform:tenant_override`   |  ✓  |  ✓  |     |     |     |     |     |     |
 
 **Platform roles** are the roles that hold any `platform:*` permission: `super_admin` and `platform_admin` (`PLATFORM_ROLE_KEYS`). They can be assigned only to users of the platform organization (`kind = platform`); assigning one in a customer organization is `400`. Customer organizations never see platform roles in `GET /roles` or `GET /roles/{key}` (`404`). Domain Admin is organization-wide; per-domain scoping of roles is out of scope for now.
+
+## Domain permissions (step 2.1)
+
+The domain routes (`/domains`, design [docs/plan/steps/03-domain-onboarding.md](../plan/steps/03-domain-onboarding.md) D14) use three permissions. All of them accept user tokens and API keys (an API key needs the permission in its scopes).
+
+| Permission           | Routes                                                                                             | System roles                                                                                                        |
+| -------------------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `domain:read`        | `GET /domains`, `GET /domains/{id}`, `GET /domains/{id}/dns-records`, `GET /domains/{id}/status`   | super admin, platform admin, organization admin, domain admin, security analyst, compliance auditor, read-only user |
+| `domain:manage`      | `POST /domains`, `POST /domains/{id}/verify`, `PATCH /domains/{id}/status`, `DELETE /domains/{id}` | super admin, organization admin, domain admin                                                                       |
+| `domain:dkim_rotate` | `POST /domains/{id}/dkim/rotate`                                                                   | super admin, organization admin (holds every tenant permission), domain admin                                       |
+
+- `domain:dkim_rotate` is separate from `domain:manage` because a rotation creates a key whose DNS record the customer must publish; misused, it can break outbound signing. A custom role with `domain:manage` but without `domain:dkim_rotate` can add, verify, activate, suspend and delete domains but gets `403` on rotation. The underscore keeps the `resource:action` shape (like `message:read_content`).
+- Another tenant's domain, a deleted domain and an unknown id are all `404` on every route; the tenant is the caller's organization (or the override target), never a request field.
+- Platform users without an override see only their own (platform) organization's domains. Under an override, `super_admin` can manage the target's domains (every mutation's audit row carries `metadata.override`) and `platform_admin` can only read them (`403` on mutations).
+- `apps/api/integration/tenant-isolation-domains.test.ts` proves these rules end to end (tenant A admin and an A API key with every domain scope get `404` on every route of a tenant B domain; read-only `403` on mutations; domain admin manages and rotates; the custom role cannot rotate; override behaviour as above).
 
 ## Custom roles
 

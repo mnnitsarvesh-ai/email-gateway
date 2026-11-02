@@ -28,11 +28,15 @@ class Controller {
 
   @RateLimit({ bucket: 'pair', limit: 1, windowSeconds: 60, by: 'ip+body', bodyField: 'email' })
   pair(): void {}
+
+  @RateLimit({ bucket: 'mine', limit: 1, windowSeconds: 60, by: 'principal' })
+  mine(): void {}
 }
 
 interface Call {
   ip?: string;
   body?: unknown;
+  principal?: unknown;
 }
 
 function context(
@@ -40,7 +44,7 @@ function context(
   call: Call,
 ): { ctx: ExecutionContext; headers: Record<string, string> } {
   const headers: Record<string, string> = {};
-  const req = { ip: call.ip ?? '198.51.100.1', body: call.body };
+  const req = { ip: call.ip ?? '198.51.100.1', body: call.body, principal: call.principal };
   const res = { setHeader: (name: string, value: string) => (headers[name] = value) };
   const ctx = {
     getHandler: () => handler,
@@ -124,6 +128,24 @@ describe('RateLimitGuard', () => {
     await expect(call(handler, { body: { email: 'b@example.com' } })).resolves.toBe(true);
   });
 
+  it('counts per principal (user or API key) for by=principal, whatever the IP', async () => {
+    const handler = Controller.prototype.mine;
+    const user = { kind: 'user', userPublicId: 'u-1' };
+    const apiKey = { kind: 'api_key', apiKeyPublicId: 'k-1' };
+    await expect(call(handler, { principal: user })).resolves.toBe(true);
+    expect(await kv.get('rl:mine:user:u-1')).toBe('1');
+    await expect(call(handler, { ip: '203.0.113.9', principal: user })).rejects.toThrow(
+      HttpException,
+    );
+    await expect(call(handler, { principal: apiKey })).resolves.toBe(true);
+    expect(await kv.get('rl:mine:api_key:k-1')).toBe('1');
+  });
+
+  it('falls back to the IP for by=principal when no principal is set', async () => {
+    await expect(call(Controller.prototype.mine)).resolves.toBe(true);
+    expect(await kv.get('rl:mine:ip:198.51.100.1')).toBe('1');
+  });
+
   it('fails closed with 503 when the store is unavailable', async () => {
     kv.failing = true;
     await expect(call(Controller.prototype.login)).rejects.toThrow(ServiceUnavailableException);
@@ -150,5 +172,9 @@ describe('@RateLimit()', () => {
     expect(() => RateLimit({ bucket: 'b', limit: 0, windowSeconds: 1, by: 'ip' })).toThrow();
     expect(() => RateLimit({ bucket: 'b', limit: 1, windowSeconds: 0, by: 'ip' })).toThrow();
     expect(() => RateLimit({ bucket: 'b', limit: 1, windowSeconds: 1, by: 'body' })).toThrow();
+    expect(() => RateLimit({ bucket: 'b', limit: 1, windowSeconds: 1, by: 'ip+body' })).toThrow();
+    expect(() =>
+      RateLimit({ bucket: 'b', limit: 1, windowSeconds: 1, by: 'principal' }),
+    ).not.toThrow();
   });
 });

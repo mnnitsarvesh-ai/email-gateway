@@ -42,7 +42,10 @@ export class OrganizationUsageService {
       counts.messagesByDirection.get(direction) ?? 0;
 
     const usersTotal = [...counts.usersByStatus.values()].reduce((a, b) => a + b, 0);
-    const domainsTotal = [...counts.domainsByStatus.values()].reduce((a, b) => a + b, 0);
+    // Soft-deleted domains (step 2.1) are history: they count neither in totals nor in limits.
+    const domainsTotal = [...counts.domainsByStatus.entries()]
+      .filter(([status]) => status !== 'deleted')
+      .reduce((sum, [, count]) => sum + count, 0);
     const used: Record<string, number> = {
       max_users: usersTotal,
       max_domains: domainsTotal,
@@ -61,8 +64,11 @@ export class OrganizationUsageService {
       },
       domains: {
         total: domainsTotal,
-        verified: domains('verified'),
+        // Ownership verified: every post-verification state (step 2.1 D3).
+        verified: domains('verified') + domains('active') + domains('suspended'),
         pendingVerification: domains('pending_verification'),
+        active: domains('active'),
+        suspended: domains('suspended'),
       },
       messages: {
         total: messages('inbound') + messages('outbound') + messages('internal'),

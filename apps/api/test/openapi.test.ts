@@ -29,11 +29,13 @@ import { ACCESS_TOKEN_SCHEME, API_KEY_SCHEME, buildOpenApiDocument } from '../sr
 import { KeyValueStore } from '../src/kv/key-value-store';
 import { InMemoryKeyValueStore } from './support/in-memory-key-value-store';
 import { RecordingEmailSender } from './support/recording-email-sender';
+import { TEST_DOMAIN_ENV } from './support/test-env';
 
 const SNAPSHOT = resolve(__dirname, '../../../docs/api/openapi.json');
 const UPDATE = process.env.UPDATE_OPENAPI === '1';
 
 const config = loadApiConfig({
+  ...TEST_DOMAIN_ENV,
   NODE_ENV: 'test',
   HTTP_PORT: '3000',
   DATABASE_URL: 'mysql://test:test@localhost:3306/test',
@@ -194,6 +196,29 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
         'GET /api/v1/organizations/{id}/limits',
       ].sort(),
     );
+  });
+
+  it('documents every domain endpoint of step 2.1 §4 for bearer tokens and API keys', () => {
+    const expected = [
+      'POST /api/v1/domains',
+      'GET /api/v1/domains',
+      'GET /api/v1/domains/{id}',
+      'POST /api/v1/domains/{id}/verify',
+      'GET /api/v1/domains/{id}/dns-records',
+      'GET /api/v1/domains/{id}/status',
+      'POST /api/v1/domains/{id}/dkim/rotate',
+      'PATCH /api/v1/domains/{id}/status',
+      'DELETE /api/v1/domains/{id}',
+    ];
+    const byKey = new Map(operations(doc).map((op) => [op.key, op]));
+    for (const key of expected) {
+      const op = byKey.get(key);
+      expect(op?.tags, key).toEqual(['domains']);
+      const schemes = op!.security.flatMap((s) => Object.keys(s)).sort();
+      expect(schemes, key).toEqual([ACCESS_TOKEN_SCHEME, API_KEY_SCHEME].sort());
+    }
+    const domainOps = operations(doc).filter((op) => op.key.includes(' /api/v1/domains'));
+    expect(domainOps.map((op) => op.key).sort()).toEqual([...expected].sort());
   });
 
   it('matches the committed snapshot docs/api/openapi.json', async () => {

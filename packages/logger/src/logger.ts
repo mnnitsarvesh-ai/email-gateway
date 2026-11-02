@@ -29,6 +29,10 @@ const SECRET_FIELDS = [
   'key',
   'apiKey',
   'otpauthUri',
+  // DKIM signing keys (step 2.1, ADR-0018).
+  'privateKey',
+  'privateKeyPem',
+  'privateKeyCiphertext',
 ];
 
 /** Paths that must never reach logs. Extend rather than bypass. */

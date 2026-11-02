@@ -57,7 +57,7 @@ function expectEveryQueryScoped(calls: Call[]): void {
 }
 
 describe('tenant-scoped repositories (D9)', () => {
-  it('domains: by public id with the organization (writer), lists on the reader', async () => {
+  it('domains: by public id with the organization (writer), lists on the reader, never deleted', async () => {
     const { writer, reader, calls } = recordingClients();
     const repo = new DomainsRepository(writer, reader);
     await repo.findByPublicId(SCOPE, PUBLIC_ID);
@@ -67,8 +67,9 @@ describe('tenant-scoped repositories (D9)', () => {
       'writer:findFirst',
       'reader:findMany',
     ]);
-    expect(calls[0]!.args.where).toEqual({ publicId: PUBLIC_ID, organizationId: 42n });
-    expect(calls[1]!.args.where).toEqual({ id: { lt: 9n }, organizationId: 42n });
+    const live = { status: { not: 'deleted' } };
+    expect(calls[0]!.args.where).toEqual({ publicId: PUBLIC_ID, ...live, organizationId: 42n });
+    expect(calls[1]!.args.where).toEqual({ ...live, id: { lt: 9n }, organizationId: 42n });
   });
 
   it('policies: soft-deleted policies are excluded', async () => {

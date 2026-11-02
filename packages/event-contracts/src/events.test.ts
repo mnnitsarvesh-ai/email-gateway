@@ -1,7 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { parseEvent } from './envelope';
-import { EventTypes, messageReceivedV1, messageScannedV1, policyDecidedV1 } from './events';
+import {
+  domainStatusChangedV1,
+  EventTypes,
+  messageReceivedV1,
+  messageScannedV1,
+  policyDecidedV1,
+} from './events';
 import { QUEUES, queueArguments } from './topology';
 
 const organizationId = '42';
@@ -110,6 +116,64 @@ describe('parseEvent', () => {
     expect(() =>
       parseEvent(envelope(receivedPayload(), { eventType: 'mail.received' }), messageReceivedV1),
     ).toThrow();
+  });
+});
+
+describe('domain.status.changed.v1', () => {
+  const domainPayload = (overrides: Record<string, unknown> = {}) => ({
+    domainId: '9007199254740993',
+    domainPublicId: '01890a5d-ac96-774b-bcce-b302099a8057',
+    name: 'xn--bcher-kva.example',
+    previousStatus: 'verified',
+    status: 'active',
+    reason: null,
+    changedAt: '2026-11-02T09:00:00.000Z',
+    ...overrides,
+  });
+  const parse = (payload: unknown) =>
+    parseEvent(
+      envelope(payload, { eventType: EventTypes.DomainStatusChanged }),
+      domainStatusChangedV1,
+    );
+
+  it('has a versioned event type', () => {
+    expect(EventTypes.DomainStatusChanged).toBe('domain.status.changed.v1');
+  });
+
+  it('accepts a status change, a first status (previousStatus null) and a reason', () => {
+    expect(parse(domainPayload()).payload.status).toBe('active');
+    expect(
+      parse(domainPayload({ previousStatus: null, status: 'pending_verification' })).payload
+        .previousStatus,
+    ).toBeNull();
+    expect(
+      parse(
+        domainPayload({
+          previousStatus: 'pending_verification',
+          status: 'failed',
+          reason: 'claimed_by_another_organization',
+        }),
+      ).payload.reason,
+    ).toBe('claimed_by_another_organization');
+  });
+
+  it('rejects numeric or malformed ids, long names and reasons, and non-ISO timestamps', () => {
+    for (const overrides of [
+      { domainId: 9 },
+      { domainId: '09' },
+      { domainId: randomUUID().replaceAll('-', '') },
+      { domainPublicId: '12' },
+      { name: '' },
+      { name: 'a'.repeat(254) },
+      { status: '' },
+      { reason: 'x'.repeat(513) },
+      { changedAt: '2026-11-02' },
+      { changedAt: 'yesterday' },
+    ]) {
+      expect(() => parse(domainPayload(overrides)), JSON.stringify(overrides)).toThrow();
+    }
+    const { reason: _reason, ...withoutReason } = domainPayload();
+    expect(() => parse(withoutReason)).toThrow();
   });
 });
 

@@ -36,7 +36,11 @@ export class OrganizationUsageRepository {
         where: { organizationId, deletedAt: null },
         _count: { _all: true },
       }),
-      db.domain.groupBy({ by: ['status'], where: { organizationId }, _count: { _all: true } }),
+      db.domain.groupBy({
+        by: ['status'],
+        where: { organizationId, status: { not: 'deleted' } },
+        _count: { _all: true },
+      }),
       db.emailMessage.groupBy({
         by: ['direction'],
         where: { organizationId, receivedAt: { gte: period.from, lt: period.to } },

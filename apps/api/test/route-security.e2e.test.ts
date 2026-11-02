@@ -27,8 +27,10 @@ import { API_GLOBAL_PREFIX, configureApiApp } from '../src/http/configure-api-ap
 import { KeyValueStore } from '../src/kv/key-value-store';
 import { InMemoryKeyValueStore } from './support/in-memory-key-value-store';
 import { RecordingEmailSender } from './support/recording-email-sender';
+import { TEST_DOMAIN_ENV } from './support/test-env';
 
 const config = loadApiConfig({
+  ...TEST_DOMAIN_ENV,
   NODE_ENV: 'test',
   HTTP_PORT: '3000',
   DATABASE_URL: 'mysql://test:test@localhost:3306/test',

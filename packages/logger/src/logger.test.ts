@@ -112,6 +112,41 @@ describe('redaction of credentials (design §6)', () => {
   });
 });
 
+describe('redaction of DKIM key material (step 2.1 §6)', () => {
+  it.each(['privateKey', 'privateKeyPem', 'privateKeyCiphertext'])(
+    'censors %s at the top level and one level down',
+    (field) => {
+      const out = capture();
+      const logger = createLogger({ service: 'test-svc', destination: out.stream });
+      const pem = `-----BEGIN PRIVATE KEY-----${field}TopSecret-----END PRIVATE KEY-----`;
+      const nested = `${field}-nested-ciphertext-value`;
+      logger.info(
+        { [field]: pem, dkimKey: { selector: 'egr20261102abcd', [field]: nested } },
+        'dkim',
+      );
+      const line = out.lines()[0]!;
+      const serialized = JSON.stringify(line);
+      expect(serialized).not.toContain('TopSecret');
+      expect(serialized).not.toContain(nested);
+      expect(line[field]).toBe('[REDACTED]');
+      expect((line.dkimKey as Record<string, unknown>).selector).toBe('egr20261102abcd');
+    },
+  );
+
+  it('lists the paths and their *. variants', () => {
+    expect(REDACT_PATHS).toEqual(
+      expect.arrayContaining([
+        'privateKey',
+        '*.privateKey',
+        'privateKeyPem',
+        '*.privateKeyPem',
+        'privateKeyCiphertext',
+        '*.privateKeyCiphertext',
+      ]),
+    );
+  });
+});
+
 describe('setContextTenant', () => {
   it('adds the tenant to the current context and to later log lines', () => {
     const out = capture();

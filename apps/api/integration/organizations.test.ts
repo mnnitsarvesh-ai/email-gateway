@@ -612,10 +612,14 @@ describe('usage', () => {
       await ctx.prisma.emailMessage.deleteMany({ where: { organizationId: org.id } });
       await ctx.prisma.domain.deleteMany({ where: { organizationId: org.id } });
     });
+    // Step 2.1 statuses: verified/active/suspended count as verified; deleted domains count nowhere.
     await ctx.prisma.domain.createMany({
       data: [
         { organizationId: org.id, name: `a-${uniqueSuffix()}.test`, status: 'verified' },
         { organizationId: org.id, name: `b-${uniqueSuffix()}.test` },
+        { organizationId: org.id, name: `c-${uniqueSuffix()}.test`, status: 'active' },
+        { organizationId: org.id, name: `d-${uniqueSuffix()}.test`, status: 'suspended' },
+        { organizationId: org.id, name: `e-${uniqueSuffix()}.test`, status: 'deleted' },
       ],
     });
     const now = new Date();
@@ -673,7 +677,7 @@ describe('usage', () => {
       .toBe(4);
     expect(usage).toMatchObject({
       users: { total: 3, active: 1, invited: 1, disabled: 1, locked: 0 },
-      domains: { total: 2, verified: 1, pendingVerification: 1 },
+      domains: { total: 4, verified: 3, pendingVerification: 1, active: 1, suspended: 1 },
       messages: { total: 4, inbound: 2, outbound: 1, internal: 1 },
       quarantine: { active: 1 },
       apiKeys: { active: 1 },
@@ -686,7 +690,7 @@ describe('usage', () => {
       value: standard.limits.max_users,
       used: 3,
     });
-    expect(usage!.limits.find((l) => l.key === 'max_domains')).toMatchObject({ used: 2 });
+    expect(usage!.limits.find((l) => l.key === 'max_domains')).toMatchObject({ used: 4 });
     expect(usage!.limits.find((l) => l.key === 'messages_per_day')?.used).toBe(
       usage!.messages.today,
     );

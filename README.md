@@ -2,7 +2,7 @@
 
 A multi-tenant email security gateway: inbound, outbound and internal mail inspection, spam and phishing detection, malware and attachment scanning, URL protection, BEC detection, DLP, quarantine and optional archiving. It runs as shared SaaS or as a dedicated per-customer deployment. The design target is **1M emails/day**, scaling horizontally beyond that.
 
-> **Status: Phase 1 in progress (steps 1.2/1.3: tenants, authentication, RBAC).** Phase 0 (monorepo, local stack, health, CI, architecture docs) and step 1.1 (the MySQL schema with the read/write split) are in place. The control-plane API now has first-party authentication (Argon2id passwords, JWT access tokens with rotating refresh tokens, TOTP MFA, API keys), eight default roles, tenant-scoped authorization with an audited platform override, and the organizations API (catalog, settings, features, limits, usage, deletion workflow). Mail-processing features come in later phases. See [docs/architecture/overview.md](docs/architecture/overview.md#what-exists-now-and-what-comes-next) and [docs/plan/execution-plan.md](docs/plan/execution-plan.md).
+> **Status: Phase 2 in progress (step 2.1: domain onboarding).** Phase 0 (monorepo, local stack, health, CI, architecture docs), step 1.1 (the MySQL schema with the read/write split) and steps 1.2/1.3 (tenants, first-party authentication with MFA and API keys, eight default roles, tenant-scoped authorization with an audited platform override, the organizations API) are in place. Step 2.1 adds the domains API: DNS TXT ownership verification (system resolver or DNS-over-HTTPS, a Redis cache, timeouts that never change state), generated MX/SPF/DKIM/DMARC records with checks and recommendations, DKIM keys encrypted at rest with rotation, the domain lifecycle (activate, suspend, delete) and background re-verification inside the api. Mail-processing features come in later steps. See [docs/architecture/overview.md](docs/architecture/overview.md#what-exists-now-and-what-comes-next) and [docs/plan/execution-plan.md](docs/plan/execution-plan.md).
 
 ## Stack
 
@@ -46,6 +46,14 @@ pnpm test:integration               # now also checks every service's /health/re
 MySQL runs as a GTID primary plus a read replica. The one-shot `mysql-replica-setup` container creates the database accounts and seeds the replica with CLONE on first start (about 10 s). After that it is a no-op. Only the api reads from the replica (`DATABASE_READ_URL`); see [replication](docs/database/replication.md). If your `.env` predates the replica, append `MYSQL_REPLICA_HOST_PORT`, `MYSQL_READER_*`, `MYSQL_REPLICATION_*` (password at most 32 characters) and `DATABASE_READ_*` from `.env.example`, without regenerating the existing secrets.
 
 Step 1.2/1.3 (tenants, authentication, RBAC) adds api keys: `AUTH_JWT_SECRET`, `AUTH_TOKEN_PEPPER`, `DATA_ENCRYPTION_KEY` (secrets), `PORTAL_PUBLIC_URL`, `HTTP_TRUST_PROXY` and the `AUTH_*`/`PLATFORM_*`/`ORG_*` tuning keys (see the "API authentication and tenancy" section of `.env.example`). If your `.env` predates them, append that section from `.env.example` and fill the `__GENERATE_64__` placeholders with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`, without rotating existing secrets (never `env:init --force`). Transactional email (invitations, password resets) goes through `NOTIFY_SMTP_*`; when `NOTIFY_SMTP_HOST` is empty the api logs the email (with a dev link) instead of sending it.
+
+Step 2.1 (domain onboarding) adds the section "Domain onboarding and DNS (step 2.1)" of `.env.example`: `DNS_*` (resolver mode, servers, DoH URL, timeouts, propagation upstreams, cache), `GATEWAY_*` (the MX hosts and SPF include customers publish, DMARC report addresses), `DOMAIN_*` (verification label and lifetime, reserved names, background-job tuning) and `DKIM_ROTATION_OVERLAP_DAYS`. None of them is a secret. `GATEWAY_MX_HOSTS` and `GATEWAY_SPF_INCLUDE` have no default: the api refuses to start without them. If your `.env` predates them, append the section without touching anything else:
+
+```bash
+grep -q '^GATEWAY_MX_HOSTS=' .env || sed -n '/^# --- Domain onboarding and DNS (step 2.1) ---/,/^DKIM_ROTATION_OVERLAP_DAYS=/p' .env.example >> .env
+```
+
+The local values point at `.test` names; in a real deployment set `GATEWAY_MX_HOSTS`/`GATEWAY_SPF_INCLUDE` to the gateway's public names and choose the DNS resolver ([runbook](docs/runbooks/domain-verification.md#dns-resolver-modes)). The API integration tests never use public DNS: they run their own in-process DNS server.
 
 The API serves business routes under `/api/v1` ([ADR-0015](docs/architecture/adr/0015-api-base-path.md)); health endpoints stay at `/health/*`, and outside production the OpenAPI UI is at `/docs` (snapshot: [docs/api/openapi.json](docs/api/openapi.json)). Endpoints and conventions: [docs/api/README.md](docs/api/README.md).
 
@@ -151,6 +159,9 @@ scripts/                Developer tooling
 - [Deployment](docs/deployment/README.md)
 - [Runbook: local stack](docs/runbooks/local-stack.md)
 - [Runbook: organization deletion](docs/runbooks/organization-deletion.md)
+- [Adding a domain (customer guide: verification, MX, SPF, DKIM, DMARC)](docs/domains/onboarding.md)
+- [Runbook: domain verification and DNS checks](docs/runbooks/domain-verification.md)
+- [DNS resolution (ADR-0017)](docs/architecture/adr/0017-dns-resolution-strategy.md) and [DKIM key custody (ADR-0018)](docs/architecture/adr/0018-dkim-key-custody.md)
 
 ## Engineering rules (short version)
 

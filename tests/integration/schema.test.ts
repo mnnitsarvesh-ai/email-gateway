@@ -1,5 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { Prisma, PrismaClient, REGISTRY_PURGE_SQL } from '@email-gateway/database';
+import {
+  type DomainStatus,
+  Prisma,
+  PrismaClient,
+  REGISTRY_PURGE_SQL,
+} from '@email-gateway/database';
 import { afterAll, describe, expect, it } from 'vitest';
 import { stack } from './support/env';
 
@@ -7,7 +12,8 @@ import { stack } from './support/env';
  * Asserts the physical MySQL schema produced by the migrations matches the data model in
  * docs/plan/steps/01-database.md (section 3) and ADR-0014: tables, partitioning, the absence of
  * foreign keys on partitioned tables, the tenancy column and the identity registry's unique key;
- * plus the identity/tenancy changes of docs/plan/steps/02-tenants-auth-rbac.md (D10).
+ * plus the identity/tenancy changes of docs/plan/steps/02-tenants-auth-rbac.md (D10) and the
+ * domain onboarding changes of docs/plan/steps/03-domain-onboarding.md (§3).
  */
 const prisma = new PrismaClient({ datasourceUrl: stack.databaseUrl() });
 
@@ -500,12 +506,17 @@ describe('tenant-safe unique keys', () => {
     }
   });
 
-  it('refuses writes to the generated verified_name column', async () => {
+  it('refuses writes to the generated verified_name and live_name columns', async () => {
     const { suffix, ids, cleanup } = await scratchOrganizations(1);
     try {
       await expect(
         prisma.domain.create({
           data: { organizationId: ids[0]!, name: `it-${suffix}.test`, verifiedName: 'x.test' },
+        }),
+      ).rejects.toThrow(/generated column/i);
+      await expect(
+        prisma.domain.create({
+          data: { organizationId: ids[0]!, name: `it-${suffix}.test`, liveName: 'x.test' },
         }),
       ).rejects.toThrow(/generated column/i);
     } finally {
@@ -571,6 +582,261 @@ describe('tenant-safe unique keys', () => {
       }
       await cleanup();
     }
+  });
+});
+
+describe('domain onboarding schema (step 2.1, §3)', () => {
+  it('appends active, suspended and deleted to the domain status enum and adds DnsCheckOutcome', async () => {
+    const cols = await columns(['domains', 'domain_verifications', 'domain_dns_records']);
+    expect(cols.get('domains.status')!.columnType).toBe(
+      "enum('pending_verification','verified','failed','disabled','active','suspended','deleted')",
+    );
+    expect(cols.get('domains.status')!.columnDefault).toBe('pending_verification');
+    const outcome = "enum('valid','invalid','missing','indeterminate')";
+    expect(cols.get('domain_verifications.last_outcome')!.columnType).toBe(outcome);
+    expect(cols.get('domain_dns_records.last_outcome')!.columnType).toBe(outcome);
+  });
+
+  it('adds the lifecycle, scheduling, evidence and key-custody columns', async () => {
+    const cols = await columns([
+      'domains',
+      'domain_verifications',
+      'domain_dns_records',
+      'domain_dkim_keys',
+    ]);
+    const expectColumn = (key: string, type: string, nullable: 'YES' | 'NO') => {
+      const col = cols.get(key);
+      expect(col, key).toBeDefined();
+      expect(`${col!.columnType} ${col!.nullable}`, key).toBe(`${type} ${nullable}`);
+    };
+    expectColumn('domains.status_reason', 'varchar(512)', 'YES');
+    expectColumn('domains.status_changed_at', 'datetime(3)', 'YES');
+    expectColumn('domains.activated_at', 'datetime(3)', 'YES');
+    expectColumn('domains.deleted_at', 'datetime(3)', 'YES');
+    expectColumn('domains.next_check_at', 'datetime(3)', 'YES');
+    expectColumn('domains.last_checked_at', 'datetime(3)', 'YES');
+    expectColumn('domains.check_failures', 'int unsigned', 'NO');
+    expect(cols.get('domains.check_failures')!.columnDefault).toBe('0');
+    expectColumn('domains.verified_name', 'varchar(253)', 'YES');
+    expectColumn('domains.live_name', 'varchar(253)', 'YES');
+
+    expectColumn('domain_verifications.evidence', 'json', 'YES');
+
+    expectColumn('domain_dns_records.record_key', 'varchar(191)', 'NO');
+    expectColumn('domain_dns_records.dkim_key_id', 'bigint unsigned', 'YES');
+    expectColumn('domain_dns_records.last_error', 'varchar(512)', 'YES');
+    expectColumn('domain_dns_records.evidence', 'json', 'YES');
+    expectColumn('domain_dns_records.status_changed_at', 'datetime(3)', 'YES');
+
+    expectColumn('domain_dkim_keys.private_key_ciphertext', 'text', 'YES');
+    expectColumn('domain_dkim_keys.private_key_ref', 'varchar(512)', 'YES');
+    expectColumn('domain_dkim_keys.retire_after', 'datetime(3)', 'YES');
+  });
+
+  it('defines verified_name and live_name as STORED generated columns', async () => {
+    const rows = await prisma.$queryRaw<
+      { columnName: string; extra: string; expression: string }[]
+    >`
+      SELECT COLUMN_NAME AS columnName, EXTRA AS extra, GENERATION_EXPRESSION AS expression
+      FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'domains'
+        AND COLUMN_NAME IN ('verified_name', 'live_name')
+      ORDER BY COLUMN_NAME`;
+    // information_schema escapes the quotes and prints the charset introducer.
+    const normalize = (sql: string) =>
+      sql.replaceAll('`', '').replaceAll('_utf8mb4', '').replaceAll("\\'", "'");
+    expect(rows.map((r) => [r.columnName, r.extra, normalize(r.expression)])).toEqual([
+      ['live_name', 'STORED GENERATED', "if((status = 'deleted'),NULL,name)"],
+      [
+        'verified_name',
+        'STORED GENERATED',
+        "if((status in ('verified','active','suspended')),name,NULL)",
+      ],
+    ]);
+  });
+
+  it('derives verified_name and live_name from the status', async () => {
+    const { suffix, ids, cleanup } = await scratchOrganizations(1);
+    const name = `it-${suffix}.gen.test`;
+    try {
+      const domain = await prisma.domain.create({ data: { organizationId: ids[0]!, name } });
+      const expected: Record<
+        DomainStatus,
+        { verifiedName: string | null; liveName: string | null }
+      > = {
+        pending_verification: { verifiedName: null, liveName: name },
+        failed: { verifiedName: null, liveName: name },
+        disabled: { verifiedName: null, liveName: name },
+        verified: { verifiedName: name, liveName: name },
+        active: { verifiedName: name, liveName: name },
+        suspended: { verifiedName: name, liveName: name },
+        deleted: { verifiedName: null, liveName: null },
+      };
+      for (const [status, generated] of Object.entries(expected)) {
+        const row = await prisma.domain.update({
+          where: { id: domain.id },
+          data: { status: status as DomainStatus },
+          select: { verifiedName: true, liveName: true },
+        });
+        expect(row, status).toEqual(generated);
+      }
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('lets an organization re-add a deleted name, but never hold two live rows for it', async () => {
+    const { suffix, ids, cleanup } = await scratchOrganizations(1);
+    const organizationId = ids[0]!;
+    const name = `it-${suffix}.readd.test`;
+    try {
+      const first = await prisma.domain.create({ data: { organizationId, name } });
+      await expect(prisma.domain.create({ data: { organizationId, name } })).rejects.toMatchObject({
+        code: 'P2002',
+      });
+
+      await prisma.domain.update({
+        where: { id: first.id },
+        data: { status: 'deleted', deletedAt: new Date() },
+      });
+      const second = await prisma.domain.create({ data: { organizationId, name } });
+      expect(second.liveName).toBe(name);
+      // The compound unique key addresses the live row only.
+      const live = await prisma.domain.findUnique({
+        where: { organizationId_liveName: { organizationId, liveName: name } },
+        select: { id: true },
+      });
+      expect(live?.id).toBe(second.id);
+
+      // Several deleted rows of the same name may exist (history).
+      await prisma.domain.update({ where: { id: second.id }, data: { status: 'deleted' } });
+      const third = await prisma.domain.create({ data: { organizationId, name } });
+      expect(await prisma.domain.count({ where: { organizationId, name } })).toBe(3);
+
+      // Un-deleting the old row while another live row exists is rejected.
+      await expect(
+        prisma.domain.update({ where: { id: first.id }, data: { status: 'pending_verification' } }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+      expect(third.liveName).toBe(name);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('keeps verified ownership globally unique across active and suspended states', async () => {
+    const { suffix, ids, cleanup } = await scratchOrganizations(2);
+    const [a, b] = ids as [bigint, bigint];
+    const name = `it-${suffix}.owner.test`;
+    try {
+      const owner = await prisma.domain.create({
+        data: { organizationId: a, name, status: 'active' },
+      });
+      const claim = await prisma.domain.create({ data: { organizationId: b, name } });
+      for (const status of ['verified', 'active', 'suspended'] as const) {
+        await expect(
+          prisma.domain.update({ where: { id: claim.id }, data: { status } }),
+          status,
+        ).rejects.toMatchObject({ code: 'P2002' });
+      }
+      await prisma.domain.update({ where: { id: owner.id }, data: { status: 'suspended' } });
+      await expect(
+        prisma.domain.update({ where: { id: claim.id }, data: { status: 'verified' } }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+
+      // Deleting the owner's domain frees the name for the other organization.
+      await prisma.domain.update({ where: { id: owner.id }, data: { status: 'deleted' } });
+      await prisma.domain.update({ where: { id: claim.id }, data: { status: 'verified' } });
+      expect(
+        (await prisma.domain.findUnique({ where: { verifiedName: name } }))?.organizationId,
+      ).toBe(b);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('keeps record_key unique per domain and unlinks DNS records from a deleted DKIM key', async () => {
+    const { suffix, ids, cleanup } = await scratchOrganizations(1);
+    const organizationId = ids[0]!;
+    try {
+      const d1 = await prisma.domain.create({
+        data: { organizationId, name: `it-${suffix}.rk1.test` },
+      });
+      const d2 = await prisma.domain.create({
+        data: { organizationId, name: `it-${suffix}.rk2.test` },
+      });
+      const key = await prisma.domainDkimKey.create({
+        data: {
+          organizationId,
+          domainId: d1.id,
+          selector: 'egr20261102abcd',
+          algorithm: 'rsa_2048',
+          publicKey: 'MIIB',
+          privateKeyCiphertext: 'v1:ciphertext',
+        },
+      });
+      expect(key.privateKeyRef).toBeNull();
+      const record = (domainId: bigint, recordKey: string, dkimKeyId: bigint | null = null) => ({
+        organizationId,
+        domainId,
+        recordKey,
+        purpose: 'dkim' as const,
+        recordType: 'TXT' as const,
+        host: `egr20261102abcd._domainkey.it-${suffix}.test`,
+        expectedValue: 'v=DKIM1; k=rsa; p=MIIB',
+        dkimKeyId,
+      });
+      const row = await prisma.domainDnsRecord.create({
+        data: record(d1.id, 'dkim:egr20261102abcd', key.id),
+      });
+      await expect(
+        prisma.domainDnsRecord.create({ data: record(d1.id, 'dkim:egr20261102abcd') }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+      // The same key on another domain is fine.
+      await prisma.domainDnsRecord.create({ data: record(d2.id, 'dkim:egr20261102abcd') });
+
+      await prisma.domainDkimKey.delete({ where: { id: key.id } });
+      const after = await prisma.domainDnsRecord.findUniqueOrThrow({ where: { id: row.id } });
+      expect(after.dkimKeyId).toBeNull();
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('has the step 2.1 indexes, and (organization_id, live_name) replaces (organization_id, name)', async () => {
+    const domains = await indexColumnSets('domains');
+    expect(domains).toContainEqual(
+      expect.objectContaining({ key: 'organization_id,live_name', unique: true }),
+    );
+    expect(domains).toContainEqual(expect.objectContaining({ key: 'verified_name', unique: true }));
+    expect(domains).toContainEqual(
+      expect.objectContaining({ key: 'next_check_at', unique: false }),
+    );
+    expect(domains).toContainEqual(
+      expect.objectContaining({ key: 'organization_id,status', unique: false }),
+    );
+    expect(domains.map((i) => i.key)).not.toContain('organization_id,name');
+
+    const records = await indexColumnSets('domain_dns_records');
+    expect(records).toContainEqual(
+      expect.objectContaining({ key: 'domain_id,record_key', unique: true }),
+    );
+    expect(records).toContainEqual(expect.objectContaining({ key: 'dkim_key_id', unique: false }));
+
+    const keys = await indexColumnSets('domain_dkim_keys');
+    expect(keys).toContainEqual(
+      expect.objectContaining({ key: 'status,retire_after', unique: false }),
+    );
+  });
+
+  it('links domain_dns_records.dkim_key_id to domain_dkim_keys with ON DELETE SET NULL', async () => {
+    const rows = await prisma.$queryRaw<{ referencedTable: string; deleteRule: string }[]>`
+      SELECT k.REFERENCED_TABLE_NAME AS referencedTable, r.DELETE_RULE AS deleteRule
+      FROM information_schema.KEY_COLUMN_USAGE k
+      JOIN information_schema.REFERENTIAL_CONSTRAINTS r
+        ON r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+      WHERE k.TABLE_SCHEMA = DATABASE() AND k.TABLE_NAME = 'domain_dns_records'
+        AND k.COLUMN_NAME = 'dkim_key_id'`;
+    expect(rows).toEqual([{ referencedTable: 'domain_dkim_keys', deleteRule: 'SET NULL' }]);
   });
 });
 

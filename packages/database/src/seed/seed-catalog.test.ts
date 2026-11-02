@@ -70,7 +70,7 @@ describe('seed catalog', () => {
   const sorted = (list: readonly string[]) => [...list].sort();
   const role = (key: string) => SYSTEM_ROLES.find((r) => r.key === key)!.permissions;
 
-  it('contains the 30 permissions of D7 and D8, without duplicates', () => {
+  it('contains the 31 permissions of D7, D8 and step 2.1 D14, without duplicates', () => {
     expect(new Set(keys).size).toBe(keys.length);
     expect(sorted(keys)).toEqual(
       sorted([
@@ -104,8 +104,10 @@ describe('seed catalog', () => {
         'platform:organizations',
         'platform:operations',
         'platform:tenant_override',
+        'domain:dkim_rotate',
       ]),
     );
+    expect(keys).toHaveLength(31);
     for (const key of keys) expect(key).toMatch(/^[a-z]+:[a-z_]+$/);
     for (const p of PERMISSIONS) expect(p.description.length, p.key).toBeGreaterThan(0);
   });
@@ -190,6 +192,7 @@ describe('seed catalog', () => {
         'user:read',
         'domain:read',
         'domain:manage',
+        'domain:dkim_rotate',
         'policy:read',
         'message:read',
         'quarantine:read',
@@ -225,6 +228,12 @@ describe('seed catalog', () => {
     for (const [key, permissions] of Object.entries(expected)) {
       expect(sorted(role(key)), key).toEqual(sorted(permissions));
     }
+    // DKIM rotation (step 2.1 D14): domain admin, organization admin and super admin only.
+    const rotators = SYSTEM_ROLES.filter((r) =>
+      (r.permissions as readonly string[]).includes('domain:dkim_rotate'),
+    ).map((r) => r.key);
+    expect(rotators).toEqual(['super_admin', 'organization_admin', 'domain_admin']);
+    expect(TENANT_READ_PERMISSIONS).not.toContain('domain:dkim_rotate');
     // Content access stays with the roles that investigate messages.
     expect(role('platform_admin')).not.toContain('message:read_content');
     expect(role('quarantine_reviewer')).not.toContain('message:read_content');

@@ -16,6 +16,7 @@ import type { ApiConfig } from './config';
 import { MetaModule } from './meta/meta.module';
 import { ApiKeysModule } from './modules/api-keys/api-keys.module';
 import { AuthModule } from './modules/auth/auth.module';
+import { DomainsModule } from './modules/domains/domains.module';
 import { LoginAuditModule } from './modules/login-audit/login-audit.module';
 import { OrganizationsModule } from './modules/organizations/organizations.module';
 import { RolesModule } from './modules/roles/roles.module';
@@ -56,6 +57,7 @@ export class AppModule {
         LoginAuditModule,
         TenantDataModule,
         OrganizationsModule,
+        DomainsModule,
       ],
       providers: [{ provide: API_CONFIG, useValue: config }],
       exports: [API_CONFIG],

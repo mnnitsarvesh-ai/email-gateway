@@ -58,18 +58,23 @@ The api's `SessionPurgeService` (auth module, design [D5](../plan/steps/02-tenan
 
 Deleting an organization ([D12](../plan/steps/02-tenants-auth-rbac.md#d12-organizations-wp5)) is a soft delete: `status = deleted`, `deleted_at`, and `purge_after = max(now + ORG_DELETION_RETENTION_DAYS, the latest email_archives.retain_until of the organization)`. The index `organizations (status, purge_after)` serves the purge job's scan. The **purge job itself is deferred** (not implemented in step 1.2): it will delete the tenant's rows and S3 objects only after `purge_after`, never while an `archive_legal_holds` row is `active`, and never archives still under retention. Its safeguards are documented in `docs/runbooks/organization-deletion.md`.
 
+## Soft-deleted domains (step 2.1)
+
+Deleting a domain ([D3](../plan/steps/03-domain-onboarding.md#d3-lifecycle-and-status-model)) is a soft delete: `status = deleted`, `deleted_at`, `next_check_at = NULL`. The row and its children (verification rows, DNS record rows, DKIM keys with their public keys and selectors, observed MX rows, settings) stay as history and keep the audit linkage. The generated columns free the name at once: `verified_name` becomes NULL (another organization may verify it) and `live_name` becomes NULL (the same organization may add it again as a new row). Key material does not outlive the domain: deleting it revokes every non-retired DKIM key and sets its `private_key_ciphertext` to NULL, and retired keys lose theirs at retirement ([ADR-0018](../architecture/adr/0018-dkim-key-custody.md)). There is no separate time-based purge for deleted domains: they are removed with the organization purge (below). Rows are a few per domain, so keeping them is cheap.
+
 ## Planned feature-owned purges
 
 These are not implemented yet. Each belongs to the step that builds the feature, and uses an indexed, batched delete. (The `user_sessions`, `user_tokens` and `login_audit_logs` purges moved to the api in step 1.3, above.)
 
-| Data                         | Rule                                                                                                                      | Status                 |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
-| Deleted organizations        | Purge tenant rows and S3 objects after `purge_after`, skipping active legal holds (see above)                             | Deferred (after 1.2)   |
-| `quarantine_messages`        | Expire by `expires_at` (index `(status, expires_at)`), recording a `quarantine_actions` row, then delete the S3 object    | Planned, step 5.3      |
-| `delivery_suppressions`      | Delete after `expires_at` (index `(expires_at)`)                                                                          | Planned, step 6.x      |
-| Per-tenant message retention | Retention below the platform maximum: batched delete by `(organization_id, received_at)` on the message tables            | Planned, steps 1.2/8.1 |
-| Archive expiry               | Delete `email_archives` rows (and objects) past `retain_until`, skipping rows under an active legal hold                  | Planned, step 8.1      |
-| S3 lifecycle                 | Bucket lifecycle rules aligned with the MySQL tiers, so objects do not outlive their metadata by more than a grace period | Planned, step 8.1      |
+| Data                         | Rule                                                                                                                      | Status                                 |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------- | -------------------------------------- |
+| Deleted organizations        | Purge tenant rows and S3 objects after `purge_after`, skipping active legal holds (see above)                             | Deferred (after 1.2)                   |
+| Soft-deleted domains         | Delete `domains` rows with `status = deleted` (children cascade) together with the organization purge                     | Deferred (with the organization purge) |
+| `quarantine_messages`        | Expire by `expires_at` (index `(status, expires_at)`), recording a `quarantine_actions` row, then delete the S3 object    | Planned, step 5.3                      |
+| `delivery_suppressions`      | Delete after `expires_at` (index `(expires_at)`)                                                                          | Planned, step 6.x                      |
+| Per-tenant message retention | Retention below the platform maximum: batched delete by `(organization_id, received_at)` on the message tables            | Planned, steps 1.2/8.1                 |
+| Archive expiry               | Delete `email_archives` rows (and objects) past `retain_until`, skipping rows under an active legal hold                  | Planned, step 8.1                      |
+| S3 lifecycle                 | Bucket lifecycle rules aligned with the MySQL tiers, so objects do not outlive their metadata by more than a grace period | Planned, step 8.1                      |
 
 ## Long-term history
 

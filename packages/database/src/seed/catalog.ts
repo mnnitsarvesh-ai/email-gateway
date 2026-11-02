@@ -60,6 +60,8 @@ export const PERMISSIONS = Object.freeze([
     key: 'platform:tenant_override',
     description: 'Platform: start an audited override into a customer organization',
   },
+  // Step 2.1 (D14): rotation can break outbound signing when misused, so it has its own key.
+  { key: 'domain:dkim_rotate', description: 'Rotate DKIM signing keys of domains' },
 ] as const satisfies readonly PermissionDef[]);
 
 /** Every permission key of the catalog. */
@@ -172,6 +174,7 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'user:read',
       'domain:read',
       'domain:manage',
+      'domain:dkim_rotate',
       'policy:read',
       'message:read',
       'quarantine:read',
@@ -416,7 +419,10 @@ export interface DemoUserDef {
   organization: 'platform' | 'demo';
 }
 
-/** Demo data (local, dev and CI only). The domain matches POSTFIX_RELAY_DOMAINS. */
+/**
+ * Demo data (local, dev and CI only). The domain matches POSTFIX_RELAY_DOMAINS and is seeded
+ * `active` (step 2.1), so it resolves on the mail path.
+ */
 export const DEMO = Object.freeze({
   organization: { slug: 'demo', name: 'Demo Organization', plan: 'standard' },
   dataRegion: DEFAULT_DATA_REGION,

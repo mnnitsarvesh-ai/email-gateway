@@ -213,29 +213,39 @@ erDiagram
   domains ||--o{ domain_mx_records : "CASCADE"
   domains ||--o{ domain_mail_servers : "CASCADE"
   domains ||--o| domain_settings : "1:1, CASCADE"
+  domain_dkim_keys |o--o{ domain_dns_records : "dkim_key_id, SET NULL"
   domains {
     bigint id PK
     char public_id UK
     bigint organization_id FK
-    varchar name "lower-case punycode; UK with organization_id"
-    enum status
-    varchar verified_name UK "generated: name when verified"
+    varchar name "lower-case punycode"
+    enum status "pending_verification, verified, failed, active, suspended, deleted"
+    datetime next_check_at "background DNS checks"
+    varchar verified_name UK "generated: name when verified, active or suspended"
+    varchar live_name "generated: name unless deleted; UK with organization_id"
   }
   domain_verifications {
     bigint id PK
     bigint domain_id FK
     enum status
+    enum last_outcome "DnsCheckOutcome"
   }
   domain_dns_records {
     bigint id PK
     bigint domain_id FK
+    varchar record_key "UQ with domain_id"
     enum purpose
+    bigint dkim_key_id FK "nullable"
+    enum status "last definitive outcome"
+    enum last_outcome "DnsCheckOutcome"
   }
   domain_dkim_keys {
     bigint id PK
     bigint domain_id FK
     varchar selector "UQ with domain_id"
-    varchar private_key_ref "reference only"
+    text private_key_ciphertext "SecretBox-encrypted, NULL once retired (ADR-0018)"
+    varchar private_key_ref "external store reference, nullable"
+    datetime retire_after "rotation overlap"
   }
   domain_mx_records {
     bigint id PK

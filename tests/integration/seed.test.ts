@@ -14,7 +14,7 @@ import { stack } from './support/env';
 
 /**
  * db:seed (step 1.1 D7, step 1.2/1.3 D8 and D10) against the dev schema, with the DML account:
- * the catalog (30 permissions, the 8 system roles, the platform organization), the retired
+ * the catalog (31 permissions, the 8 system roles, the platform organization), the retired
  * role-key remap, and idempotency (running it twice leaves the same row counts). The seeded
  * rows are dev data and are deliberately left in place.
  */
@@ -92,7 +92,7 @@ describe('db:seed', () => {
     expect(await counts()).toEqual(afterFirst);
 
     expect(afterFirst).toMatchObject({
-      permissions: 30,
+      permissions: 31,
       systemRoles: 8,
       plans: expect.any(Number) as unknown,
       demoOrganizations: 2,
@@ -113,14 +113,52 @@ describe('db:seed', () => {
     });
     expect(afterFirst.plans).toBeGreaterThanOrEqual(4);
 
-    // The demo domain is the verified owner of its name (tenant resolution key).
+    // The demo domain is the owner of its name (tenant resolution key) and active (step 2.1).
     const domain = await prisma.domain.findUnique({
       where: { verifiedName: stack.relayDomain() },
     });
-    expect(domain?.status).toBe('verified');
+    expect(domain?.status).toBe('active');
+    expect(domain?.verifiedAt).toBeInstanceOf(Date);
+    expect(domain?.activatedAt).toBeInstanceOf(Date);
+    expect(domain?.liveName).toBe(stack.relayDomain());
+    // Scheduled for the api's domain-check job, which materializes its configuration (D11, D12).
+    expect(domain?.nextCheckAt).toBeInstanceOf(Date);
   });
 
-  it('seeds exactly the 30 permissions and the 8 system roles of D8, with their permissions', async () => {
+  it('moves a demo domain seeded before step 2.1 (verified) to active, keeping its row', async () => {
+    const demo = await prisma.organization.findUniqueOrThrow({ where: { slug: 'demo' } });
+    const domain = await prisma.domain.findUniqueOrThrow({
+      where: {
+        organizationId_liveName: { organizationId: demo.id, liveName: stack.relayDomain() },
+      },
+    });
+    // Simulate the step 1.1 seed state (never scheduled for checks).
+    await prisma.domain.update({
+      where: { id: domain.id },
+      data: { status: 'verified', activatedAt: null, nextCheckAt: null },
+    });
+    const before = Date.now();
+    const result = seed();
+    expect(result.status, result.output).toBe(0);
+    const after = await prisma.domain.findUniqueOrThrow({ where: { id: domain.id } });
+    expect(after.status).toBe('active');
+    expect(after.activatedAt).toBeInstanceOf(Date);
+    expect(after.verifiedAt).toEqual(domain.verifiedAt);
+    // Made due, so the domain-check job materializes its configuration (D11, D12).
+    expect(after.nextCheckAt!.getTime()).toBeGreaterThanOrEqual(before - 1000);
+    expect(after.nextCheckAt!.getTime()).toBeLessThanOrEqual(Date.now() + 1000);
+    expect(await prisma.domain.count({ where: { organizationId: demo.id } })).toBe(1);
+
+    // A scheduled row keeps its time on a re-seed.
+    const scheduled = new Date(Date.UTC(2099, 0, 1));
+    await prisma.domain.update({ where: { id: domain.id }, data: { nextCheckAt: scheduled } });
+    expect(seed().status).toBe(0);
+    const again = await prisma.domain.findUniqueOrThrow({ where: { id: domain.id } });
+    expect(again.nextCheckAt).toEqual(scheduled);
+    await prisma.domain.update({ where: { id: domain.id }, data: { nextCheckAt: new Date() } });
+  });
+
+  it('seeds exactly the 31 permissions and the 8 system roles of D8, with their permissions', async () => {
     expect(seed().status).toBe(0);
     const permissions = await prisma.permission.findMany({ select: { key: true } });
     expect(permissions.map((p) => p.key).sort()).toEqual(PERMISSIONS.map((p) => p.key).sort());
@@ -146,6 +184,13 @@ describe('db:seed', () => {
     for (const retired of Object.keys(RETIRED_ROLE_KEYS)) {
       expect(roles.map((r) => r.key)).not.toContain(retired);
     }
+
+    // Step 2.1 D14: DKIM rotation is granted to domain, organization and super admins only.
+    const rotators = roles
+      .filter((r) => r.permissions.some((p) => p.permission.key === 'domain:dkim_rotate'))
+      .map((r) => r.key)
+      .sort();
+    expect(rotators).toEqual(['domain_admin', 'organization_admin', 'super_admin']);
   });
 
   it('seeds the platform organization with mandatory MFA and the demo users', async () => {

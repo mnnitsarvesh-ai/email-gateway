@@ -8276,20 +8276,38 @@
                         "total": {
                           "type": "integer",
                           "minimum": -9007199254740991,
-                          "maximum": 9007199254740991
+                          "maximum": 9007199254740991,
+                          "description": "Non-deleted domains"
                         },
                         "verified": {
                           "type": "integer",
                           "minimum": -9007199254740991,
-                          "maximum": 9007199254740991
+                          "maximum": 9007199254740991,
+                          "description": "Ownership verified (verified, active or suspended)"
                         },
                         "pendingVerification": {
                           "type": "integer",
                           "minimum": -9007199254740991,
                           "maximum": 9007199254740991
+                        },
+                        "active": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "suspended": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
                         }
                       },
-                      "required": ["total", "verified", "pendingVerification"],
+                      "required": [
+                        "total",
+                        "verified",
+                        "pendingVerification",
+                        "active",
+                        "suspended"
+                      ],
                       "additionalProperties": false
                     },
                     "messages": {
@@ -10622,6 +10640,2929 @@
         "security": [{ "access-token": [] }],
         "summary": "Cancel deletion",
         "tags": ["organizations"]
+      }
+    },
+    "/api/v1/domains": {
+      "post": {
+        "description": "Normalizes the name (IDN → punycode, lower case, one trailing dot ignored), enforces `max_domains`, and creates the ownership challenge, a DKIM key (RSA 2048, plus Ed25519 on request) and the DNS records to publish. `409` when the organization already has the name or another organization owns it. The first check runs about a minute later. At most 60 per caller per minute (`429` with `Retry-After`).",
+        "operationId": "DomainsController_create_v1",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 253,
+                    "description": "Domain name; IDN allowed (stored as punycode), one trailing dot ignored"
+                  },
+                  "inboundEnabled": { "default": true, "type": "boolean" },
+                  "dkim": {
+                    "type": "object",
+                    "properties": {
+                      "ed25519": {
+                        "default": false,
+                        "description": "Also create an Ed25519 key (RFC 8463)",
+                        "type": "boolean"
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "required": ["name"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "name": { "type": "string", "description": "ASCII (punycode) name" },
+                    "unicodeName": { "type": "string" },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "pending_verification",
+                        "verified",
+                        "failed",
+                        "disabled",
+                        "active",
+                        "suspended"
+                      ]
+                    },
+                    "statusReason": { "nullable": true, "type": "string" },
+                    "inboundEnabled": { "type": "boolean" },
+                    "outboundEnabled": { "type": "boolean" },
+                    "verifiedAt": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "activatedAt": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "lastCheckedAt": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "nextCheckAt": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "updatedAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "statusChangedAt": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "verification": {
+                      "nullable": true,
+                      "type": "object",
+                      "properties": {
+                        "method": { "type": "string", "enum": ["dns_txt"] },
+                        "host": { "type": "string" },
+                        "value": {
+                          "type": "string",
+                          "description": "TXT value to publish at host"
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": ["pending", "verified", "failed", "expired"]
+                        },
+                        "attempts": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "lastCheckedAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                        },
+                        "lastOutcome": {
+                          "nullable": true,
+                          "type": "string",
+                          "enum": ["valid", "invalid", "missing", "indeterminate"]
+                        },
+                        "lastError": { "nullable": true, "type": "string" },
+                        "expiresAt": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                        },
+                        "verifiedAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                        }
+                      },
+                      "required": [
+                        "method",
+                        "host",
+                        "value",
+                        "status",
+                        "attempts",
+                        "lastCheckedAt",
+                        "lastOutcome",
+                        "lastError",
+                        "expiresAt",
+                        "verifiedAt"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "dkimKeys": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "selector": { "type": "string" },
+                          "algorithm": { "type": "string", "enum": ["rsa_2048", "ed25519"] },
+                          "status": {
+                            "type": "string",
+                            "enum": ["pending", "active", "rotating", "retired", "revoked"]
+                          },
+                          "host": {
+                            "type": "string",
+                            "description": "FQDN of the selector record"
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "activatedAt": {
+                            "nullable": true,
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "retireAfter": {
+                            "nullable": true,
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "retiredAt": {
+                            "nullable": true,
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          }
+                        },
+                        "required": [
+                          "selector",
+                          "algorithm",
+                          "status",
+                          "host",
+                          "createdAt",
+                          "activatedAt",
+                          "retireAfter",
+                          "retiredAt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "description": "Non-retired keys and keys retired in the last 30 days"
+                    },
+                    "dnsRecords": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "key": {
+                            "type": "string",
+                            "description": "Stable record key: verification, mx:<host>, spf, dkim:<selector>, dmarc"
+                          },
+                          "purpose": {
+                            "type": "string",
+                            "enum": [
+                              "verification",
+                              "mx",
+                              "spf",
+                              "dkim",
+                              "dmarc",
+                              "mta_sts",
+                              "tls_rpt"
+                            ]
+                          },
+                          "requirement": {
+                            "type": "string",
+                            "enum": ["activation", "inbound", "outbound", "recommended"]
+                          },
+                          "type": { "type": "string", "enum": ["MX", "TXT", "CNAME"] },
+                          "host": { "type": "string", "description": "FQDN" },
+                          "name": {
+                            "type": "string",
+                            "description": "Relative to the domain (@ for the apex)"
+                          },
+                          "value": { "type": "string" },
+                          "priority": {
+                            "nullable": true,
+                            "description": "MX only",
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": ["pending", "valid", "invalid", "missing"]
+                          },
+                          "lastOutcome": {
+                            "nullable": true,
+                            "type": "string",
+                            "enum": ["valid", "invalid", "missing", "indeterminate"]
+                          },
+                          "observedValue": { "nullable": true, "type": "string" },
+                          "lastCheckedAt": {
+                            "nullable": true,
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "lastError": { "nullable": true, "type": "string" },
+                          "warnings": { "type": "array", "items": { "type": "string" } },
+                          "instructions": { "type": "string" }
+                        },
+                        "required": [
+                          "key",
+                          "purpose",
+                          "requirement",
+                          "type",
+                          "host",
+                          "name",
+                          "value",
+                          "priority",
+                          "status",
+                          "lastOutcome",
+                          "observedValue",
+                          "lastCheckedAt",
+                          "lastError",
+                          "warnings",
+                          "instructions"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name",
+                    "unicodeName",
+                    "status",
+                    "statusReason",
+                    "inboundEnabled",
+                    "outboundEnabled",
+                    "verifiedAt",
+                    "activatedAt",
+                    "lastCheckedAt",
+                    "nextCheckAt",
+                    "createdAt",
+                    "updatedAt",
+                    "statusChangedAt",
+                    "verification",
+                    "dkimKeys",
+                    "dnsRecords"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with the current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (`Retry-After` header when known)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Authentication backend unavailable (fail closed)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "Add a domain",
+        "tags": ["domains"]
+      },
+      "get": {
+        "description": "Non-deleted domains, newest first, cursor-paginated, from the read replica.",
+        "operationId": "DomainsController_list_v1",
+        "parameters": [
+          {
+            "name": "limit",
+            "required": false,
+            "in": "query",
+            "schema": { "default": 25, "type": "integer", "minimum": 1, "maximum": 100 }
+          },
+          {
+            "name": "cursor",
+            "required": false,
+            "in": "query",
+            "schema": { "type": "string", "minLength": 1, "maxLength": 64 }
+          },
+          {
+            "name": "status",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pending_verification",
+                "verified",
+                "failed",
+                "disabled",
+                "active",
+                "suspended"
+              ]
+            }
+          },
+          {
+            "name": "q",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "description": "Prefix of the ASCII (punycode) domain name",
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 253,
+              "pattern": "^[a-z0-9.-]+$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                          },
+                          "name": { "type": "string", "description": "ASCII (punycode) name" },
+                          "unicodeName": { "type": "string" },
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "pending_verification",
+                              "verified",
+                              "failed",
+                              "disabled",
+                              "active",
+                              "suspended"
+                            ]
+                          },
+                          "statusReason": { "nullable": true, "type": "string" },
+                          "inboundEnabled": { "type": "boolean" },
+                          "outboundEnabled": { "type": "boolean" },
+                          "verifiedAt": {
+                            "nullable": true,
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "activatedAt": {
+                            "nullable": true,
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "lastCheckedAt": {
+                            "nullable": true,
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "nextCheckAt": {
+                            "nullable": true,
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "updatedAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "name",
+                          "unicodeName",
+                          "status",
+                          "statusReason",
+                          "inboundEnabled",
+                          "outboundEnabled",
+                          "verifiedAt",
+                          "activatedAt",
+                          "lastCheckedAt",
+                          "nextCheckAt",
+                          "createdAt",
+                          "updatedAt"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "nextCursor": { "nullable": true, "type": "string" }
+                  },
+                  "required": ["data", "nextCursor"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "List domains",
+        "tags": ["domains"]
+      }
+    },
+    "/api/v1/domains/{id}": {
+      "get": {
+        "description": "Verification state and DKIM keys.",
+        "operationId": "DomainsController_get_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "description": "Domain public id",
+            "schema": { "format": "uuid", "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "name": { "type": "string", "description": "ASCII (punycode) name" },
+                    "unicodeName": { "type": "string" },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "pending_verification",
+                        "verified",
+                        "failed",
+                        "disabled",
+                        "active",
+                        "suspended"
+                      ]
+                    },
+                    "statusReason": { "nullable": true, "type": "string" },
+                    "inboundEnabled": { "type": "boolean" },
+                    "outboundEnabled": { "type": "boolean" },
+                    "verifiedAt": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "activatedAt": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "lastCheckedAt": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "nextCheckAt": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "updatedAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "statusChangedAt": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "verification": {
+                      "nullable": true,
+                      "type": "object",
+                      "properties": {
+                        "method": { "type": "string", "enum": ["dns_txt"] },
+                        "host": { "type": "string" },
+                        "value": {
+                          "type": "string",
+                          "description": "TXT value to publish at host"
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": ["pending", "verified", "failed", "expired"]
+                        },
+                        "attempts": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "lastCheckedAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                        },
+                        "lastOutcome": {
+                          "nullable": true,
+                          "type": "string",
+                          "enum": ["valid", "invalid", "missing", "indeterminate"]
+                        },
+                        "lastError": { "nullable": true, "type": "string" },
+                        "expiresAt": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                        },
+                        "verifiedAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                        }
+                      },
+                      "required": [
+                        "method",
+                        "host",
+                        "value",
+                        "status",
+                        "attempts",
+                        "lastCheckedAt",
+                        "lastOutcome",
+                        "lastError",
+                        "expiresAt",
+                        "verifiedAt"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "dkimKeys": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "selector": { "type": "string" },
+                          "algorithm": { "type": "string", "enum": ["rsa_2048", "ed25519"] },
+                          "status": {
+                            "type": "string",
+                            "enum": ["pending", "active", "rotating", "retired", "revoked"]
+                          },
+                          "host": {
+                            "type": "string",
+                            "description": "FQDN of the selector record"
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "activatedAt": {
+                            "nullable": true,
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "retireAfter": {
+                            "nullable": true,
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "retiredAt": {
+                            "nullable": true,
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          }
+                        },
+                        "required": [
+                          "selector",
+                          "algorithm",
+                          "status",
+                          "host",
+                          "createdAt",
+                          "activatedAt",
+                          "retireAfter",
+                          "retiredAt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "description": "Non-retired keys and keys retired in the last 30 days"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name",
+                    "unicodeName",
+                    "status",
+                    "statusReason",
+                    "inboundEnabled",
+                    "outboundEnabled",
+                    "verifiedAt",
+                    "activatedAt",
+                    "lastCheckedAt",
+                    "nextCheckAt",
+                    "createdAt",
+                    "updatedAt",
+                    "statusChangedAt",
+                    "verification",
+                    "dkimKeys"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (also for resources of another tenant)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "Get a domain",
+        "tags": ["domains"]
+      },
+      "delete": {
+        "description": "Soft delete: the name is freed, checks stop and every DKIM key is revoked. An active domain must be suspended first (`409`).",
+        "operationId": "DomainsController_remove_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "description": "Domain public id",
+            "schema": { "format": "uuid", "type": "string" }
+          }
+        ],
+        "responses": {
+          "204": { "description": "Deleted" },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (also for resources of another tenant)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with the current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "Delete a domain",
+        "tags": ["domains"]
+      }
+    },
+    "/api/v1/domains/{id}/status": {
+      "patch": {
+        "description": "`verified → active`, `active → suspended` (reason required), `suspended → active`. Activation needs verified ownership only, so the gateway can be activated before the MX records are switched. Any other transition is `409`.",
+        "operationId": "DomainsController_changeStatus_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "description": "Domain public id",
+            "schema": { "format": "uuid", "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "status": { "type": "string", "enum": ["active", "suspended"] },
+                  "reason": {
+                    "description": "Required when suspending",
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512
+                  }
+                },
+                "required": ["status"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "name": { "type": "string", "description": "ASCII (punycode) name" },
+                    "unicodeName": { "type": "string" },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "pending_verification",
+                        "verified",
+                        "failed",
+                        "disabled",
+                        "active",
+                        "suspended"
+                      ]
+                    },
+                    "statusReason": { "nullable": true, "type": "string" },
+                    "inboundEnabled": { "type": "boolean" },
+                    "outboundEnabled": { "type": "boolean" },
+                    "verifiedAt": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "activatedAt": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "lastCheckedAt": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "nextCheckAt": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "updatedAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "statusChangedAt": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "verification": {
+                      "nullable": true,
+                      "type": "object",
+                      "properties": {
+                        "method": { "type": "string", "enum": ["dns_txt"] },
+                        "host": { "type": "string" },
+                        "value": {
+                          "type": "string",
+                          "description": "TXT value to publish at host"
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": ["pending", "verified", "failed", "expired"]
+                        },
+                        "attempts": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "lastCheckedAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                        },
+                        "lastOutcome": {
+                          "nullable": true,
+                          "type": "string",
+                          "enum": ["valid", "invalid", "missing", "indeterminate"]
+                        },
+                        "lastError": { "nullable": true, "type": "string" },
+                        "expiresAt": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                        },
+                        "verifiedAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                        }
+                      },
+                      "required": [
+                        "method",
+                        "host",
+                        "value",
+                        "status",
+                        "attempts",
+                        "lastCheckedAt",
+                        "lastOutcome",
+                        "lastError",
+                        "expiresAt",
+                        "verifiedAt"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "dkimKeys": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "selector": { "type": "string" },
+                          "algorithm": { "type": "string", "enum": ["rsa_2048", "ed25519"] },
+                          "status": {
+                            "type": "string",
+                            "enum": ["pending", "active", "rotating", "retired", "revoked"]
+                          },
+                          "host": {
+                            "type": "string",
+                            "description": "FQDN of the selector record"
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "activatedAt": {
+                            "nullable": true,
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "retireAfter": {
+                            "nullable": true,
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "retiredAt": {
+                            "nullable": true,
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          }
+                        },
+                        "required": [
+                          "selector",
+                          "algorithm",
+                          "status",
+                          "host",
+                          "createdAt",
+                          "activatedAt",
+                          "retireAfter",
+                          "retiredAt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "description": "Non-retired keys and keys retired in the last 30 days"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name",
+                    "unicodeName",
+                    "status",
+                    "statusReason",
+                    "inboundEnabled",
+                    "outboundEnabled",
+                    "verifiedAt",
+                    "activatedAt",
+                    "lastCheckedAt",
+                    "nextCheckAt",
+                    "createdAt",
+                    "updatedAt",
+                    "statusChangedAt",
+                    "verification",
+                    "dkimKeys"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (also for resources of another tenant)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with the current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "Activate, suspend or resume a domain",
+        "tags": ["domains"]
+      },
+      "get": {
+        "description": "Stored state only (no DNS lookups): readiness for activation, mail-flow readiness and a summary per check (ownership, MX with propagation, SPF, DKIM, DMARC).",
+        "operationId": "DomainDnsController_status_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "description": "Domain public id",
+            "schema": { "format": "uuid", "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "domainId": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "name": { "type": "string" },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "pending_verification",
+                        "verified",
+                        "failed",
+                        "disabled",
+                        "active",
+                        "suspended"
+                      ]
+                    },
+                    "statusReason": { "nullable": true, "type": "string" },
+                    "readyForActivation": {
+                      "type": "boolean",
+                      "description": "Ownership verified: the domain can be activated"
+                    },
+                    "mailFlowReady": {
+                      "type": "boolean",
+                      "description": "Active and the MX points at the gateway"
+                    },
+                    "lastCheckedAt": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "nextCheckAt": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "checkFailures": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "checks": {
+                      "type": "object",
+                      "properties": {
+                        "ownership": {
+                          "type": "object",
+                          "properties": {
+                            "status": {
+                              "type": "string",
+                              "enum": ["pending", "valid", "invalid", "missing"]
+                            },
+                            "lastOutcome": {
+                              "nullable": true,
+                              "type": "string",
+                              "enum": ["valid", "invalid", "missing", "indeterminate"]
+                            },
+                            "lastCheckedAt": {
+                              "nullable": true,
+                              "type": "string",
+                              "format": "date-time",
+                              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                            },
+                            "warnings": { "type": "array", "items": { "type": "string" } }
+                          },
+                          "required": ["status", "lastOutcome", "lastCheckedAt", "warnings"],
+                          "additionalProperties": false
+                        },
+                        "mx": {
+                          "type": "object",
+                          "properties": {
+                            "status": {
+                              "type": "string",
+                              "enum": ["pending", "valid", "invalid", "missing"]
+                            },
+                            "lastOutcome": {
+                              "nullable": true,
+                              "type": "string",
+                              "enum": ["valid", "invalid", "missing", "indeterminate"]
+                            },
+                            "lastCheckedAt": {
+                              "nullable": true,
+                              "type": "string",
+                              "format": "date-time",
+                              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                            },
+                            "warnings": { "type": "array", "items": { "type": "string" } },
+                            "observed": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "priority": {
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "host": { "type": "string" },
+                                  "pointsToGateway": { "type": "boolean" }
+                                },
+                                "required": ["priority", "host", "pointsToGateway"],
+                                "additionalProperties": false
+                              }
+                            },
+                            "propagation": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "upstream": { "type": "string" },
+                                  "outcome": {
+                                    "type": "string",
+                                    "enum": ["valid", "invalid", "missing", "indeterminate"]
+                                  }
+                                },
+                                "required": ["upstream", "outcome"],
+                                "additionalProperties": false
+                              }
+                            }
+                          },
+                          "required": [
+                            "status",
+                            "lastOutcome",
+                            "lastCheckedAt",
+                            "warnings",
+                            "observed",
+                            "propagation"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "spf": {
+                          "type": "object",
+                          "properties": {
+                            "status": {
+                              "type": "string",
+                              "enum": ["pending", "valid", "invalid", "missing"]
+                            },
+                            "lastOutcome": {
+                              "nullable": true,
+                              "type": "string",
+                              "enum": ["valid", "invalid", "missing", "indeterminate"]
+                            },
+                            "lastCheckedAt": {
+                              "nullable": true,
+                              "type": "string",
+                              "format": "date-time",
+                              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                            },
+                            "warnings": { "type": "array", "items": { "type": "string" } },
+                            "lookupCount": {
+                              "nullable": true,
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            "recommendedValue": { "type": "string" }
+                          },
+                          "required": [
+                            "status",
+                            "lastOutcome",
+                            "lastCheckedAt",
+                            "warnings",
+                            "lookupCount",
+                            "recommendedValue"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "dkim": {
+                          "type": "object",
+                          "properties": {
+                            "status": {
+                              "type": "string",
+                              "enum": ["pending", "valid", "invalid", "missing"]
+                            },
+                            "lastOutcome": {
+                              "nullable": true,
+                              "type": "string",
+                              "enum": ["valid", "invalid", "missing", "indeterminate"]
+                            },
+                            "lastCheckedAt": {
+                              "nullable": true,
+                              "type": "string",
+                              "format": "date-time",
+                              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                            },
+                            "warnings": { "type": "array", "items": { "type": "string" } },
+                            "selectors": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "selector": { "type": "string" },
+                                  "algorithm": {
+                                    "type": "string",
+                                    "enum": ["rsa_2048", "ed25519"]
+                                  },
+                                  "keyStatus": {
+                                    "type": "string",
+                                    "enum": ["pending", "active", "rotating", "retired", "revoked"]
+                                  },
+                                  "recordStatus": {
+                                    "type": "string",
+                                    "enum": ["pending", "valid", "invalid", "missing"]
+                                  }
+                                },
+                                "required": ["selector", "algorithm", "keyStatus", "recordStatus"],
+                                "additionalProperties": false
+                              }
+                            }
+                          },
+                          "required": [
+                            "status",
+                            "lastOutcome",
+                            "lastCheckedAt",
+                            "warnings",
+                            "selectors"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "dmarc": {
+                          "type": "object",
+                          "properties": {
+                            "status": {
+                              "type": "string",
+                              "enum": ["pending", "valid", "invalid", "missing"]
+                            },
+                            "lastOutcome": {
+                              "nullable": true,
+                              "type": "string",
+                              "enum": ["valid", "invalid", "missing", "indeterminate"]
+                            },
+                            "lastCheckedAt": {
+                              "nullable": true,
+                              "type": "string",
+                              "format": "date-time",
+                              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                            },
+                            "warnings": { "type": "array", "items": { "type": "string" } },
+                            "stage": {
+                              "type": "string",
+                              "enum": ["missing", "none", "quarantine", "reject"]
+                            },
+                            "recommendedValue": { "type": "string" },
+                            "nextStep": { "type": "string" }
+                          },
+                          "required": [
+                            "status",
+                            "lastOutcome",
+                            "lastCheckedAt",
+                            "warnings",
+                            "stage",
+                            "recommendedValue",
+                            "nextStep"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": ["ownership", "mx", "spf", "dkim", "dmarc"],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "domainId",
+                    "name",
+                    "status",
+                    "statusReason",
+                    "readyForActivation",
+                    "mailFlowReady",
+                    "lastCheckedAt",
+                    "nextCheckAt",
+                    "checkFailures",
+                    "checks"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (also for resources of another tenant)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "Verification and configuration status",
+        "tags": ["domains"]
+      }
+    },
+    "/api/v1/domains/{id}/verify": {
+      "post": {
+        "description": "Runs a fresh check (DNS cache bypassed) and returns the status view. A failed domain restarts verification first. DNS failures (timeouts, SERVFAIL) are not errors: the result is `200` with `lastOutcome: indeterminate` and the retry scheduled; the status never changes because of them. At most 6 per domain per minute (`429` with `Retry-After`); `409` while another check of the domain is running.",
+        "operationId": "DomainDnsController_verify_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "description": "Domain public id",
+            "schema": { "format": "uuid", "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "domainId": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "name": { "type": "string" },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "pending_verification",
+                        "verified",
+                        "failed",
+                        "disabled",
+                        "active",
+                        "suspended"
+                      ]
+                    },
+                    "statusReason": { "nullable": true, "type": "string" },
+                    "readyForActivation": {
+                      "type": "boolean",
+                      "description": "Ownership verified: the domain can be activated"
+                    },
+                    "mailFlowReady": {
+                      "type": "boolean",
+                      "description": "Active and the MX points at the gateway"
+                    },
+                    "lastCheckedAt": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "nextCheckAt": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "checkFailures": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "checks": {
+                      "type": "object",
+                      "properties": {
+                        "ownership": {
+                          "type": "object",
+                          "properties": {
+                            "status": {
+                              "type": "string",
+                              "enum": ["pending", "valid", "invalid", "missing"]
+                            },
+                            "lastOutcome": {
+                              "nullable": true,
+                              "type": "string",
+                              "enum": ["valid", "invalid", "missing", "indeterminate"]
+                            },
+                            "lastCheckedAt": {
+                              "nullable": true,
+                              "type": "string",
+                              "format": "date-time",
+                              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                            },
+                            "warnings": { "type": "array", "items": { "type": "string" } }
+                          },
+                          "required": ["status", "lastOutcome", "lastCheckedAt", "warnings"],
+                          "additionalProperties": false
+                        },
+                        "mx": {
+                          "type": "object",
+                          "properties": {
+                            "status": {
+                              "type": "string",
+                              "enum": ["pending", "valid", "invalid", "missing"]
+                            },
+                            "lastOutcome": {
+                              "nullable": true,
+                              "type": "string",
+                              "enum": ["valid", "invalid", "missing", "indeterminate"]
+                            },
+                            "lastCheckedAt": {
+                              "nullable": true,
+                              "type": "string",
+                              "format": "date-time",
+                              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                            },
+                            "warnings": { "type": "array", "items": { "type": "string" } },
+                            "observed": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "priority": {
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "host": { "type": "string" },
+                                  "pointsToGateway": { "type": "boolean" }
+                                },
+                                "required": ["priority", "host", "pointsToGateway"],
+                                "additionalProperties": false
+                              }
+                            },
+                            "propagation": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "upstream": { "type": "string" },
+                                  "outcome": {
+                                    "type": "string",
+                                    "enum": ["valid", "invalid", "missing", "indeterminate"]
+                                  }
+                                },
+                                "required": ["upstream", "outcome"],
+                                "additionalProperties": false
+                              }
+                            }
+                          },
+                          "required": [
+                            "status",
+                            "lastOutcome",
+                            "lastCheckedAt",
+                            "warnings",
+                            "observed",
+                            "propagation"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "spf": {
+                          "type": "object",
+                          "properties": {
+                            "status": {
+                              "type": "string",
+                              "enum": ["pending", "valid", "invalid", "missing"]
+                            },
+                            "lastOutcome": {
+                              "nullable": true,
+                              "type": "string",
+                              "enum": ["valid", "invalid", "missing", "indeterminate"]
+                            },
+                            "lastCheckedAt": {
+                              "nullable": true,
+                              "type": "string",
+                              "format": "date-time",
+                              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                            },
+                            "warnings": { "type": "array", "items": { "type": "string" } },
+                            "lookupCount": {
+                              "nullable": true,
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            "recommendedValue": { "type": "string" }
+                          },
+                          "required": [
+                            "status",
+                            "lastOutcome",
+                            "lastCheckedAt",
+                            "warnings",
+                            "lookupCount",
+                            "recommendedValue"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "dkim": {
+                          "type": "object",
+                          "properties": {
+                            "status": {
+                              "type": "string",
+                              "enum": ["pending", "valid", "invalid", "missing"]
+                            },
+                            "lastOutcome": {
+                              "nullable": true,
+                              "type": "string",
+                              "enum": ["valid", "invalid", "missing", "indeterminate"]
+                            },
+                            "lastCheckedAt": {
+                              "nullable": true,
+                              "type": "string",
+                              "format": "date-time",
+                              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                            },
+                            "warnings": { "type": "array", "items": { "type": "string" } },
+                            "selectors": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "selector": { "type": "string" },
+                                  "algorithm": {
+                                    "type": "string",
+                                    "enum": ["rsa_2048", "ed25519"]
+                                  },
+                                  "keyStatus": {
+                                    "type": "string",
+                                    "enum": ["pending", "active", "rotating", "retired", "revoked"]
+                                  },
+                                  "recordStatus": {
+                                    "type": "string",
+                                    "enum": ["pending", "valid", "invalid", "missing"]
+                                  }
+                                },
+                                "required": ["selector", "algorithm", "keyStatus", "recordStatus"],
+                                "additionalProperties": false
+                              }
+                            }
+                          },
+                          "required": [
+                            "status",
+                            "lastOutcome",
+                            "lastCheckedAt",
+                            "warnings",
+                            "selectors"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "dmarc": {
+                          "type": "object",
+                          "properties": {
+                            "status": {
+                              "type": "string",
+                              "enum": ["pending", "valid", "invalid", "missing"]
+                            },
+                            "lastOutcome": {
+                              "nullable": true,
+                              "type": "string",
+                              "enum": ["valid", "invalid", "missing", "indeterminate"]
+                            },
+                            "lastCheckedAt": {
+                              "nullable": true,
+                              "type": "string",
+                              "format": "date-time",
+                              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                            },
+                            "warnings": { "type": "array", "items": { "type": "string" } },
+                            "stage": {
+                              "type": "string",
+                              "enum": ["missing", "none", "quarantine", "reject"]
+                            },
+                            "recommendedValue": { "type": "string" },
+                            "nextStep": { "type": "string" }
+                          },
+                          "required": [
+                            "status",
+                            "lastOutcome",
+                            "lastCheckedAt",
+                            "warnings",
+                            "stage",
+                            "recommendedValue",
+                            "nextStep"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": ["ownership", "mx", "spf", "dkim", "dmarc"],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "domainId",
+                    "name",
+                    "status",
+                    "statusReason",
+                    "readyForActivation",
+                    "mailFlowReady",
+                    "lastCheckedAt",
+                    "nextCheckAt",
+                    "checkFailures",
+                    "checks"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (also for resources of another tenant)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with the current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (`Retry-After` header when known)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Authentication backend unavailable (fail closed)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "Check the DNS records now",
+        "tags": ["domains"]
+      }
+    },
+    "/api/v1/domains/{id}/dns-records": {
+      "get": {
+        "description": "Every record with its requirement (activation, inbound, outbound, recommended), the value to publish, the last check result and instructions; `cleanup` lists TXT records of DKIM selectors retired in the last 30 days that can be deleted.",
+        "operationId": "DomainDnsController_dnsRecords_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "description": "Domain public id",
+            "schema": { "format": "uuid", "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "domainId": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "records": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "key": {
+                            "type": "string",
+                            "description": "Stable record key: verification, mx:<host>, spf, dkim:<selector>, dmarc"
+                          },
+                          "purpose": {
+                            "type": "string",
+                            "enum": [
+                              "verification",
+                              "mx",
+                              "spf",
+                              "dkim",
+                              "dmarc",
+                              "mta_sts",
+                              "tls_rpt"
+                            ]
+                          },
+                          "requirement": {
+                            "type": "string",
+                            "enum": ["activation", "inbound", "outbound", "recommended"]
+                          },
+                          "type": { "type": "string", "enum": ["MX", "TXT", "CNAME"] },
+                          "host": { "type": "string", "description": "FQDN" },
+                          "name": {
+                            "type": "string",
+                            "description": "Relative to the domain (@ for the apex)"
+                          },
+                          "value": { "type": "string" },
+                          "priority": {
+                            "nullable": true,
+                            "description": "MX only",
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": ["pending", "valid", "invalid", "missing"]
+                          },
+                          "lastOutcome": {
+                            "nullable": true,
+                            "type": "string",
+                            "enum": ["valid", "invalid", "missing", "indeterminate"]
+                          },
+                          "observedValue": { "nullable": true, "type": "string" },
+                          "lastCheckedAt": {
+                            "nullable": true,
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "lastError": { "nullable": true, "type": "string" },
+                          "warnings": { "type": "array", "items": { "type": "string" } },
+                          "instructions": { "type": "string" }
+                        },
+                        "required": [
+                          "key",
+                          "purpose",
+                          "requirement",
+                          "type",
+                          "host",
+                          "name",
+                          "value",
+                          "priority",
+                          "status",
+                          "lastOutcome",
+                          "observedValue",
+                          "lastCheckedAt",
+                          "lastError",
+                          "warnings",
+                          "instructions"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "cleanup": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "type": { "type": "string", "enum": ["TXT"] },
+                          "host": { "type": "string" },
+                          "reason": { "type": "string", "enum": ["retired_dkim_selector"] },
+                          "retiredAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          }
+                        },
+                        "required": ["type", "host", "reason", "retiredAt"],
+                        "additionalProperties": false
+                      },
+                      "description": "Records the customer can delete"
+                    }
+                  },
+                  "required": ["domainId", "records", "cleanup"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (also for resources of another tenant)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "DNS records to publish",
+        "tags": ["domains"]
+      }
+    },
+    "/api/v1/domains/{id}/dkim/rotate": {
+      "post": {
+        "description": "Creates a new pending key of the algorithm (default rsa_2048) whose TXT record must be published; once it validates, it becomes active and the previous key keeps signing verification valid for the overlap period, then is retired. `409` when a rotation of that algorithm is already in progress. At most 10 per domain per 24 hours and 30 per caller per minute (`429` with `Retry-After`).",
+        "operationId": "DomainDnsController_rotate_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "description": "Domain public id",
+            "schema": { "format": "uuid", "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "algorithm": {
+                    "default": "rsa_2048",
+                    "type": "string",
+                    "enum": ["rsa_2048", "ed25519"]
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "domainId": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "key": {
+                      "type": "object",
+                      "properties": {
+                        "selector": { "type": "string" },
+                        "algorithm": { "type": "string", "enum": ["rsa_2048", "ed25519"] },
+                        "status": {
+                          "type": "string",
+                          "enum": ["pending", "active", "rotating", "retired", "revoked"]
+                        },
+                        "host": { "type": "string", "description": "FQDN of the selector record" },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                        },
+                        "activatedAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                        },
+                        "retireAfter": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                        },
+                        "retiredAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                        }
+                      },
+                      "required": [
+                        "selector",
+                        "algorithm",
+                        "status",
+                        "host",
+                        "createdAt",
+                        "activatedAt",
+                        "retireAfter",
+                        "retiredAt"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "previous": {
+                      "nullable": true,
+                      "type": "object",
+                      "properties": {
+                        "selector": { "type": "string" },
+                        "algorithm": { "type": "string", "enum": ["rsa_2048", "ed25519"] },
+                        "status": {
+                          "type": "string",
+                          "enum": ["pending", "active", "rotating", "retired", "revoked"]
+                        },
+                        "host": { "type": "string", "description": "FQDN of the selector record" },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                        },
+                        "activatedAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                        },
+                        "retireAfter": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                        },
+                        "retiredAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                        }
+                      },
+                      "required": [
+                        "selector",
+                        "algorithm",
+                        "status",
+                        "host",
+                        "createdAt",
+                        "activatedAt",
+                        "retireAfter",
+                        "retiredAt"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "dnsRecord": {
+                      "type": "object",
+                      "properties": {
+                        "key": {
+                          "type": "string",
+                          "description": "Stable record key: verification, mx:<host>, spf, dkim:<selector>, dmarc"
+                        },
+                        "purpose": {
+                          "type": "string",
+                          "enum": [
+                            "verification",
+                            "mx",
+                            "spf",
+                            "dkim",
+                            "dmarc",
+                            "mta_sts",
+                            "tls_rpt"
+                          ]
+                        },
+                        "requirement": {
+                          "type": "string",
+                          "enum": ["activation", "inbound", "outbound", "recommended"]
+                        },
+                        "type": { "type": "string", "enum": ["MX", "TXT", "CNAME"] },
+                        "host": { "type": "string", "description": "FQDN" },
+                        "name": {
+                          "type": "string",
+                          "description": "Relative to the domain (@ for the apex)"
+                        },
+                        "value": { "type": "string" },
+                        "priority": {
+                          "nullable": true,
+                          "description": "MX only",
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": ["pending", "valid", "invalid", "missing"]
+                        },
+                        "lastOutcome": {
+                          "nullable": true,
+                          "type": "string",
+                          "enum": ["valid", "invalid", "missing", "indeterminate"]
+                        },
+                        "observedValue": { "nullable": true, "type": "string" },
+                        "lastCheckedAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                        },
+                        "lastError": { "nullable": true, "type": "string" },
+                        "warnings": { "type": "array", "items": { "type": "string" } },
+                        "instructions": { "type": "string" }
+                      },
+                      "required": [
+                        "key",
+                        "purpose",
+                        "requirement",
+                        "type",
+                        "host",
+                        "name",
+                        "value",
+                        "priority",
+                        "status",
+                        "lastOutcome",
+                        "observedValue",
+                        "lastCheckedAt",
+                        "lastError",
+                        "warnings",
+                        "instructions"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "overlapDays": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": ["domainId", "key", "previous", "dnsRecord", "overlapDays"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (also for resources of another tenant)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with the current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (`Retry-After` header when known)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Authentication backend unavailable (fail closed)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "Rotate a DKIM key",
+        "tags": ["domains"]
       }
     }
   },

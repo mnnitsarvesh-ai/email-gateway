@@ -30,3 +30,28 @@ data:
   # NOTIFY_SMTP_CA_PATH to the mounted file path in the overlay (verification stays on).
   NOTIFY_SMTP_PORT: '587'
   NOTIFY_SMTP_SECURE: starttls
+  # Domain onboarding and DNS (api, step 2.1; ADR-0017). DNS_SERVERS empty = the pod's resolver
+  # (cluster DNS / VPC resolver). DNS_RESOLVER_MODE=doh sends customer domain names to the
+  # DNS_DOH_URL provider (https only); set DNS_PROPAGATION_UPSTREAMS per overlay if wanted.
+  DNS_RESOLVER_MODE: system
+  DNS_DOH_URL: https://cloudflare-dns.com/dns-query
+  DNS_TIMEOUT_MS: '2500'
+  DNS_TRIES: '2'
+  DNS_CACHE_MAX_TTL_SECONDS: '300'
+  DNS_CACHE_NEGATIVE_TTL_SECONDS: '60'
+  # Where customers point their MX and the SPF record they include: no default in the api.
+  # Replace per environment with the gateway's real public names (priority:host list).
+  GATEWAY_MX_HOSTS: 10:mx1.replace-per-environment.invalid,20:mx2.replace-per-environment.invalid
+  GATEWAY_SPF_INCLUDE: _spf.replace-per-environment.invalid
+  DOMAIN_VERIFICATION_LABEL: _emailgateway-verify
+  DOMAIN_VERIFICATION_TTL_DAYS: '7'
+  DOMAIN_BACKGROUND_JOBS_ENABLED: 'true'
+  DOMAIN_JOBS_INTERVAL_SECONDS: '30'
+  DOMAIN_CHECK_BATCH_SIZE: '50'
+  DOMAIN_CHECK_CONCURRENCY: '4'
+  DOMAIN_CHECK_DEADLINE_MS: '15000'
+  DOMAIN_RETRY_BASE_SECONDS: '60'
+  DOMAIN_RETRY_MAX_SECONDS: '3600'
+  DOMAIN_RECHECK_INCOMPLETE_SECONDS: '1800'
+  DOMAIN_RECHECK_INTERVAL_SECONDS: '86400'
+  DKIM_ROTATION_OVERLAP_DAYS: '7'

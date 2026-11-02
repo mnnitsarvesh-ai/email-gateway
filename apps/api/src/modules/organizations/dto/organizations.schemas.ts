@@ -324,9 +324,11 @@ export const UsageResponseSchema = z.object({
     locked: z.number().int(),
   }),
   domains: z.object({
-    total: z.number().int(),
-    verified: z.number().int(),
+    total: z.number().int().describe('Non-deleted domains'),
+    verified: z.number().int().describe('Ownership verified (verified, active or suspended)'),
     pendingVerification: z.number().int(),
+    active: z.number().int(),
+    suspended: z.number().int(),
   }),
   messages: z.object({
     total: z.number().int(),
