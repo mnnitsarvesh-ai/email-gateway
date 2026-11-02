@@ -67,8 +67,15 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # db:migrate builds the database package, runs the migration-history preflight
+      # (dist/migrations/cli.js check), then prisma migrate deploy.
       - name: Apply migrations
         run: pnpm db:migrate
+      # Partition maintenance as in Compose and the CronJob; the second run must be a no-op.
+      - name: Partition maintenance
+        working-directory: packages/database
+        run: node dist/partitioning/cli.js apply && node dist/partitioning/cli.js apply
+      # Prisma does not model partitions, so the drift check must stay clean after the split.
       - name: Fail if schema.prisma has changes without a migration
         working-directory: packages/database
         run: >-
@@ -76,6 +83,23 @@ jobs:
           --from-url "$MIGRATION_DATABASE_URL"
           --to-schema-datamodel prisma/schema.prisma
           --exit-code
+      - name: Seed catalog and demo data twice (idempotent)
+        working-directory: packages/database
+        env:
+          APP_ENV: ci
+          # Prints the row counts of the seeded tables; the second seed must not change them.
+          COUNT: >-
+            const {PrismaClient}=require('@prisma/client'); const p=new PrismaClient();
+            const t=['permissions','roles','role_permissions','organization_plans','system_settings','organizations','users','user_roles','domains','email_policies','policy_versions'];
+            Promise.all(t.map(n=>p.$queryRawUnsafe('SELECT COUNT(*) AS c FROM '+n).then(r=>n+'='+r[0].c)))
+            .then(l=>{console.log(l.join(' '));return p.$disconnect()});
+        run: |
+          node dist/seed/cli.js
+          node -e "$COUNT" > /tmp/seed-1.txt
+          node dist/seed/cli.js
+          node -e "$COUNT" > /tmp/seed-2.txt
+          cat /tmp/seed-2.txt
+          diff /tmp/seed-1.txt /tmp/seed-2.txt
 
   iac:
     name: Validate Terraform, Kubernetes and Compose

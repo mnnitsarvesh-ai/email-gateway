@@ -38,29 +38,44 @@ describe('MySQL', () => {
   });
 
   it('processOnce applies an event exactly once and rolls back on failure', async () => {
-    const consumer = 'integration-test';
+    const consumer = `integration-test-${randomUUID().slice(0, 8)}`;
     const eventId = randomUUID();
-    const slug = `it-${eventId.slice(0, 8)}`;
-    const createTenant = () =>
+    const suffix = eventId.slice(0, 8);
+    const slug = `it-${suffix}`;
+    // No seed exists yet: the test owns its plan row and removes it afterwards.
+    const plan = await prisma.organizationPlan.create({
+      data: {
+        code: `it-${suffix}`,
+        name: 'Integration plan',
+        defaultLimits: {},
+        defaultFeatures: {},
+      },
+    });
+    const createOrganization = () =>
       processOnce(prisma, consumer, eventId, (tx) =>
-        tx.tenant.create({ data: { slug, name: 'Integration' } }),
+        tx.organization.create({
+          data: { slug, name: 'Integration', planId: plan.id, dataRegion: 'ap-south-1' },
+        }),
       );
 
     try {
-      expect((await createTenant()).status).toBe('processed');
-      expect((await createTenant()).status).toBe('duplicate');
-      expect(await prisma.tenant.count({ where: { slug } })).toBe(1);
+      const first = await createOrganization();
+      expect(first.status).toBe('processed');
+      expect((await createOrganization()).status).toBe('duplicate');
+      expect(await prisma.organization.count({ where: { slug } })).toBe(1);
+      expect(await prisma.messageIdempotency.count({ where: { consumer, eventId } })).toBe(1);
 
       const failingId = randomUUID();
       await expect(
         processOnce(prisma, consumer, failingId, () => Promise.reject(new Error('handler failed'))),
       ).rejects.toThrow('handler failed');
-      expect(await prisma.processedEvent.count({ where: { consumer, eventId: failingId } })).toBe(
-        0,
-      );
+      expect(
+        await prisma.messageIdempotency.count({ where: { consumer, eventId: failingId } }),
+      ).toBe(0);
     } finally {
-      await prisma.tenant.deleteMany({ where: { slug } });
-      await prisma.processedEvent.deleteMany({ where: { consumer } });
+      await prisma.organization.deleteMany({ where: { slug } });
+      await prisma.organizationPlan.deleteMany({ where: { id: plan.id } });
+      await prisma.messageIdempotency.deleteMany({ where: { consumer } });
     }
   });
 });

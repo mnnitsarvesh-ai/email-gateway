@@ -1,0 +1,17 @@
+# Replica (reader) role. Mounted as /etc/mysql/conf.d/role.cnf next to the shared gateway.cnf.
+# Seeded from the primary with CLONE and kept in sync by GTID auto-positioning
+# (infrastructure/mysql/replica/setup-replica.sh). See docs/database/replication.md.
+[mysqld]
+server_id = 2
+gtid_mode = ON
+enforce_gtid_consistency = ON
+# No client, not even root, can write here; only the replication applier can.
+read_only = ON
+super_read_only = ON
+log_replica_updates = ON
+relay_log = relay-bin
+replica_parallel_workers = 4
+replica_preserve_commit_order = ON
+plugin-load-add = mysql_clone.so
+# Overrides gateway.cnf (512M): the local replica serves light control-plane reads only.
+innodb_buffer_pool_size = 256M

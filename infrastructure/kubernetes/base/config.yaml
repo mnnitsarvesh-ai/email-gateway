@@ -9,4 +9,7 @@ data:
   S3_REGION: ap-south-1
   S3_BUCKET_MAIL: replace-per-environment
   S3_BUCKET_ARCHIVE: replace-per-environment
+  # Read replica lag handling (api only; data-plane services ignore these).
+  DATABASE_READ_MAX_LAG_SECONDS: '10'
+  DATABASE_READ_LAG_CHECK_INTERVAL_MS: '5000'
   OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.observability:4318

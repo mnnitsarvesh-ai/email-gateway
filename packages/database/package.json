@@ -14,14 +14,21 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src",
     "test": "vitest run --passWithNoTests",
-    "migrate:deploy": "node --env-file-if-exists=../../.env node_modules/prisma/build/index.js migrate deploy",
+    "migrate:deploy": "node --env-file-if-exists=../../.env dist/migrations/cli.js check && node --env-file-if-exists=../../.env node_modules/prisma/build/index.js migrate deploy",
+    "migrate:reset:local": "node --env-file-if-exists=../../.env dist/migrations/cli.js assert-local && node --env-file-if-exists=../../.env node_modules/prisma/build/index.js migrate reset --force --skip-seed --skip-generate",
     "migrate:dev": "node --env-file-if-exists=../../.env node_modules/prisma/build/index.js migrate dev",
     "migrate:status": "node --env-file-if-exists=../../.env node_modules/prisma/build/index.js migrate status",
-    "migrate:diff": "prisma migrate diff --from-migrations prisma/migrations --to-schema-datamodel prisma/schema.prisma --script"
+    "migrate:diff": "prisma migrate diff --from-migrations prisma/migrations --to-schema-datamodel prisma/schema.prisma --script",
+    "partitions": "node --env-file-if-exists=../../.env dist/partitioning/cli.js",
+    "seed": "node --env-file-if-exists=../../.env dist/seed/cli.js",
+    "perf": "node --env-file-if-exists=../../.env dist/perf/cli.js"
   },
   "dependencies": {
+    "@email-gateway/config": "workspace:*",
+    "@email-gateway/logger": "workspace:*",
     "@prisma/client": "^6.16.2",
-    "prisma": "^6.16.2"
+    "prisma": "^6.16.2",
+    "zod": "^4.1.5"
   },
   "devDependencies": {}
 }

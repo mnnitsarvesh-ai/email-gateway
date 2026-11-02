@@ -6,6 +6,10 @@
   "engines": {
     "node": ">=22.12.0"
   },
+  "author": {
+    "name": "sarvesh patel",
+    "email": "sarvesh.patel1@kratikal.com"
+  },
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev --parallel",
@@ -17,9 +21,13 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "db:generate": "pnpm --filter @email-gateway/database run generate",
-    "db:migrate": "pnpm --filter @email-gateway/database run migrate:deploy",
+    "db:migrate": "turbo run build --filter=@email-gateway/database... --output-logs=errors-only && pnpm --filter @email-gateway/database run migrate:deploy",
+    "db:reset:local": "turbo run build --filter=@email-gateway/database... --output-logs=errors-only && pnpm --filter @email-gateway/database run migrate:reset:local && pnpm --filter @email-gateway/database run partitions apply && pnpm --filter @email-gateway/database run seed",
     "db:migrate:dev": "pnpm --filter @email-gateway/database run migrate:dev",
     "db:status": "pnpm --filter @email-gateway/database run migrate:status",
+    "db:partitions": "turbo run build --filter=@email-gateway/database... --output-logs=errors-only && pnpm --filter @email-gateway/database run partitions",
+    "db:seed": "turbo run build --filter=@email-gateway/database... --output-logs=errors-only && pnpm --filter @email-gateway/database run seed",
+    "db:perf": "turbo run build --filter=@email-gateway/database... --output-logs=errors-only && pnpm --filter @email-gateway/database run perf",
     "env:init": "node scripts/init-env.mjs",
     "infra:up": "docker compose up -d --wait",
     "infra:down": "docker compose down",

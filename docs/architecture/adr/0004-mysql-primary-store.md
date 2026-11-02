@@ -1,6 +1,6 @@
 # ADR-0004: MySQL 8.4 as the primary transactional store
 
-**Status:** Accepted
+**Status:** Superseded by [ADR-0014](0014-mysql-data-model-partitioning-read-write-split.md)
 
 **Context.** Control-plane data and per-message pipeline state need ACID transactions, foreign keys where possible, and one atomic commit for "message + recipients + outbox". MySQL 8.4 LTS is mandated.
 

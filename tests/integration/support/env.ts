@@ -11,6 +11,10 @@ const port = (key: string, fallback: number): number => Number(process.env[key] 
 export const stack = {
   host: '127.0.0.1',
   databaseUrl: () => required('DATABASE_URL'),
+  /** Migrator account (DDL), used by the partition maintenance tests. */
+  migrationDatabaseUrl: () => required('MIGRATION_DATABASE_URL'),
+  /** Reader account on the replica (SELECT + REPLICATION CLIENT). */
+  databaseReadUrl: () => required('DATABASE_READ_URL'),
   rabbitmqUrl: () => required('RABBITMQ_URL'),
   redisUrl: () => required('REDIS_URL'),
   s3: () => ({
@@ -23,6 +27,8 @@ export const stack = {
   }),
   relayDomain: () => (process.env.POSTFIX_RELAY_DOMAINS ?? 'gateway.test').split(',')[0]!.trim(),
   ports: {
+    mysql: port('MYSQL_HOST_PORT', 3306),
+    mysqlReplica: port('MYSQL_REPLICA_HOST_PORT', 3308),
     smtp: port('SMTP_HOST_PORT', 2525),
     rspamd: port('RSPAMD_HOST_PORT', 11333),
     clamav: port('CLAMAV_HOST_PORT', 3310),

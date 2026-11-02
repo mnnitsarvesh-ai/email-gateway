@@ -42,7 +42,12 @@ export const engineVerdictSchema = z.object({
 export type EngineVerdict = z.infer<typeof engineVerdictSchema>;
 
 export interface ScanInput {
-  tenantId: string;
+  /**
+   * The tenant's numeric `organizations.id` as a decimal string (ADR-0014), taken from the
+   * event envelope, never from message content.
+   */
+  organizationId: string;
+  /** The message registry id (`message_identities.id`) as a decimal string. */
   messageId: string;
   emlS3Key: string;
   sizeBytes: number;

@@ -1,0 +1,92 @@
+# 12. Failure handling architecture
+
+How the platform keeps mail safe when a component fails. The principle: **every hop either has durably accepted the message or has told the previous hop to retry.** Postfix's disk spool is the buffer in front of everything; MySQL holds state and the outbox; RabbitMQ holds work; a failure anywhere turns into a retry, a dead letter or a fallback, never into silent loss or a silent `clean`. The per-dependency detail is in [failure-handling.md](../failure-handling.md).
+
+```mermaid
+flowchart LR
+  classDef impl fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#1b1b1b
+  classDef planned fill:#fff8e1,stroke:#b26a00,stroke-width:2px,stroke-dasharray:6 4,color:#1b1b1b
+  classDef ext fill:#eceff1,stroke:#546e7a,stroke-width:1px,color:#1b1b1b
+
+  sender["Sending MTA<br/>retries on 4xx for days"]:::ext
+
+  subgraph edge["Edge: nothing accepted unchecked"]
+    spool["Postfix disk spool<br/>IMPLEMENTED"]:::impl
+    polFail["Policy service down, slow or erroring<br/>DEFER_IF_PERMIT 4.3.5<br/>IMPLEMENTED"]:::impl
+    milFail["Rspamd milter down<br/>milter_default_action tempfail<br/>IMPLEMENTED config"]:::impl
+  end
+
+  subgraph ingest["Ingestion: 250 only after commit"]
+    ingFail["S3 or MySQL writer failure<br/>LMTP 4xx, Postfix retries<br/>PLANNED 3.1"]:::planned
+    dedupe["Duplicate ingest_key<br/>250 without rewriting<br/>registry IMPLEMENTED, use PLANNED 3.1"]:::planned
+  end
+
+  subgraph async["Async pipeline: at-least-once, exactly-once effects"]
+    outbox["message_outbox<br/>unpublished rows retried with available_at backoff<br/>table IMPLEMENTED, relay PLANNED 3.2"]:::planned
+    confirms["Publisher confirms<br/>ConfirmChannel IMPLEMENTED"]:::impl
+    quorum["Quorum queues, x-delivery-limit,<br/>reject-publish on overflow<br/>IMPLEMENTED"]:::impl
+    once["processOnce on message_idempotency<br/>duplicate delivery is a no-op<br/>IMPLEMENTED"]:::impl
+    dlq["queue.dlq via mail.dlx<br/>at-least-once dead-lettering<br/>IMPLEMENTED"]:::impl
+    replay["DLQ replay tool and<br/>stuck-message reconciliation (Q7)<br/>PLANNED 3.2"]:::planned
+    pause["Pause consumers while a dependency is down<br/>so outages do not exhaust delivery limits<br/>PLANNED 3.2"]:::planned
+    crash["Broker connection lost:<br/>process exits, orchestrator restarts<br/>IMPLEMENTED"]:::impl
+  end
+
+  subgraph verdicts["Scanning"]
+    engFail["Engine error or timeout is an explicit outcome<br/>policy decides, e.g. quarantine engine_unavailable<br/>contract IMPLEMENTED, use PLANNED 4.x, 5.2"]:::planned
+  end
+
+  subgraph dbl["Database"]
+    readerFb["Replica down, stopped or lagging:<br/>PrismaReadService falls back to the writer,<br/>readiness stays ok<br/>IMPLEMENTED"]:::impl
+    partJob["Partition maintenance: future partitions,<br/>outbox drop guard, non-zero exit on failure"]:::impl
+    alerts["Alerts: reader mode, pmax rows, DLQ depth,<br/>outbox age, job failures<br/>PLANNED 10.3"]:::planned
+  end
+
+  delivery["Outbound Postfix owns retries, backoff, DSNs<br/>PLANNED 2.2"]:::planned
+  ready["/health/ready 503 removes the pod from service<br/>IMPLEMENTED"]:::impl
+
+  sender --> spool
+  polFail -->|"4xx"| sender
+  milFail -->|"4xx"| sender
+  spool -.->|"LMTP retry, P 2.2"| ingFail
+  ingFail -.->|"4xx keeps mail in spool"| spool
+  spool -.-> dedupe
+  dedupe -.-> outbox
+  outbox -.->|"P 3.2"| confirms
+  confirms --> quorum
+  quorum --> once
+  once -->|"handler throws: rollback, nack"| quorum
+  quorum -->|"delivery limit reached"| dlq
+  dlq -.->|"P 3.2"| replay
+  replay -.-> quorum
+  pause -.-> quorum
+  crash --> quorum
+  once -.-> engFail
+  once -.-> delivery
+  readerFb -.-> alerts
+  partJob -.-> alerts
+  dlq -.-> alerts
+```
+
+**Legend.** Green solid: IMPLEMENTED (each box names the mechanism). Amber dashed and dotted arrows: PLANNED with the step.
+
+## Status
+
+| Mechanism                                                  | Status                   | Evidence or delivering step                                                                                                    |
+| ---------------------------------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| Policy service fail-closed (down, slow, throws, malformed) | IMPLEMENTED              | `main.cf` (`smtpd_policy_service_default_action`, 10 s timeout); `mail-plane.test.ts`, `policy-server.service.test.ts`         |
+| Milter fail-closed                                         | IMPLEMENTED              | `main.cf` (`milter_default_action = tempfail`). Configuration only; no automated test stops Rspamd mid-session                 |
+| Postfix spool                                              | IMPLEMENTED              | `postfix-spool` volume locally; EBS-backed ASG in production is PLANNED 10.1                                                   |
+| Ingestion `250 after commit`, `4xx` on failure             | PLANNED 3.1              |                                                                                                                                |
+| Registry de-duplication `(organization_id, ingest_key)`    | IMPLEMENTED (constraint) | `schema.test.ts` rejects a duplicate. Its use by ingestion is PLANNED 3.1                                                      |
+| Outbox table, relay                                        | PLANNED 3.2              | `message_outbox` (daily partitions, `(published_at, id)` index) exists                                                         |
+| Publisher confirms, manual acks, quorum queues, DLQs       | IMPLEMENTED              | `rabbitmq.module.ts`, `topology.ts`; `events.test.ts`, `rabbitmq-redis.test.ts`                                                |
+| `processOnce`                                              | IMPLEMENTED              | `idempotency.test.ts`, `mysql.test.ts` (once, duplicate, rollback)                                                             |
+| Crash-only RabbitMQ reconnect                              | IMPLEMENTED              | `RabbitMqService` exits on an unexpected `close`; restart policy in Compose and Kubernetes                                     |
+| Reader to writer fallback                                  | IMPLEMENTED              | `prisma-read.service.test.ts`, `replication.test.ts`                                                                           |
+| Readiness gating                                           | IMPLEMENTED              | `health.service.test.ts` (2 s per check, 503 on any failure)                                                                   |
+| Engine `error` / `timeout` outcomes                        | IMPLEMENTED (contract)   | `packages/security-contracts`; `quarantine_messages.reason` includes `engine_unavailable`. Use PLANNED 4.x, 5.2                |
+| DLQ replay, reconciliation, consumer pause                 | PLANNED 3.2              |                                                                                                                                |
+| Partition maintenance                                      | IMPLEMENTED              | `packages/database/src/partitioning/*.test.ts`, `tests/integration/partitions.test.ts`, CI migrations job (runs `apply` twice) |
+| Alerting                                                   | PLANNED 10.3             |                                                                                                                                |
+| Outbound retries and DSNs in Postfix                       | PLANNED 2.2              | ADR-0006                                                                                                                       |

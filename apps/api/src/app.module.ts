@@ -3,6 +3,7 @@ import {
   CorrelationModule,
   DatabaseModule,
   HealthModule,
+  PrismaReadService,
   PrismaService,
   RedisModule,
   RedisService,
@@ -23,12 +24,19 @@ export class AppModule {
       global: true,
       imports: [
         CorrelationModule,
-        DatabaseModule.forRoot({ url: config.DATABASE_URL }),
+        DatabaseModule.forRoot({
+          url: config.DATABASE_URL,
+          read: {
+            url: config.DATABASE_READ_URL,
+            maxLagSeconds: config.DATABASE_READ_MAX_LAG_SECONDS,
+            lagCheckIntervalMs: config.DATABASE_READ_LAG_CHECK_INTERVAL_MS,
+          },
+        }),
         RedisModule.forRoot({ url: config.REDIS_URL }),
         S3Module.forRoot(config),
         HealthModule.forRoot({
           service: { name: SERVICE_NAME, version: config.SERVICE_VERSION },
-          indicators: [PrismaService, RedisService, S3Service],
+          indicators: [PrismaService, PrismaReadService, RedisService, S3Service],
         }),
         MetaModule,
       ],

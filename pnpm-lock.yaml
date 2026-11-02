@@ -545,12 +545,21 @@ importers:
 
   packages/database:
     dependencies:
+      '@email-gateway/config':
+        specifier: workspace:*
+        version: link:../config
+      '@email-gateway/logger':
+        specifier: workspace:*
+        version: link:../logger
       '@prisma/client':
         specifier: ^6.16.2
         version: 6.19.3(prisma@6.19.3(typescript@5.9.3))(typescript@5.9.3)
       prisma:
         specifier: ^6.16.2
         version: 6.19.3(typescript@5.9.3)
+      zod:
+        specifier: ^4.1.5
+        version: 4.6.7
 
   packages/event-contracts:
     dependencies:

@@ -1,0 +1,11 @@
+# Primary (writer) role. Mounted as /etc/mysql/conf.d/role.cnf next to the shared gateway.cnf.
+# GTID-based replication source for mysql-replica, and CLONE donor for seeding it.
+# See docs/database/replication.md.
+[mysqld]
+server_id = 1
+log_bin = binlog
+gtid_mode = ON
+enforce_gtid_consistency = ON
+# Keep 7 days of binlogs so a stopped replica can catch up without a re-seed.
+binlog_expire_logs_seconds = 604800
+plugin-load-add = mysql_clone.so

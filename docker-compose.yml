@@ -1,12 +1,15 @@
 # Local development stack.
 #
 #   pnpm env:init                                   # once: create .env with random secrets
-#   docker compose up -d --wait                     # infrastructure only (default)
+#   docker compose up -d --wait                     # infrastructure only (default), including the
+#                                                   # MySQL replica, seeded by mysql-replica-setup
 #   docker compose --profile apps up -d --build --wait     # + migrations and all services
 #   docker compose --profile analytics up -d --wait        # + OpenSearch, ClickHouse
 #   docker compose --profile observability up -d --wait    # + OTel Collector, Prometheus, Grafana
 #
 # Every published port binds to 127.0.0.1 only. Credentials come from .env (never defaults).
+# MySQL runs as a GTID primary (`mysql`, writer) plus a read replica (`mysql-replica`); only the
+# api reads from the replica. See docs/database/replication.md.
 
 name: ${COMPOSE_PROJECT_NAME:-email-gateway}
 
@@ -56,9 +59,14 @@ services:
       MYSQL_APP_PASSWORD: ${MYSQL_APP_PASSWORD:?}
       MYSQL_MIGRATOR_USER: ${MYSQL_MIGRATOR_USER:?}
       MYSQL_MIGRATOR_PASSWORD: ${MYSQL_MIGRATOR_PASSWORD:?}
+      MYSQL_READER_USER: ${MYSQL_READER_USER:?}
+      MYSQL_READER_PASSWORD: ${MYSQL_READER_PASSWORD:?}
+      MYSQL_REPLICATION_USER: ${MYSQL_REPLICATION_USER:?}
+      MYSQL_REPLICATION_PASSWORD: ${MYSQL_REPLICATION_PASSWORD:?}
     volumes:
       - mysql-data:/var/lib/mysql
-      - ./infrastructure/mysql/conf.d:/etc/mysql/conf.d:ro
+      - ./infrastructure/mysql/conf.d/gateway.cnf:/etc/mysql/conf.d/gateway.cnf:ro
+      - ./infrastructure/mysql/primary/role.cnf:/etc/mysql/conf.d/role.cnf:ro
       - ./infrastructure/mysql/init:/docker-entrypoint-initdb.d:ro
     ports: ['127.0.0.1:${MYSQL_HOST_PORT:-3306}:3306']
     healthcheck:
@@ -72,6 +80,60 @@ services:
       timeout: 5s
       start_period: 60s
       retries: 20
+
+  mysql-replica:
+    # Read replica (GTID, read_only + super_read_only). No MYSQL_DATABASE and no init scripts:
+    # mysql-replica-setup seeds it from the primary with CLONE, which brings schema and accounts.
+    image: mysql:8.4
+    restart: unless-stopped
+    # Stock entrypoint, except that the first-start init server runs without super_read_only.
+    entrypoint: ['/bin/bash', '/replica/entrypoint.sh']
+    command: ['mysqld']
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?run pnpm env:init}
+    volumes:
+      - mysql-replica-data:/var/lib/mysql
+      - ./infrastructure/mysql/replica/entrypoint.sh:/replica/entrypoint.sh:ro
+      - ./infrastructure/mysql/conf.d/gateway.cnf:/etc/mysql/conf.d/gateway.cnf:ro
+      - ./infrastructure/mysql/replica/role.cnf:/etc/mysql/conf.d/role.cnf:ro
+    ports: ['127.0.0.1:${MYSQL_REPLICA_HOST_PORT:-3308}:3306']
+    healthcheck:
+      # Healthy only while both replication threads run (i.e. after mysql-replica-setup).
+      test:
+        [
+          'CMD-SHELL',
+          's=$$(MYSQL_PWD="$$MYSQL_ROOT_PASSWORD" mysql -uroot -e "SHOW REPLICA STATUS\G") && echo "$$s" | grep -q "Replica_IO_Running: Yes" && echo "$$s" | grep -q "Replica_SQL_Running: Yes"',
+        ]
+      interval: 5s
+      timeout: 5s
+      start_period: 180s
+      retries: 30
+
+  mysql-replica-setup:
+    # One-shot, idempotent: ensures the accounts on the primary, then seeds (CLONE) and starts
+    # replication on mysql-replica only when it is not already replicating.
+    image: mysql:8.4
+    restart: 'no'
+    entrypoint: ['/bin/bash', '/setup/setup-replica.sh']
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_REPLICA_HOST: mysql-replica
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?run pnpm env:init}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:?}
+      MYSQL_APP_USER: ${MYSQL_APP_USER:?}
+      MYSQL_APP_PASSWORD: ${MYSQL_APP_PASSWORD:?}
+      MYSQL_MIGRATOR_USER: ${MYSQL_MIGRATOR_USER:?}
+      MYSQL_MIGRATOR_PASSWORD: ${MYSQL_MIGRATOR_PASSWORD:?}
+      MYSQL_READER_USER: ${MYSQL_READER_USER:?}
+      MYSQL_READER_PASSWORD: ${MYSQL_READER_PASSWORD:?}
+      MYSQL_REPLICATION_USER: ${MYSQL_REPLICATION_USER:?}
+      MYSQL_REPLICATION_PASSWORD: ${MYSQL_REPLICATION_PASSWORD:?}
+    volumes:
+      - ./infrastructure/mysql/replica/setup-replica.sh:/setup/setup-replica.sh:ro
+      - ./infrastructure/mysql/init/01-users.sh:/setup/01-users.sh:ro
+    depends_on:
+      mysql: { condition: service_healthy }
+      mysql-replica: { condition: service_started }
 
   rabbitmq:
     image: rabbitmq:4.1-management-alpine
@@ -216,7 +278,13 @@ services:
       dockerfile: infrastructure/docker/node-service.Dockerfile
       args: { APP: database }
     image: email-gateway/db-migrate:local
-    command: ['node', 'node_modules/prisma/build/index.js', 'migrate', 'deploy']
+    # History preflight (fails with an explanation on a retired phase-0 migration), migrations,
+    # then partition maintenance (D3): split pmax into dated partitions and drop expired ones.
+    # All idempotent, so re-running the job is safe.
+    command:
+      - sh
+      - -c
+      - node dist/migrations/cli.js check && node node_modules/prisma/build/index.js migrate deploy && node dist/partitioning/cli.js apply
     environment:
       DATABASE_URL: mysql://${MYSQL_MIGRATOR_USER:?}:${MYSQL_MIGRATOR_PASSWORD:?}@mysql:3306/${MYSQL_DATABASE:?}
       MIGRATION_DATABASE_URL: mysql://${MYSQL_MIGRATOR_USER:?}:${MYSQL_MIGRATOR_PASSWORD:?}@mysql:3306/${MYSQL_DATABASE:?}
@@ -229,10 +297,17 @@ services:
     build:
       { context: ., dockerfile: infrastructure/docker/node-service.Dockerfile, args: { APP: api } }
     image: email-gateway/api:local
+    depends_on:
+      <<: *app-deps
+      mysql-replica-setup: { condition: service_completed_successfully }
     environment:
       <<: *node-env
       HTTP_PORT: 3000
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3001}
+      # Only the api reads from the replica (control-plane reads). Data-plane services are writer-only.
+      DATABASE_READ_URL: mysql://${MYSQL_READER_USER:?}:${MYSQL_READER_PASSWORD:?}@mysql-replica:3306/${MYSQL_DATABASE:?}
+      DATABASE_READ_MAX_LAG_SECONDS: ${DATABASE_READ_MAX_LAG_SECONDS:-10}
+      DATABASE_READ_LAG_CHECK_INTERVAL_MS: ${DATABASE_READ_LAG_CHECK_INTERVAL_MS:-5000}
     ports: ['127.0.0.1:${API_HOST_PORT:-3000}:3000']
     healthcheck:
       <<: *node-healthcheck
@@ -498,6 +573,7 @@ services:
 
 volumes:
   mysql-data:
+  mysql-replica-data:
   rabbitmq-data:
   redis-data:
   minio-data:

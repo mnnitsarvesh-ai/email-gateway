@@ -23,6 +23,22 @@ export const databaseConfigSchema = z.object({
   DATABASE_URL: z.string().startsWith('mysql://', 'DATABASE_URL must be a mysql:// URL'),
 });
 
+/**
+ * Optional read replica, composed only by control-plane services (api). Data-plane services
+ * never read from a replica (ADR-0014): replica lag must not affect a mail decision.
+ * Without DATABASE_READ_URL, reads go to the writer.
+ */
+export const databaseReadConfigSchema = z.object({
+  DATABASE_READ_URL: z
+    .string()
+    .startsWith('mysql://', 'DATABASE_READ_URL must be a mysql:// URL')
+    .optional(),
+  /** Above this replication lag, reads fall back to the writer. */
+  DATABASE_READ_MAX_LAG_SECONDS: z.coerce.number().int().min(0).default(10),
+  /** How often the replica's lag and thread state are probed. */
+  DATABASE_READ_LAG_CHECK_INTERVAL_MS: z.coerce.number().int().min(1000).max(60000).default(5000),
+});
+
 export const rabbitmqConfigSchema = z.object({
   RABBITMQ_URL: z.string().regex(/^amqps?:\/\//, 'RABBITMQ_URL must be an amqp(s):// URL'),
   RABBITMQ_PREFETCH: z.coerce.number().int().min(1).max(1000).default(20),
@@ -47,6 +63,7 @@ export const s3ConfigSchema = z.object({
 export type BaseConfig = z.infer<typeof baseConfigSchema>;
 export type HttpConfig = z.infer<ReturnType<typeof httpConfigSchema>>;
 export type DatabaseConfig = z.infer<typeof databaseConfigSchema>;
+export type DatabaseReadConfig = z.infer<typeof databaseReadConfigSchema>;
 export type RabbitmqConfig = z.infer<typeof rabbitmqConfigSchema>;
 export type RedisConfig = z.infer<typeof redisConfigSchema>;
 export type S3Config = z.infer<typeof s3ConfigSchema>;

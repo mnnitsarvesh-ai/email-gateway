@@ -1,6 +1,6 @@
 # ADR-0012: Shared-schema multi-tenancy; SaaS and dedicated deployments differ only by config
 
-**Status:** Accepted
+**Status:** Accepted. Amended by [ADR-0014](0014-mysql-data-model-partitioning-read-write-split.md): the tenant column is `organization_id BIGINT UNSIGNED`, and domains live in `domains`
 
 **Decision.**
 

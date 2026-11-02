@@ -15,3 +15,5 @@ resources:
   - notification-worker.yaml
   - archive-worker.yaml
   - admin-portal.yaml
+  # Daily partition maintenance (CronJob, migrator account).
+  - db-maintenance.yaml

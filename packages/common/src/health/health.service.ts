@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import type { DependencyHealth, HealthReport } from '@email-gateway/shared-types';
+import type { DependencyHealth, HealthDetails, HealthReport } from '@email-gateway/shared-types';
 import {
   HEALTH_INDICATORS,
   type HealthIndicator,
@@ -43,16 +43,22 @@ export class HealthService {
     const started = performance.now();
     let timer: NodeJS.Timeout | undefined;
     try {
-      await Promise.race([
+      const details = await Promise.race<void | HealthDetails>([
         indicator.checkHealth(),
-        new Promise((_, reject) => {
+        new Promise<never>((_, reject) => {
           timer = setTimeout(
             () => reject(new Error(`timed out after ${CHECK_TIMEOUT_MS}ms`)),
             CHECK_TIMEOUT_MS,
           );
         }),
       ]);
-      return { name: indicator.healthName, status: 'ok', latencyMs: this.elapsed(started) };
+      const check: DependencyHealth = {
+        name: indicator.healthName,
+        status: 'ok',
+        latencyMs: this.elapsed(started),
+      };
+      if (details && typeof details === 'object') check.details = { ...details };
+      return check;
     } catch (err) {
       return {
         name: indicator.healthName,

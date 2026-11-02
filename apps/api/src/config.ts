@@ -1,6 +1,7 @@
 import {
   baseConfigSchema,
   databaseConfigSchema,
+  databaseReadConfigSchema,
   httpConfigSchema,
   loadConfig,
   redisConfigSchema,
@@ -11,6 +12,8 @@ import { z } from 'zod';
 export const apiConfigSchema = baseConfigSchema
   .extend(httpConfigSchema(3000).shape)
   .extend(databaseConfigSchema.shape)
+  // Control plane only: list/search/report reads may use the replica (ADR-0014).
+  .extend(databaseReadConfigSchema.shape)
   .extend(redisConfigSchema.shape)
   .extend(s3ConfigSchema.shape)
   .extend({

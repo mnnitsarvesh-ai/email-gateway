@@ -38,6 +38,8 @@ spec:
             - { name: HTTP_PORT, value: '3000' }
             # Secrets are mounted as files by External Secrets and read via the <KEY>_FILE convention.
             - { name: DATABASE_URL_FILE, value: /var/run/secrets/gateway/database-url }
+            # Control-plane reads: RDS/Aurora reader endpoint (see docs/database/replication.md).
+            - { name: DATABASE_READ_URL_FILE, value: /var/run/secrets/gateway/database-read-url }
             - { name: RABBITMQ_URL_FILE, value: /var/run/secrets/gateway/rabbitmq-url }
             - { name: REDIS_URL_FILE, value: /var/run/secrets/gateway/redis-url }
           volumeMounts:

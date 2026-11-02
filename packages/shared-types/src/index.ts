@@ -42,11 +42,15 @@ export type TenantStatus = (typeof TenantStatus)[keyof typeof TenantStatus];
 
 export type HealthStatus = 'ok' | 'error';
 
+/** Flat, JSON-safe facts a dependency check may report (e.g. read replica mode and lag). */
+export type HealthDetails = Record<string, string | number | boolean | null>;
+
 export interface DependencyHealth {
   name: string;
   status: HealthStatus;
   latencyMs: number;
   error?: string;
+  details?: HealthDetails;
 }
 
 export interface HealthReport {

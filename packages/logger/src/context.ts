@@ -4,7 +4,11 @@ import { randomUUID } from 'node:crypto';
 /** Request/message-scoped context propagated through async calls. */
 export interface RequestContext {
   correlationId: string;
-  /** Set only after authentication resolves the tenant. Never taken from client headers. */
+  /**
+   * The organization id (`organizations.id`, a decimal string). The field keeps the name
+   * `tenantId` for log schema stability. Set only after authentication resolves the tenant.
+   * Never taken from client headers.
+   */
   tenantId?: string;
 }
 

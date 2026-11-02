@@ -1,6 +1,12 @@
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
-import { configureHttpApp, PrismaService, RedisService, S3Service } from '@email-gateway/common';
+import {
+  configureHttpApp,
+  PrismaReadService,
+  PrismaService,
+  RedisService,
+  S3Service,
+} from '@email-gateway/common';
 import { createLogger } from '@email-gateway/logger';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -19,6 +25,12 @@ const config = loadApiConfig({
 
 const healthy = (healthName: string) => ({ healthName, checkHealth: () => Promise.resolve() });
 let dbHealthy = true;
+const readerDetails = {
+  mode: 'writer-fallback',
+  lagSeconds: 42,
+  maxLagSeconds: 10,
+  reason: 'lag 42s > max 10s',
+};
 
 describe('API (e2e, dependencies stubbed)', () => {
   let app: INestApplication;
@@ -30,6 +42,8 @@ describe('API (e2e, dependencies stubbed)', () => {
         healthName: 'mysql',
         checkHealth: () => (dbHealthy ? Promise.resolve() : Promise.reject(new Error('down'))),
       })
+      .overrideProvider(PrismaReadService)
+      .useValue({ healthName: 'mysql-reader', checkHealth: () => Promise.resolve(readerDetails) })
       .overrideProvider(RedisService)
       .useValue(healthy('redis'))
       .overrideProvider(S3Service)
@@ -52,7 +66,23 @@ describe('API (e2e, dependencies stubbed)', () => {
   it('GET /health/ready reports each dependency', async () => {
     dbHealthy = true;
     const res = await request(app.getHttpServer()).get('/health/ready').expect(200);
-    expect(res.body.checks.map((c: { name: string }) => c.name)).toEqual(['mysql', 'redis', 's3']);
+    expect(res.body.checks.map((c: { name: string }) => c.name)).toEqual([
+      'mysql',
+      'mysql-reader',
+      'redis',
+      's3',
+    ]);
+  });
+
+  it('GET /health/ready reports read replica details without failing on a lagging replica', async () => {
+    dbHealthy = true;
+    const res = await request(app.getHttpServer()).get('/health/ready').expect(200);
+    expect(res.body.status).toBe('ok');
+    const reader = res.body.checks.find((c: { name: string }) => c.name === 'mysql-reader');
+    expect(reader).toMatchObject({ status: 'ok', details: readerDetails });
+    expect(res.body.checks.find((c: { name: string }) => c.name === 'mysql')).not.toHaveProperty(
+      'details',
+    );
   });
 
   it('GET /health/ready returns 503 when a dependency is down', async () => {

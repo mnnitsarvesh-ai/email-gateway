@@ -26,6 +26,22 @@ describe('HealthService', () => {
     ]);
   });
 
+  it('includes the details an indicator resolves with', async () => {
+    const detailed: HealthIndicator = {
+      healthName: 'mysql-reader',
+      checkHealth: () =>
+        Promise.resolve({ mode: 'writer-fallback', lagSeconds: null, maxLagSeconds: 10 }),
+    };
+    const report = await new HealthService([ok, detailed], service).readiness();
+    expect(report.status).toBe('ok');
+    expect(report.checks[0]).not.toHaveProperty('details');
+    expect(report.checks[1]).toMatchObject({
+      name: 'mysql-reader',
+      status: 'ok',
+      details: { mode: 'writer-fallback', lagSeconds: null, maxLagSeconds: 10 },
+    });
+  });
+
   it('times out a hanging dependency instead of hanging the probe', async () => {
     const hanging: HealthIndicator = {
       healthName: 'slow',

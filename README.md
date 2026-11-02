@@ -24,8 +24,8 @@ A multi-tenant email security gateway: inbound, outbound and internal mail inspe
 ```bash
 pnpm install
 pnpm env:init                       # creates .env with random local secrets (git-ignored)
-docker compose up -d --wait         # MySQL, RabbitMQ, Redis, MinIO, Postfix, Rspamd, ClamAV
-pnpm db:migrate                     # apply database migrations
+docker compose up -d --wait         # MySQL primary + replica, RabbitMQ, Redis, MinIO, Postfix, Rspamd, ClamAV
+pnpm db:migrate                     # history preflight + apply database migrations
 pnpm test:integration               # verify every infrastructure service
 ```
 
@@ -42,6 +42,8 @@ or run everything in containers:
 docker compose --profile apps up -d --build --wait
 pnpm test:integration               # now also checks every service's /health/ready
 ```
+
+MySQL runs as a GTID primary plus a read replica. The one-shot `mysql-replica-setup` container creates the database accounts and seeds the replica with CLONE on first start (about 10 s). After that it is a no-op. Only the api reads from the replica (`DATABASE_READ_URL`); see [replication](docs/database/replication.md). If your `.env` predates the replica, append `MYSQL_REPLICA_HOST_PORT`, `MYSQL_READER_*`, `MYSQL_REPLICATION_*` (password at most 32 characters) and `DATABASE_READ_*` from `.env.example`, without regenerating the existing secrets.
 
 On first start, ClamAV downloads about 300 MB of signatures. `--wait` blocks until it is healthy, which can take a few minutes.
 
@@ -62,7 +64,8 @@ All ports bind to `127.0.0.1`. You can change any host port in `.env` (`*_HOST_P
 | notification-worker | 3050                                          | `/health/ready`                                     |
 | archive-worker      | 3060                                          | `/health/ready`                                     |
 | Postfix (SMTP)      | 2525 → 25                                     | Container health check                              |
-| MySQL               | 3306                                          |                                                     |
+| MySQL (primary)     | 3306 (`MYSQL_HOST_PORT`)                      | Container health check                              |
+| MySQL (replica)     | 3308 (`MYSQL_REPLICA_HOST_PORT`)              | Healthy only while replication runs                 |
 | RabbitMQ            | 5672, management 15672                        |                                                     |
 | Redis               | 6379                                          |                                                     |
 | MinIO               | 9000, console 9001                            |                                                     |
@@ -71,15 +74,19 @@ All ports bind to `127.0.0.1`. You can change any host port in `.env` (`*_HOST_P
 
 ## Common commands
 
-| Command                                               | Does                                            |
-| ----------------------------------------------------- | ----------------------------------------------- |
-| `pnpm build` / `pnpm dev`                             | Build / run all workspaces (Turborepo)          |
-| `pnpm lint` / `pnpm typecheck` / `pnpm format`        | Code quality                                    |
-| `pnpm test`                                           | Unit tests                                      |
-| `pnpm test:e2e`                                       | In-process API e2e tests (dependencies stubbed) |
-| `pnpm test:integration`                               | Tests against the running Compose stack         |
-| `pnpm db:migrate` / `db:migrate:dev` / `db:status`    | Prisma migrations                               |
-| `pnpm infra:up` / `pnpm stack:up` / `pnpm stack:down` | Compose shortcuts                               |
+| Command                                               | Does                                                                                |
+| ----------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `pnpm build` / `pnpm dev`                             | Build / run all workspaces (Turborepo)                                              |
+| `pnpm lint` / `pnpm typecheck` / `pnpm format`        | Code quality                                                                        |
+| `pnpm test`                                           | Unit tests                                                                          |
+| `pnpm test:e2e`                                       | In-process API e2e tests (dependencies stubbed)                                     |
+| `pnpm test:integration`                               | Tests against the running Compose stack                                             |
+| `pnpm db:migrate` / `db:migrate:dev` / `db:status`    | Prisma migrations (`db:migrate` runs a history preflight first)                     |
+| `pnpm db:reset:local`                                 | Local only: reset the schema, then partitions and seed (upgrading a phase-0 volume) |
+| `pnpm db:partitions -- plan\|apply`                   | Partition maintenance (create ahead, drop expired)                                  |
+| `pnpm db:seed`                                        | Seed the catalog and demo data (idempotent)                                         |
+| `pnpm db:perf`                                        | Database performance test (throwaway schema)                                        |
+| `pnpm infra:up` / `pnpm stack:up` / `pnpm stack:down` | Compose shortcuts                                                                   |
 
 ## Repository layout
 
@@ -111,7 +118,8 @@ scripts/                Developer tooling
 
 - [Architecture overview](docs/architecture/overview.md)
 - [Technology decision records](docs/architecture/adr/README.md)
-- [Database conventions and migrations](docs/database/README.md)
+- [Database: conventions, schema reference, partitioning, retention, backups](docs/database/README.md)
+- [MySQL replication and the read/write split](docs/database/replication.md)
 - [API conventions](docs/api/README.md)
 - [Security baseline](docs/security/README.md)
 - [Deployment](docs/deployment/README.md)

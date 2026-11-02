@@ -5,7 +5,8 @@ export type IdempotentResult<T> = { status: 'processed'; result: T } | { status:
 class DuplicateEventError extends Error {}
 
 /**
- * Runs `handler` at most once per (consumer, eventId), atomically with its side effects.
+ * Runs `handler` at most once per (consumer, eventId), atomically with its side effects
+ * (ADR-0005). The ledger is the `message_idempotency` table.
  *
  * The ledger row is inserted first inside the transaction. If another delivery of the same
  * event already committed, that insert fails on the primary key and the handler never runs.
@@ -21,7 +22,7 @@ export async function processOnce<T>(
   try {
     return await prisma.$transaction(async (tx) => {
       try {
-        await tx.processedEvent.create({ data: { consumer, eventId } });
+        await tx.messageIdempotency.create({ data: { consumer, eventId } });
       } catch (err) {
         if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
           throw new DuplicateEventError();

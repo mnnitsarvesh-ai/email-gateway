@@ -67,6 +67,46 @@ export default tseslint.config(
     },
   },
   {
+    // Data plane is writer-only (ADR-0014). Flat config replaces rule options, so the boundary
+    // patterns above are repeated here. Tests are exempt so they can assert the reader is absent.
+    files: [
+      'apps/{smtp-adapter,email-worker,policy-engine,delivery-worker,archive-worker}/**/*.ts',
+    ],
+    ignores: ['**/*.test.ts', '**/*.spec.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          paths: [
+            {
+              name: '@email-gateway/common',
+              importNames: ['PrismaReadService'],
+              message:
+                'Data-plane services use the writer only (ADR-0014). Replica lag must never affect a mail decision.',
+            },
+          ],
+          patterns: [
+            {
+              group: [
+                '**/apps/*',
+                '@email-gateway/api',
+                '@email-gateway/*-worker',
+                '@email-gateway/smtp-adapter',
+                '@email-gateway/policy-engine',
+                '@email-gateway/admin-portal',
+              ],
+              message: 'Apps are deployable units. Share code through packages/* only.',
+            },
+            {
+              group: ['../../packages/*', '../../../packages/*'],
+              message: 'Import packages by name (@email-gateway/*), not by relative path.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     files: ['**/*.test.ts', '**/*.spec.ts', '**/test/**/*.ts', 'tests/**/*.ts'],
     rules: {
       '@typescript-eslint/no-unsafe-assignment': 'off',

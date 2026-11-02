@@ -1,6 +1,7 @@
 import { Test } from '@nestjs/testing';
 import {
   HealthService,
+  PrismaReadService,
   PrismaService,
   RabbitMqService,
   RedisService,
@@ -39,6 +40,8 @@ describe('AppModule wiring', () => {
       const report = await moduleRef.get(HealthService).readiness();
       expect(report.checks.map((c) => c.name)).toEqual(['mysql', 'rabbitmq', 'redis', 's3']);
       expect(report.status).toBe('ok');
+      // Data plane is writer-only (ADR-0014): the read replica is not even registered.
+      expect(() => moduleRef.get(PrismaReadService, { strict: false })).toThrow();
     } finally {
       await moduleRef.close();
     }

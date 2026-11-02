@@ -25,7 +25,14 @@ const lines = readFileSync(join(root, '.env.example'), 'utf8')
     if (!match) return line;
     const [, key, raw] = match;
     // Hex secrets are URL-safe, so they can be embedded in connection strings unescaped.
-    let value = raw === '__GENERATE__' ? randomBytes(24).toString('hex') : raw;
+    // __GENERATE__ is 48 hex characters; __GENERATE_<n>__ is n (for length-limited secrets).
+    const generate = /^__GENERATE(?:_(\d+))?__$/.exec(raw);
+    const length = generate ? Number(generate[1] ?? 48) : 0;
+    let value = generate
+      ? randomBytes(Math.ceil(length / 2))
+          .toString('hex')
+          .slice(0, length)
+      : raw;
     value = value.replace(/\$\{([A-Z0-9_]+)\}/g, (_, ref) => {
       if (!values.has(ref)) throw new Error(`${key} references ${ref} before it is defined`);
       return values.get(ref);

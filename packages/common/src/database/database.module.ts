@@ -1,54 +1,30 @@
+import { type DynamicModule, Global, Module, type Provider } from '@nestjs/common';
 import {
-  type DynamicModule,
-  Global,
-  Inject,
-  Injectable,
-  Module,
-  type OnModuleDestroy,
-  type OnModuleInit,
-} from '@nestjs/common';
-import { PrismaClient } from '@email-gateway/database';
-import type { HealthIndicator } from '../health/health-indicator';
+  DATABASE_OPTIONS,
+  DATABASE_READ_OPTIONS,
+  type DatabaseModuleOptions,
+} from './database.options';
+import { PrismaReadService } from './prisma-read.service';
+import { PrismaService } from './prisma.service';
 
-const DATABASE_OPTIONS = Symbol('DATABASE_OPTIONS');
-
-export interface DatabaseModuleOptions {
-  url: string;
-}
-
-/** The writer connection. Data-plane services must use this, never a read replica. */
-@Injectable()
-export class PrismaService
-  extends PrismaClient
-  implements OnModuleInit, OnModuleDestroy, HealthIndicator
-{
-  readonly healthName = 'mysql';
-
-  constructor(@Inject(DATABASE_OPTIONS) options: DatabaseModuleOptions) {
-    super({ datasourceUrl: options.url });
-  }
-
-  async onModuleInit(): Promise<void> {
-    await this.$connect();
-  }
-
-  async onModuleDestroy(): Promise<void> {
-    await this.$disconnect();
-  }
-
-  async checkHealth(): Promise<void> {
-    await this.$queryRaw`SELECT 1`;
-  }
-}
+export type { DatabaseModuleOptions, DatabaseReadOptions } from './database.options';
+export { PrismaService } from './prisma.service';
 
 @Global()
 @Module({})
 export class DatabaseModule {
+  /**
+   * Registers the writer (PrismaService). With `read`, also registers PrismaReadService for
+   * control-plane reads. Without it, injecting PrismaReadService is a DI error, which is how
+   * data-plane services stay on the writer (ADR-0014).
+   */
   static forRoot(options: DatabaseModuleOptions): DynamicModule {
-    return {
-      module: DatabaseModule,
-      providers: [{ provide: DATABASE_OPTIONS, useValue: options }, PrismaService],
-      exports: [PrismaService],
-    };
+    const providers: Provider[] = [{ provide: DATABASE_OPTIONS, useValue: options }, PrismaService];
+    const exports: Provider[] = [PrismaService];
+    if (options.read) {
+      providers.push({ provide: DATABASE_READ_OPTIONS, useValue: options.read }, PrismaReadService);
+      exports.push(PrismaReadService);
+    }
+    return { module: DatabaseModule, providers, exports };
   }
 }

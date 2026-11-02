@@ -2,18 +2,19 @@
 
 Each record captures one decision: the context, the decision itself, the alternatives considered and the consequences. The statuses are `Proposed`, `Accepted` and `Superseded by ADR-NNNN`. To change an Accepted decision, add a new ADR that supersedes it rather than editing the old one.
 
-| ADR                                                | Decision                                                                          | Status   |
-| -------------------------------------------------- | --------------------------------------------------------------------------------- | -------- |
-| [0001](0001-monorepo-pnpm-turborepo.md)            | pnpm workspaces + Turborepo monorepo                                              | Accepted |
-| [0002](0002-modular-services-nestjs.md)            | NestJS modular services; 15 logical services on 8 deployables                     | Accepted |
-| [0003](0003-prisma-orm.md)                         | Prisma ORM and Prisma Migrate for MySQL                                           | Accepted |
-| [0004](0004-mysql-primary-store.md)                | MySQL 8.4 as the primary transactional store                                      | Accepted |
-| [0005](0005-rabbitmq-outbox-idempotency.md)        | RabbitMQ quorum queues, transactional outbox, idempotent consumers                | Accepted |
-| [0006](0006-postfix-mail-path.md)                  | Postfix at the edge; pre-queue vs post-queue split; Postfix owns delivery retries | Accepted |
-| [0007](0007-security-engines.md)                   | Rspamd, ClamAV and YARA behind one engine contract                                | Accepted |
-| [0008](0008-object-storage.md)                     | S3 for message content; MinIO for local development                               | Accepted |
-| [0009](0009-search-and-analytics.md)               | OpenSearch for search, ClickHouse for analytics                                   | Accepted |
-| [0010](0010-configuration-and-secrets.md)          | Validated configuration, file-mounted secrets, least-privilege DB accounts        | Accepted |
-| [0011](0011-observability.md)                      | Structured logs, correlation IDs, OpenTelemetry, Prometheus, Grafana              | Accepted |
-| [0012](0012-multi-tenancy-and-deployment-modes.md) | Shared-schema multi-tenancy; SaaS and dedicated deployments differ only by config | Accepted |
-| [0013](0013-testing-strategy.md)                   | Vitest with SWC; unit, e2e and integration layers                                 | Accepted |
+| ADR                                                            | Decision                                                                                           | Status                                                                       |
+| -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| [0001](0001-monorepo-pnpm-turborepo.md)                        | pnpm workspaces + Turborepo monorepo                                                               | Accepted                                                                     |
+| [0002](0002-modular-services-nestjs.md)                        | NestJS modular services; 15 logical services on 8 deployables                                      | Accepted                                                                     |
+| [0003](0003-prisma-orm.md)                                     | Prisma ORM and Prisma Migrate for MySQL                                                            | Accepted                                                                     |
+| [0004](0004-mysql-primary-store.md)                            | MySQL 8.4 as the primary transactional store                                                       | Superseded by [0014](0014-mysql-data-model-partitioning-read-write-split.md) |
+| [0005](0005-rabbitmq-outbox-idempotency.md)                    | RabbitMQ quorum queues, transactional outbox, idempotent consumers                                 | Accepted (table names amended by 0014)                                       |
+| [0006](0006-postfix-mail-path.md)                              | Postfix at the edge; pre-queue vs post-queue split; Postfix owns delivery retries                  | Accepted                                                                     |
+| [0007](0007-security-engines.md)                               | Rspamd, ClamAV and YARA behind one engine contract                                                 | Accepted                                                                     |
+| [0008](0008-object-storage.md)                                 | S3 for message content; MinIO for local development                                                | Accepted                                                                     |
+| [0009](0009-search-and-analytics.md)                           | OpenSearch for search, ClickHouse for analytics                                                    | Accepted                                                                     |
+| [0010](0010-configuration-and-secrets.md)                      | Validated configuration, file-mounted secrets, least-privilege DB accounts                         | Accepted                                                                     |
+| [0011](0011-observability.md)                                  | Structured logs, correlation IDs, OpenTelemetry, Prometheus, Grafana                               | Accepted                                                                     |
+| [0012](0012-multi-tenancy-and-deployment-modes.md)             | Shared-schema multi-tenancy; SaaS and dedicated deployments differ only by config                  | Accepted (column name amended by 0014)                                       |
+| [0013](0013-testing-strategy.md)                               | Vitest with SWC; unit, e2e and integration layers                                                  | Accepted                                                                     |
+| [0014](0014-mysql-data-model-partitioning-read-write-split.md) | MySQL data model: BIGINT ids, `organization_id`, partitioning, identity registry, read/write split | Accepted                                                                     |
