@@ -28,7 +28,7 @@ One codebase ships as **shared SaaS** (many tenants) and as **dedicated** single
 | [Data ownership](data-ownership.md)                                          | Writers per table, bucket, queue and cache; who may read the replica                                              |
 | [Security boundaries](security-boundaries.md)                                | Trust zones, network boundaries, DB accounts, secrets, tenant isolation points                                    |
 | [Failure handling](failure-handling.md)                                      | Per-dependency failure, detection and recovery; the service dependency matrix                                     |
-| [ADRs](adr/README.md)                                                        | Architecture decision records 0001–0014                                                                           |
+| [ADRs](adr/README.md)                                                        | Architecture decision records 0001–0016                                                                           |
 | [Database](../database/README.md), [replication](../database/replication.md) | Schema reference, partitioning, read/write split                                                                  |
 | [Execution plan](../plan/execution-plan.md)                                  | The delivery steps referenced as `PLANNED x.y` throughout these documents                                         |
 
@@ -166,7 +166,7 @@ The ESLint configuration enforces module boundaries: apps cannot import other ap
 
 **Phase 0 (step 0.1, done):** the monorepo, shared packages, a running API, a policy server, worker shells that assert their queue topology and report readiness, the admin dashboard, the Compose stack, CI, Kubernetes base manifests and a Terraform skeleton (the S3 + KMS module).
 
-**Step 1.1 (database) and step 0.2 (architecture documentation), this step:**
+**Step 1.1 (database) and step 0.2 (architecture documentation):**
 
 - The complete MySQL data model: 61 tables, `BIGINT UNSIGNED` ids with `public_id` on exposed aggregates, `organization_id` on every tenant-owned table, 16 partitioned tables created with a `pmax` partition, and the `message_identities` registry (ADR-0014). Verified by `tests/integration/schema.test.ts`.
 - The read/write split: GTID primary + replica in Compose, a reader account with `SELECT` + `REPLICATION CLIENT`, `PrismaReadService` with lag-based writer fallback in `api` only. Verified by `tests/integration/replication.test.ts` and unit tests. The probe reads Prisma's positional `SHOW REPLICA STATUS` columns ([replication.md](../database/replication.md#lag-handling-and-modes)).
@@ -174,6 +174,14 @@ The ESLint configuration enforces module boundaries: apps cannot import other ap
 - Partition maintenance, seeds, the performance harness and the retention and backup docs are delivered by the same step (work package WP4).
 - This architecture documentation set (15 diagrams, contracts, data ownership, security boundaries, failure handling).
 
-No business feature exists yet: no ingestion, consumers, engine adapters, policies, quarantine, delivery or authentication.
+**Steps 1.2 + 1.3 (tenant management, authentication, RBAC), this step** ([design](../plan/steps/02-tenants-auth-rbac.md), [ADR-0015](adr/0015-api-base-path.md), [ADR-0016](adr/0016-authentication-sessions-rbac.md)):
 
-**Next (see the [execution plan](../plan/execution-plan.md)):** tenant management (1.2) and authentication/RBAC (1.3) → domain onboarding (2.1) → the Postfix gateway with LMTP ingestion and outbound Postfix (2.2) and routing (2.3) → ingestion, RabbitMQ architecture and the message lifecycle (3.1–3.3) → engine adapters (4.x) → scoring, policy and quarantine (5.x) → the REST API and webhooks (6.x) → the admin portal (7.x) → archiving, connectors and the deployment manager (8.x) → performance (9.x) → AWS, DR and monitoring (10.x).
+- Business routes moved under `/api/v1`; every non-public route passes the global fail-closed `AuthGuard` → `PermissionsGuard` (bearer JWT or `X-API-Key`), and an e2e test proves no route ships without an authorization requirement. OpenAPI snapshot: [docs/api/openapi.json](../api/openapi.json).
+- Authentication ([authentication.md](../security/authentication.md)): Argon2id passwords, rotating refresh-token sessions with reuse detection and immediate revocation (Redis deny-list), brute-force lockout, TOTP MFA with recovery codes and organization-enforced enrollment, password reset and email verification through the `NOTIFY_SMTP_*` relay, invitations, API keys, the audited platform override and a bootstrap CLI for the first super admin.
+- RBAC ([rbac.md](../security/rbac.md)): the permission catalog, 8 system roles, custom roles without escalation, last-administrator protection; users, roles, API keys and login events APIs.
+- Tenant management ([API](../api/README.md#organizations-organizations-tag)): the organization catalog (create with plan-materialized limits/features, settings, deployment row and an invited administrator; plan changes that keep overrides; suspension that cuts off sessions and API keys), settings with validation, feature and limit overrides, usage counters from the read replica, and the four-eyes deletion workflow with legal-hold and archive-retention safeguards ([runbook](../runbooks/organization-deletion.md); the purge job itself is deferred).
+- Tenant isolation: the tenant comes only from the authenticated principal (`TenantScope`); repositories are the only Prisma users and take the scope first; another tenant's resource is `404`. Proven by the API integration suites against real MySQL and Redis, including the tenant isolation suites.
+
+No mail-processing feature exists yet: no ingestion, consumers, engine adapters, policies, quarantine actions or delivery. Domain management (2.1), the admin-portal login pages (7.x), SSO, per-organization API rate limits (6.1) and the organization purge job are not built.
+
+**Next (see the [execution plan](../plan/execution-plan.md)):** domain onboarding (2.1) → the Postfix gateway with LMTP ingestion and outbound Postfix (2.2) and routing (2.3) → ingestion, RabbitMQ architecture and the message lifecycle (3.1–3.3) → engine adapters (4.x) → scoring, policy and quarantine (5.x) → the REST API and webhooks (6.x) → the admin portal (7.x) → archiving, connectors and the deployment manager (8.x) → performance (9.x) → AWS, DR and monitoring (10.x).

@@ -4,7 +4,9 @@ import {
   DEMO,
   PERMISSIONS,
   PLANS,
+  PLATFORM_ORGANIZATION,
   type PlanDef,
+  RETIRED_ROLE_KEYS,
   SYSTEM_ROLES,
   SYSTEM_SETTINGS,
   permissionCategory,
@@ -21,15 +23,34 @@ type Tx = Prisma.TransactionClient;
 
 const TX_OPTIONS = { timeout: 60_000, maxWait: 10_000 } as const;
 
+export interface CatalogOptions {
+  /** `organization_deployments.environment` of the platform org; default APP_ENV or `local`. */
+  environment?: string;
+}
+
 export interface CatalogSummary {
   permissions: number;
   roles: number;
   rolePermissions: number;
+  /** Retired step-1.1 system roles deleted by this run (0 once migrated). */
+  retiredRolesRemoved: number;
+  /** User-role assignments moved from a retired role to its replacement by this run. */
+  userRolesRemapped: number;
   plans: number;
   systemSettings: number;
+  platformOrganizationId: bigint;
 }
 
-export async function seedCatalog(prisma: PrismaClient): Promise<CatalogSummary> {
+/**
+ * The catalog: permissions, the 8 system roles (D8) and the migration of retired role keys,
+ * plans, system settings and the platform organization (D10). Safe in every environment; one
+ * transaction.
+ */
+export async function seedCatalog(
+  prisma: PrismaClient,
+  options: CatalogOptions = {},
+): Promise<CatalogSummary> {
+  const environment = options.environment ?? process.env.APP_ENV ?? 'local';
   return prisma.$transaction(async (tx) => {
     for (const p of PERMISSIONS) {
       const data = { description: p.description, category: permissionCategory(p.key) };
@@ -44,6 +65,7 @@ export async function seedCatalog(prisma: PrismaClient): Promise<CatalogSummary>
     );
 
     let rolePermissions = 0;
+    const roleIds = new Map<string, bigint>();
     for (const role of SYSTEM_ROLES) {
       const data = { name: role.name, description: role.description, isSystem: true };
       const existing = await tx.role.findFirst({
@@ -53,6 +75,7 @@ export async function seedCatalog(prisma: PrismaClient): Promise<CatalogSummary>
       const { id: roleId } = existing
         ? await tx.role.update({ where: { id: existing.id }, data, select: { id: true } })
         : await tx.role.create({ data: { key: role.key, ...data }, select: { id: true } });
+      roleIds.set(role.key, roleId);
 
       const wanted = role.permissions.map((key) => {
         const id = permissionIds.get(key);
@@ -68,6 +91,8 @@ export async function seedCatalog(prisma: PrismaClient): Promise<CatalogSummary>
       });
       rolePermissions += wanted.length;
     }
+
+    const retired = await migrateRetiredRoles(tx, roleIds);
 
     for (const plan of PLANS) {
       const data = {
@@ -97,14 +122,163 @@ export async function seedCatalog(prisma: PrismaClient): Promise<CatalogSummary>
       });
     }
 
+    const platformOrganizationId = await ensurePlatformOrganization(tx, environment);
+
     return {
       permissions: PERMISSIONS.length,
       roles: SYSTEM_ROLES.length,
       rolePermissions,
+      retiredRolesRemoved: retired.rolesRemoved,
+      userRolesRemapped: retired.userRolesRemapped,
       plans: PLANS.length,
       systemSettings: SYSTEM_SETTINGS.length,
+      platformOrganizationId,
     };
   }, TX_OPTIONS);
+}
+
+/**
+ * Moves the assignments of every retired step-1.1 system role (RETIRED_ROLE_KEYS) to its
+ * replacement, keeping `organization_id` and `granted_by_user_id` and skipping users who already
+ * hold the replacement, then deletes the retired role's assignments, permissions and row. Only
+ * system roles (organization_id NULL) are touched; a custom role with the same key is not.
+ */
+async function migrateRetiredRoles(
+  tx: Tx,
+  roleIds: ReadonlyMap<string, bigint>,
+): Promise<{ rolesRemoved: number; userRolesRemapped: number }> {
+  let rolesRemoved = 0;
+  let userRolesRemapped = 0;
+  for (const [retiredKey, targetKey] of Object.entries(RETIRED_ROLE_KEYS)) {
+    const retired = await tx.role.findFirst({
+      where: { organizationId: null, key: retiredKey },
+      select: { id: true },
+    });
+    if (!retired) continue;
+    const targetId = roleIds.get(targetKey);
+    if (targetId === undefined) {
+      throw new Error(`Retired role ${retiredKey} maps to unknown role ${targetKey}`);
+    }
+    const assignments = await tx.userRole.findMany({
+      where: { roleId: retired.id },
+      select: { userId: true, organizationId: true, grantedByUserId: true },
+    });
+    if (assignments.length > 0) {
+      const { count } = await tx.userRole.createMany({
+        data: assignments.map((a) => ({ ...a, roleId: targetId })),
+        skipDuplicates: true,
+      });
+      userRolesRemapped += count;
+    }
+    await tx.userRole.deleteMany({ where: { roleId: retired.id } });
+    await tx.rolePermission.deleteMany({ where: { roleId: retired.id } });
+    await tx.role.delete({ where: { id: retired.id } });
+    rolesRemoved += 1;
+  }
+  return { rolesRemoved, userRolesRemapped };
+}
+
+/**
+ * The platform organization (D10): created if missing, never re-pointed. Its settings always
+ * require MFA (D7, D12: it cannot be turned off for the platform org).
+ */
+async function ensurePlatformOrganization(tx: Tx, environment: string): Promise<bigint> {
+  const def = PLATFORM_ORGANIZATION;
+  const plan = await planByCode(tx, def.plan);
+  const platform = await tx.organization.upsert({
+    where: { slug: def.slug },
+    create: {
+      slug: def.slug,
+      name: def.name,
+      kind: 'platform',
+      status: 'active',
+      planId: plan.id,
+      deploymentMode: 'saas',
+      dataRegion: def.dataRegion,
+    },
+    update: {},
+    select: { id: true, kind: true },
+  });
+  if (platform.kind !== 'platform') {
+    throw new Error(`Organization slug ${def.slug} exists but is not kind=platform`);
+  }
+  const organizationId = platform.id;
+  await tx.organizationSetting.upsert({
+    where: { organizationId },
+    create: {
+      organizationId,
+      quarantineRetentionDays: plan.def.limits.quarantine_retention_days,
+      mfaRequired: def.mfaRequired,
+    },
+    update: { mfaRequired: def.mfaRequired },
+  });
+  await materializePlan(tx, organizationId, plan.def);
+  await ensureSaasDeployment(tx, organizationId, def.dataRegion, environment);
+  return organizationId;
+}
+
+/**
+ * Materializes a plan's limits and features (`source = plan`): missing rows are created, rows
+ * that still follow the plan are updated to its current values, and overrides are kept.
+ */
+async function materializePlan(tx: Tx, organizationId: bigint, plan: PlanDef): Promise<void> {
+  const limits = Object.entries(plan.limits);
+  await tx.organizationLimit.createMany({
+    data: limits.map(([limitKey, value]) => ({
+      organizationId,
+      limitKey,
+      limitValue: BigInt(value),
+      source: 'plan' as const,
+    })),
+    skipDuplicates: true,
+  });
+  for (const [limitKey, value] of limits) {
+    await tx.organizationLimit.updateMany({
+      where: { organizationId, limitKey, source: 'plan', limitValue: { not: BigInt(value) } },
+      data: { limitValue: BigInt(value) },
+    });
+  }
+  const features = Object.entries(plan.features);
+  await tx.organizationFeature.createMany({
+    data: features.map(([featureKey, enabled]) => ({
+      organizationId,
+      featureKey,
+      enabled,
+      source: 'plan' as const,
+    })),
+    skipDuplicates: true,
+  });
+  for (const [featureKey, enabled] of features) {
+    await tx.organizationFeature.updateMany({
+      where: { organizationId, featureKey, source: 'plan', enabled: { not: enabled } },
+      data: { enabled },
+    });
+  }
+}
+
+/** One active `saas` deployment row per organization, created if none exists. */
+async function ensureSaasDeployment(
+  tx: Tx,
+  organizationId: bigint,
+  region: string,
+  environment: string,
+): Promise<void> {
+  const deployment = await tx.organizationDeployment.findFirst({
+    where: { organizationId, deploymentMode: 'saas' },
+    select: { id: true },
+  });
+  if (!deployment) {
+    await tx.organizationDeployment.create({
+      data: {
+        organizationId,
+        deploymentMode: 'saas',
+        region,
+        environment,
+        status: 'active',
+        provisionedAt: new Date(),
+      },
+    });
+  }
 }
 
 async function planByCode(tx: Tx, code: string): Promise<{ id: bigint; def: PlanDef }> {
@@ -139,23 +313,12 @@ export async function seedDemo(
   options: { environment: string },
 ): Promise<DemoSummary> {
   return prisma.$transaction(async (tx) => {
-    const platformPlan = await planByCode(tx, DEMO.platformOrganization.plan);
-    const platform = await tx.organization.upsert({
-      where: { slug: DEMO.platformOrganization.slug },
-      create: {
-        slug: DEMO.platformOrganization.slug,
-        name: DEMO.platformOrganization.name,
-        kind: 'platform',
-        planId: platformPlan.id,
-        dataRegion: DEMO.dataRegion,
-      },
-      update: {},
-      select: { id: true, kind: true },
+    const platform = await tx.organization.findUnique({
+      where: { slug: PLATFORM_ORGANIZATION.slug },
+      select: { id: true },
     });
-    if (platform.kind !== 'platform') {
-      throw new Error(
-        `Organization slug ${DEMO.platformOrganization.slug} exists but is not kind=platform`,
-      );
+    if (!platform) {
+      throw new Error(`Platform organization is missing: seed the catalog first`);
     }
 
     const plan = await planByCode(tx, DEMO.organization.plan);
@@ -181,39 +344,12 @@ export async function seedDemo(
         locale: 'en',
         quarantineRetentionDays: plan.def.limits.quarantine_retention_days,
         notificationEmail: DEMO.users[0]!.email,
+        mfaRequired: false,
       },
       update: {},
     });
-    for (const [limitKey, value] of Object.entries(plan.def.limits)) {
-      await tx.organizationLimit.upsert({
-        where: { organizationId_limitKey: { organizationId, limitKey } },
-        create: { organizationId, limitKey, limitValue: BigInt(value), source: 'plan' },
-        update: {},
-      });
-    }
-    for (const [featureKey, enabled] of Object.entries(plan.def.features)) {
-      await tx.organizationFeature.upsert({
-        where: { organizationId_featureKey: { organizationId, featureKey } },
-        create: { organizationId, featureKey, enabled, source: 'plan' },
-        update: {},
-      });
-    }
-    const deployment = await tx.organizationDeployment.findFirst({
-      where: { organizationId, deploymentMode: 'saas' },
-      select: { id: true },
-    });
-    if (!deployment) {
-      await tx.organizationDeployment.create({
-        data: {
-          organizationId,
-          deploymentMode: 'saas',
-          region: DEMO.dataRegion,
-          environment: options.environment,
-          status: 'active',
-          provisionedAt: new Date(),
-        },
-      });
-    }
+    await materializePlan(tx, organizationId, plan.def);
+    await ensureSaasDeployment(tx, organizationId, DEMO.dataRegion, options.environment);
 
     // Verified ownership is globally unique (domains.verified_name); a pending claim is not.
     const owner = await tx.domain.findUnique({
@@ -269,17 +405,21 @@ export async function seedDemo(
     }
 
     const userIds: bigint[] = [];
+    let demoAdminId: bigint | null = null;
     for (const user of DEMO.users) {
+      const userOrganizationId = user.organization === 'platform' ? platform.id : organizationId;
       const role = await tx.role.findFirst({
         where: { organizationId: null, key: user.role },
         select: { id: true },
       });
       if (!role) throw new Error(`System role ${user.role} is missing: seed the catalog first`);
-      // Invited, no password: passwords and MFA arrive with step 1.3.
+      // Invited, no password: they activate through an invitation (step 1.3).
       const row = await tx.user.upsert({
-        where: { organizationId_email: { organizationId, email: user.email } },
+        where: {
+          organizationId_email: { organizationId: userOrganizationId, email: user.email },
+        },
         create: {
-          organizationId,
+          organizationId: userOrganizationId,
           email: user.email,
           displayName: user.displayName,
           status: 'invited',
@@ -289,9 +429,10 @@ export async function seedDemo(
       });
       await tx.userRole.upsert({
         where: { userId_roleId: { userId: row.id, roleId: role.id } },
-        create: { userId: row.id, roleId: role.id, organizationId },
+        create: { userId: row.id, roleId: role.id, organizationId: userOrganizationId },
         update: {},
       });
+      if (demoAdminId === null && user.organization === 'demo') demoAdminId = row.id;
       userIds.push(row.id);
     }
 
@@ -304,7 +445,7 @@ export async function seedDemo(
         direction: 'inbound',
         priority: DEMO.policy.priority,
         status: 'active',
-        createdByUserId: userIds[0] ?? null,
+        createdByUserId: demoAdminId,
       },
       update: {},
       select: { id: true, activeVersionId: true },
@@ -324,7 +465,7 @@ export async function seedDemo(
         definitionSha256: createHash('sha256').update(canonicalJson(definition)).digest('hex'),
         changeNote: 'Seeded sample policy',
         publishedAt: new Date(),
-        publishedByUserId: userIds[0] ?? null,
+        publishedByUserId: demoAdminId,
       },
       update: {},
       select: { id: true },

@@ -1,9 +1,10 @@
 import './instrumentation';
 import { bootstrapService } from '@email-gateway/common';
-import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import helmet from 'helmet';
 import { AppModule, SERVICE_NAME } from './app.module';
 import { loadApiConfig } from './config';
+import { configureApiApp } from './http/configure-api-app';
+import { setupOpenApi } from './http/openapi';
 
 const config = loadApiConfig();
 
@@ -15,14 +16,10 @@ void bootstrapService({
   port: config.HTTP_PORT,
   host: config.HTTP_HOST,
   configure: (app) => {
+    // Business routes under /api/v1 (ADR-0015); probes stay at /health/*.
+    configureApiApp(app, config);
     app.use(helmet());
     app.enableCors({ origin: config.CORS_ORIGINS, credentials: true });
-    if (config.NODE_ENV !== 'production') {
-      const doc = new DocumentBuilder()
-        .setTitle('Email Security Gateway API')
-        .setVersion('v1')
-        .build();
-      SwaggerModule.setup('docs', app, () => SwaggerModule.createDocument(app, doc));
-    }
+    if (config.NODE_ENV !== 'production') setupOpenApi(app);
   },
 });

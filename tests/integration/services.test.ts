@@ -28,11 +28,16 @@ describe.skipIf(!running)('Application services (compose profile: apps)', () => 
     expect(await page.text()).toContain('Operational');
   });
 
-  it('API serves versioned routes with correlation ids', async () => {
-    const res = await fetch(`http://${stack.host}:${stack.ports.services.api}/v1/meta`, {
+  it('API serves business routes under /api/v1 with correlation ids (ADR-0015)', async () => {
+    const base = `http://${stack.host}:${stack.ports.services.api}`;
+    const res = await fetch(`${base}/api/v1/meta`, {
       headers: { 'x-correlation-id': 'integration-0001' },
     });
     expect(res.status).toBe(200);
     expect(res.headers.get('x-correlation-id')).toBe('integration-0001');
+    expect(((await res.json()) as { apiVersion: string }).apiVersion).toBe('v1');
+    // The pre-ADR-0015 path is gone; probes stay unprefixed.
+    expect((await fetch(`${base}/v1/meta`)).status).toBe(404);
+    expect((await fetch(`${base}/api/health/live`)).status).toBe(404);
   });
 });

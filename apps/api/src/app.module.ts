@@ -10,9 +10,17 @@ import {
   S3Module,
   S3Service,
 } from '@email-gateway/common';
+import { ApiCommonModule } from './api-common.module';
 import { API_CONFIG } from './api-config.token';
 import type { ApiConfig } from './config';
 import { MetaModule } from './meta/meta.module';
+import { ApiKeysModule } from './modules/api-keys/api-keys.module';
+import { AuthModule } from './modules/auth/auth.module';
+import { LoginAuditModule } from './modules/login-audit/login-audit.module';
+import { OrganizationsModule } from './modules/organizations/organizations.module';
+import { RolesModule } from './modules/roles/roles.module';
+import { TenantDataModule } from './modules/tenant-data/tenant-data.module';
+import { UsersModule } from './modules/users/users.module';
 
 export const SERVICE_NAME = 'api';
 
@@ -38,7 +46,16 @@ export class AppModule {
           service: { name: SERVICE_NAME, version: config.SERVICE_VERSION },
           indicators: [PrismaService, PrismaReadService, RedisService, S3Service],
         }),
+        ApiCommonModule,
+        // Registers the global AuthGuard → PermissionsGuard and the override audit interceptor.
+        AuthModule,
         MetaModule,
+        UsersModule,
+        RolesModule,
+        ApiKeysModule,
+        LoginAuditModule,
+        TenantDataModule,
+        OrganizationsModule,
       ],
       providers: [{ provide: API_CONFIG, useValue: config }],
       exports: [API_CONFIG],

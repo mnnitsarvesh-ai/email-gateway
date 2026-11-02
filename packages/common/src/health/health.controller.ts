@@ -1,9 +1,11 @@
 import { Controller, Get, HttpStatus, Res, VERSION_NEUTRAL } from '@nestjs/common';
 import type { HealthReport } from '@email-gateway/shared-types';
 import type { Response } from 'express';
+import { Public } from '../auth/public.decorator';
 import { HealthService } from './health.service';
 
 /** Unversioned probe endpoints used by Docker, Kubernetes and load balancers. */
+@Public()
 @Controller({ path: 'health', version: VERSION_NEUTRAL })
 export class HealthController {
   constructor(private readonly health: HealthService) {}

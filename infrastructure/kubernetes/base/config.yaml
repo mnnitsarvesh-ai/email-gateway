@@ -13,3 +13,20 @@ data:
   DATABASE_READ_MAX_LAG_SECONDS: '10'
   DATABASE_READ_LAG_CHECK_INTERVAL_MS: '5000'
   OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.observability:4318
+  # api: one reverse-proxy hop (ALB / ingress) in front of the pods; drives client IPs.
+  HTTP_TRUST_PROXY: '1'
+  # api: links in invitation/reset/verification emails. Set per overlay (https required).
+  PORTAL_PUBLIC_URL: https://portal.replace-per-environment.invalid
+  # Session and token lifetimes (api; defaults of design D15).
+  AUTH_ACCESS_TOKEN_TTL_SECONDS: '600'
+  AUTH_REFRESH_TOKEN_TTL_SECONDS: '604800'
+  AUTH_SESSION_MAX_AGE_SECONDS: '2592000'
+  AUTH_PASSWORD_RESET_TTL_SECONDS: '1800'
+  AUTH_EMAIL_VERIFICATION_TTL_SECONDS: '86400'
+  AUTH_INVITATION_TTL_SECONDS: '604800'
+  # Transactional-email relay (api now, notification-worker later). NOTIFY_SMTP_HOST,
+  # NOTIFY_SMTP_FROM and NOTIFY_SMTP_USER are set per overlay; the password is a secret file.
+  # A relay with a self-signed certificate: mount the certificate from a Secret and set
+  # NOTIFY_SMTP_CA_PATH to the mounted file path in the overlay (verification stays on).
+  NOTIFY_SMTP_PORT: '587'
+  NOTIFY_SMTP_SECURE: starttls

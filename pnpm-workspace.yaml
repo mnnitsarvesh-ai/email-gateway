@@ -11,6 +11,7 @@ onlyBuiltDependencies:
   - '@prisma/engines'
   - '@swc/core'
   - '@tailwindcss/oxide'
+  - argon2
   - esbuild
   - prisma
   - sharp

@@ -3,7 +3,8 @@
  * Seed CLI (D7). Uses DATABASE_URL (the DML account).
  *
  *   node dist/seed/cli.js                                      catalog + demo (local/dev/CI)
- *   node dist/seed/cli.js --catalog-only                       catalog only
+ *   node dist/seed/cli.js --catalog-only                       catalog only (includes the
+ *                                                              platform organization)
  *   node dist/seed/cli.js --catalog-only --allow-production    the only form allowed in
  *                                                              staging/production
  */
@@ -47,8 +48,11 @@ async function main(): Promise<number> {
 
   const prisma = new PrismaClient({ datasourceUrl: config.DATABASE_URL });
   try {
-    const catalog = await seedCatalog(prisma);
-    logger.info(catalog, 'catalog seeded');
+    const catalog = await seedCatalog(prisma, { environment: config.APP_ENV });
+    logger.info(
+      { ...catalog, platformOrganizationId: formatId(catalog.platformOrganizationId) },
+      'catalog seeded',
+    );
     if (decision.demo) {
       const demo = await seedDemo(prisma, { environment: config.APP_ENV });
       logger.info(

@@ -107,7 +107,51 @@ export default tseslint.config(
     },
   },
   {
-    files: ['**/*.test.ts', '**/*.spec.ts', '**/test/**/*.ts', 'tests/**/*.ts'],
+    // Repository rule (design D2 of steps 1.2/1.3): inside API feature modules only
+    // *.repository.ts files talk to Prisma; services use repositories and TransactionRunner.
+    // Flat config replaces rule options, so the boundary patterns above are repeated here.
+    files: ['apps/api/src/modules/**/*.ts'],
+    ignores: ['**/*.repository.ts', '**/*.test.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          paths: [
+            {
+              name: '@email-gateway/common',
+              importNames: ['PrismaService', 'PrismaReadService'],
+              message: 'Only *.repository.ts files may use Prisma (design D2)',
+            },
+          ],
+          patterns: [
+            {
+              group: [
+                '**/apps/*',
+                '@email-gateway/api',
+                '@email-gateway/*-worker',
+                '@email-gateway/smtp-adapter',
+                '@email-gateway/policy-engine',
+                '@email-gateway/admin-portal',
+              ],
+              message: 'Apps are deployable units. Share code through packages/* only.',
+            },
+            {
+              group: ['../../packages/*', '../../../packages/*'],
+              message: 'Import packages by name (@email-gateway/*), not by relative path.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    files: [
+      '**/*.test.ts',
+      '**/*.spec.ts',
+      '**/test/**/*.ts',
+      'tests/**/*.ts',
+      'apps/*/integration/**/*.ts',
+    ],
     rules: {
       '@typescript-eslint/no-unsafe-assignment': 'off',
       '@typescript-eslint/no-unsafe-member-access': 'off',

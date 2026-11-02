@@ -67,3 +67,72 @@ export type DatabaseReadConfig = z.infer<typeof databaseReadConfigSchema>;
 export type RabbitmqConfig = z.infer<typeof rabbitmqConfigSchema>;
 export type RedisConfig = z.infer<typeof redisConfigSchema>;
 export type S3Config = z.infer<typeof s3ConfigSchema>;
+
+const EMAIL = z.email();
+const NAMED_ADDRESS = /^(?<name>[^<>\r\n]*?)\s*<(?<address>[^<>\s]+)>$/;
+
+/** True for `user@example.com` or `Display Name <user@example.com>` (no CR/LF anywhere). */
+export function isSenderAddress(value: string): boolean {
+  if (/[\r\n]/.test(value)) return false;
+  const named = NAMED_ADDRESS.exec(value.trim());
+  const address = named?.groups?.address ?? value.trim();
+  return EMAIL.safeParse(address).success;
+}
+
+/**
+ * Transactional-email relay (password reset, verification, invitations; later the notification
+ * service). Without NOTIFY_SMTP_HOST no relay is configured and callers fall back to logging.
+ * `APP_ENV` is part of the schema because plaintext SMTP is accepted only in local and CI.
+ */
+export const notifySmtpFieldsSchema = z.object({
+  APP_ENV: baseConfigSchema.shape.APP_ENV,
+  NOTIFY_SMTP_HOST: z.string().min(1).max(253).optional(),
+  NOTIFY_SMTP_PORT: port.default(587),
+  /** `tls`: implicit TLS (465). `starttls`: upgrade required (587). `none`: plaintext, local/CI only. */
+  NOTIFY_SMTP_SECURE: z.enum(['tls', 'starttls', 'none']).default('starttls'),
+  NOTIFY_SMTP_USER: z.string().min(1).optional(),
+  NOTIFY_SMTP_PASSWORD: z.string().min(1).optional(),
+  /**
+   * PEM file of extra certificates to trust for the relay, e.g. a pinned self-signed relay
+   * certificate. Verification stays on: only these (and the system CAs) are accepted.
+   * Deliberately not named *_FILE, which is the secret-indirection convention.
+   */
+  NOTIFY_SMTP_CA_PATH: z.string().min(1).optional(),
+  /** `no-reply@example.com` or `Example <no-reply@example.com>`. Required when HOST is set. */
+  NOTIFY_SMTP_FROM: z
+    .string()
+    .refine(isSenderAddress, 'must be an email address or "Name <email>"')
+    .optional(),
+});
+
+export type NotifySmtpConfig = z.infer<typeof notifySmtpFieldsSchema>;
+
+/**
+ * Cross-field rules of the relay config. Exported so a service that composes the fields into a
+ * larger schema (`.extend(notifySmtpFieldsSchema.shape)`) can apply them with `.superRefine`.
+ */
+export function validateNotifySmtpConfig(cfg: NotifySmtpConfig, ctx: z.RefinementCtx): void {
+  if (cfg.NOTIFY_SMTP_HOST && !cfg.NOTIFY_SMTP_FROM) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['NOTIFY_SMTP_FROM'],
+      message: 'is required when NOTIFY_SMTP_HOST is set',
+    });
+  }
+  if (Boolean(cfg.NOTIFY_SMTP_USER) !== Boolean(cfg.NOTIFY_SMTP_PASSWORD)) {
+    ctx.addIssue({
+      code: 'custom',
+      path: [cfg.NOTIFY_SMTP_USER ? 'NOTIFY_SMTP_PASSWORD' : 'NOTIFY_SMTP_USER'],
+      message: 'NOTIFY_SMTP_USER and NOTIFY_SMTP_PASSWORD must be set together',
+    });
+  }
+  if (cfg.NOTIFY_SMTP_SECURE === 'none' && cfg.APP_ENV !== 'local' && cfg.APP_ENV !== 'ci') {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['NOTIFY_SMTP_SECURE'],
+      message: 'none (plaintext SMTP) is allowed only when APP_ENV is local or ci',
+    });
+  }
+}
+
+export const notifySmtpConfigSchema = notifySmtpFieldsSchema.superRefine(validateNotifySmtpConfig);

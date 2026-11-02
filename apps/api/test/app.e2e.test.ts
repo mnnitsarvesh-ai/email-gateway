@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import {
@@ -12,6 +13,12 @@ import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { AppModule } from '../src/app.module';
 import { loadApiConfig } from '../src/config';
+import { EmailSender } from '../src/email/email-sender';
+import { configureApiApp } from '../src/http/configure-api-app';
+import { ACCESS_TOKEN_SCHEME, API_KEY_SCHEME, buildOpenApiDocument } from '../src/http/openapi';
+import { KeyValueStore } from '../src/kv/key-value-store';
+import { InMemoryKeyValueStore } from './support/in-memory-key-value-store';
+import { RecordingEmailSender } from './support/recording-email-sender';
 
 const config = loadApiConfig({
   NODE_ENV: 'test',
@@ -21,6 +28,12 @@ const config = loadApiConfig({
   S3_REGION: 'us-east-1',
   S3_BUCKET_MAIL: 'test-mail',
   S3_BUCKET_ARCHIVE: 'test-archive',
+  // Random per run: tests never use real secrets.
+  AUTH_JWT_SECRET: randomBytes(32).toString('hex'),
+  AUTH_TOKEN_PEPPER: randomBytes(32).toString('hex'),
+  DATA_ENCRYPTION_KEY: randomBytes(32).toString('hex'),
+  AUTH_BACKGROUND_JOBS_ENABLED: 'false',
+  HTTP_TRUST_PROXY: '1',
 });
 
 const healthy = (healthName: string) => ({ healthName, checkHealth: () => Promise.resolve() });
@@ -48,9 +61,14 @@ describe('API (e2e, dependencies stubbed)', () => {
       .useValue(healthy('redis'))
       .overrideProvider(S3Service)
       .useValue(healthy('s3'))
+      .overrideProvider(KeyValueStore)
+      .useValue(new InMemoryKeyValueStore())
+      .overrideProvider(EmailSender)
+      .useValue(new RecordingEmailSender())
       .compile();
     app = moduleRef.createNestApplication({ logger: false });
     configureHttpApp(app, createLogger({ service: 'api-test', level: 'silent' }));
+    configureApiApp(app, config);
     await app.init();
   });
 
@@ -92,10 +110,39 @@ describe('API (e2e, dependencies stubbed)', () => {
     dbHealthy = true;
   });
 
-  it('serves versioned routes under /v1', async () => {
-    const res = await request(app.getHttpServer()).get('/v1/meta').expect(200);
+  it('serves business routes under /api/v1 (ADR-0015)', async () => {
+    const res = await request(app.getHttpServer()).get('/api/v1/meta').expect(200);
     expect(res.body).toMatchObject({ apiVersion: 'v1' });
+    await request(app.getHttpServer()).get('/v1/meta').expect(404);
     await request(app.getHttpServer()).get('/meta').expect(404);
+    await request(app.getHttpServer()).get('/api/meta').expect(404);
+  });
+
+  it('keeps the probes unprefixed', async () => {
+    await request(app.getHttpServer()).get('/api/health/live').expect(404);
+    await request(app.getHttpServer()).get('/api/health/ready').expect(404);
+    await request(app.getHttpServer()).get('/api/v1/health/live').expect(404);
+  });
+
+  it('applies the configured trust proxy hop count', () => {
+    const express = app.getHttpAdapter().getInstance() as { get: (key: string) => unknown };
+    expect(express.get('trust proxy')).toBe(1);
+  });
+
+  it('builds the OpenAPI document with both security schemes and /api/v1 paths', () => {
+    const doc = buildOpenApiDocument(app);
+    expect(doc.components?.securitySchemes?.[ACCESS_TOKEN_SCHEME]).toMatchObject({
+      type: 'http',
+      scheme: 'bearer',
+      bearerFormat: 'JWT',
+    });
+    expect(doc.components?.securitySchemes?.[API_KEY_SCHEME]).toMatchObject({
+      type: 'apiKey',
+      in: 'header',
+      name: 'X-API-Key',
+    });
+    expect(Object.keys(doc.paths)).toContain('/api/v1/meta');
+    expect(Object.keys(doc.paths)).not.toContain('/v1/meta');
   });
 
   it('echoes a valid correlation id and mints one otherwise', async () => {
@@ -112,7 +159,7 @@ describe('API (e2e, dependencies stubbed)', () => {
 
   it('returns structured errors with the correlation id', async () => {
     const res = await request(app.getHttpServer())
-      .get('/v1/does-not-exist')
+      .get('/api/v1/x')
       .set('x-correlation-id', 'client-req-0002')
       .expect(404);
     expect(res.body).toMatchObject({ statusCode: 404, correlationId: 'client-req-0002' });

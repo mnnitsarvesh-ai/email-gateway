@@ -141,6 +141,9 @@ jobs:
         run: pnpm env:init
       - name: Start infrastructure and application services
         run: docker compose --profile apps up -d --build --wait --wait-timeout 900
+      # The api integration tests need the catalog (plans, permissions, platform organization).
+      - name: Seed catalog
+        run: pnpm db:seed
       - name: Integration tests
         run: pnpm test:integration
       - name: Service logs

@@ -21,6 +21,9 @@ export function summarizeHealth(report: HealthReport | null): PlatformHealth {
 /**
  * Server-side only: queries the API over the internal network. The URL is never exposed to the
  * browser. Times out quickly so a down API cannot stall page rendering.
+ *
+ * `API_INTERNAL_URL` is the API **origin** (e.g. `http://api:3000`). Probes are unprefixed
+ * (`/health/ready`); business calls use `${API_INTERNAL_URL}/api/v1/...` (ADR-0015).
  */
 export async function fetchPlatformHealth(): Promise<PlatformHealth> {
   const baseUrl = process.env.API_INTERNAL_URL;

@@ -12,19 +12,34 @@ export interface CreateLoggerOptions {
   destination?: pino.DestinationStream;
 }
 
+/** Credential-bearing field names censored at the top level and one level down (`*.<name>`). */
+const SECRET_FIELDS = [
+  'password',
+  'secret',
+  'token',
+  'authorization',
+  'accessToken',
+  'refreshToken',
+  'mfaToken',
+  'recoveryCode',
+  'recoveryCodes',
+  'code',
+  'newPassword',
+  'currentPassword',
+  'key',
+  'apiKey',
+  'otpauthUri',
+];
+
 /** Paths that must never reach logs. Extend rather than bypass. */
 export const REDACT_PATHS = [
-  'password',
-  '*.password',
-  'secret',
-  '*.secret',
-  'token',
-  '*.token',
-  'authorization',
+  ...SECRET_FIELDS.flatMap((field) => [field, `*.${field}`]),
   'req.headers.authorization',
   'req.headers.cookie',
+  'req.headers["x-api-key"]',
   'headers.authorization',
   'headers.cookie',
+  'headers["x-api-key"]',
 ];
 
 /**

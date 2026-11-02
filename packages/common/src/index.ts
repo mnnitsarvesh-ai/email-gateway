@@ -1,5 +1,6 @@
 import 'reflect-metadata';
 
+export * from './auth/public.decorator';
 export * from './bootstrap';
 export * from './cache/redis.module';
 export * from './correlation/correlation-id.middleware';

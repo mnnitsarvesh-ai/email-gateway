@@ -48,6 +48,10 @@ The manifests expect an `email-gateway-secrets` Secret (managed by External Secr
 | `migration-database-url` | `MIGRATION_DATABASE_URL` (migration Job, not in `base` yet) | `db-migrate`  | MySQL writer, migrator (DDL) account                                                               |
 | `rabbitmq-url`           | `RABBITMQ_URL_FILE`                                         | every service | Amazon MQ / RabbitMQ                                                                               |
 | `redis-url`              | `REDIS_URL_FILE`                                            | every service | ElastiCache Redis                                                                                  |
+| `auth-jwt-secret`        | `AUTH_JWT_SECRET_FILE`                                      | `api` only    | HMAC key for access tokens (at least 64 characters)                                                |
+| `auth-token-pepper`      | `AUTH_TOKEN_PEPPER_FILE`                                    | `api` only    | HMAC pepper for API-key and recovery-code hashes (at least 64 characters)                          |
+| `data-encryption-key`    | `DATA_ENCRYPTION_KEY_FILE`                                  | `api` only    | AES-256-GCM key, exactly 64 hex characters (application-encrypted columns such as MFA secrets)     |
+| `notify-smtp-password`   | `NOTIFY_SMTP_PASSWORD_FILE`                                 | `api`         | Password of the transactional-email relay (SES SMTP or similar); optional                          |
 
 `database-read-url` is **required** by the `api` Deployment: a missing file fails startup. An environment without a replica sets it to the writer URL; the api then reports `writer-fallback` (`not a replica`) and reads from the writer. The ConfigMap carries `DATABASE_READ_MAX_LAG_SECONDS` (`'10'`) and `DATABASE_READ_LAG_CHECK_INTERVAL_MS` (`'5000'`). Data-plane Deployments get no reader URL: they are writer-only by design.
 
@@ -58,6 +62,13 @@ The manifests expect an `email-gateway-secrets` Secret (managed by External Secr
 - The lag probe uses `SHOW REPLICA STATUS`, which works on RDS for MySQL read replicas. Aurora replicas return no rows, so on Aurora the api stays in `writer-fallback` until the Aurora probe (`information_schema.replica_host_status`) lands, which is planned for step 10.1.
 
 Details: [docs/database/replication.md](../database/replication.md).
+
+### Authentication, tenancy and transactional email (step 1.2/1.3)
+
+- The three auth secrets above are **required** by the `api`: a missing or too-short value fails startup. Never rotate `auth-token-pepper` (stored API-key and recovery-code hashes depend on it). To rotate `auth-jwt-secret` or `data-encryption-key`, put the old value in `AUTH_JWT_PREVIOUS_SECRET` / `DATA_ENCRYPTION_KEY_PREVIOUS` (also as secret files) for one rotation window, then remove it.
+- The ConfigMap carries `HTTP_TRUST_PROXY` (`'1'`: one proxy hop, the ALB/ingress, so client IPs and rate limits use the real address), `PORTAL_PUBLIC_URL` (set per overlay, must be `https://` in staging and production; links in invitation, reset and verification emails), the token TTL defaults (`AUTH_ACCESS_TOKEN_TTL_SECONDS`, `AUTH_REFRESH_TOKEN_TTL_SECONDS`, `AUTH_SESSION_MAX_AGE_SECONDS`, `AUTH_PASSWORD_RESET_TTL_SECONDS`, `AUTH_EMAIL_VERIFICATION_TTL_SECONDS`, `AUTH_INVITATION_TTL_SECONDS`), `NOTIFY_SMTP_PORT` (`'587'`) and `NOTIFY_SMTP_SECURE` (`starttls`). The remaining `AUTH_*`, `PLATFORM_OVERRIDE_MAX_MINUTES` and `ORG_DELETION_*` keys have safe defaults (see `.env.example`).
+- `NOTIFY_SMTP_HOST`, `NOTIFY_SMTP_USER` and `NOTIFY_SMTP_FROM` are set per overlay. Without `NOTIFY_SMTP_HOST` the api only logs outbound emails (and warns at startup in production). `NOTIFY_SMTP_SECURE=none` is rejected outside `local`/`ci`, and certificate verification is always on.
+- Business routes are served under `/api/v1`; the load balancer rule added with the infrastructure phase must forward `/api/*` to the api Service. Probes stay on `/health/*`.
 
 ## Terraform
 

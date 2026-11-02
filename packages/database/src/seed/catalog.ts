@@ -1,10 +1,11 @@
 /**
- * Seed data constants (docs/plan/steps/01-database.md D7). The catalog is platform data that
- * is safe in every environment; the demo data is for local, dev and CI only.
+ * Seed data constants (docs/plan/steps/01-database.md D7, docs/plan/steps/02-tenants-auth-rbac.md
+ * D8 and D10). The catalog is platform data that is safe in every environment (it includes the
+ * platform organization); the demo data is for local, dev and CI only.
  *
  * Role → permission mappings are explicit lists, never derived at runtime, so a reviewer can
- * see exactly what each built-in role may do. Tenant scoping (e.g. "own quarantine only" for
- * end users) is enforced by the services; permissions only say which actions exist.
+ * see exactly what each built-in role may do. Guards check permission keys, never role names;
+ * tenant scoping is enforced by the services.
  */
 
 export interface PermissionDef {
@@ -12,13 +13,17 @@ export interface PermissionDef {
   description: string;
 }
 
-export const PERMISSIONS: readonly PermissionDef[] = Object.freeze([
+/** The permission catalog. `permissions` in MySQL is synchronised from this list. */
+export const PERMISSIONS = Object.freeze([
   { key: 'organization:read', description: 'View organization profile, settings and limits' },
   { key: 'organization:manage', description: 'Change organization profile and settings' },
   { key: 'user:read', description: 'View users and their roles' },
   { key: 'user:manage', description: 'Invite, disable and assign roles to users' },
+  { key: 'role:read', description: 'View roles and the permission catalog' },
   { key: 'role:manage', description: 'Create and edit custom roles' },
+  { key: 'apikey:read', description: 'View API keys (never secrets)' },
   { key: 'apikey:manage', description: 'Create and revoke API keys' },
+  { key: 'session:manage', description: "View and revoke other users' sessions" },
   { key: 'domain:read', description: 'View domains, DNS records and mail servers' },
   { key: 'domain:manage', description: 'Add, verify and configure domains' },
   { key: 'policy:read', description: 'View email policies and exceptions' },
@@ -51,85 +56,137 @@ export const PERMISSIONS: readonly PermissionDef[] = Object.freeze([
     key: 'platform:operations',
     description: 'Platform: view operational health, queues and maintenance status',
   },
-]);
+  {
+    key: 'platform:tenant_override',
+    description: 'Platform: start an audited override into a customer organization',
+  },
+] as const satisfies readonly PermissionDef[]);
+
+/** Every permission key of the catalog. */
+export type PermissionKey = (typeof PERMISSIONS)[number]['key'];
 
 /** `resource` part of a `resource:action` key. */
 export const permissionCategory = (key: string): string => key.split(':', 1)[0]!;
 
-const ALL = PERMISSIONS.map((p) => p.key);
-const TENANT_SCOPED = ALL.filter((key) => !key.startsWith('platform:'));
+const ALL_PERMISSIONS: readonly PermissionKey[] = PERMISSIONS.map((p) => p.key);
 
-/** Read-only tenant permissions shared by support and audit roles. */
-const TENANT_READ = [
+const isPlatformPermission = (key: string): boolean => key.startsWith('platform:');
+
+/** Platform-only permissions (`platform:*`). A role holding any of them is a platform role. */
+export const PLATFORM_PERMISSIONS: readonly PermissionKey[] = Object.freeze(
+  ALL_PERMISSIONS.filter(isPlatformPermission),
+);
+
+/** Every permission that is not `platform:*`: what customer roles and API keys may hold. */
+export const TENANT_PERMISSIONS: readonly PermissionKey[] = Object.freeze(
+  ALL_PERMISSIONS.filter((key) => !isPlatformPermission(key)),
+);
+
+/** Read-only tenant permissions (D8 "TENANT_READ"). */
+export const TENANT_READ_PERMISSIONS: readonly PermissionKey[] = Object.freeze([
   'organization:read',
   'user:read',
+  'role:read',
+  'apikey:read',
   'domain:read',
   'policy:read',
   'message:read',
   'quarantine:read',
   'report:read',
   'archive:read',
-];
+]);
+
+/** Keys of the 8 built-in system roles (D8). */
+export const SYSTEM_ROLE_KEYS = Object.freeze([
+  'super_admin',
+  'platform_admin',
+  'organization_admin',
+  'domain_admin',
+  'security_analyst',
+  'quarantine_reviewer',
+  'compliance_auditor',
+  'read_only_user',
+] as const);
+export type SystemRoleKey = (typeof SYSTEM_ROLE_KEYS)[number];
+
+/** System roles that hold `platform:*` permissions; assignable only in the platform org. */
+export const PLATFORM_ROLE_KEYS = Object.freeze([
+  'super_admin',
+  'platform_admin',
+] as const satisfies readonly SystemRoleKey[]);
+
+/**
+ * System role keys of step 1.1 that no longer exist, mapped to their replacement. The seed
+ * moves their assignments and deletes them (idempotently).
+ */
+export const RETIRED_ROLE_KEYS: Readonly<Record<string, SystemRoleKey>> = Object.freeze({
+  platform_support: 'platform_admin',
+  tenant_admin: 'organization_admin',
+  security_admin: 'organization_admin',
+  helpdesk: 'quarantine_reviewer',
+  auditor: 'compliance_auditor',
+  end_user: 'read_only_user',
+});
 
 export interface RoleDef {
-  key: string;
+  key: SystemRoleKey;
   name: string;
   description: string;
-  permissions: readonly string[];
+  permissions: readonly PermissionKey[];
 }
 
-/** The 8 built-in system roles (organization_id NULL, is_system true). */
+/** The 8 built-in system roles (organization_id NULL, is_system true), exactly as D8. */
 export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
   {
     key: 'super_admin',
-    name: 'Super administrator',
+    name: 'Super Admin',
     description: 'Platform operator with every permission',
-    permissions: ALL,
+    permissions: ALL_PERMISSIONS,
   },
   {
-    key: 'platform_support',
-    name: 'Platform support',
-    description: 'Platform operator: read access to tenants for support, no content access',
-    permissions: ['platform:operations', ...TENANT_READ, 'audit:read'],
+    key: 'platform_admin',
+    name: 'Platform Admin',
+    description:
+      'Platform operator: manages customer organizations and operations, reads tenant data, ' +
+      'may start an audited override; no content access',
+    permissions: [
+      'platform:organizations',
+      'platform:operations',
+      'platform:tenant_override',
+      ...TENANT_READ_PERMISSIONS,
+      'audit:read',
+    ],
   },
   {
-    key: 'tenant_admin',
-    name: 'Tenant administrator',
-    description: 'Every tenant-scoped permission within the organization',
-    permissions: TENANT_SCOPED,
+    key: 'organization_admin',
+    name: 'Organization Admin',
+    description: 'Every tenant permission within the organization',
+    permissions: TENANT_PERMISSIONS,
   },
   {
-    key: 'security_admin',
-    name: 'Security administrator',
-    description: 'Configures domains and policies and handles quarantine',
+    key: 'domain_admin',
+    name: 'Domain Admin',
+    description: "Adds, verifies and configures the organization's domains",
     permissions: [
       'organization:read',
       'user:read',
       'domain:read',
       'domain:manage',
       'policy:read',
-      'policy:manage',
-      'policy:publish',
       'message:read',
-      'message:read_content',
       'quarantine:read',
-      'quarantine:release',
-      'quarantine:delete',
       'report:read',
-      'audit:read',
-      'archive:read',
-      'webhook:manage',
-      'settings:manage',
     ],
   },
   {
     key: 'security_analyst',
-    name: 'Security analyst',
-    description: 'Investigates messages and handles quarantine; cannot change configuration',
+    name: 'Security Analyst',
+    description: 'Investigates messages, edits draft policies and handles quarantine',
     permissions: [
       'organization:read',
       'domain:read',
       'policy:read',
+      'policy:manage',
       'message:read',
       'message:read_content',
       'quarantine:read',
@@ -137,33 +194,34 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'quarantine:delete',
       'report:read',
       'archive:read',
+      'audit:read',
     ],
   },
   {
-    key: 'helpdesk',
-    name: 'Helpdesk',
-    description: 'Answers user requests: message tracking and quarantine release, no content',
+    key: 'quarantine_reviewer',
+    name: 'Quarantine Reviewer',
+    description: 'Reviews, releases and deletes quarantined messages; no content access',
     permissions: [
       'organization:read',
-      'user:read',
-      'domain:read',
       'message:read',
       'quarantine:read',
       'quarantine:release',
+      'quarantine:delete',
+      'quarantine:request_release',
       'report:read',
     ],
   },
   {
-    key: 'auditor',
-    name: 'Auditor',
-    description: 'Read-only access including the audit log',
-    permissions: [...TENANT_READ, 'audit:read'],
+    key: 'compliance_auditor',
+    name: 'Compliance Auditor',
+    description: 'Read-only access plus the audit log and archive export',
+    permissions: [...TENANT_READ_PERMISSIONS, 'audit:read', 'archive:export'],
   },
   {
-    key: 'end_user',
-    name: 'End user',
-    description: 'Mailbox owner: own quarantine only (scoped by the service)',
-    permissions: ['quarantine:read', 'quarantine:request_release'],
+    key: 'read_only_user',
+    name: 'Read-only User',
+    description: 'Read-only access to the organization',
+    permissions: TENANT_READ_PERMISSIONS,
   },
 ]);
 
@@ -332,17 +390,58 @@ export const SYSTEM_SETTINGS: readonly SystemSettingDef[] = Object.freeze([
   },
 ]);
 
+/** Region of the seeded organizations (the platform org and the demo org). */
+export const DEFAULT_DATA_REGION = 'ap-south-1';
+
+/** Slug of the platform operators' organization (`kind = platform`). */
+export const PLATFORM_ORGANIZATION_SLUG = 'platform';
+
+/**
+ * The platform organization is catalog data (D10): it exists in every environment, because
+ * platform operators and the bootstrap CLI need it. MFA is mandatory for its members.
+ */
+export const PLATFORM_ORGANIZATION = Object.freeze({
+  slug: PLATFORM_ORGANIZATION_SLUG,
+  name: 'Platform operations',
+  plan: 'enterprise',
+  dataRegion: DEFAULT_DATA_REGION,
+  mfaRequired: true,
+});
+
+export interface DemoUserDef {
+  email: string;
+  displayName: string;
+  role: SystemRoleKey;
+  /** `platform` = the platform organization, `demo` = the demo customer organization. */
+  organization: 'platform' | 'demo';
+}
+
 /** Demo data (local, dev and CI only). The domain matches POSTFIX_RELAY_DOMAINS. */
 export const DEMO = Object.freeze({
-  platformOrganization: { slug: 'platform', name: 'Platform operations', plan: 'enterprise' },
   organization: { slug: 'demo', name: 'Demo Organization', plan: 'standard' },
-  dataRegion: 'ap-south-1',
+  dataRegion: DEFAULT_DATA_REGION,
   domain: 'gateway.test',
   inboundMailServer: { host: 'mail.gateway.test', port: 25 },
   users: [
-    { email: 'admin@gateway.test', displayName: 'Demo Admin', role: 'tenant_admin' },
-    { email: 'analyst@gateway.test', displayName: 'Demo Analyst', role: 'security_analyst' },
-  ],
+    {
+      email: 'admin@gateway.test',
+      displayName: 'Demo Admin',
+      role: 'organization_admin',
+      organization: 'demo',
+    },
+    {
+      email: 'analyst@gateway.test',
+      displayName: 'Demo Analyst',
+      role: 'security_analyst',
+      organization: 'demo',
+    },
+    {
+      email: 'operator@gateway.test',
+      displayName: 'Demo Platform Operator',
+      role: 'super_admin',
+      organization: 'platform',
+    },
+  ] as readonly DemoUserDef[],
   policy: {
     name: 'Quarantine malware and phishing',
     description: 'Sample organization-wide inbound policy',

@@ -42,6 +42,17 @@ spec:
             - { name: DATABASE_READ_URL_FILE, value: /var/run/secrets/gateway/database-read-url }
             - { name: RABBITMQ_URL_FILE, value: /var/run/secrets/gateway/rabbitmq-url }
             - { name: REDIS_URL_FILE, value: /var/run/secrets/gateway/redis-url }
+            # Authentication (steps 1.2/1.3) and the transactional-email relay password.
+            - { name: AUTH_JWT_SECRET_FILE, value: /var/run/secrets/gateway/auth-jwt-secret }
+            - { name: AUTH_TOKEN_PEPPER_FILE, value: /var/run/secrets/gateway/auth-token-pepper }
+            - {
+                name: DATA_ENCRYPTION_KEY_FILE,
+                value: /var/run/secrets/gateway/data-encryption-key,
+              }
+            - {
+                name: NOTIFY_SMTP_PASSWORD_FILE,
+                value: /var/run/secrets/gateway/notify-smtp-password,
+              }
           volumeMounts:
             - { name: secrets, mountPath: /var/run/secrets/gateway, readOnly: true }
             - { name: tmp, mountPath: /tmp }

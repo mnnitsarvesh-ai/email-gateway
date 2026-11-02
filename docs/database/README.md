@@ -2,7 +2,7 @@
 
 MySQL 8.4 is the primary transactional store, managed with Prisma ([ADR-0003](../architecture/adr/0003-prisma-orm.md), [ADR-0014](../architecture/adr/0014-mysql-data-model-partitioning-read-write-split.md)). The schema is `packages/database/prisma/schema.prisma`, and the migrations are in `packages/database/prisma/migrations/`. The design behind it is [step 1.1](../plan/steps/01-database.md).
 
-The schema has **61 tables** in 10 modules, and **16** of them are range-partitioned by time. Email bodies and attachments are never stored in MySQL: only S3 object keys, sizes and hashes.
+The schema has **63 tables** in 10 modules, and **16** of them are range-partitioned by time. Steps 1.2 + 1.3 added `user_tokens` and `user_mfa_recovery_codes` and the identity/tenancy columns ([D10](../plan/steps/02-tenants-auth-rbac.md#d10-data-model-changes-one-forward-migration-wp1)). Email bodies and attachments are never stored in MySQL: only S3 object keys, sizes and hashes.
 
 ## Documents
 
@@ -54,7 +54,7 @@ pnpm db:status                       # migration status
 pnpm db:partitions -- plan           # print the partition DDL and purges, change nothing
 pnpm db:partitions -- apply          # create partitions ahead, drop expired ones, run purges
 pnpm db:seed                         # catalog + demo data (local, dev, CI); idempotent
-pnpm db:seed -- --catalog-only       # catalog only
+pnpm db:seed -- --catalog-only       # catalog only (includes the platform organization)
 pnpm db:perf                         # performance test in a throwaway schema; writes performance-report.md
 pnpm db:migrate:dev --name <change>  # local only: create and apply a new migration
 pnpm db:generate                     # regenerate the Prisma client
@@ -63,6 +63,20 @@ pnpm db:generate                     # regenerate the Prisma client
 `db:migrate`, `db:reset:local`, `db:partitions`, `db:seed` and `db:perf` build `@email-gateway/database` (and its workspace dependencies) first. `db:partitions` accepts `--now <ISO>`, `--bootstrap-from <YYYY-MM-DD>` and `--lock-wait-timeout <seconds>` (default 5). `db:reset:local` refuses to run when `APP_ENV` is staging/production or `NODE_ENV` is production. In staging and production, `db:seed` refuses to run unless given `--catalog-only --allow-production`, and then seeds only the catalog.
 
 In Compose, the `db-migrate` job runs the history preflight, `migrate deploy` and then `db:partitions apply` before any service starts. In Kubernetes, the `db-maintenance` CronJob runs partition maintenance daily at 01:30 UTC. CI applies the migrations to a fresh MySQL, runs maintenance twice (the second run must be a no-op), checks drift, and seeds twice to prove idempotency.
+
+### Seed data
+
+`db:seed` (`packages/database/src/seed`) is idempotent: every row is an upsert on a natural key or a find-then-create in one transaction, so running it twice leaves identical row counts (`tests/integration/seed.test.ts`).
+
+**Catalog** (every environment, including `--catalog-only --allow-production`):
+
+- **30 permissions** (`resource:action`). `PLATFORM_PERMISSIONS` are the `platform:*` keys, `TENANT_PERMISSIONS` all others, `TENANT_READ_PERMISSIONS` the read-only tenant set; all are exported from `@email-gateway/database` with `PermissionKey`.
+- **8 system roles** (`organization_id NULL`, `is_system`), exactly as [D8](../plan/steps/02-tenants-auth-rbac.md#d8-authorization-model): `super_admin`, `platform_admin`, `organization_admin`, `domain_admin`, `security_analyst`, `quarantine_reviewer`, `compliance_auditor`, `read_only_user`. Their permission sets are synchronised exactly on every run. `super_admin` and `platform_admin` (`PLATFORM_ROLE_KEYS`) hold `platform:*` permissions and belong to platform-organization users only (enforced by the api).
+- **Retired role keys.** Step 1.1 seeded `platform_support`, `tenant_admin`, `security_admin`, `helpdesk`, `auditor` and `end_user`. The seed moves their `user_roles` to `platform_admin`, `organization_admin`, `organization_admin`, `quarantine_reviewer`, `compliance_auditor` and `read_only_user` (`RETIRED_ROLE_KEYS`; keeping `organization_id` and `granted_by_user_id`, skipping users who already hold the new role), then deletes the retired role, its `role_permissions` and its `user_roles`. Only system roles are touched; the step is a no-op once done.
+- **4 plans** and the **system settings** (created only; operator changes are never overwritten).
+- **The platform organization** (`PLATFORM_ORGANIZATION_SLUG = 'platform'`, `kind = platform`, plan `enterprise`, region `ap-south-1`, `active`): settings with `mfa_required = true` (re-asserted on every run), limits and features materialized from the plan (`source = plan` rows follow the plan, `override` rows are kept), and one active `saas` deployment row (environment = `APP_ENV`). Platform operators and the api's bootstrap CLI need it in every environment.
+
+**Demo data** (local, dev and CI only): the `demo` customer organization (plan `standard`, `mfa_required = false`), the verified domain `gateway.test` with an inbound mail server, a sample published policy, and three invited users without passwords: `admin@gateway.test` (`organization_admin`) and `analyst@gateway.test` (`security_analyst`) in `demo`, and `operator@gateway.test` (`super_admin`) in the platform organization. They activate through an invitation (step 1.3).
 
 ### Changing the schema
 
@@ -74,13 +88,38 @@ In Compose, the `db-migrate` job runs the history preflight, `migrate deploy` an
 
    ```bash
    cd packages/database
+   MIGRATION_URL=$(node --env-file=../../.env -e 'process.stdout.write(process.env.MIGRATION_DATABASE_URL)')
    node --env-file=../../.env node_modules/prisma/build/index.js migrate diff \
-     --from-url "$MIGRATION_DATABASE_URL" --to-schema-datamodel prisma/schema.prisma --exit-code
+     --from-url "$MIGRATION_URL" --to-schema-datamodel prisma/schema.prisma --exit-code
    ```
 
-   The shell must have `MIGRATION_DATABASE_URL` set (for example `set -a; . ../../.env; set +a`). Partitions do not appear in Prisma's introspection, so the check stays clean after `db:partitions` has split `pmax`.
+   Read `.env` with `node --env-file`, not by sourcing it in the shell: values such as `NOTIFY_SMTP_FROM="Name <addr>"` are valid for Node and Compose but break `. ../../.env` in zsh and sh. Never echo the URL: it contains the migrator password. Partitions do not appear in Prisma's introspection, so the check stays clean after `db:partitions` has split `pmax`.
 
-5. Commit the schema and the migration together. CI fails if they do not match.
+5. Verify the full history on a clean schema (below), then commit the schema and the migration together. CI fails if they do not match.
+
+#### Clean-schema verification
+
+Before committing a migration, apply **all** migrations to a throwaway schema `email_gateway_verify`, run partition maintenance and the drift check against it, then drop it. Never use the main schema for this and never run `prisma migrate reset` on it. The migrator holds no global `CREATE` (see Accounts), so locally the schema is created and granted by root inside the MySQL container, with the password taken from the container environment and never printed:
+
+```bash
+docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot -e \
+  "CREATE DATABASE email_gateway_verify CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+   GRANT ALL PRIVILEGES ON email_gateway_verify.* TO \"$MYSQL_MIGRATOR_USER\"@\"%\";"'
+
+cd packages/database
+VERIFY_URL=$(node --env-file=../../.env -e 'const u=new URL(process.env.MIGRATION_DATABASE_URL); u.pathname="/email_gateway_verify"; process.stdout.write(u.toString())')
+DATABASE_URL="$VERIFY_URL" MIGRATION_DATABASE_URL="$VERIFY_URL" node node_modules/prisma/build/index.js migrate deploy
+# --env-file never overrides variables already set, so the verify URL wins.
+DATABASE_URL="$VERIFY_URL" MIGRATION_DATABASE_URL="$VERIFY_URL" node --env-file=../../.env dist/partitioning/cli.js apply
+node node_modules/prisma/build/index.js migrate diff --from-url "$VERIFY_URL" \
+  --to-schema-datamodel prisma/schema.prisma --exit-code      # "No difference detected"
+
+docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot -e \
+  "DROP DATABASE email_gateway_verify;
+   REVOKE ALL PRIVILEGES ON email_gateway_verify.* FROM \"$MYSQL_MIGRATOR_USER\"@\"%\";"'
+```
+
+The replica follows the `CREATE`, the migrations and the `DROP` through replication. Never echo `$VERIFY_URL`: it contains the migrator password.
 
 Never edit a migration that has been applied anywhere shared. Write a new one instead.
 

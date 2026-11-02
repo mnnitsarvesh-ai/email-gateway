@@ -90,10 +90,14 @@ erDiagram
     enum status
     bigint plan_id FK
     enum deployment_mode
+    bigint deletion_requested_by_user_id "no FK"
+    bigint deletion_confirmed_by_user_id "no FK"
+    datetime purge_after "IDX with status"
   }
   organization_settings {
     bigint id PK
     bigint organization_id FK,UK
+    bool mfa_required
   }
   organization_limits {
     bigint id PK
@@ -124,9 +128,14 @@ erDiagram
   roles ||--o{ user_roles : ""
   users |o--o{ user_roles : "granted_by"
   users ||--o{ user_sessions : "CASCADE"
+  users ||--o{ user_tokens : "CASCADE"
+  users |o--o{ user_tokens : "created_by, SET NULL"
+  organizations ||--o{ user_tokens : ""
+  users ||--o{ user_mfa_recovery_codes : "CASCADE"
+  organizations ||--o{ user_mfa_recovery_codes : ""
   organizations ||--o{ api_keys : ""
   users |o--o{ api_keys : "created_by"
-  organizations |o..o{ login_audit_logs : "no FK"
+  organizations |o--o{ login_audit_logs : "nullable"
   users |o..o{ login_audit_logs : "no FK, survives deletion"
   users {
     bigint id PK
@@ -134,6 +143,7 @@ erDiagram
     bigint organization_id FK
     varchar email "UQ with organization_id"
     enum status
+    bigint mfa_last_used_step "TOTP replay protection"
   }
   roles {
     bigint id PK
@@ -158,7 +168,25 @@ erDiagram
     bigint id PK
     bigint user_id FK
     char refresh_token_hash UK
-    char family_id
+    char family_id "IDX with revoked_at"
+    datetime absolute_expires_at
+    bool mfa_authenticated
+  }
+  user_tokens {
+    bigint id PK
+    bigint organization_id FK
+    bigint user_id FK
+    enum purpose "invitation, password_reset, email_verification"
+    char token_hash UK "SHA-256"
+    datetime consumed_at
+    bigint created_by_user_id FK "nullable"
+  }
+  user_mfa_recovery_codes {
+    bigint id PK
+    bigint organization_id FK
+    bigint user_id FK
+    char code_hash "UQ with user_id"
+    datetime used_at
   }
   api_keys {
     bigint id PK

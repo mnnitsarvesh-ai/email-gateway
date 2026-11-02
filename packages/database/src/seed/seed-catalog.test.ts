@@ -1,11 +1,21 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DEMO,
   FEATURE_KEYS,
   LIMIT_KEYS,
   PERMISSIONS,
   PLANS,
+  PLATFORM_ORGANIZATION,
+  PLATFORM_ORGANIZATION_SLUG,
+  PLATFORM_PERMISSIONS,
+  PLATFORM_ROLE_KEYS,
+  RETIRED_ROLE_KEYS,
+  SYSTEM_ROLE_KEYS,
   SYSTEM_ROLES,
   SYSTEM_SETTINGS,
+  TENANT_PERMISSIONS,
+  TENANT_READ_PERMISSIONS,
+  type PermissionKey,
 } from './catalog';
 import { decideSeed } from './guard';
 
@@ -56,72 +66,206 @@ describe('seed guard', () => {
 });
 
 describe('seed catalog', () => {
-  const keys = PERMISSIONS.map((p) => p.key);
+  const keys: string[] = PERMISSIONS.map((p) => p.key);
+  const sorted = (list: readonly string[]) => [...list].sort();
+  const role = (key: string) => SYSTEM_ROLES.find((r) => r.key === key)!.permissions;
 
-  it('contains every permission required by D7, without duplicates', () => {
+  it('contains the 30 permissions of D7 and D8, without duplicates', () => {
     expect(new Set(keys).size).toBe(keys.length);
-    for (const key of [
-      'organization:read',
-      'organization:manage',
-      'user:read',
-      'user:manage',
-      'role:manage',
-      'apikey:manage',
-      'domain:read',
-      'domain:manage',
-      'policy:read',
-      'policy:manage',
-      'policy:publish',
-      'message:read',
-      'message:read_content',
-      'quarantine:read',
-      'quarantine:release',
-      'quarantine:delete',
-      'quarantine:request_release',
-      'report:read',
-      'audit:read',
-      'archive:read',
-      'archive:export',
-      'archive:legal_hold',
-      'webhook:manage',
-      'settings:manage',
-      'platform:organizations',
-      'platform:operations',
-    ]) {
-      expect(keys).toContain(key);
-    }
-    for (const key of keys) expect(key).toMatch(/^[a-z]+:[a-z_]+$/);
-  });
-
-  it('has the 8 system roles, each referencing existing permissions only, without duplicates', () => {
-    expect(SYSTEM_ROLES.map((r) => r.key)).toEqual([
-      'super_admin',
-      'platform_support',
-      'tenant_admin',
-      'security_admin',
-      'security_analyst',
-      'helpdesk',
-      'auditor',
-      'end_user',
-    ]);
-    for (const role of SYSTEM_ROLES) {
-      expect(new Set(role.permissions).size, role.key).toBe(role.permissions.length);
-      for (const p of role.permissions) expect(keys, `${role.key} → ${p}`).toContain(p);
-    }
-  });
-
-  it('maps the roles as D7 describes', () => {
-    const role = (key: string) => SYSTEM_ROLES.find((r) => r.key === key)!.permissions;
-    expect([...role('super_admin')].sort()).toEqual([...keys].sort());
-    expect(role('tenant_admin').some((p) => p.startsWith('platform:'))).toBe(false);
-    expect(role('tenant_admin')).toHaveLength(
-      keys.filter((k) => !k.startsWith('platform:')).length,
+    expect(sorted(keys)).toEqual(
+      sorted([
+        'organization:read',
+        'organization:manage',
+        'user:read',
+        'user:manage',
+        'role:read',
+        'role:manage',
+        'apikey:read',
+        'apikey:manage',
+        'session:manage',
+        'domain:read',
+        'domain:manage',
+        'policy:read',
+        'policy:manage',
+        'policy:publish',
+        'message:read',
+        'message:read_content',
+        'quarantine:read',
+        'quarantine:release',
+        'quarantine:delete',
+        'quarantine:request_release',
+        'report:read',
+        'audit:read',
+        'archive:read',
+        'archive:export',
+        'archive:legal_hold',
+        'webhook:manage',
+        'settings:manage',
+        'platform:organizations',
+        'platform:operations',
+        'platform:tenant_override',
+      ]),
     );
-    expect(role('auditor')).toContain('audit:read');
-    expect(role('auditor').every((p) => /:(read)$/.test(p))).toBe(true);
-    expect([...role('end_user')].sort()).toEqual(['quarantine:read', 'quarantine:request_release']);
-    expect(role('platform_support')).not.toContain('message:read_content');
-    expect(role('helpdesk')).not.toContain('message:read_content');
+    for (const key of keys) expect(key).toMatch(/^[a-z]+:[a-z_]+$/);
+    for (const p of PERMISSIONS) expect(p.description.length, p.key).toBeGreaterThan(0);
+  });
+
+  it('splits the catalog into platform and tenant permissions', () => {
+    expect(sorted(PLATFORM_PERMISSIONS)).toEqual([
+      'platform:operations',
+      'platform:organizations',
+      'platform:tenant_override',
+    ]);
+    expect(TENANT_PERMISSIONS.some((p) => p.startsWith('platform:'))).toBe(false);
+    expect(sorted([...TENANT_PERMISSIONS, ...PLATFORM_PERMISSIONS])).toEqual(sorted(keys));
+    expect(TENANT_PERMISSIONS).toHaveLength(keys.length - PLATFORM_PERMISSIONS.length);
+    for (const p of TENANT_READ_PERMISSIONS) expect(TENANT_PERMISSIONS).toContain(p);
+    expect(sorted(TENANT_READ_PERMISSIONS)).toEqual(
+      sorted([
+        'organization:read',
+        'user:read',
+        'role:read',
+        'apikey:read',
+        'domain:read',
+        'policy:read',
+        'message:read',
+        'quarantine:read',
+        'report:read',
+        'archive:read',
+      ]),
+    );
+  });
+
+  it('has exactly the 8 system roles of D8, each referencing existing permissions only', () => {
+    expect(SYSTEM_ROLES.map((r) => r.key)).toEqual([...SYSTEM_ROLE_KEYS]);
+    expect([...SYSTEM_ROLE_KEYS]).toEqual([
+      'super_admin',
+      'platform_admin',
+      'organization_admin',
+      'domain_admin',
+      'security_analyst',
+      'quarantine_reviewer',
+      'compliance_auditor',
+      'read_only_user',
+    ]);
+    expect(SYSTEM_ROLES.map((r) => r.name)).toEqual([
+      'Super Admin',
+      'Platform Admin',
+      'Organization Admin',
+      'Domain Admin',
+      'Security Analyst',
+      'Quarantine Reviewer',
+      'Compliance Auditor',
+      'Read-only User',
+    ]);
+    for (const r of SYSTEM_ROLES) {
+      expect(new Set(r.permissions).size, r.key).toBe(r.permissions.length);
+      for (const p of r.permissions) expect(keys, `${r.key} → ${p}`).toContain(p);
+      expect(r.description.length, r.key).toBeGreaterThan(0);
+    }
+  });
+
+  it('treats exactly the roles holding a platform:* permission as platform roles', () => {
+    const platformRoles = SYSTEM_ROLES.filter((r) =>
+      r.permissions.some((p) => p.startsWith('platform:')),
+    ).map((r) => r.key);
+    expect(platformRoles).toEqual([...PLATFORM_ROLE_KEYS]);
+    expect([...PLATFORM_ROLE_KEYS]).toEqual(['super_admin', 'platform_admin']);
+  });
+
+  it('maps the roles exactly as D8 describes', () => {
+    const read = TENANT_READ_PERMISSIONS;
+    const expected: Record<string, readonly PermissionKey[]> = {
+      super_admin: keys as PermissionKey[],
+      platform_admin: [
+        'platform:organizations',
+        'platform:operations',
+        'platform:tenant_override',
+        ...read,
+        'audit:read',
+      ],
+      organization_admin: TENANT_PERMISSIONS,
+      domain_admin: [
+        'organization:read',
+        'user:read',
+        'domain:read',
+        'domain:manage',
+        'policy:read',
+        'message:read',
+        'quarantine:read',
+        'report:read',
+      ],
+      security_analyst: [
+        'organization:read',
+        'domain:read',
+        'policy:read',
+        'policy:manage',
+        'message:read',
+        'message:read_content',
+        'quarantine:read',
+        'quarantine:release',
+        'quarantine:delete',
+        'report:read',
+        'archive:read',
+        'audit:read',
+      ],
+      quarantine_reviewer: [
+        'organization:read',
+        'message:read',
+        'quarantine:read',
+        'quarantine:release',
+        'quarantine:delete',
+        'quarantine:request_release',
+        'report:read',
+      ],
+      compliance_auditor: [...read, 'audit:read', 'archive:export'],
+      read_only_user: read,
+    };
+    expect(Object.keys(expected)).toEqual([...SYSTEM_ROLE_KEYS]);
+    for (const [key, permissions] of Object.entries(expected)) {
+      expect(sorted(role(key)), key).toEqual(sorted(permissions));
+    }
+    // Content access stays with the roles that investigate messages.
+    expect(role('platform_admin')).not.toContain('message:read_content');
+    expect(role('quarantine_reviewer')).not.toContain('message:read_content');
+  });
+
+  it('maps every retired step-1.1 role key to an existing, non-retired role', () => {
+    expect(RETIRED_ROLE_KEYS).toEqual({
+      platform_support: 'platform_admin',
+      tenant_admin: 'organization_admin',
+      security_admin: 'organization_admin',
+      helpdesk: 'quarantine_reviewer',
+      auditor: 'compliance_auditor',
+      end_user: 'read_only_user',
+    });
+    for (const [retired, target] of Object.entries(RETIRED_ROLE_KEYS)) {
+      expect(SYSTEM_ROLE_KEYS as readonly string[], retired).not.toContain(retired);
+      expect(SYSTEM_ROLE_KEYS, retired).toContain(target);
+    }
+  });
+
+  it('defines the platform organization as catalog data with mandatory MFA', () => {
+    expect(PLATFORM_ORGANIZATION_SLUG).toBe('platform');
+    expect(PLATFORM_ORGANIZATION).toMatchObject({
+      slug: 'platform',
+      plan: 'enterprise',
+      dataRegion: 'ap-south-1',
+      mfaRequired: true,
+    });
+    expect(PLANS.map((p) => p.code)).toContain(PLATFORM_ORGANIZATION.plan);
+  });
+
+  it('seeds demo users with current role keys, platform roles only in the platform org', () => {
+    expect(DEMO.users.map((u) => [u.email, u.organization, u.role])).toEqual([
+      ['admin@gateway.test', 'demo', 'organization_admin'],
+      ['analyst@gateway.test', 'demo', 'security_analyst'],
+      ['operator@gateway.test', 'platform', 'super_admin'],
+    ]);
+    for (const u of DEMO.users) {
+      const isPlatformRole = (PLATFORM_ROLE_KEYS as readonly string[]).includes(u.role);
+      expect(isPlatformRole, u.email).toBe(u.organization === 'platform');
+    }
   });
 
   it('defines the four plans with every limit and feature key', () => {

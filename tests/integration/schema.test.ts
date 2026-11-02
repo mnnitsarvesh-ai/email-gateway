@@ -6,7 +6,8 @@ import { stack } from './support/env';
 /**
  * Asserts the physical MySQL schema produced by the migrations matches the data model in
  * docs/plan/steps/01-database.md (section 3) and ADR-0014: tables, partitioning, the absence of
- * foreign keys on partitioned tables, the tenancy column and the identity registry's unique key.
+ * foreign keys on partitioned tables, the tenancy column and the identity registry's unique key;
+ * plus the identity/tenancy changes of docs/plan/steps/02-tenants-auth-rbac.md (D10).
  */
 const prisma = new PrismaClient({ datasourceUrl: stack.databaseUrl() });
 
@@ -68,6 +69,8 @@ const TENANT_OWNED = [
   'roles',
   'user_roles',
   'user_sessions',
+  'user_tokens',
+  'user_mfa_recovery_codes',
   'api_keys',
   'login_audit_logs',
   'domains',
@@ -115,12 +118,12 @@ const TENANT_OWNED = [
 const ALL_TABLES = [...NOT_TENANT_OWNED, ...TENANT_OWNED];
 
 describe('MySQL schema', () => {
-  it('has exactly the 61 data-model tables plus _prisma_migrations', async () => {
+  it('has exactly the 63 data-model tables plus _prisma_migrations', async () => {
     const rows = await prisma.$queryRaw<{ name: string }[]>`
       SELECT TABLE_NAME AS name FROM information_schema.TABLES
       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'`;
-    expect(ALL_TABLES).toHaveLength(61);
-    expect(new Set(ALL_TABLES).size).toBe(61);
+    expect(ALL_TABLES).toHaveLength(63);
+    expect(new Set(ALL_TABLES).size).toBe(63);
     expect(rows.map((r) => r.name).sort()).toEqual([...ALL_TABLES, '_prisma_migrations'].sort());
   });
 
@@ -215,6 +218,217 @@ describe('MySQL schema', () => {
       await prisma.messageIdentity.deleteMany({ where: { organizationId: organization.id } });
       await prisma.organization.deleteMany({ where: { id: organization.id } });
       await prisma.organizationPlan.deleteMany({ where: { id: plan.id } });
+    }
+  });
+});
+
+interface ColumnInfo {
+  tableName: string;
+  columnName: string;
+  columnType: string;
+  nullable: string;
+  columnDefault: string | null;
+}
+
+async function columns(tables: string[]): Promise<Map<string, ColumnInfo>> {
+  const rows = await prisma.$queryRaw<ColumnInfo[]>`
+    SELECT TABLE_NAME AS tableName, COLUMN_NAME AS columnName, COLUMN_TYPE AS columnType,
+           IS_NULLABLE AS nullable, COLUMN_DEFAULT AS columnDefault
+    FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN (${Prisma.join(tables)})`;
+  return new Map(rows.map((r) => [`${r.tableName}.${r.columnName}`, r]));
+}
+
+/** Index name → ordered column list (and uniqueness) for one table. */
+async function indexes(
+  table: string,
+): Promise<Map<string, { columns: string[]; unique: boolean }>> {
+  const rows = await prisma.$queryRaw<
+    { indexName: string; columnName: string; seq: number | bigint; nonUnique: number | bigint }[]
+  >`
+    SELECT INDEX_NAME AS indexName, COLUMN_NAME AS columnName, SEQ_IN_INDEX AS seq,
+           NON_UNIQUE AS nonUnique
+    FROM information_schema.STATISTICS
+    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ${table}
+    ORDER BY INDEX_NAME, SEQ_IN_INDEX`;
+  const out = new Map<string, { columns: string[]; unique: boolean }>();
+  for (const r of rows) {
+    const entry = out.get(r.indexName) ?? { columns: [], unique: Number(r.nonUnique) === 0 };
+    entry.columns.push(r.columnName);
+    out.set(r.indexName, entry);
+  }
+  return out;
+}
+
+const indexColumnSets = async (table: string) =>
+  [...(await indexes(table)).values()].map((i) => ({ ...i, key: i.columns.join(',') }));
+
+describe('identity and tenancy schema (step 1.2 + 1.3, D10)', () => {
+  it('adds the new users, user_sessions, organizations and organization_settings columns', async () => {
+    const cols = await columns([
+      'users',
+      'user_sessions',
+      'organizations',
+      'organization_settings',
+    ]);
+    const expectColumn = (key: string, type: string, nullable: 'YES' | 'NO') => {
+      const col = cols.get(key);
+      expect(col, key).toBeDefined();
+      expect(col!.columnType, key).toBe(type);
+      expect(col!.nullable, key).toBe(nullable);
+    };
+    expectColumn('users.email_verified_at', 'datetime(3)', 'YES');
+    expectColumn('users.mfa_last_used_step', 'bigint unsigned', 'YES');
+    expectColumn('users.status_reason', 'varchar(512)', 'YES');
+    expectColumn('users.status_changed_at', 'datetime(3)', 'YES');
+
+    expectColumn('user_sessions.authenticated_at', 'datetime(3)', 'NO');
+    expectColumn('user_sessions.absolute_expires_at', 'datetime(3)', 'NO');
+    expectColumn('user_sessions.mfa_authenticated', 'tinyint(1)', 'NO');
+    expect(cols.get('user_sessions.mfa_authenticated')!.columnDefault).toBe('0');
+
+    expectColumn('organizations.status_reason', 'varchar(512)', 'YES');
+    expectColumn('organizations.status_changed_at', 'datetime(3)', 'YES');
+    expectColumn('organizations.deletion_requested_at', 'datetime(3)', 'YES');
+    expectColumn('organizations.deletion_requested_by_user_id', 'bigint unsigned', 'YES');
+    expectColumn('organizations.deletion_reason', 'varchar(512)', 'YES');
+    expectColumn('organizations.deletion_confirmed_at', 'datetime(3)', 'YES');
+    expectColumn('organizations.deletion_confirmed_by_user_id', 'bigint unsigned', 'YES');
+    expectColumn(
+      'organizations.status_before_deletion',
+      "enum('active','suspended','deleted','pending_deletion')",
+      'YES',
+    );
+    expectColumn('organizations.purge_after', 'datetime(3)', 'YES');
+
+    expectColumn('organization_settings.mfa_required', 'tinyint(1)', 'NO');
+    expect(cols.get('organization_settings.mfa_required')!.columnDefault).toBe('0');
+  });
+
+  it('creates user_tokens and user_mfa_recovery_codes with the documented columns', async () => {
+    const cols = await columns(['user_tokens', 'user_mfa_recovery_codes']);
+    const shape = (table: string) =>
+      Object.fromEntries(
+        [...cols.values()]
+          .filter((c) => c.tableName === table)
+          .map((c) => [
+            c.columnName,
+            `${c.columnType} ${c.nullable === 'YES' ? 'NULL' : 'NOT NULL'}`,
+          ]),
+      );
+    expect(shape('user_tokens')).toEqual({
+      id: 'bigint unsigned NOT NULL',
+      organization_id: 'bigint unsigned NOT NULL',
+      user_id: 'bigint unsigned NOT NULL',
+      purpose: "enum('invitation','password_reset','email_verification') NOT NULL",
+      token_hash: 'char(64) NOT NULL',
+      expires_at: 'datetime(3) NOT NULL',
+      consumed_at: 'datetime(3) NULL',
+      created_by_user_id: 'bigint unsigned NULL',
+      created_ip: 'varchar(45) NULL',
+      created_at: 'datetime(3) NOT NULL',
+    });
+    expect(shape('user_mfa_recovery_codes')).toEqual({
+      id: 'bigint unsigned NOT NULL',
+      organization_id: 'bigint unsigned NOT NULL',
+      user_id: 'bigint unsigned NOT NULL',
+      code_hash: 'char(64) NOT NULL',
+      used_at: 'datetime(3) NULL',
+      created_at: 'datetime(3) NOT NULL',
+    });
+  });
+
+  it('has the new indexes, and (family_id, revoked_at) replaces (family_id)', async () => {
+    const tokens = await indexColumnSets('user_tokens');
+    expect(tokens).toContainEqual(expect.objectContaining({ key: 'token_hash', unique: true }));
+    expect(tokens).toContainEqual(
+      expect.objectContaining({ key: 'user_id,purpose,consumed_at', unique: false }),
+    );
+    expect(tokens).toContainEqual(expect.objectContaining({ key: 'expires_at', unique: false }));
+
+    const codes = await indexColumnSets('user_mfa_recovery_codes');
+    expect(codes).toContainEqual(
+      expect.objectContaining({ key: 'user_id,code_hash', unique: true }),
+    );
+
+    const sessions = (await indexColumnSets('user_sessions')).map((i) => i.key);
+    expect(sessions).toContain('family_id,revoked_at');
+    expect(sessions).not.toContain('family_id');
+
+    const organizations = (await indexColumnSets('organizations')).map((i) => i.key);
+    expect(organizations).toContain('status,purge_after');
+  });
+
+  it('has the documented foreign keys (CASCADE from users, none for the deletion actors)', async () => {
+    const rows = await prisma.$queryRaw<
+      { tableName: string; columnName: string; referencedTable: string; deleteRule: string }[]
+    >`
+      SELECT k.TABLE_NAME AS tableName, k.COLUMN_NAME AS columnName,
+             k.REFERENCED_TABLE_NAME AS referencedTable, r.DELETE_RULE AS deleteRule
+      FROM information_schema.KEY_COLUMN_USAGE k
+      JOIN information_schema.REFERENTIAL_CONSTRAINTS r
+        ON r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+      WHERE k.TABLE_SCHEMA = DATABASE()
+        AND k.TABLE_NAME IN ('user_tokens', 'user_mfa_recovery_codes', 'organizations')
+        AND k.REFERENCED_TABLE_NAME IS NOT NULL`;
+    const fks = rows
+      .map((r) => `${r.tableName}.${r.columnName} -> ${r.referencedTable} ${r.deleteRule}`)
+      .sort();
+    expect(fks).toEqual(
+      [
+        'organizations.plan_id -> organization_plans RESTRICT',
+        'user_mfa_recovery_codes.organization_id -> organizations RESTRICT',
+        'user_mfa_recovery_codes.user_id -> users CASCADE',
+        'user_tokens.created_by_user_id -> users SET NULL',
+        'user_tokens.organization_id -> organizations RESTRICT',
+        'user_tokens.user_id -> users CASCADE',
+      ].sort(),
+    );
+  });
+
+  it('appends rate_limited to the login outcome enum', async () => {
+    const cols = await columns(['login_audit_logs']);
+    expect(cols.get('login_audit_logs.outcome')!.columnType).toBe(
+      "enum('success','failure','locked','mfa_required','mfa_failure','rate_limited')",
+    );
+  });
+
+  it('enforces unique token hashes and removes tokens and recovery codes with their user', async () => {
+    const { suffix, ids, cleanup } = await scratchOrganizations(1);
+    const organizationId = ids[0]!;
+    try {
+      const user = await prisma.user.create({
+        data: { organizationId, email: `it-${suffix}@example.test`, displayName: 'Schema test' },
+      });
+      const tokenHash = randomUUID().replaceAll('-', '').padEnd(64, 'a');
+      const token = {
+        organizationId,
+        userId: user.id,
+        purpose: 'password_reset' as const,
+        tokenHash,
+        expiresAt: new Date(Date.now() + 60_000),
+      };
+      await prisma.userToken.create({ data: token });
+      await expect(
+        prisma.userToken.create({ data: { ...token, purpose: 'invitation' } }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+
+      const codeHash = randomUUID().replaceAll('-', '').padEnd(64, 'b');
+      await prisma.userMfaRecoveryCode.create({
+        data: { organizationId, userId: user.id, codeHash },
+      });
+      await expect(
+        prisma.userMfaRecoveryCode.create({ data: { organizationId, userId: user.id, codeHash } }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+
+      await prisma.user.delete({ where: { id: user.id } });
+      expect(await prisma.userToken.count({ where: { organizationId } })).toBe(0);
+      expect(await prisma.userMfaRecoveryCode.count({ where: { organizationId } })).toBe(0);
+    } finally {
+      await prisma.userToken.deleteMany({ where: { organizationId } });
+      await prisma.userMfaRecoveryCode.deleteMany({ where: { organizationId } });
+      await prisma.user.deleteMany({ where: { organizationId } });
+      await cleanup();
     }
   });
 });

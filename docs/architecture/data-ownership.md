@@ -7,24 +7,25 @@ Which deployable owns (writes) each table, bucket, queue and cache, and who may 
 3. **Schema changes are owned by migrations.** Only `db-migrate` and partition maintenance use the DDL account (`MIGRATION_DATABASE_URL`). Runtime services have DML only.
 4. **Content is never in MySQL.** Bodies and attachments live in S3; MySQL holds keys, sizes and hashes.
 
-Status: all 61 tables are IMPLEMENTED (step 1.1 schema, `tests/integration/schema.test.ts`). **No business code writes any of them yet**; the writing step is given for each group. The "Writer" column is ownership by design.
+Status: all 63 tables are IMPLEMENTED (step 1.1 schema plus the steps 1.2 + 1.3 migration `identity_tenancy`, `tests/integration/schema.test.ts`). Apart from `db:seed` (catalog, the platform organization and demo data), **no business code writes them yet**; the writing step is given for each group. The "Writer" column is ownership by design.
 
 ## MySQL tables by owner
 
 ### api (control plane)
 
-| Tables                                                                                                                                     | Notes                                                                                               | Writing step |
-| ------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- | ------------ |
-| `organizations`, `organization_settings`, `organization_limits`, `organization_features`, `organization_deployments`                       | Tenant management; deployments also by the deployment manager (in `api`)                            | 1.2, 8.3     |
-| `users`, `roles`, `role_permissions`, `user_roles`, `user_sessions`, `api_keys`, `login_audit_logs`                                        | Identity and access. Password and MFA secrets are hashes or app-encrypted ciphertext only           | 1.3          |
-| `domains`, `domain_verifications`, `domain_dns_records`, `domain_dkim_keys`, `domain_mx_records`, `domain_mail_servers`, `domain_settings` | Domain onboarding and its background DNS jobs. DKIM private keys are references, never key material | 2.1          |
-| `email_policies`, `policy_versions`, `policy_conditions`, `policy_actions`, `policy_exceptions`                                            | Everything in policy except execution logs                                                          | 5.2          |
-| `delivery_routes`; `delivery_suppressions` (manual entries)                                                                                |                                                                                                     | 2.3, 6.x     |
-| `quarantine_actions`; `quarantine_release_logs` (created on release); `quarantine_messages` status changes caused by user actions          | Release and delete requests, approvals                                                              | 5.3          |
-| `archive_settings`, `archive_retention_policies`, `archive_legal_holds`                                                                    |                                                                                                     | 8.1          |
-| `webhook_subscriptions`                                                                                                                    | HMAC secret stored as app-encrypted ciphertext                                                      | 6.2          |
-| `audit_logs`                                                                                                                               | Append-only, partitioned monthly, never auto-dropped                                                | 1.2 onwards  |
-| `system_settings`, `yara_rules`, `threat_indicators` (analyst and organization entries)                                                    | Platform operators and tenant analysts                                                              | 4.2, 6.1     |
+| Tables                                                                                                                                     | Notes                                                                                                        | Writing step |
+| ------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ | ------------ |
+| `organizations`, `organization_settings`, `organization_limits`, `organization_features`, `organization_deployments`                       | Tenant management; deployments also by the deployment manager (in `api`)                                     | 1.2, 8.3     |
+| `users`, `roles`, `role_permissions`, `user_roles`, `user_sessions`, `api_keys`, `login_audit_logs`                                        | Identity and access. Password and MFA secrets are hashes or app-encrypted ciphertext only                    | 1.3          |
+| `user_tokens`, `user_mfa_recovery_codes`                                                                                                   | Auth module: single-use tokens (SHA-256 only) and MFA recovery codes (HMAC only); purged/replaced by the api | 1.3          |
+| `domains`, `domain_verifications`, `domain_dns_records`, `domain_dkim_keys`, `domain_mx_records`, `domain_mail_servers`, `domain_settings` | Domain onboarding and its background DNS jobs. DKIM private keys are references, never key material          | 2.1          |
+| `email_policies`, `policy_versions`, `policy_conditions`, `policy_actions`, `policy_exceptions`                                            | Everything in policy except execution logs                                                                   | 5.2          |
+| `delivery_routes`; `delivery_suppressions` (manual entries)                                                                                |                                                                                                              | 2.3, 6.x     |
+| `quarantine_actions`; `quarantine_release_logs` (created on release); `quarantine_messages` status changes caused by user actions          | Release and delete requests, approvals                                                                       | 5.3          |
+| `archive_settings`, `archive_retention_policies`, `archive_legal_holds`                                                                    |                                                                                                              | 8.1          |
+| `webhook_subscriptions`                                                                                                                    | HMAC secret stored as app-encrypted ciphertext                                                               | 6.2          |
+| `audit_logs`                                                                                                                               | Append-only, partitioned monthly, never auto-dropped                                                         | 1.2 onwards  |
+| `system_settings`, `yara_rules`, `threat_indicators` (analyst and organization entries)                                                    | Platform operators and tenant analysts                                                                       | 4.2, 6.1     |
 
 ### smtp-adapter (ingestion)
 

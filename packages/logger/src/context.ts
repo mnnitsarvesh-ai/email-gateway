@@ -36,3 +36,13 @@ export function getContext(): RequestContext | undefined {
 export function getCorrelationId(): string | undefined {
   return storage.getStore()?.correlationId;
 }
+
+/**
+ * Records the authenticated tenant (decimal `organizations.id`) on the current request context so
+ * every later log line carries it. Called by the API's authentication guard only, after the
+ * principal is resolved; a no-op outside a context.
+ */
+export function setContextTenant(organizationId: string): void {
+  const store = storage.getStore();
+  if (store) store.tenantId = organizationId;
+}

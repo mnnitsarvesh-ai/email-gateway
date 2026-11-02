@@ -1,16 +1,28 @@
 import { spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { PrismaClient } from '@email-gateway/database';
+import {
+  PERMISSIONS,
+  PLATFORM_ORGANIZATION_SLUG,
+  PrismaClient,
+  RETIRED_ROLE_KEYS,
+  SYSTEM_ROLE_KEYS,
+  SYSTEM_ROLES,
+} from '@email-gateway/database';
 import { afterAll, describe, expect, it } from 'vitest';
 import { stack } from './support/env';
 
 /**
- * db:seed (D7) against the dev schema, with the DML account: running it twice leaves the same
- * row counts. The seeded rows are dev data and are deliberately left in place.
+ * db:seed (step 1.1 D7, step 1.2/1.3 D8 and D10) against the dev schema, with the DML account:
+ * the catalog (30 permissions, the 8 system roles, the platform organization), the retired
+ * role-key remap, and idempotency (running it twice leaves the same row counts). The seeded
+ * rows are dev data and are deliberately left in place.
  */
 const SEED_CLI = fileURLToPath(
   new URL('../../packages/database/dist/seed/cli.js', import.meta.url),
 );
+/** Relative `<KEY>_FILE` paths in .env are relative to the repository root, like compose. */
+const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const prisma = new PrismaClient({ datasourceUrl: stack.databaseUrl() });
 
 afterAll(async () => {
@@ -19,6 +31,7 @@ afterAll(async () => {
 
 function seed(args: string[] = [], env: Record<string, string> = {}) {
   const result = spawnSync(process.execPath, [SEED_CLI, ...args], {
+    cwd: REPO_ROOT,
     env: { ...process.env, LOG_LEVEL: 'warn', ...env },
     encoding: 'utf8',
     timeout: 60_000,
@@ -29,6 +42,10 @@ function seed(args: string[] = [], env: Record<string, string> = {}) {
 async function counts() {
   const demo = await prisma.organization.findUnique({ where: { slug: 'demo' } });
   const organizationId = demo?.id ?? 0n;
+  const platform = await prisma.organization.findUnique({
+    where: { slug: PLATFORM_ORGANIZATION_SLUG },
+  });
+  const platformId = platform?.id ?? 0n;
   return {
     permissions: await prisma.permission.count(),
     systemRoles: await prisma.role.count({ where: { organizationId: null, isSystem: true } }),
@@ -47,6 +64,20 @@ async function counts() {
     demoMailServers: await prisma.domainMailServer.count({ where: { organizationId } }),
     demoPolicies: await prisma.emailPolicy.count({ where: { organizationId } }),
     demoPolicyVersions: await prisma.policyVersion.count({ where: { organizationId } }),
+    platformUsers: await prisma.user.count({ where: { organizationId: platformId } }),
+    platformUserRoles: await prisma.userRole.count({ where: { organizationId: platformId } }),
+    platformSettings: await prisma.organizationSetting.count({
+      where: { organizationId: platformId },
+    }),
+    platformLimits: await prisma.organizationLimit.count({
+      where: { organizationId: platformId },
+    }),
+    platformFeatures: await prisma.organizationFeature.count({
+      where: { organizationId: platformId },
+    }),
+    platformDeployments: await prisma.organizationDeployment.count({
+      where: { organizationId: platformId },
+    }),
   };
 }
 
@@ -61,17 +92,25 @@ describe('db:seed', () => {
     expect(await counts()).toEqual(afterFirst);
 
     expect(afterFirst).toMatchObject({
+      permissions: 30,
       systemRoles: 8,
       plans: expect.any(Number) as unknown,
       demoOrganizations: 2,
       demoUsers: 2,
       demoUserRoles: 2,
+      demoLimits: 7,
+      demoFeatures: 11,
       demoDeployments: 1,
       demoDomains: 1,
       demoPolicies: 1,
       demoPolicyVersions: 1,
+      platformUsers: 1,
+      platformUserRoles: 1,
+      platformSettings: 1,
+      platformLimits: 7,
+      platformFeatures: 11,
+      platformDeployments: 1,
     });
-    expect(afterFirst.permissions).toBeGreaterThanOrEqual(26);
     expect(afterFirst.plans).toBeGreaterThanOrEqual(4);
 
     // The demo domain is the verified owner of its name (tenant resolution key).
@@ -79,6 +118,201 @@ describe('db:seed', () => {
       where: { verifiedName: stack.relayDomain() },
     });
     expect(domain?.status).toBe('verified');
+  });
+
+  it('seeds exactly the 30 permissions and the 8 system roles of D8, with their permissions', async () => {
+    expect(seed().status).toBe(0);
+    const permissions = await prisma.permission.findMany({ select: { key: true } });
+    expect(permissions.map((p) => p.key).sort()).toEqual(PERMISSIONS.map((p) => p.key).sort());
+
+    const roles = await prisma.role.findMany({
+      where: { organizationId: null },
+      select: {
+        key: true,
+        name: true,
+        isSystem: true,
+        permissions: { select: { permission: { select: { key: true } } } },
+      },
+    });
+    expect(roles.map((r) => r.key).sort()).toEqual([...SYSTEM_ROLE_KEYS].sort());
+    for (const def of SYSTEM_ROLES) {
+      const row = roles.find((r) => r.key === def.key)!;
+      expect(row.isSystem, def.key).toBe(true);
+      expect(row.name, def.key).toBe(def.name);
+      expect(row.permissions.map((p) => p.permission.key).sort(), def.key).toEqual(
+        [...def.permissions].sort(),
+      );
+    }
+    for (const retired of Object.keys(RETIRED_ROLE_KEYS)) {
+      expect(roles.map((r) => r.key)).not.toContain(retired);
+    }
+  });
+
+  it('seeds the platform organization with mandatory MFA and the demo users', async () => {
+    const demoEmails = ['admin@gateway.test', 'analyst@gateway.test', 'operator@gateway.test'];
+    const accountState = async () =>
+      prisma.user.findMany({
+        where: { email: { in: demoEmails } },
+        select: { email: true, status: true, passwordHash: true, mfaEnabled: true },
+        orderBy: { email: 'asc' },
+      });
+    // The demo users may already have been activated locally (invitation, password reset): the
+    // seed must leave existing accounts exactly as they are (upsert with `update: {}`).
+    const before = await accountState();
+    expect(seed().status).toBe(0);
+    const after = await accountState();
+    for (const previous of before) {
+      expect(
+        after.find((u) => u.email === previous.email),
+        previous.email,
+      ).toEqual(previous);
+    }
+    const platform = await prisma.organization.findUniqueOrThrow({
+      where: { slug: PLATFORM_ORGANIZATION_SLUG },
+      include: { settings: true, plan: true, deployments: true },
+    });
+    expect(platform).toMatchObject({
+      kind: 'platform',
+      status: 'active',
+      dataRegion: 'ap-south-1',
+    });
+    expect(platform.plan.code).toBe('enterprise');
+    expect(platform.settings?.mfaRequired).toBe(true);
+    expect(platform.deployments.filter((d) => d.deploymentMode === 'saas')).toHaveLength(1);
+
+    const demo = await prisma.organization.findUniqueOrThrow({
+      where: { slug: 'demo' },
+      include: { settings: true },
+    });
+    expect(demo.settings?.mfaRequired).toBe(false);
+
+    const users = await prisma.user.findMany({
+      where: { email: { in: demoEmails } },
+      select: {
+        email: true,
+        status: true,
+        passwordHash: true,
+        organizationId: true,
+        userRoles: { select: { role: { select: { key: true } } } },
+      },
+    });
+    const byEmail = new Map(users.map((u) => [u.email, u]));
+    const expectUser = (email: string, organizationId: bigint, roleKey: string) => {
+      const user = byEmail.get(email);
+      expect(user, email).toBeDefined();
+      expect(user!.organizationId, email).toBe(organizationId);
+      expect(
+        user!.userRoles.map((r) => r.role.key),
+        email,
+      ).toContain(roleKey);
+      // The seed creates users as invited without a password; an invited account never has one
+      // (accepting the invitation sets the password and activates it).
+      if (user!.status === 'invited') expect(user!.passwordHash, email).toBeNull();
+    };
+    expectUser('admin@gateway.test', demo.id, 'organization_admin');
+    expectUser('analyst@gateway.test', demo.id, 'security_analyst');
+    expectUser('operator@gateway.test', platform.id, 'super_admin');
+  });
+
+  it('remaps assignments of retired role keys and deletes the retired roles', async () => {
+    const suffix = randomUUID().slice(0, 8);
+    const plan = await prisma.organizationPlan.create({
+      data: { code: `it-${suffix}`, name: 'Seed test', defaultLimits: {}, defaultFeatures: {} },
+    });
+    const organization = await prisma.organization.create({
+      data: { slug: `it-${suffix}`, name: 'Seed test', planId: plan.id, dataRegion: 'ap-south-1' },
+    });
+    const organizationId = organization.id;
+    try {
+      const mkUser = (name: string) =>
+        prisma.user.create({
+          data: { organizationId, email: `${name}-${suffix}@example.test`, displayName: name },
+        });
+      const granter = await mkUser('granter');
+      const both = await mkUser('both');
+      const reviewer = await mkUser('reviewer');
+
+      // A retired system role as step 1.1 seeded it (organization_id NULL). The seed below
+      // deletes it again, so the test leaves no role behind even if an assertion fails later.
+      const retiredRole = async (key: string) =>
+        (await prisma.role.findFirst({ where: { organizationId: null, key } })) ??
+        (await prisma.role.create({ data: { key, name: key, isSystem: true } }));
+      const tenantAdmin = await retiredRole('tenant_admin');
+      const securityAdmin = await retiredRole('security_admin');
+      const helpdesk = await retiredRole('helpdesk');
+      const userRead = await prisma.permission.findUniqueOrThrow({ where: { key: 'user:read' } });
+      await prisma.rolePermission.createMany({
+        data: [{ roleId: tenantAdmin.id, permissionId: userRead.id }],
+        skipDuplicates: true,
+      });
+      await prisma.userRole.createMany({
+        data: [
+          // Both retired roles map to organization_admin: one assignment must result.
+          {
+            userId: both.id,
+            roleId: tenantAdmin.id,
+            organizationId,
+            grantedByUserId: granter.id,
+          },
+          { userId: both.id, roleId: securityAdmin.id, organizationId },
+          { userId: reviewer.id, roleId: helpdesk.id, organizationId },
+        ],
+      });
+
+      const result = seed(['--catalog-only']);
+      expect(result.status, result.output).toBe(0);
+
+      const roleKeysOf = async (userId: bigint) =>
+        (
+          await prisma.userRole.findMany({
+            where: { userId },
+            select: {
+              organizationId: true,
+              grantedByUserId: true,
+              role: { select: { key: true, organizationId: true } },
+            },
+          })
+        ).map((r) => ({
+          key: r.role.key,
+          system: r.role.organizationId === null,
+          organizationId: r.organizationId,
+          grantedByUserId: r.grantedByUserId,
+        }));
+      expect(await roleKeysOf(both.id)).toEqual([
+        {
+          key: 'organization_admin',
+          system: true,
+          organizationId,
+          grantedByUserId: granter.id,
+        },
+      ]);
+      expect(await roleKeysOf(reviewer.id)).toEqual([
+        { key: 'quarantine_reviewer', system: true, organizationId, grantedByUserId: null },
+      ]);
+      expect(
+        await prisma.role.count({
+          where: { organizationId: null, key: { in: Object.keys(RETIRED_ROLE_KEYS) } },
+        }),
+      ).toBe(0);
+      expect(
+        await prisma.rolePermission.count({
+          where: { roleId: { in: [tenantAdmin.id, securityAdmin.id, helpdesk.id] } },
+        }),
+      ).toBe(0);
+    } finally {
+      await prisma.user.deleteMany({ where: { organizationId } });
+      await prisma.organization.deleteMany({ where: { id: organizationId } });
+      await prisma.organizationPlan.deleteMany({ where: { id: plan.id } });
+    }
+  });
+
+  it('seeds the catalog, including the platform organization, with --catalog-only --allow-production', () => {
+    const result = seed(['--catalog-only', '--allow-production'], {
+      APP_ENV: 'production',
+      NODE_ENV: 'production',
+    });
+    expect(result.status, result.output).toBe(0);
+    expect(result.output).not.toContain('demo data seeded');
   });
 
   it('refuses to seed demo data in production', () => {
