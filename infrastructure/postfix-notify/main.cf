@@ -1,0 +1,40 @@
+# Transactional-email smarthost (local development profile). Upstream relay settings are applied
+# by entrypoint.sh from the environment; credentials never live in this file.
+
+compatibility_level = 3.6
+maillog_file = /dev/stdout
+myhostname = notify.gateway.local
+mydestination =
+local_recipient_maps =
+local_transport = error:5.1.1 local delivery is disabled
+alias_maps =
+alias_database =
+inet_interfaces = all
+inet_protocols = ipv4
+
+# Only callers on the private network may submit, and only to be relayed upstream.
+# mynetworks is set from the environment by the entrypoint.
+smtpd_relay_restrictions = permit_mynetworks, reject
+smtpd_recipient_restrictions = permit_mynetworks, reject
+smtpd_helo_required = yes
+disable_vrfy_command = yes
+message_size_limit = 10485760
+
+# --- Upstream relay -----------------------------------------------------------
+# relayhost and the pinned fingerprint are set by the entrypoint.
+smtp_sasl_auth_enable = yes
+smtp_sasl_password_maps = texthash:/etc/postfix/sasl/relay_passwd
+smtp_sasl_security_options = noanonymous
+smtp_sasl_tls_security_options = noanonymous
+# Never send credentials in clear text: TLS is mandatory and the upstream certificate is pinned
+# by its SHA-256 fingerprint (works for a self-signed certificate without disabling checks).
+smtp_tls_security_level = fingerprint
+smtp_tls_fingerprint_digest = sha256
+smtp_tls_mandatory_protocols = >=TLSv1.2
+smtp_tls_loglevel = 1
+# The upstream advertises PIPELINING but answers RCPT before processing MAIL FROM (503 5.5.1).
+smtp_discard_ehlo_keywords = pipelining
+
+# Transactional mail is time-sensitive: give up (and bounce to the sender) after a day.
+maximal_queue_lifetime = 1d
+bounce_queue_lifetime = 1d

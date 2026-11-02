@@ -270,6 +270,25 @@ services:
     depends_on:
       rspamd: { condition: service_healthy }
 
+  postfix-notify:
+    # Internal smarthost for transactional email: services submit without credentials on the
+    # private network; it relays to NOTIFY_RELAY_HOST with SASL, a pinned certificate and no
+    # pipelining (see infrastructure/postfix-notify). Without NOTIFY_RELAY_HOST it discards mail.
+    build: ./infrastructure/postfix-notify
+    image: email-gateway/postfix-notify:local
+    restart: unless-stopped
+    hostname: notify
+    environment:
+      NOTIFY_RELAY_HOST: ${NOTIFY_RELAY_HOST:-}
+      NOTIFY_RELAY_PORT: ${NOTIFY_RELAY_PORT:-587}
+      NOTIFY_RELAY_USER: ${NOTIFY_RELAY_USER:-}
+      NOTIFY_RELAY_PASSWORD: ${NOTIFY_RELAY_PASSWORD:-}
+      NOTIFY_RELAY_TLS_FINGERPRINT: ${NOTIFY_RELAY_TLS_FINGERPRINT:-}
+      # Docker's private ranges: other containers, plus the host via the published port.
+      POSTFIX_MYNETWORKS: 127.0.0.0/8 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
+    volumes: ['postfix-notify-spool:/var/spool/postfix']
+    ports: ['127.0.0.1:${NOTIFY_SMARTHOST_HOST_PORT:-2526}:25']
+
   # ---------------------------------------------------------------- applications (profile: apps)
   db-migrate:
     profiles: [apps]
@@ -315,20 +334,13 @@ services:
       DATA_ENCRYPTION_KEY: ${DATA_ENCRYPTION_KEY:?run pnpm env:init}
       DATA_ENCRYPTION_KEY_PREVIOUS: ${DATA_ENCRYPTION_KEY_PREVIOUS:-}
       PORTAL_PUBLIC_URL: ${PORTAL_PUBLIC_URL:-http://localhost:3001}
-      # Transactional-email relay; without NOTIFY_SMTP_HOST emails are only logged (not delivered).
-      NOTIFY_SMTP_HOST: ${NOTIFY_SMTP_HOST:-}
-      NOTIFY_SMTP_PORT: ${NOTIFY_SMTP_PORT:-587}
-      NOTIFY_SMTP_SECURE: ${NOTIFY_SMTP_SECURE:-starttls}
-      NOTIFY_SMTP_USER: ${NOTIFY_SMTP_USER:-}
-      NOTIFY_SMTP_PASSWORD: ${NOTIFY_SMTP_PASSWORD:-}
+      # Transactional email goes to the internal smarthost (postfix-notify), which relays upstream
+      # with SASL and a pinned certificate. Plaintext on the private network is local/CI only.
+      NOTIFY_SMTP_HOST: postfix-notify
+      NOTIFY_SMTP_PORT: 25
+      NOTIFY_SMTP_SECURE: none
       NOTIFY_SMTP_FROM: ${NOTIFY_SMTP_FROM:-}
-      # Pinned relay certificate: when .env sets NOTIFY_SMTP_CA_PATH (host path), the container
-      # reads secrets/notify-smtp-ca.pem from the read-only secrets mount below.
-      NOTIFY_SMTP_CA_PATH: ${NOTIFY_SMTP_CA_PATH:+/run/gateway-secrets/notify-smtp-ca.pem}
     ports: ['127.0.0.1:${API_HOST_PORT:-3000}:3000']
-    volumes:
-      # Git-ignored local secret files (e.g. the pinned relay certificate). Read-only.
-      - ./secrets:/run/gateway-secrets:ro
     healthcheck:
       <<: *node-healthcheck
       test:
@@ -600,6 +612,7 @@ volumes:
   rspamd-data:
   clamav-db:
   postfix-spool:
+  postfix-notify-spool:
   opensearch-data:
   clickhouse-data:
   prometheus-data:
