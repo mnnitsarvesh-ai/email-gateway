@@ -43,6 +43,8 @@ flowchart LR
   end
 
   delivery["postfix-outbound owns retries, backoff, DSNs;<br/>DSN copies → bounce_events, suppressions<br/>IMPLEMENTED"]:::impl
+  dworker["delivery-worker: retries only its own reinjection hop<br/>(backoff, max age → expired); rate limit or Redis error → deferred;<br/>ambiguous crash window resolved by the log binding<br/>IMPLEMENTED 2.3"]:::impl
+  dstatus["Per-recipient status from the delivery log + DSN copies;<br/>idempotent signals; missing signal → unknown, never guessed<br/>IMPLEMENTED 2.3"]:::impl
   ready["/health/ready 503 removes the pod from service<br/>IMPLEMENTED"]:::impl
 
   sender --> spool
@@ -63,6 +65,9 @@ flowchart LR
   crash --> quorum
   once -.-> engFail
   once -.-> delivery
+  dedupe -->|"outbox poller (interim, R6)"| dworker
+  dworker -->|"reinject 10026 / 10027"| delivery
+  delivery --> dstatus
   readerFb -.-> alerts
   partJob -.-> alerts
   dlq -.-> alerts
@@ -91,3 +96,6 @@ flowchart LR
 | Partition maintenance                                      | IMPLEMENTED            | `packages/database/src/partitioning/*.test.ts`, `tests/integration/partitions.test.ts`, CI migrations job (runs `apply` twice)                                                                   |
 | Alerting                                                   | PLANNED 10.3           |                                                                                                                                                                                                  |
 | Outbound retries and DSNs in Postfix, bounce processing    | IMPLEMENTED            | ADR-0006; `postfix-outbound` queue settings; `bounces.test.ts`, `smtp-outbound.test.ts` (hard bounce)                                                                                            |
+| delivery-worker hop retry, fail-closed rate limits         | IMPLEMENTED 2.3        | `reinjection.test.ts`, `rate-limit.test.ts` (worker integration); `routing-rate-limit.test.ts` (Redis stopped: nothing sent, delivered after recovery)                                           |
+| Destination outage → Postfix retry → delivered             | IMPLEMENTED 2.3        | `routing-retry.test.ts` (sink stopped and started, no `postqueue -f`; failover along the next-hop list); [diagram 19](19-retry-bounce-sequence.md)                                               |
+| Status signals idempotent, stale → `unknown`               | IMPLEMENTED 2.3        | `recorder.test.ts`, `status-tailer.test.ts`, `routing-signals.test.ts` (whole log re-read, bounce notice redelivered: no change)                                                                 |

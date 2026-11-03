@@ -13,7 +13,12 @@ import {
   randomUUID,
 } from 'node:crypto';
 import { join } from 'node:path';
-import { PrismaClient, type RecipientValidation, type TlsMode } from '@email-gateway/database';
+import {
+  type MailDestinationProvider,
+  PrismaClient,
+  type RecipientValidation,
+  type TlsMode,
+} from '@email-gateway/database';
 import { Redis } from 'ioredis';
 import { composeExec, repoRoot, run, runningServices } from './compose';
 import { stack } from './env';
@@ -55,6 +60,18 @@ export interface FixtureDomain {
   publicId: string;
   organizationId: bigint;
   name: string;
+}
+
+/** One destination server row (domain_mail_servers, role inbound_destination). */
+export interface DestinationServerFixture {
+  host: string;
+  tlsMode: TlsMode;
+  port?: number;
+  priority?: number;
+  /** Step 2.3 R2; default `custom`. */
+  provider?: MailDestinationProvider;
+  /** Postfix `match=` list for `verify` (NULL = nexthop). */
+  tlsVerifyNames?: string | null;
 }
 
 export interface DkimFixture {
@@ -128,7 +145,7 @@ export class SmtpFixtures {
       },
     });
     this.organizationIds.push(org.id);
-    for (const prefix of ['sa:rl:in', 'sa:rl:out', 'sa:rl:outd']) {
+    for (const prefix of ['sa:rl:in', 'sa:rl:out', 'sa:rl:outd', 'dw:rl:out', 'dw:rl:outd']) {
       this.redisPatterns.add(`${prefix}:${org.id.toString()}:*`);
     }
     this.redisPatterns.add(`rep:${org.id.toString()}:*`);
@@ -142,7 +159,21 @@ export class SmtpFixtures {
     label: string,
     options: DomainOptions = {},
   ): Promise<FixtureDomain> {
-    const name = this.name(label);
+    return this.domainNamed(organizationId, this.name(label), options);
+  }
+
+  /**
+   * An `active` domain with an explicit name, for names outside `it-<suffix>-<label>.test`
+   * (step 2.3: another tenant's domain under `*.gwtenant.sink.test`, reached through the
+   * gateway MX). Callers keep the `it-<suffix>-` prefix in the first label.
+   */
+  async domainNamed(
+    organizationId: bigint,
+    name: string,
+    options: DomainOptions = {},
+  ): Promise<FixtureDomain> {
+    if (!name.startsWith(`it-${this.suffix}-`))
+      throw new Error(`fixture domain ${name} lacks the run prefix`);
     const row = await this.prisma.domain.create({
       data: {
         organizationId,
@@ -173,7 +204,9 @@ export class SmtpFixtures {
     const domain = { id: row.id, publicId: row.publicId, organizationId, name };
     this.domains.push(domain);
     this.redisKeys.add(`sa:dom:${name}`);
-    this.redisKeys.add(`sa:route:${name}`);
+    // smtp-adapter cache keys (apps/smtp-adapter/src/tenancy/cache-keys.ts); step 2.3 R2 moved
+    // the route list to `sa:route:v2:` and the TLS answers to one `sa:tls:v2:{host}` per host.
+    this.redisKeys.add(`sa:route:v2:${name}`);
     this.redisPatterns.add(`sa:rcpt:${row.id.toString()}:*`);
     return domain;
   }
@@ -191,19 +224,37 @@ export class SmtpFixtures {
 
   /** The tenant's inbound destination server (domain_mail_servers, role inbound_destination). */
   async destination(domain: FixtureDomain, host: string, tlsMode: TlsMode, port = 25) {
-    await this.prisma.domainMailServer.create({
-      data: {
-        organizationId: domain.organizationId,
-        domainId: domain.id,
-        role: 'inbound_destination',
-        host,
-        port,
-        priority: 10,
-        tlsMode,
-        enabled: true,
-      },
-    });
-    this.redisKeys.add(`sa:tls:${host}:${port}`);
+    await this.destinations(domain, [{ host, tlsMode, port }]);
+  }
+
+  /**
+   * Several destination servers of one domain (step 2.3 R2: next-hop list ordered by
+   * `(priority, id)`, so rows are inserted in the given order), written like the api's
+   * `PUT /domains/{id}/destinations` stores them. The adapter's route and TLS cache keys are
+   * dropped so the new rows are answered at once.
+   */
+  async destinations(domain: FixtureDomain, servers: readonly DestinationServerFixture[]) {
+    for (const server of servers) {
+      const port = server.port ?? 25;
+      await this.prisma.domainMailServer.create({
+        data: {
+          organizationId: domain.organizationId,
+          domainId: domain.id,
+          role: 'inbound_destination',
+          host: server.host,
+          port,
+          priority: server.priority ?? 10,
+          tlsMode: server.tlsMode,
+          provider: server.provider ?? 'custom',
+          tlsVerifyNames: server.tlsVerifyNames ?? null,
+          enabled: true,
+        },
+      });
+      const tlsKey = `sa:tls:v2:${server.host.toLowerCase().replace(/\.$/, '')}`;
+      this.redisKeys.add(tlsKey);
+      await this.redis.del(tlsKey);
+    }
+    await this.redis.del(`sa:route:v2:${domain.name}`);
   }
 
   async limit(organizationId: bigint, limitKey: string, limitValue: number): Promise<void> {
@@ -396,6 +447,10 @@ export class SmtpFixtures {
     try {
       if (ids.length > 0) {
         const where = { organizationId: { in: ids } };
+        // Step 2.3: with the delivery-worker running (dev pass-through), every ingested message
+        // of a run is also planned and reinjected; its delivery rows go with the fixtures.
+        // Reinjection rows first, so the worker claims nothing more of this run.
+        await this.deleteDeliveryRows(ids);
         await this.prisma.messageOutbox.deleteMany({ where });
         await this.prisma.emailEvent.deleteMany({ where });
         await this.prisma.emailRecipient.deleteMany({ where });
@@ -412,6 +467,9 @@ export class SmtpFixtures {
         await this.prisma.domainDkimKey.deleteMany({ where });
         await this.prisma.domain.deleteMany({ where });
         await this.prisma.organization.deleteMany({ where: { id: { in: ids } } });
+        // A worker session that was in flight during the first pass may still have committed.
+        await new Promise((r) => setTimeout(r, 1_500));
+        await this.deleteDeliveryRows(ids);
         for (const id of ids) {
           for (const key of await this.objectKeys(id)) {
             await this.s3.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
@@ -429,6 +487,18 @@ export class SmtpFixtures {
       this.redis.disconnect();
       this.s3.destroy();
     }
+  }
+
+  /** Delivery rows of step 2.3 (worker, adapter bounce matching, recorder) of `ids`. */
+  private async deleteDeliveryRows(ids: readonly bigint[]): Promise<void> {
+    const where = { organizationId: { in: [...ids] } };
+    await this.prisma.deliveryReinjection.deleteMany({ where });
+    await this.prisma.deliveryStatusEvent.deleteMany({ where });
+    await this.prisma.deliveryAttempt.deleteMany({ where });
+    await this.prisma.emailDelivery.deleteMany({ where });
+    await this.prisma.emailMessageStatusHistory.deleteMany({ where });
+    await this.prisma.messageOutbox.deleteMany({ where });
+    await this.prisma.emailEvent.deleteMany({ where });
   }
 
   private async cleanRedis(): Promise<void> {

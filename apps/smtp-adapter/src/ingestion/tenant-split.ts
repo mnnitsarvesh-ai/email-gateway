@@ -1,5 +1,6 @@
 import { normalizeDomainName } from '@email-gateway/database';
 import { countGatewayPasses } from '@email-gateway/common';
+import type { RoutedDirection } from '@email-gateway/mail-routing';
 import { FROM_MISMATCH, LMTP_OK, LMTP_TEMPFAIL, LOOP, type SmtpReply } from '../shared/replies';
 import type { IngestDirection } from './ingestion-keys';
 
@@ -12,6 +13,12 @@ export interface IngestRecipient {
   organizationId: bigint;
   /** Inbound: the recipient domain; outbound: the sender domain. */
   domainId: bigint;
+  /**
+   * Routed direction (step 2.3 R1, classifyRecipient): always `inbound` on the inbound
+   * listener; on the outbound listener `internal` when the recipient domain is an active domain
+   * of the sender's organization, else `outbound`.
+   */
+  direction: RoutedDirection;
 }
 
 /** The recipients of one organization of a message, in RCPT order. */

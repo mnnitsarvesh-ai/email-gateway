@@ -3,6 +3,7 @@ import {
   DEMO,
   FEATURE_KEYS,
   LIMIT_KEYS,
+  MAIL_DESTINATION_PRESETS,
   PERMISSIONS,
   PLANS,
   PLATFORM_ORGANIZATION,
@@ -70,7 +71,7 @@ describe('seed catalog', () => {
   const sorted = (list: readonly string[]) => [...list].sort();
   const role = (key: string) => SYSTEM_ROLES.find((r) => r.key === key)!.permissions;
 
-  it('contains the 33 permissions of D7, D8, step 2.1 D14 and step 2.2, without duplicates', () => {
+  it('contains the 35 permissions of D7, D8, steps 2.1 D14, 2.2 and 2.3, without duplicates', () => {
     expect(new Set(keys).size).toBe(keys.length);
     expect(sorted(keys)).toEqual(
       sorted([
@@ -107,11 +108,18 @@ describe('seed catalog', () => {
         'domain:dkim_rotate',
         'connector:read',
         'connector:manage',
+        'domain:routing_manage',
+        'delivery:read',
       ]),
     );
-    expect(keys).toHaveLength(33);
+    expect(keys).toHaveLength(35);
     // Appended in catalog order (permission ids follow it on a fresh database).
-    expect(keys.slice(-2)).toEqual(['connector:read', 'connector:manage']);
+    expect(keys.slice(-4)).toEqual([
+      'connector:read',
+      'connector:manage',
+      'domain:routing_manage',
+      'delivery:read',
+    ]);
     for (const key of keys) expect(key).toMatch(/^[a-z]+:[a-z_]+$/);
     for (const p of PERMISSIONS) expect(p.description.length, p.key).toBeGreaterThan(0);
   });
@@ -139,6 +147,7 @@ describe('seed catalog', () => {
         'report:read',
         'archive:read',
         'connector:read',
+        'delivery:read',
       ]),
     );
   });
@@ -198,10 +207,12 @@ describe('seed catalog', () => {
         'domain:read',
         'domain:manage',
         'domain:dkim_rotate',
+        'domain:routing_manage',
         'connector:read',
         'connector:manage',
         'policy:read',
         'message:read',
+        'delivery:read',
         'quarantine:read',
         'report:read',
       ],
@@ -212,6 +223,7 @@ describe('seed catalog', () => {
         'policy:manage',
         'message:read',
         'message:read_content',
+        'delivery:read',
         'quarantine:read',
         'quarantine:release',
         'quarantine:delete',
@@ -222,6 +234,7 @@ describe('seed catalog', () => {
       quarantine_reviewer: [
         'organization:read',
         'message:read',
+        'delivery:read',
         'quarantine:read',
         'quarantine:release',
         'quarantine:delete',
@@ -251,6 +264,21 @@ describe('seed catalog', () => {
     expect(connectorManagers).toEqual(['super_admin', 'organization_admin', 'domain_admin']);
     expect(TENANT_READ_PERMISSIONS).toContain('connector:read');
     expect(TENANT_READ_PERMISSIONS).not.toContain('connector:manage');
+    // Step 2.3 (R13): routing changes are separate from domain:manage; delivery status is read
+    // by every built-in role (TENANT_READ plus the explicit tenant roles).
+    const holders = (key: string) =>
+      SYSTEM_ROLES.filter((r) => (r.permissions as readonly string[]).includes(key)).map(
+        (r) => r.key,
+      );
+    expect(holders('domain:routing_manage')).toEqual([
+      'super_admin',
+      'organization_admin',
+      'domain_admin',
+    ]);
+    expect(TENANT_READ_PERMISSIONS).not.toContain('domain:routing_manage');
+    expect(holders('delivery:read')).toEqual([...SYSTEM_ROLE_KEYS]);
+    expect(TENANT_PERMISSIONS).toContain('domain:routing_manage');
+    expect(TENANT_PERMISSIONS).toContain('delivery:read');
   });
 
   it('maps every retired step-1.1 role key to an existing, non-retired role', () => {
@@ -318,6 +346,74 @@ describe('seed catalog', () => {
       standard: [3_000, 300, 50_000],
       enterprise: [12_000, 1_200, 500_000],
       dedicated: [30_000, 3_000, 2_000_000],
+    });
+  });
+
+  it('defines the step 2.3 per-destination-domain limit as half the per-minute limit (R11)', () => {
+    for (const plan of PLANS) {
+      expect(plan.limits.outbound_recipients_per_domain_per_minute, plan.code).toBe(
+        Math.max(1, Math.floor(plan.limits.outbound_recipients_per_minute / 2)),
+      );
+    }
+    expect(
+      Object.fromEntries(
+        PLANS.map((p) => [p.code, p.limits.outbound_recipients_per_domain_per_minute]),
+      ),
+    ).toEqual({ trial: 30, standard: 150, enterprise: 600, dedicated: 1_500 });
+  });
+
+  it('defines the destination provider presets of R2 with valid anchored patterns', () => {
+    expect(MAIL_DESTINATION_PRESETS.map((p) => p.provider)).toEqual([
+      'microsoft_365',
+      'google_workspace',
+    ]);
+    const [m365, google] = MAIL_DESTINATION_PRESETS;
+    expect(m365).toMatchObject({
+      displayName: 'Microsoft 365 (Exchange Online)',
+      defaultServers: null,
+      port: 25,
+      tlsMode: 'verify',
+      tlsVerifyNames: 'nexthop:mail.protection.outlook.com:.mail.protection.outlook.com',
+      maxServers: 1,
+      documentationUrl: 'docs/domains/destination-servers.md#microsoft-365',
+    });
+    expect(google).toMatchObject({
+      displayName: 'Google Workspace (Gmail)',
+      hostHint: null,
+      port: 25,
+      tlsMode: 'verify',
+      tlsVerifyNames: 'nexthop:mx.google.com:.aspmx.l.google.com',
+      maxServers: 5,
+      documentationUrl: 'docs/domains/destination-servers.md#google-workspace',
+    });
+    expect(google!.defaultServers).toEqual([
+      { host: 'aspmx.l.google.com', priority: 1 },
+      { host: 'alt1.aspmx.l.google.com', priority: 5 },
+      { host: 'alt2.aspmx.l.google.com', priority: 5 },
+      { host: 'alt3.aspmx.l.google.com', priority: 10 },
+      { host: 'alt4.aspmx.l.google.com', priority: 10 },
+    ]);
+    const matches = (patterns: readonly string[], host: string) =>
+      patterns.some((p) => new RegExp(p).test(host));
+    for (const preset of MAIL_DESTINATION_PRESETS) {
+      for (const pattern of preset.hostPatterns) {
+        expect(pattern.startsWith('^') && pattern.endsWith('$'), pattern).toBe(true);
+      }
+      expect(preset.defaultServers?.length ?? 1).toBeLessThanOrEqual(preset.maxServers);
+      for (const server of preset.defaultServers ?? []) {
+        expect(matches(preset.hostPatterns, server.host), server.host).toBe(true);
+      }
+    }
+    expect(matches(m365!.hostPatterns, 'contoso-com.mail.protection.outlook.com')).toBe(true);
+    expect(matches(m365!.hostPatterns, 'contoso-com.o-v1.mx.microsoft')).toBe(true);
+    expect(matches(m365!.hostPatterns, 'mail.protection.outlook.com')).toBe(false);
+    expect(matches(m365!.hostPatterns, 'x.mail.protection.outlook.com.evil.test')).toBe(false);
+    expect(matches(google!.hostPatterns, 'alt5.aspmx.l.google.com')).toBe(false);
+    expect(matches(google!.hostPatterns, 'aspmxxl.google.com')).toBe(false);
+    expect(DEMO.inboundMailServer).toEqual({
+      host: 'mail.gateway.test',
+      port: 25,
+      provider: 'custom',
     });
   });
 

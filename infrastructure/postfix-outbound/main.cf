@@ -1,5 +1,5 @@
 # Outbound MTA of the Email Security Gateway (step 2.2, docs/plan/steps/04-smtp-gateway.md
-# D9-D13/D15).
+# D9-D13/D15; step 2.3 routing and delivery log, docs/plan/steps/05-routing.md R4/R9).
 #
 # Listeners (master.cf): 25 connector relay, 587 submission, 10026 reinject-inbound, 10027
 # reinject-outbound. Every listener states its own relay permission with -o overrides; the
@@ -10,7 +10,15 @@
 # (Dovecot auth protocol), tenant data comes over socketmap and policy delegation.
 
 compatibility_level = 3.6
-maillog_file = /dev/stdout
+# Delivery log (step 2.3 R9): the structured record of every delivery attempt, read by the
+# delivery-worker's status tailer (read-only mount of the directory). The entrypoint creates the
+# directory and the file (0644) and mirrors new lines to stdout, so `docker compose logs` still
+# shows them. Rotate with `postfix logrotate` (renames to maillog.<YYYYMMDD-HHMMSS>, HUPs master so
+# postlogd reopens, then runs the compressor on the old file): docs/deployment/mail-routing.md.
+maillog_file = /var/log/postfix-outbound/maillog
+# postlogd creates the new file with mode 0600; this wrapper makes it 0644 for the read-only,
+# non-root status tailer, then gzips the rotated file (Postfix 3.7 has no mode setting).
+maillog_file_compressor = /usr/local/lib/postfix-entrypoint/maillog-compress
 smtpd_banner = $myhostname ESMTP
 biff = no
 append_dot_mydomain = no
@@ -121,7 +129,16 @@ delay_notice_recipient = bounce-notices@${gw_bounce_domain}
 2bounce_notice_recipient = bounce-notices@${gw_bounce_domain}
 delay_warning_time = 4h
 
-# --- Queue (rendered from the environment) ----------------------------------------------------
+# --- Queue and retry (rendered from the environment; step 2.3 R4) ---------------------------------
+# Postfix owns retries to remote servers (ADR-0006). A deferred message waits at least
+# minimal_backoff_time; each further failure doubles its wait up to maximal_backoff_time; the queue
+# manager scans the deferred queue every queue_run_delay, so a wait is rounded up to the next scan.
+# Production values (300s/4000s/300s) give retries after about 5, 10, 20, 40, 66, 66, ... minutes
+# (roughly 110 attempts in 5 days). After maximal_queue_lifetime the recipient `expired`: DSN to the
+# sender (inbound deliveries use NOTIFY=NEVER: none) plus a postmaster copy to the bounce handler.
+# bounce_queue_lifetime (= the same value) applies to undeliverable DSNs themselves.
+# delay_warning_time (above, POSTFIX_DELAY_WARNING_TIME, 4h) sends one delay DSN (NOTIFY=DELAY).
+# Test profile (local .env, CI): 10s/60s/10s. Nothing in code depends on these values.
 minimal_backoff_time = 300s
 maximal_backoff_time = 4000s
 queue_run_delay = 300s
@@ -154,7 +171,16 @@ smtpd_tls_session_cache_database = btree:${data_directory}/smtpd_scache
 smtpd_tls_received_header = yes
 smtpd_tls_loglevel = 1
 
+# --- SMTP client (delivery; step 2.3 R4) -------------------------------------------------------
+# POSTFIX_OUTBOUND_SMTP_CONNECT_TIMEOUT (30s; test profile 5s). HELO is the public PTR name.
+# Per-destination concurrency stays Postfix's default (smtp_destination_concurrency_limit =
+# $default_destination_concurrency_limit = 20, smtp_destination_rate_delay = 0).
+smtp_connect_timeout = 30s
+smtp_helo_name = $myhostname
+
 # --- TLS client (delivery). Per-destination policy comes from the tls_policy socketmap. ---------
+# smtp_tls_CApath is added by the entrypoint only when POSTFIX_OUTBOUND_SMTP_TLS_CAPATH is set
+# (test profile: the hashed test CA of the smtp-test profile); the system bundle always applies.
 smtp_tls_security_level = may
 smtp_tls_CAfile = /etc/ssl/certs/ca-certificates.crt
 smtp_tls_session_cache_database = btree:${data_directory}/smtp_scache

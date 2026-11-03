@@ -10,6 +10,10 @@
 #   10026 reinject-in  $reinject_networks, tenant destinations only    reinject-inbound
 #   10027 reinject-out $reinject_networks, tenant senders only, DKIM   reinject-outbound
 #
+# Routing after reinjection (step 2.3 R4): 10026 has no content filter and routes through
+# transport_maps (the tenant's destination servers); 10027 uses content_filter=smtp: (Internet MX
+# of the recipient domain, transport_maps bypassed). postlogd writes $maillog_file.
+#
 # Reinjection ports are never published to the host (docker-compose.yml) nor to the Internet
 # (security groups, docs/deployment/smtp-gateway.md).
 #
@@ -59,6 +63,11 @@ submission inet n       -       n       -       -       smtpd
   -o content_filter=
   -o receive_override_options=no_address_mappings
   -o smtpd_authorized_xforward_hosts=$reinject_networks
+  # Step 2.3 (verified, docs/deployment/mail-routing.md V4): XFORWARD attributes go to the log
+  # (orig_client=, orig_queue_id=) and the queue file, but the Received: header of this hop always
+  # names the real peer (the delivery-worker). No reverse lookup, so internal host names never
+  # appear in delivered mail: "from <DELIVERY_REINJECT_HELO> (unknown [<worker address>])".
+  -o smtpd_peername_lookup=no
   -o smtpd_milters=
 10027     inet  n       -       n       -       -       smtpd
   -o syslog_name=postfix/reinject-outbound
@@ -68,9 +77,19 @@ submission inet n       -       n       -       -       smtpd
   -o smtpd_client_restrictions=permit_mynetworks,reject
   -o smtpd_relay_restrictions=permit_mynetworks,reject
   -o smtpd_recipient_restrictions=$gw_reinject_outbound_recipient_restrictions
-  -o content_filter=
+  # Step 2.3 R4: "smtp:" with an empty next hop = the recipient domain (default_filter_nexthop is
+  # empty), so Postfix resolves the recipient's MX itself and NEVER consults transport_maps for
+  # mail reinjected here: a recipient in another tenant's domain goes through that tenant's public
+  # MX (its full inbound path), never straight to its destination servers. DSNs and postmaster
+  # copies are new messages without this filter and route through transport_maps as before.
+  -o content_filter=smtp:
   -o receive_override_options=no_address_mappings
   -o smtpd_authorized_xforward_hosts=$reinject_networks
+  # Step 2.3 (verified, docs/deployment/mail-routing.md V4): XFORWARD attributes go to the log
+  # (orig_client=, orig_queue_id=) and the queue file, but the Received: header of this hop always
+  # names the real peer (the delivery-worker). No reverse lookup, so internal host names never
+  # appear in delivered mail: "from <DELIVERY_REINJECT_HELO> (unknown [<worker address>])".
+  -o smtpd_peername_lookup=no
   -o smtpd_milters=inet:rspamd-outbound:11332
   -o milter_default_action=tempfail
 pickup    unix  n       -       n       60      1       pickup

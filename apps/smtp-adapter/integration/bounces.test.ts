@@ -2,6 +2,7 @@ import type { TestingModule } from '@nestjs/testing';
 import { buildGatewayTrace } from '@email-gateway/common';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { LmtpBounceListener } from '../src/bounces/bounces.module';
+import { reinjectionToken } from '@email-gateway/mail-routing';
 import { reputationKey } from '../src/shared/reputation';
 import { postfixPostmasterCopy, singleHardBounce } from './support/dsn-fixtures';
 import { Fixtures, queueId } from './support/fixtures';
@@ -252,5 +253,236 @@ describe('bounce notices', () => {
       '550 5.1.1 Recipient address rejected: User unknown',
       '250 Accepted',
     ]);
+  });
+});
+
+/**
+ * Step 2.3 R9 "Bounce notices": a notice is matched to the reinjection that carried the mail
+ * (by X-Postfix-Queue-ID, else by Original-Envelope-Id = the reinjection token) and becomes a
+ * `bounce_notice` delivery signal for the organization and delivery of that reinjection, in any
+ * direction. The 2.2 outbound behaviour (bounce_events, suppressions, reputation) is unchanged
+ * and now carries the message reference.
+ */
+describe('bounce notices → per-recipient delivery status (step 2.3)', () => {
+  const deliveryOf = (id: bigint) =>
+    fx.prisma.emailDelivery.findFirstOrThrow({ where: { id, organizationId: org } });
+  const auditOf = (deliveryId: bigint) =>
+    fx.prisma.deliveryStatusEvent.findMany({ where: { deliveryId }, orderBy: { id: 'asc' } });
+
+  it('matches by queue id: the outbound delivery bounces, and the bounce event names the message', async () => {
+    const qid = queueId();
+    const fixture = await fx.reinjectedMessage({
+      organizationId: org,
+      direction: 'outbound',
+      envelopeFrom: `erin@${tenantDomain}`,
+      recipients: ['Gone@ext-r.test'],
+      queueId: qid,
+    });
+    const result = await send(
+      singleHardBounce(qid, `erin@${tenantDomain}`, 'Gone@ext-r.test', [trace(org)]),
+    );
+    expect(result.data.map((r) => r.code)).toEqual([250]);
+
+    const delivery = await deliveryOf(fixture.deliveryIds[0]!);
+    expect(delivery).toMatchObject({
+      status: 'bounced',
+      enhancedStatus: '5.1.1',
+      finalSmtpCode: 550,
+      outboundQueueId: qid,
+    });
+    const audit = await auditOf(delivery.id);
+    expect(audit.map((a) => [a.source, a.fromStatus, a.toStatus, a.applied])).toEqual([
+      ['bounce_notice', 'queued', 'bounced', true],
+    ]);
+    expect(audit[0]!.queueId).toBe(qid);
+    const recipient = await fx.prisma.emailRecipient.findFirstOrThrow({
+      where: { messageId: fixture.messageId, organizationId: org },
+    });
+    expect(recipient.status).toBe('bounced');
+    expect(
+      await fx.prisma.emailEvent.count({
+        where: { messageId: fixture.messageId, eventType: 'delivery.bounced' },
+      }),
+    ).toBe(1);
+    // 2.2 behaviour, now with the message reference.
+    const bounce = await fx.prisma.bounceEvent.findFirstOrThrow({
+      where: { organizationId: org, recipientAddress: 'gone@ext-r.test' },
+    });
+    expect(bounce.messageId).toBe(fixture.messageId);
+    expect(bounce.messageReceivedAt).toEqual(fixture.receivedAt);
+    expect(
+      await fx.prisma.deliverySuppression.count({
+        where: { organizationId: org, address: 'gone@ext-r.test' },
+      }),
+    ).toBe(1);
+    // The message aggregate: its only delivery is terminal and not delivered.
+    const message = await fx.prisma.emailMessage.findFirstOrThrow({
+      where: { id: fixture.messageId, organizationId: org },
+    });
+    expect(message.status).toBe('failed');
+  });
+
+  it('a redelivered notice gives no second transition, event or outbox row', async () => {
+    const qid = queueId();
+    const fixture = await fx.reinjectedMessage({
+      organizationId: org,
+      direction: 'outbound',
+      envelopeFrom: `erin@${tenantDomain}`,
+      recipients: ['twice@ext-r.test'],
+      queueId: qid,
+    });
+    const notice = singleHardBounce(qid, `erin@${tenantDomain}`, 'twice@ext-r.test', [trace(org)]);
+    await send(notice);
+    const counts = async () => ({
+      audit: await fx.prisma.deliveryStatusEvent.count({
+        where: { deliveryId: fixture.deliveryIds[0]! },
+      }),
+      events: await fx.prisma.emailEvent.count({ where: { messageId: fixture.messageId } }),
+      outbox: await fx.prisma.messageOutbox.count({
+        where: { organizationId: org, aggregateId: fixture.messageId.toString() },
+      }),
+      bounces: await fx.prisma.bounceEvent.count({
+        where: { organizationId: org, recipientAddress: 'twice@ext-r.test' },
+      }),
+    });
+    const before = await counts();
+    expect(before).toEqual({ audit: 1, events: 1, outbox: 1, bounces: 1 });
+    const again = await send(notice);
+    expect(again.data.map((r) => r.code)).toEqual([250]);
+    expect(await counts()).toEqual(before);
+  });
+
+  it('matches by Original-Envelope-Id when the queue id is not bound: failed 4.x.x → expired', async () => {
+    const fixture = await fx.reinjectedMessage({
+      organizationId: org,
+      direction: 'outbound',
+      envelopeFrom: `frank@${tenantDomain}`,
+      recipients: ['slow@ext-r.test'],
+      queueId: null,
+    });
+    const result = await send(
+      postfixPostmasterCopy({
+        queueId: queueId(),
+        envelopeId: reinjectionToken(fixture.reinjectionPublicId),
+        sender: `frank@${tenantDomain}`,
+        originalHeaders: [trace(org)],
+        recipients: [
+          {
+            address: 'slow@ext-r.test',
+            action: 'failed',
+            status: '4.4.7',
+            diagnostic:
+              'X-Postfix; delivery temporarily suspended: connect to mx.ext-r.test[192.0.2.9]:25: Connection timed out',
+          },
+        ],
+      }),
+    );
+    expect(result.data.map((r) => r.code)).toEqual([250]);
+    const delivery = await deliveryOf(fixture.deliveryIds[0]!);
+    expect(delivery.status).toBe('expired');
+    expect(delivery.lastErrorClass).toBe('connect');
+    expect((await auditOf(delivery.id)).map((a) => a.toStatus)).toEqual(['expired']);
+  });
+
+  it('a delay warning moves the delivery to deferred', async () => {
+    const qid = queueId();
+    const fixture = await fx.reinjectedMessage({
+      organizationId: org,
+      direction: 'outbound',
+      envelopeFrom: `gina@${tenantDomain}`,
+      recipients: ['busy@ext-r.test'],
+      queueId: qid,
+    });
+    await send(
+      postfixPostmasterCopy({
+        kind: 'delay',
+        queueId: qid,
+        date: new Date(Date.now() + 1000).toUTCString(),
+        sender: `gina@${tenantDomain}`,
+        originalHeaders: [trace(org)],
+        recipients: [
+          {
+            address: 'busy@ext-r.test',
+            action: 'delayed',
+            status: '4.2.1',
+            diagnostic: 'smtp; 450 4.2.1 Mailbox busy',
+          },
+        ],
+      }),
+    );
+    const delivery = await deliveryOf(fixture.deliveryIds[0]!);
+    expect(delivery.status).toBe('deferred');
+    expect(delivery.lastErrorClass).toBe('remote_4xx');
+  });
+
+  it('an inbound delivery notice with an external sender is recorded on the delivery, never suppressed', async () => {
+    const qid = queueId();
+    const fixture = await fx.reinjectedMessage({
+      organizationId: org,
+      direction: 'inbound',
+      envelopeFrom: 'someone@external-sender.test',
+      recipients: [`hard-bounce@${tenantDomain}`],
+      queueId: qid,
+    });
+    const suppressionsBefore = await fx.prisma.deliverySuppression.count({
+      where: { organizationId: org },
+    });
+    const bouncesBefore = await fx.prisma.bounceEvent.count({ where: { organizationId: org } });
+    const reputationBefore = await reputation();
+    const result = await send(
+      singleHardBounce(qid, 'someone@external-sender.test', `hard-bounce@${tenantDomain}`, [
+        trace(org, 'in'),
+      ]),
+    );
+    expect(result.data.map((r) => r.code)).toEqual([250]);
+    expect((await deliveryOf(fixture.deliveryIds[0]!)).status).toBe('bounced');
+    expect(await fx.prisma.deliverySuppression.count({ where: { organizationId: org } })).toBe(
+      suppressionsBefore,
+    );
+    expect(await fx.prisma.bounceEvent.count({ where: { organizationId: org } })).toBe(
+      bouncesBefore,
+    );
+    expect(await reputation()).toEqual(reputationBefore);
+  });
+
+  it('the organization comes from the reinjection, never from the sender domain of the notice', async () => {
+    const other = await fx.organization('bounce-foreign');
+    const qid = queueId();
+    const fixture = await fx.reinjectedMessage({
+      organizationId: other,
+      direction: 'inbound',
+      envelopeFrom: `spoof@${tenantDomain}`,
+      recipients: ['user@foreign-r.test'],
+      queueId: qid,
+    });
+    const bouncesBefore = await fx.prisma.bounceEvent.count({ where: { organizationId: org } });
+    await send(singleHardBounce(qid, `spoof@${tenantDomain}`, 'user@foreign-r.test', [trace(org)]));
+    const delivery = await fx.prisma.emailDelivery.findFirstOrThrow({
+      where: { id: fixture.deliveryIds[0]!, organizationId: other },
+    });
+    expect(delivery.status).toBe('bounced');
+    const audit = await fx.prisma.deliveryStatusEvent.findMany({
+      where: { deliveryId: delivery.id },
+    });
+    expect(audit.map((a) => a.organizationId)).toEqual([other]);
+    // An inbound reinjection never feeds the sender organization's bounce statistics.
+    expect(await fx.prisma.bounceEvent.count({ where: { organizationId: org } })).toBe(
+      bouncesBefore,
+    );
+  });
+
+  it('an unmatched notice keeps the 2.2 behaviour (no message reference, no delivery signal)', async () => {
+    const before = await fx.prisma.deliveryStatusEvent.count({ where: { organizationId: org } });
+    await send(
+      singleHardBounce(queueId(), `hank@${tenantDomain}`, 'nomatch@ext-r.test', [trace(org)]),
+    );
+    const bounce = await fx.prisma.bounceEvent.findFirstOrThrow({
+      where: { organizationId: org, recipientAddress: 'nomatch@ext-r.test' },
+    });
+    expect(bounce.messageId).toBeNull();
+    expect(bounce.messageReceivedAt).toBeNull();
+    expect(await fx.prisma.deliveryStatusEvent.count({ where: { organizationId: org } })).toBe(
+      before,
+    );
   });
 });

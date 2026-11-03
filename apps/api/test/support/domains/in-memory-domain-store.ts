@@ -572,6 +572,9 @@ export class InMemoryDomainStore {
         this.outbox.push(clone(event));
         return Promise.resolve(randomUUID());
       },
+      // Step 2.3: the domain onboarding flows never change destinations.
+      insertRoutingChanged: () =>
+        Promise.reject(new Error('unexpected domain.routing.changed.v1 in a domain test')),
     };
   }
 

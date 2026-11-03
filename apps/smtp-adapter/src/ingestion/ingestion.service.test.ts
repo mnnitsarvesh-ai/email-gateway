@@ -1,11 +1,13 @@
 import { MetricsService } from '@email-gateway/common';
 import { Prisma } from '@email-gateway/database';
+import { createHash } from 'node:crypto';
 import { PassThrough } from 'node:stream';
 import type { SMTPServerDataStream } from 'smtp-server';
 import { describe, expect, it } from 'vitest';
 import type { MessageSink } from './message-reader';
 import type { EmlStore, EmlUploadOptions } from './eml-store';
 import type { IngestionConfig } from './ingestion.config';
+import { ingestKey, objectRef } from './ingestion-keys';
 import { IngestionMetrics } from './ingestion.metrics';
 import type { CommittedMessage, IngestCommit, IngestionRepository } from './ingestion.repository';
 import { IngestionService } from './ingestion.service';
@@ -83,12 +85,48 @@ class FakeRepository {
   }
 }
 
-function setup() {
+/** `domains` rows by verified name, as resolveDomainOwner reads them. */
+interface DomainRow {
+  id: bigint;
+  organizationId: bigint;
+  status: 'active' | 'suspended';
+  organizationStatus?: 'active' | 'suspended';
+}
+
+function fakePrisma(domains: Record<string, DomainRow>, failFor = new Set<string>()) {
+  const lookups: string[] = [];
+  return {
+    lookups,
+    domain: {
+      findUnique: ({ where }: { where: { verifiedName: string } }) => {
+        lookups.push(where.verifiedName);
+        if (failFor.has(where.verifiedName)) return Promise.reject(new Error('db down'));
+        const row = domains[where.verifiedName];
+        return Promise.resolve(
+          row
+            ? {
+                id: row.id,
+                publicId: `p-${row.id}`,
+                organizationId: row.organizationId,
+                name: where.verifiedName,
+                status: row.status,
+                inboundEnabled: true,
+                outboundEnabled: true,
+                organization: { status: row.organizationStatus ?? 'active' },
+              }
+            : null,
+        );
+      },
+    },
+  };
+}
+
+function setup(prisma: unknown = {}) {
   const store = new FakeStore();
   const repository = new FakeRepository();
   const service = new IngestionService(
     { config, listenHost: '127.0.0.1', internalNetworks: '127.0.0.0/8', logLevel: 'silent' },
-    {} as never,
+    prisma as never,
     repository as unknown as IngestionRepository,
     store as unknown as EmlStore,
     new IngestionMetrics(new MetricsService({ service: 'test' })),
@@ -97,8 +135,20 @@ function setup() {
 }
 
 const recipients: IngestRecipient[] = [
-  { address: 'a@one.test', domain: 'one.test', organizationId: 1n, domainId: 10n },
-  { address: 'b@two.test', domain: 'two.test', organizationId: 2n, domainId: 20n },
+  {
+    address: 'a@one.test',
+    domain: 'one.test',
+    organizationId: 1n,
+    domainId: 10n,
+    direction: 'inbound',
+  },
+  {
+    address: 'b@two.test',
+    domain: 'two.test',
+    organizationId: 2n,
+    domainId: 20n,
+    direction: 'inbound',
+  },
 ];
 
 function stream(text: string): SMTPServerDataStream {
@@ -212,7 +262,15 @@ describe('IngestionService.handleData', () => {
     );
     const replies = await service.handleData(
       tx,
-      [{ address: 'x@sink.test', domain: 'sink.test', organizationId: 1n, domainId: 10n }],
+      [
+        {
+          address: 'x@sink.test',
+          domain: 'sink.test',
+          organizationId: 1n,
+          domainId: 10n,
+          direction: 'outbound',
+        },
+      ],
       stream('From: boss@evil.test\r\n\r\nbody\r\n'),
     );
     expect(replies.map((r) => `${r.code} ${r.text}`)).toEqual([
@@ -233,5 +291,122 @@ describe('IngestionService.handleData', () => {
     };
     expect(() => service.beginTransaction('inbound', { ...base, queueId: null }, '')).toThrow();
     expect(() => service.beginTransaction('inbound', { ...base, lhloName: null }, '')).toThrow();
+  });
+});
+
+describe('IngestionService classification at ingestion (step 2.3 R1)', () => {
+  const client = {
+    connectionId: 'c',
+    peerAddress: '127.0.0.1',
+    lhloName: 'out.test',
+    queueId: 'Q9',
+    clientAddress: null,
+    clientHelo: null,
+  };
+  const domains: Record<string, DomainRow> = {
+    'one.test': { id: 10n, organizationId: 1n, status: 'active' },
+    'second.test': { id: 11n, organizationId: 1n, status: 'active' },
+    'paused.test': { id: 12n, organizationId: 1n, status: 'suspended' },
+    'other.test': { id: 20n, organizationId: 2n, status: 'active' },
+  };
+
+  it('outbound: own active domain → internal; another tenant, unknown or inactive → outbound', async () => {
+    const prisma = fakePrisma(domains);
+    const { service } = setup(prisma);
+    const tx = service.beginTransaction('outbound', client, 'alice@one.test');
+    const accepted = await Promise.all(
+      [
+        'a@second.test',
+        'b@SECOND.test',
+        'c@other.test',
+        'd@external.example',
+        'e@paused.test',
+        'f@one.test',
+      ].map((address) => service.acceptRecipient(tx, address)),
+    );
+    expect(accepted.map((r) => [r.address, r.organizationId, r.direction])).toEqual([
+      ['a@second.test', 1n, 'internal'],
+      ['b@second.test', 1n, 'internal'],
+      ['c@other.test', 1n, 'outbound'],
+      ['d@external.example', 1n, 'outbound'],
+      ['e@paused.test', 1n, 'outbound'],
+      ['f@one.test', 1n, 'internal'],
+    ]);
+    // One lookup per distinct domain per transaction (the sender's shared with its recipients).
+    expect([...prisma.lookups].sort()).toEqual(
+      ['external.example', 'one.test', 'other.test', 'paused.test', 'second.test'].sort(),
+    );
+  });
+
+  it('outbound: a suspended organization owning the recipient domain → outbound', async () => {
+    const { service } = setup(
+      fakePrisma({
+        ...domains,
+        'second.test': {
+          id: 11n,
+          organizationId: 1n,
+          status: 'active',
+          organizationStatus: 'suspended',
+        },
+      }),
+    );
+    const tx = service.beginTransaction('outbound', client, 'alice@one.test');
+    expect((await service.acceptRecipient(tx, 'a@second.test')).direction).toBe('outbound');
+  });
+
+  it('outbound: a recipient-domain lookup error tempfails that recipient (and is retried)', async () => {
+    const prisma = fakePrisma(domains, new Set(['other.test']));
+    const { service } = setup(prisma);
+    const tx = service.beginTransaction('outbound', client, 'alice@one.test');
+    await expect(service.acceptRecipient(tx, 'c@other.test')).rejects.toThrow('db down');
+    expect((await service.acceptRecipient(tx, 'a@second.test')).direction).toBe('internal');
+  });
+
+  it('inbound: every recipient is inbound, even with a same-organization sender', async () => {
+    const prisma = fakePrisma(domains);
+    const { service } = setup(prisma);
+    const tx = service.beginTransaction(
+      'inbound',
+      { ...client, lhloName: 'mx.test' },
+      'boss@second.test',
+    );
+    const accepted = await service.acceptRecipient(tx, 'a@one.test');
+    expect(accepted.direction).toBe('inbound');
+    expect(prisma.lookups).toEqual(['one.test']);
+  });
+
+  it('stores the message direction and recipient directions, keeping the listener keys', async () => {
+    const { repository, store, service } = setup(fakePrisma(domains));
+    const tx = service.beginTransaction('outbound', client, 'alice@one.test');
+    const internalOnly = [
+      await service.acceptRecipient(tx, 'a@second.test'),
+      await service.acceptRecipient(tx, 'f@one.test'),
+    ];
+    const message = 'From: alice@one.test\r\nSubject: s\r\n\r\nbody\r\n';
+    expect(codes(await service.handleData(tx, internalOnly, stream(message)))).toEqual([250, 250]);
+    const [commit] = repository.commits;
+    expect(commit!.direction).toBe('outbound');
+    expect(commit!.messageDirection).toBe('internal');
+    expect(commit!.recipientDirections).toEqual(['internal', 'internal']);
+    // 2.2 D7/D8 contracts unchanged: both keys are built from the LISTENER direction.
+    const ref = { mtaId: 'out.test', queueId: 'Q9', direction: 'outbound' as const };
+    const sha = createHash('sha256').update(message).digest('hex');
+    expect(commit!.ingestKey).toBe(ingestKey(ref, sha, ['a@second.test', 'f@one.test']));
+    expect(store.uploads[0]).toContain(`/${objectRef(ref, 1n)}.eml`);
+    expect(commit!.emlObjectKey).toBe(store.uploads[0]);
+
+    const mixed = setup(fakePrisma(domains));
+    const tx2 = mixed.service.beginTransaction(
+      'outbound',
+      { ...client, queueId: 'Q10' },
+      'alice@one.test',
+    );
+    const recipients = [
+      await mixed.service.acceptRecipient(tx2, 'a@second.test'),
+      await mixed.service.acceptRecipient(tx2, 'c@other.test'),
+    ];
+    await mixed.service.handleData(tx2, recipients, stream(message));
+    expect(mixed.repository.commits[0]!.messageDirection).toBe('outbound');
+    expect(mixed.repository.commits[0]!.recipientDirections).toEqual(['internal', 'outbound']);
   });
 });

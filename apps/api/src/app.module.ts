@@ -16,6 +16,8 @@ import type { ApiConfig } from './config';
 import { MetaModule } from './meta/meta.module';
 import { ApiKeysModule } from './modules/api-keys/api-keys.module';
 import { AuthModule } from './modules/auth/auth.module';
+import { DeliveriesModule } from './modules/deliveries/deliveries.module';
+import { DomainDestinationsModule } from './modules/domain-destinations/domain-destinations.module';
 import { DomainsModule } from './modules/domains/domains.module';
 import { LoginAuditModule } from './modules/login-audit/login-audit.module';
 import { OrganizationsModule } from './modules/organizations/organizations.module';
@@ -60,6 +62,9 @@ export class AppModule {
         OrganizationsModule,
         DomainsModule,
         SmtpConnectorsModule,
+        // Step 2.3: destination servers and per-recipient delivery status.
+        DomainDestinationsModule,
+        DeliveriesModule,
       ],
       providers: [{ provide: API_CONFIG, useValue: config }],
       exports: [API_CONFIG],

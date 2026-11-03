@@ -1,8 +1,23 @@
-# dns-sink: TEST-ONLY authoritative DNS (Compose profile smtp-test, step 2.2 §6/D17).
+# dns-sink: TEST-ONLY authoritative DNS (Compose profile smtp-test, step 2.2 §6/D17, step 2.3 §6).
 # postfix-outbound uses it as its only upstream resolver, so locally the outbound MTA resolves
-# sink.test and NOTHING else: every other name is REFUSED (no forwarding, no recursion).
+# the zones below and NOTHING else: every other name is REFUSED (no forwarding, no recursion).
+#   sink.test                      mail-sink, the gateway MX (gw-mx), relay-sink, *.gwtenant
+#   mail.protection.outlook.com    sink-m365 (Microsoft 365 preset)
+#   aspmx.l.google.com             sink-google / sink-google-alt (Google Workspace preset)
 sink.test:53 {
     file /etc/coredns/sink.test.db
+    errors
+    log
+}
+
+mail.protection.outlook.com:53 {
+    file /etc/coredns/mail.protection.outlook.com.db
+    errors
+    log
+}
+
+aspmx.l.google.com:53 {
+    file /etc/coredns/aspmx.l.google.com.db
     errors
     log
 }

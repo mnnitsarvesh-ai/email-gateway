@@ -15,41 +15,43 @@ All paths below are under `/api/v1`.
 
 The `permissions` table is seeded from `PERMISSIONS` in `packages/database/src/seed/catalog.ts` (the source of truth; `GET /permissions` lists it). Keys starting with `platform:` are **platform permissions** (`PLATFORM_PERMISSIONS`); all others are **tenant permissions** (`TENANT_PERMISSIONS`). `TENANT_READ_PERMISSIONS` is the read-only subset used by several default roles.
 
-| Key                          | Meaning                                                          |
-| ---------------------------- | ---------------------------------------------------------------- |
-| `organization:read`          | View organization profile, settings and limits                   |
-| `organization:manage`        | Change organization profile and settings                         |
-| `user:read`                  | View users and their roles                                       |
-| `user:manage`                | Invite, disable and assign roles to users                        |
-| `role:read`                  | View roles and the permission catalog                            |
-| `role:manage`                | Create and edit custom roles                                     |
-| `apikey:read`                | View API keys (never secrets)                                    |
-| `apikey:manage`              | Create and revoke API keys                                       |
-| `session:manage`             | View and revoke other users' sessions                            |
-| `domain:read`                | View domains, DNS records and mail servers                       |
-| `domain:manage`              | Add, verify and configure domains                                |
-| `domain:dkim_rotate`         | Rotate DKIM signing keys of domains (step 2.1)                   |
-| `policy:read`                | View email policies and exceptions                               |
-| `policy:manage`              | Create and edit draft policies and exceptions                    |
-| `policy:publish`             | Publish and roll back policy versions                            |
-| `message:read`               | View message metadata, verdicts and delivery status              |
-| `message:read_content`       | View message content (body and attachments) from object storage  |
-| `quarantine:read`            | View quarantined messages                                        |
-| `quarantine:release`         | Release quarantined messages                                     |
-| `quarantine:delete`          | Delete quarantined messages                                      |
-| `quarantine:request_release` | Request the release of a quarantined message                     |
-| `report:read`                | View dashboards and reports                                      |
-| `audit:read`                 | View the audit log                                               |
-| `archive:read`               | Search and view archived messages                                |
-| `archive:export`             | Export archived messages                                         |
-| `archive:legal_hold`         | Create and release legal holds                                   |
-| `webhook:manage`             | Create and edit webhook subscriptions                            |
-| `settings:manage`            | Change notification, quarantine and archive settings             |
-| `platform:organizations`     | Platform: create, suspend and manage customer organizations      |
-| `platform:operations`        | Platform: view operational health, queues and maintenance status |
-| `platform:tenant_override`   | Platform: start an audited override into a customer organization |
-| `connector:read`             | View SMTP connectors (never secrets) (step 2.2)                  |
-| `connector:manage`           | Create, rotate and disable SMTP connectors (step 2.2)            |
+| Key                          | Meaning                                                                    |
+| ---------------------------- | -------------------------------------------------------------------------- |
+| `organization:read`          | View organization profile, settings and limits                             |
+| `organization:manage`        | Change organization profile and settings                                   |
+| `user:read`                  | View users and their roles                                                 |
+| `user:manage`                | Invite, disable and assign roles to users                                  |
+| `role:read`                  | View roles and the permission catalog                                      |
+| `role:manage`                | Create and edit custom roles                                               |
+| `apikey:read`                | View API keys (never secrets)                                              |
+| `apikey:manage`              | Create and revoke API keys                                                 |
+| `session:manage`             | View and revoke other users' sessions                                      |
+| `domain:read`                | View domains, DNS records and mail servers                                 |
+| `domain:manage`              | Add, verify and configure domains                                          |
+| `domain:dkim_rotate`         | Rotate DKIM signing keys of domains (step 2.1)                             |
+| `policy:read`                | View email policies and exceptions                                         |
+| `policy:manage`              | Create and edit draft policies and exceptions                              |
+| `policy:publish`             | Publish and roll back policy versions                                      |
+| `message:read`               | View message metadata, verdicts and delivery status                        |
+| `message:read_content`       | View message content (body and attachments) from object storage            |
+| `quarantine:read`            | View quarantined messages                                                  |
+| `quarantine:release`         | Release quarantined messages                                               |
+| `quarantine:delete`          | Delete quarantined messages                                                |
+| `quarantine:request_release` | Request the release of a quarantined message                               |
+| `report:read`                | View dashboards and reports                                                |
+| `audit:read`                 | View the audit log                                                         |
+| `archive:read`               | Search and view archived messages                                          |
+| `archive:export`             | Export archived messages                                                   |
+| `archive:legal_hold`         | Create and release legal holds                                             |
+| `webhook:manage`             | Create and edit webhook subscriptions                                      |
+| `settings:manage`            | Change notification, quarantine and archive settings                       |
+| `platform:organizations`     | Platform: create, suspend and manage customer organizations                |
+| `platform:operations`        | Platform: view operational health, queues and maintenance status           |
+| `platform:tenant_override`   | Platform: start an audited override into a customer organization           |
+| `connector:read`             | View SMTP connectors (never secrets) (step 2.2)                            |
+| `connector:manage`           | Create, rotate and disable SMTP connectors (step 2.2)                      |
+| `domain:routing_manage`      | Change where a domain's mail is delivered (destination servers) (step 2.3) |
+| `delivery:read`              | View per-recipient delivery status and the delivery audit trail (step 2.3) |
 
 `GET /permissions` lists `platform:*` keys only to users of the platform organization who are not under an override; customer users and API keys see the tenant permissions only.
 
@@ -106,6 +108,8 @@ Generated from the seed catalog (`SYSTEM_ROLES`); if the catalog changes, regene
 | `platform:tenant_override`   |  ✓  |  ✓  |     |     |     |     |     |     |
 | `connector:read`             |  ✓  |  ✓  |  ✓  |  ✓  |     |     |  ✓  |  ✓  |
 | `connector:manage`           |  ✓  |     |  ✓  |  ✓  |     |     |     |     |
+| `domain:routing_manage`      |  ✓  |     |  ✓  |  ✓  |     |     |     |     |
+| `delivery:read`              |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |
 
 **Platform roles** are the roles that hold any `platform:*` permission: `super_admin` and `platform_admin` (`PLATFORM_ROLE_KEYS`). They can be assigned only to users of the platform organization (`kind = platform`); assigning one in a customer organization is `400`. Customer organizations never see platform roles in `GET /roles` or `GET /roles/{key}` (`404`). Domain Admin is organization-wide; per-domain scoping of roles is out of scope for now.
 
@@ -137,6 +141,20 @@ Outbound SMTP connectors (SASL credentials, source-IP networks, client-certifica
 - `connector:manage` is held by the domain admin (who already configures the organization's mail domains), the organization admin and the super admin. Security analysts and quarantine reviewers hold neither key.
 - The recipient allow-list routes (`/domains/{id}/recipient-validation`, `/domains/{id}/recipients`) use the existing `domain:read` and `domain:manage`.
 - Tenant scoping is unchanged: the organization comes from the principal (or the audited override target), a foreign connector id is `404`.
+
+## Mail routing and delivery permissions (step 2.3)
+
+Two permissions for destination servers and delivery tracking (design [docs/plan/steps/05-routing.md](../plan/steps/05-routing.md) R13; catalog 33 → 35). The routes are designed in R13 and implemented by the api in step 2.3; this section records the permission model the seed grants.
+
+| Permission              | Routes (R13)                                                                                             | System roles                                                                  |
+| ----------------------- | -------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `domain:read`           | `GET /destination-providers`, `GET /domains/{id}/destinations` (existing key)                            | as above                                                                      |
+| `domain:routing_manage` | `PUT /domains/{id}/destinations`, `DELETE /domains/{id}/destinations`                                    | super admin, organization admin (holds every tenant permission), domain admin |
+| `delivery:read`         | `GET /messages/{messageId}/deliveries`, `GET /messages/{messageId}/deliveries/events`, `GET /deliveries` | every system role                                                             |
+
+- `domain:routing_manage` is separate from `domain:manage` (like `domain:dkim_rotate`): changing a domain's destination servers redirects **all** of its inbound and internal mail, so a custom role can configure domains without being able to send their mail elsewhere. It is not part of `TENANT_READ_PERMISSIONS`.
+- `delivery:read` is part of `TENANT_READ_PERMISSIONS` (platform admin, compliance auditor and read-only user hold it through the read set) and is also granted explicitly to the domain admin, the security analyst and the quarantine reviewer, the roles that already hold `message:read`; so every system role can read delivery status, as R13 states ("every built-in tenant role and `read_only_user`"). Organization admin and super admin hold it through "every tenant permission" / "every permission". Delivery rows show recipient addresses of the caller's organization only; the audit trail never contains message content.
+- Tenant scoping as everywhere: another organization's domain or message is `404`; platform users act on a tenant only through the audited override.
 
 ## Custom roles
 

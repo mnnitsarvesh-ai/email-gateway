@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '@email-gateway/common';
-import type { Prisma } from '@email-gateway/database';
+import type { MessageDirection, Prisma } from '@email-gateway/database';
+import { parseReinjectionToken } from '@email-gateway/mail-routing';
 
 export interface BounceRecord {
   organizationId: bigint;
@@ -14,7 +15,34 @@ export interface BounceRecord {
   dedupeKey: string;
   /** Hard-bounce suppression expiry (null: no suppression for this bounce). */
   suppressUntil: Date | null;
+  /** The message of the matched reinjection (step 2.3 R9), else null. */
+  messageId?: bigint | null;
+  messageReceivedAt?: Date | null;
 }
+
+/** The reinjection a notice belongs to (step 2.3 R9 "Bounce notices"). */
+export interface MatchedReinjection {
+  id: bigint;
+  receivedAt: Date;
+  publicId: string;
+  messageId: bigint;
+  organizationId: bigint;
+  direction: MessageDirection;
+  /** How it was found. */
+  matchedBy: 'queue_id' | 'envelope_id';
+}
+
+/** A Postfix queue id (short or long form). */
+const QUEUE_ID = /^[A-Za-z0-9]{1,32}$/;
+
+const REINJECTION_SELECT = {
+  id: true,
+  receivedAt: true,
+  publicId: true,
+  messageId: true,
+  organizationId: true,
+  direction: true,
+} satisfies Prisma.DeliveryReinjectionSelect;
 
 export type SuppressionResult = 'created' | 'extended' | 'kept' | 'none';
 
@@ -58,6 +86,8 @@ export class BouncesRepository {
             diagnostic: record.diagnostic,
             reportingMta: record.reportingMta?.slice(0, MAX_REPORTING_MTA) ?? null,
             dedupeKey: record.dedupeKey,
+            messageId: record.messageId ?? null,
+            messageReceivedAt: record.messageReceivedAt ?? null,
           },
           select: { id: true },
         });
@@ -74,6 +104,45 @@ export class BouncesRepository {
       },
       { timeout: timeoutMs, maxWait: timeoutMs },
     );
+  }
+
+  /**
+   * The reinjection of a notice (writer): by `X-Postfix-Queue-ID` = `delivery_reinjections.queue_id`
+   * (bound by the worker or the log tailer), then through `email_deliveries.outbound_queue_id`,
+   * then by `Original-Envelope-Id` = the reinjection token (`dw1-<public id hex>`). The
+   * organization of the result is the reinjection's, never derived from the notice.
+   */
+  async findReinjection(
+    queueId: string | null,
+    envelopeId: string | null,
+  ): Promise<MatchedReinjection | null> {
+    if (queueId !== null && QUEUE_ID.test(queueId)) {
+      const byQueue = await this.prisma.deliveryReinjection.findFirst({
+        where: { queueId },
+        select: REINJECTION_SELECT,
+        orderBy: { id: 'desc' },
+      });
+      if (byQueue) return { ...byQueue, matchedBy: 'queue_id' };
+      const delivery = await this.prisma.emailDelivery.findFirst({
+        where: { outboundQueueId: queueId, reinjectionId: { not: null } },
+        select: { reinjectionId: true, receivedAt: true },
+        orderBy: { id: 'desc' },
+      });
+      if (delivery?.reinjectionId) {
+        const viaDelivery = await this.prisma.deliveryReinjection.findUnique({
+          where: { id_receivedAt: { id: delivery.reinjectionId, receivedAt: delivery.receivedAt } },
+          select: REINJECTION_SELECT,
+        });
+        if (viaDelivery) return { ...viaDelivery, matchedBy: 'queue_id' };
+      }
+    }
+    const publicId = envelopeId === null ? null : parseReinjectionToken(envelopeId);
+    if (publicId === null) return null;
+    const byToken = await this.prisma.deliveryReinjection.findFirst({
+      where: { publicId },
+      select: REINJECTION_SELECT,
+    });
+    return byToken ? { ...byToken, matchedBy: 'envelope_id' } : null;
   }
 
   /**

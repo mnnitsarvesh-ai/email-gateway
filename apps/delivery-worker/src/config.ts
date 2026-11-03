@@ -4,15 +4,176 @@ import {
   httpConfigSchema,
   loadConfig,
   rabbitmqConfigSchema,
+  redisConfigSchema,
+  s3ConfigSchema,
 } from '@email-gateway/config';
-import type { z } from 'zod';
+import { z } from 'zod';
 
-export const configSchema = baseConfigSchema
+const port = z.coerce.number().int().min(1).max(65535);
+const positiveInt = z.coerce.number().int().min(1);
+const nonNegativeInt = z.coerce.number().int().min(0);
+const flag = z.enum(['true', 'false', '1', '0']).transform((v) => v === 'true' || v === '1');
+
+const HOST_NAME =
+  /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
+
+const hostName = z
+  .string()
+  .transform((value) => value.trim().toLowerCase().replace(/\.$/, ''))
+  .refine((v) => HOST_NAME.test(v) && v.length <= 253, 'must be a host name');
+
+/**
+ * Delivery-worker configuration (step 2.3 §5; `.env.example` section "Mail routing and delivery
+ * (step 2.3)"). Every key is validated here; the cross-field rules are in `validateWorkerConfig`.
+ */
+export const deliveryConfigShape = {
+  // Reinjection into postfix-outbound (R8).
+  DELIVERY_REINJECT_HOST: z.string().min(1).max(253).default('postfix-outbound'),
+  DELIVERY_REINJECT_INBOUND_PORT: port.default(10026),
+  DELIVERY_REINJECT_OUTBOUND_PORT: port.default(10027),
+  /** Organization-neutral EHLO name (invariant 9). */
+  DELIVERY_REINJECT_HELO: hostName.default('delivery.gateway.local'),
+  DELIVERY_REINJECT_CONCURRENCY: positiveInt.max(256).default(8),
+  /** ≤ postfix-outbound `smtpd_recipient_limit` (100). */
+  DELIVERY_BATCH_MAX_RECIPIENTS: positiveInt.max(100).default(100),
+  DELIVERY_REINJECT_COMMAND_TIMEOUT_MS: z.coerce.number().int().min(100).default(60_000),
+  DELIVERY_REINJECT_DATA_TIMEOUT_MS: z.coerce.number().int().min(100).default(600_000),
+  DELIVERY_REINJECT_LEASE_SECONDS: positiveInt.max(86_400).default(900),
+  DELIVERY_REINJECT_RETRY_BASE_SECONDS: positiveInt.default(30),
+  DELIVERY_REINJECT_RETRY_MAX_SECONDS: positiveInt.default(900),
+  DELIVERY_REINJECT_MAX_AGE_SECONDS: positiveInt.default(432_000),
+
+  // Scheduler and approval outbox poller (R6, R8).
+  DELIVERY_POLL_INTERVAL_MS: z.coerce.number().int().min(10).default(1000),
+  DELIVERY_OUTBOX_POLL_INTERVAL_MS: z.coerce.number().int().min(10).default(1000),
+  DELIVERY_OUTBOX_SAFETY_LAG_MS: nonNegativeInt.default(120_000),
+  DELIVERY_OUTBOX_BATCH_SIZE: positiveInt.max(5000).default(500),
+
+  // Roles of this process.
+  DELIVERY_APPROVALS_ENABLED: flag.default(true),
+  DELIVERY_REINJECTION_ENABLED: flag.default(true),
+  DELIVERY_STATUS_LOG_ENABLED: flag.default(true),
+  /** DEVELOPMENT ONLY (R5): refused unless APP_ENV is local or ci. */
+  DELIVERY_DEV_PASSTHROUGH_ENABLED: flag.default(false),
+
+  // Postfix delivery log (R9) and reconciler (R12).
+  DELIVERY_STATUS_LOG_PATH: z.string().min(1).default('/var/log/postfix-outbound/maillog'),
+  /** Unique per postfix-outbound host; part of the cursor name and of the GET_LOCK name (≤ 64). */
+  DELIVERY_STATUS_LOG_SOURCE_ID: z
+    .string()
+    .regex(/^[A-Za-z0-9._-]{1,48}$/, 'must be 1-48 characters of [A-Za-z0-9._-]')
+    .default('out.gateway.local'),
+  DELIVERY_STATUS_LOG_POLL_MS: z.coerce.number().int().min(10).default(500),
+  DELIVERY_STATUS_UNMATCHED_RETRY_SECONDS: nonNegativeInt.default(60),
+  DELIVERY_STATUS_STALE_AFTER_SECONDS: positiveInt.default(518_400),
+  DELIVERY_RECONCILE_INTERVAL_MS: z.coerce.number().int().min(100).default(30_000),
+  /**
+   * A recipient of a queued reinjection with no delivery-log line this long after qmgr took the
+   * queue file (and the log past that time) was not accepted at RCPT: it is re-planned.
+   */
+  DELIVERY_RECONCILE_UNCONFIRMED_SECONDS: positiveInt.default(3600),
+
+  // Outbound rate limits per UTC minute (R11); 0 = hold.
+  DELIVERY_RATE_TENANT_RCPT_PER_MINUTE: nonNegativeInt.default(600),
+  DELIVERY_RATE_TENANT_DOMAIN_RCPT_PER_MINUTE: nonNegativeInt.default(300),
+  DELIVERY_RATE_DESTINATION_DOMAIN_RCPT_PER_MINUTE: nonNegativeInt.default(6000),
+
+  // Hop enforcement at reinjection (R10).
+  ROUTING_MAX_RECEIVED_HEADERS: positiveInt.max(1000).default(25),
+  ROUTING_MAX_GATEWAY_PASSES: positiveInt.max(100).default(4),
+
+  // Shared with the smtp-adapter (step 2.2 D14).
+  /** HMAC key of the X-Gateway-Trace header. Never logged. */
+  GATEWAY_TRACE_SECRET: z.string().min(32),
+  GATEWAY_TRACE_ID: z
+    .string()
+    .regex(/^[A-Za-z0-9._-]{1,64}$/)
+    .default('gw-local'),
+  POSTFIX_OUTBOUND_MYHOSTNAME: hostName.default('out.gateway.local'),
+  /** Header block read cap before connecting (R8 step 2). */
+  INGEST_HEADER_MAX_BYTES: z.coerce.number().int().min(1024).max(1_048_576).default(65_536),
+};
+
+/** The text of the startup refusal (also asserted by the tests). */
+export const DEV_PASSTHROUGH_REFUSAL =
+  'true is allowed only when APP_ENV is local or ci: the dev pass-through delivers mail without scanning or policy';
+
+/** Cross-field rules. */
+export function validateWorkerConfig(
+  cfg: {
+    APP_ENV: string;
+    DELIVERY_DEV_PASSTHROUGH_ENABLED: boolean;
+    DELIVERY_APPROVALS_ENABLED: boolean;
+    DELIVERY_REINJECT_RETRY_BASE_SECONDS: number;
+    DELIVERY_REINJECT_RETRY_MAX_SECONDS: number;
+    DELIVERY_REINJECT_INBOUND_PORT: number;
+    DELIVERY_REINJECT_OUTBOUND_PORT: number;
+  },
+  ctx: z.RefinementCtx,
+): void {
+  if (cfg.DELIVERY_DEV_PASSTHROUGH_ENABLED && cfg.APP_ENV !== 'local' && cfg.APP_ENV !== 'ci') {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['DELIVERY_DEV_PASSTHROUGH_ENABLED'],
+      message: DEV_PASSTHROUGH_REFUSAL,
+    });
+  }
+  if (cfg.DELIVERY_DEV_PASSTHROUGH_ENABLED && !cfg.DELIVERY_APPROVALS_ENABLED) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['DELIVERY_DEV_PASSTHROUGH_ENABLED'],
+      message: 'requires DELIVERY_APPROVALS_ENABLED=true (it writes approvals for the planner)',
+    });
+  }
+  if (cfg.DELIVERY_REINJECT_RETRY_MAX_SECONDS < cfg.DELIVERY_REINJECT_RETRY_BASE_SECONDS) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['DELIVERY_REINJECT_RETRY_MAX_SECONDS'],
+      message: 'must be at least DELIVERY_REINJECT_RETRY_BASE_SECONDS',
+    });
+  }
+  if (cfg.DELIVERY_REINJECT_INBOUND_PORT === cfg.DELIVERY_REINJECT_OUTBOUND_PORT) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['DELIVERY_REINJECT_OUTBOUND_PORT'],
+      message:
+        'must differ from DELIVERY_REINJECT_INBOUND_PORT (10026 and 10027 apply different policies)',
+    });
+  }
+}
+
+const objectSchema = baseConfigSchema
   .extend(httpConfigSchema(3040).shape)
   .extend(databaseConfigSchema.shape)
-  .extend(rabbitmqConfigSchema.shape);
+  .extend(rabbitmqConfigSchema.shape)
+  .extend(redisConfigSchema.shape)
+  .extend(s3ConfigSchema.shape)
+  .extend(deliveryConfigShape);
+
+export const configSchema = objectSchema.superRefine(validateWorkerConfig);
 
 export type WorkerConfig = z.infer<typeof configSchema>;
 
+/**
+ * Only the worker's own keys (and their `<KEY>_FILE` secret indirections) are handed to
+ * `loadConfig`: the shared `.env` holds keys of other services, and a foreign `*_FILE` key would
+ * otherwise be read as a secret file of this service (same defence as the smtp-adapter).
+ */
+function ownEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const keys = new Set(Object.keys(objectSchema.shape));
+  return Object.fromEntries(
+    Object.entries(env).filter(
+      ([key]) => keys.has(key) || (key.endsWith('_FILE') && keys.has(key.slice(0, -5))),
+    ),
+  );
+}
+
 export const loadWorkerConfig = (env: NodeJS.ProcessEnv = process.env): Readonly<WorkerConfig> =>
-  loadConfig(configSchema, env);
+  loadConfig(configSchema, ownEnv(env));
+
+// --- Injection tokens ---------------------------------------------------------------------------
+
+/** The validated `WorkerConfig`. */
+export const WORKER_CONFIG = Symbol('WORKER_CONFIG');
+/** Root pino logger of the worker (components derive `.child({ component })`). */
+export const WORKER_LOGGER = Symbol('WORKER_LOGGER');

@@ -9,7 +9,7 @@ import {
 import { DomainCacheInvalidator } from './domain-cache-invalidator.service';
 import type { DomainPolicyService } from './domain-policy.service';
 
-type Row = { id: bigint; payload: unknown };
+type Row = { id: bigint; eventType?: string; payload: unknown };
 
 function harness(rows: Row[][], env: Record<string, string> = {}, maxId: bigint | null = 41n) {
   const queries: unknown[][] = [];
@@ -20,15 +20,16 @@ function harness(rows: Row[][], env: Record<string, string> = {}, maxId: bigint 
     return Promise.resolve(rows.shift() ?? []);
   });
   const invalidate = vi.fn(() => Promise.resolve());
+  const invalidateRouting = vi.fn(() => Promise.resolve());
   const metrics = newMetrics();
   const invalidator = new DomainCacheInvalidator(
     prismaService({ $queryRaw: queryRaw }),
-    { invalidate } as unknown as DomainPolicyService,
+    { invalidate, invalidateRouting } as unknown as DomainPolicyService,
     metrics,
     testConfig(env),
     silentLogger(),
   );
-  return { invalidator, invalidate, queryRaw, queries, metrics };
+  return { invalidator, invalidate, invalidateRouting, queryRaw, queries, metrics };
 }
 
 describe('DomainCacheInvalidator (D5)', () => {
@@ -47,10 +48,50 @@ describe('DomainCacheInvalidator (D5)', () => {
     expect(await h.invalidator.poll()).toBe(2);
     expect(h.invalidate.mock.calls).toEqual([['a.test'], ['b.test']]);
     // Second query starts after MAX(id) = 41, filters the event type and limits the batch.
-    expect(h.queries[1]).toEqual([41n, 'domain.status.changed.v1', 500]);
+    expect(h.queries[1]).toEqual([
+      41n,
+      'domain.status.changed.v1',
+      'domain.routing.changed.v1',
+      500,
+    ]);
     await h.invalidator.poll();
     expect(h.queries[2]?.[0]).toBe(46n);
     expect(await metricValue(h.metrics, 'smtp_cache_invalidations_total')).toBe(2);
+  });
+
+  it('invalidates the route and TLS keys of a domain.routing.changed event', async () => {
+    const routing = (hosts: string[]) => ({
+      domainId: '7',
+      domainPublicId: '0195f3c1-7a2b-7c3d-8e4f-5a6b7c8d9e0f',
+      name: 'tenant.test',
+      hosts,
+      changedAt: new Date().toISOString(),
+    });
+    const h = harness([
+      [
+        {
+          id: 42n,
+          eventType: 'domain.routing.changed.v1',
+          payload: routing(['old.example', 'new.example']),
+        },
+        { id: 43n, eventType: 'domain.routing.changed.v1', payload: { name: 'tenant.test' } },
+        {
+          id: 44n,
+          eventType: 'domain.routing.changed.v1',
+          payload: JSON.stringify(routing([])),
+        },
+        { id: 45n, eventType: 'domain.status.changed.v1', payload: { name: 'b.test' } },
+      ],
+    ]);
+    await h.invalidator.poll();
+    expect(await h.invalidator.poll()).toBe(3);
+    expect(h.invalidateRouting.mock.calls).toEqual([
+      ['tenant.test', ['old.example', 'new.example']],
+      ['tenant.test', []],
+    ]);
+    expect(h.invalidate.mock.calls).toEqual([['b.test']]);
+    await h.invalidator.poll();
+    expect(h.queries[2]?.[0]).toBe(45n);
   });
 
   it('starts at 0 on an empty outbox', async () => {

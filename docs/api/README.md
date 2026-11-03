@@ -244,6 +244,87 @@ curl -X POST "$API/api/v1/smtp-connectors" -H "Authorization: Bearer $TOKEN" \
 
 **DKIM signing keys.** Not an HTTP route: the api's `DkimSigningPublisher` copies the active RSA-2048 key of every active, outbound-enabled domain of an active organization into redis-dkim every `DKIM_SIGNING_SYNC_INTERVAL_SECONDS` (default 30; one replica per tick), and on demand with `pnpm --filter @email-gateway/api dkim:sync` (prints counts only: `published removed unchanged skipped pruned`). `REDIS_DKIM_URL` empty disables it with one startup warning ([ADR-0020](../architecture/adr/0020-dkim-signing.md)).
 
+### Destination servers (`domains` tag, step 2.3)
+
+Where a domain's approved inbound and internal mail is delivered: the tenant's own servers or a provider preset (Microsoft 365, Google Workspace). Design: [docs/plan/steps/05-routing.md](../plan/steps/05-routing.md) (R2, R3, R13); customer-side setup: [docs/domains/destination-servers.md](../domains/destination-servers.md). Every route is scoped to the caller's organization (or the override target) and accepts user tokens and API keys; another tenant's domain and an unknown id are `404`. Changing destinations redirects all mail of a domain, so it has its own permission, `domain:routing_manage` (granted to `domain_admin`, `organization_admin`, `super_admin`; **not** implied by `domain:manage`).
+
+| Method | Path                         | Access                         | Body → result                                                                                                                                        |
+| ------ | ---------------------------- | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/destination-providers`     | `domain:read`, K               | reader; `{ data: [{ provider, displayName, hostHint, hostPatterns, port, tlsMode, tlsVerifyNames, maxServers, defaultServers, documentationUrl }] }` |
+| GET    | `/domains/{id}/destinations` | `domain:read`, K               | reader; `{ provider: custom \| microsoft_365 \| google_workspace \| null, servers: [Server] }` in delivery order (deleted domain → `404`)            |
+| PUT    | `/domains/{id}/destinations` | `domain:routing_manage`, K, RL | one of the bodies below → `200` as GET (writer); `422` with `reason`; `409 Domain is deleted`; `400` more than `ROUTING_MAX_DESTINATIONS_PER_DOMAIN` |
+| DELETE | `/domains/{id}/destinations` | `domain:routing_manage`, K, RL | `204`; every destination removed (mail for the domain is then held with `no_destination` until destinations are set again); `409 Domain is deleted`  |
+
+**Server** (`Server`): `{ id, host, port, priority, tlsMode: none | opportunistic | required | verify, tlsVerifyNames, enabled, createdAt, updatedAt }` (`id` is the server's public id). Deprecated `outbound_source` rows are never shown or touched.
+
+**Bodies** (a discriminated union on `provider`; unknown fields are `400`):
+
+- `{ "provider": "microsoft_365", "host": "contoso-com.mail.protection.outlook.com" }`: exactly one host matching the preset's patterns (`*.mail.protection.outlook.com`, `*.mx.microsoft`), copied from the Microsoft 365 admin center. Port 25, `verify` and the preset's certificate names are forced.
+- `{ "provider": "google_workspace" }`: the preset's five servers (`aspmx.l.google.com` priority 1, `alt1`/`alt2` 5, `alt3`/`alt4` 10), `verify`.
+- `{ "provider": "custom", "servers": [{ "host", "port"?: 25, "priority"?: 10, "tlsMode"?: "opportunistic", "tlsVerifyNames"? }] }`: 1–`ROUTING_MAX_DESTINATIONS_PER_DOMAIN` (default 10) servers. `tlsVerifyNames` (a Postfix `match=` list such as `nexthop:.example.com`, `^[A-Za-z0-9.:-]{1,512}$`) only with `tlsMode: verify`; omitted means `nexthop`. Hosts are normalized (lower case, trailing dot removed, IDN to ASCII, canonical IP); a repeated host:port is `422 duplicate_server`.
+
+The replacement is atomic: the rows, the audit entry and the `domain.routing.changed.v1` outbox event commit in one transaction, and the gateway's MTA follows the change within seconds (cache invalidation; otherwise within the 60-second cache TTL). A body equal to the stored destinations writes nothing. Postfix tries the servers in order (priority, then list order) and fails over to the next one; the TLS policy applies per server.
+
+**Refusals (`422`).** The body is the standard error body plus a stable `reason` and the request `field` it applies to (`host`, `servers.<i>.host`, `servers.<i>.port`, `provider`); the input value is never echoed:
+
+```json
+{
+  "statusCode": 422,
+  "error": "UNPROCESSABLE_ENTITY",
+  "message": "Destination IP address is not publicly routable",
+  "reason": "ip_not_public",
+  "field": "servers.0.host",
+  "correlationId": "..."
+}
+```
+
+| `reason`                        | When                                                                                                                                                                                  |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ip_not_public`                 | IP literal (v4/v6, with or without brackets) in a non-public range (private, loopback, link-local, CGNAT, documentation, ULA, …), unless `ROUTING_ALLOW_NON_PUBLIC_DESTINATIONS=true` |
+| `metadata_address`              | Cloud metadata address or name (`169.254.169.254`, `fd00:ec2::254`, `100.100.100.200`, `169.254.170.2`, `metadata.google.internal`, `instance-data`), even with the flag              |
+| `single_label`                  | A name without a dot (`mysql`, `localhost`, any container or service short name)                                                                                                      |
+| `internal_suffix`               | A name under `.local`, `.localhost`, `.localdomain`, `.internal`, `.intranet`, `.lan`, `.home.arpa`, `.svc`, `.cluster.local`, `.consul` or `ROUTING_DENIED_DESTINATION_SUFFIXES`     |
+| `gateway_host`                  | One of the gateway's own hosts (`GATEWAY_MX_HOSTS`, `POSTFIX_MYHOSTNAME`, `POSTFIX_OUTBOUND_MYHOSTNAME`) or the bounce domain (`POSTFIX_BOUNCE_DOMAIN`) and names under it            |
+| `invalid_host`                  | Not a valid host name (LDH labels, ≤ 253 characters) or IP literal                                                                                                                    |
+| `port_not_allowed`              | Not the preset's port; for custom servers not one of `ROUTING_ALLOWED_DESTINATION_PORTS` (default 25, 587, 2525); the gateway's internal listener ports are always refused            |
+| `host_not_allowed_for_provider` | The host does not match the preset's patterns (e.g. `mail.contoso.com` for `microsoft_365`)                                                                                           |
+| `duplicate_server`              | The same host:port twice in one request                                                                                                                                               |
+| `provider_unavailable`          | The preset is disabled or its seeded servers fail the rules (a platform configuration problem)                                                                                        |
+| `host_reserved_for_provider`    | A custom server on a provider preset's host (e.g. `aspmx.l.google.com`): use that provider; its TLS policy is fixed for every tenant                                                  |
+| `destination_tls_conflict`      | The custom `host:port` is already a destination of another organization with a different `tlsMode` (or, for `verify`, other `tlsVerifyNames`); the field is `servers.<i>.tlsMode`     |
+
+Resolved addresses are not checked (DNS can change); production egress rules block private ranges (see [docs/deployment/mail-routing.md](../deployment/mail-routing.md)). The smtp-adapter re-applies the same rules on every Postfix lookup, so a row written directly to the database is skipped (logged), and any gateway host makes the domain defer instead of looping.
+
+**Rate limit and audit.** `PUT` and `DELETE` share one counter: 30 per caller (user or API key) per minute (`429` with `Retry-After`). `domain.destinations_replaced` (`name`, `provider`, `hosts`, `count`, `previous: { provider, hosts }`) and `domain.destinations_removed` (`name`, `provider`, `hosts`, `count`); never secrets. Platform users act only through an audited override (ADR-0016); `platform_admin` can read but not change destinations.
+
+```bash
+curl -X PUT "$API/api/v1/domains/$DOMAIN_ID/destinations" -H "X-API-Key: $KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"provider":"custom","servers":[{"host":"mx1.example.com","tlsMode":"required"},{"host":"mx2.example.com","priority":20}]}'
+curl -X PUT "$API/api/v1/domains/$DOMAIN_ID/destinations" -H "X-API-Key: $KEY" \
+  -H 'Content-Type: application/json' -d '{"provider":"microsoft_365","host":"contoso-com.mail.protection.outlook.com"}'
+```
+
+### Delivery status (`deliveries` tag, step 2.3)
+
+Per-recipient delivery state of the caller's organization (R9, R13), from the read replica (a few seconds behind the mail path). Permission `delivery:read` (every built-in tenant role, `read_only_user` included). A message is addressed by its public id; another organization's message is `404`. Internal ids never appear: recipients are identified by `rcptSeq` (position in the RCPT list) and deliveries by `rcptSeq` + `deliverySeq` (`0` = the initial delivery; releases use 1, 2, …).
+
+| Method | Path                                      | Access             | Result                                                                                                                                                                                                               |
+| ------ | ----------------------------------------- | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/messages/{messageId}/deliveries`        | `delivery:read`, K | `{ message: { id, direction, status, receivedAt }, deliveries: [Delivery] }` by `rcptSeq`, then `deliverySeq`                                                                                                        |
+| GET    | `/messages/{messageId}/deliveries/events` | `delivery:read`, K | `?rcptSeq&limit&cursor` → `{ data: [{ rcptSeq, deliverySeq, source, fromStatus, toStatus, applied, occurredAt, queueId, smtpCode, enhancedStatus, remoteHost, errorClass, detail }], nextCursor }`, **oldest first** |
+| GET    | `/deliveries`                             | `delivery:read`, K | `?from&to&status&direction&limit&cursor` → `{ data: [{ messageId, rcptSeq, recipient, direction, status, attemptCount, lastErrorClass, statusChangedAt }], nextCursor }`, newest first                               |
+
+**Delivery** (`Delivery`): `{ rcptSeq, deliverySeq, recipient, direction: inbound | outbound | internal | null, status, attemptCount, lastAttemptAt, deliveredAt, remoteHost, finalSmtpCode, enhancedStatus, finalSmtpResponse, lastErrorClass, failureReason, dsnGenerated, statusChangedAt }`. `dsnGenerated` is true when the gateway's MTA sent a DSN to the original sender (never for inbound mail). `finalSmtpCode`, `enhancedStatus` and `finalSmtpResponse` describe the latest result that explains the status: a remote server's reply or Postfix's own outcome from the delivery log or a DSN, or the gateway's refusal or deferral of its internal hop; the hop's own `250 … queued as` is never shown there (a `queued` recipient has no final code), and a later result without an SMTP code (`connect to …: No route to host`) clears an earlier attempt's code. `lastErrorClass` is cleared when the recipient is delivered. `direction` is null for recipients ingested before step 2.3.
+
+**Statuses.** `pending` (planned), `queued` (accepted by the gateway's outbound MTA), `deferred` (temporary failure, retried by the MTA), `delivered` (only after the remote server's `2xx`, from the MTA's delivery log), `bounced` (permanent failure), `expired` (the MTA gave up after its queue lifetime, or the gateway's own retry window ended), `failed` (refused by the gateway; `failureReason`: `direction_changed`, `recipient_domain_inactive`, `loop_detected`, `reinjection_refused`, `reinjection_expired`, `content_missing`), `suppressed` (address on the organization's suppression list), `unknown` (no status signal for too long, or an ambiguous hand-off to the MTA that no log evidence resolved before the gateway's retry window ended, `failureReason: status_signal_missing`; never guessed; a late real signal still makes it final). `delivered`, `bounced`, `expired`, `failed` and `suppressed` are final.
+
+**Error classes** (`lastErrorClass`, `errorClass`): `connect`, `dns`, `tls`, `timeout`, `remote_4xx`, `remote_5xx`, `no_destination` (the domain has no usable destination server), `loop`, `gateway_rate_limited`, `gateway_rate_limit_unavailable`, `gateway_hold`, `reinjection_4xx`, `reinjection_error`, `other`.
+
+**Audit trail.** Every status signal is kept, applied or not (`applied: false` for stale, conflicting or same-state signals). `source`: `planner`, `reinjection`, `postfix_log` (the MTA delivery log), `bounce_notice` (postmaster DSN copies), `reconciler`. `detail` is the remote reply or the reason text, never message content.
+
+**List range.** `from` (inclusive) and `to` (exclusive) are ISO 8601 date-times; `to` defaults to now and `from` to `to` − 24 h. The range must be at most 31 days and `from` before `to` (`400`). The cursor is opaque (keyset on received-at and id); filters must stay the same between pages.
+
 ## Errors
 
 Every error uses one shape, produced by the global exception filter:
@@ -264,7 +345,7 @@ Every error uses one shape, produced by the global exception filter:
 | `403`  | Authenticated but not allowed: missing permission, user-only route called with an API key, `MFA required`, `MFA enrollment required`, four-eyes violation                                                      |
 | `404`  | Not found, **including resources of another tenant** and soft-deleted resources                                                                                                                                |
 | `409`  | Conflicts with the current state: duplicates (slug, email, domain), limit reached (`Organization limit reached: <key>`), invalid state transitions, active legal hold, a check or rotation already in progress |
-| `422`  | A valid request for a feature that is not implemented (`Not implemented`, e.g. `smtp_callout`/`ldap` recipient validation)                                                                                     |
+| `422`  | A valid request for a feature that is not implemented (`Not implemented`, e.g. `smtp_callout`/`ldap` recipient validation); a refused destination server (with `reason` and `field`, step 2.3)                 |
 | `429`  | Rate limited, with `Retry-After` (seconds)                                                                                                                                                                     |
 | `503`  | Authentication, rate-limit or domain-verification backend (Redis) unavailable: these paths fail closed                                                                                                         |
 

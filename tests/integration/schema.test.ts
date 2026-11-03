@@ -13,8 +13,9 @@ import { stack } from './support/env';
  * docs/plan/steps/01-database.md (section 3) and ADR-0014: tables, partitioning, the absence of
  * foreign keys on partitioned tables, the tenancy column and the identity registry's unique key;
  * plus the identity/tenancy changes of docs/plan/steps/02-tenants-auth-rbac.md (D10), the
- * domain onboarding changes of docs/plan/steps/03-domain-onboarding.md (§3) and the SMTP gateway
- * tables of docs/plan/steps/04-smtp-gateway.md (§3).
+ * domain onboarding changes of docs/plan/steps/03-domain-onboarding.md (§3), the SMTP gateway
+ * tables of docs/plan/steps/04-smtp-gateway.md (§3) and the mail routing and delivery tracking
+ * changes of docs/plan/steps/05-routing.md (§3).
  */
 const prisma = new PrismaClient({ datasourceUrl: stack.databaseUrl() });
 
@@ -22,7 +23,7 @@ afterAll(async () => {
   await prisma.$disconnect();
 });
 
-/** Partitioned tables and their RANGE COLUMNS partition column (D3). */
+/** Partitioned tables and their RANGE COLUMNS partition column (D3, step 2.3 §3). */
 const PARTITIONED: Record<string, string> = {
   email_messages: 'received_at',
   email_recipients: 'received_at',
@@ -40,6 +41,8 @@ const PARTITIONED: Record<string, string> = {
   audit_logs: 'created_at',
   webhook_deliveries: 'event_occurred_at',
   message_outbox: 'created_at',
+  delivery_reinjections: 'received_at',
+  delivery_status_events: 'received_at',
 };
 
 /** Tables with no `organization_id`: platform catalogs, the root, a join table, the ledger and
@@ -56,6 +59,8 @@ const NOT_TENANT_OWNED = [
   'system_settings',
   'message_idempotency',
   'maintenance_watermarks',
+  'mail_destination_presets',
+  'stream_cursors',
 ];
 
 /** Tenant-owned tables whose `organization_id` is nullable (platform-level rows), per D1. */
@@ -112,6 +117,8 @@ const TENANT_OWNED = [
   'delivery_attempts',
   'delivery_suppressions',
   'bounce_events',
+  'delivery_reinjections',
+  'delivery_status_events',
   'quarantine_messages',
   'quarantine_actions',
   'quarantine_release_logs',
@@ -128,16 +135,17 @@ const TENANT_OWNED = [
 const ALL_TABLES = [...NOT_TENANT_OWNED, ...TENANT_OWNED];
 
 describe('MySQL schema', () => {
-  it('has exactly the 66 data-model tables plus _prisma_migrations', async () => {
+  it('has exactly the 70 data-model tables plus _prisma_migrations', async () => {
     const rows = await prisma.$queryRaw<{ name: string }[]>`
       SELECT TABLE_NAME AS name FROM information_schema.TABLES
       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'`;
-    expect(ALL_TABLES).toHaveLength(66);
-    expect(new Set(ALL_TABLES).size).toBe(66);
+    expect(ALL_TABLES).toHaveLength(70);
+    expect(new Set(ALL_TABLES).size).toBe(70);
     expect(rows.map((r) => r.name).sort()).toEqual([...ALL_TABLES, '_prisma_migrations'].sort());
   });
 
-  it('partitions the 16 high-volume tables by RANGE COLUMNS with a pmax partition', async () => {
+  it('partitions the 18 high-volume tables by RANGE COLUMNS with a pmax partition', async () => {
+    expect(Object.keys(PARTITIONED)).toHaveLength(18);
     const rows = await prisma.$queryRaw<
       { tableName: string; method: string; expression: string; partitionName: string }[]
     >`
@@ -1054,6 +1062,214 @@ describe('SMTP gateway schema (step 2.2, §3)', () => {
       expect(await prisma.domainRecipientAddress.count({ where: { organizationId } })).toBe(1);
     } finally {
       await cleanup();
+    }
+  });
+});
+
+describe('mail routing and delivery tracking schema (step 2.3, §3)', () => {
+  const STATUS =
+    "enum('pending','in_progress','delivered','deferred','bounced','failed','suppressed','queued','expired','unknown')";
+
+  it('adds the destination, recipient and delivery columns with the data-model types', async () => {
+    const cols = await columns([
+      'domain_mail_servers',
+      'email_recipients',
+      'email_deliveries',
+      'delivery_reinjections',
+      'delivery_status_events',
+      'mail_destination_presets',
+      'stream_cursors',
+    ]);
+    const col = (table: string, column: string) => cols.get(`${table}.${column}`);
+    expect(col('domain_mail_servers', 'public_id')).toMatchObject({
+      columnType: 'char(36)',
+      nullable: 'NO',
+    });
+    expect(col('domain_mail_servers', 'provider')).toMatchObject({
+      columnType: "enum('custom','microsoft_365','google_workspace')",
+      nullable: 'NO',
+      columnDefault: 'custom',
+    });
+    expect(col('domain_mail_servers', 'tls_verify_names')).toMatchObject({
+      columnType: 'varchar(512)',
+      nullable: 'YES',
+    });
+    expect(col('email_recipients', 'direction')).toMatchObject({
+      columnType: "enum('inbound','outbound','internal')",
+      nullable: 'YES',
+    });
+    expect(col('email_deliveries', 'status')?.columnType).toBe(STATUS);
+    for (const [column, type] of [
+      ['reinjection_id', 'bigint unsigned'],
+      ['direction', "enum('inbound','outbound','internal')"],
+      ['destination_key', 'varchar(300)'],
+      ['status_changed_at', 'datetime(3)'],
+      ['last_signal_at', 'datetime(3)'],
+      ['enhanced_status', 'varchar(16)'],
+      ['last_error_class', 'varchar(32)'],
+      ['failure_reason', 'varchar(64)'],
+      ['dsn_queue_id', 'varchar(32)'],
+    ] as const) {
+      expect(col('email_deliveries', column), column).toMatchObject({
+        columnType: type,
+        nullable: 'YES',
+      });
+    }
+    expect(col('delivery_reinjections', 'listener')?.columnType).toBe(
+      "enum('reinject_inbound','reinject_outbound')",
+    );
+    expect(col('delivery_reinjections', 'status')).toMatchObject({
+      columnType: "enum('pending','in_progress','queued','failed')",
+      columnDefault: 'pending',
+    });
+    expect(col('delivery_reinjections', 'idempotency_key')?.columnType).toBe('char(64)');
+    expect(col('delivery_status_events', 'source')?.columnType).toBe(
+      "enum('planner','reinjection','postfix_log','bounce_notice','reconciler')",
+    );
+    expect(col('delivery_status_events', 'from_status')).toMatchObject({
+      columnType: STATUS,
+      nullable: 'YES',
+    });
+    expect(col('delivery_status_events', 'to_status')).toMatchObject({
+      columnType: STATUS,
+      nullable: 'NO',
+    });
+    expect(col('delivery_status_events', 'detail')?.columnType).toBe('varchar(1024)');
+    expect(col('mail_destination_presets', 'host_patterns')?.columnType).toBe('json');
+    expect(col('mail_destination_presets', 'max_servers')?.columnType).toBe('tinyint unsigned');
+    expect(col('stream_cursors', 'file_offset')?.columnType).toBe('bigint unsigned');
+  });
+
+  it('has the step 2.3 keys and indexes; unique keys of partitioned tables end with received_at', async () => {
+    const servers = await indexColumnSets('domain_mail_servers');
+    expect(servers).toContainEqual(expect.objectContaining({ key: 'public_id', unique: true }));
+    expect(servers).toContainEqual(expect.objectContaining({ key: 'host,port', unique: false }));
+
+    const deliveries = await indexColumnSets('email_deliveries');
+    expect(deliveries).toContainEqual(
+      expect.objectContaining({ key: 'outbound_queue_id', unique: false }),
+    );
+    expect(deliveries).toContainEqual(
+      expect.objectContaining({ key: 'organization_id,received_at,id', unique: false }),
+    );
+
+    const reinjections = await indexColumnSets('delivery_reinjections');
+    expect(reinjections).toContainEqual(
+      expect.objectContaining({ key: 'id,received_at', unique: true }),
+    );
+    expect(reinjections).toContainEqual(
+      expect.objectContaining({ key: 'message_id,idempotency_key,received_at', unique: true }),
+    );
+    for (const key of ['status,next_attempt_at', 'queue_id', 'public_id']) {
+      expect(reinjections, key).toContainEqual(expect.objectContaining({ key, unique: false }));
+    }
+    const events = await indexColumnSets('delivery_status_events');
+    expect(events).toContainEqual(
+      expect.objectContaining({ key: 'delivery_id,signal_key,received_at', unique: true }),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({ key: 'message_id,received_at', unique: false }),
+    );
+    for (const index of [...reinjections, ...events].filter((i) => i.unique)) {
+      expect(index.columns.at(-1), index.key).toBe('received_at');
+    }
+    const presets = await indexColumnSets('mail_destination_presets');
+    expect(presets).toContainEqual(expect.objectContaining({ key: 'provider', unique: true }));
+  });
+
+  it('generates distinct public ids for destination servers and refuses duplicates', async () => {
+    const suffix = randomUUID().slice(0, 8);
+    const plan = await prisma.organizationPlan.create({
+      data: {
+        code: `it-${suffix}`,
+        name: 'Routing schema',
+        defaultLimits: {},
+        defaultFeatures: {},
+      },
+    });
+    const organization = await prisma.organization.create({
+      data: {
+        slug: `it-${suffix}`,
+        name: 'Routing schema',
+        planId: plan.id,
+        dataRegion: 'ap-south-1',
+      },
+    });
+    const organizationId = organization.id;
+    try {
+      const domain = await prisma.domain.create({
+        data: { organizationId, name: `it-${suffix}.test` },
+      });
+      const server = (host: string, publicId?: string) =>
+        prisma.domainMailServer.create({
+          data: {
+            organizationId,
+            domainId: domain.id,
+            role: 'inbound_destination',
+            host,
+            ...(publicId ? { publicId } : {}),
+          },
+        });
+      const a = await server('mx1.example.test');
+      const b = await server('mx2.example.test');
+      expect(a.publicId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-/);
+      expect(a.publicId).not.toBe(b.publicId);
+      expect(a.provider).toBe('custom');
+      expect(a.tlsVerifyNames).toBeNull();
+      await expect(server('mx3.example.test', a.publicId)).rejects.toMatchObject({
+        code: 'P2002',
+      });
+    } finally {
+      await prisma.domain.deleteMany({ where: { organizationId } });
+      await prisma.organization.deleteMany({ where: { id: organizationId } });
+      await prisma.organizationPlan.deleteMany({ where: { id: plan.id } });
+    }
+  });
+
+  it('dedupes reinjection groups and status signals per partition key', async () => {
+    const organizationId = 999_999_001n;
+    const receivedAt = new Date();
+    const messageId = BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000));
+    const reinjection = {
+      receivedAt,
+      messageId,
+      organizationId,
+      listener: 'reinject_outbound' as const,
+      direction: 'outbound' as const,
+      destinationKey: 'mx:example.test',
+      emlObjectKey: `org/${organizationId}/eml/x.eml`,
+      recipientCount: 1,
+      recipientSetSha256: 'a'.repeat(64),
+      idempotencyKey: 'b'.repeat(64),
+      approvalEventId: randomUUID(),
+      nextAttemptAt: receivedAt,
+    };
+    const event = {
+      receivedAt,
+      deliveryId: messageId,
+      messageId,
+      recipientId: messageId,
+      organizationId,
+      source: 'planner' as const,
+      signalKey: 'c'.repeat(64),
+      occurredAt: receivedAt,
+      toStatus: 'pending' as const,
+      applied: true,
+    };
+    try {
+      const row = await prisma.deliveryReinjection.create({ data: reinjection });
+      expect(row.publicId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-/);
+      expect(row.status).toBe('pending');
+      await expect(prisma.deliveryReinjection.create({ data: reinjection })).rejects.toMatchObject({
+        code: 'P2002',
+      });
+      await prisma.deliveryStatusEvent.create({ data: event });
+      await expect(prisma.deliveryStatusEvent.create({ data: event })).rejects.toMatchObject({
+        code: 'P2002',
+      });
+    } finally {
+      await prisma.deliveryReinjection.deleteMany({ where: { organizationId } });
+      await prisma.deliveryStatusEvent.deleteMany({ where: { organizationId } });
     }
   });
 });

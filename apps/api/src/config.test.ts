@@ -526,3 +526,47 @@ describe('loadApiConfig: SMTP gateway control plane (step 2.2 §5)', () => {
     );
   });
 });
+
+describe('loadApiConfig: mail routing (step 2.3 R3, §5)', () => {
+  it('defaults: public destinations only, no extra suffixes, 10 servers, the Postfix names', () => {
+    const cfg = loadApiConfig(valid);
+    expect(cfg.ROUTING_ALLOW_NON_PUBLIC_DESTINATIONS).toBe(false);
+    expect(cfg.ROUTING_DENIED_DESTINATION_SUFFIXES).toEqual([]);
+    expect(cfg.ROUTING_MAX_DESTINATIONS_PER_DOMAIN).toBe(10);
+    expect(cfg.ROUTING_ALLOWED_DESTINATION_PORTS).toEqual([25, 587, 2525]);
+    expect(cfg.POSTFIX_MYHOSTNAME).toBe('mx.gateway.local');
+    expect(cfg.POSTFIX_OUTBOUND_MYHOSTNAME).toBe('out.gateway.local');
+    expect(cfg.POSTFIX_BOUNCE_DOMAIN).toBe('bounces.gateway.internal');
+  });
+
+  it('parses the flag, the suffixes (leading dot optional) and the gateway names', () => {
+    const cfg = loadApiConfig({
+      ...valid,
+      ROUTING_ALLOW_NON_PUBLIC_DESTINATIONS: 'true',
+      ROUTING_DENIED_DESTINATION_SUFFIXES: '.test, Example ,corp.lan.',
+      ROUTING_MAX_DESTINATIONS_PER_DOMAIN: '4',
+      ROUTING_ALLOWED_DESTINATION_PORTS: '25, 2526',
+      POSTFIX_MYHOSTNAME: 'MX.GW.example.',
+      POSTFIX_OUTBOUND_MYHOSTNAME: 'out.gw.example',
+      POSTFIX_BOUNCE_DOMAIN: 'bounces.gw.example',
+    });
+    expect(cfg.ROUTING_ALLOW_NON_PUBLIC_DESTINATIONS).toBe(true);
+    expect(cfg.ROUTING_DENIED_DESTINATION_SUFFIXES).toEqual(['test', 'example', 'corp.lan']);
+    expect(cfg.ROUTING_MAX_DESTINATIONS_PER_DOMAIN).toBe(4);
+    expect(cfg.ROUTING_ALLOWED_DESTINATION_PORTS).toEqual([25, 2526]);
+    expect(cfg.POSTFIX_MYHOSTNAME).toBe('mx.gw.example');
+  });
+
+  it.each([
+    ['ROUTING_ALLOW_NON_PUBLIC_DESTINATIONS', 'maybe'],
+    ['ROUTING_DENIED_DESTINATION_SUFFIXES', 'bad suffix'],
+    ['ROUTING_MAX_DESTINATIONS_PER_DOMAIN', '0'],
+    ['ROUTING_MAX_DESTINATIONS_PER_DOMAIN', '11'],
+    ['ROUTING_ALLOWED_DESTINATION_PORTS', '25,abc'],
+    ['ROUTING_ALLOWED_DESTINATION_PORTS', '25,10052'],
+    ['POSTFIX_MYHOSTNAME', 'not a host'],
+    ['POSTFIX_BOUNCE_DOMAIN', 'single'],
+  ])('refuses %s=%s', (key, value) => {
+    expect(rejection({ ...valid, [key]: value })).toContain(key);
+  });
+});

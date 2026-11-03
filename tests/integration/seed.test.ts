@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {
   DEMO,
+  MAIL_DESTINATION_PRESETS,
   PERMISSIONS,
   PLATFORM_ORGANIZATION_SLUG,
   PrismaClient,
@@ -15,7 +16,8 @@ import { stack } from './support/env';
 
 /**
  * db:seed (step 1.1 D7, step 1.2/1.3 D8 and D10) against the dev schema, with the DML account:
- * the catalog (33 permissions, the 8 system roles, the platform organization), the retired
+ * the catalog (35 permissions, the 8 system roles, the platform organization, the step 2.3
+ * destination provider presets), the retired
  * role-key remap, and idempotency (running it twice leaves the same row counts). The seeded
  * rows are dev data and are deliberately left in place.
  */
@@ -53,6 +55,7 @@ async function counts() {
     rolePermissions: await prisma.rolePermission.count(),
     plans: await prisma.organizationPlan.count(),
     systemSettings: await prisma.systemSetting.count(),
+    destinationPresets: await prisma.mailDestinationPreset.count(),
     demoOrganizations: await prisma.organization.count({
       where: { slug: { in: ['demo', 'platform'] } },
     }),
@@ -93,13 +96,14 @@ describe('db:seed', () => {
     expect(await counts()).toEqual(afterFirst);
 
     expect(afterFirst).toMatchObject({
-      permissions: 33,
+      permissions: 35,
       systemRoles: 8,
+      destinationPresets: 2,
       plans: expect.any(Number) as unknown,
       demoOrganizations: 2,
       demoUsers: 2,
       demoUserRoles: 2,
-      demoLimits: 10,
+      demoLimits: 11,
       demoFeatures: 11,
       demoDeployments: 1,
       demoDomains: 1,
@@ -108,7 +112,7 @@ describe('db:seed', () => {
       platformUsers: 1,
       platformUserRoles: 1,
       platformSettings: 1,
-      platformLimits: 10,
+      platformLimits: 11,
       platformFeatures: 11,
       platformDeployments: 1,
     });
@@ -142,7 +146,61 @@ describe('db:seed', () => {
       inbound_recipients_per_minute: 3_000,
       outbound_recipients_per_minute: 300,
       outbound_recipients_per_day: 50_000,
+      outbound_recipients_per_domain_per_minute: 150,
     });
+    // Step 2.3 (R11): the per-destination-domain limit is materialized like the other limits
+    // (demo = standard: 300 / 2; platform = enterprise: 1 200 / 2).
+    const platformOrg = await prisma.organization.findUniqueOrThrow({
+      where: { slug: PLATFORM_ORGANIZATION_SLUG },
+    });
+    const domainLimit = (organizationId: bigint) =>
+      prisma.organizationLimit.findUniqueOrThrow({
+        where: {
+          organizationId_limitKey: {
+            organizationId,
+            limitKey: 'outbound_recipients_per_domain_per_minute',
+          },
+        },
+        select: { limitValue: true, source: true },
+      });
+    expect(await domainLimit(demo.id)).toEqual({ limitValue: 150n, source: 'plan' });
+    expect(await domainLimit(platformOrg.id)).toEqual({ limitValue: 600n, source: 'plan' });
+
+    // Step 2.3 (R2): destination provider presets are platform configuration data.
+    const presets = await prisma.mailDestinationPreset.findMany({ orderBy: { provider: 'asc' } });
+    expect(presets.map((p) => p.provider).sort()).toEqual(['google_workspace', 'microsoft_365']);
+    for (const def of MAIL_DESTINATION_PRESETS) {
+      const row = presets.find((p) => p.provider === def.provider)!;
+      expect(row, def.provider).toMatchObject({
+        displayName: def.displayName,
+        hostPatterns: [...def.hostPatterns],
+        hostHint: def.hostHint,
+        defaultServers: def.defaultServers === null ? null : [...def.defaultServers],
+        port: 25,
+        tlsMode: 'verify',
+        tlsVerifyNames: def.tlsVerifyNames,
+        maxServers: def.maxServers,
+        documentationUrl: def.documentationUrl,
+        enabled: true,
+      });
+      for (const pattern of row.hostPatterns as string[])
+        expect(() => new RegExp(pattern)).not.toThrow();
+    }
+    // The demo destination stays the custom mail.gateway.test server, now with a public id.
+    const servers = await prisma.domainMailServer.findMany({
+      where: { organizationId: demo.id, role: 'inbound_destination' },
+      select: { host: true, port: true, provider: true, publicId: true, tlsVerifyNames: true },
+    });
+    expect(servers).toHaveLength(1);
+    expect(servers[0]).toMatchObject({
+      host: 'mail.gateway.test',
+      port: 25,
+      provider: 'custom',
+      tlsVerifyNames: null,
+    });
+    expect(servers[0]!.publicId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    );
 
     // The demo domain is the owner of its name (tenant resolution key) and active (step 2.1).
     const domain = await prisma.domain.findUnique({
@@ -189,7 +247,7 @@ describe('db:seed', () => {
     await prisma.domain.update({ where: { id: domain.id }, data: { nextCheckAt: new Date() } });
   });
 
-  it('seeds exactly the 33 permissions and the 8 system roles of D8, with their permissions', async () => {
+  it('seeds exactly the 35 permissions and the 8 system roles of D8, with their permissions', async () => {
     expect(seed().status).toBe(0);
     const permissions = await prisma.permission.findMany({ select: { key: true } });
     expect(permissions.map((p) => p.key).sort()).toEqual(PERMISSIONS.map((p) => p.key).sort());
@@ -236,6 +294,13 @@ describe('db:seed', () => {
     for (const retired of Object.keys(RETIRED_ROLE_KEYS)) {
       expect(roles.map((r) => r.key)).not.toContain(retired);
     }
+    // Step 2.3 (R13): destination changes and delivery status.
+    expect(holders('domain:routing_manage')).toEqual([
+      'domain_admin',
+      'organization_admin',
+      'super_admin',
+    ]);
+    expect(holders('delivery:read')).toEqual([...SYSTEM_ROLE_KEYS].sort());
 
     // Step 2.1 D14: DKIM rotation is granted to domain, organization and super admins only.
     const rotators = roles

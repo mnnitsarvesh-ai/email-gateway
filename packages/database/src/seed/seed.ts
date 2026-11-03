@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
-import { type DomainStatus, type Prisma, type PrismaClient } from '@prisma/client';
+import { type DomainStatus, Prisma, type PrismaClient } from '@prisma/client';
 import {
   DEMO,
+  MAIL_DESTINATION_PRESETS,
   PERMISSIONS,
   PLANS,
   PLATFORM_ORGANIZATION,
@@ -46,6 +47,8 @@ export interface CatalogSummary {
   userRolesRemapped: number;
   plans: number;
   systemSettings: number;
+  /** Destination provider presets upserted (step 2.3 R2). */
+  destinationPresets: number;
   platformOrganizationId: bigint;
 }
 
@@ -130,6 +133,31 @@ export async function seedCatalog(
       });
     }
 
+    // Destination provider presets (step 2.3 R2): code-owned platform configuration, so every
+    // run synchronises them exactly (an operator disables a preset in code, not in the table).
+    for (const preset of MAIL_DESTINATION_PRESETS) {
+      const data = {
+        displayName: preset.displayName,
+        hostPatterns: [...preset.hostPatterns],
+        hostHint: preset.hostHint,
+        defaultServers:
+          preset.defaultServers === null
+            ? Prisma.DbNull
+            : preset.defaultServers.map((server) => ({ ...server })),
+        port: preset.port,
+        tlsMode: preset.tlsMode,
+        tlsVerifyNames: preset.tlsVerifyNames,
+        maxServers: preset.maxServers,
+        documentationUrl: preset.documentationUrl,
+        enabled: true,
+      };
+      await tx.mailDestinationPreset.upsert({
+        where: { provider: preset.provider },
+        create: { provider: preset.provider, ...data },
+        update: data,
+      });
+    }
+
     const platformOrganizationId = await ensurePlatformOrganization(tx, environment);
 
     return {
@@ -140,6 +168,7 @@ export async function seedCatalog(
       userRolesRemapped: retired.userRolesRemapped,
       plans: PLANS.length,
       systemSettings: SYSTEM_SETTINGS.length,
+      destinationPresets: MAIL_DESTINATION_PRESETS.length,
       platformOrganizationId,
     };
   }, TX_OPTIONS);
@@ -442,6 +471,7 @@ export async function seedDemo(
           role: 'inbound_destination',
           host: DEMO.inboundMailServer.host,
           port: DEMO.inboundMailServer.port,
+          provider: DEMO.inboundMailServer.provider,
           priority: 10,
           tlsMode: 'opportunistic',
         },

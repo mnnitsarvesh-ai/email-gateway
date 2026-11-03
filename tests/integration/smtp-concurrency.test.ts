@@ -61,7 +61,13 @@ describe.skipIf(gate.skip)('SMTP stack: concurrency (suite 9)', { timeout: 900_0
       MESSAGES,
     );
     expect(await fx.prisma.emailRecipient.count({ where: { organizationId: org } })).toBe(MESSAGES);
-    expect(await fx.prisma.messageOutbox.count({ where: { organizationId: org } })).toBe(MESSAGES);
+    // Step 2.3 (docs/plan/steps/05-routing.md R5, R9.1): the delivery-worker's dev pass-through
+    // and recorder add `mail.delivery.*` outbox rows; ingestion's own rows are counted here.
+    expect(
+      await fx.prisma.messageOutbox.count({
+        where: { organizationId: org, eventType: 'mail.message.received.v1' },
+      }),
+    ).toBe(MESSAGES);
     expect(await fx.objectKeys(org)).toHaveLength(MESSAGES);
     const distinctQueueIds = await fx.prisma.emailMessage.groupBy({
       by: ['mtaQueueId'],

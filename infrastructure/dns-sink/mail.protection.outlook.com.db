@@ -1,0 +1,9 @@
+; Zone mail.protection.outlook.com (TEST-ONLY, step 2.3): stand-in for Microsoft 365 (Exchange
+; Online Protection) inbound hosts, e.g. contoso-test.mail.protection.outlook.com. Every name
+; resolves to sink-m365, which presents a test-CA certificate with the real SAN set.
+$ORIGIN mail.protection.outlook.com.
+$TTL 60
+@       IN SOA  ns.sink.test. hostmaster.sink.test. ( 2026110301 3600 600 86400 60 )
+@       IN NS   ns.sink.test.
+@       IN A    172.31.250.26
+*       IN A    172.31.250.26

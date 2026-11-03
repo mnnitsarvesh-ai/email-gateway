@@ -1,0 +1,38 @@
+Nov 03 06:22:00 out postfix/reinject-outbound/smtpd[694]: 4jJdlD6Cp2zrsd: client=email-gateway-reinject-forwarder-1.email-gateway_mailtest[172.31.250.30], orig_queue_id=dw1-c0722beaeab545ec8914353368ec6afb, orig_client=mail.example.org[203.0.113.7]
+Nov 03 06:24:03 out postfix/reinject-inbound/smtpd[290]: 4jJdnb6VPDzs5m: client=unknown[172.31.250.30], orig_queue_id=dw1-89290587de5847d890bc0688ef786d21, orig_client=mail.example.org[203.0.113.9]
+Nov 03 06:24:03 out postfix/reinject-outbound/smtpd[282]: 4jJdnb56vBzs5S: client=unknown[172.31.250.30], orig_queue_id=dw1-124412a52ae34e32aa06b9cf0eeb48b1, orig_client=unknown
+Nov 03 06:25:07 out postfix/reinject-outbound/smtpd[234]: 4jJdpq5F5kzBLhX: client=unknown[172.31.250.30], orig_queue_id=dw1-35989ee0182e44c3aff447469f299f30
+Nov 03 06:22:00 out postfix/qmgr[212]: 4jJdlD6Cp2zrsd: from=<alice@it-wp2-e13b06-out.sink.test>, size=466, nrcpt=2 (queue active)
+Nov 03 06:24:03 out postfix/qmgr[266]: 4jJdnb5qBvzs5Z: from=<>, size=3295, nrcpt=1 (queue active)
+Nov 03 06:24:03 out postfix/qmgr[266]: 4jJdnb5qlPzs5c: from=<double-bounce@out.gateway.local>, size=2887, nrcpt=1 (queue active)
+Nov 03 06:22:01 out postfix/smtp[698]: 4jJdlD6Cp2zrsd: to=<user@it-wp2-e13b06-t.sink.test>, relay=mx.sink.test[172.31.250.25]:25, delay=0.16, delays=0.09/0.05/0.02/0.01, dsn=2.0.0, status=sent (250 2.0.0 Ok: queued as 05221156A60)
+Nov 03 06:22:04 out postfix/smtp[697]: 4jJdlD6Cp2zrsd: to=<bob@it-wp2-e13b06-g.gwtenant.sink.test>, relay=gw-mx.sink.test[172.31.250.10]:25, delay=3.9, delays=0.09/0.02/0.02/3.8, dsn=2.0.0, status=sent (250 2.0.0 Ok: queued as 4jJdlF03jCzBLL7)
+Nov 03 06:31:24 out postfix/smtp[238]: 4jJdxB42pbzs5Q: to=<user@it-wp2-e13b06-t.sink.test>, relay=alt1.aspmx.l.google.com[172.31.250.28]:25, delay=46, delays=46/0.01/0.03/0.01, dsn=2.0.0, status=sent (250 2.0.0 Ok: queued as DEF16156A86)
+Nov 03 06:38:59 out postfix/smtp[1587]: 4jJf6j4YqHzBYty: to=<v@v2.test>, relay=alt1.aspmx.l.google.com[172.31.250.28]:25, delay=6, delays=0.01/0.94/5/0, dsn=2.0.0, status=sent (250 2.0.0 Ok: queued as 933E61E895)
+Nov 03 06:42:09 out postfix/smtp[283]: 4jJfBS741Qzs54: to=<Mixed.Case@orcpt-e13b06.sink.test>, relay=mx.sink.test[172.31.250.25]:25, delay=0.07, delays=0.06/0/0.01/0, dsn=2.0.0, status=sent (250 2.0.0 Ok: queued as 0DDA214FBDA)
+Nov 03 06:25:07 out postfix/smtp[238]: 4jJdpq5F5kzBLhX: to=<soft-bounce@ext-e13b06.sink.test>, relay=mx.sink.test[172.31.250.25]:25, delay=0.11, delays=0.08/0.02/0.01/0, dsn=4.2.1, status=deferred (host mx.sink.test[172.31.250.25] said: 450 4.2.1 <soft-bounce@ext-e13b06.sink.test>: Recipient address rejected: Mailbox busy (in reply to RCPT TO command))
+Nov 03 06:25:07 out postfix/smtp[238]: connect to mx.sink.test[172.31.250.25]:2526: Connection refused
+Nov 03 06:25:07 out postfix/smtp[238]: 4jJdpq6K4yzBLhZ: to=<user@it-wp2-e13b06-refused.sink.test>, relay=none, delay=0.01, delays=0.01/0/0/0, dsn=4.4.1, status=deferred (connect to mx.sink.test[172.31.250.25]:2526: Connection refused)
+Nov 03 06:30:41 out postfix/smtp[238]: connect to alt1.aspmx.l.google.com[172.31.250.28]:25: No route to host
+Nov 03 06:30:41 out postfix/smtp[238]: 4jJdxB42pbzs5Q: to=<user@it-wp2-e13b06-t.sink.test>, relay=none, delay=3.1, delays=0.02/0.02/3.1/0, dsn=4.4.1, status=deferred (connect to alt1.aspmx.l.google.com[172.31.250.28]:25: No route to host)
+Nov 03 06:38:43 out postfix/smtp[1482]: connect to aspmx.l.google.com[172.31.250.27]:25: Connection timed out
+Nov 03 06:30:07 out postfix/smtp[238]: 4jJdpq6t8lzBLhc: to=<user@it-wp2-e13b06-m365.test>, relay=contoso-e13b06.mail.protection.outlook.com[172.31.250.26]:25, delay=300, delays=0.01/0/300/0, dsn=4.4.2, status=deferred (conversation with contoso-e13b06.mail.protection.outlook.com[172.31.250.26] timed out while receiving the initial server greeting)
+Nov 03 06:36:25 out postfix/smtp[946]: server certificate verification failed for contoso-test.mail.protection.outlook.com[172.31.250.26]:25: num=62:hostname mismatch
+Nov 03 06:36:25 out postfix/smtp[946]: 4jJf3r68sxzBLhX: to=<v@v3m.test>, relay=contoso-test.mail.protection.outlook.com[172.31.250.26]:25, delay=0.65, delays=0.01/0.64/0.01/0, dsn=4.7.5, status=deferred (Server certificate not verified)
+Nov 03 06:38:43 out postfix/smtp[1482]: 4jJf6P5wmjz60cD: to=<v@v2.test>, relay=alt1.aspmx.l.google.com[172.31.250.28]:25, delay=5.6, delays=0.01/0.64/5/0, dsn=4.7.5, status=deferred (Server certificate not verified)
+Nov 03 06:30:54 out postfix/error[255]: 4jJdxB4cnGzsFw: to=<user@it-wp2-e13b06-refused.sink.test>, relay=none, delay=16, delays=16/0.02/0/0, dsn=4.4.1, status=deferred (Destination not configured)
+Nov 03 06:24:03 out postfix/smtp[286]: 4jJdnb56vBzs5S: to=<hard-bounce@ext-e13b06.sink.test>, relay=mx.sink.test[172.31.250.25]:25, delay=0.11, delays=0.06/0.02/0.02/0.01, dsn=5.1.1, status=bounced (host mx.sink.test[172.31.250.25] said: 550 5.1.1 <hard-bounce@ext-e13b06.sink.test>: Recipient address rejected: User unknown (in reply to RCPT TO command))
+Nov 03 06:26:23 out postfix/smtp[256]: 4jJdpq6K4yzBLhZ: to=<user@it-wp2-e13b06-refused.sink.test>, relay=none, delay=76, delays=76/0.02/0.01/0, dsn=4.4.1, status=deferred (connect to mx.sink.test[172.31.250.25]:2526: Connection refused)
+Nov 03 06:26:23 out postfix/qmgr[212]: 4jJdpq6K4yzBLhZ: from=<ext@example.org>, status=expired, returned to sender
+Nov 03 06:26:23 out postfix/qmgr[212]: 4jJdpq5F5kzBLhX: from=<alice@it-wp2-e13b06-out.sink.test>, status=expired, returned to sender
+Nov 03 06:24:03 out postfix/bounce[287]: 4jJdnb56vBzs5S: sender non-delivery notification: 4jJdnb5qBvzs5Z
+Nov 03 06:24:03 out postfix/bounce[287]: 4jJdnb56vBzs5S: postmaster non-delivery notification: 4jJdnb5qlPzs5c
+Nov 03 06:25:23 out postfix/bounce[239]: 4jJdpq5F5kzBLhX: sender delay notification: 4jJdq71pPzzBLhY
+Nov 03 06:25:23 out postfix/bounce[239]: 4jJdpq6K4yzBLhZ: postmaster delay notification: 4jJdq71TRHzxsM
+Nov 03 06:26:23 out postfix/bounce[239]: 4jJdpq5F5kzBLhX: sender non-delivery notification: 4jJdrH47Xmzw7V
+Nov 03 06:22:04 out postfix/qmgr[212]: 4jJdlD6Cp2zrsd: removed
+Nov 03 06:31:26 out postfix/postsuper[298]: 4jJdxB4cnGzsFw: removed
+Nov 03 06:25:08 out postfix/reinject-inbound/smtpd[240]: NOQUEUE: reject: RCPT from unknown[172.31.250.30]: 450 4.4.1 <user@it-wp2-e13b06-nodest.sink.test>: Recipient address rejected: Destination not configured; from=<ext@example.org> to=<user@it-wp2-e13b06-nodest.sink.test> proto=ESMTP helo=<delivery.gateway.local>
+Nov 03 06:49:14 out postfix/postsuper[980]: 4jJfLW444tzw53: requeued
+Nov 03 06:50:03 out postfix/pickup[253]: 4jJfMb5dpKzw88: uid=100 from=<alice@it-wp2-8a36b3-out.sink.test> orig_id=4jJfLW444tzw53
+Nov 03 06:24:03 out postfix/cleanup[288]: 4jJdnb68Syzw59: message-id=<4jJdnb68Syzw59@out.gateway.local>

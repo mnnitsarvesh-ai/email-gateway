@@ -167,9 +167,13 @@ describe('LMTP ingestion: inbound', () => {
   });
 
   it('answers 250 to a redelivery of the same queue file without writing anything', async () => {
+    // Ingestion's own outbox rows: a delivery-worker running against the same database (the
+    // routing stack suites, CI's apps profile) adds `mail.delivery.*` rows for these messages
+    // through its development pass-through (step 2.3 R5; docs/plan/steps/05-routing.md §12).
+    const ingestionOutbox = { organizationId: orgA, eventType: 'mail.message.received.v1' };
     const before = await Promise.all([
       fx.messageCount(orgA),
-      fx.prisma.messageOutbox.count({ where: { organizationId: orgA } }),
+      fx.prisma.messageOutbox.count({ where: ingestionOutbox }),
       fx.objectKeys(orgA),
     ]);
     const result = await deliver({
@@ -183,9 +187,7 @@ describe('LMTP ingestion: inbound', () => {
     });
     expect(result.data.map((r) => r.code)).toEqual([250, 250]);
     expect(await fx.messageCount(orgA)).toBe(before[0]);
-    expect(await fx.prisma.messageOutbox.count({ where: { organizationId: orgA } })).toBe(
-      before[1],
-    );
+    expect(await fx.prisma.messageOutbox.count({ where: ingestionOutbox })).toBe(before[1]);
     expect(await fx.objectKeys(orgA)).toEqual(before[2]);
   });
 
@@ -406,6 +408,117 @@ describe('LMTP ingestion: outbound', () => {
       });
       expect(result.rcpt.map((r) => r.code)).toEqual([451]);
     }
+  });
+});
+
+/**
+ * Step 2.3 R1: classification at ingestion. Directions come from the listener and the
+ * organizations' verified domains, never from headers; the ingest key, the S3 object key and
+ * the loop check keep the LISTENER direction (2.2 D7, D8, D14).
+ */
+describe('LMTP ingestion: direction classification (step 2.3)', () => {
+  let orgC = 0n;
+
+  beforeAll(async () => {
+    await fx.domain(orgA, fx.name('a3'));
+    orgC = await fx.organization('c');
+    await fx.domain(orgC, fx.name('c'));
+  });
+
+  async function stored(ident: string) {
+    const row = await fx.prisma.emailMessage.findFirstOrThrow({ where: { mtaQueueId: ident } });
+    const recipients = await fx.prisma.emailRecipient.findMany({
+      where: { messageId: row.id, receivedAt: row.receivedAt },
+      orderBy: { rcptSeq: 'asc' },
+    });
+    const outbox = await fx.prisma.messageOutbox.findFirstOrThrow({
+      where: { aggregateId: row.id.toString(), eventType: 'mail.message.received.v1' },
+    });
+    const event = await fx.prisma.emailEvent.findFirstOrThrow({
+      where: { messageId: row.id, eventType: 'received' },
+    });
+    return { row, recipients, outbox, event };
+  }
+
+  const send = (ident: string, to: string[], from = `alice@${fx.name('a')}`) =>
+    deliver({
+      port: outboundPort,
+      lhlo: 'out.gateway.local',
+      xforward: { IDENT: ident },
+      from,
+      to,
+      message: message(`Dir ${ident}`, [], `Alice <${from}>`),
+    });
+
+  it('an outbound message to the sender organization’s second domain is internal; keys keep the listener direction', async () => {
+    const ident = queueId();
+    const to = [`colleague@${fx.name('a3')}`, `self@${fx.name('a')}`];
+    const result = await send(ident, to);
+    expect(result.data.map((r) => r.code)).toEqual([250, 250]);
+    const { row, recipients, outbox, event } = await stored(ident);
+    expect(row).toMatchObject({ direction: 'internal', organizationId: orgA, domainId: domainA });
+    expect(recipients.map((r) => r.direction)).toEqual(['internal', 'internal']);
+    expect(messageReceivedV1.parse(outbox.payload).direction).toBe('internal');
+    expect(event.details).toMatchObject({ direction: 'outbound', messageDirection: 'internal' });
+
+    // Unchanged 2.2 contracts: ingest key and S3 key are built with the listener direction.
+    const bytes = wireBytes(message(`Dir ${ident}`, [], `Alice <alice@${fx.name('a')}>`));
+    const recipientSet = sha256(
+      Buffer.from(
+        [...to]
+          .map((a) => a.toLowerCase())
+          .sort()
+          .join('\n'),
+      ),
+    );
+    const identity = await fx.prisma.messageIdentity.findFirstOrThrow({
+      where: { id: row.id, organizationId: orgA },
+    });
+    expect(identity.ingestKey).toBe(
+      `v2:${sha256(Buffer.from(`out.gateway.local|${ident}|outbound|${sha256(bytes)}|${recipientSet}`))}`,
+    );
+    const ref = sha256(Buffer.from(`out.gateway.local|${ident}|outbound|${orgA.toString()}`)).slice(
+      0,
+      32,
+    );
+    expect(row.emlObjectKey.endsWith(`/${ref}.eml`)).toBe(true);
+  });
+
+  it('a mixed message stays outbound with per-recipient directions', async () => {
+    const ident = queueId();
+    await send(ident, [`colleague@${fx.name('a3')}`, 'partner@sink.test']);
+    const { row, recipients, outbox } = await stored(ident);
+    expect(row.direction).toBe('outbound');
+    expect(recipients.map((r) => r.direction)).toEqual(['internal', 'outbound']);
+    expect(messageReceivedV1.parse(outbox.payload).direction).toBe('outbound');
+  });
+
+  it('another tenant’s domain and the sender’s suspended domain are outbound', async () => {
+    const ident = queueId();
+    await send(ident, [`peer@${fx.name('c')}`, `held@${fx.name('a2')}`]);
+    const { row, recipients } = await stored(ident);
+    expect(row).toMatchObject({ direction: 'outbound', organizationId: orgA });
+    expect(recipients.map((r) => r.direction)).toEqual(['outbound', 'outbound']);
+    // Nothing is written for the other tenant by A's submission.
+    expect(await fx.prisma.emailMessage.count({ where: { organizationId: orgC } })).toBe(0);
+  });
+
+  it('inbound mail with a same-organization sender is inbound (spoofing candidate, never internal)', async () => {
+    const ident = queueId();
+    const result = await deliver({
+      port: inboundPort,
+      lhlo: MTA,
+      xforward: { IDENT: ident },
+      from: `ceo@${fx.name('a3')}`,
+      to: [`alice@${fx.name('a')}`],
+      message: message(`Inbound same org ${ident}`, [], `CEO <ceo@${fx.name('a3')}>`),
+    });
+    expect(result.data.map((r) => r.code)).toEqual([250]);
+    const { row, recipients, outbox, event } = await stored(ident);
+    expect(row.direction).toBe('inbound');
+    expect(recipients.map((r) => r.direction)).toEqual(['inbound']);
+    expect(messageReceivedV1.parse(outbox.payload).direction).toBe('inbound');
+    expect(event.details).toMatchObject({ direction: 'inbound', messageDirection: 'inbound' });
   });
 });
 

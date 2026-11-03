@@ -64,6 +64,8 @@ import { RedisDkimStore } from './signing/redis-dkim-store';
     DkimSigningPublisher,
   ],
   exports: [
+    // Step 2.3: the destinations module writes domain.routing.changed.v1 with it.
+    DomainOutboxRepository,
     DomainCheckScheduler,
     DomainVerificationService,
     DkimRotationService,

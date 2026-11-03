@@ -1,0 +1,11 @@
+; Zone aspmx.l.google.com (TEST-ONLY, step 2.3): stand-in for the Google Workspace MX hosts.
+; aspmx.l and alt2-alt4 resolve to sink-google, alt1 to sink-google-alt (the failover target).
+$ORIGIN aspmx.l.google.com.
+$TTL 60
+@       IN SOA  ns.sink.test. hostmaster.sink.test. ( 2026110301 3600 600 86400 60 )
+@       IN NS   ns.sink.test.
+@       IN A    172.31.250.27
+alt1    IN A    172.31.250.28
+alt2    IN A    172.31.250.27
+alt3    IN A    172.31.250.27
+alt4    IN A    172.31.250.27

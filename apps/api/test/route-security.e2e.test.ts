@@ -54,6 +54,7 @@ interface DiscoveredRoute {
   name: string;
   isPublic: boolean;
   hasRequirement: boolean;
+  requirement: unknown;
 }
 
 const asArray = (value: unknown): string[] =>
@@ -94,6 +95,7 @@ function discoverRoutes(app: INestApplication): DiscoveredRoute[] {
             isPublic: !!reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [handler, controller]),
             hasRequirement:
               reflector.getAllAndOverride<unknown>(AUTHZ_KEY, [handler, controller]) !== undefined,
+            requirement: reflector.getAllAndOverride<unknown>(AUTHZ_KEY, [handler, controller]),
           });
         }
       }
@@ -200,6 +202,23 @@ describe('route security (e2e, dependencies stubbed)', () => {
       if (res.status !== 401) failures.push(`${route.method} ${route.path} → ${res.status}`);
     }
     expect(failures).toEqual([]);
+  });
+
+  it('every step 2.3 route requires exactly its permission (R13)', () => {
+    const expected: Record<string, string> = {
+      'get /api/v1/destination-providers': 'domain:read',
+      'get /api/v1/domains/:id/destinations': 'domain:read',
+      'put /api/v1/domains/:id/destinations': 'domain:routing_manage',
+      'delete /api/v1/domains/:id/destinations': 'domain:routing_manage',
+      'get /api/v1/messages/:messageId/deliveries': 'delivery:read',
+      'get /api/v1/messages/:messageId/deliveries/events': 'delivery:read',
+      'get /api/v1/deliveries': 'delivery:read',
+    };
+    for (const [key, permission] of Object.entries(expected)) {
+      const route = routes.find((r) => `${r.method} ${r.path}` === key);
+      expect(route?.isPublic, key).toBe(false);
+      expect(route?.requirement, key).toEqual({ mode: 'all', permissions: [permission] });
+    }
   });
 
   it('non-public routes also reject a junk bearer token and a junk API key', async () => {

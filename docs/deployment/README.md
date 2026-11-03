@@ -12,7 +12,7 @@
 ## Topology
 
 - **EKS** runs the stateless Node services and the admin portal (`infrastructure/kubernetes/base`). Each Deployment has liveness, readiness and startup probes, an HPA, a PDB, zone spread and a hardened security context.
-- **EC2 Auto Scaling Groups** run Postfix inbound and outbound, with EBS spools behind an NLB on port 25. The spool must outlive any pod. Details (listeners, security groups, static egress IPs, drain and instance refresh, DKIM signer and redis-dkim): [SMTP gateway deployment](smtp-gateway.md).
+- **EC2 Auto Scaling Groups** run Postfix inbound and outbound, with EBS spools behind an NLB on port 25. The spool must outlive any pod. Details (listeners, security groups, static egress IPs, drain and instance refresh, DKIM signer and redis-dkim): [SMTP gateway deployment](smtp-gateway.md). Routing per direction, the delivery log and its status-reader sidecar, retry schedule and egress rules (step 2.3): [Mail routing and delivery tracking](mail-routing.md).
 - **Managed services** (via Terraform): RDS/Aurora MySQL 8.4 (writer plus a reader endpoint for the api's control-plane reads), ElastiCache Redis, Amazon MQ for RabbitMQ (or self-managed), Amazon OpenSearch, S3 + KMS, and ClickHouse (Cloud or EC2).
 
 ## Release flow

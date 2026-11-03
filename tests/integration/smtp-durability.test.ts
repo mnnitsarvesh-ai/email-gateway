@@ -158,12 +158,18 @@ describe.skipIf(gate.skip)(
       );
       const bytes = await fx.object(original.emlObjectKey);
       expect(sha256(bytes)).toBe(original.emlSha256);
+      // Step 2.3 (docs/plan/steps/05-routing.md R5, R9.1): with the delivery-worker running, the
+      // development pass-through and the delivery recorder add their own email_events
+      // (`delivery.*`, source delivery-worker) and outbox rows (`mail.delivery.*`) for this message;
+      // this suite checks what INGESTION wrote, so it counts only those rows.
+      const ingestionEvents = { organizationId: org, sourceService: 'smtp-adapter' };
+      const ingestionOutbox = { organizationId: org, eventType: 'mail.message.received.v1' };
       const before = {
         identities: await fx.prisma.messageIdentity.count({ where: { organizationId: org } }),
         messages: await fx.messageCount(org),
         recipients: await fx.prisma.emailRecipient.count({ where: { organizationId: org } }),
-        events: await fx.prisma.emailEvent.count({ where: { organizationId: org } }),
-        outbox: await fx.prisma.messageOutbox.count({ where: { organizationId: org } }),
+        events: await fx.prisma.emailEvent.count({ where: ingestionEvents }),
+        outbox: await fx.prisma.messageOutbox.count({ where: ingestionOutbox }),
         objects: (await fx.objectKeys(org)).length,
       };
       const mtaId = (await composeExec('postfix', ['postconf', '-h', 'myhostname'])).stdout.trim();
@@ -188,8 +194,8 @@ describe.skipIf(gate.skip)(
         identities: await fx.prisma.messageIdentity.count({ where: { organizationId: org } }),
         messages: await fx.messageCount(org),
         recipients: await fx.prisma.emailRecipient.count({ where: { organizationId: org } }),
-        events: await fx.prisma.emailEvent.count({ where: { organizationId: org } }),
-        outbox: await fx.prisma.messageOutbox.count({ where: { organizationId: org } }),
+        events: await fx.prisma.emailEvent.count({ where: ingestionEvents }),
+        outbox: await fx.prisma.messageOutbox.count({ where: ingestionOutbox }),
         objects: (await fx.objectKeys(org)).length,
       }).toEqual(before);
       // The deterministic object key was overwritten with identical bytes, never orphaned.

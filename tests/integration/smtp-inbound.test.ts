@@ -89,7 +89,6 @@ describe.skipIf(gate.skip)('SMTP stack: inbound delivery (suite 1)', { timeout: 
       organizationId: orgA,
       domainId: domainA.id,
       direction: 'inbound',
-      status: 'received',
       envelopeFrom: 'sender@example.org',
       headerFrom: 'sender@example.org',
       subject: 'Inbound end to end',
@@ -97,6 +96,9 @@ describe.skipIf(gate.skip)('SMTP stack: inbound delivery (suite 1)', { timeout: 
       recipientCount: 1,
       mtaQueueId: queueId,
     });
+    // Ingestion commits `received`; step 2.3's delivery-worker (dev pass-through, R5/R7) may
+    // already have planned the message (`delivery_queued`) by the time this row is read.
+    expect(['received', 'delivery_queued']).toContain(message.status);
     expect(message.clientIp).toMatch(/^\d+\.\d+\.\d+\.\d+$/);
     expect(message.emlObjectKey).toMatch(
       new RegExp(`^org/${orgA.toString()}/eml/\\d{4}/\\d{2}/\\d{2}/[0-9a-f]{32}\\.eml$`),
@@ -119,18 +121,28 @@ describe.skipIf(gate.skip)('SMTP stack: inbound delivery (suite 1)', { timeout: 
       organizationId: orgA,
       rcptSeq: 0,
       address: `Alice@${domainA.name}`,
-      status: 'pending',
     });
+    // Ingestion writes `pending`; the step 2.3 delivery-worker may already have recorded the
+    // reinjection refusal of this destination-less domain (`deferred`, R9.1 recipient mapping).
+    expect(['pending', 'deferred']).toContain(recipients[0]!.status);
 
+    // Step 2.3 (docs/plan/steps/05-routing.md R5, R9.1): with the delivery-worker running, the
+    // development pass-through and the delivery recorder add their own email_events
+    // (`delivery.*`, source delivery-worker) and outbox rows (`mail.delivery.*`) for this message;
+    // this suite checks what INGESTION wrote, so it counts only those rows.
     const events = await fx.prisma.emailEvent.findMany({
-      where: { messageId: message.id, organizationId: orgA },
+      where: { messageId: message.id, organizationId: orgA, sourceService: 'smtp-adapter' },
     });
     expect(events.map((e) => [e.eventType, e.sourceService])).toEqual([
       ['received', 'smtp-adapter'],
     ]);
 
     const outbox = await fx.prisma.messageOutbox.findMany({
-      where: { organizationId: orgA, aggregateId: message.id.toString() },
+      where: {
+        organizationId: orgA,
+        aggregateId: message.id.toString(),
+        eventType: { not: { startsWith: 'mail.delivery.' } },
+      },
     });
     expect(outbox).toHaveLength(1);
     expect(outbox[0]!.eventType).toBe('mail.message.received.v1');

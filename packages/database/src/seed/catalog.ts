@@ -65,6 +65,16 @@ export const PERMISSIONS = Object.freeze([
   // Step 2.2 (D10): outbound SMTP connectors (SASL credentials, source networks, certificates).
   { key: 'connector:read', description: 'View SMTP connectors (never secrets)' },
   { key: 'connector:manage', description: 'Create, rotate and disable SMTP connectors' },
+  // Step 2.3 (R13): changing destinations redirects all mail of a domain, so it is separate from
+  // domain:manage (like domain:dkim_rotate). Destinations are readable with domain:read.
+  {
+    key: 'domain:routing_manage',
+    description: "Change where a domain's mail is delivered (destination servers)",
+  },
+  {
+    key: 'delivery:read',
+    description: 'View per-recipient delivery status and the delivery audit trail',
+  },
 ] as const satisfies readonly PermissionDef[]);
 
 /** Every permission key of the catalog. */
@@ -100,6 +110,7 @@ export const TENANT_READ_PERMISSIONS: readonly PermissionKey[] = Object.freeze([
   'report:read',
   'archive:read',
   'connector:read',
+  'delivery:read',
 ]);
 
 /** Keys of the 8 built-in system roles (D8). */
@@ -179,10 +190,12 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'domain:read',
       'domain:manage',
       'domain:dkim_rotate',
+      'domain:routing_manage',
       'connector:read',
       'connector:manage',
       'policy:read',
       'message:read',
+      'delivery:read',
       'quarantine:read',
       'report:read',
     ],
@@ -198,6 +211,7 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'policy:manage',
       'message:read',
       'message:read_content',
+      'delivery:read',
       'quarantine:read',
       'quarantine:release',
       'quarantine:delete',
@@ -213,6 +227,7 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
     permissions: [
       'organization:read',
       'message:read',
+      'delivery:read',
       'quarantine:read',
       'quarantine:release',
       'quarantine:delete',
@@ -247,6 +262,11 @@ export const LIMIT_KEYS = [
   'inbound_recipients_per_minute',
   'outbound_recipients_per_minute',
   'outbound_recipients_per_day',
+  // Step 2.3 (R11): recipients per UTC minute per destination domain, enforced by the
+  // delivery-worker before an outbound reinjection. Plan value = half of
+  // outbound_recipients_per_minute (rounded down, at least 1). Organizations without a row fall
+  // back to DELIVERY_RATE_TENANT_DOMAIN_RCPT_PER_MINUTE; 0 = no outbound delivery.
+  'outbound_recipients_per_domain_per_minute',
 ] as const;
 export type LimitKey = (typeof LIMIT_KEYS)[number];
 
@@ -296,6 +316,7 @@ export const PLANS: readonly PlanDef[] = Object.freeze([
       archive_retention_days: 0,
       inbound_recipients_per_minute: 600,
       outbound_recipients_per_minute: 60,
+      outbound_recipients_per_domain_per_minute: 30,
       outbound_recipients_per_day: 2_000,
     },
     features: features(['inbound_filtering', 'bec_detection']),
@@ -314,6 +335,7 @@ export const PLANS: readonly PlanDef[] = Object.freeze([
       archive_retention_days: 0,
       inbound_recipients_per_minute: 3_000,
       outbound_recipients_per_minute: 300,
+      outbound_recipients_per_domain_per_minute: 150,
       outbound_recipients_per_day: 50_000,
     },
     features: features([
@@ -339,6 +361,7 @@ export const PLANS: readonly PlanDef[] = Object.freeze([
       archive_retention_days: 2_555,
       inbound_recipients_per_minute: 12_000,
       outbound_recipients_per_minute: 1_200,
+      outbound_recipients_per_domain_per_minute: 600,
       outbound_recipients_per_day: 500_000,
     },
     features: features([...FEATURE_KEYS]),
@@ -357,9 +380,73 @@ export const PLANS: readonly PlanDef[] = Object.freeze([
       archive_retention_days: 3_650,
       inbound_recipients_per_minute: 30_000,
       outbound_recipients_per_minute: 3_000,
+      outbound_recipients_per_domain_per_minute: 1_500,
       outbound_recipients_per_day: 2_000_000,
     },
     features: features([...FEATURE_KEYS]),
+  },
+]);
+
+export interface DestinationServerDef {
+  host: string;
+  priority: number;
+}
+
+export interface DestinationPresetDef {
+  provider: 'microsoft_365' | 'google_workspace';
+  displayName: string;
+  /** Anchored regular expressions over lower-case host names (stored as a JSON array). */
+  hostPatterns: readonly string[];
+  hostHint: string | null;
+  /** Servers the preset provides; null = the customer supplies the host. */
+  defaultServers: readonly DestinationServerDef[] | null;
+  port: number;
+  tlsMode: 'verify';
+  /** Postfix `match=` list (`:`-separated). */
+  tlsVerifyNames: string;
+  maxServers: number;
+  documentationUrl: string;
+}
+
+/**
+ * Destination provider presets (step 2.3 R2): platform configuration data in
+ * `mail_destination_presets`, upserted on every run (code-owned, like the system roles). The
+ * certificate names are verified against test-CA sinks by the stack tests (WP2); a correction
+ * is a data change here, never a code path.
+ */
+export const MAIL_DESTINATION_PRESETS: readonly DestinationPresetDef[] = Object.freeze([
+  {
+    provider: 'microsoft_365',
+    displayName: 'Microsoft 365 (Exchange Online)',
+    hostPatterns: [
+      '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.mail\\.protection\\.outlook\\.com$',
+      '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.(?:[a-z0-9-]+\\.)?mx\\.microsoft$',
+    ],
+    hostHint: '<domain-key>.mail.protection.outlook.com',
+    defaultServers: null,
+    port: 25,
+    tlsMode: 'verify',
+    tlsVerifyNames: 'nexthop:mail.protection.outlook.com:.mail.protection.outlook.com',
+    maxServers: 1,
+    documentationUrl: 'docs/domains/destination-servers.md#microsoft-365',
+  },
+  {
+    provider: 'google_workspace',
+    displayName: 'Google Workspace (Gmail)',
+    hostPatterns: ['^(?:aspmx\\.l|alt[1-4]\\.aspmx\\.l)\\.google\\.com$'],
+    hostHint: null,
+    defaultServers: [
+      { host: 'aspmx.l.google.com', priority: 1 },
+      { host: 'alt1.aspmx.l.google.com', priority: 5 },
+      { host: 'alt2.aspmx.l.google.com', priority: 5 },
+      { host: 'alt3.aspmx.l.google.com', priority: 10 },
+      { host: 'alt4.aspmx.l.google.com', priority: 10 },
+    ],
+    port: 25,
+    tlsMode: 'verify',
+    tlsVerifyNames: 'nexthop:mx.google.com:.aspmx.l.google.com',
+    maxServers: 5,
+    documentationUrl: 'docs/domains/destination-servers.md#google-workspace',
   },
 ]);
 
@@ -450,7 +537,7 @@ export const DEMO = Object.freeze({
   organization: { slug: 'demo', name: 'Demo Organization', plan: 'standard' },
   dataRegion: DEFAULT_DATA_REGION,
   domain: 'gateway.test',
-  inboundMailServer: { host: 'mail.gateway.test', port: 25 },
+  inboundMailServer: { host: 'mail.gateway.test', port: 25, provider: 'custom' as const },
   users: [
     {
       email: 'admin@gateway.test',

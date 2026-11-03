@@ -25,3 +25,6 @@ secrets/
 
 .DS_Store
 *.log
+
+# Local runtime data of the Compose stack (e.g. postfix-outbound's delivery log, step 2.3).
+.local/

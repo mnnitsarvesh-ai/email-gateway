@@ -27,6 +27,14 @@ export interface DsnNotice {
   sender: string | null;
   /** `Arrival-Date`, else the notice's `Date` (deterministic for dedupe). Null if neither. */
   occurredAt: Date | null;
+  /** The notice's own `Date` header (when the notice was generated); null if missing. */
+  noticeDate: Date | null;
+  /**
+   * `Original-Envelope-Id` (RFC 3464 §2.2.1, the `MAIL … ENVID` of the reinjection, step 2.3
+   * R8): `dw1-<32 hex>` for mail the delivery-worker reinjected. xtext-decoded, trimmed; null
+   * when absent or unusable (longer than 100 characters, RFC 3461 §4.4).
+   */
+  envelopeId: string | null;
   recipients: DsnRecipient[];
   /**
    * `X-Gateway-Trace` values of the undelivered message's headers (the `text/rfc822-headers`
@@ -38,6 +46,8 @@ export interface DsnNotice {
 }
 
 const STATUS = /^[245]\.\d{1,3}\.\d{1,3}$/;
+/** RFC 3461 §4.4: ENVID is at most 100 characters (xtext-encoded). */
+const MAX_ENVID = 100;
 const MAX_DIAGNOSTIC = 1024;
 
 /** Splits an RFC 3464 body into groups of unfolded fields (lower-cased names). */
@@ -77,6 +87,31 @@ export function typedValue(value: string | undefined): string | null {
   const raw = (semicolon === -1 ? value : value.slice(semicolon + 1)).trim();
   const unwrapped = raw.startsWith('<') && raw.endsWith('>') ? raw.slice(1, -1).trim() : raw;
   return unwrapped;
+}
+
+/** Decodes RFC 3461 xtext (`+XX` hex escapes); null for malformed escapes. */
+export function decodeXtext(value: string): string | null {
+  let out = '';
+  for (let i = 0; i < value.length; i += 1) {
+    const char = value[i]!;
+    if (char !== '+') {
+      out += char;
+      continue;
+    }
+    const hex = value.slice(i + 1, i + 3);
+    if (!/^[0-9A-Fa-f]{2}$/.test(hex)) return null;
+    out += String.fromCharCode(parseInt(hex, 16));
+    i += 2;
+  }
+  return out;
+}
+
+/** `Original-Envelope-Id` value → the decoded id, or null. */
+function envelopeIdOf(value: string | undefined): string | null {
+  const raw = value?.trim() ?? '';
+  if (raw.length === 0 || raw.length > MAX_ENVID || /\s/.test(raw)) return null;
+  const decoded = decodeXtext(raw);
+  return decoded === null || decoded.length === 0 ? null : decoded;
 }
 
 /** Parses an RFC 5322 / RFC 3464 date (comments allowed); null when unusable. */
@@ -134,6 +169,8 @@ export function parseDeliveryStatus(text: string, noticeDate: Date | null): DsnN
     queueId: queueId.length > 0 ? queueId : null,
     sender: typedValue(perMessage.get('x-postfix-sender')),
     occurredAt: parseDsnDate(perMessage.get('arrival-date')) ?? noticeDate,
+    noticeDate,
+    envelopeId: envelopeIdOf(perMessage.get('original-envelope-id')),
     recipients,
     originalTraces: [],
   };

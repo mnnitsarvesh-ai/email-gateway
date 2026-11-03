@@ -38,6 +38,8 @@ flowchart LR
   end
   subgraph delivery[Delivery]
     email_deliveries[(email_deliveries P)]
+    delivery_reinjections[(delivery_reinjections P)]
+    delivery_status_events[(delivery_status_events P)]
   end
   subgraph quarantine[Quarantine]
     quarantine_messages
@@ -60,6 +62,8 @@ flowchart LR
   domains -.-> email_messages
   email_messages -.-> email_scans
   email_messages -.-> email_deliveries
+  delivery_reinjections -.-> email_deliveries
+  email_deliveries -.-> delivery_status_events
   email_messages -.-> quarantine_messages
   email_messages -.-> email_archives
   email_messages -.-> message_outbox
@@ -206,7 +210,7 @@ erDiagram
 
 ## Domain management and SMTP connectors
 
-Step 2.2 added the recipient allow-list (`domain_recipient_addresses`, D3) and the organization-level outbound connectors (`smtp_connectors` and `smtp_connector_networks`, D10). `created_by_user_id` on both (FK to `users`, `SET NULL`) is omitted from the diagram.
+Step 2.2 added the recipient allow-list (`domain_recipient_addresses`, D3) and the organization-level outbound connectors (`smtp_connectors` and `smtp_connector_networks`, D10). `created_by_user_id` on both (FK to `users`, `SET NULL`) is omitted from the diagram. Step 2.3 added `public_id`, `provider` and `tls_verify_names` to `domain_mail_servers` and the platform table `mail_destination_presets` (R2). A server's `provider` names a preset by value only: presets are configuration data, so there is no foreign key.
 
 ```mermaid
 erDiagram
@@ -263,8 +267,19 @@ erDiagram
   }
   domain_mail_servers {
     bigint id PK
+    char public_id UK "step 2.3, API id"
     bigint domain_id FK
     enum role "inbound_destination; outbound_source deprecated (2.2 D10)"
+    varchar host "index with port (tls_policy)"
+    enum provider "custom, microsoft_365, google_workspace"
+    varchar tls_verify_names "Postfix match= list, NULL = nexthop"
+  }
+  mail_destination_presets {
+    enum provider PK "microsoft_365, google_workspace"
+    json host_patterns "anchored regexes"
+    json default_servers "NULL = customer supplies the host"
+    enum tls_mode "verify"
+    tinyint max_servers
   }
   domain_settings {
     bigint id PK
@@ -330,6 +345,7 @@ erDiagram
     datetime received_at PK "PARTITIONED month"
     bigint message_id
     smallint rcpt_seq
+    enum direction "routed direction (step 2.3), NULL before"
   }
   email_headers {
     bigint id PK
@@ -456,6 +472,8 @@ erDiagram
 
 ## Delivery
 
+Step 2.3 added per-recipient delivery tracking: `delivery_reinjections` (one SMTP transaction into postfix-outbound per group of recipients) and the append-only audit `delivery_status_events`, both partitioned like the message (same `received_at`). `delivery_routes` stays unused (reserved for rule-based routing, 5.x).
+
 ```mermaid
 erDiagram
   organizations ||--o{ delivery_routes : ""
@@ -464,6 +482,9 @@ erDiagram
   email_recipients ||..o{ email_deliveries : "recipient_id + received_at"
   email_deliveries ||..o{ delivery_attempts : "delivery_id + received_at"
   delivery_routes |o..o{ email_deliveries : "route_id"
+  email_messages ||..o{ delivery_reinjections : "message_id + received_at"
+  delivery_reinjections |o..o{ email_deliveries : "reinjection_id + received_at"
+  email_deliveries ||..o{ delivery_status_events : "delivery_id + received_at"
   organizations ||--o{ delivery_suppressions : ""
   email_messages |o..o{ bounce_events : "message_id + message_received_at"
   delivery_routes {
@@ -478,6 +499,26 @@ erDiagram
     bigint message_id
     bigint recipient_id
     smallint delivery_seq
+    bigint reinjection_id "step 2.3"
+    enum status "pending ... queued, expired, unknown"
+    varchar outbound_queue_id "indexed: log and DSN matching"
+  }
+  delivery_reinjections {
+    bigint id PK
+    datetime received_at PK "PARTITIONED month"
+    char public_id "token dw1-HEX"
+    bigint message_id
+    char idempotency_key "UQ with message_id, received_at"
+    enum status "pending, in_progress, queued, failed"
+    varchar queue_id
+  }
+  delivery_status_events {
+    bigint id PK
+    datetime received_at PK "PARTITIONED month"
+    bigint delivery_id
+    char signal_key "UQ with delivery_id, received_at"
+    enum source "planner, reinjection, postfix_log, bounce_notice, reconciler"
+    boolean applied
   }
   delivery_attempts {
     bigint id PK
@@ -606,6 +647,12 @@ erDiagram
     varchar name PK
     bigint value
   }
+  stream_cursors {
+    varchar name PK "outbox:CONSUMER, postfix-log:SOURCE"
+    bigint position_id
+    varchar file_id
+    bigint file_offset
+  }
 ```
 
-`message_idempotency` stands alone: its key is the consumer name and the event id. `maintenance_watermarks` belongs to the partition-maintenance job (the registry purge watermark, see [retention.md](retention.md)).
+`message_idempotency` stands alone: its key is the consumer name and the event id. `stream_cursors` (step 2.3) holds the durable positions of the delivery-worker's outbox pollers and Postfix log tailers; it references nothing. `maintenance_watermarks` belongs to the partition-maintenance job (the registry purge watermark, see [retention.md](retention.md)).

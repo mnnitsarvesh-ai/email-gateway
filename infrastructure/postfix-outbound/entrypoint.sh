@@ -1,7 +1,8 @@
 #!/bin/sh
-# Outbound MTA entrypoint (step 2.2): validates every environment value, renders it into
-# main.cf / master.cf / the static transport table, refuses to start on invalid input or
-# `postfix check` output, then runs Postfix in the foreground so Docker sees its exit status.
+# Outbound MTA entrypoint (step 2.2, extended in step 2.3): validates every environment value,
+# renders it into main.cf / master.cf / the static transport table, refuses to start on invalid
+# input or `postfix check` output, prepares the delivery log (maillog_file) and mirrors it to
+# stdout, then runs Postfix in the foreground so Docker sees its exit status.
 set -eu
 
 . /usr/local/lib/postfix-entrypoint/validate.sh
@@ -25,6 +26,8 @@ set -eu
 : "${POSTFIX_MAXIMAL_QUEUE_LIFETIME:=5d}"
 : "${POSTFIX_OUTBOUND_TLS_CERT_PATH:=/etc/ssl/certs/ssl-cert-snakeoil.pem}"
 : "${POSTFIX_OUTBOUND_TLS_KEY_PATH:=/etc/ssl/private/ssl-cert-snakeoil.key}"
+: "${POSTFIX_OUTBOUND_SMTP_CONNECT_TIMEOUT:=30s}"
+: "${POSTFIX_OUTBOUND_SMTP_TLS_CAPATH:=}"
 
 require_hostname POSTFIX_OUTBOUND_MYHOSTNAME "$POSTFIX_OUTBOUND_MYHOSTNAME"
 require_hostname SMTP_ADAPTER_HOST "$SMTP_ADAPTER_HOST"
@@ -49,6 +52,25 @@ require_time POSTFIX_QUEUE_RUN_DELAY "$POSTFIX_QUEUE_RUN_DELAY"
 require_time POSTFIX_MAXIMAL_QUEUE_LIFETIME "$POSTFIX_MAXIMAL_QUEUE_LIFETIME"
 require_readable POSTFIX_OUTBOUND_TLS_CERT_PATH "$POSTFIX_OUTBOUND_TLS_CERT_PATH"
 require_readable POSTFIX_OUTBOUND_TLS_KEY_PATH "$POSTFIX_OUTBOUND_TLS_KEY_PATH"
+require_time POSTFIX_OUTBOUND_SMTP_CONNECT_TIMEOUT "$POSTFIX_OUTBOUND_SMTP_CONNECT_TIMEOUT"
+# Optional extra CA directory (hashed, `openssl rehash`) for verified delivery (step 2.3: the test
+# CA of the smtp-test profile). Empty = system bundle only (smtp_tls_CAfile).
+if [ -n "$POSTFIX_OUTBOUND_SMTP_TLS_CAPATH" ]; then
+  case "$POSTFIX_OUTBOUND_SMTP_TLS_CAPATH" in
+    /*) ;;
+    *) die "POSTFIX_OUTBOUND_SMTP_TLS_CAPATH must be an absolute path" ;;
+  esac
+  case "$POSTFIX_OUTBOUND_SMTP_TLS_CAPATH" in
+    *[!A-Za-z0-9/._-]*) die "POSTFIX_OUTBOUND_SMTP_TLS_CAPATH contains unsupported characters" ;;
+  esac
+  # Not fatal: locally the directory is filled by the one-shot test-pki service of the smtp-test
+  # profile, which may run after this container started. OpenSSL reads a hashed CA directory
+  # lazily at each verification, so new smtp(8) processes see the CA once it exists; until then
+  # only `secure`/`verify` destinations that need it fail (deferred: fail closed).
+  if [ ! -d "$POSTFIX_OUTBOUND_SMTP_TLS_CAPATH" ]; then
+    echo "postfix-entrypoint: warning: POSTFIX_OUTBOUND_SMTP_TLS_CAPATH is not a directory (yet); verification against it fails until it exists" >&2
+  fi
+fi
 
 reinject_networks=$(printf '%s' "$POSTFIX_REINJECT_NETWORKS" | tr ',' ' ' | tr -s ' ')
 
@@ -71,7 +93,14 @@ postconf -e \
   "maximal_queue_lifetime=${POSTFIX_MAXIMAL_QUEUE_LIFETIME}" \
   "bounce_queue_lifetime=${POSTFIX_MAXIMAL_QUEUE_LIFETIME}" \
   "smtpd_tls_cert_file=${POSTFIX_OUTBOUND_TLS_CERT_PATH}" \
-  "smtpd_tls_key_file=${POSTFIX_OUTBOUND_TLS_KEY_PATH}"
+  "smtpd_tls_key_file=${POSTFIX_OUTBOUND_TLS_KEY_PATH}" \
+  "smtp_connect_timeout=${POSTFIX_OUTBOUND_SMTP_CONNECT_TIMEOUT}"
+
+if [ -n "$POSTFIX_OUTBOUND_SMTP_TLS_CAPATH" ]; then
+  postconf -e "smtp_tls_CApath=${POSTFIX_OUTBOUND_SMTP_TLS_CAPATH}"
+else
+  postconf -X smtp_tls_CApath
+fi
 
 # Every smtpd listener carries the same process limit (master.cf maxproc column).
 for service in smtp/inet submission/inet 10026/inet 10027/inet; do
@@ -82,6 +111,16 @@ done
 printf '%s lmtp:inet:%s:10052\n' "$POSTFIX_BOUNCE_DOMAIN" "$SMTP_ADAPTER_HOST" > /etc/postfix/transport
 chmod 0644 /etc/postfix/transport
 
+# Delivery log (step 2.3 R9): postlogd appends to $maillog_file; the delivery-worker's status
+# tailer reads it through a read-only mount of the directory, so the file must be world-readable.
+# Created here with mode 0644; after `postfix logrotate` the maillog_file_compressor wrapper
+# (maillog-compress) restores 0644 on the file postlogd re-creates with 0600.
+maillog_file=$(postconf -h maillog_file)
+maillog_dir=$(dirname "$maillog_file")
+install -d -m 0755 "$maillog_dir"
+[ -e "$maillog_file" ] || : > "$maillog_file"
+chmod 0644 "$maillog_file"
+
 check_output=$(postfix check 2>&1) || {
   printf '%s\n' "$check_output" >&2
   die "postfix check failed"
@@ -90,5 +129,10 @@ if [ -n "$check_output" ]; then
   printf '%s\n' "$check_output" >&2
   die "postfix check reported warnings"
 fi
+
+# Mirror new lines to stdout so `docker compose logs` keeps working. `tail -F` follows the name,
+# so it continues with the new file after a rotation. Started before Postfix so no line is missed;
+# -n0 skips what earlier container runs left in the (persistent) file.
+tail -n0 -F "$maillog_file" 2>/dev/null &
 
 exec postfix start-fg

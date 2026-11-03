@@ -9518,7 +9518,8 @@
                 "archive_retention_days",
                 "inbound_recipients_per_minute",
                 "outbound_recipients_per_minute",
-                "outbound_recipients_per_day"
+                "outbound_recipients_per_day",
+                "outbound_recipients_per_domain_per_minute"
               ]
             }
           }
@@ -9702,7 +9703,8 @@
                 "archive_retention_days",
                 "inbound_recipients_per_minute",
                 "outbound_recipients_per_minute",
-                "outbound_recipients_per_day"
+                "outbound_recipients_per_day",
+                "outbound_recipients_per_domain_per_minute"
               ]
             }
           }
@@ -15623,6 +15625,1551 @@
         "security": [{ "api-key": [] }, { "access-token": [] }],
         "summary": "Rotate the SASL password of a connector",
         "tags": ["smtp-connectors"]
+      }
+    },
+    "/api/v1/destination-providers": {
+      "get": {
+        "description": "Microsoft 365 and Google Workspace presets for `PUT /domains/{id}/destinations`: host patterns, the forced port and TLS mode (`verify`), the certificate names checked, the maximum number of servers and the preset servers. See docs/domains/destination-servers.md for the customer-side setup.",
+        "operationId": "DestinationProvidersController_list_v1",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "provider": {
+                            "type": "string",
+                            "enum": ["custom", "microsoft_365", "google_workspace"]
+                          },
+                          "displayName": { "type": "string" },
+                          "hostHint": { "nullable": true, "type": "string" },
+                          "hostPatterns": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Anchored regular expressions (lower-case hosts)"
+                          },
+                          "port": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "tlsMode": {
+                            "type": "string",
+                            "enum": ["none", "opportunistic", "required", "verify"]
+                          },
+                          "tlsVerifyNames": { "type": "string" },
+                          "maxServers": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "defaultServers": {
+                            "nullable": true,
+                            "description": "Servers the preset provides; null = you supply the host",
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "host": { "type": "string" },
+                                "priority": {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                }
+                              },
+                              "required": ["host", "priority"],
+                              "additionalProperties": false
+                            }
+                          },
+                          "documentationUrl": { "nullable": true, "type": "string" }
+                        },
+                        "required": [
+                          "provider",
+                          "displayName",
+                          "hostHint",
+                          "hostPatterns",
+                          "port",
+                          "tlsMode",
+                          "tlsVerifyNames",
+                          "maxServers",
+                          "defaultServers",
+                          "documentationUrl"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "List the destination provider presets",
+        "tags": ["domains"]
+      }
+    },
+    "/api/v1/domains/{id}/destinations": {
+      "get": {
+        "description": "Inbound destinations only, in delivery order (priority, then insertion order); the gateway fails over in this order. From the read replica (a few seconds behind a change).",
+        "operationId": "DomainDestinationsController_get_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "description": "Domain public id",
+            "schema": { "format": "uuid", "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "provider": {
+                      "nullable": true,
+                      "description": "null when the domain has no destination",
+                      "type": "string",
+                      "enum": ["custom", "microsoft_365", "google_workspace"]
+                    },
+                    "servers": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                          },
+                          "host": { "type": "string" },
+                          "port": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "priority": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "tlsMode": {
+                            "type": "string",
+                            "enum": ["none", "opportunistic", "required", "verify"]
+                          },
+                          "tlsVerifyNames": {
+                            "nullable": true,
+                            "description": "Postfix match= list; null = nexthop",
+                            "type": "string"
+                          },
+                          "enabled": { "type": "boolean" },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "updatedAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "host",
+                          "port",
+                          "priority",
+                          "tlsMode",
+                          "tlsVerifyNames",
+                          "enabled",
+                          "createdAt",
+                          "updatedAt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "description": "In delivery order: (priority, insertion order); Postfix fails over in this order"
+                    }
+                  },
+                  "required": ["provider", "servers"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (also for resources of another tenant)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "Get the destination servers of a domain",
+        "tags": ["domains"]
+      },
+      "put": {
+        "description": "Atomically replaces every destination. `{ provider: microsoft_365, host }` (one host of the preset’s patterns), `{ provider: google_workspace }` (the preset’s servers) or `{ provider: custom, servers: [...] }` (1..`ROUTING_MAX_DESTINATIONS_PER_DOMAIN`, defaults port 25, priority 10, `opportunistic`). Presets force their port and verified TLS. Refused hosts are `422` with a stable `reason`; a deleted domain is `409`. The change reaches the mail path within seconds (`domain.routing.changed.v1`). Needs `domain:routing_manage`; at most 30 changes per caller per minute (`429`).",
+        "operationId": "DomainDestinationsController_replace_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "description": "Domain public id",
+            "schema": { "format": "uuid", "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "provider": { "type": "string", "enum": ["microsoft_365"] },
+                      "host": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 255,
+                        "description": "The \"points to address\" of the domain’s MX in the Microsoft 365 admin center, e.g. `contoso-com.mail.protection.outlook.com`. Port 25 and verified TLS are forced."
+                      }
+                    },
+                    "required": ["provider", "host"],
+                    "additionalProperties": false,
+                    "description": "Microsoft 365 (Exchange Online): exactly one host of the preset’s patterns"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "provider": { "type": "string", "enum": ["google_workspace"] }
+                    },
+                    "required": ["provider"],
+                    "additionalProperties": false,
+                    "description": "Google Workspace: the preset’s servers (aspmx.l + alt1–4), verified TLS"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "provider": { "type": "string", "enum": ["custom"] },
+                      "servers": {
+                        "minItems": 1,
+                        "maxItems": 10,
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "host": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 255,
+                              "description": "Host name (IDN allowed, stored as ASCII) or IP literal. Refused (422 with `reason`): non-public or metadata IP addresses, single-label names, internal suffixes, the gateway itself."
+                            },
+                            "port": {
+                              "description": "Default 25. Must be one of ROUTING_ALLOWED_DESTINATION_PORTS (default 25, 587, 2525); other ports are refused with 422 port_not_allowed",
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 65535
+                            },
+                            "priority": {
+                              "description": "Lower is tried first; ties in list order. Default 10",
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 65535
+                            },
+                            "tlsMode": {
+                              "description": "none | opportunistic (default) | required (encrypt, TLS ≥ 1.2) | verify (certificate verified against tlsVerifyNames)",
+                              "type": "string",
+                              "enum": ["none", "opportunistic", "required", "verify"]
+                            },
+                            "tlsVerifyNames": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9.:-]{1,512}$",
+                              "description": "Postfix `match=` list for tlsMode verify (`:`-separated; `nexthop`, `dot-nexthop`, names, `.suffix`). Omitted: `nexthop`."
+                            }
+                          },
+                          "required": ["host"],
+                          "additionalProperties": false
+                        },
+                        "description": "1..ROUTING_MAX_DESTINATIONS_PER_DOMAIN servers; host:port must be unique"
+                      }
+                    },
+                    "required": ["provider", "servers"],
+                    "additionalProperties": false,
+                    "description": "Your own servers"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "provider": {
+                      "nullable": true,
+                      "description": "null when the domain has no destination",
+                      "type": "string",
+                      "enum": ["custom", "microsoft_365", "google_workspace"]
+                    },
+                    "servers": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                          },
+                          "host": { "type": "string" },
+                          "port": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "priority": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "tlsMode": {
+                            "type": "string",
+                            "enum": ["none", "opportunistic", "required", "verify"]
+                          },
+                          "tlsVerifyNames": {
+                            "nullable": true,
+                            "description": "Postfix match= list; null = nexthop",
+                            "type": "string"
+                          },
+                          "enabled": { "type": "boolean" },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "updatedAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "host",
+                          "port",
+                          "priority",
+                          "tlsMode",
+                          "tlsVerifyNames",
+                          "enabled",
+                          "createdAt",
+                          "updatedAt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "description": "In delivery order: (priority, insertion order); Postfix fails over in this order"
+                    }
+                  },
+                  "required": ["provider", "servers"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (also for resources of another tenant)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with the current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Destination refused (step 2.3 R3). `reason`: `ip_not_public`, `metadata_address`, `single_label`, `internal_suffix`, `gateway_host`, `invalid_host`, `port_not_allowed`, `host_not_allowed_for_provider`, `duplicate_server`, `provider_unavailable`, `host_reserved_for_provider`, `destination_tls_conflict`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [422] },
+                    "error": { "type": "string" },
+                    "message": { "type": "string" },
+                    "reason": {
+                      "type": "string",
+                      "enum": [
+                        "ip_not_public",
+                        "metadata_address",
+                        "single_label",
+                        "internal_suffix",
+                        "gateway_host",
+                        "invalid_host",
+                        "port_not_allowed",
+                        "host_not_allowed_for_provider",
+                        "duplicate_server",
+                        "provider_unavailable",
+                        "host_reserved_for_provider",
+                        "destination_tls_conflict"
+                      ]
+                    },
+                    "field": {
+                      "type": "string",
+                      "description": "Request field the refusal applies to, e.g. `host`, `servers.1.host`"
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message", "reason", "field"]
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (`Retry-After` header when known)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "Replace the destination servers of a domain",
+        "tags": ["domains"]
+      },
+      "delete": {
+        "description": "Removes every destination: mail for the domain is then held (deferred, `no_destination`) until destinations are set again or the queue lifetime expires. A deleted domain is `409`.",
+        "operationId": "DomainDestinationsController_remove_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "description": "Domain public id",
+            "schema": { "format": "uuid", "type": "string" }
+          }
+        ],
+        "responses": {
+          "204": { "description": "Removed" },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (also for resources of another tenant)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with the current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (`Retry-After` header when known)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "Remove the destination servers of a domain",
+        "tags": ["domains"]
+      }
+    },
+    "/api/v1/messages/{messageId}/deliveries": {
+      "get": {
+        "description": "One entry per recipient and delivery (`deliverySeq` 0 = initial delivery), by `rcptSeq`. Statuses: `pending` (planned), `queued` (accepted by the gateway’s MTA), `deferred` (temporary failure, retried), `delivered` (the remote server answered 2xx), `bounced` (permanent failure), `expired` (gave up after retries), `failed` (refused by the gateway, see `failureReason`), `suppressed` (address on the suppression list), `unknown` (no signal; never guessed). `dsnGenerated`: the gateway’s MTA sent a DSN to the original sender (never for inbound mail).",
+        "operationId": "DeliveriesController_forMessage_v1",
+        "parameters": [
+          {
+            "name": "messageId",
+            "required": true,
+            "in": "path",
+            "description": "Message public id",
+            "schema": { "format": "uuid", "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "direction": {
+                          "type": "string",
+                          "enum": ["inbound", "outbound", "internal"]
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "received",
+                            "scanning",
+                            "scanned",
+                            "policy_evaluated",
+                            "quarantined",
+                            "delivery_queued",
+                            "delivered",
+                            "partially_delivered",
+                            "discarded",
+                            "failed"
+                          ]
+                        },
+                        "receivedAt": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                        }
+                      },
+                      "required": ["id", "direction", "status", "receivedAt"],
+                      "additionalProperties": false
+                    },
+                    "deliveries": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "rcptSeq": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "deliverySeq": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991,
+                            "description": "0 = the initial delivery; releases use 1, 2, …"
+                          },
+                          "recipient": { "type": "string" },
+                          "direction": {
+                            "nullable": true,
+                            "type": "string",
+                            "enum": ["inbound", "outbound", "internal"]
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "pending",
+                              "in_progress",
+                              "queued",
+                              "deferred",
+                              "delivered",
+                              "bounced",
+                              "expired",
+                              "failed",
+                              "suppressed",
+                              "unknown"
+                            ]
+                          },
+                          "attemptCount": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991,
+                            "description": "Attempts against a remote server"
+                          },
+                          "lastAttemptAt": {
+                            "nullable": true,
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "deliveredAt": {
+                            "nullable": true,
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "remoteHost": { "nullable": true, "type": "string" },
+                          "finalSmtpCode": {
+                            "nullable": true,
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "enhancedStatus": { "nullable": true, "type": "string" },
+                          "finalSmtpResponse": { "nullable": true, "type": "string" },
+                          "lastErrorClass": { "nullable": true, "type": "string" },
+                          "failureReason": {
+                            "nullable": true,
+                            "description": "Gateway-side reason (e.g. direction_changed)",
+                            "type": "string"
+                          },
+                          "dsnGenerated": {
+                            "type": "boolean",
+                            "description": "Postfix sent a DSN to the original sender"
+                          },
+                          "statusChangedAt": {
+                            "nullable": true,
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          }
+                        },
+                        "required": [
+                          "rcptSeq",
+                          "deliverySeq",
+                          "recipient",
+                          "direction",
+                          "status",
+                          "attemptCount",
+                          "lastAttemptAt",
+                          "deliveredAt",
+                          "remoteHost",
+                          "finalSmtpCode",
+                          "enhancedStatus",
+                          "finalSmtpResponse",
+                          "lastErrorClass",
+                          "failureReason",
+                          "dsnGenerated",
+                          "statusChangedAt"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["message", "deliveries"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (also for resources of another tenant)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "Get the delivery status of every recipient of a message",
+        "tags": ["deliveries"]
+      }
+    },
+    "/api/v1/messages/{messageId}/deliveries/events": {
+      "get": {
+        "description": "Every status signal of the message’s deliveries, applied or not (stale, conflicting and duplicate-state signals are kept with `applied: false`), oldest first, cursor-paginated; `rcptSeq` limits it to one recipient. Sources: `planner`, `reinjection`, `postfix_log` (the MTA delivery log), `bounce_notice` (DSN copies), `reconciler`.",
+        "operationId": "DeliveriesController_events_v1",
+        "parameters": [
+          {
+            "name": "messageId",
+            "required": true,
+            "in": "path",
+            "description": "Message public id",
+            "schema": { "format": "uuid", "type": "string" }
+          },
+          {
+            "name": "rcptSeq",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "description": "Only the events of this recipient (position in the RCPT list)",
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535
+            }
+          },
+          {
+            "name": "limit",
+            "required": false,
+            "in": "query",
+            "schema": { "default": 25, "type": "integer", "minimum": 1, "maximum": 100 }
+          },
+          {
+            "name": "cursor",
+            "required": false,
+            "in": "query",
+            "schema": { "type": "string", "minLength": 1, "maxLength": 128 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "rcptSeq": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "deliverySeq": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "source": {
+                            "type": "string",
+                            "enum": [
+                              "planner",
+                              "reinjection",
+                              "postfix_log",
+                              "bounce_notice",
+                              "reconciler"
+                            ]
+                          },
+                          "fromStatus": {
+                            "nullable": true,
+                            "type": "string",
+                            "enum": [
+                              "pending",
+                              "in_progress",
+                              "queued",
+                              "deferred",
+                              "delivered",
+                              "bounced",
+                              "expired",
+                              "failed",
+                              "suppressed",
+                              "unknown"
+                            ]
+                          },
+                          "toStatus": {
+                            "type": "string",
+                            "enum": [
+                              "pending",
+                              "in_progress",
+                              "queued",
+                              "deferred",
+                              "delivered",
+                              "bounced",
+                              "expired",
+                              "failed",
+                              "suppressed",
+                              "unknown"
+                            ]
+                          },
+                          "applied": {
+                            "type": "boolean",
+                            "description": "false for stale, conflicting or same-state signals"
+                          },
+                          "occurredAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "queueId": { "nullable": true, "type": "string" },
+                          "smtpCode": {
+                            "nullable": true,
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "enhancedStatus": { "nullable": true, "type": "string" },
+                          "remoteHost": { "nullable": true, "type": "string" },
+                          "errorClass": { "nullable": true, "type": "string" },
+                          "detail": {
+                            "nullable": true,
+                            "description": "Remote reply or reason text; never message content",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "rcptSeq",
+                          "deliverySeq",
+                          "source",
+                          "fromStatus",
+                          "toStatus",
+                          "applied",
+                          "occurredAt",
+                          "queueId",
+                          "smtpCode",
+                          "enhancedStatus",
+                          "remoteHost",
+                          "errorClass",
+                          "detail"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "description": "Oldest first"
+                    },
+                    "nextCursor": { "nullable": true, "type": "string" }
+                  },
+                  "required": ["data", "nextCursor"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (also for resources of another tenant)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "Get the delivery audit trail of a message",
+        "tags": ["deliveries"]
+      }
+    },
+    "/api/v1/deliveries": {
+      "get": {
+        "description": "Deliveries of messages received in `[from, to)` (default the last 24 hours, at most 31 days, else `400`), newest first, keyset-paginated (`cursor`). Filters: `status` (`pending` (planned), `queued` (accepted by the gateway’s MTA), `deferred` (temporary failure, retried), `delivered` (the remote server answered 2xx), `bounced` (permanent failure), `expired` (gave up after retries), `failed` (refused by the gateway, see `failureReason`), `suppressed` (address on the suppression list), `unknown` (no signal; never guessed).) and `direction` (`inbound`, `outbound`, `internal`).",
+        "operationId": "DeliveriesController_list_v1",
+        "parameters": [
+          {
+            "name": "from",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "description": "Start of the received-at range (inclusive); default `to` − 24 h",
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            }
+          },
+          {
+            "name": "to",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "description": "End of the received-at range (exclusive); default now. At most 31 days",
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            }
+          },
+          {
+            "name": "status",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "in_progress",
+                "queued",
+                "deferred",
+                "delivered",
+                "bounced",
+                "expired",
+                "failed",
+                "suppressed",
+                "unknown"
+              ]
+            }
+          },
+          {
+            "name": "direction",
+            "required": false,
+            "in": "query",
+            "schema": { "type": "string", "enum": ["inbound", "outbound", "internal"] }
+          },
+          {
+            "name": "limit",
+            "required": false,
+            "in": "query",
+            "schema": { "default": 25, "type": "integer", "minimum": 1, "maximum": 100 }
+          },
+          {
+            "name": "cursor",
+            "required": false,
+            "in": "query",
+            "schema": { "type": "string", "minLength": 1, "maxLength": 128 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "messageId": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                          },
+                          "rcptSeq": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "recipient": { "type": "string" },
+                          "direction": {
+                            "nullable": true,
+                            "type": "string",
+                            "enum": ["inbound", "outbound", "internal"]
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "pending",
+                              "in_progress",
+                              "queued",
+                              "deferred",
+                              "delivered",
+                              "bounced",
+                              "expired",
+                              "failed",
+                              "suppressed",
+                              "unknown"
+                            ]
+                          },
+                          "attemptCount": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "lastErrorClass": { "nullable": true, "type": "string" },
+                          "statusChangedAt": {
+                            "nullable": true,
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          }
+                        },
+                        "required": [
+                          "messageId",
+                          "rcptSeq",
+                          "recipient",
+                          "direction",
+                          "status",
+                          "attemptCount",
+                          "lastErrorClass",
+                          "statusChangedAt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "description": "Newest first (received at, then id)"
+                    },
+                    "nextCursor": { "nullable": true, "type": "string" }
+                  },
+                  "required": ["data", "nextCursor"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "List deliveries",
+        "tags": ["deliveries"]
       }
     }
   },

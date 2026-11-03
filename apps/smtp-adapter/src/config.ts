@@ -6,6 +6,10 @@ import {
   redisConfigSchema,
   s3ConfigSchema,
 } from '@email-gateway/config';
+import {
+  parseAllowedDestinationPorts,
+  type ValidateDestinationHostOptions,
+} from '@email-gateway/mail-routing';
 import { z } from 'zod';
 import { bouncesConfigShape } from './bounces/bounces.config';
 import { ingestionConfigShape } from './ingestion/ingestion.config';
@@ -127,6 +131,65 @@ export const inSessionConfigShape = {
   POSTFIX_OUTBOUND_MYHOSTNAME: hostName.default('out.gateway.local'),
 };
 
+/** A DNS suffix of `ROUTING_DENIED_DESTINATION_SUFFIXES` (leading dot optional). */
+const DENIED_SUFFIX =
+  /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
+
+/**
+ * `ROUTING_DENIED_DESTINATION_SUFFIXES`: comma-separated DNS suffixes, lower-cased, without a
+ * leading or trailing dot (`.test, example` → `['test', 'example']`). Throws on invalid input.
+ */
+export function parseDeniedSuffixes(value: string | undefined): string[] {
+  if (value === undefined || value.trim() === '') return [];
+  return value.split(',').flatMap((entry) => {
+    const suffix = entry.trim().toLowerCase().replace(/^\./, '').replace(/\.$/, '');
+    if (suffix === '') return [];
+    if (!DENIED_SUFFIX.test(suffix) || suffix.length > 253) {
+      throw new Error(`Invalid ROUTING_DENIED_DESTINATION_SUFFIXES entry "${entry.trim()}"`);
+    }
+    return [suffix];
+  });
+}
+
+const validSuffixList = (value: string): boolean => {
+  try {
+    parseDeniedSuffixes(value);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Destination host safety (step 2.3 R2, R3): re-validation of every destination server before
+ * the transport map answers Postfix. Same keys and defaults as the api, which validates on write.
+ */
+export const routingConfigShape = {
+  /** Accept non-public IP literals as destinations (dedicated deployments); never metadata. */
+  ROUTING_ALLOW_NON_PUBLIC_DESTINATIONS: flag.default(false),
+  /** Extra refused destination suffixes (comma list), on top of the built-in internal names. */
+  ROUTING_DENIED_DESTINATION_SUFFIXES: z
+    .string()
+    .default('')
+    .refine(validSuffixList, 'must be a comma-separated list of DNS suffixes')
+    .transform(parseDeniedSuffixes),
+  /** Ports a custom destination may use (default 25,587,2525; internal gateway ports never). */
+  ROUTING_ALLOWED_DESTINATION_PORTS: z
+    .string()
+    .default('')
+    .refine((value) => {
+      try {
+        parseAllowedDestinationPorts(value);
+        return true;
+      } catch {
+        return false;
+      }
+    }, 'must be a comma-separated list of ports (internal gateway ports are refused)')
+    .transform(parseAllowedDestinationPorts),
+  /** Next hops per domain in a transport answer (the api allows as many servers). */
+  ROUTING_MAX_DESTINATIONS_PER_DOMAIN: positiveInt.max(10).default(10),
+};
+
 export const configSchema = baseConfigSchema
   .extend(httpConfigSchema(3010).shape)
   .extend(databaseConfigSchema.shape)
@@ -134,7 +197,8 @@ export const configSchema = baseConfigSchema
   .extend(s3ConfigSchema.shape)
   .extend(inSessionConfigShape)
   .extend(ingestionConfigShape)
-  .extend(bouncesConfigShape);
+  .extend(bouncesConfigShape)
+  .extend(routingConfigShape);
 
 export type SmtpAdapterConfig = z.infer<typeof configSchema>;
 
@@ -191,3 +255,29 @@ export const ADAPTER_CONFIG = Symbol('ADAPTER_CONFIG');
 export const ADAPTER_LOGGER = Symbol('ADAPTER_LOGGER');
 /** `BlockList` parsed from SMTP_INTERNAL_CLIENT_NETWORKS. */
 export const INTERNAL_NETWORKS = Symbol('INTERNAL_NETWORKS');
+
+/**
+ * validateDestinationHost options of the map answers (step 2.3 R3): the gateway's own hosts,
+ * the bounce domain, the denied suffixes and the non-public flag. No provider: a preset's host
+ * patterns are enforced by the api on write; the adapter re-checks safety only.
+ */
+export function destinationHostOptions(
+  config: Pick<
+    SmtpAdapterConfig,
+    | 'GATEWAY_MX_HOSTS'
+    | 'POSTFIX_MYHOSTNAME'
+    | 'POSTFIX_OUTBOUND_MYHOSTNAME'
+    | 'POSTFIX_BOUNCE_DOMAIN'
+    | 'ROUTING_ALLOW_NON_PUBLIC_DESTINATIONS'
+    | 'ROUTING_DENIED_DESTINATION_SUFFIXES'
+    | 'ROUTING_ALLOWED_DESTINATION_PORTS'
+  >,
+): ValidateDestinationHostOptions {
+  return {
+    allowNonPublic: config.ROUTING_ALLOW_NON_PUBLIC_DESTINATIONS,
+    deniedSuffixes: config.ROUTING_DENIED_DESTINATION_SUFFIXES,
+    allowedPorts: config.ROUTING_ALLOWED_DESTINATION_PORTS,
+    gatewayHosts: gatewayOwnHosts(config),
+    bounceDomain: config.POSTFIX_BOUNCE_DOMAIN,
+  };
+}

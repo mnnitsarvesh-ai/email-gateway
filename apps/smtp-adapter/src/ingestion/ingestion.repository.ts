@@ -3,6 +3,7 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from '@email-gateway/common';
 import { Prisma } from '@email-gateway/database';
 import { EventTypes, messageReceivedV1 } from '@email-gateway/event-contracts';
+import type { RoutedDirection } from '@email-gateway/mail-routing';
 import type { IngestDirection } from './ingestion-keys';
 
 export const MESSAGE_AGGREGATE_TYPE = 'message';
@@ -14,7 +15,18 @@ export interface IngestCommit {
   domainId: bigint;
   ingestKey: string;
   receivedAt: Date;
+  /**
+   * The LISTENER direction (`:10050` inbound, `:10051` outbound). It is part of the ingest key
+   * and the S3 object key and is what the loop check counts (2.2 D7, D8, D14); it is kept in
+   * the `received` event details as `direction`.
+   */
   direction: IngestDirection;
+  /**
+   * `email_messages.direction` and the `mail.message.received.v1` payload direction (step 2.3
+   * R1): `internal` when the listener is outbound and every recipient is internal, else the
+   * listener direction (messageDirection).
+   */
+  messageDirection: RoutedDirection;
   envelopeFrom: string;
   internetMessageId: string | null;
   headerFrom: string | null;
@@ -27,6 +39,8 @@ export interface IngestCommit {
   queueId: string;
   /** In RCPT order (`rcpt_seq` 0..n-1). */
   recipients: readonly string[];
+  /** `email_recipients.direction` per recipient, same order and length as `recipients`. */
+  recipientDirections: readonly RoutedDirection[];
 }
 
 export interface CommittedMessage {
@@ -71,6 +85,9 @@ export class IngestionRepository {
     data: IngestCommit,
     timeoutMs: number,
   ): Promise<{ messageId: bigint; eventId: string }> {
+    if (data.recipientDirections.length !== data.recipients.length) {
+      throw new Error('recipientDirections must have one entry per recipient');
+    }
     const eventId = randomUUID();
     return this.prisma.$transaction(
       async (tx) => {
@@ -86,7 +103,7 @@ export class IngestionRepository {
         const payload = messageReceivedV1.parse({
           messageId: messageId.toString(),
           receivedAt: data.receivedAt.toISOString(),
-          direction: data.direction,
+          direction: data.messageDirection,
           emlS3Key: data.emlObjectKey,
           sizeBytes: data.sizeBytes,
           envelopeFrom: data.envelopeFrom,
@@ -98,7 +115,7 @@ export class IngestionRepository {
             receivedAt: data.receivedAt,
             organizationId: data.organizationId,
             domainId: data.domainId,
-            direction: data.direction,
+            direction: data.messageDirection,
             status: 'received',
             statusChangedAt: data.receivedAt,
             internetMessageId: data.internetMessageId,
@@ -123,6 +140,7 @@ export class IngestionRepository {
             rcptSeq,
             address,
             status: 'pending' as const,
+            direction: data.recipientDirections[rcptSeq]!,
           })),
         });
         await tx.emailEvent.create({
@@ -135,6 +153,7 @@ export class IngestionRepository {
             sourceService: SOURCE_SERVICE,
             details: {
               direction: data.direction,
+              messageDirection: data.messageDirection,
               queueId: data.queueId,
               recipientCount: data.recipients.length,
               sizeBytes: data.sizeBytes,

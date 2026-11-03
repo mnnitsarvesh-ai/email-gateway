@@ -36,8 +36,9 @@ const daily = (...names: string[]): ExistingPartition[] => [
 const utc = (iso: string) => new Date(iso);
 
 describe('registry', () => {
-  it('lists the 16 partitioned tables of D3 with their retention', () => {
-    expect(PARTITION_REGISTRY).toHaveLength(16);
+  it('lists the 18 partitioned tables (D3 and step 2.3) with their retention', () => {
+    expect(PARTITION_REGISTRY).toHaveLength(18);
+    expect(new Set(PARTITION_REGISTRY.map((s) => s.table)).size).toBe(18);
     const byTable = Object.fromEntries(PARTITION_REGISTRY.map((s) => [s.table, s]));
     expect(byTable.email_messages).toMatchObject({
       column: 'received_at',
@@ -48,6 +49,21 @@ describe('registry', () => {
     expect(byTable.bounce_events).toMatchObject({ column: 'occurred_at', retention: 6 });
     expect(byTable.webhook_deliveries).toMatchObject({ column: 'event_occurred_at', retention: 2 });
     expect(byTable.email_archives).toMatchObject({ retention: null, drop: false });
+    // Step 2.3 delivery tables.
+    expect(byTable.delivery_reinjections).toMatchObject({
+      column: 'received_at',
+      granularity: 'month',
+      retention: 6,
+      drop: true,
+      tier: 'core',
+    });
+    expect(byTable.delivery_status_events).toMatchObject({
+      column: 'received_at',
+      granularity: 'month',
+      retention: 3,
+      drop: true,
+      tier: 'detail',
+    });
     expect(byTable.audit_logs).toMatchObject({
       column: 'created_at',
       retention: null,

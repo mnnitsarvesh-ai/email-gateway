@@ -19,6 +19,8 @@ describe('parseDsnNotice (Postfix 3.7 postmaster copies)', () => {
       queueId: '4ZbK3B2xyzQ',
       sender: 'alice@Acme.Test',
       occurredAt: new Date('2026-11-02T10:00:00.000Z'),
+      noticeDate: new Date('2026-11-02T10:05:00.000Z'),
+      envelopeId: null,
       recipients: [
         {
           finalRecipient: 'hard-bounce@sink.test',
@@ -131,6 +133,33 @@ describe('parseDsnNotice (Postfix 3.7 postmaster copies)', () => {
       ),
     );
     expect(notice?.occurredAt).toEqual(new Date('2026-11-02T10:05:00.000Z'));
+  });
+
+  it('extracts Original-Envelope-Id (the reinjection token, xtext-decoded)', async () => {
+    const token = `dw1-${'0195f3c17a2b7c3d8e4f5a6b7c8d9e0f'}`;
+    const notice = await parseDsnNotice(
+      Buffer.from(
+        postfixPostmasterCopy({
+          queueId: 'QENV1',
+          sender: 'a@acme.test',
+          envelopeId: token,
+          recipients: [{ address: 'x@sink.test', action: 'failed', status: '5.1.1' }],
+        }),
+      ),
+    );
+    expect(notice?.envelopeId).toBe(token);
+    const encoded = parseDeliveryStatus(
+      'Original-Envelope-Id: a+2Bb+3Dc\nX-Postfix-Queue-ID: Q\n',
+      null,
+    );
+    expect(encoded?.envelopeId).toBe('a+b=c');
+    for (const bad of ['x+zz', 'x'.repeat(101), 'two words', '']) {
+      const parsed = parseDeliveryStatus(
+        `Original-Envelope-Id: ${bad}\nX-Postfix-Queue-ID: Q\n`,
+        null,
+      );
+      expect(parsed?.envelopeId, bad).toBeNull();
+    }
   });
 
   it('returns null for mail without a delivery-status part', async () => {

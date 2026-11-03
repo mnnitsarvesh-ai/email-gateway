@@ -6,6 +6,7 @@ import { createConnection, type Socket } from 'node:net';
 import { Redis } from 'ioredis';
 import {
   type DomainStatus,
+  type MailDestinationProvider,
   type OrganizationStatus,
   PrismaClient,
   type RecipientValidation,
@@ -323,7 +324,14 @@ export class InSessionFixtures {
     organizationId: bigint,
     domainId: bigint,
     host: string,
-    options: { port?: number; priority?: number; tlsMode?: TlsMode; enabled?: boolean } = {},
+    options: {
+      port?: number;
+      priority?: number;
+      tlsMode?: TlsMode;
+      enabled?: boolean;
+      provider?: MailDestinationProvider;
+      tlsVerifyNames?: string | null;
+    } = {},
   ): Promise<void> {
     await this.prisma.domainMailServer.create({
       data: {
@@ -335,6 +343,37 @@ export class InSessionFixtures {
         priority: options.priority ?? 10,
         tlsMode: options.tlsMode ?? 'opportunistic',
         enabled: options.enabled ?? true,
+        provider: options.provider ?? 'custom',
+        tlsVerifyNames: options.tlsVerifyNames ?? null,
+      },
+    });
+    this.extraRedisKeys.add(`sa:tls:v2:${host.toLowerCase().replace(/\.$/, '')}`);
+  }
+
+  /** A `domain.routing.changed.v1` outbox row, as the api writes it (step 2.3 R2). */
+  async domainRoutingEvent(
+    organizationId: bigint,
+    domainId: bigint,
+    name: string,
+    hosts: string[],
+  ): Promise<void> {
+    const eventId = randomUUID();
+    this.outboxEventIds.push(eventId);
+    await this.prisma.messageOutbox.create({
+      data: {
+        eventId,
+        organizationId,
+        eventType: 'domain.routing.changed.v1',
+        aggregateType: 'domain',
+        aggregateId: String(domainId),
+        correlationId: `it-${this.suffix}`,
+        payload: {
+          domainId: String(domainId),
+          domainPublicId: randomUUID(),
+          name,
+          hosts,
+          changedAt: new Date().toISOString(),
+        },
       },
     });
   }

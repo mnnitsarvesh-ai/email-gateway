@@ -30,6 +30,7 @@ smtpd_recipient_restrictions = check_recipient_access regexp:/etc/postfix/sink/r
 smtpd_helo_required = yes
 disable_vrfy_command = yes
 
+# Store mode (default; entrypoint.sh switches to relay mode on SINK_MODE=relay).
 # Every *.test domain, one Maildir per recipient, written by the `sink` pipe(8) transport
 # (master.cf; /usr/local/bin/sink-deliver as user sink), one recipient per delivery.
 virtual_mailbox_domains = regexp:/etc/postfix/sink/domains.regexp

@@ -5,7 +5,7 @@ import {
   type OnModuleDestroy,
 } from '@nestjs/common';
 import { type Counter, MetricsService, PrismaService } from '@email-gateway/common';
-import { EventTypes } from '@email-gateway/event-contracts';
+import { domainRoutingChangedV1, EventTypes } from '@email-gateway/event-contracts';
 import type { Logger } from '@email-gateway/logger';
 import { ADAPTER_CONFIG, ADAPTER_LOGGER, type SmtpAdapterConfig } from '../config';
 import { DomainPolicyService } from './domain-policy.service';
@@ -15,13 +15,18 @@ export const INVALIDATION_BATCH_SIZE = 500;
 
 interface OutboxRow {
   id: bigint;
+  eventType: string;
   payload: unknown;
 }
 
 /**
  * Fast-path invalidation of the domain cache (step 2.2 D5): tails `message_outbox` on the
- * writer for `domain.status.changed.v1` rows every SMTP_CACHE_INVALIDATION_POLL_MS and deletes
- * the cached view (`sa:dom:{name}`) plus the socketmap keys derived from the name.
+ * writer every SMTP_CACHE_INVALIDATION_POLL_MS for
+ *
+ * - `domain.status.changed.v1`: deletes the cached view (`sa:dom:{name}`) plus the socketmap
+ *   keys derived from the name;
+ * - `domain.routing.changed.v1` (step 2.3 R2, written by the api on every destination change):
+ *   deletes the domain's route list and the TLS policy keys of every old and new host.
  *
  * Starts at `MAX(id)` (the TTL already bounds anything older). Ids committed out of order may
  * be skipped; the TTL is the guarantee, the tail only makes changes visible within seconds.
@@ -49,7 +54,7 @@ export class DomainCacheInvalidator implements OnApplicationBootstrap, OnModuleD
     this.logger = logger.child({ component: 'domain-cache-invalidator' });
     this.invalidations = metrics.counter(
       'smtp_cache_invalidations_total',
-      'Domain cache entries invalidated from domain.status.changed outbox events',
+      'Domain cache entries invalidated from domain.status.changed / domain.routing.changed outbox events',
     );
   }
 
@@ -76,22 +81,40 @@ export class DomainCacheInvalidator implements OnApplicationBootstrap, OnModuleD
       return 0;
     }
     const rows = await this.prisma.$queryRaw<OutboxRow[]>`
-      SELECT id, payload FROM message_outbox
-      WHERE id > ${this.lastId} AND event_type = ${EventTypes.DomainStatusChanged}
+      SELECT id, event_type AS eventType, payload FROM message_outbox
+      WHERE id > ${this.lastId}
+        AND event_type IN (${EventTypes.DomainStatusChanged}, ${EventTypes.DomainRoutingChanged})
       ORDER BY id LIMIT ${INVALIDATION_BATCH_SIZE}`;
     let count = 0;
     for (const row of rows) {
-      const name = payloadName(row.payload);
-      if (name !== null) {
-        await this.domains.invalidate(name);
+      if (await this.apply(row)) {
         this.invalidations.inc();
         count += 1;
-      } else {
-        this.logger.warn({ outboxId: String(row.id) }, 'domain event without a name; skipped');
       }
       this.lastId = BigInt(row.id);
     }
     return count;
+  }
+
+  /** Invalidates what one outbox row names; false (warned) for an unusable payload. */
+  private async apply(row: OutboxRow): Promise<boolean> {
+    const payload: unknown = typeof row.payload === 'string' ? safeJson(row.payload) : row.payload;
+    if (row.eventType === EventTypes.DomainRoutingChanged) {
+      const event = domainRoutingChangedV1.safeParse(payload);
+      if (!event.success) {
+        this.logger.warn({ outboxId: String(row.id) }, 'invalid routing event; skipped');
+        return false;
+      }
+      await this.domains.invalidateRouting(event.data.name, event.data.hosts);
+      return true;
+    }
+    const name = payloadName(payload);
+    if (name === null) {
+      this.logger.warn({ outboxId: String(row.id) }, 'domain event without a name; skipped');
+      return false;
+    }
+    await this.domains.invalidate(name);
+    return true;
   }
 
   private schedule(delayMs: number): void {
@@ -111,8 +134,7 @@ export class DomainCacheInvalidator implements OnApplicationBootstrap, OnModuleD
   }
 }
 
-function payloadName(payload: unknown): string | null {
-  const value: unknown = typeof payload === 'string' ? safeJson(payload) : payload;
+function payloadName(value: unknown): string | null {
   if (typeof value !== 'object' || value === null) return null;
   const name = (value as { name?: unknown }).name;
   return typeof name === 'string' && name.length > 0 && name.length <= 253 ? name : null;

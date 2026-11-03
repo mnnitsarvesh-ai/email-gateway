@@ -141,9 +141,35 @@ describe('DomainPolicyService (D5)', () => {
   it('invalidates the view and the derived route key', async () => {
     const h = harness();
     await h.service.get('tenant.test');
-    h.redis.store.set('sa:route:tenant.test', { value: 'null' });
+    h.redis.store.set('sa:route:v2:tenant.test', { value: 'null' });
     await h.service.invalidate('TENANT.test');
     expect(h.redis.store.has('sa:dom:tenant.test')).toBe(false);
-    expect(h.redis.store.has('sa:route:tenant.test')).toBe(false);
+    expect(h.redis.store.has('sa:route:v2:tenant.test')).toBe(false);
+  });
+
+  it('invalidates the route list and the TLS keys of every named host on a routing change', async () => {
+    const h = harness();
+    await h.service.get('tenant.test');
+    for (const key of [
+      'sa:route:v2:tenant.test',
+      'sa:tls:v2:old.example',
+      'sa:tls:v2:new.example',
+      'sa:tls:v2:2001:db8::1',
+      'sa:tls:v2:other.example',
+    ]) {
+      h.redis.store.set(key, { value: 'null' });
+    }
+    await h.service.invalidateRouting('Tenant.TEST', [
+      'OLD.example.',
+      'new.example',
+      '[2001:DB8::1]',
+    ]);
+    expect(h.redis.store.has('sa:route:v2:tenant.test')).toBe(false);
+    expect(h.redis.store.has('sa:tls:v2:old.example')).toBe(false);
+    expect(h.redis.store.has('sa:tls:v2:new.example')).toBe(false);
+    expect(h.redis.store.has('sa:tls:v2:2001:db8::1')).toBe(false);
+    // Unrelated hosts and the domain view stay cached.
+    expect(h.redis.store.has('sa:tls:v2:other.example')).toBe(true);
+    expect(h.redis.store.has('sa:dom:tenant.test')).toBe(true);
   });
 });

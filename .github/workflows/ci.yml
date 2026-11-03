@@ -129,8 +129,33 @@ jobs:
   stack:
     name: Docker Compose stack + integration tests
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 60
     needs: [quality]
+    # Test profile of step 2.3 (docs/plan/steps/05-routing.md §5), for THIS job only. Compose
+    # and the test runner take these over the generated .env (shell environment wins over .env
+    # in Compose interpolation; process.loadEnvFile never overrides a set variable).
+    # - DELIVERY_DEV_PASSTHROUGH_ENABLED: DEVELOPMENT/CI ONLY, the delivery-worker approves every
+    #   received message without scanning or policy (steps 3.x/5.x do not exist yet), so the
+    #   routing stack suites can deliver end to end. The worker refuses it unless APP_ENV is
+    #   local or ci; never set it anywhere else.
+    # - Postfix retry and connect timeout shortened by configuration only (nothing in code
+    #   depends on them): 10s/60s/10s backoff, 5s connect timeout.
+    # - The test CA of the smtp-test sinks (volume test-pki) for verified TLS to the provider
+    #   sinks; trusted by nothing else.
+    # - The worker's own hop retries quickly (local .env values).
+    env:
+      DELIVERY_DEV_PASSTHROUGH_ENABLED: 'true'
+      POSTFIX_MINIMAL_BACKOFF_TIME: 10s
+      POSTFIX_MAXIMAL_BACKOFF_TIME: 60s
+      POSTFIX_QUEUE_RUN_DELAY: 10s
+      POSTFIX_OUTBOUND_SMTP_CONNECT_TIMEOUT: 5s
+      POSTFIX_OUTBOUND_SMTP_TLS_CAPATH: /etc/postfix/test-ca/ca
+      DELIVERY_REINJECT_LEASE_SECONDS: '120'
+      DELIVERY_REINJECT_RETRY_BASE_SECONDS: '2'
+      DELIVERY_REINJECT_RETRY_MAX_SECONDS: '20'
+      DELIVERY_POLL_INTERVAL_MS: '500'
+      DELIVERY_OUTBOX_POLL_INTERVAL_MS: '500'
+      DELIVERY_RECONCILE_INTERVAL_MS: '5000'
     steps:
       - uses: actions/checkout@v5
         with:
@@ -147,16 +172,29 @@ jobs:
       # container of the apps profile (locally it may be host.docker.internal instead).
       - name: Check the mail plane targets the adapter container
         run: grep -qx 'SMTP_ADAPTER_HOST=smtp-adapter' .env
-      # apps + smtp-test (mail-sink, dns-sink, smtp-tools): the stack SMTP suites
-      # (tests/integration/smtp-*.test.ts) FAIL without them, so they run in every CI build.
+      # apps + smtp-test: the stack suites FAIL without them, so they run in every CI build.
+      # smtp-test = mail-sink, dns-sink, smtp-tools (step 2.2) and, for the routing suites
+      # (tests/integration/routing-*.test.ts, step 2.3), test-pki (one-shot test CA), sink-m365,
+      # sink-google, sink-google-alt, relay-sink and reinject-forwarder. The delivery-worker of the
+      # apps profile reinjects into postfix-outbound directly (10026/10027).
       - name: Start infrastructure, application services and SMTP test sinks
         run: docker compose --profile apps --profile smtp-test up -d --build --wait --wait-timeout 900
+      # The delivery-worker reads postfix-outbound's delivery log from the shared bind mount
+      # (read-only); the routing suites read the same file on the runner.
+      - name: Check the delivery-worker reads the delivery log and runs the test profile
+        run: |
+          docker compose exec -T delivery-worker test -r /var/log/postfix-outbound/maillog
+          docker compose exec -T postfix-outbound postconf -h minimal_backoff_time | grep -qx 10s
+          docker compose exec -T postfix-outbound postconf -h smtp_tls_CApath | grep -qx /etc/postfix/test-ca/ca
+          test -r "${POSTFIX_OUTBOUND_LOG_DIR:-./.local/postfix-outbound-log}/maillog"
       # The api integration tests need the catalog (plans, permissions, platform organization).
       - name: Seed catalog
         run: pnpm db:seed
       # DKIM keys of the SMTP suites are published by running the api's one-shot publisher
       # (`node dist/modules/domains/cli/dkim-sync.js`) inside the running api container
       # (tests/integration/support/smtp-fixtures.ts); the periodic publisher keeps running too.
+      # pnpm test:integration = the stack suites (tests/), then the api, smtp-adapter,
+      # mail-routing (recorder against MySQL) and delivery-worker integration suites.
       - name: Integration tests
         run: pnpm test:integration
       - name: Service logs
@@ -165,8 +203,8 @@ jobs:
       - name: Mail plane logs and queues
         if: failure()
         run: |
-          docker compose --profile apps logs --no-color --tail 1000 postfix postfix-outbound smtp-adapter rspamd-outbound redis-dkim
-          docker compose --profile smtp-test logs --no-color --tail 300 mail-sink dns-sink
+          docker compose --profile apps logs --no-color --tail 1000 postfix postfix-outbound smtp-adapter delivery-worker rspamd-outbound redis-dkim
+          docker compose --profile smtp-test logs --no-color --tail 300 mail-sink dns-sink sink-m365 sink-google sink-google-alt relay-sink reinject-forwarder
           docker compose exec -T postfix postqueue -j || true
           docker compose exec -T postfix-outbound postqueue -j || true
       - name: Tear down

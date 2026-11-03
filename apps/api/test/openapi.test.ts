@@ -215,6 +215,10 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
       'GET /api/v1/domains/{id}/recipients',
       'POST /api/v1/domains/{id}/recipients',
       'POST /api/v1/domains/{id}/recipients/remove',
+      // Step 2.3 R13: destination servers.
+      'GET /api/v1/domains/{id}/destinations',
+      'PUT /api/v1/domains/{id}/destinations',
+      'DELETE /api/v1/domains/{id}/destinations',
     ];
     const byKey = new Map(operations(doc).map((op) => [op.key, op]));
     for (const key of expected) {
@@ -250,6 +254,46 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     expect(create.description).toContain('Google Workspace');
     // The secret hash is never part of any response schema.
     expect(JSON.stringify(doc)).not.toMatch(/secretHash|secret_hash/);
+  });
+
+  it('documents the step 2.3 destination and delivery status endpoints (R13)', () => {
+    const expected: Record<string, string> = {
+      'GET /api/v1/destination-providers': 'domains',
+      'GET /api/v1/domains/{id}/destinations': 'domains',
+      'PUT /api/v1/domains/{id}/destinations': 'domains',
+      'DELETE /api/v1/domains/{id}/destinations': 'domains',
+      'GET /api/v1/messages/{messageId}/deliveries': 'deliveries',
+      'GET /api/v1/messages/{messageId}/deliveries/events': 'deliveries',
+      'GET /api/v1/deliveries': 'deliveries',
+    };
+    const byKey = new Map(operations(doc).map((op) => [op.key, op]));
+    for (const [key, tag] of Object.entries(expected)) {
+      const op = byKey.get(key);
+      expect(op?.tags, key).toEqual([tag]);
+      const schemes = op!.security.flatMap((s) => Object.keys(s)).sort();
+      expect(schemes, key).toEqual([ACCESS_TOKEN_SCHEME, API_KEY_SCHEME].sort());
+    }
+    const deliveryOps = operations(doc).filter(
+      (op) => op.key.includes(' /api/v1/deliveries') || op.key.includes(' /api/v1/messages'),
+    );
+    expect(deliveryOps.map((op) => op.key).sort()).toEqual(
+      Object.keys(expected)
+        .filter((key) => key.includes('deliveries'))
+        .sort(),
+    );
+    // The 422 of PUT documents every stable refusal reason.
+    const put = (doc.paths['/api/v1/domains/{id}/destinations'] as Record<string, unknown>).put as {
+      responses: Record<string, { content?: Record<string, { schema?: unknown }> }>;
+    };
+    const refusal = JSON.stringify(put.responses['422']);
+    for (const reason of [
+      'ip_not_public',
+      'metadata_address',
+      'gateway_host',
+      'duplicate_server',
+    ]) {
+      expect(refusal).toContain(reason);
+    }
   });
 
   it('matches the committed snapshot docs/api/openapi.json', async () => {

@@ -40,6 +40,13 @@ async function partitionNames(table: string): Promise<string[]> {
 }
 
 describe('partition maintenance', () => {
+  it('manages the 18 partitioned tables, including the step 2.3 delivery tables', () => {
+    expect(PARTITION_REGISTRY).toHaveLength(18);
+    expect(PARTITION_REGISTRY.map((s) => s.table)).toEqual(
+      expect.arrayContaining(['delivery_reinjections', 'delivery_status_events']),
+    );
+  });
+
   it('creates partitions ahead for every registered table, and a second apply is a no-op', async () => {
     const now = new Date();
     const first = await runPartitionMaintenance({

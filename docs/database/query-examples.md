@@ -278,3 +278,79 @@ SELECT id, event_occurred_at, subscription_id, organization_id, attempt_count
 ```
 
 Prisma: `webhookDelivery.findMany({ where: { status: 'pending', nextAttemptAt: { lte: now } }, orderBy: { nextAttemptAt: 'asc' }, take: 100 })`. A platform-level worker query (notification-worker), not tenant-scoped. Index `(status, next_attempt_at)`. **Pruning:** none (no partition key in the predicate), so every partition's index is probed with a short range read; the performance report shows this stays sub-millisecond at 2 months of retention.
+
+## Q19: Deliveries of one message (step 2.3)
+
+`GET /messages/{messageId}/deliveries` ([R13](../plan/steps/05-routing.md#r13-api-tenant-scoped-openapi)): the registry resolves the public id to `(id, received_at)` within the caller's organization (Q2), then:
+
+```sql
+SELECT d.id, d.delivery_seq, d.direction, d.status, d.attempt_count, d.last_attempt_at,
+       d.delivered_at, d.remote_host, d.final_smtp_code, d.enhanced_status,
+       d.final_smtp_response, d.last_error_class, d.failure_reason, d.dsn_queue_id,
+       d.status_changed_at, r.rcpt_seq, r.address
+  FROM email_deliveries d
+  JOIN email_recipients r ON r.id = d.recipient_id AND r.received_at = d.received_at
+ WHERE d.message_id = ? AND d.received_at = ? AND d.organization_id = ?
+ ORDER BY r.rcpt_seq, d.delivery_seq;
+```
+
+Prisma: `emailDelivery.findMany({ where: { messageId, receivedAt, organizationId }, orderBy: [{ deliverySeq: 'asc' }, { id: 'asc' }] })`, then `emailRecipient.findMany({ where: { messageId, receivedAt, organizationId } })` joined in memory (no relations on partitioned tables). Index `(message_id, received_at)` on both sides (recipients through the unique `(message_id, rcpt_seq, received_at)`). **Pruning:** one partition of each table. The `organization_id` predicate is a second tenant check on top of the registry lookup. Read from the replica (`PrismaReadService`); a few seconds of lag are acceptable for a status page.
+
+## Q20: Tenant delivery list, bounded window, keyset pagination (step 2.3)
+
+`GET /deliveries` (R13): window `[from, to)` of at most 31 days (default the last 24 h), optional `status` / `direction` filters.
+
+```sql
+SELECT id, received_at, message_id, recipient_id, direction, status, attempt_count,
+       last_error_class, status_changed_at
+  FROM email_deliveries
+ WHERE organization_id = ? AND received_at >= ? AND received_at < ?
+   AND (? IS NULL OR status = ?) AND (? IS NULL OR direction = ?)
+   AND (received_at < ? OR (received_at = ? AND id < ?))  -- next page only
+ ORDER BY received_at DESC, id DESC
+ LIMIT 50;
+```
+
+Prisma: `emailDelivery.findMany({ where: { organizationId, receivedAt: { gte: from, lt: to }, status, direction, OR: cursor ? [{ receivedAt: { lt: c.receivedAt } }, { receivedAt: c.receivedAt, id: { lt: c.id } }] : undefined }, orderBy: [{ receivedAt: 'desc' }, { id: 'desc' }], take: 50 })`. Index `(organization_id, received_at, id)` (step 2.3): a backward range scan in index order, no filesort; `status` / `direction` are filtered on the rows read, so a rare status in a busy tenant reads more rows per page (bounded by the window). The message public id and the recipient address of the page are fetched with two batched lookups (`message_identities` by id, `email_recipients` by `(id, received_at)`). **Pruning:** the partitions overlapping the window (at most 2 for 31 days).
+
+## Q21: Delivery-log and DSN matching by queue id (step 2.3)
+
+The Postfix log tailer and the bounce handler match a line or a notice to a delivery by the postfix-outbound queue id (R9.1 step 1, `recordDeliverySignal`):
+
+```sql
+SELECT id, received_at, message_id, recipient_id, delivery_seq
+  FROM email_deliveries
+ WHERE outbound_queue_id = ?
+ LIMIT 1000;
+-- then the recipients of those rows, compared case-insensitively on the whole address in code
+SELECT id, received_at, address FROM email_recipients WHERE (id, received_at) IN ((?, ?), ...);
+-- no hit: a recipient not yet tied to the file, among the bound reinjection's recipients
+-- (a log line naming the address proves postfix-outbound accepted it under this queue id):
+SELECT id, received_at FROM delivery_reinjections WHERE queue_id = ?;
+SELECT id, received_at, message_id, recipient_id, delivery_seq
+  FROM email_deliveries
+ WHERE reinjection_id = ? AND received_at = ? AND outbound_queue_id IS NULL;
+-- bounce notices also look the reinjection up by queue id or token, then its recipients:
+SELECT id, received_at, message_id, organization_id FROM delivery_reinjections WHERE queue_id = ?;
+SELECT id, received_at, message_id, organization_id FROM delivery_reinjections WHERE public_id = ?;
+SELECT id FROM email_deliveries WHERE reinjection_id = ? AND received_at = ?;
+```
+
+Prisma: `emailDelivery.findMany({ where: { outboundQueueId }, take: 1000 })`, `deliveryReinjection.findFirst({ where: { publicId } })`, `emailDelivery.findMany({ where: { reinjectionId, receivedAt } })`. Indexes `email_deliveries (outbound_queue_id)` and `(reinjection_id, received_at)` (one partition: `received_at` is the reinjection's), `delivery_reinjections (queue_id)` and `(public_id)`. **Pruning:** none: a log line carries no `received_at`, so the index is probed in every partition (7 monthly partitions at 6 months of retention), returning at most the ≤ 100 recipients of one reinjection. Writer only (data plane, ADR-0014).
+
+## Q22: Delivery audit trail of one message (step 2.3)
+
+`GET /messages/{messageId}/deliveries/events` (R13), oldest first, optional `rcptSeq` filter (resolved to the recipient's delivery ids first):
+
+```sql
+SELECT id, delivery_id, source, from_status, to_status, applied, occurred_at, queue_id,
+       smtp_code, enhanced_status, remote_host, error_class, detail
+  FROM delivery_status_events
+ WHERE message_id = ? AND received_at = ? AND organization_id = ?
+   AND (? IS NULL OR delivery_id IN (...))
+   AND id > ?  -- next page
+ ORDER BY id
+ LIMIT 100;
+```
+
+Prisma: `deliveryStatusEvent.findMany({ where: { messageId, receivedAt, organizationId, deliveryId: { in: ids }, id: { gt: cursor } }, orderBy: { id: 'asc' }, take: 100 })`. Index `(message_id, received_at)`; `id` is allocated in insert order, so ordering by id is oldest first for one message. **Pruning:** one partition. Rows older than 3 months are gone (detail tier); the delivery row keeps the final status.

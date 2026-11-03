@@ -1,0 +1,20 @@
+#!/bin/sh
+# maillog_file_compressor of postfix-outbound (step 2.3, docs/deployment/mail-routing.md V6).
+# `postfix logrotate` renames $maillog_file to $maillog_file.<suffix>, HUPs master (postlogd
+# reopens and creates a NEW file with mode 0600, owner root), sleeps one second and then runs
+# this program with the rotated file name. Postfix 3.7 has no setting for that mode, but the
+# delivery-worker's status tailer reads the log as a non-root user through a read-only mount, so
+# the new file is made world-readable (0644) here before the rotated one is compressed.
+# The file is only ever opened for append (never truncated) in case postlogd has not created it.
+set -eu
+
+rotated=$1
+current=$(postconf -h maillog_file)
+case "$current" in
+  /dev/*) ;;
+  *)
+    [ -e "$current" ] || (umask 022 && : >> "$current")
+    chmod 0644 "$current"
+    ;;
+esac
+exec gzip "$rotated"

@@ -16,6 +16,12 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: ['smtp-adapter:3010']
+  # delivery-worker (step 2.3 R14): approvals, reinjections, status signals and transitions, log
+  # and outbox lag, rate limiting, reconciler actions.
+  - job_name: delivery-worker
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['delivery-worker:3040']
   - job_name: prometheus
     static_configs:
       - targets: ['localhost:9090']

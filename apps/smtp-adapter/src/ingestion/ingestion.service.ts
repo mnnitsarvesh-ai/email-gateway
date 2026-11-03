@@ -2,6 +2,11 @@ import { Inject, Injectable } from '@nestjs/common';
 import { PrismaService } from '@email-gateway/common';
 import { type DomainOwner, resolveDomainOwner } from '@email-gateway/database';
 import { createLogger, type Logger } from '@email-gateway/logger';
+import {
+  classifyRecipient,
+  messageDirection,
+  type RoutedDirection,
+} from '@email-gateway/mail-routing';
 import type { SMTPServerDataStream } from 'smtp-server';
 import type { LmtpClientInfo, LmtpHandler } from '../lmtp/lmtp-listener';
 import { LmtpReplyException } from '../lmtp/lmtp-reply';
@@ -140,7 +145,32 @@ export class IngestionService {
       domain: recipient.domain,
       organizationId: owner.organizationId,
       domainId: owner.domainId,
+      direction: await this.classify(transaction, owner.organizationId, recipient.domain),
     };
+  }
+
+  /**
+   * Step 2.3 R1 at ingestion: the routed direction of one recipient. Inbound listener → always
+   * `inbound` (no lookup). Outbound listener → the recipient domain's owner with
+   * `resolveActiveDomain` semantics (verified, `active` domain of an `active` organization),
+   * read from the writer through the transaction's owner memo (one query per distinct domain,
+   * shared with the sender lookup); `internal` when it is the sender's organization. A lookup
+   * error propagates: the recipient is tempfailed (451) like every other ingestion lookup.
+   */
+  private async classify(
+    transaction: IngestTransaction,
+    organizationId: bigint,
+    recipientDomain: string,
+  ): Promise<RoutedDirection> {
+    if (transaction.direction === 'inbound') return 'inbound';
+    const owner = await this.owner(transaction, recipientDomain);
+    const active =
+      owner !== null && owner.status === 'active' && owner.organizationStatus === 'active';
+    return classifyRecipient({
+      listenerDirection: 'outbound',
+      messageOrganizationId: organizationId,
+      recipientDomainOwner: active ? { organizationId: owner.organizationId } : null,
+    });
   }
 
   private async owner(transaction: IngestTransaction, domain: string): Promise<DomainOwner | null> {
@@ -380,6 +410,10 @@ export class IngestionService {
             ingestKey: input.ingestKey,
             receivedAt,
             direction: ref.direction,
+            messageDirection: messageDirection(
+              ref.direction,
+              group.recipients.map((recipient) => recipient.direction),
+            ),
             envelopeFrom: transaction.envelopeFrom,
             internetMessageId: input.headers.messageId,
             headerFrom: input.headers.from,
@@ -391,6 +425,7 @@ export class IngestionService {
             clientHelo: transaction.clientHelo,
             queueId: ref.queueId,
             recipients: group.recipients.map((recipient) => recipient.address),
+            recipientDirections: group.recipients.map((recipient) => recipient.direction),
           },
           config.INGEST_DB_TIMEOUT_MS,
         ),

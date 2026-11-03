@@ -158,8 +158,19 @@ describe.skipIf(gate.skip)(
       const object = (await fx.object(message.emlObjectKey)).toString('utf8');
       // smtpd_sasl_authenticated_header = no: the SASL username never appears in headers.
       expect(object).not.toContain(sasl.username);
-      // Ingested, not delivered: nothing reaches the sink and nothing stays queued.
-      expect(involving(await listQueue('postfix-outbound'), [out.name])).toEqual([]);
+      // Ingested over LMTP: the submission's own queue file is gone. Step 2.3
+      // (docs/plan/steps/05-routing.md R5, R7, R8): with the delivery-worker running, the
+      // development pass-through approves the message and the worker reinjects it through 10027,
+      // so a NEW queue file (another queue id) may be in postfix-outbound while it is delivered;
+      // any such file must belong to a reinjection the worker planned for this message.
+      const queued = involving(await listQueue('postfix-outbound'), [out.name]);
+      expect(queued.map((m) => m.queue_id)).not.toContain(result.queueId);
+      if (queued.length > 0) {
+        const reinjections = await fx.prisma.deliveryReinjection.findMany({
+          where: { messageId: message.id, organizationId: orgO, listener: 'reinject_outbound' },
+        });
+        expect(reinjections.length).toBeGreaterThan(0);
+      }
     });
 
     it('refuses a sender domain of another tenant with 550 5.7.1', async () => {

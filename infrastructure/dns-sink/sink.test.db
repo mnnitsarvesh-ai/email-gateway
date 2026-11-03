@@ -1,9 +1,19 @@
-; Zone sink.test (TEST-ONLY). Every name under sink.test has its MX at the mail-sink container.
+; Zone sink.test (TEST-ONLY). Every name under sink.test has its MX at the mail-sink container,
+; except the step 2.3 names below.
 $ORIGIN sink.test.
 $TTL 60
-@       IN SOA  ns.sink.test. hostmaster.sink.test. ( 2026110201 3600 600 86400 60 )
+@       IN SOA  ns.sink.test. hostmaster.sink.test. ( 2026110301 3600 600 86400 60 )
 @       IN NS   ns.sink.test.
 @       IN MX   10 mx.sink.test.
 *       IN MX   10 mx.sink.test.
 ns      IN A    172.31.250.53
 mx      IN A    172.31.250.25
+; Step 2.3 (docs/plan/steps/05-routing.md §6): the gateway's own inbound MX (postfix on mailtest).
+gw-mx   IN A    172.31.250.10
+; Domains of other tenants of this gateway: <anything>.gwtenant.sink.test (any depth) has its MX
+; at the gateway MX (cross-tenant and loop tests): the closest encloser of those names is
+; `gwtenant`, so this wildcard wins over `*` above (verified with CoreDNS 1.11.3). The bare name
+; gwtenant.sink.test itself is answered from `*` (MX mx.sink.test); never use it as a domain.
+*.gwtenant IN MX 10 gw-mx.sink.test.
+; relay-sink: a tenant destination server that relays back to the gateway MX (loop tests).
+relay   IN A    172.31.250.29

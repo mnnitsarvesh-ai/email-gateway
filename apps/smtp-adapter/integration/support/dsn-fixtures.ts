@@ -24,6 +24,8 @@ export interface DsnFixtureOptions {
   reportingMta?: string;
   /** Extra header lines of the undelivered message, e.g. `X-Gateway-Trace: v=1; …`. */
   originalHeaders?: string[];
+  /** `Original-Envelope-Id` (the `MAIL … ENVID` of the reinjection, step 2.3 R8). */
+  envelopeId?: string;
 }
 
 /** Folds a long Diagnostic-Code value at a space, the way Postfix does (continuation lines). */
@@ -57,6 +59,7 @@ export function postfixPostmasterCopy(options: DsnFixtureOptions): string {
     )
     .join('\r\n\r\n');
   const perMessage = [
+    ...(options.envelopeId ? [`Original-Envelope-Id: ${options.envelopeId}`] : []),
     `Reporting-MTA: dns; ${host}`,
     `X-Postfix-Queue-ID: ${options.queueId}`,
     `X-Postfix-Sender: rfc822; ${options.sender}`,

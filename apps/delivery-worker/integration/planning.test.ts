@@ -1,0 +1,231 @@
+import { deliveryStatusChangedV1, EventTypes } from '@email-gateway/event-contracts';
+import { reinjectionIdempotencyKey, recipientSetSha256 } from '@email-gateway/mail-routing';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { Fixtures, workerConfig } from './support/fixtures';
+import { buildWorker, FAST, type TestWorker } from './support/worker';
+
+const fx = new Fixtures();
+let worker: TestWorker;
+let org: bigint;
+let other: bigint;
+let domainA: bigint;
+let domainB: bigint;
+
+beforeAll(async () => {
+  worker = buildWorker(fx, workerConfig({ ...FAST, DELIVERY_BATCH_MAX_RECIPIENTS: '2' }));
+  org = await fx.organization('plan');
+  other = await fx.organization('plan-other');
+  domainA = await fx.domain(org, fx.name('a'));
+  domainB = await fx.domain(org, fx.name('b'));
+  await fx.domain(other, fx.name('other'));
+  await fx.domain(org, fx.name('held'), { status: 'suspended' });
+});
+afterAll(async () => {
+  await worker.close();
+  await fx.cleanup();
+});
+
+describe('planning (R7) against the real writer', () => {
+  it('plans an approval into deliveries, reinjection groups and planner signals; a duplicate plans nothing', async () => {
+    const message = await fx.message(org, {
+      direction: 'inbound',
+      recipients: [
+        { address: `u1@${fx.name('a')}` },
+        { address: `u2@${fx.name('a')}` },
+        { address: `u3@${fx.name('b')}` },
+      ],
+    });
+    const approval = fx.approval(message);
+    const result = await worker.plan(approval);
+    expect(result).toMatchObject({ status: 'planned', deliveries: 3, reinjections: 2, refused: 0 });
+
+    const reinjections = await fx.reinjections(message);
+    expect(
+      reinjections.map((r) => [
+        r.listener,
+        r.direction,
+        r.destinationKey,
+        r.recipientCount,
+        r.status,
+      ]),
+    ).toEqual([
+      ['reinject_inbound', 'inbound', `tenant:${domainA}`, 2, 'pending'],
+      ['reinject_inbound', 'inbound', `tenant:${domainB}`, 1, 'pending'],
+    ]);
+    const first = reinjections[0]!;
+    expect(first.publicId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    expect(first.emlObjectKey).toBe(message.emlObjectKey);
+    expect(first.approvalEventId).toBe(approval.eventId);
+    const setSha = recipientSetSha256([`u1@${fx.name('a')}`, `u2@${fx.name('a')}`]);
+    expect(first.recipientSetSha256).toBe(setSha);
+    expect(first.idempotencyKey).toBe(
+      reinjectionIdempotencyKey({
+        messageId: message.messageId,
+        deliverySeq: 0,
+        listener: 'reinject_inbound',
+        recipientSetSha256: setSha,
+      }),
+    );
+
+    const deliveries = await fx.deliveries(message);
+    expect(deliveries.map((d) => [d.status, d.direction, d.deliverySeq])).toEqual([
+      ['pending', 'inbound', 0],
+      ['pending', 'inbound', 0],
+      ['pending', 'inbound', 0],
+    ]);
+    expect(deliveries[0]!.reinjectionId).toBe(first.id);
+    expect(deliveries[2]!.reinjectionId).toBe(reinjections[1]!.id);
+    const msg = await fx.prisma.emailMessage.findUniqueOrThrow({
+      where: { id_receivedAt: { id: message.messageId, receivedAt: message.receivedAt } },
+    });
+    expect(msg.status).toBe('delivery_queued');
+    const audit = await fx.prisma.deliveryStatusEvent.findMany({
+      where: { messageId: message.messageId, receivedAt: message.receivedAt },
+    });
+    expect(audit.map((a) => [a.source, a.toStatus, a.applied])).toEqual(
+      Array(3).fill(['planner', 'pending', true]),
+    );
+    const before = await fx.counts(message);
+    expect(before.outbox).toBe(0); // initial pending signals publish nothing
+
+    // Same event again: the processOnce ledger.
+    expect(await worker.plan(approval)).toBe('duplicate');
+    // A second approval with the same deliverySeq: the unique keys, no second plan.
+    expect(await worker.plan(fx.approval(message))).toMatchObject({
+      status: 'duplicate',
+      alreadyPlanned: 3,
+    });
+    expect(await fx.reinjections(message)).toHaveLength(2);
+    expect(await fx.deliveries(message)).toHaveLength(3);
+    expect(await fx.counts(message)).toEqual(before);
+  });
+
+  it('splits mixed routes: internal per tenant domain, outbound per recipient domain, refusals and suppressions', async () => {
+    await fx.suppression(org, 'blocked@ext-two.test');
+    const message = await fx.message(org, {
+      direction: 'outbound',
+      recipients: [
+        { address: `int1@${fx.name('a')}`, direction: 'internal' },
+        { address: `int2@${fx.name('b')}`, direction: 'internal' },
+        { address: 'x1@ext-one.test', direction: 'outbound' },
+        { address: 'x2@EXT-ONE.test', direction: 'outbound' },
+        { address: 'x3@ext-two.test', direction: 'outbound' },
+        { address: 'x4@ext-two.test', direction: 'outbound' },
+        { address: 'x5@ext-two.test', direction: 'outbound' },
+        { address: 'blocked@ext-two.test', direction: 'outbound' },
+        // Another tenant of this gateway: outbound through its public MX, never internal.
+        { address: `p@${fx.name('other')}`, direction: 'outbound' },
+        // Classified internal at ingestion, outbound now (domain gone): never delivered.
+        { address: 'moved@ext-one.test', direction: 'internal' },
+      ],
+    });
+    const result = await worker.plan(fx.approval(message));
+    expect(result).toMatchObject({ status: 'planned', deliveries: 10, refused: 2 });
+    const groups = (await fx.reinjections(message))
+      .map((r) => `${r.listener}|${r.destinationKey}|${r.recipientCount}`)
+      .sort();
+    expect(groups).toEqual(
+      [
+        `reinject_inbound|tenant:${domainA}|1`,
+        `reinject_inbound|tenant:${domainB}|1`,
+        'reinject_outbound|mx:ext-one.test|2',
+        // Chunked to DELIVERY_BATCH_MAX_RECIPIENTS = 2.
+        'reinject_outbound|mx:ext-two.test|1',
+        'reinject_outbound|mx:ext-two.test|2',
+        `reinject_outbound|mx:${fx.name('other')}|1`,
+      ].sort(),
+    );
+    const deliveries = await fx.deliveries(message);
+    const byAddress = new Map(
+      await Promise.all(
+        deliveries.map(async (d) => {
+          const r = await fx.prisma.emailRecipient.findUniqueOrThrow({
+            where: { id_receivedAt: { id: d.recipientId, receivedAt: d.receivedAt } },
+          });
+          return [r.address, d] as const;
+        }),
+      ),
+    );
+    expect(byAddress.get('blocked@ext-two.test')).toMatchObject({
+      status: 'suppressed',
+      failureReason: 'suppressed',
+      reinjectionId: null,
+    });
+    expect(byAddress.get('moved@ext-one.test')).toMatchObject({
+      status: 'failed',
+      failureReason: 'direction_changed',
+      reinjectionId: null,
+    });
+    expect(byAddress.get(`p@${fx.name('other')}`)).toMatchObject({
+      direction: 'outbound',
+      destinationKey: `mx:${fx.name('other')}`,
+    });
+    // Refusals are published (outbox, valid payloads); routed recipients are not yet.
+    const outbox = await fx.prisma.messageOutbox.findMany({
+      where: {
+        aggregateId: message.messageId.toString(),
+        eventType: EventTypes.DeliveryStatusChanged,
+      },
+    });
+    expect(outbox).toHaveLength(2);
+    for (const row of outbox)
+      expect(deliveryStatusChangedV1.parse(row.payload).previousStatus).toBeNull();
+  });
+
+  it('holds a suspended inbound domain (gateway_hold) and refuses a domain of another organization', async () => {
+    const message = await fx.message(org, {
+      direction: 'inbound',
+      recipients: [{ address: `h@${fx.name('held')}` }, { address: `x@${fx.name('other')}` }],
+    });
+    const before = Date.now();
+    expect(await worker.plan(fx.approval(message))).toMatchObject({
+      status: 'planned',
+      held: 1,
+      refused: 1,
+    });
+    const [held] = await fx.reinjections(message);
+    expect(held).toMatchObject({ status: 'pending', lastErrorClass: 'gateway_hold' });
+    expect(held!.nextAttemptAt.getTime()).toBeGreaterThan(before);
+    const deliveries = await fx.deliveries(message);
+    expect(deliveries.map((d) => [d.status, d.lastErrorClass ?? d.failureReason]).sort()).toEqual([
+      ['deferred', 'gateway_hold'],
+      ['failed', 'recipient_domain_inactive'],
+    ]);
+  });
+
+  it('rejects approvals that do not belong to the envelope organization', async () => {
+    const message = await fx.message(org, { recipients: [{ address: 'a@ext.test' }] });
+    // Payload names org's message, envelope says another organization.
+    const foreign = {
+      ...fx.approval(message, { emlS3Key: `org/${other}/eml/x.eml` }),
+      organizationId: other.toString(),
+    };
+    expect(await worker.plan(foreign)).toMatchObject({
+      status: 'rejected',
+      reason: 'message_not_found',
+    });
+    // Key outside the organization prefix.
+    expect(
+      await worker.plan(fx.approval(message, { emlS3Key: `org/${other}/eml/x.eml` })),
+    ).toMatchObject({
+      status: 'rejected',
+      reason: 'eml_key_prefix',
+    });
+    // A recipient id of another message is skipped.
+    const second = await fx.message(org, { recipients: [{ address: 'b@ext.test' }] });
+    const mixed = fx.approval(message, {
+      recipients: [
+        { recipientId: message.recipients[0]!.id.toString(), rcptSeq: 0 },
+        { recipientId: second.recipients[0]!.id.toString(), rcptSeq: 0 },
+      ],
+    });
+    expect(await worker.plan(mixed)).toMatchObject({
+      status: 'planned',
+      deliveries: 1,
+      unknownRecipients: 1,
+    });
+    expect(await fx.deliveries(second)).toHaveLength(0);
+  });
+});

@@ -1,6 +1,6 @@
 # ADR-0006: Postfix at the edge; pre-queue vs post-queue split; Postfix owns delivery retries
 
-**Status:** Accepted (amended by [ADR-0019](0019-smtp-gateway-topology.md))
+**Status:** Accepted (amended by [ADR-0019](0019-smtp-gateway-topology.md); delivery path detailed by [ADR-0021](0021-mail-routing-and-delivery-status.md))
 
 **Context.** A gateway can reject mail during the SMTP session (cheap, no backscatter, but adds latency while the client waits) or after accepting it (thorough, but any rejection becomes an NDR, which is backscatter to forged senders). Delivery needs MX lookup, TLS policy, retries and DSNs, all of which Postfix already does well.
 

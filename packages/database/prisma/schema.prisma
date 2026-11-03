@@ -14,7 +14,7 @@
 // - Timestamps are DATETIME(3) UTC. Append-only tables have no `updated_at`.
 // - snake_case table and column names via @@map / @map. Enum values are only ever appended.
 // - No email bodies or attachment content: only S3 object keys, sizes and hashes.
-// - Partitioned tables (16, marked PARTITIONED below) use a composite primary key
+// - Partitioned tables (18, marked PARTITIONED below) use a composite primary key
 //   (id, <partition column>), have no foreign keys in either direction, and every unique key
 //   ends with the partition column. The PARTITION BY clause is hand-written in the migration
 //   SQL; Prisma does not model partitions. Child rows of a message copy the message's
@@ -164,6 +164,13 @@ enum DkimKeyStatus {
 enum MailServerRole {
   inbound_destination
   outbound_source
+}
+
+/// Kind of destination server set of a domain (step 2.3 R2); presets in mail_destination_presets.
+enum MailDestinationProvider {
+  custom
+  microsoft_365
+  google_workspace
 }
 
 enum TlsMode {
@@ -367,6 +374,9 @@ enum RouteMatchType {
   recipient
 }
 
+/// `in_progress` is unused by step 2.3. `queued` = accepted by postfix-outbound (never
+/// `delivered`); `expired` = Postfix queue lifetime or worker max age reached; `unknown` = no
+/// signal arrived in time (never a guessed outcome). Lattice: docs/plan/steps/05-routing.md R9.1.
 enum DeliveryStatus {
   pending
   in_progress
@@ -375,6 +385,31 @@ enum DeliveryStatus {
   bounced
   failed
   suppressed
+  queued
+  expired
+  unknown
+}
+
+/// Who produced a delivery status signal (step 2.3 R9).
+enum DeliverySignalSource {
+  planner
+  reinjection
+  postfix_log
+  bounce_notice
+  reconciler
+}
+
+/// postfix-outbound reinjection listener: 10026 (inbound and internal) or 10027 (outbound).
+enum ReinjectionListener {
+  reinject_inbound
+  reinject_outbound
+}
+
+enum ReinjectionStatus {
+  pending
+  in_progress
+  queued
+  failed
 }
 
 enum DeliveryAttemptOutcome {
@@ -1081,28 +1116,41 @@ model DomainMxRecord {
 }
 
 model DomainMailServer {
-  id             BigInt         @id @default(autoincrement()) @db.UnsignedBigInt
-  organizationId BigInt         @map("organization_id") @db.UnsignedBigInt
-  domainId       BigInt         @map("domain_id") @db.UnsignedBigInt
-  /// `inbound_destination`: the tenant's own mail server that approved inbound mail is delivered
-  /// to (transport and TLS policy maps, step 2.2 D11). `outbound_source` is DEPRECATED (step 2.2
-  /// D10): never read by the mail path; outbound senders are organization-level `smtp_connectors`.
+  id             BigInt                  @id @default(autoincrement()) @db.UnsignedBigInt
+  /// UUIDv7, the API id of a destination server (step 2.3 R13). Rows created before step 2.3
+  /// were backfilled with UUID() (v1) by the mail_routing migration.
+  publicId       String                  @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId BigInt                  @map("organization_id") @db.UnsignedBigInt
+  domainId       BigInt                  @map("domain_id") @db.UnsignedBigInt
+  /// `inbound_destination`: the tenant's own mail server that approved inbound and internal mail
+  /// is delivered to (transport and TLS policy maps, step 2.2 D11; all enabled rows form an
+  /// ordered next-hop list ordered by (priority, id), step 2.3 R2). `outbound_source` is
+  /// DEPRECATED (step 2.2 D10): never read by the mail path; outbound senders are
+  /// organization-level `smtp_connectors`.
   role           MailServerRole
-  host           String?        @db.VarChar(255)
-  port           Int            @default(25) @db.UnsignedSmallInt
+  /// Normalized ASCII host name, validated with validateDestinationHost (step 2.3 R3) on write
+  /// by the api and again on every map answer by the smtp-adapter.
+  host           String?                 @db.VarChar(255)
+  port           Int                     @default(25) @db.UnsignedSmallInt
   /// Source network of a deprecated `outbound_source` row (never read; see `role`).
-  ipCidr         String?        @map("ip_cidr") @db.VarChar(64)
-  priority       Int            @default(10) @db.UnsignedSmallInt
-  tlsMode        TlsMode        @default(opportunistic) @map("tls_mode")
-  enabled        Boolean        @default(true)
-  createdAt      DateTime       @default(now()) @map("created_at") @db.DateTime(3)
-  updatedAt      DateTime       @updatedAt @map("updated_at") @db.DateTime(3)
+  ipCidr         String?                 @map("ip_cidr") @db.VarChar(64)
+  priority       Int                     @default(10) @db.UnsignedSmallInt
+  tlsMode        TlsMode                 @default(opportunistic) @map("tls_mode")
+  /// Preset the row was created from (step 2.3 R2); one provider per domain (api-enforced).
+  provider       MailDestinationProvider @default(custom)
+  /// Postfix `match=` list for tls_mode = verify (`:`-separated); NULL = `nexthop`.
+  tlsVerifyNames String?                 @map("tls_verify_names") @db.VarChar(512)
+  enabled        Boolean                 @default(true)
+  createdAt      DateTime                @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt      DateTime                @updatedAt @map("updated_at") @db.DateTime(3)
 
   organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Restrict)
   domain         Domain          @relation(fields: [domainId], references: [id], onDelete: Cascade)
   deliveryRoutes DeliveryRoute[]
 
   @@index([domainId, role, priority])
+  // The smtp-adapter's tls_policy map looks rows up by `[host]:port`.
+  @@index([host, port])
   @@map("domain_mail_servers")
 }
 
@@ -1272,17 +1320,20 @@ model EmailMessage {
 
 /// PARTITIONED by RANGE COLUMNS(received_at), monthly. No foreign keys.
 model EmailRecipient {
-  id             BigInt          @default(autoincrement()) @db.UnsignedBigInt
-  receivedAt     DateTime        @map("received_at") @db.DateTime(3)
-  messageId      BigInt          @map("message_id") @db.UnsignedBigInt
-  organizationId BigInt          @map("organization_id") @db.UnsignedBigInt
-  rcptSeq        Int             @map("rcpt_seq") @db.UnsignedSmallInt
-  address        String          @db.VarChar(320)
-  userId         BigInt?         @map("user_id") @db.UnsignedBigInt
-  status         RecipientStatus @default(pending)
-  finalAction    MessageAction?  @map("final_action")
-  createdAt      DateTime        @default(now()) @map("created_at") @db.DateTime(3)
-  updatedAt      DateTime        @updatedAt @map("updated_at") @db.DateTime(3)
+  id             BigInt            @default(autoincrement()) @db.UnsignedBigInt
+  receivedAt     DateTime          @map("received_at") @db.DateTime(3)
+  messageId      BigInt            @map("message_id") @db.UnsignedBigInt
+  organizationId BigInt            @map("organization_id") @db.UnsignedBigInt
+  rcptSeq        Int               @map("rcpt_seq") @db.UnsignedSmallInt
+  address        String            @db.VarChar(320)
+  userId         BigInt?           @map("user_id") @db.UnsignedBigInt
+  status         RecipientStatus   @default(pending)
+  finalAction    MessageAction?    @map("final_action")
+  /// Routed direction (step 2.3 R1), classified at ingestion; NULL for rows ingested before
+  /// step 2.3 (classified at planning).
+  direction      MessageDirection?
+  createdAt      DateTime          @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt      DateTime          @updatedAt @map("updated_at") @db.DateTime(3)
 
   @@id([id, receivedAt])
   @@unique([messageId, rcptSeq, receivedAt])
@@ -1718,32 +1769,134 @@ model DeliveryRoute {
   @@map("delivery_routes")
 }
 
-/// PARTITIONED by RANGE COLUMNS(received_at), monthly. `delivery_seq` 0 = initial delivery,
-/// then releases or redirects. No foreign keys.
+/// PARTITIONED by RANGE COLUMNS(received_at), monthly. One row per recipient and delivery
+/// (step 2.3 R7, R9): `delivery_seq` 0 = initial delivery, then releases or redirects. Status
+/// changes only through the shared recorder (@email-gateway/mail-routing). No foreign keys.
 model EmailDelivery {
-  id                BigInt         @default(autoincrement()) @db.UnsignedBigInt
-  receivedAt        DateTime       @map("received_at") @db.DateTime(3)
-  messageId         BigInt         @map("message_id") @db.UnsignedBigInt
-  recipientId       BigInt         @map("recipient_id") @db.UnsignedBigInt
-  organizationId    BigInt         @map("organization_id") @db.UnsignedBigInt
-  deliverySeq       Int            @default(0) @map("delivery_seq") @db.UnsignedSmallInt
-  routeId           BigInt?        @map("route_id") @db.UnsignedBigInt
-  status            DeliveryStatus @default(pending)
-  attemptCount      Int            @default(0) @map("attempt_count") @db.UnsignedSmallInt
-  lastAttemptAt     DateTime?      @map("last_attempt_at") @db.DateTime(3)
-  deliveredAt       DateTime?      @map("delivered_at") @db.DateTime(3)
-  remoteHost        String?        @map("remote_host") @db.VarChar(255)
-  finalSmtpCode     Int?           @map("final_smtp_code") @db.UnsignedSmallInt
-  finalSmtpResponse String?        @map("final_smtp_response") @db.VarChar(512)
-  outboundQueueId   String?        @map("outbound_queue_id") @db.VarChar(32)
-  createdAt         DateTime       @default(now()) @map("created_at") @db.DateTime(3)
-  updatedAt         DateTime       @updatedAt @map("updated_at") @db.DateTime(3)
+  id                BigInt            @default(autoincrement()) @db.UnsignedBigInt
+  receivedAt        DateTime          @map("received_at") @db.DateTime(3)
+  messageId         BigInt            @map("message_id") @db.UnsignedBigInt
+  recipientId       BigInt            @map("recipient_id") @db.UnsignedBigInt
+  organizationId    BigInt            @map("organization_id") @db.UnsignedBigInt
+  deliverySeq       Int               @default(0) @map("delivery_seq") @db.UnsignedSmallInt
+  routeId           BigInt?           @map("route_id") @db.UnsignedBigInt
+  status            DeliveryStatus    @default(pending)
+  attemptCount      Int               @default(0) @map("attempt_count") @db.UnsignedSmallInt
+  lastAttemptAt     DateTime?         @map("last_attempt_at") @db.DateTime(3)
+  deliveredAt       DateTime?         @map("delivered_at") @db.DateTime(3)
+  remoteHost        String?           @map("remote_host") @db.VarChar(255)
+  finalSmtpCode     Int?              @map("final_smtp_code") @db.UnsignedSmallInt
+  finalSmtpResponse String?           @map("final_smtp_response") @db.VarChar(512)
+  /// Queue id of postfix-outbound for this recipient's reinjection; matched against the
+  /// delivery log and DSN copies (step 2.3 R9).
+  outboundQueueId   String?           @map("outbound_queue_id") @db.VarChar(32)
+  /// delivery_reinjections.id of the group that carries this recipient (same received_at).
+  reinjectionId     BigInt?           @map("reinjection_id") @db.UnsignedBigInt
+  /// Routed direction of this recipient (step 2.3 R1).
+  direction         MessageDirection?
+  /// `tenant:<domainId>` | `mx:<recipient domain>`.
+  destinationKey    String?           @map("destination_key") @db.VarChar(300)
+  statusChangedAt   DateTime?         @map("status_changed_at") @db.DateTime(3)
+  /// Time of the newest applied signal (out-of-order handling, step 2.3 R9.1).
+  lastSignalAt      DateTime?         @map("last_signal_at") @db.DateTime(3)
+  enhancedStatus    String?           @map("enhanced_status") @db.VarChar(16)
+  /// Error class of the last failure or deferral (step 2.3 R9.2).
+  lastErrorClass    String?           @map("last_error_class") @db.VarChar(32)
+  /// Gateway-side reason: direction_changed, recipient_domain_inactive, loop_detected,
+  /// reinjection_refused, reinjection_expired, content_missing, status_signal_missing, suppressed.
+  failureReason     String?           @map("failure_reason") @db.VarChar(64)
+  /// Queue id of the DSN Postfix generated to the original sender (step 2.3 R9).
+  dsnQueueId        String?           @map("dsn_queue_id") @db.VarChar(32)
+  createdAt         DateTime          @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt         DateTime          @updatedAt @map("updated_at") @db.DateTime(3)
 
   @@id([id, receivedAt])
   @@unique([recipientId, deliverySeq, receivedAt])
   @@index([messageId, receivedAt])
   @@index([status, lastAttemptAt])
+  @@index([outboundQueueId])
+  @@index([organizationId, receivedAt, id])
+  /// The recipients of one reinjection: token matching, queue-id binding, reconciler scans.
+  @@index([reinjectionId, receivedAt])
   @@map("email_deliveries")
+}
+
+/// PARTITIONED by RANGE COLUMNS(received_at), monthly (6 months, core). One SMTP transaction into
+/// postfix-outbound for a group of recipients of one message (step 2.3 R7, R8). No foreign keys.
+model DeliveryReinjection {
+  id                 BigInt              @default(autoincrement()) @db.UnsignedBigInt
+  receivedAt         DateTime            @map("received_at") @db.DateTime(3)
+  /// UUIDv7; the token `dw1-<32 hex>` (XFORWARD IDENT, ENVID) is derived from it.
+  publicId           String              @default(uuid(7)) @map("public_id") @db.Char(36)
+  messageId          BigInt              @map("message_id") @db.UnsignedBigInt
+  organizationId     BigInt              @map("organization_id") @db.UnsignedBigInt
+  deliverySeq        Int                 @default(0) @map("delivery_seq") @db.UnsignedSmallInt
+  listener           ReinjectionListener
+  direction          MessageDirection
+  /// `tenant:<domainId>` | `mx:<recipient domain>`.
+  destinationKey     String              @map("destination_key") @db.VarChar(300)
+  /// S3 key of the EML to deliver (from the approval; `org/{organizationId}/…`).
+  emlObjectKey       String              @map("eml_object_key") @db.VarChar(512)
+  recipientCount     Int                 @map("recipient_count") @db.UnsignedSmallInt
+  /// Hex SHA-256 of the group's addresses, lower-cased, de-duplicated, sorted, LF-joined.
+  recipientSetSha256 String              @map("recipient_set_sha256") @db.Char(64)
+  /// Hex SHA-256(`v1|{messageId}|{deliverySeq}|{listener}|{recipientSetSha256}`) (step 2.3 R7).
+  idempotencyKey     String              @map("idempotency_key") @db.Char(64)
+  /// Envelope event id of the approval that planned this group.
+  approvalEventId    String              @map("approval_event_id") @db.Char(36)
+  status             ReinjectionStatus   @default(pending)
+  attempts           Int                 @default(0) @db.UnsignedSmallInt
+  nextAttemptAt      DateTime            @map("next_attempt_at") @db.DateTime(3)
+  leaseExpiresAt     DateTime?           @map("lease_expires_at") @db.DateTime(3)
+  startedAt          DateTime?           @map("started_at") @db.DateTime(3)
+  queuedAt           DateTime?           @map("queued_at") @db.DateTime(3)
+  /// postfix-outbound queue id (from the `250 … queued as` reply or the log binding).
+  queueId            String?             @map("queue_id") @db.VarChar(32)
+  lastErrorClass     String?             @map("last_error_class") @db.VarChar(32)
+  /// Last error text (reply or reason), ≤ 512 characters; never message content.
+  lastError          String?             @map("last_error") @db.VarChar(512)
+  createdAt          DateTime            @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt          DateTime            @updatedAt @map("updated_at") @db.DateTime(3)
+
+  @@id([id, receivedAt])
+  @@unique([messageId, idempotencyKey, receivedAt])
+  @@index([status, nextAttemptAt])
+  @@index([queueId])
+  @@index([publicId])
+  @@map("delivery_reinjections")
+}
+
+/// PARTITIONED by RANGE COLUMNS(received_at), monthly (3 months, detail). Append-only delivery
+/// audit: every status signal, applied or not (step 2.3 R9.1). Services never update or delete
+/// it. No foreign keys.
+model DeliveryStatusEvent {
+  id             BigInt               @default(autoincrement()) @db.UnsignedBigInt
+  receivedAt     DateTime             @map("received_at") @db.DateTime(3)
+  deliveryId     BigInt               @map("delivery_id") @db.UnsignedBigInt
+  messageId      BigInt               @map("message_id") @db.UnsignedBigInt
+  recipientId    BigInt               @map("recipient_id") @db.UnsignedBigInt
+  organizationId BigInt               @map("organization_id") @db.UnsignedBigInt
+  source         DeliverySignalSource
+  /// Hex SHA-256 of the source-specific signal key (step 2.3 R9.1 "Signal keys").
+  signalKey      String               @map("signal_key") @db.Char(64)
+  occurredAt     DateTime             @map("occurred_at") @db.DateTime(3)
+  fromStatus     DeliveryStatus?      @map("from_status")
+  toStatus       DeliveryStatus       @map("to_status")
+  /// False for stale or conflicting signals (kept for the audit trail).
+  applied        Boolean
+  queueId        String?              @map("queue_id") @db.VarChar(32)
+  smtpCode       Int?                 @map("smtp_code") @db.UnsignedSmallInt
+  enhancedStatus String?              @map("enhanced_status") @db.VarChar(16)
+  remoteHost     String?              @map("remote_host") @db.VarChar(255)
+  errorClass     String?              @map("error_class") @db.VarChar(32)
+  /// Remote reply or reason text, ≤ 1024 characters; never message content.
+  detail         String?              @db.VarChar(1024)
+  createdAt      DateTime             @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@id([id, receivedAt])
+  @@unique([deliveryId, signalKey, receivedAt])
+  @@index([messageId, receivedAt])
+  @@map("delivery_status_events")
 }
 
 /// PARTITIONED by RANGE COLUMNS(received_at), monthly. Append-only. No foreign keys.
@@ -1795,6 +1948,7 @@ model BounceEvent {
   id                BigInt     @default(autoincrement()) @db.UnsignedBigInt
   occurredAt        DateTime   @map("occurred_at") @db.DateTime(3)
   organizationId    BigInt     @map("organization_id") @db.UnsignedBigInt
+  /// Set when the notice matches a reinjection, step 2.3 (with message_received_at).
   messageId         BigInt?    @map("message_id") @db.UnsignedBigInt
   messageReceivedAt DateTime?  @map("message_received_at") @db.DateTime(3)
   recipientAddress  String     @map("recipient_address") @db.VarChar(320)
@@ -2099,6 +2253,46 @@ model WebhookDelivery {
   @@unique([subscriptionId, eventId, eventOccurredAt])
   @@index([status, nextAttemptAt])
   @@map("webhook_deliveries")
+}
+
+/// Platform configuration data (seeded): provider presets for destination servers (step 2.3
+/// R2). Read by the api and the routing module; no tenant is special-cased in code.
+model MailDestinationPreset {
+  provider         MailDestinationProvider @id
+  displayName      String                  @map("display_name") @db.VarChar(128)
+  /// JSON array of anchored regular expressions (lower-case host names).
+  hostPatterns     Json                    @map("host_patterns")
+  hostHint         String?                 @map("host_hint") @db.VarChar(255)
+  /// JSON array of { host, priority } or NULL (customer supplies the host).
+  defaultServers   Json?                   @map("default_servers")
+  port             Int                     @db.UnsignedSmallInt
+  tlsMode          TlsMode                 @map("tls_mode")
+  /// Postfix `match=` list (`:`-separated) for the preset's verified TLS.
+  tlsVerifyNames   String                  @map("tls_verify_names") @db.VarChar(512)
+  maxServers       Int                     @map("max_servers") @db.UnsignedTinyInt
+  /// Relative documentation path (customer-side setup).
+  documentationUrl String?                 @map("documentation_url") @db.VarChar(512)
+  enabled          Boolean                 @default(true)
+  createdAt        DateTime                @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt        DateTime                @updatedAt @map("updated_at") @db.DateTime(3)
+
+  @@map("mail_destination_presets")
+}
+
+/// Durable positions of stream consumers (outbox pollers, Postfix log tailers; step 2.3 R6, R9).
+/// Not partitioned.
+model StreamCursor {
+  /// E.g. `outbox:delivery-worker.planner`, `postfix-log:out.gateway.local`.
+  name        String    @id @db.VarChar(128)
+  /// Outbox consumers: largest processed message_outbox.id below the safety lag.
+  positionId  BigInt?   @map("position_id") @db.UnsignedBigInt
+  /// Log tailers: file identity (device + inode) and byte offset.
+  fileId      String?   @map("file_id") @db.VarChar(128)
+  fileOffset  BigInt?   @map("file_offset") @db.UnsignedBigInt
+  lastEventAt DateTime? @map("last_event_at") @db.DateTime(3)
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.DateTime(3)
+
+  @@map("stream_cursors")
 }
 
 /// Platform catalog of settings.

@@ -51,7 +51,7 @@ const monthly = (
   tier,
 });
 
-/** The 16 partitioned tables, exactly as listed in D3. */
+/** The 18 partitioned tables: the 16 of D3 plus the two delivery tables of step 2.3 (§3). */
 export const PARTITION_REGISTRY: readonly PartitionSpec[] = Object.freeze([
   monthly('email_messages', 'received_at', 6, 'core'),
   monthly('email_recipients', 'received_at', 6, 'core'),
@@ -64,6 +64,10 @@ export const PARTITION_REGISTRY: readonly PartitionSpec[] = Object.freeze([
   monthly('scan_engine_results', 'received_at', 3, 'detail'),
   monthly('policy_execution_logs', 'received_at', 3, 'detail'),
   monthly('delivery_attempts', 'received_at', 3, 'detail'),
+  // Step 2.3 (docs/plan/steps/05-routing.md §3): reinjection groups live as long as the
+  // deliveries they carry; the status audit trail is detail data.
+  monthly('delivery_reinjections', 'received_at', 6, 'core'),
+  monthly('delivery_status_events', 'received_at', 3, 'detail'),
   // Legal hold and per-tenant archive retention are row-level (step 8.1).
   monthly('email_archives', 'received_at', null, 'compliance'),
   monthly('bounce_events', 'occurred_at', 6, 'core'),

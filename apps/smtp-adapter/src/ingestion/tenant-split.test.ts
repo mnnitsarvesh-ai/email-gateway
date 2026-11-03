@@ -18,6 +18,7 @@ const rcpt = (address: string, organizationId: bigint, domainId: bigint): Ingest
   domain: address.split('@')[1]!,
   organizationId,
   domainId,
+  direction: 'inbound',
 });
 
 describe('groupByOrganization', () => {

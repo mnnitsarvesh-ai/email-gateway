@@ -6,9 +6,10 @@ import {
   type RecipientValidation,
   resolveActiveDomain,
 } from '@email-gateway/database';
+import { normalizeHostForComparison } from '@email-gateway/mail-routing';
 import { z } from 'zod';
 import { ADAPTER_CONFIG, type SmtpAdapterConfig } from '../config';
-import { cacheKeys, domainInvalidationKeys } from './cache-keys';
+import { cacheKeys, domainInvalidationKeys, routingInvalidationKeys } from './cache-keys';
 import { RedisJsonCache } from './redis-json-cache';
 
 /** Everything the in-session services need to know about a tenant domain (step 2.2 D5). */
@@ -94,6 +95,20 @@ export class DomainPolicyService {
     const name = DomainPolicyService.normalize(rawName);
     if (name === null) return;
     await this.cache.delete('domain', domainInvalidationKeys(name));
+  }
+
+  /**
+   * Drops the socketmap answers derived from a domain's destinations
+   * (`domain.routing.changed.v1`, step 2.3 R2): the domain's route list and the TLS policies of
+   * every named host (old and new). The domain view itself is unchanged by a routing change.
+   */
+  async invalidateRouting(rawName: string, hosts: readonly string[]): Promise<void> {
+    const name = DomainPolicyService.normalize(rawName);
+    if (name === null) return;
+    const normalized = hosts
+      .map((host) => normalizeHostForComparison(host))
+      .filter((host) => host.length > 0);
+    await this.cache.delete('route', routingInvalidationKeys(name, normalized));
   }
 
   private async load(name: string): Promise<ViewDto | null> {

@@ -9,6 +9,7 @@ import {
   s3ConfigSchema,
   validateNotifySmtpConfig,
 } from '@email-gateway/config';
+import { parseAllowedDestinationPorts } from '@email-gateway/mail-routing';
 import { z } from 'zod';
 import {
   checkDohUrl,
@@ -236,6 +237,73 @@ const smtpGatewayConfigShape = {
   DOMAIN_RECIPIENTS_MAX_PER_DOMAIN: int(1, 10_000_000).default(100_000),
 };
 
+/** A host name of the gateway itself (`POSTFIX_*MYHOSTNAME`, `POSTFIX_BOUNCE_DOMAIN`). */
+const gatewayName = (fallback: string) =>
+  z
+    .string()
+    .default(fallback)
+    .transform((value, ctx) => {
+      const name = normalizeDnsName(value);
+      if (!isDnsName(name)) {
+        ctx.addIssue({ code: 'custom', message: 'must be a DNS name' });
+        return z.NEVER;
+      }
+      return name;
+    });
+
+/** Comma list of DNS suffixes; a leading dot is optional (`.test` = `test`). */
+const suffixList = z
+  .string()
+  .default('')
+  .transform((value, ctx) => {
+    const suffixes = splitList(value).map((entry) => normalizeDnsName(entry).replace(/^\./, ''));
+    const valid = suffixes.every(
+      (suffix) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(suffix) || isDnsName(suffix),
+    );
+    if (!valid) {
+      ctx.addIssue({ code: 'custom', message: 'must be a comma-separated list of DNS suffixes' });
+      return z.NEVER;
+    }
+    return suffixes;
+  });
+
+const allowedPortList = z
+  .string()
+  .default('')
+  .transform((value, ctx) => {
+    try {
+      return parseAllowedDestinationPorts(value);
+    } catch {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'must be a comma-separated list of ports (internal gateway ports are refused)',
+      });
+      return z.NEVER;
+    }
+  });
+
+/**
+ * Mail routing (step 2.3 R2, R3, §5): destination host safety and the gateway's own names,
+ * which a destination may never be. The smtp-adapter re-checks every map answer with the same
+ * keys. The Postfix names default to the values of `.env.example`.
+ */
+const routingConfigShape = {
+  /** Accept non-public IP literals as destinations (dedicated deployments); never metadata. */
+  ROUTING_ALLOW_NON_PUBLIC_DESTINATIONS: bool.default(false),
+  /** Extra refused destination suffixes, on top of the built-in internal names. */
+  ROUTING_DENIED_DESTINATION_SUFFIXES: suffixList,
+  /** Ports a custom destination may use (default 25,587,2525; internal gateway ports never). */
+  ROUTING_ALLOWED_DESTINATION_PORTS: allowedPortList,
+  /** Custom destination servers per domain (the adapter caps its next-hop list the same). */
+  ROUTING_MAX_DESTINATIONS_PER_DOMAIN: int(1, 10).default(10),
+  /** `myhostname` of the inbound Postfix (a destination may never be the gateway). */
+  POSTFIX_MYHOSTNAME: gatewayName('mx.gateway.local'),
+  /** `myhostname` of postfix-outbound. */
+  POSTFIX_OUTBOUND_MYHOSTNAME: gatewayName('out.gateway.local'),
+  /** Domain of the bounce-notice recipient (refused as a destination, with every name under it). */
+  POSTFIX_BOUNCE_DOMAIN: gatewayName('bounces.gateway.internal'),
+};
+
 const DOH_URL_MESSAGES: Record<DohUrlProblem, string> = {
   invalid: 'must be an absolute http(s) URL without a fragment',
   insecure: 'must be an https:// URL unless APP_ENV is local or ci',
@@ -319,6 +387,7 @@ export const apiConfigSchema = baseConfigSchema
   .extend(authConfigShape)
   .extend(domainConfigShape)
   .extend(smtpGatewayConfigShape)
+  .extend(routingConfigShape)
   .extend({
     /** Comma-separated allow-list of admin portal origins. */
     CORS_ORIGINS: z

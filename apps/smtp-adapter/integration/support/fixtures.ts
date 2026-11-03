@@ -4,8 +4,14 @@ import {
   ListObjectsV2Command,
   S3Client,
 } from '@aws-sdk/client-s3';
-import { randomUUID } from 'node:crypto';
-import { type DomainStatus, type OrganizationStatus, PrismaClient } from '@email-gateway/database';
+import { createHash, randomUUID } from 'node:crypto';
+import {
+  type DeliveryStatus,
+  type DomainStatus,
+  type MessageDirection,
+  type OrganizationStatus,
+  PrismaClient,
+} from '@email-gateway/database';
 import { Redis } from 'ioredis';
 import { requireEnv, s3Config } from './stack';
 
@@ -104,6 +110,111 @@ export class Fixtures {
     return keys;
   }
 
+  /**
+   * A reinjected message as the delivery-worker leaves it (step 2.3 R7/R8): registry row,
+   * message, recipients, one reinjection (`queued`, with `queueId` when given) and one delivery
+   * per recipient bound to it (`queued`, `outbound_queue_id` = `queueId`). Rows are inserted
+   * directly; the adapter only reads them and records signals.
+   */
+  async reinjectedMessage(options: {
+    organizationId: bigint;
+    direction: MessageDirection;
+    envelopeFrom: string;
+    recipients: string[];
+    queueId?: string | null;
+    deliveryStatus?: DeliveryStatus;
+  }): Promise<{
+    messageId: bigint;
+    receivedAt: Date;
+    reinjectionPublicId: string;
+    deliveryIds: bigint[];
+  }> {
+    const receivedAt = new Date(Date.now() - 60_000);
+    const sha = (text: string) => createHash('sha256').update(text).digest('hex');
+    const identity = await this.prisma.messageIdentity.create({
+      data: {
+        organizationId: options.organizationId,
+        ingestKey: `v2:${sha(randomUUID())}`,
+        receivedAt,
+      },
+      select: { id: true },
+    });
+    const messageId = identity.id;
+    await this.prisma.emailMessage.create({
+      data: {
+        id: messageId,
+        receivedAt,
+        organizationId: options.organizationId,
+        direction: options.direction,
+        status: 'delivery_queued',
+        statusChangedAt: receivedAt,
+        envelopeFrom: options.envelopeFrom,
+        sizeBytes: 100,
+        recipientCount: options.recipients.length,
+        emlObjectKey: `org/${options.organizationId}/eml/test/${randomUUID()}.eml`,
+        emlSha256: sha('x'),
+      },
+    });
+    const recipientRows = [];
+    for (const [rcptSeq, address] of options.recipients.entries()) {
+      recipientRows.push(
+        await this.prisma.emailRecipient.create({
+          data: {
+            receivedAt,
+            messageId,
+            organizationId: options.organizationId,
+            rcptSeq,
+            address,
+            direction: options.direction,
+          },
+          select: { id: true },
+        }),
+      );
+    }
+    const queueId = options.queueId ?? null;
+    const reinjection = await this.prisma.deliveryReinjection.create({
+      data: {
+        receivedAt,
+        messageId,
+        organizationId: options.organizationId,
+        listener: options.direction === 'outbound' ? 'reinject_outbound' : 'reinject_inbound',
+        direction: options.direction,
+        destinationKey: options.direction === 'outbound' ? 'mx:sink.test' : 'tenant:1',
+        emlObjectKey: `org/${options.organizationId}/eml/test.eml`,
+        recipientCount: options.recipients.length,
+        recipientSetSha256: sha(options.recipients.join('\n')),
+        idempotencyKey: sha(randomUUID()),
+        approvalEventId: randomUUID(),
+        status: 'queued',
+        attempts: 1,
+        nextAttemptAt: receivedAt,
+        queuedAt: receivedAt,
+        queueId,
+      },
+      select: { id: true, publicId: true },
+    });
+    const deliveryIds: bigint[] = [];
+    for (const recipient of recipientRows) {
+      const delivery = await this.prisma.emailDelivery.create({
+        data: {
+          receivedAt,
+          messageId,
+          recipientId: recipient.id,
+          organizationId: options.organizationId,
+          status: options.deliveryStatus ?? 'queued',
+          reinjectionId: reinjection.id,
+          direction: options.direction,
+          outboundQueueId: queueId,
+          statusChangedAt: receivedAt,
+          lastSignalAt: receivedAt,
+        },
+        select: { id: true },
+      });
+      deliveryIds.push(delivery.id);
+    }
+    return { messageId, receivedAt, reinjectionPublicId: reinjection.publicId, deliveryIds };
+  }
+
   async messageCount(organizationId: bigint): Promise<number> {
     return this.prisma.messageIdentity.count({ where: { organizationId } });
   }
@@ -114,6 +225,11 @@ export class Fixtures {
       if (ids.length > 0) {
         const where = { organizationId: { in: ids } };
         await this.prisma.messageOutbox.deleteMany({ where });
+        await this.prisma.deliveryStatusEvent.deleteMany({ where });
+        await this.prisma.deliveryAttempt.deleteMany({ where });
+        await this.prisma.emailDelivery.deleteMany({ where });
+        await this.prisma.deliveryReinjection.deleteMany({ where });
+        await this.prisma.emailMessageStatusHistory.deleteMany({ where });
         await this.prisma.emailEvent.deleteMany({ where });
         await this.prisma.emailRecipient.deleteMany({ where });
         await this.prisma.emailMessage.deleteMany({ where });
