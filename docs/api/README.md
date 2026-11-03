@@ -177,6 +177,73 @@ Every route is scoped to the caller's organization (or the override target) and 
 
 **Audit and events.** Transitions write `audit_logs` rows (`domain.created`, `domain.verified`, `domain.verification_expired`, `domain.verification_restarted`, `domain.claim_superseded`, `domain.status_changed`, `domain.deleted`, `domain.dkim_rotation_started`, `domain.dkim_key_activated`, `domain.dkim_key_retired`, `domain.ownership_record_missing`) and status transitions write a `domain.status.changed.v1` event to `message_outbox` in the same transaction ([contracts](../architecture/contracts.md)). Checks without a transition write neither.
 
+### Inbound recipient validation (`domains` tag, step 2.2)
+
+Per-domain recipient checks at SMTP `RCPT` time, stored in the existing `domain_settings` columns, and the domain's recipient allow-list (`domain_recipient_addresses`). Design: [docs/plan/steps/04-smtp-gateway.md](../plan/steps/04-smtp-gateway.md) (D3, §4.1). Same scoping as the other domain routes: another tenant's domain, a deleted domain and an unknown id are `404`. Changes reach the mail path within about 60 seconds (smtp-adapter cache).
+
+| Method | Path                                 | Access             | Body → result                                                                                                                                                          |
+| ------ | ------------------------------------ | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/domains/{id}/recipient-validation` | `domain:read`, K   | `{ domainId, mode: accept_all \| allow_list \| smtp_callout \| ldap, enforcement: reject \| monitor, implemented, addressCount }`                                      |
+| PUT    | `/domains/{id}/recipient-validation` | `domain:manage`, K | `{ mode: accept_all }` or `{ mode: allow_list, enforcement: reject \| monitor }` → `200` as GET; `422 Not implemented` (`smtp_callout`, `ldap`); `409` (below)         |
+| GET    | `/domains/{id}/recipients`           | `domain:read`, K   | reader; `?limit&cursor&q` (`q`: local-part prefix, normalized like the entries) → `{ data: [{ localPart, createdAt }], nextCursor }`, newest first                     |
+| POST   | `/domains/{id}/recipients`           | `domain:manage`, K | `{ localParts: string[1..1000] }` → `200 { added, existing }` (idempotent); `409 Recipient limit reached: at most <n> per domain` (`DOMAIN_RECIPIENTS_MAX_PER_DOMAIN`) |
+| POST   | `/domains/{id}/recipients/remove`    | `domain:manage`, K | `{ localParts: string[1..1000] }` → `200 { removed }`; unknown local parts are ignored                                                                                 |
+
+**Modes.** `accept_all` (column `none`, the default) accepts every local part. `allow_list` (column `list`) checks the list: `enforcement: reject` (`reject_unknown_recipients = true`) refuses unknown recipients with `550 5.1.1`; `monitor` accepts them and only counts would-be rejections (onboarding shadow mode). `enforcement` is required with `allow_list` and not allowed with `accept_all`. Enforcing an empty list is `409 Add recipients before enforcing the allow-list`. `smtp_callout` and `ldap` exist in the schema but are not implemented: the API refuses to set them (`422`) and reports `implemented: false` if a row holds one (the mail path then accepts everyone).
+
+**Local parts.** The part before `@` only (the domain is implied). Stored Unicode-NFC-normalized and lower-cased; 1–64 bytes of UTF-8; `@`, whitespace, control and format characters are refused (`400 localParts.<i>: …`). Duplicates in one request count once. The column collation is case- and accent-insensitive, so entries that differ only by accents are treated as the same address. A request that would exceed the per-domain cap adds nothing.
+
+**Audit.** `domain.recipient_validation_changed` (`from`/`to` mode and enforcement), `domain.recipients_added` (`added`, `existing`), `domain.recipients_removed` (`removed`, `requested`); counts only, never the local parts. A request that changes nothing writes no audit row.
+
+```bash
+curl -X PUT "$API/api/v1/domains/$DOMAIN_ID/recipient-validation" -H "X-API-Key: $KEY" \
+  -H 'Content-Type: application/json' -d '{"mode":"allow_list","enforcement":"monitor"}'
+curl -X POST "$API/api/v1/domains/$DOMAIN_ID/recipients" -H "X-API-Key: $KEY" \
+  -H 'Content-Type: application/json' -d '{"localParts":["sales","support","jane.doe"]}'
+# → {"added":3,"existing":0}
+```
+
+### SMTP connectors (`smtp-connectors` tag, step 2.2)
+
+Organization-level outbound connectors that let a tenant's mail servers relay through the gateway's outbound MTA (`postfix-outbound`). Design: [docs/plan/steps/04-smtp-gateway.md](../plan/steps/04-smtp-gateway.md) (D10, §4.1). Every route is scoped to the caller's organization (or the override target) and accepts user tokens and API keys; another tenant's connector is `404`. Responses never contain a secret hash.
+
+| Method | Path                                  | Access                    | Body → result                                                                                                                                                                            |
+| ------ | ------------------------------------- | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| POST   | `/smtp-connectors`                    | `connector:manage`, K, RL | `{ name (1–128), authType: sasl \| source_ip \| client_certificate, networks?, certificateFingerprintSha256?, requireTls? = true }` → `201` connector (+ `credentials` for `sasl`, once) |
+| GET    | `/smtp-connectors`                    | `connector:read`, K       | reader; `?limit&cursor&status&authType` → `{ data: Connector[], nextCursor }`, newest first                                                                                              |
+| GET    | `/smtp-connectors/{id}`               | `connector:read`, K       | connector (writer)                                                                                                                                                                       |
+| PATCH  | `/smtp-connectors/{id}`               | `connector:manage`, K     | `{ name?, status?: active \| disabled, networks?, requireTls? }` (at least one) → `200` connector; networks are replaced atomically with the create rules                                |
+| POST   | `/smtp-connectors/{id}/rotate-secret` | `connector:manage`, K, RL | no body → `200 { id, credentials: { username, password }, secretSetAt }`; `409 Only sasl connectors have a secret`                                                                       |
+| DELETE | `/smtp-connectors/{id}`               | `connector:manage`, K     | `204` hard delete; its networks are freed                                                                                                                                                |
+
+**Connector** (`Connector`): `{ id, name, authType, status, saslUsername, certificateFingerprintSha256, networks: [{ cidr, ipVersion }], requireTls, secretSetAt, createdAt, updatedAt }`.
+
+**Types.**
+
+- `sasl`: SMTP AUTH (PLAIN/LOGIN) after STARTTLS on the submission port (587). The username (`egc-` + 20 lower-case base32 characters) and a random password (32 bytes, base64url) are generated by the API and returned **once** in `credentials`; only an Argon2id hash is stored. Lost passwords are replaced with `rotate-secret` (the old one stops working at once). `networks` are not allowed.
+- `source_ip`: 1–20 networks (`a.b.c.d/nn`, IPv6 CIDR, or a bare address for one host) on the port 25 relay listener. IPv4 prefixes must be `/16` or longer, IPv6 `/48` or longer; host bits are cleared (`192.0.2.7/24` is stored as `192.0.2.0/24`); IPv4-mapped IPv6 is refused (use the IPv4 form). Networks must be publicly routable: a network that overlaps a private (RFC 1918, IPv6 ULA), loopback, link-local, shared (100.64.0.0/10), documentation, benchmarking, multicast or reserved range is refused with `400` (`networks.N: must be a publicly routable network …`), so no tenant can claim the gateway's internal ranges or lock others out of them. A dedicated deployment whose customer relays from its own private networks sets `SMTP_CONNECTOR_ALLOW_NON_PUBLIC_NETWORKS=true`. `requireTls: false` lets the servers relay without STARTTLS (only for this type).
+- `client_certificate`: the SHA-256 fingerprint of the client certificate presented on port 25 (64 hex characters, colons optional, any case; stored lower-case without colons), optionally restricted to networks (same rules, `[]` clears them).
+
+> **Warning: never use `source_ip` connectors for shared-IP mail platforms such as Microsoft 365 or Google Workspace.** Every customer of such a platform sends from the same addresses and could then send as your organization. Use `sasl` or `client_certificate` connectors there. (The non-overlap rule below stops two tenants from claiming the same range, but cannot know who else sends from it.)
+
+**Global uniqueness.** A network may not overlap any network of any connector in any organization: `409 Network overlaps an existing connector network` (never says whose; the api logs each refusal with the requesting organization, the IP version and the prefix, as a signal of probing or of a disputed range). The check and the insert run in one transaction under the MySQL named lock `smtp_connector_networks` (`503` if it cannot be taken within 5 s), so concurrent claims of the same range cannot both succeed. Fingerprints are globally unique (`409 Certificate fingerprint is already registered`); names are unique per organization (`409 SMTP connector name already exists`). At most `SMTP_CONNECTORS_MAX_PER_ORGANIZATION` (default 50) connectors per organization (`409 SMTP connector limit reached: at most <n> per organization`).
+
+**Status.** A `disabled` connector (and any connector of an organization that is not active) authorizes nothing; the change reaches the mail path within the adapter's cache TTL (about 30 seconds).
+
+**Rate limits and audit.** `POST /smtp-connectors`: 20 per caller (user or API key) per minute; `rotate-secret`: 10 per caller per minute (`429` with `Retry-After`). `smtp_connector.created`, `smtp_connector.updated` (`changes` with `from`/`to`), `smtp_connector.secret_rotated` and `smtp_connector.deleted` are written in the same transaction as the change; their metadata never contains the password or its hash.
+
+```bash
+curl -X POST "$API/api/v1/smtp-connectors" -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"name":"On-prem Exchange","authType":"sasl"}'
+# → 201 { "id": "…", "authType": "sasl", "saslUsername": "egc-…", …,
+#         "credentials": { "username": "egc-…", "password": "<shown once>" } }
+curl -X POST "$API/api/v1/smtp-connectors" -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Datacenter relay","authType":"source_ip","networks":["192.0.2.0/27","2001:db8:10::/48"]}'
+```
+
+**DKIM signing keys.** Not an HTTP route: the api's `DkimSigningPublisher` copies the active RSA-2048 key of every active, outbound-enabled domain of an active organization into redis-dkim every `DKIM_SIGNING_SYNC_INTERVAL_SECONDS` (default 30; one replica per tick), and on demand with `pnpm --filter @email-gateway/api dkim:sync` (prints counts only: `published removed unchanged skipped pruned`). `REDIS_DKIM_URL` empty disables it with one startup warning ([ADR-0020](../architecture/adr/0020-dkim-signing.md)).
+
 ## Errors
 
 Every error uses one shape, produced by the global exception filter:
@@ -197,6 +264,7 @@ Every error uses one shape, produced by the global exception filter:
 | `403`  | Authenticated but not allowed: missing permission, user-only route called with an API key, `MFA required`, `MFA enrollment required`, four-eyes violation                                                      |
 | `404`  | Not found, **including resources of another tenant** and soft-deleted resources                                                                                                                                |
 | `409`  | Conflicts with the current state: duplicates (slug, email, domain), limit reached (`Organization limit reached: <key>`), invalid state transitions, active legal hold, a check or rotation already in progress |
+| `422`  | A valid request for a feature that is not implemented (`Not implemented`, e.g. `smtp_callout`/`ldap` recipient validation)                                                                                     |
 | `429`  | Rate limited, with `Retry-After` (seconds)                                                                                                                                                                     |
 | `503`  | Authentication, rate-limit or domain-verification backend (Redis) unavailable: these paths fail closed                                                                                                         |
 

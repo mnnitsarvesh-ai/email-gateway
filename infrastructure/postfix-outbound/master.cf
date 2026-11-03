@@ -1,0 +1,100 @@
+# Postfix master process configuration: outbound MTA (step 2.2 D9).
+#
+# Debian's default service list (without the third-party pipe(8) transports), every service
+# unchrooted (the container is the isolation boundary), postlogd for logging to stdout, and four
+# smtpd listeners. Each listener overrides the refuse-everything defaults of main.cf:
+#
+#   listener           who may relay                                   policy_context
+#   25   smtp          active source-IP / client-certificate connectors relay
+#   587  submission    SASL-authenticated connectors, after STARTTLS   submission
+#   10026 reinject-in  $reinject_networks, tenant destinations only    reinject-inbound
+#   10027 reinject-out $reinject_networks, tenant senders only, DKIM   reinject-outbound
+#
+# Reinjection ports are never published to the host (docker-compose.yml) nor to the Internet
+# (security groups, docs/deployment/smtp-gateway.md).
+#
+# ==========================================================================
+# service type  private unpriv  chroot  wakeup  maxproc command + args
+#               (yes)   (yes)   (no)    (never) (100)
+# ==========================================================================
+smtp      inet  n       -       n       -       -       smtpd
+  -o syslog_name=postfix/relay
+  -o smtpd_tls_security_level=may
+  -o smtpd_tls_ask_ccert=yes
+  -o smtpd_sasl_auth_enable=no
+  -o smtpd_client_restrictions=
+  -o smtpd_relay_restrictions=$gw_relay_relay_restrictions
+  -o smtpd_recipient_restrictions=$gw_relay_recipient_restrictions
+  -o smtpd_end_of_data_restrictions=$gw_relay_end_of_data_restrictions
+  -o content_filter=$gw_ingest_content_filter
+  -o smtpd_sasl_authenticated_header=no
+submission inet n       -       n       -       -       smtpd
+  -o syslog_name=postfix/submission
+  -o smtpd_tls_security_level=encrypt
+  -o smtpd_tls_auth_only=yes
+  -o smtpd_sasl_auth_enable=yes
+  -o smtpd_sasl_type=dovecot
+  -o smtpd_sasl_path=inet:$smtp_adapter_host:10042
+  # One SMTP session per smtpd process (found by the step 2.2 stack tests, WP6): Postfix's Dovecot
+  # SASL client keeps one auth connection per smtpd PROCESS and never reconnects after the server
+  # closed it (adapter restart, or a temporary failure, which the adapter signals by closing:
+  # contracts.md §14). Every later AUTH in that process answered "454 Connection lost to
+  # authentication server" until the process exited. A fresh process per session reconnects.
+  -o max_use=1
+  -o smtpd_sasl_security_options=noanonymous
+  -o smtpd_sasl_authenticated_header=no
+  -o smtpd_client_restrictions=permit_sasl_authenticated,reject
+  -o smtpd_relay_restrictions=permit_sasl_authenticated,reject
+  -o smtpd_recipient_restrictions=$gw_submission_recipient_restrictions
+  -o smtpd_end_of_data_restrictions=$gw_submission_end_of_data_restrictions
+  -o content_filter=$gw_ingest_content_filter
+10026     inet  n       -       n       -       -       smtpd
+  -o syslog_name=postfix/reinject-inbound
+  -o mynetworks=$reinject_networks
+  -o smtpd_client_event_limit_exceptions=$reinject_networks
+  -o smtpd_sasl_auth_enable=no
+  -o smtpd_client_restrictions=permit_mynetworks,reject
+  -o smtpd_relay_restrictions=permit_mynetworks,reject
+  -o smtpd_recipient_restrictions=$gw_reinject_inbound_recipient_restrictions
+  -o content_filter=
+  -o receive_override_options=no_address_mappings
+  -o smtpd_authorized_xforward_hosts=$reinject_networks
+  -o smtpd_milters=
+10027     inet  n       -       n       -       -       smtpd
+  -o syslog_name=postfix/reinject-outbound
+  -o mynetworks=$reinject_networks
+  -o smtpd_client_event_limit_exceptions=$reinject_networks
+  -o smtpd_sasl_auth_enable=no
+  -o smtpd_client_restrictions=permit_mynetworks,reject
+  -o smtpd_relay_restrictions=permit_mynetworks,reject
+  -o smtpd_recipient_restrictions=$gw_reinject_outbound_recipient_restrictions
+  -o content_filter=
+  -o receive_override_options=no_address_mappings
+  -o smtpd_authorized_xforward_hosts=$reinject_networks
+  -o smtpd_milters=inet:rspamd-outbound:11332
+  -o milter_default_action=tempfail
+pickup    unix  n       -       n       60      1       pickup
+cleanup   unix  n       -       n       -       0       cleanup
+qmgr      unix  n       -       n       300     1       qmgr
+tlsmgr    unix  -       -       n       1000?   1       tlsmgr
+rewrite   unix  -       -       n       -       -       trivial-rewrite
+bounce    unix  -       -       n       -       0       bounce
+defer     unix  -       -       n       -       0       bounce
+trace     unix  -       -       n       -       0       bounce
+verify    unix  -       -       n       -       1       verify
+flush     unix  n       -       n       1000?   0       flush
+proxymap  unix  -       -       n       -       -       proxymap
+proxywrite unix -       -       n       -       1       proxymap
+smtp      unix  -       -       n       -       -       smtp
+relay     unix  -       -       n       -       -       smtp
+  -o syslog_name=postfix/$service_name
+showq     unix  n       -       n       -       -       showq
+error     unix  -       -       n       -       -       error
+retry     unix  -       -       n       -       -       error
+discard   unix  -       -       n       -       -       discard
+local     unix  -       n       n       -       -       local
+virtual   unix  -       n       n       -       -       virtual
+lmtp      unix  -       -       n       -       -       lmtp
+anvil     unix  -       -       n       -       1       anvil
+scache    unix  -       -       n       -       1       scache
+postlog   unix-dgram n  -       n       -       1       postlogd

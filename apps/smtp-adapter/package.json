@@ -7,20 +7,28 @@
     "dev": "nest start --watch --exec \"node --env-file-if-exists=../../.env\"",
     "start": "node dist/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "eslint src",
-    "test": "vitest run --dir src"
+    "lint": "eslint --no-error-on-unmatched-pattern src integration",
+    "test": "vitest run --dir src",
+    "test:integration": "vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.890.0",
+    "@aws-sdk/lib-storage": "^3.1152.0",
     "@email-gateway/common": "workspace:*",
     "@email-gateway/config": "workspace:*",
     "@email-gateway/database": "workspace:*",
+    "@email-gateway/event-contracts": "workspace:*",
     "@email-gateway/logger": "workspace:*",
     "@email-gateway/shared-types": "workspace:*",
     "@nestjs/common": "^11.1.6",
     "@nestjs/core": "^11.1.6",
     "@nestjs/platform-express": "^11.1.6",
+    "argon2": "^0.45.1",
+    "ioredis": "^5.8.0",
+    "mailparser": "^3.9.46",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
+    "smtp-server": "^3.20.2",
     "zod": "^4.1.5"
   },
   "devDependencies": {
@@ -28,6 +36,8 @@
     "@nestjs/testing": "^11.1.6",
     "@swc/core": "^1.13.5",
     "@types/express": "^5.0.3",
+    "@types/mailparser": "^3.9.0",
+    "@types/smtp-server": "^3.5.13",
     "unplugin-swc": "^1.5.7"
   }
 }

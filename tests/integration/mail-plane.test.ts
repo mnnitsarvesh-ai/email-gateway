@@ -1,6 +1,8 @@
+import { randomUUID } from 'node:crypto';
 import { createConnection } from 'node:net';
+import { DEMO } from '@email-gateway/database';
 import { describe, expect, it } from 'vitest';
-import { appsRunning, stack } from './support/env';
+import { adapterRunning, stack } from './support/env';
 import { SmtpClient } from './support/smtp-client';
 
 describe('Postfix (inbound MX)', () => {
@@ -18,29 +20,36 @@ describe('Postfix (inbound MX)', () => {
     }
   });
 
-  it('refuses to relay for domains it does not serve', async () => {
+  it('refuses to relay for domains it does not serve (554), or tempfails without the adapter', async () => {
+    // Relay domains come from smtp-adapter (socketmap relay_domain, step 2.2 D2). With the adapter
+    // up an unknown domain fails reject_unauth_destination permanently; without it the lookup
+    // fails and Postfix must answer 451 4.3.0 (fail closed), never 250.
+    const adapterUp = await adapterRunning();
     const { client } = await SmtpClient.connect(stack.host, stack.ports.smtp);
     try {
       await client.command('EHLO integration.example.test');
       expect(await client.command('MAIL FROM:<sender@example.org>')).toMatch(/^250/);
-      expect(await client.command('RCPT TO:<victim@not-a-tenant.example>')).toMatch(
-        /^554 .*Relay access denied/,
+      // A never-seen name: smtpd caches address resolutions per process (smtpd_resolve), so a
+      // name resolved while the adapter was up would not hit the socketmap again.
+      const victim = `victim@not-a-tenant-${randomUUID().slice(0, 8)}.example`;
+      expect(await client.command(`RCPT TO:<${victim}>`)).toMatch(
+        adapterUp ? /^554 5\.7\.1 .*Relay access denied/ : /^451 4\.3\.0 /,
       );
     } finally {
       client.close();
     }
   });
 
-  it('consults the policy service and fails closed (4xx) when it is unavailable', async () => {
-    const policyUp = await appsRunning();
+  it('accepts a tenant domain only through the adapter and fails closed (4xx) without it', async () => {
+    const adapterUp = await adapterRunning();
     const { client } = await SmtpClient.connect(stack.host, stack.ports.smtp);
     try {
       await client.command('EHLO integration.example.test');
       await client.command('MAIL FROM:<sender@example.org>');
-      const reply = await client.command(`RCPT TO:<user@${stack.relayDomain()}>`);
-      // With smtp-adapter running the policy answers DUNNO (250); without it Postfix must
-      // tempfail rather than accept unchecked mail.
-      expect(reply).toMatch(policyUp ? /^250/ : /^4\d\d /);
+      const reply = await client.command(`RCPT TO:<user@${DEMO.domain}>`);
+      // With smtp-adapter running the seeded demo domain is a relay domain and the policy answers
+      // DUNNO (250); without it Postfix must tempfail rather than accept unchecked mail.
+      expect(reply).toMatch(adapterUp ? /^250/ : /^4\d\d /);
     } finally {
       client.close();
     }
@@ -59,7 +68,7 @@ describe('Rspamd', () => {
       method: 'POST',
       headers: {
         From: 'sender@example.org',
-        Rcpt: `user@${stack.relayDomain()}`,
+        Rcpt: `user@${DEMO.domain}`,
         Ip: '192.0.2.10',
       },
       body: 'From: sender@example.org\r\nTo: user@gateway.test\r\nSubject: hello\r\n\r\nplain body\r\n',

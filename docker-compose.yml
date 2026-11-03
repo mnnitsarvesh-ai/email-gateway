@@ -6,10 +6,22 @@
 #   docker compose --profile apps up -d --build --wait     # + migrations and all services
 #   docker compose --profile analytics up -d --wait        # + OpenSearch, ClickHouse
 #   docker compose --profile observability up -d --wait    # + OTel Collector, Prometheus, Grafana
+#   docker compose --profile smtp-test up -d --wait mail-sink dns-sink smtp-tools
+#                                                   # + test-only SMTP sinks and client tools
 #
 # Every published port binds to 127.0.0.1 only. Credentials come from .env (never defaults).
 # MySQL runs as a GTID primary (`mysql`, writer) plus a read replica (`mysql-replica`); only the
 # api reads from the replica. See docs/database/replication.md.
+#
+# Mail plane (step 2.2, docs/deployment/smtp-gateway.md): `postfix` (inbound MX, 25 behind
+# postscreen), `postfix-outbound` (submission 587, connector relay 25, internal reinjection
+# 10026/10027, never published), `rspamd` (inbound content milter), `rspamd-outbound` (DKIM
+# signing milter of 10027 only), `redis-dkim` (DKIM keys, ACL per role, no persistence).
+# Both Postfix instances reach smtp-adapter at SMTP_ADAPTER_HOST: `smtp-adapter` (apps profile,
+# CI) or `host.docker.internal` (adapter run on the host with pnpm dev). Without the adapter
+# every lookup, policy check, AUTH and LMTP delivery fails closed (4xx). postfix-outbound
+# resolves DNS only through dns-sink (network `mailtest`), so locally it can never reach the
+# Internet.
 
 name: ${COMPOSE_PROJECT_NAME:-email-gateway}
 
@@ -258,17 +270,133 @@ services:
       retries: 5
 
   postfix:
+    # Inbound MX (step 2.2 D2/D4/D15): relay domains, policy and LMTP ingestion from smtp-adapter.
     build: ./infrastructure/postfix
     image: email-gateway/postfix:local
     restart: unless-stopped
     hostname: mx
     environment:
+      <<: &postfix-env
+        SMTP_ADAPTER_HOST: ${SMTP_ADAPTER_HOST:-smtp-adapter}
+        POSTFIX_MESSAGE_SIZE_LIMIT: ${POSTFIX_MESSAGE_SIZE_LIMIT:-52428800}
+        POSTFIX_CLIENT_CONNECTION_COUNT_LIMIT: ${POSTFIX_CLIENT_CONNECTION_COUNT_LIMIT:-50}
+        POSTFIX_CLIENT_CONNECTION_RATE_LIMIT: ${POSTFIX_CLIENT_CONNECTION_RATE_LIMIT:-300}
+        POSTFIX_CLIENT_MESSAGE_RATE_LIMIT: ${POSTFIX_CLIENT_MESSAGE_RATE_LIMIT:-2000}
+        POSTFIX_CLIENT_RECIPIENT_RATE_LIMIT: ${POSTFIX_CLIENT_RECIPIENT_RATE_LIMIT:-5000}
+        POSTFIX_CLIENT_TLS_SESSION_RATE_LIMIT: ${POSTFIX_CLIENT_TLS_SESSION_RATE_LIMIT:-300}
+        POSTFIX_SMTPD_PROCESS_LIMIT: ${POSTFIX_SMTPD_PROCESS_LIMIT:-100}
+        POSTFIX_MINIMAL_BACKOFF_TIME: ${POSTFIX_MINIMAL_BACKOFF_TIME:-300s}
+        POSTFIX_MAXIMAL_BACKOFF_TIME: ${POSTFIX_MAXIMAL_BACKOFF_TIME:-4000s}
+        POSTFIX_QUEUE_RUN_DELAY: ${POSTFIX_QUEUE_RUN_DELAY:-300s}
+        POSTFIX_MAXIMAL_QUEUE_LIFETIME: ${POSTFIX_MAXIMAL_QUEUE_LIFETIME:-5d}
       POSTFIX_MYHOSTNAME: ${POSTFIX_MYHOSTNAME:-mx.gateway.local}
-      POSTFIX_RELAY_DOMAINS: ${POSTFIX_RELAY_DOMAINS:-gateway.test}
+      POSTFIX_POSTSCREEN_GREET_ACTION: ${POSTFIX_POSTSCREEN_GREET_ACTION:-ignore}
+      POSTFIX_POSTSCREEN_DNSBL_SITES: ${POSTFIX_POSTSCREEN_DNSBL_SITES:-}
+      POSTFIX_TLS_CERT_PATH: ${POSTFIX_TLS_CERT_PATH:-/etc/ssl/certs/ssl-cert-snakeoil.pem}
+      POSTFIX_TLS_KEY_PATH: ${POSTFIX_TLS_KEY_PATH:-/etc/ssl/private/ssl-cert-snakeoil.key}
+    # SMTP_ADAPTER_HOST=host.docker.internal reaches an adapter running on the host (D20).
+    extra_hosts: ['host.docker.internal:host-gateway']
     volumes: ['postfix-spool:/var/spool/postfix']
     ports: ['127.0.0.1:${SMTP_HOST_PORT:-2525}:25']
     depends_on:
       rspamd: { condition: service_healthy }
+
+  postfix-outbound:
+    # Outbound MTA (step 2.2 D9-D13): submission 587 (STARTTLS + SASL via smtp-adapter), connector
+    # relay 25 (source IP / client certificate), reinjection 10026 (approved inbound mail to
+    # tenant servers) and 10027 (approved outbound mail to the Internet, DKIM-signed by
+    # rspamd-outbound). Reinjection ports are deliberately NOT published.
+    build: ./infrastructure/postfix-outbound
+    image: email-gateway/postfix-outbound:local
+    restart: unless-stopped
+    hostname: out
+    environment:
+      <<: *postfix-env
+      POSTFIX_OUTBOUND_MYHOSTNAME: ${POSTFIX_OUTBOUND_MYHOSTNAME:-out.gateway.local}
+      POSTFIX_CLIENT_AUTH_RATE_LIMIT: ${POSTFIX_CLIENT_AUTH_RATE_LIMIT:-30}
+      POSTFIX_DELAY_WARNING_TIME: ${POSTFIX_DELAY_WARNING_TIME:-4h}
+      POSTFIX_REINJECT_NETWORKS: ${POSTFIX_REINJECT_NETWORKS:-127.0.0.0/8 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16}
+      POSTFIX_BOUNCE_DOMAIN: ${POSTFIX_BOUNCE_DOMAIN:-bounces.gateway.internal}
+      POSTFIX_OUTBOUND_TLS_CERT_PATH: ${POSTFIX_OUTBOUND_TLS_CERT_PATH:-/etc/ssl/certs/ssl-cert-snakeoil.pem}
+      POSTFIX_OUTBOUND_TLS_KEY_PATH: ${POSTFIX_OUTBOUND_TLS_KEY_PATH:-/etc/ssl/private/ssl-cert-snakeoil.key}
+    extra_hosts: ['host.docker.internal:host-gateway']
+    # D17: Docker's embedded DNS forwards only to dns-sink (authoritative for sink.test, nothing
+    # else), so locally the outbound MTA can never deliver to the Internet. Without the
+    # smtp-test profile every external lookup fails and mail stays queued.
+    dns: [172.31.250.53]
+    networks:
+      default: {}
+      mailtest: {}
+      dkim-signing: {}
+    volumes: ['postfix-outbound-spool:/var/spool/postfix']
+    ports:
+      [
+        '127.0.0.1:${SUBMISSION_HOST_PORT:-2587}:587',
+        '127.0.0.1:${OUTBOUND_RELAY_HOST_PORT:-2527}:25',
+      ]
+    depends_on:
+      rspamd-outbound: { condition: service_healthy }
+      redis-dkim: { condition: service_healthy }
+
+  rspamd-outbound:
+    # DKIM signer (step 2.2 D12, ADR-0020): milter of postfix-outbound's 10027 listener only.
+    # Never rejects or adds scan headers; reads keys from redis-dkim as `dkim-reader`.
+    image: rspamd/rspamd:3.12
+    restart: unless-stopped
+    entrypoint: ['/bin/sh', '/opt/rspamd/entrypoint.sh']
+    environment:
+      REDIS_DKIM_SERVERS: redis-dkim:6379
+      REDIS_DKIM_READER_PASSWORD: ${REDIS_DKIM_READER_PASSWORD:?append the SMTP gateway keys from .env.example}
+    tmpfs:
+      - /etc/rspamd/local.d:uid=11333,gid=11333,mode=0700
+    volumes:
+      - ./infrastructure/rspamd-outbound/entrypoint.sh:/opt/rspamd/entrypoint.sh:ro
+      - ./infrastructure/rspamd-outbound/local.d:/opt/rspamd/local.d:ro
+      - rspamd-outbound-data:/var/lib/rspamd
+    # Signs for whoever speaks milter to it, so only postfix-outbound may reach it: the
+    # dedicated internal network (no default network, no published port) is the only one it is
+    # attached to (review finding, docs/plan/steps/04-smtp-gateway.md §12.7).
+    networks: [dkim-signing]
+    depends_on:
+      redis-dkim: { condition: service_healthy }
+    healthcheck:
+      test: ['CMD', 'rspamc', '-h', '127.0.0.1:11334', 'stat']
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 10
+
+  redis-dkim:
+    # DKIM signing keys (step 2.2 D12): ACL users per role, default user off, no persistence.
+    # Written by the api (dkim-writer), read by rspamd-outbound (dkim-reader), probed by
+    # smtp-adapter (dkim-probe: selectors only, never keys).
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    entrypoint: ['/bin/sh', '/opt/redis-dkim/entrypoint.sh']
+    environment:
+      REDIS_DKIM_WRITER_PASSWORD: ${REDIS_DKIM_WRITER_PASSWORD:?append the SMTP gateway keys from .env.example}
+      REDIS_DKIM_READER_PASSWORD: ${REDIS_DKIM_READER_PASSWORD:?append the SMTP gateway keys from .env.example}
+      REDIS_DKIM_PROBE_PASSWORD: ${REDIS_DKIM_PROBE_PASSWORD:?append the SMTP gateway keys from .env.example}
+    # ACL file and working directory in memory only (the image's /data volume is replaced).
+    tmpfs:
+      - /run/redis-dkim:mode=0700
+      - /data:mode=0700,uid=999,gid=1000
+    volumes: ['./infrastructure/redis-dkim/entrypoint.sh:/opt/redis-dkim/entrypoint.sh:ro']
+    # default: the api (dkim-writer) and smtp-adapter (dkim-probe), and the host port for an
+    # adapter on the host; dkim-signing: rspamd-outbound (dkim-reader). ACL users per role.
+    networks:
+      default: {}
+      dkim-signing: {}
+    ports: ['127.0.0.1:${REDIS_DKIM_HOST_PORT:-6391}:6379']
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'REDISCLI_AUTH="$$REDIS_DKIM_PROBE_PASSWORD" redis-cli --no-auth-warning --user dkim-probe ping | grep -q PONG',
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   postfix-notify:
     # Internal smarthost for transactional email: services submit without credentials on the
@@ -288,6 +416,47 @@ services:
       POSTFIX_MYNETWORKS: 127.0.0.0/8 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
     volumes: ['postfix-notify-spool:/var/spool/postfix']
     ports: ['127.0.0.1:${NOTIFY_SMARTHOST_HOST_PORT:-2526}:25']
+
+  # ---------------------------------------------------------------- SMTP test sinks (profile: smtp-test)
+  # TEST-ONLY (step 2.2 §6): stand-ins for "the Internet" and tenant destination servers on the
+  # isolated `mailtest` network. Never deployed outside local/CI.
+  mail-sink:
+    # Accepts every *.test domain into Maildirs (/var/mail/sink/<domain>/<local>/), refuses
+    # hard-bounce@ (550 5.1.1), soft-bounce@ (450 4.2.1), policy-block@ (550 5.7.1); never relays.
+    profiles: [smtp-test]
+    build: ./infrastructure/mail-sink
+    image: email-gateway/mail-sink:local
+    restart: unless-stopped
+    hostname: mx.sink.test
+    networks:
+      mailtest: { ipv4_address: 172.31.250.25 }
+
+  dns-sink:
+    # Authoritative only for sink.test (MX 10 mx.sink.test -> 172.31.250.25); refuses all else.
+    # Distroless image: no shell, so no health check (dependants wait for service_started).
+    profiles: [smtp-test]
+    image: coredns/coredns:1.11.3
+    restart: unless-stopped
+    command: ['-conf', '/etc/coredns/Corefile']
+    volumes: ['./infrastructure/dns-sink:/etc/coredns:ro']
+    networks:
+      mailtest: { ipv4_address: 172.31.250.53 }
+
+  smtp-tools:
+    # swaks, smtp-source/smtp-sink, openssl, dig, nc. Use: docker compose exec smtp-tools swaks …
+    profiles: [smtp-test]
+    build: ./infrastructure/smtp-tools
+    image: email-gateway/smtp-tools:local
+    restart: unless-stopped
+    # The stack tests speak raw LMTP to smtp-adapter from here (§9 suite 7); like the Postfix
+    # containers, reach an adapter that runs on the host (SMTP_ADAPTER_HOST=host.docker.internal).
+    extra_hosts: ['host.docker.internal:host-gateway']
+    networks:
+      default: {}
+      mailtest: {}
+    depends_on:
+      mail-sink: { condition: service_healthy }
+      dns-sink: { condition: service_started }
 
   # ---------------------------------------------------------------- applications (profile: apps)
   db-migrate:
@@ -319,6 +488,7 @@ services:
     depends_on:
       <<: *app-deps
       mysql-replica-setup: { condition: service_completed_successfully }
+      redis-dkim: { condition: service_healthy }
     environment:
       <<: *node-env
       HTTP_PORT: 3000
@@ -367,6 +537,13 @@ services:
       DOMAIN_RECHECK_INCOMPLETE_SECONDS: ${DOMAIN_RECHECK_INCOMPLETE_SECONDS:-1800}
       DOMAIN_RECHECK_INTERVAL_SECONDS: ${DOMAIN_RECHECK_INTERVAL_SECONDS:-86400}
       DKIM_ROTATION_OVERLAP_DAYS: ${DKIM_ROTATION_OVERLAP_DAYS:-7}
+      # SMTP gateway (step 2.2): DKIM signing publisher (D12) and connector/recipient limits.
+      REDIS_DKIM_URL: redis://dkim-writer:${REDIS_DKIM_WRITER_PASSWORD:?append the SMTP gateway keys from .env.example}@redis-dkim:6379/0
+      DKIM_SIGNING_SYNC_ENABLED: ${DKIM_SIGNING_SYNC_ENABLED:-true}
+      DKIM_SIGNING_SYNC_INTERVAL_SECONDS: ${DKIM_SIGNING_SYNC_INTERVAL_SECONDS:-30}
+      SMTP_CONNECTORS_MAX_PER_ORGANIZATION: ${SMTP_CONNECTORS_MAX_PER_ORGANIZATION:-50}
+      SMTP_CONNECTOR_ALLOW_NON_PUBLIC_NETWORKS: ${SMTP_CONNECTOR_ALLOW_NON_PUBLIC_NETWORKS:-false}
+      DOMAIN_RECIPIENTS_MAX_PER_DOMAIN: ${DOMAIN_RECIPIENTS_MAX_PER_DOMAIN:-100000}
     ports: ['127.0.0.1:${API_HOST_PORT:-3000}:3000']
     healthcheck:
       <<: *node-healthcheck
@@ -387,10 +564,60 @@ services:
         args: { APP: smtp-adapter },
       }
     image: email-gateway/smtp-adapter:local
+    depends_on:
+      <<: *app-deps
+      redis-dkim: { condition: service_healthy }
     environment:
       <<: *node-env
       HTTP_PORT: 3010
+      # Postfix extension listeners (step 2.2 §4). The Postfix configurations use these fixed
+      # ports, so they are not taken from .env here.
       POLICY_PORT: 10040
+      SOCKETMAP_PORT: 10041
+      SASL_AUTH_PORT: 10042
+      LMTP_INBOUND_PORT: 10050
+      LMTP_OUTBOUND_PORT: 10051
+      LMTP_BOUNCE_PORT: 10052
+      MAIL_LISTEN_HOST: 0.0.0.0
+      SMTP_INTERNAL_CLIENT_NETWORKS: ${SMTP_INTERNAL_CLIENT_NETWORKS:-127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}
+      # Loop prevention (D14).
+      GATEWAY_TRACE_SECRET: ${GATEWAY_TRACE_SECRET:?append the SMTP gateway keys from .env.example}
+      GATEWAY_TRACE_ID: ${GATEWAY_TRACE_ID:-gw-local}
+      SMTP_LOOP_MAX_PASSES: ${SMTP_LOOP_MAX_PASSES:-1}
+      # Caches, policy, rate limits (D3-D6, D11).
+      SMTP_DOMAIN_CACHE_TTL_SECONDS: ${SMTP_DOMAIN_CACHE_TTL_SECONDS:-60}
+      SMTP_NEGATIVE_CACHE_TTL_SECONDS: ${SMTP_NEGATIVE_CACHE_TTL_SECONDS:-30}
+      SMTP_CACHE_INVALIDATION_POLL_MS: ${SMTP_CACHE_INVALIDATION_POLL_MS:-5000}
+      SMTP_POLICY_DECISION_TIMEOUT_MS: ${SMTP_POLICY_DECISION_TIMEOUT_MS:-3000}
+      SMTP_RATE_CLIENT_RCPT_PER_MINUTE: ${SMTP_RATE_CLIENT_RCPT_PER_MINUTE:-3000}
+      SMTP_RATE_TENANT_INBOUND_RCPT_PER_MINUTE: ${SMTP_RATE_TENANT_INBOUND_RCPT_PER_MINUTE:-6000}
+      SMTP_RATE_TENANT_OUTBOUND_RCPT_PER_MINUTE: ${SMTP_RATE_TENANT_OUTBOUND_RCPT_PER_MINUTE:-600}
+      SMTP_RATE_TENANT_OUTBOUND_RCPT_PER_DAY: ${SMTP_RATE_TENANT_OUTBOUND_RCPT_PER_DAY:-100000}
+      # Empty = no recipient delimiter (unset = '+').
+      SMTP_RECIPIENT_DELIMITER: ${SMTP_RECIPIENT_DELIMITER-+}
+      SMTP_OUTBOUND_REQUIRE_DKIM: ${SMTP_OUTBOUND_REQUIRE_DKIM:-true}
+      # SASL (D10).
+      SMTP_AUTH_FAILURE_DELAY_MS: ${SMTP_AUTH_FAILURE_DELAY_MS:-2000}
+      SMTP_AUTH_MAX_FAILURES_PER_IP: ${SMTP_AUTH_MAX_FAILURES_PER_IP:-20}
+      SMTP_AUTH_FAILURE_WINDOW_SECONDS: ${SMTP_AUTH_FAILURE_WINDOW_SECONDS:-900}
+      SMTP_AUTH_VERIFY_CACHE_SECONDS: ${SMTP_AUTH_VERIFY_CACHE_SECONDS:-300}
+      # LMTP ingestion (D7) and bounce notices (D13). S3_* come from the node env anchor.
+      LMTP_MAX_CLIENTS: ${LMTP_MAX_CLIENTS:-20}
+      INGEST_MAX_MESSAGE_BYTES: ${INGEST_MAX_MESSAGE_BYTES:-53477376}
+      INGEST_S3_PART_SIZE_BYTES: ${INGEST_S3_PART_SIZE_BYTES:-5242880}
+      INGEST_S3_QUEUE_SIZE: ${INGEST_S3_QUEUE_SIZE:-2}
+      INGEST_S3_TIMEOUT_MS: ${INGEST_S3_TIMEOUT_MS:-120000}
+      INGEST_DB_TIMEOUT_MS: ${INGEST_DB_TIMEOUT_MS:-15000}
+      INGEST_HEADER_MAX_BYTES: ${INGEST_HEADER_MAX_BYTES:-65536}
+      BOUNCE_MAX_MESSAGE_BYTES: ${BOUNCE_MAX_MESSAGE_BYTES:-2097152}
+      SUPPRESSION_HARD_BOUNCE_DAYS: ${SUPPRESSION_HARD_BOUNCE_DAYS:-180}
+      POSTFIX_BOUNCE_DOMAIN: ${POSTFIX_BOUNCE_DOMAIN:-bounces.gateway.internal}
+      # DKIM readiness probe (D11 reinject-outbound): selectors only.
+      REDIS_DKIM_PROBE_URL: redis://dkim-probe:${REDIS_DKIM_PROBE_PASSWORD:?append the SMTP gateway keys from .env.example}@redis-dkim:6379/0
+      # Gateway's own host names for the transport-map self-check (D11).
+      GATEWAY_MX_HOSTS: ${GATEWAY_MX_HOSTS:?append the domain onboarding keys from .env.example}
+      POSTFIX_MYHOSTNAME: ${POSTFIX_MYHOSTNAME:-mx.gateway.local}
+      POSTFIX_OUTBOUND_MYHOSTNAME: ${POSTFIX_OUTBOUND_MYHOSTNAME:-out.gateway.local}
     ports: ['127.0.0.1:${SMTP_ADAPTER_HOST_PORT:-3010}:3010']
     healthcheck:
       <<: *node-healthcheck
@@ -639,8 +866,24 @@ volumes:
   rspamd-data:
   clamav-db:
   postfix-spool:
+  postfix-outbound-spool:
+  rspamd-outbound-data:
   postfix-notify-spool:
   opensearch-data:
   clickhouse-data:
   prometheus-data:
   grafana-data:
+
+networks:
+  default: {}
+  # Isolated mail test network (step 2.2 D17): dns-sink .53, mail-sink .25, plus postfix-outbound
+  # and smtp-tools. Fixed subnet so dns-sink can be the outbound MTA's only resolver.
+  mailtest:
+    ipam:
+      config:
+        - subnet: 172.31.250.0/24
+  # DKIM signing path (step 2.2 D12): rspamd-outbound signs for every milter client, so it is
+  # attached only here, together with postfix-outbound (its only milter client) and redis-dkim
+  # (its key store). internal: no route outside the network, nothing published.
+  dkim-signing:
+    internal: true

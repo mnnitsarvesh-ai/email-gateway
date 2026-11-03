@@ -62,6 +62,9 @@ export const PERMISSIONS = Object.freeze([
   },
   // Step 2.1 (D14): rotation can break outbound signing when misused, so it has its own key.
   { key: 'domain:dkim_rotate', description: 'Rotate DKIM signing keys of domains' },
+  // Step 2.2 (D10): outbound SMTP connectors (SASL credentials, source networks, certificates).
+  { key: 'connector:read', description: 'View SMTP connectors (never secrets)' },
+  { key: 'connector:manage', description: 'Create, rotate and disable SMTP connectors' },
 ] as const satisfies readonly PermissionDef[]);
 
 /** Every permission key of the catalog. */
@@ -96,6 +99,7 @@ export const TENANT_READ_PERMISSIONS: readonly PermissionKey[] = Object.freeze([
   'quarantine:read',
   'report:read',
   'archive:read',
+  'connector:read',
 ]);
 
 /** Keys of the 8 built-in system roles (D8). */
@@ -175,6 +179,8 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'domain:read',
       'domain:manage',
       'domain:dkim_rotate',
+      'connector:read',
+      'connector:manage',
       'policy:read',
       'message:read',
       'quarantine:read',
@@ -236,6 +242,11 @@ export const LIMIT_KEYS = [
   'api_requests_per_minute',
   'quarantine_retention_days',
   'archive_retention_days',
+  // Step 2.2 (D6): recipients per window enforced by the smtp-adapter policy. Organizations
+  // without a row fall back to the adapter's SMTP_RATE_TENANT_* defaults; 0 = no mail of that kind.
+  'inbound_recipients_per_minute',
+  'outbound_recipients_per_minute',
+  'outbound_recipients_per_day',
 ] as const;
 export type LimitKey = (typeof LIMIT_KEYS)[number];
 
@@ -283,6 +294,9 @@ export const PLANS: readonly PlanDef[] = Object.freeze([
       api_requests_per_minute: 60,
       quarantine_retention_days: 14,
       archive_retention_days: 0,
+      inbound_recipients_per_minute: 600,
+      outbound_recipients_per_minute: 60,
+      outbound_recipients_per_day: 2_000,
     },
     features: features(['inbound_filtering', 'bec_detection']),
   },
@@ -298,6 +312,9 @@ export const PLANS: readonly PlanDef[] = Object.freeze([
       api_requests_per_minute: 300,
       quarantine_retention_days: 30,
       archive_retention_days: 0,
+      inbound_recipients_per_minute: 3_000,
+      outbound_recipients_per_minute: 300,
+      outbound_recipients_per_day: 50_000,
     },
     features: features([
       'inbound_filtering',
@@ -320,6 +337,9 @@ export const PLANS: readonly PlanDef[] = Object.freeze([
       api_requests_per_minute: 1_200,
       quarantine_retention_days: 90,
       archive_retention_days: 2_555,
+      inbound_recipients_per_minute: 12_000,
+      outbound_recipients_per_minute: 1_200,
+      outbound_recipients_per_day: 500_000,
     },
     features: features([...FEATURE_KEYS]),
   },
@@ -335,6 +355,9 @@ export const PLANS: readonly PlanDef[] = Object.freeze([
       api_requests_per_minute: 3_000,
       quarantine_retention_days: 90,
       archive_retention_days: 3_650,
+      inbound_recipients_per_minute: 30_000,
+      outbound_recipients_per_minute: 3_000,
+      outbound_recipients_per_day: 2_000_000,
     },
     features: features([...FEATURE_KEYS]),
   },

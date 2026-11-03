@@ -9515,7 +9515,10 @@
                 "max_message_size_bytes",
                 "api_requests_per_minute",
                 "quarantine_retention_days",
-                "archive_retention_days"
+                "archive_retention_days",
+                "inbound_recipients_per_minute",
+                "outbound_recipients_per_minute",
+                "outbound_recipients_per_day"
               ]
             }
           }
@@ -9696,7 +9699,10 @@
                 "max_message_size_bytes",
                 "api_requests_per_minute",
                 "quarantine_retention_days",
-                "archive_retention_days"
+                "archive_retention_days",
+                "inbound_recipients_per_minute",
+                "outbound_recipients_per_minute",
+                "outbound_recipients_per_day"
               ]
             }
           }
@@ -13563,6 +13569,2060 @@
         "security": [{ "api-key": [] }, { "access-token": [] }],
         "summary": "Rotate a DKIM key",
         "tags": ["domains"]
+      }
+    },
+    "/api/v1/domains/{id}/recipient-validation": {
+      "get": {
+        "description": "`accept_all` accepts every local part; `allow_list` checks the domain recipient list: with `enforcement: reject` unknown recipients are refused at RCPT (`550 5.1.1`), with `monitor` they are accepted and only counted. `implemented: false` for `smtp_callout` and `ldap` (not implemented; the mail path accepts everyone).",
+        "operationId": "DomainRecipientsController_get_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "description": "Domain public id",
+            "schema": { "format": "uuid", "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "domainId": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "mode": {
+                      "type": "string",
+                      "enum": ["accept_all", "allow_list", "smtp_callout", "ldap"]
+                    },
+                    "enforcement": { "type": "string", "enum": ["reject", "monitor"] },
+                    "implemented": {
+                      "type": "boolean",
+                      "description": "False for modes the mail path does not implement yet (they accept everyone)"
+                    },
+                    "addressCount": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991,
+                      "description": "Local parts on the allow-list"
+                    }
+                  },
+                  "required": ["domainId", "mode", "enforcement", "implemented", "addressCount"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (also for resources of another tenant)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "Get the recipient validation mode",
+        "tags": ["domains"]
+      },
+      "put": {
+        "description": "`{ mode: accept_all }` or `{ mode: allow_list, enforcement: reject | monitor }`. `smtp_callout` and `ldap` are `422 Not implemented`. Enforcing an empty allow-list is `409 Add recipients before enforcing the allow-list`. Changes reach the mail path within about 60 seconds (adapter cache).",
+        "operationId": "DomainRecipientsController_set_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "description": "Domain public id",
+            "schema": { "format": "uuid", "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "enum": ["accept_all", "allow_list", "smtp_callout", "ldap"],
+                    "description": "`accept_all` or `allow_list`; `smtp_callout` and `ldap` are not implemented (`422`)"
+                  },
+                  "enforcement": {
+                    "description": "allow_list only (required there): `reject` refuses unknown recipients with 550 5.1.1; `monitor` accepts them and only counts would-be rejections",
+                    "type": "string",
+                    "enum": ["reject", "monitor"]
+                  }
+                },
+                "required": ["mode"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "domainId": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "mode": {
+                      "type": "string",
+                      "enum": ["accept_all", "allow_list", "smtp_callout", "ldap"]
+                    },
+                    "enforcement": { "type": "string", "enum": ["reject", "monitor"] },
+                    "implemented": {
+                      "type": "boolean",
+                      "description": "False for modes the mail path does not implement yet (they accept everyone)"
+                    },
+                    "addressCount": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991,
+                      "description": "Local parts on the allow-list"
+                    }
+                  },
+                  "required": ["domainId", "mode", "enforcement", "implemented", "addressCount"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (also for resources of another tenant)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with the current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Valid request for a feature that is not implemented",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "Set the recipient validation mode",
+        "tags": ["domains"]
+      }
+    },
+    "/api/v1/domains/{id}/recipients": {
+      "get": {
+        "description": "Local parts, newest first, cursor-paginated, from the read replica.",
+        "operationId": "DomainRecipientsController_list_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "description": "Domain public id",
+            "schema": { "format": "uuid", "type": "string" }
+          },
+          {
+            "name": "limit",
+            "required": false,
+            "in": "query",
+            "schema": { "default": 25, "type": "integer", "minimum": 1, "maximum": 100 }
+          },
+          {
+            "name": "cursor",
+            "required": false,
+            "in": "query",
+            "schema": { "type": "string", "minLength": 1, "maxLength": 64 }
+          },
+          {
+            "name": "q",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "description": "Prefix of the local part (case-insensitive)",
+              "type": "string",
+              "maxLength": 256
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "localPart": { "type": "string" },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          }
+                        },
+                        "required": ["localPart", "createdAt"],
+                        "additionalProperties": false
+                      }
+                    },
+                    "nextCursor": { "nullable": true, "type": "string" }
+                  },
+                  "required": ["data", "nextCursor"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (also for resources of another tenant)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "List the recipient allow-list",
+        "tags": ["domains"]
+      },
+      "post": {
+        "description": "1–1000 local parts per request; idempotent (`existing` counts the ones already listed). At most `DOMAIN_RECIPIENTS_MAX_PER_DOMAIN` (default 100 000) per domain: a request that would exceed it adds nothing (`409`).",
+        "operationId": "DomainRecipientsController_add_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "description": "Domain public id",
+            "schema": { "format": "uuid", "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "localParts": {
+                    "minItems": 1,
+                    "maxItems": 1000,
+                    "type": "array",
+                    "items": { "type": "string", "maxLength": 256 },
+                    "description": "Local parts (the part before \"@\"), 1–64 bytes each; stored NFC-normalized and lower-cased. Duplicates in the request count once."
+                  }
+                },
+                "required": ["localParts"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "added": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "existing": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991,
+                      "description": "Already on the list (nothing changed for them)"
+                    }
+                  },
+                  "required": ["added", "existing"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (also for resources of another tenant)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with the current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "Add recipients to the allow-list",
+        "tags": ["domains"]
+      }
+    },
+    "/api/v1/domains/{id}/recipients/remove": {
+      "post": {
+        "description": "1–1000 local parts per request; unknown ones are ignored (idempotent).",
+        "operationId": "DomainRecipientsController_remove_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "description": "Domain public id",
+            "schema": { "format": "uuid", "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "localParts": {
+                    "minItems": 1,
+                    "maxItems": 1000,
+                    "type": "array",
+                    "items": { "type": "string", "maxLength": 256 },
+                    "description": "Local parts (the part before \"@\"), 1–64 bytes each; stored NFC-normalized and lower-cased. Duplicates in the request count once."
+                  }
+                },
+                "required": ["localParts"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "removed": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": ["removed"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (also for resources of another tenant)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "Remove recipients from the allow-list",
+        "tags": ["domains"]
+      }
+    },
+    "/api/v1/smtp-connectors": {
+      "post": {
+        "description": "One authentication method per connector. `sasl`: SMTP AUTH on port 587 after STARTTLS; the username (`egc-…`) and a random password are generated and returned **once** in `credentials` (only an Argon2id hash is stored; rotate it if it is lost). `source_ip`: 1–20 networks (IPv4 ≥ /16, IPv6 ≥ /48) on the port 25 relay listener; networks must be publicly routable (private, loopback, link-local, shared, documentation, multicast and reserved ranges are `400` unless the deployment sets `SMTP_CONNECTOR_ALLOW_NON_PUBLIC_NETWORKS`) and may not overlap any network of any connector (`409 Network overlaps an existing connector network`). `client_certificate`: the SHA-256 fingerprint of the client certificate presented on port 25 (globally unique, `409`), optionally restricted to networks. `requireTls` (default true) only applies to `source_ip`; the other types always need TLS. At most `SMTP_CONNECTORS_MAX_PER_ORGANIZATION` (default 50) per organization (`409`). At most 20 per caller per minute (`429`).\n\n**Warning:** never use `source_ip` connectors for shared-IP mail platforms such as Microsoft 365 or Google Workspace: every customer of that platform sends from the same addresses and could then send as your organization. Use `sasl` or `client_certificate` connectors for them.",
+        "operationId": "SmtpConnectorsController_create_v1",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[^\\p{Cc}]+$"
+                  },
+                  "authType": {
+                    "type": "string",
+                    "enum": ["sasl", "source_ip", "client_certificate"]
+                  },
+                  "networks": {
+                    "minItems": 1,
+                    "maxItems": 20,
+                    "type": "array",
+                    "items": { "type": "string", "maxLength": 64 },
+                    "description": "IPv4/IPv6 CIDR networks (a bare address is a single host); IPv4 prefix ≥ /16, IPv6 ≥ /48; host bits are cleared. Must be publicly routable (non-public ranges are refused unless SMTP_CONNECTOR_ALLOW_NON_PUBLIC_NETWORKS) and must not overlap any network of any other connector."
+                  },
+                  "certificateFingerprintSha256": {
+                    "description": "SHA-256 fingerprint of the client certificate (hex, colons optional)",
+                    "type": "string",
+                    "maxLength": 128
+                  },
+                  "requireTls": {
+                    "type": "boolean",
+                    "description": "Refuse sessions without STARTTLS (default true). Only source_ip connectors may set false."
+                  }
+                },
+                "required": ["name", "authType"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "name": { "type": "string" },
+                    "authType": {
+                      "type": "string",
+                      "enum": ["sasl", "source_ip", "client_certificate"]
+                    },
+                    "status": { "type": "string", "enum": ["active", "disabled"] },
+                    "saslUsername": {
+                      "nullable": true,
+                      "description": "sasl only",
+                      "type": "string"
+                    },
+                    "certificateFingerprintSha256": {
+                      "nullable": true,
+                      "description": "client_certificate only; lower-case hex",
+                      "type": "string"
+                    },
+                    "networks": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "cidr": { "type": "string", "description": "Canonical CIDR" },
+                          "ipVersion": {
+                            "anyOf": [
+                              { "type": "number", "enum": [4] },
+                              { "type": "number", "enum": [6] }
+                            ]
+                          }
+                        },
+                        "required": ["cidr", "ipVersion"],
+                        "additionalProperties": false
+                      }
+                    },
+                    "requireTls": { "type": "boolean" },
+                    "secretSetAt": {
+                      "nullable": true,
+                      "description": "sasl only: when the current password was issued",
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "updatedAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "credentials": {
+                      "description": "sasl only, returned once",
+                      "type": "object",
+                      "properties": {
+                        "username": { "type": "string" },
+                        "password": {
+                          "type": "string",
+                          "description": "Shown once; store it now. Only a hash is kept."
+                        }
+                      },
+                      "required": ["username", "password"],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name",
+                    "authType",
+                    "status",
+                    "saslUsername",
+                    "certificateFingerprintSha256",
+                    "networks",
+                    "requireTls",
+                    "secretSetAt",
+                    "createdAt",
+                    "updatedAt"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with the current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (`Retry-After` header when known)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Authentication backend unavailable (fail closed)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "Create an outbound SMTP connector",
+        "tags": ["smtp-connectors"]
+      },
+      "get": {
+        "description": "Newest first, cursor-paginated, from the read replica. Never secrets.",
+        "operationId": "SmtpConnectorsController_list_v1",
+        "parameters": [
+          {
+            "name": "limit",
+            "required": false,
+            "in": "query",
+            "schema": { "default": 25, "type": "integer", "minimum": 1, "maximum": 100 }
+          },
+          {
+            "name": "cursor",
+            "required": false,
+            "in": "query",
+            "schema": { "type": "string", "minLength": 1, "maxLength": 64 }
+          },
+          {
+            "name": "status",
+            "required": false,
+            "in": "query",
+            "schema": { "type": "string", "enum": ["active", "disabled"] }
+          },
+          {
+            "name": "authType",
+            "required": false,
+            "in": "query",
+            "schema": { "type": "string", "enum": ["sasl", "source_ip", "client_certificate"] }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                          },
+                          "name": { "type": "string" },
+                          "authType": {
+                            "type": "string",
+                            "enum": ["sasl", "source_ip", "client_certificate"]
+                          },
+                          "status": { "type": "string", "enum": ["active", "disabled"] },
+                          "saslUsername": {
+                            "nullable": true,
+                            "description": "sasl only",
+                            "type": "string"
+                          },
+                          "certificateFingerprintSha256": {
+                            "nullable": true,
+                            "description": "client_certificate only; lower-case hex",
+                            "type": "string"
+                          },
+                          "networks": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "cidr": { "type": "string", "description": "Canonical CIDR" },
+                                "ipVersion": {
+                                  "anyOf": [
+                                    { "type": "number", "enum": [4] },
+                                    { "type": "number", "enum": [6] }
+                                  ]
+                                }
+                              },
+                              "required": ["cidr", "ipVersion"],
+                              "additionalProperties": false
+                            }
+                          },
+                          "requireTls": { "type": "boolean" },
+                          "secretSetAt": {
+                            "nullable": true,
+                            "description": "sasl only: when the current password was issued",
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "updatedAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "name",
+                          "authType",
+                          "status",
+                          "saslUsername",
+                          "certificateFingerprintSha256",
+                          "networks",
+                          "requireTls",
+                          "secretSetAt",
+                          "createdAt",
+                          "updatedAt"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "nextCursor": { "nullable": true, "type": "string" }
+                  },
+                  "required": ["data", "nextCursor"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "List SMTP connectors",
+        "tags": ["smtp-connectors"]
+      }
+    },
+    "/api/v1/smtp-connectors/{id}": {
+      "get": {
+        "description": "Never secrets.",
+        "operationId": "SmtpConnectorsController_get_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "description": "SMTP connector public id",
+            "schema": { "format": "uuid", "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "name": { "type": "string" },
+                    "authType": {
+                      "type": "string",
+                      "enum": ["sasl", "source_ip", "client_certificate"]
+                    },
+                    "status": { "type": "string", "enum": ["active", "disabled"] },
+                    "saslUsername": {
+                      "nullable": true,
+                      "description": "sasl only",
+                      "type": "string"
+                    },
+                    "certificateFingerprintSha256": {
+                      "nullable": true,
+                      "description": "client_certificate only; lower-case hex",
+                      "type": "string"
+                    },
+                    "networks": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "cidr": { "type": "string", "description": "Canonical CIDR" },
+                          "ipVersion": {
+                            "anyOf": [
+                              { "type": "number", "enum": [4] },
+                              { "type": "number", "enum": [6] }
+                            ]
+                          }
+                        },
+                        "required": ["cidr", "ipVersion"],
+                        "additionalProperties": false
+                      }
+                    },
+                    "requireTls": { "type": "boolean" },
+                    "secretSetAt": {
+                      "nullable": true,
+                      "description": "sasl only: when the current password was issued",
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "updatedAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name",
+                    "authType",
+                    "status",
+                    "saslUsername",
+                    "certificateFingerprintSha256",
+                    "networks",
+                    "requireTls",
+                    "secretSetAt",
+                    "createdAt",
+                    "updatedAt"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (also for resources of another tenant)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "Get an SMTP connector",
+        "tags": ["smtp-connectors"]
+      },
+      "patch": {
+        "description": "Rename, enable/disable (`status`), change `requireTls` (source_ip only) or replace the networks atomically (same rules as on create, `409` on overlap). A disabled connector authorizes nothing; the change reaches the mail path within the adapter cache TTL (about 30 s).\n\n**Warning:** never use `source_ip` connectors for shared-IP mail platforms such as Microsoft 365 or Google Workspace: every customer of that platform sends from the same addresses and could then send as your organization. Use `sasl` or `client_certificate` connectors for them.",
+        "operationId": "SmtpConnectorsController_update_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "description": "SMTP connector public id",
+            "schema": { "format": "uuid", "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[^\\p{Cc}]+$"
+                  },
+                  "status": { "type": "string", "enum": ["active", "disabled"] },
+                  "networks": {
+                    "description": "Replaces every network atomically (same rules as on create). source_ip needs at least one; client_certificate may clear them with []; sasl connectors have none.",
+                    "maxItems": 20,
+                    "type": "array",
+                    "items": { "type": "string", "maxLength": 64 }
+                  },
+                  "requireTls": {
+                    "type": "boolean",
+                    "description": "Refuse sessions without STARTTLS (default true). Only source_ip connectors may set false."
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "name": { "type": "string" },
+                    "authType": {
+                      "type": "string",
+                      "enum": ["sasl", "source_ip", "client_certificate"]
+                    },
+                    "status": { "type": "string", "enum": ["active", "disabled"] },
+                    "saslUsername": {
+                      "nullable": true,
+                      "description": "sasl only",
+                      "type": "string"
+                    },
+                    "certificateFingerprintSha256": {
+                      "nullable": true,
+                      "description": "client_certificate only; lower-case hex",
+                      "type": "string"
+                    },
+                    "networks": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "cidr": { "type": "string", "description": "Canonical CIDR" },
+                          "ipVersion": {
+                            "anyOf": [
+                              { "type": "number", "enum": [4] },
+                              { "type": "number", "enum": [6] }
+                            ]
+                          }
+                        },
+                        "required": ["cidr", "ipVersion"],
+                        "additionalProperties": false
+                      }
+                    },
+                    "requireTls": { "type": "boolean" },
+                    "secretSetAt": {
+                      "nullable": true,
+                      "description": "sasl only: when the current password was issued",
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "updatedAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name",
+                    "authType",
+                    "status",
+                    "saslUsername",
+                    "certificateFingerprintSha256",
+                    "networks",
+                    "requireTls",
+                    "secretSetAt",
+                    "createdAt",
+                    "updatedAt"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (also for resources of another tenant)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with the current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Authentication backend unavailable (fail closed)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "Update an SMTP connector",
+        "tags": ["smtp-connectors"]
+      },
+      "delete": {
+        "description": "Hard delete; its networks are removed with it and free for other connectors.",
+        "operationId": "SmtpConnectorsController_remove_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "description": "SMTP connector public id",
+            "schema": { "format": "uuid", "type": "string" }
+          }
+        ],
+        "responses": {
+          "204": { "description": "Deleted" },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (also for resources of another tenant)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "Delete an SMTP connector",
+        "tags": ["smtp-connectors"]
+      }
+    },
+    "/api/v1/smtp-connectors/{id}/rotate-secret": {
+      "post": {
+        "description": "`sasl` connectors only (`409` otherwise). Returns a new password **once**; the previous password stops working immediately. At most 10 per caller per minute (`429`).",
+        "operationId": "SmtpConnectorsController_rotateSecret_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "description": "SMTP connector public id",
+            "schema": { "format": "uuid", "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "credentials": {
+                      "type": "object",
+                      "properties": {
+                        "username": { "type": "string" },
+                        "password": {
+                          "type": "string",
+                          "description": "Shown once; store it now. Only a hash is kept."
+                        }
+                      },
+                      "required": ["username", "password"],
+                      "additionalProperties": false,
+                      "description": "SMTP AUTH credentials (PLAIN/LOGIN over STARTTLS on port 587)"
+                    },
+                    "secretSetAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    }
+                  },
+                  "required": ["id", "credentials", "secretSetAt"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (also for resources of another tenant)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with the current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (`Retry-After` header when known)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "Rotate the SASL password of a connector",
+        "tags": ["smtp-connectors"]
       }
     }
   },

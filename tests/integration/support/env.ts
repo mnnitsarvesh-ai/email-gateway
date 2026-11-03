@@ -25,11 +25,18 @@ export const stack = {
     mailBucket: required('S3_BUCKET_MAIL'),
     archiveBucket: required('S3_BUCKET_ARCHIVE'),
   }),
-  relayDomain: () => (process.env.POSTFIX_RELAY_DOMAINS ?? 'gateway.test').split(',')[0]!.trim(),
+  /** Compose project name (docker compose -p); the same default as docker-compose.yml. */
+  composeProject: () => process.env.COMPOSE_PROJECT_NAME || 'email-gateway',
   ports: {
     mysql: port('MYSQL_HOST_PORT', 3306),
     mysqlReplica: port('MYSQL_REPLICA_HOST_PORT', 3308),
+    /** Inbound MX (postfix:25). */
     smtp: port('SMTP_HOST_PORT', 2525),
+    /** postfix-outbound submission (587). */
+    submission: port('SUBMISSION_HOST_PORT', 2587),
+    /** postfix-outbound connector relay (25). */
+    outboundRelay: port('OUTBOUND_RELAY_HOST_PORT', 2527),
+    redisDkim: port('REDIS_DKIM_HOST_PORT', 6391),
     rspamd: port('RSPAMD_HOST_PORT', 11333),
     clamav: port('CLAMAV_HOST_PORT', 3310),
     services: {
@@ -45,8 +52,11 @@ export const stack = {
   },
 };
 
-/** True when the `apps` compose profile is running (smtp-adapter answers its probe). */
-export async function appsRunning(): Promise<boolean> {
+/**
+ * True when smtp-adapter answers its liveness probe, as a container of the `apps` profile or on
+ * the host (`pnpm --filter @email-gateway/smtp-adapter dev`, step 2.2 D20).
+ */
+export async function adapterRunning(): Promise<boolean> {
   try {
     const res = await fetch(
       `http://${stack.host}:${stack.ports.services['smtp-adapter']}/health/live`,

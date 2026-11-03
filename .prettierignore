@@ -8,3 +8,4 @@ infrastructure/rspamd/**
 infrastructure/clamav/**
 infrastructure/mysql/**
 infrastructure/rabbitmq/**
+infrastructure/rspamd-outbound/**

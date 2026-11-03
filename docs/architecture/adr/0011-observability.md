@@ -1,6 +1,6 @@
 # ADR-0011: Structured logs, correlation IDs, OpenTelemetry, Prometheus, Grafana
 
-**Status:** Accepted
+**Status:** Accepted (metrics bullet amended by [ADR-0019](0019-smtp-gateway-topology.md))
 
 **Decision.**
 

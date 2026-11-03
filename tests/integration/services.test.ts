@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { appsRunning, stack } from './support/env';
+import { runningServices } from './support/compose';
+import { stack } from './support/env';
 
-const running = await appsRunning();
+// The whole `apps` profile runs as containers (smtp-adapter alone may run on the host for the
+// SMTP suites, which says nothing about the other services).
+const running = (await runningServices()).has('api');
 
 describe.skipIf(!running)('Application services (compose profile: apps)', () => {
   const nestServices = Object.entries(stack.ports.services).filter(

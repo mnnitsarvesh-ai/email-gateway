@@ -7,7 +7,7 @@ Which deployable owns (writes) each table, bucket, queue and cache, and who may 
 3. **Schema changes are owned by migrations.** Only `db-migrate` and partition maintenance use the DDL account (`MIGRATION_DATABASE_URL`). Runtime services have DML only.
 4. **Content is never in MySQL.** Bodies and attachments live in S3; MySQL holds keys, sizes and hashes.
 
-Status: all 63 tables are IMPLEMENTED (step 1.1 schema plus the steps 1.2 + 1.3 migration `identity_tenancy`, `tests/integration/schema.test.ts`). Apart from `db:seed` (catalog, the platform organization and demo data), **no business code writes them yet**; the writing step is given for each group. The "Writer" column is ownership by design.
+Status: all 66 tables are IMPLEMENTED (step 1.1 schema, the steps 1.2 + 1.3 migration `identity_tenancy`, the step 2.1 `domain_onboarding` migration and the step 2.2 `smtp_gateway` migration: `smtp_connectors`, `smtp_connector_networks`, `domain_recipient_addresses`; `tests/integration/schema.test.ts`). The api writes the control-plane tables (steps 1.2–2.2); since step 2.2 **smtp-adapter writes the ingestion and bounce tables below**; the other data-plane writers arrive with their steps.
 
 ## MySQL tables by owner
 
@@ -21,6 +21,7 @@ Status: all 63 tables are IMPLEMENTED (step 1.1 schema plus the steps 1.2 + 1.3 
 | `domains`, `domain_verifications`, `domain_dns_records`, `domain_dkim_keys`, `domain_mx_records`, `domain_mail_servers`, `domain_settings` | Domain onboarding and its background DNS jobs (verification, re-verification, DKIM retirement), which run inside `api` (step 2.1 D11). DKIM private keys are stored SecretBox-encrypted with `DATA_ENCRYPTION_KEY` in `domain_dkim_keys.private_key_ciphertext` and shredded on retire/revoke ([ADR-0018](adr/0018-dkim-key-custody.md)); only `api` holds that key. Domains are soft-deleted | 2.1          |
 | `email_policies`, `policy_versions`, `policy_conditions`, `policy_actions`, `policy_exceptions`                                            | Everything in policy except execution logs                                                                                                                                                                                                                                                                                                                                                    | 5.2          |
 | `delivery_routes`; `delivery_suppressions` (manual entries)                                                                                |                                                                                                                                                                                                                                                                                                                                                                                               | 2.3, 6.x     |
+| `smtp_connectors`, `smtp_connector_networks`, `domain_recipient_addresses` (step 2.2)                                                      | SMTP connectors (Argon2id secret hashes only; global non-overlap of networks under a MySQL named lock) and recipient allow-lists; audited in the same transaction                                                                                                                                                                                                                             |
 | `quarantine_actions`; `quarantine_release_logs` (created on release); `quarantine_messages` status changes caused by user actions          | Release and delete requests, approvals                                                                                                                                                                                                                                                                                                                                                        | 5.3          |
 | `archive_settings`, `archive_retention_policies`, `archive_legal_holds`                                                                    |                                                                                                                                                                                                                                                                                                                                                                                               | 8.1          |
 | `webhook_subscriptions`                                                                                                                    | HMAC secret stored as app-encrypted ciphertext                                                                                                                                                                                                                                                                                                                                                | 6.2          |
@@ -29,9 +30,11 @@ Status: all 63 tables are IMPLEMENTED (step 1.1 schema plus the steps 1.2 + 1.3 
 
 ### smtp-adapter (ingestion)
 
-| Tables                                                                                                                       | Notes                                                                                        | Writing step |
-| ---------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ------------ |
-| `message_identities`, `email_messages` (insert, status `received`), `email_recipients`, `email_headers`, `email_attachments` | One transaction with the outbox row; the registry allocates the message id and `received_at` | 3.1          |
+| Tables                                                                                                                                | Notes                                                                                                                                             | Writing step      |
+| ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- |
+| `message_identities`, `email_messages` (insert, status `received`), `email_recipients`, `email_events` (`received`), `message_outbox` | One writer transaction **per organization** of the message (LMTP ingestion, step 2.2 D7); the registry allocates the message id and `received_at` | 2.2 (IMPLEMENTED) |
+| `email_headers`, `email_attachments`                                                                                                  | Written once MIME parsing exists                                                                                                                  | 3.1               |
+| `bounce_events`, `delivery_suppressions` (`reason hard_bounce`, `source bounce`)                                                      | Bounce handler on LMTP 10052 (postmaster copies of `postfix-outbound` DSNs, D13); never shortens or replaces a `manual`/`complaint` suppression   | 2.2 (IMPLEMENTED) |
 
 ### email-worker (scanning)
 
@@ -51,10 +54,10 @@ Status: all 63 tables are IMPLEMENTED (step 1.1 schema plus the steps 1.2 + 1.3 
 
 ### delivery-worker (delivery)
 
-| Tables                                                                | Notes                                             | Writing step |
-| --------------------------------------------------------------------- | ------------------------------------------------- | ------------ |
-| `email_deliveries`, `delivery_attempts`, `bounce_events`              | Postfix owns the retries; the worker records them | 2.3          |
-| `delivery_suppressions` (automatic, from hard bounces and complaints) |                                                   | 6.x          |
+| Tables                                                                      | Notes                                                          | Writing step |
+| --------------------------------------------------------------------------- | -------------------------------------------------------------- | ------------ |
+| `email_deliveries`, `delivery_attempts`; linking `bounce_events.message_id` | Postfix owns the retries; the worker records them              | 2.3          |
+| `delivery_suppressions` from complaints (feedback loops)                    | Hard-bounce suppressions are written by smtp-adapter since 2.2 | 6.x          |
 
 ### archive-worker and notification-worker
 
@@ -83,38 +86,38 @@ Status: all 63 tables are IMPLEMENTED (step 1.1 schema plus the steps 1.2 + 1.3 
 
 ## Read access and the replica
 
-| Service               | MySQL connection                               | Typical reads (all on the writer unless stated)                                                                                                                                                                              |
-| --------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `api`                 | Writer + **reader** (`PrismaReadService`)      | Lists, search, reports, dashboards and usage on the **reader**. Read-after-write paths, transactions and authorization right after a write on the writer                                                                     |
-| `smtp-adapter`        | Writer only                                    | `domains` (tenant resolution through `resolveActiveDomain` from `@email-gateway/database`, step 2.2), `domain_settings`, `domain_mail_servers`, `organizations` status, `organization_limits` (in-session, latency-critical) |
-| `email-worker`        | Writer only                                    | `email_messages`, `email_attachments`, `organization_features`, `policy_exceptions` (`skip_engine`), `yara_rules`, threat and reputation tables                                                                              |
-| `policy-engine`       | Writer only                                    | `email_scans`, `scan_engine_results`, `email_recipients`, policies and versions, `organization_settings`                                                                                                                     |
-| `delivery-worker`     | Writer only                                    | `delivery_routes`, `domain_mail_servers`, `delivery_suppressions`, `quarantine_release_logs`                                                                                                                                 |
-| `archive-worker`      | Writer only                                    | `archive_settings`, `archive_retention_policies`, `archive_legal_holds`                                                                                                                                                      |
-| `notification-worker` | Writer only (may adopt the reader in step 6.2) | `webhook_subscriptions`, `organization_settings`, `quarantine_messages` (digests)                                                                                                                                            |
+| Service               | MySQL connection                               | Typical reads (all on the writer unless stated)                                                                                                                                                                                                                                                                                                                                                                    |
+| --------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `api`                 | Writer + **reader** (`PrismaReadService`)      | Lists, search, reports, dashboards and usage on the **reader**. Read-after-write paths, transactions and authorization right after a write on the writer                                                                                                                                                                                                                                                           |
+| `smtp-adapter`        | Writer only                                    | `domains` (`resolveActiveDomain` in-session, `resolveDomainOwner` at ingestion), `domain_settings`, `domain_recipient_addresses`, `domain_dkim_keys` (status only), `domain_mail_servers` (`inbound_destination`), `smtp_connectors`, `smtp_connector_networks`, `organizations` status, `organization_limits`, `delivery_suppressions`, `message_outbox` (`domain.status.changed.v1` tail for cache invalidation) |
+| `email-worker`        | Writer only                                    | `email_messages`, `email_attachments`, `organization_features`, `policy_exceptions` (`skip_engine`), `yara_rules`, threat and reputation tables                                                                                                                                                                                                                                                                    |
+| `policy-engine`       | Writer only                                    | `email_scans`, `scan_engine_results`, `email_recipients`, policies and versions, `organization_settings`                                                                                                                                                                                                                                                                                                           |
+| `delivery-worker`     | Writer only                                    | `delivery_routes`, `domain_mail_servers`, `delivery_suppressions`, `quarantine_release_logs`                                                                                                                                                                                                                                                                                                                       |
+| `archive-worker`      | Writer only                                    | `archive_settings`, `archive_retention_policies`, `archive_legal_holds`                                                                                                                                                                                                                                                                                                                                            |
+| `notification-worker` | Writer only (may adopt the reader in step 6.2) | `webhook_subscriptions`, `organization_settings`, `quarantine_messages` (digests)                                                                                                                                                                                                                                                                                                                                  |
 
 The reader is IMPLEMENTED and registered only in `api` (`apps/api/src/app.module.ts`). No feature module uses it yet; feature steps adopt it. See [replication.md](../database/replication.md) for the modes and lag handling.
 
 ## Object storage
 
-| Bucket (`env`)                | Prefix                          | Writer                      | Readers                                                                                               | Status                                 |
-| ----------------------------- | ------------------------------- | --------------------------- | ----------------------------------------------------------------------------------------------------- | -------------------------------------- |
-| Mail (`S3_BUCKET_MAIL`)       | `org/{organizationId}/eml/`     | `smtp-adapter` (ingestion)  | `email-worker` (scan), `delivery-worker` (reinject), `api` (preview with `message:read_content`, 6.1) | Bucket IMPLEMENTED; writer PLANNED 3.1 |
-| Mail (`S3_BUCKET_MAIL`)       | `org/{organizationId}/part/`    | Ingestion or `email-worker` | `email-worker`, `api`                                                                                 | PLANNED 3.1, 4.2                       |
-| Archive (`S3_BUCKET_ARCHIVE`) | `org/{organizationId}/archive/` | `archive-worker`            | `api` (search, export, 8.1)                                                                           | Bucket IMPLEMENTED; writer PLANNED 8.1 |
+| Bucket (`env`)                | Prefix                          | Writer                      | Readers                                                                                               | Status                                        |
+| ----------------------------- | ------------------------------- | --------------------------- | ----------------------------------------------------------------------------------------------------- | --------------------------------------------- |
+| Mail (`S3_BUCKET_MAIL`)       | `org/{organizationId}/eml/`     | `smtp-adapter` (ingestion)  | `email-worker` (scan), `delivery-worker` (reinject), `api` (preview with `message:read_content`, 6.1) | IMPLEMENTED (writer since 2.2; key format D8) |
+| Mail (`S3_BUCKET_MAIL`)       | `org/{organizationId}/part/`    | Ingestion or `email-worker` | `email-worker`, `api`                                                                                 | PLANNED 3.1, 4.2                              |
+| Archive (`S3_BUCKET_ARCHIVE`) | `org/{organizationId}/archive/` | `archive-worker`            | `api` (search, export, 8.1)                                                                           | Bucket IMPLEMENTED; writer PLANNED 8.1        |
 
 Every key carries the organization prefix. Lifecycle: the Terraform module expires mail objects after 30 days by default, while message rows are kept 6 months; alignment is PLANNED 8.1.
 
 ## Queues
 
-| Queue                            | Producer of the bound event    | Consumer (owner)       | Status                                                       |
-| -------------------------------- | ------------------------------ | ---------------------- | ------------------------------------------------------------ |
-| `email-worker.message-received`  | `smtp-adapter` via the outbox  | `email-worker`         | Topology IMPLEMENTED; producer and consumer PLANNED 3.1, 4.1 |
-| `policy-engine.message-scanned`  | `email-worker` via the outbox  | `policy-engine`        | Topology IMPLEMENTED; PLANNED 4.1, 5.2                       |
-| `delivery-worker.policy-decided` | `policy-engine` via the outbox | `delivery-worker`      | Topology IMPLEMENTED; PLANNED 5.2, 2.3                       |
-| `archive-worker.policy-decided`  | `policy-engine` via the outbox | `archive-worker`       | Topology IMPLEMENTED; PLANNED 8.1                            |
-| `notification-worker.events`     | `policy-engine` via the outbox | `notification-worker`  | Topology IMPLEMENTED; PLANNED 6.2                            |
-| `<queue>.dlq` (each)             | RabbitMQ dead-lettering        | Operators, replay tool | IMPLEMENTED; replay PLANNED 3.2                              |
+| Queue                            | Producer of the bound event    | Consumer (owner)       | Status                                                                       |
+| -------------------------------- | ------------------------------ | ---------------------- | ---------------------------------------------------------------------------- |
+| `email-worker.message-received`  | `smtp-adapter` via the outbox  | `email-worker`         | Topology IMPLEMENTED; outbox rows written since 2.2; relay 3.2, consumer 4.1 |
+| `policy-engine.message-scanned`  | `email-worker` via the outbox  | `policy-engine`        | Topology IMPLEMENTED; PLANNED 4.1, 5.2                                       |
+| `delivery-worker.policy-decided` | `policy-engine` via the outbox | `delivery-worker`      | Topology IMPLEMENTED; PLANNED 5.2, 2.3                                       |
+| `archive-worker.policy-decided`  | `policy-engine` via the outbox | `archive-worker`       | Topology IMPLEMENTED; PLANNED 8.1                                            |
+| `notification-worker.events`     | `policy-engine` via the outbox | `notification-worker`  | Topology IMPLEMENTED; PLANNED 6.2                                            |
+| `<queue>.dlq` (each)             | RabbitMQ dead-lettering        | Operators, replay tool | IMPLEMENTED; replay PLANNED 3.2                                              |
 
 Each consumer owns its queue and its DLQ and asserts them at startup.
 
@@ -122,15 +125,25 @@ Each consumer owns its queue and its DLQ and asserts them at startup.
 
 Redis is never the source of truth (`noeviction`, AOF on locally, but anything in it must be rebuildable).
 
-| User            | Use                                           | Status               |
-| --------------- | --------------------------------------------- | -------------------- |
-| Rspamd          | Its own statistics and module state           | IMPLEMENTED (config) |
-| `smtp-adapter`  | Per-tenant and per-client rate-limit counters | PLANNED 2.2          |
-| `email-worker`  | Engine result and hash caches                 | PLANNED 4.1, 4.2     |
-| `api`           | API rate limits, short-lived locks            | PLANNED 6.1          |
-| `policy-engine` | Compiled policy cache                         | PLANNED 5.2          |
+| User            | Use                                                                                                                                                                                                                                                                                                    | Status               |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------- |
+| Rspamd          | Its own statistics and module state                                                                                                                                                                                                                                                                    | IMPLEMENTED (config) |
+| `smtp-adapter`  | `sa:dom:*`, `sa:route:*`, `sa:tls:*`, `sa:rcpt:*`, `sa:lim:*`, `sa:conn:*` caches (30–60 s TTL, rebuilt from MySQL); `sa:rl:*` fixed-window rate counters; `sa:authfail:*` SASL failure counters; `sa:inst:*` per-message size limits (15 min); `rep:{orgId}:{yyyymmdd}` reputation counters (40 days) | IMPLEMENTED 2.2      |
+| `api`           | Auth deny-lists, locks, DNS cache, `@RateLimit` counters                                                                                                                                                                                                                                               | IMPLEMENTED 1.2–2.1  |
+| `email-worker`  | Engine result and hash caches                                                                                                                                                                                                                                                                          | PLANNED 4.1, 4.2     |
+| `api`           | Per-organization API rate limits                                                                                                                                                                                                                                                                       | PLANNED 6.1          |
+| `policy-engine` | Compiled policy cache                                                                                                                                                                                                                                                                                  | PLANNED 5.2          |
 
-Key prefixes per service and per organization will be fixed by the first step that writes keys.
+Every smtp-adapter key starts with `sa:` (layout: `apps/smtp-adapter/src/tenancy/cache-keys.ts`); losing Redis loses only caches and counters, and the mail path fails closed (4xx) while Redis is down.
+
+### redis-dkim (step 2.2, ADR-0020)
+
+A separate Redis 7.4 without persistence that holds plaintext DKIM signing keys of active, outbound-enabled domains. It is **not** a source of truth: the api's `DkimSigningPublisher` rebuilds it from `domain_dkim_keys` (SecretBox ciphertext) every sync interval.
+
+| Key              | Writer (ACL user)     | Readers (ACL user)                                                                |
+| ---------------- | --------------------- | --------------------------------------------------------------------------------- |
+| `dkim_selectors` | `api` (`dkim-writer`) | `rspamd-outbound` (`dkim-reader`), smtp-adapter (`dkim-probe`, HEXISTS/HGET only) |
+| `dkim_keys`      | `api` (`dkim-writer`) | `rspamd-outbound` (`dkim-reader`) only                                            |
 
 ## Search and analytics
 

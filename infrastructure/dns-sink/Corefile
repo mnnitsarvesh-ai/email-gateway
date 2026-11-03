@@ -1,0 +1,8 @@
+# dns-sink: TEST-ONLY authoritative DNS (Compose profile smtp-test, step 2.2 §6/D17).
+# postfix-outbound uses it as its only upstream resolver, so locally the outbound MTA resolves
+# sink.test and NOTHING else: every other name is REFUSED (no forwarding, no recursion).
+sink.test:53 {
+    file /etc/coredns/sink.test.db
+    errors
+    log
+}

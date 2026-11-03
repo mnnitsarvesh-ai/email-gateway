@@ -1,0 +1,153 @@
+import {
+  DeleteObjectCommand,
+  GetObjectCommand,
+  ListObjectsV2Command,
+  S3Client,
+} from '@aws-sdk/client-s3';
+import { randomUUID } from 'node:crypto';
+import { type DomainStatus, type OrganizationStatus, PrismaClient } from '@email-gateway/database';
+import { Redis } from 'ioredis';
+import { requireEnv, s3Config } from './stack';
+
+/**
+ * Per-run fixtures with random names (organizations, domains) and cleanup of everything the
+ * adapter wrote for them: message rows, outbox rows, bounce rows, suppressions, S3 objects under
+ * their `org/{id}/` prefixes and reputation keys in Redis.
+ */
+export class Fixtures {
+  readonly prisma: PrismaClient = new PrismaClient({ datasourceUrl: requireEnv('DATABASE_URL') });
+  readonly redis = new Redis(requireEnv('REDIS_URL'), {
+    lazyConnect: false,
+    maxRetriesPerRequest: 2,
+  });
+  readonly s3: S3Client;
+  readonly bucket: string;
+  readonly suffix = randomUUID().slice(0, 8);
+  private planId: bigint | undefined;
+  readonly organizationIds: bigint[] = [];
+
+  constructor() {
+    const config = s3Config();
+    this.bucket = config.S3_BUCKET_MAIL;
+    this.s3 = new S3Client({
+      region: config.S3_REGION,
+      endpoint: config.S3_ENDPOINT,
+      forcePathStyle: config.S3_FORCE_PATH_STYLE,
+      credentials:
+        config.S3_ACCESS_KEY_ID && config.S3_SECRET_ACCESS_KEY
+          ? { accessKeyId: config.S3_ACCESS_KEY_ID, secretAccessKey: config.S3_SECRET_ACCESS_KEY }
+          : undefined,
+    });
+  }
+
+  /** `it-<suffix>-<label>.test` */
+  name(label: string): string {
+    return `it-${this.suffix}-${label}.test`;
+  }
+
+  async organization(label: string, status: OrganizationStatus = 'active'): Promise<bigint> {
+    if (this.planId === undefined) {
+      const plan = await this.prisma.organizationPlan.create({
+        data: {
+          code: `it-${this.suffix}`,
+          name: 'smtp-adapter integration',
+          defaultLimits: {},
+          defaultFeatures: {},
+        },
+      });
+      this.planId = plan.id;
+    }
+    const org = await this.prisma.organization.create({
+      data: {
+        slug: `it-${this.suffix}-${label}`,
+        name: `Adapter ${label}`,
+        planId: this.planId,
+        dataRegion: 'ap-south-1',
+        status,
+      },
+    });
+    this.organizationIds.push(org.id);
+    return org.id;
+  }
+
+  async domain(
+    organizationId: bigint,
+    name: string,
+    status: DomainStatus = 'active',
+  ): Promise<bigint> {
+    const row = await this.prisma.domain.create({
+      data: { organizationId, name, status, outboundEnabled: true },
+      select: { id: true },
+    });
+    return row.id;
+  }
+
+  async object(key: string): Promise<Buffer> {
+    const result = await this.s3.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }));
+    return Buffer.from(await result.Body!.transformToByteArray());
+  }
+
+  async objectKeys(organizationId: bigint): Promise<string[]> {
+    const keys: string[] = [];
+    let token: string | undefined;
+    do {
+      const page = await this.s3.send(
+        new ListObjectsV2Command({
+          Bucket: this.bucket,
+          Prefix: `org/${organizationId.toString()}/`,
+          ContinuationToken: token,
+        }),
+      );
+      for (const item of page.Contents ?? []) if (item.Key) keys.push(item.Key);
+      token = page.IsTruncated ? page.NextContinuationToken : undefined;
+    } while (token);
+    return keys;
+  }
+
+  async messageCount(organizationId: bigint): Promise<number> {
+    return this.prisma.messageIdentity.count({ where: { organizationId } });
+  }
+
+  async cleanup(): Promise<void> {
+    const ids = this.organizationIds;
+    try {
+      if (ids.length > 0) {
+        const where = { organizationId: { in: ids } };
+        await this.prisma.messageOutbox.deleteMany({ where });
+        await this.prisma.emailEvent.deleteMany({ where });
+        await this.prisma.emailRecipient.deleteMany({ where });
+        await this.prisma.emailMessage.deleteMany({ where });
+        await this.prisma.messageIdentity.deleteMany({ where });
+        await this.prisma.bounceEvent.deleteMany({ where });
+        await this.prisma.deliverySuppression.deleteMany({ where });
+        await this.prisma.domain.deleteMany({ where });
+        await this.prisma.organization.deleteMany({ where: { id: { in: ids } } });
+        for (const id of ids) {
+          for (const key of await this.objectKeys(id)) {
+            await this.s3.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
+          }
+          const repKeys = await this.redis.keys(`rep:${id.toString()}:*`);
+          if (repKeys.length > 0) await this.redis.del(...repKeys);
+        }
+      }
+      if (this.planId !== undefined) {
+        await this.prisma.organizationPlan.deleteMany({ where: { id: this.planId } });
+      }
+    } finally {
+      await this.prisma.$disconnect();
+      this.redis.disconnect();
+      this.s3.destroy();
+    }
+  }
+}
+
+/** The bytes smtp-server hands to onData for a message sent by `LmtpTestClient.data`. */
+export function wireBytes(message: string): Buffer {
+  const normalized = message.replace(/\r?\n/g, '\r\n');
+  return Buffer.from(normalized.endsWith('\r\n') ? normalized : `${normalized}\r\n`, 'utf8');
+}
+
+/** A random Postfix-style long queue id. */
+export function queueId(): string {
+  return `4Z${randomUUID().replaceAll('-', '').slice(0, 12).toUpperCase()}`;
+}

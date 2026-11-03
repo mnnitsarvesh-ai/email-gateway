@@ -12,13 +12,13 @@ flowchart LR
 
   subgraph edge["Edge: nothing accepted unchecked"]
     spool["Postfix disk spool<br/>IMPLEMENTED"]:::impl
-    polFail["Policy service down, slow or erroring<br/>DEFER_IF_PERMIT 4.3.5<br/>IMPLEMENTED"]:::impl
+    polFail["smtp-adapter down, slow or erroring<br/>(policy, socketmap, SASL, Redis, DB)<br/>4xx on both Postfix instances<br/>IMPLEMENTED"]:::impl
     milFail["Rspamd milter down<br/>milter_default_action tempfail<br/>IMPLEMENTED config"]:::impl
   end
 
   subgraph ingest["Ingestion: 250 only after commit"]
-    ingFail["S3 or MySQL writer failure<br/>LMTP 4xx, Postfix retries<br/>PLANNED 3.1"]:::planned
-    dedupe["Duplicate ingest_key<br/>250 without rewriting<br/>registry IMPLEMENTED, use PLANNED 3.1"]:::planned
+    ingFail["S3 or MySQL writer failure<br/>LMTP 451 per organization, Postfix retries<br/>IMPLEMENTED"]:::impl
+    dedupe["Duplicate ingest_key<br/>250 without rewriting<br/>IMPLEMENTED"]:::impl
   end
 
   subgraph async["Async pipeline: at-least-once, exactly-once effects"]
@@ -42,16 +42,16 @@ flowchart LR
     alerts["Alerts: reader mode, pmax rows, DLQ depth,<br/>outbox age, job failures<br/>PLANNED 10.3"]:::planned
   end
 
-  delivery["Outbound Postfix owns retries, backoff, DSNs<br/>PLANNED 2.2"]:::planned
+  delivery["postfix-outbound owns retries, backoff, DSNs;<br/>DSN copies → bounce_events, suppressions<br/>IMPLEMENTED"]:::impl
   ready["/health/ready 503 removes the pod from service<br/>IMPLEMENTED"]:::impl
 
   sender --> spool
   polFail -->|"4xx"| sender
   milFail -->|"4xx"| sender
-  spool -.->|"LMTP retry, P 2.2"| ingFail
-  ingFail -.->|"4xx keeps mail in spool"| spool
-  spool -.-> dedupe
-  dedupe -.-> outbox
+  spool -->|"LMTP retry"| ingFail
+  ingFail -->|"4xx keeps mail in spool"| spool
+  spool --> dedupe
+  dedupe --> outbox
   outbox -.->|"P 3.2"| confirms
   confirms --> quorum
   quorum --> once
@@ -72,21 +72,22 @@ flowchart LR
 
 ## Status
 
-| Mechanism                                                  | Status                   | Evidence or delivering step                                                                                                    |
-| ---------------------------------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
-| Policy service fail-closed (down, slow, throws, malformed) | IMPLEMENTED              | `main.cf` (`smtpd_policy_service_default_action`, 10 s timeout); `mail-plane.test.ts`, `policy-server.service.test.ts`         |
-| Milter fail-closed                                         | IMPLEMENTED              | `main.cf` (`milter_default_action = tempfail`). Configuration only; no automated test stops Rspamd mid-session                 |
-| Postfix spool                                              | IMPLEMENTED              | `postfix-spool` volume locally; EBS-backed ASG in production is PLANNED 10.1                                                   |
-| Ingestion `250 after commit`, `4xx` on failure             | PLANNED 3.1              |                                                                                                                                |
-| Registry de-duplication `(organization_id, ingest_key)`    | IMPLEMENTED (constraint) | `schema.test.ts` rejects a duplicate. Its use by ingestion is PLANNED 3.1                                                      |
-| Outbox table, relay                                        | PLANNED 3.2              | `message_outbox` (daily partitions, `(published_at, id)` index) exists                                                         |
-| Publisher confirms, manual acks, quorum queues, DLQs       | IMPLEMENTED              | `rabbitmq.module.ts`, `topology.ts`; `events.test.ts`, `rabbitmq-redis.test.ts`                                                |
-| `processOnce`                                              | IMPLEMENTED              | `idempotency.test.ts`, `mysql.test.ts` (once, duplicate, rollback)                                                             |
-| Crash-only RabbitMQ reconnect                              | IMPLEMENTED              | `RabbitMqService` exits on an unexpected `close`; restart policy in Compose and Kubernetes                                     |
-| Reader to writer fallback                                  | IMPLEMENTED              | `prisma-read.service.test.ts`, `replication.test.ts`                                                                           |
-| Readiness gating                                           | IMPLEMENTED              | `health.service.test.ts` (2 s per check, 503 on any failure)                                                                   |
-| Engine `error` / `timeout` outcomes                        | IMPLEMENTED (contract)   | `packages/security-contracts`; `quarantine_messages.reason` includes `engine_unavailable`. Use PLANNED 4.x, 5.2                |
-| DLQ replay, reconciliation, consumer pause                 | PLANNED 3.2              |                                                                                                                                |
-| Partition maintenance                                      | IMPLEMENTED              | `packages/database/src/partitioning/*.test.ts`, `tests/integration/partitions.test.ts`, CI migrations job (runs `apply` twice) |
-| Alerting                                                   | PLANNED 10.3             |                                                                                                                                |
-| Outbound retries and DSNs in Postfix                       | PLANNED 2.2              | ADR-0006                                                                                                                       |
+| Mechanism                                                  | Status                 | Evidence or delivering step                                                                                                                                                                      |
+| ---------------------------------------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Policy service fail-closed (down, slow, throws, malformed) | IMPLEMENTED            | `main.cf` (`smtpd_policy_service_default_action`, 10 s timeout); `mail-plane.test.ts`, `policy-server.service.test.ts`, `smtp-fail-closed.test.ts` (Redis down; adapter container stopped in CI) |
+| Socketmap / SASL fail-closed                               | IMPLEMENTED            | `TEMP Lookup failed` → `451 4.3.0`; SASL temporary failure → `454 4.7.0` (`smtp-fail-closed.test.ts`)                                                                                            |
+| Milter fail-closed                                         | IMPLEMENTED            | `main.cf` (`milter_default_action = tempfail`). Configuration only; no automated test stops Rspamd mid-session                                                                                   |
+| Postfix spool (both instances), survives restarts          | IMPLEMENTED            | `postfix-spool`, `postfix-outbound-spool` volumes; `smtp-durability.test.ts` suite 6. EBS-backed ASG in production is PLANNED 10.1                                                               |
+| Ingestion `250 after commit`, `451` on failure             | IMPLEMENTED            | `ingestion.service.test.ts`, `apps/smtp-adapter/integration/ingestion.test.ts`, `smtp-durability.test.ts` suite 5 (MinIO stopped)                                                                |
+| Registry de-duplication `(organization_id, ingest_key)`    | IMPLEMENTED            | `schema.test.ts`; ingestion dedupe in `smtp-durability.test.ts` suite 7                                                                                                                          |
+| Outbox table, relay                                        | PLANNED 3.2            | `message_outbox` (daily partitions, `(published_at, id)` index) exists                                                                                                                           |
+| Publisher confirms, manual acks, quorum queues, DLQs       | IMPLEMENTED            | `rabbitmq.module.ts`, `topology.ts`; `events.test.ts`, `rabbitmq-redis.test.ts`                                                                                                                  |
+| `processOnce`                                              | IMPLEMENTED            | `idempotency.test.ts`, `mysql.test.ts` (once, duplicate, rollback)                                                                                                                               |
+| Crash-only RabbitMQ reconnect                              | IMPLEMENTED            | `RabbitMqService` exits on an unexpected `close`; restart policy in Compose and Kubernetes                                                                                                       |
+| Reader to writer fallback                                  | IMPLEMENTED            | `prisma-read.service.test.ts`, `replication.test.ts`                                                                                                                                             |
+| Readiness gating                                           | IMPLEMENTED            | `health.service.test.ts` (2 s per check, 503 on any failure)                                                                                                                                     |
+| Engine `error` / `timeout` outcomes                        | IMPLEMENTED (contract) | `packages/security-contracts`; `quarantine_messages.reason` includes `engine_unavailable`. Use PLANNED 4.x, 5.2                                                                                  |
+| DLQ replay, reconciliation, consumer pause                 | PLANNED 3.2            |                                                                                                                                                                                                  |
+| Partition maintenance                                      | IMPLEMENTED            | `packages/database/src/partitioning/*.test.ts`, `tests/integration/partitions.test.ts`, CI migrations job (runs `apply` twice)                                                                   |
+| Alerting                                                   | PLANNED 10.3           |                                                                                                                                                                                                  |
+| Outbound retries and DSNs in Postfix, bounce processing    | IMPLEMENTED            | ADR-0006; `postfix-outbound` queue settings; `bounces.test.ts`, `smtp-outbound.test.ts` (hard bounce)                                                                                            |

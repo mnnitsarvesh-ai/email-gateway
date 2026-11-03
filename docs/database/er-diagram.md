@@ -22,8 +22,9 @@ flowchart LR
     roles
     permissions
   end
-  subgraph domain[Domains]
+  subgraph domain[Domains and SMTP connectors]
     domains
+    smtp_connectors
   end
   subgraph mail[Email metadata - partitioned]
     message_identities
@@ -52,6 +53,7 @@ flowchart LR
   organizations --> users
   organizations --> roles
   organizations --> domains
+  organizations --> smtp_connectors
   organizations --> email_policies
   organizations --> message_identities
   message_identities -.-> email_messages
@@ -202,11 +204,18 @@ erDiagram
   }
 ```
 
-## Domain management
+## Domain management and SMTP connectors
+
+Step 2.2 added the recipient allow-list (`domain_recipient_addresses`, D3) and the organization-level outbound connectors (`smtp_connectors` and `smtp_connector_networks`, D10). `created_by_user_id` on both (FK to `users`, `SET NULL`) is omitted from the diagram.
 
 ```mermaid
 erDiagram
   organizations ||--o{ domains : ""
+  domains ||--o{ domain_recipient_addresses : "CASCADE"
+  organizations ||--o{ domain_recipient_addresses : ""
+  organizations ||--o{ smtp_connectors : ""
+  smtp_connectors ||--o{ smtp_connector_networks : "CASCADE"
+  organizations ||--o{ smtp_connector_networks : ""
   domains ||--o{ domain_verifications : "CASCADE"
   domains ||--o{ domain_dns_records : "CASCADE"
   domains ||--o{ domain_dkim_keys : "CASCADE"
@@ -255,11 +264,38 @@ erDiagram
   domain_mail_servers {
     bigint id PK
     bigint domain_id FK
-    enum role
+    enum role "inbound_destination; outbound_source deprecated (2.2 D10)"
   }
   domain_settings {
     bigint id PK
     bigint domain_id FK,UK
+    enum recipient_validation "none, list, smtp_callout, ldap"
+  }
+  domain_recipient_addresses {
+    bigint id PK
+    bigint organization_id FK
+    bigint domain_id FK
+    varchar local_part "UQ with domain_id"
+  }
+  smtp_connectors {
+    bigint id PK
+    char public_id UK
+    bigint organization_id FK
+    varchar name "UQ with organization_id"
+    enum auth_type "sasl, source_ip, client_certificate"
+    enum status "active, disabled"
+    varchar sasl_username UK "sasl only"
+    varchar secret_hash "Argon2id, never returned"
+    char cert_fingerprint_sha256 UK "client_certificate only"
+  }
+  smtp_connector_networks {
+    bigint id PK
+    bigint organization_id FK
+    bigint connector_id FK
+    varchar cidr "UQ with connector_id"
+    tinyint ip_version "index with range_start"
+    varbinary range_start "4 or 16 bytes"
+    varbinary range_end "ranges never overlap"
   }
 ```
 
@@ -279,7 +315,7 @@ erDiagram
     bigint id PK "allocates the message id"
     char public_id UK
     bigint organization_id FK
-    varchar ingest_key "UQ with organization_id"
+    varchar ingest_key "UQ with organization_id; v2 + SHA-256 of mta, queue id, direction, content, recipient set"
     datetime received_at
   }
   email_messages {
@@ -287,7 +323,7 @@ erDiagram
     datetime received_at PK "PARTITIONED month"
     bigint organization_id
     enum status
-    varchar eml_object_key "S3 key, no content"
+    varchar eml_object_key "S3 key org/ORG/eml/YYYY/MM/DD/REF.eml, no content"
   }
   email_recipients {
     bigint id PK

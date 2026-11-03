@@ -23,8 +23,8 @@ flowchart LR
 
   senders -->|"SMTP :25 inbound<br/>IMPLEMENTED"| core
   core -.->|"deliver clean mail<br/>P 2.3"| tenantMail
-  tenantMail -.->|"outbound relay<br/>P 2.2"| core
-  core -.->|"SMTP delivery, DKIM-signed<br/>P 2.2"| recipients
+  tenantMail -->|"outbound relay: 587 SASL,<br/>25 connector, IMPLEMENTED"| core
+  core -->|"SMTP delivery, DKIM-signed<br/>(reinjection listener IMPLEMENTED;<br/>automatic delivery P 2.3)"| recipients
   tenantMail -.->|"connector setup, API sync<br/>P 8.2"| core
   admins -->|"HTTPS portal + /v1 API<br/>IMPLEMENTED: health, meta"| core
   endUsers -.->|"quarantine self-service<br/>P 5.3, 7.x"| core
@@ -39,18 +39,18 @@ flowchart LR
 
 ## Status
 
-| Element                         | Status       | Evidence or delivering step                                                                                                                                                  |
-| ------------------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Gateway platform (local stack)  | IMPLEMENTED  | `docker-compose.yml`; `tests/integration/*.test.ts`                                                                                                                          |
-| Inbound SMTP from senders       | IMPLEMENTED  | `infrastructure/postfix/main.cf`; `mail-plane.test.ts` (greeting, STARTTLS, relay denial, fail-closed policy). Accepted mail is discarded locally until LMTP ingestion (2.2) |
-| Admin access over HTTPS         | IMPLEMENTED  | Portal dashboard and `/v1/meta`, `/health/*` (`services.test.ts`). Authentication is PLANNED 1.3                                                                             |
-| DNS lookups by Rspamd           | IMPLEMENTED  | Rspamd's SPF/DKIM/DMARC modules with `local.d/options.inc` DNS settings; `mail-plane.test.ts` scans a message                                                                |
-| Delivery to tenant mail systems | PLANNED 2.3  | `delivery-worker` reinjection into outbound Postfix                                                                                                                          |
-| Outbound relay from tenants     | PLANNED 2.2  | Outbound listener, relay authentication via `domain_mail_servers` (`outbound_source`)                                                                                        |
-| Delivery to external recipients | PLANNED 2.2  | Outbound Postfix with DKIM signing                                                                                                                                           |
-| M365 / Google connectors        | PLANNED 8.2  | Connector configuration, validation and setup wizard                                                                                                                         |
-| End-user quarantine             | PLANNED 5.3  | Portal pages in 7.x                                                                                                                                                          |
-| Notifications and webhooks      | PLANNED 6.2  | `notification-worker`, `webhook_subscriptions`, `webhook_deliveries` (tables exist)                                                                                          |
-| Domain verification DNS checks  | PLANNED 2.1  | `domain_verifications`, `domain_dns_records` (tables exist)                                                                                                                  |
-| Threat intelligence feeds       | PLANNED      | `threat_indicators` and the reputation catalogs exist (step 1.1). Step 4.3 excludes external feeds; no execution-plan step ingests them yet                                  |
-| AWS hosting                     | PLANNED 10.1 | Only `infrastructure/terraform/modules/mail-storage` (S3 + KMS) exists and passes `terraform validate`; it has never been applied                                            |
+| Element                         | Status                 | Evidence or delivering step                                                                                                                                   |
+| ------------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Gateway platform (local stack)  | IMPLEMENTED            | `docker-compose.yml`; `tests/integration/*.test.ts`                                                                                                           |
+| Inbound SMTP from senders       | IMPLEMENTED            | `infrastructure/postfix/*`; `mail-plane.test.ts`, `smtp-inbound.test.ts` (tenant relay domains, recipient validation, durable LMTP ingestion into S3 + MySQL) |
+| Admin access over HTTPS         | IMPLEMENTED            | Portal dashboard and `/v1/meta`, `/health/*` (`services.test.ts`). Authentication is PLANNED 1.3                                                              |
+| DNS lookups by Rspamd           | IMPLEMENTED            | Rspamd's SPF/DKIM/DMARC modules with `local.d/options.inc` DNS settings; `mail-plane.test.ts` scans a message                                                 |
+| Delivery to tenant mail systems | PLANNED 2.3            | `delivery-worker` reinjection into outbound Postfix                                                                                                           |
+| Outbound relay from tenants     | IMPLEMENTED            | `postfix-outbound` 587/25 with SMTP connectors (SASL, source IP, client certificate); `smtp-outbound.test.ts`                                                 |
+| Delivery to external recipients | IMPLEMENTED (listener) | `postfix-outbound` 10027 with `rspamd-outbound` DKIM signing (`smtp-outbound.test.ts`); the delivery-worker that reinjects approved mail is PLANNED 2.3       |
+| M365 / Google connectors        | PLANNED 8.2            | Connector configuration, validation and setup wizard                                                                                                          |
+| End-user quarantine             | PLANNED 5.3            | Portal pages in 7.x                                                                                                                                           |
+| Notifications and webhooks      | PLANNED 6.2            | `notification-worker`, `webhook_subscriptions`, `webhook_deliveries` (tables exist)                                                                           |
+| Domain verification DNS checks  | PLANNED 2.1            | `domain_verifications`, `domain_dns_records` (tables exist)                                                                                                   |
+| Threat intelligence feeds       | PLANNED                | `threat_indicators` and the reputation catalogs exist (step 1.1). Step 4.3 excludes external feeds; no execution-plan step ingests them yet                   |
+| AWS hosting                     | PLANNED 10.1           | Only `infrastructure/terraform/modules/mail-storage` (S3 + KMS) exists and passes `terraform validate`; it has never been applied                             |

@@ -12,7 +12,7 @@
 ## Topology
 
 - **EKS** runs the stateless Node services and the admin portal (`infrastructure/kubernetes/base`). Each Deployment has liveness, readiness and startup probes, an HPA, a PDB, zone spread and a hardened security context.
-- **EC2 Auto Scaling Groups** run Postfix inbound and outbound, with EBS spools behind an NLB on port 25. The spool must outlive any pod.
+- **EC2 Auto Scaling Groups** run Postfix inbound and outbound, with EBS spools behind an NLB on port 25. The spool must outlive any pod. Details (listeners, security groups, static egress IPs, drain and instance refresh, DKIM signer and redis-dkim): [SMTP gateway deployment](smtp-gateway.md).
 - **Managed services** (via Terraform): RDS/Aurora MySQL 8.4 (writer plus a reader endpoint for the api's control-plane reads), ElastiCache Redis, Amazon MQ for RabbitMQ (or self-managed), Amazon OpenSearch, S3 + KMS, and ClickHouse (Cloud or EC2).
 
 ## Release flow
@@ -82,6 +82,10 @@ The api verifies customer domains and checks their MX, SPF, DKIM and DMARC recor
 - **Timeouts and cache.** `DNS_TIMEOUT_MS` per try × `DNS_TRIES` must fit in `DOMAIN_CHECK_DEADLINE_MS` (validated). Definitive answers are cached in Redis under `eg:dns:v1:*` for at most `DNS_CACHE_MAX_TTL_SECONDS` (`0` disables the cache); timeouts and `SERVFAIL` are never cached and never change a domain's status.
 - **Jobs and schedule:** `DOMAIN_JOBS_INTERVAL_SECONDS`, `DOMAIN_CHECK_BATCH_SIZE`, `DOMAIN_CHECK_CONCURRENCY`, `DOMAIN_RETRY_BASE_SECONDS` / `DOMAIN_RETRY_MAX_SECONDS` (backoff), `DOMAIN_RECHECK_INCOMPLETE_SECONDS`, `DOMAIN_RECHECK_INTERVAL_SECONDS`, `DOMAIN_VERIFICATION_TTL_DAYS`, `DOMAIN_VERIFICATION_LABEL` and `DKIM_ROTATION_OVERLAP_DAYS` have production defaults in the ConfigMap.
 - **Egress:** the api pods need outbound DNS (UDP and TCP 53) to the configured resolvers, or HTTPS to the DoH endpoint. No secret is added by this step; DKIM private keys are encrypted with the existing `data-encryption-key` ([ADR-0018](../architecture/adr/0018-dkim-key-custody.md)).
+
+### SMTP gateway (step 2.2)
+
+Inbound MX (`postfix`), outbound MTA (`postfix-outbound`: submission 587, connector relay 25, reinjection 10026/10027), the DKIM signer `rspamd-outbound` and its key store `redis-dkim`, and the test-only sinks of the `smtp-test` profile are described in [smtp-gateway.md](smtp-gateway.md), including every environment key, the fail-closed behaviour without smtp-adapter and the deviations from the design. New secrets: `REDIS_DKIM_WRITER_PASSWORD`, `REDIS_DKIM_READER_PASSWORD`, `REDIS_DKIM_PROBE_PASSWORD` (redis-dkim, rspamd-outbound; as URLs for the api and smtp-adapter) and `GATEWAY_TRACE_SECRET` (smtp-adapter).
 
 ## Terraform
 

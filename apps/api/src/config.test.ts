@@ -466,3 +466,63 @@ describe('loadApiConfig: domain onboarding and DNS (D16)', () => {
     ).toBe(0);
   });
 });
+
+describe('loadApiConfig: SMTP gateway control plane (step 2.2 §5)', () => {
+  it('applies the documented defaults and leaves the DKIM publisher unconfigured', () => {
+    const cfg = loadApiConfig(valid);
+    expect(cfg).toMatchObject({
+      DKIM_SIGNING_SYNC_ENABLED: true,
+      DKIM_SIGNING_SYNC_INTERVAL_SECONDS: 30,
+      SMTP_CONNECTORS_MAX_PER_ORGANIZATION: 50,
+      SMTP_CONNECTOR_ALLOW_NON_PUBLIC_NETWORKS: false,
+      DOMAIN_RECIPIENTS_MAX_PER_DOMAIN: 100000,
+    });
+    expect(cfg.REDIS_DKIM_URL).toBeUndefined();
+    expect(
+      loadApiConfig({ ...valid, SMTP_CONNECTOR_ALLOW_NON_PUBLIC_NETWORKS: 'true' })
+        .SMTP_CONNECTOR_ALLOW_NON_PUBLIC_NETWORKS,
+    ).toBe(true);
+  });
+
+  it('treats an empty REDIS_DKIM_URL as not configured', () => {
+    expect(loadApiConfig({ ...valid, REDIS_DKIM_URL: '  ' }).REDIS_DKIM_URL).toBeUndefined();
+  });
+
+  it('accepts redis:// and rediss:// URLs for the DKIM key store', () => {
+    for (const url of [
+      'redis://dkim-writer:pw@localhost:6391/0',
+      'rediss://w:pw@redis-dkim:6379',
+    ]) {
+      expect(loadApiConfig({ ...valid, REDIS_DKIM_URL: url }).REDIS_DKIM_URL).toBe(url);
+    }
+  });
+
+  it('rejects other DKIM key store URLs without echoing them', () => {
+    const message = rejection({ ...valid, REDIS_DKIM_URL: 'http://user:s3cr3t@host' });
+    expect(message).toContain('REDIS_DKIM_URL');
+    expect(message).not.toContain('s3cr3t');
+    expect(rejection({ ...valid, REDIS_DKIM_URL: 'not a url' })).toContain('REDIS_DKIM_URL');
+  });
+
+  it('can disable the periodic DKIM sync and enforces the interval floor', () => {
+    expect(
+      loadApiConfig({ ...valid, DKIM_SIGNING_SYNC_ENABLED: 'false' }).DKIM_SIGNING_SYNC_ENABLED,
+    ).toBe(false);
+    expect(rejection({ ...valid, DKIM_SIGNING_SYNC_INTERVAL_SECONDS: '4' })).toContain(
+      'DKIM_SIGNING_SYNC_INTERVAL_SECONDS',
+    );
+    expect(
+      loadApiConfig({ ...valid, DKIM_SIGNING_SYNC_INTERVAL_SECONDS: '5' })
+        .DKIM_SIGNING_SYNC_INTERVAL_SECONDS,
+    ).toBe(5);
+  });
+
+  it('requires positive connector and recipient caps', () => {
+    expect(rejection({ ...valid, SMTP_CONNECTORS_MAX_PER_ORGANIZATION: '0' })).toContain(
+      'SMTP_CONNECTORS_MAX_PER_ORGANIZATION',
+    );
+    expect(rejection({ ...valid, DOMAIN_RECIPIENTS_MAX_PER_DOMAIN: '0' })).toContain(
+      'DOMAIN_RECIPIENTS_MAX_PER_DOMAIN',
+    );
+  });
+});

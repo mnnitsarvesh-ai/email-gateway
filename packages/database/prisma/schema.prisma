@@ -180,6 +180,17 @@ enum RecipientValidation {
   ldap
 }
 
+enum SmtpConnectorAuthType {
+  sasl
+  source_ip
+  client_certificate
+}
+
+enum SmtpConnectorStatus {
+  active
+  disabled
+}
+
 enum MessageDirection {
   inbound
   outbound
@@ -540,6 +551,9 @@ model Organization {
   domainMxRecords          DomainMxRecord[]
   domainMailServers        DomainMailServer[]
   domainSettings           DomainSetting[]
+  domainRecipientAddresses DomainRecipientAddress[]
+  smtpConnectors           SmtpConnector[]
+  smtpConnectorNetworks    SmtpConnectorNetwork[]
   messageIdentities        MessageIdentity[]
   threatIndicators         ThreatIndicator[]
   yaraRules                YaraRule[]
@@ -674,11 +688,11 @@ model User {
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
 
-  userRoles               UserRole[]            @relation("UserRoleUser")
-  grantedUserRoles        UserRole[]            @relation("UserRoleGrantedBy")
+  userRoles               UserRole[]               @relation("UserRoleUser")
+  grantedUserRoles        UserRole[]               @relation("UserRoleGrantedBy")
   sessions                UserSession[]
-  tokens                  UserToken[]           @relation("UserTokenUser")
-  createdTokens           UserToken[]           @relation("UserTokenCreatedBy")
+  tokens                  UserToken[]              @relation("UserTokenUser")
+  createdTokens           UserToken[]              @relation("UserTokenCreatedBy")
   mfaRecoveryCodes        UserMfaRecoveryCode[]
   createdApiKeys          ApiKey[]
   updatedYaraRules        YaraRule[]
@@ -688,10 +702,12 @@ model User {
   createdSuppressions     DeliverySuppression[]
   quarantineMessages      QuarantineMessage[]
   quarantineActions       QuarantineAction[]
-  createdLegalHolds       ArchiveLegalHold[]    @relation("LegalHoldCreatedBy")
-  releasedLegalHolds      ArchiveLegalHold[]    @relation("LegalHoldReleasedBy")
+  createdLegalHolds       ArchiveLegalHold[]       @relation("LegalHoldCreatedBy")
+  releasedLegalHolds      ArchiveLegalHold[]       @relation("LegalHoldReleasedBy")
   createdWebhooks         WebhookSubscription[]
   updatedSystemSettings   SystemSetting[]
+  createdSmtpConnectors   SmtpConnector[]
+  createdRecipients       DomainRecipientAddress[]
 
   @@unique([organizationId, email])
   @@index([organizationId, status])
@@ -940,6 +956,7 @@ model Domain {
   mailServers    DomainMailServer[]
   settings       DomainSetting?
   deliveryRoutes DeliveryRoute[]
+  recipients     DomainRecipientAddress[]
 
   @@unique([organizationId, liveName])
   @@index([name])
@@ -1067,10 +1084,13 @@ model DomainMailServer {
   id             BigInt         @id @default(autoincrement()) @db.UnsignedBigInt
   organizationId BigInt         @map("organization_id") @db.UnsignedBigInt
   domainId       BigInt         @map("domain_id") @db.UnsignedBigInt
+  /// `inbound_destination`: the tenant's own mail server that approved inbound mail is delivered
+  /// to (transport and TLS policy maps, step 2.2 D11). `outbound_source` is DEPRECATED (step 2.2
+  /// D10): never read by the mail path; outbound senders are organization-level `smtp_connectors`.
   role           MailServerRole
   host           String?        @db.VarChar(255)
   port           Int            @default(25) @db.UnsignedSmallInt
-  /// Allowed outbound source network.
+  /// Source network of a deprecated `outbound_source` row (never read; see `role`).
   ipCidr         String?        @map("ip_cidr") @db.VarChar(64)
   priority       Int            @default(10) @db.UnsignedSmallInt
   tlsMode        TlsMode        @default(opportunistic) @map("tls_mode")
@@ -1103,6 +1123,83 @@ model DomainSetting {
   @@map("domain_settings")
 }
 
+/// Recipient allow-list entry of a domain (step 2.2 D3). Used when
+/// domain_settings.recipient_validation = list (authoritative when reject_unknown_recipients,
+/// monitor-only otherwise). The domain part is never stored: rows belong to the domain.
+model DomainRecipientAddress {
+  id              BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId  BigInt   @map("organization_id") @db.UnsignedBigInt
+  domainId        BigInt   @map("domain_id") @db.UnsignedBigInt
+  /// Lower-cased, NFC, 1..64 octets.
+  localPart       String   @map("local_part") @db.VarChar(64)
+  createdByUserId BigInt?  @map("created_by_user_id") @db.UnsignedBigInt
+  createdAt       DateTime @default(now()) @map("created_at") @db.DateTime(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  domain       Domain       @relation(fields: [domainId], references: [id], onDelete: Cascade)
+  createdBy    User?        @relation(fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([domainId, localPart])
+  @@index([organizationId])
+  @@map("domain_recipient_addresses")
+}
+
+/// Outbound relay connector of an organization (step 2.2 D10). Exactly one auth method.
+/// Disabled connectors and connectors of non-active organizations never authorize anything.
+model SmtpConnector {
+  id                    BigInt                @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId              String                @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId        BigInt                @map("organization_id") @db.UnsignedBigInt
+  name                  String                @db.VarChar(128)
+  authType              SmtpConnectorAuthType @map("auth_type")
+  status                SmtpConnectorStatus   @default(active)
+  /// sasl only; generated (`egc-` + 20 lower-case base32 characters), globally unique.
+  saslUsername          String?               @unique @map("sasl_username") @db.VarChar(64)
+  /// sasl only; Argon2id PHC string. Never returned or logged.
+  secretHash            String?               @map("secret_hash") @db.VarChar(255)
+  secretSetAt           DateTime?             @map("secret_set_at") @db.DateTime(3)
+  /// client_certificate only; lower-case hex SHA-256 of the DER certificate, no colons.
+  certFingerprintSha256 String?               @unique @map("cert_fingerprint_sha256") @db.Char(64)
+  /// Refuse sessions without TLS (source_ip; implied for sasl and client_certificate).
+  requireTls            Boolean               @default(true) @map("require_tls")
+  createdByUserId       BigInt?               @map("created_by_user_id") @db.UnsignedBigInt
+  createdAt             DateTime              @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt             DateTime              @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization Organization           @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  createdBy    User?                  @relation(fields: [createdByUserId], references: [id], onDelete: SetNull)
+  networks     SmtpConnectorNetwork[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId, status])
+  @@map("smtp_connectors")
+}
+
+/// Allowed client network of a connector. Ranges never overlap across all connectors, in any
+/// organization (enforced by the api under a MySQL named lock), so an IP maps to at most one
+/// connector. Lookup: WHERE ip_version = ? AND range_start <= ? ORDER BY range_start DESC
+/// LIMIT 1, then check range_end >= ?.
+model SmtpConnectorNetwork {
+  id             BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId BigInt   @map("organization_id") @db.UnsignedBigInt
+  connectorId    BigInt   @map("connector_id") @db.UnsignedBigInt
+  /// Canonical CIDR text (network address, prefix).
+  cidr           String   @db.VarChar(49)
+  /// 4 or 6.
+  ipVersion      Int      @map("ip_version") @db.UnsignedTinyInt
+  /// First and last address, 4 or 16 bytes big-endian, for range lookups.
+  rangeStart     Bytes    @map("range_start") @db.VarBinary(16)
+  rangeEnd       Bytes    @map("range_end") @db.VarBinary(16)
+  createdAt      DateTime @default(now()) @map("created_at") @db.DateTime(3)
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  connector    SmtpConnector @relation(fields: [connectorId], references: [id], onDelete: Cascade)
+
+  @@unique([connectorId, cidr])
+  @@index([ipVersion, rangeStart])
+  @@map("smtp_connector_networks")
+}
+
 // ---------------------------------------------------------------------------------------------
 // 3.4 Email metadata
 // ---------------------------------------------------------------------------------------------
@@ -1114,7 +1211,14 @@ model MessageIdentity {
   id             BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
   publicId       String   @unique @default(uuid(7)) @map("public_id") @db.Char(36)
   organizationId BigInt   @map("organization_id") @db.UnsignedBigInt
-  /// Opaque ingestion idempotency key (defined in step 3.1).
+  /// Ingestion idempotency key (step 2.2 D7, §12.7): `v2:` + lower-case hex SHA-256 of
+  /// `{mtaId}|{queueId}|{direction}|{contentSha256}|{recipientSetSha256}` (mtaId = the LMTP
+  /// client's LHLO name, queueId = the Postfix queue id from XFORWARD IDENT, direction =
+  /// inbound|outbound, contentSha256 = hex SHA-256 of the EML bytes, recipientSetSha256 = hex
+  /// SHA-256 of this organization's accepted recipients, lower-cased, de-duplicated, sorted,
+  /// LF-joined); 67 characters. A redelivery of the same queue file to the same recipients hits
+  /// the unique key and is answered as a duplicate; a retry of other recipients is stored.
+  /// `v1:` keys (without the recipient set) predate the step 2.2 review fix.
   ingestKey      String   @map("ingest_key") @db.VarChar(128)
   receivedAt     DateTime @map("received_at") @db.DateTime(3)
   createdAt      DateTime @default(now()) @map("created_at") @db.DateTime(3)
@@ -1144,6 +1248,10 @@ model EmailMessage {
   sizeBytes         Int              @map("size_bytes") @db.UnsignedInt
   recipientCount    Int              @map("recipient_count") @db.UnsignedSmallInt
   attachmentCount   Int              @default(0) @map("attachment_count") @db.UnsignedSmallInt
+  /// S3 key of the raw EML (step 2.2 D8):
+  /// `org/{organizationId}/eml/{yyyy}/{mm}/{dd}/{objectRef}.eml`, UTC date of the ingestion
+  /// attempt, objectRef = first 32 hex characters of SHA-256 of
+  /// `{mtaId}|{queueId}|{direction}|{organizationId}`. Consumers read it, never derive it.
   emlObjectKey      String           @map("eml_object_key") @db.VarChar(512)
   emlSha256         String           @map("eml_sha256") @db.Char(64)
   clientIp          String?          @map("client_ip") @db.VarChar(45)

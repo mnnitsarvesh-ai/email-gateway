@@ -119,13 +119,17 @@ jobs:
         run: |
           kubectl kustomize infrastructure/kubernetes/overlays/saas > /dev/null
           kubectl kustomize infrastructure/kubernetes/overlays/dedicated > /dev/null
+      # Every profile, including the test-only SMTP sinks (smtp-test). Rendering only: the
+      # analytics/observability profiles are never started together with apps.
       - name: Validate docker-compose.yml
-        run: cp .env.example .env && docker compose --profile apps --profile analytics --profile observability config -q
+        run: >-
+          cp .env.example .env && docker compose --profile apps --profile analytics
+          --profile observability --profile smtp-test config -q
 
   stack:
     name: Docker Compose stack + integration tests
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 50
     needs: [quality]
     steps:
       - uses: actions/checkout@v5
@@ -139,16 +143,32 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Generate ephemeral credentials
         run: pnpm env:init
-      - name: Start infrastructure and application services
-        run: docker compose --profile apps up -d --build --wait --wait-timeout 900
+      # .env.example's SMTP_ADAPTER_HOST=smtp-adapter: both Postfix instances reach the adapter
+      # container of the apps profile (locally it may be host.docker.internal instead).
+      - name: Check the mail plane targets the adapter container
+        run: grep -qx 'SMTP_ADAPTER_HOST=smtp-adapter' .env
+      # apps + smtp-test (mail-sink, dns-sink, smtp-tools): the stack SMTP suites
+      # (tests/integration/smtp-*.test.ts) FAIL without them, so they run in every CI build.
+      - name: Start infrastructure, application services and SMTP test sinks
+        run: docker compose --profile apps --profile smtp-test up -d --build --wait --wait-timeout 900
       # The api integration tests need the catalog (plans, permissions, platform organization).
       - name: Seed catalog
         run: pnpm db:seed
+      # DKIM keys of the SMTP suites are published by running the api's one-shot publisher
+      # (`node dist/modules/domains/cli/dkim-sync.js`) inside the running api container
+      # (tests/integration/support/smtp-fixtures.ts); the periodic publisher keeps running too.
       - name: Integration tests
         run: pnpm test:integration
       - name: Service logs
         if: failure()
-        run: docker compose --profile apps logs --no-color --tail 200
+        run: docker compose --profile apps --profile smtp-test logs --no-color --tail 200
+      - name: Mail plane logs and queues
+        if: failure()
+        run: |
+          docker compose --profile apps logs --no-color --tail 1000 postfix postfix-outbound smtp-adapter rspamd-outbound redis-dkim
+          docker compose --profile smtp-test logs --no-color --tail 300 mail-sink dns-sink
+          docker compose exec -T postfix postqueue -j || true
+          docker compose exec -T postfix-outbound postqueue -j || true
       - name: Tear down
         if: always()
-        run: docker compose --profile apps down -v
+        run: docker compose --profile apps --profile smtp-test down -v

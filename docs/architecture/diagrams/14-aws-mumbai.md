@@ -21,7 +21,7 @@ flowchart TB
       end
       subgraph appnet["Private app subnets"]
         pfIn["Postfix inbound ASG<br/>EBS spool, 3 AZs<br/>PLANNED 10.1 mta module"]:::planned
-        pfOut["Postfix outbound ASG<br/>EBS spool, static egress IPs + PTR<br/>PLANNED 2.2, 10.1"]:::planned
+        pfOut["Postfix outbound ASG<br/>EBS spool, static egress IPs + PTR<br/>PLANNED 10.1 (image IMPLEMENTED 2.2)"]:::planned
         eks["EKS cluster, managed node groups, IRSA<br/>runs the Kustomize base (IMPLEMENTED manifests)<br/>PLANNED 10.1 eks module"]:::planned
         eso["External Secrets operator<br/>PLANNED 10.1"]:::planned
       end

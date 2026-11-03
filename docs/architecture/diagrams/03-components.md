@@ -25,11 +25,17 @@ flowchart TB
   subgraph smtp["smtp-adapter"]
     polSrv["PolicyServerService<br/>TCP :10040, in-order replies,<br/>tempfail on error"]:::impl
     polProto["policy-protocol<br/>parser 16 KiB cap, formatResponse"]:::impl
-    polDec["PolicyDecisionService<br/>answers DUNNO"]:::impl
-    tenRes["Tenant resolution, recipient<br/>validation, rate limits<br/>PLANNED 2.2"]:::planned
-    lmtpL["LMTP listener<br/>PLANNED 2.2"]:::planned
-    ingest["Ingestion: MIME, S3, registry,<br/>message txn, outbox<br/>PLANNED 3.1"]:::planned
-    smtpInfra["DatabaseModule writer, RedisModule,<br/>HealthModule: mysql, redis, policy-listener"]:::impl
+    polDec["PolicyDecisionService<br/>contexts inbound, submission, relay,<br/>reinject-inbound, reinject-outbound"]:::impl
+    tenRes["Tenancy: DomainPolicyService (Redis cache),<br/>RecipientValidator, TenantLimits,<br/>DomainCacheInvalidator (outbox tail)"]:::impl
+    rate["FixedWindowLimiter (Lua),<br/>ReputationRecorder"]:::impl
+    sockSrv["SocketmapServerService :10041<br/>relay_domain, transport, tls_policy,<br/>relay_client, relay_ccert"]:::impl
+    sasl["SaslServerService :10042<br/>Dovecot auth protocol,<br/>ConnectorAuthService (Argon2id)"]:::impl
+    conn["ConnectorResolver, Suppressions,<br/>DkimReadiness (redis-dkim probe)"]:::impl
+    lmtpL["LMTP listeners :10050 / :10051<br/>(smtp-server, XFORWARD)"]:::impl
+    ingest["IngestionService: S3 stream + copy,<br/>header scan, ingest key, loop guard,<br/>txn per organization, outbox"]:::impl
+    mime["MIME parsing, header and<br/>attachment rows PLANNED 3.1"]:::planned
+    bounce["BounceNoticeService :10052<br/>DSN parser, bounce_events,<br/>suppressions"]:::impl
+    smtpInfra["DatabaseModule writer, RedisModule, S3Module,<br/>MetricsModule /metrics, HealthModule:<br/>mysql, redis, s3, 6 listeners"]:::impl
   end
 
   subgraph ew["email-worker"]
@@ -62,8 +68,14 @@ flowchart TB
 
   polSrv --> polProto
   polSrv --> polDec
-  polDec -.->|"P 2.2"| tenRes
-  lmtpL -.->|"P 3.1"| ingest
+  polDec --> tenRes
+  polDec --> rate
+  polDec --> conn
+  sockSrv --> tenRes
+  sockSrv --> conn
+  sasl --> conn
+  lmtpL --> ingest
+  ingest -.->|"P 3.1"| mime
   ewCons -.-> ewEng
   ewEng -.-> ewAgg
   peEval -.-> peQ

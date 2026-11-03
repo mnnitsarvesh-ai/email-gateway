@@ -8,5 +8,6 @@ export * from './partitioning';
 export * from './migrations';
 // Seed catalog and runners (D7).
 export * from './seed';
-// Domain-name normalization (step 2.1 D2) and mail-path tenant resolution (D13).
+// Domain-name normalization (step 2.1 D2), mail-path tenant resolution (D13) and post-queue
+// owner resolution (step 2.2 D7).
 export * from './domains';

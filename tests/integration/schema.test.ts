@@ -12,8 +12,9 @@ import { stack } from './support/env';
  * Asserts the physical MySQL schema produced by the migrations matches the data model in
  * docs/plan/steps/01-database.md (section 3) and ADR-0014: tables, partitioning, the absence of
  * foreign keys on partitioned tables, the tenancy column and the identity registry's unique key;
- * plus the identity/tenancy changes of docs/plan/steps/02-tenants-auth-rbac.md (D10) and the
- * domain onboarding changes of docs/plan/steps/03-domain-onboarding.md (§3).
+ * plus the identity/tenancy changes of docs/plan/steps/02-tenants-auth-rbac.md (D10), the
+ * domain onboarding changes of docs/plan/steps/03-domain-onboarding.md (§3) and the SMTP gateway
+ * tables of docs/plan/steps/04-smtp-gateway.md (§3).
  */
 const prisma = new PrismaClient({ datasourceUrl: stack.databaseUrl() });
 
@@ -86,6 +87,9 @@ const TENANT_OWNED = [
   'domain_mx_records',
   'domain_mail_servers',
   'domain_settings',
+  'domain_recipient_addresses',
+  'smtp_connectors',
+  'smtp_connector_networks',
   'message_identities',
   'email_messages',
   'email_recipients',
@@ -124,12 +128,12 @@ const TENANT_OWNED = [
 const ALL_TABLES = [...NOT_TENANT_OWNED, ...TENANT_OWNED];
 
 describe('MySQL schema', () => {
-  it('has exactly the 63 data-model tables plus _prisma_migrations', async () => {
+  it('has exactly the 66 data-model tables plus _prisma_migrations', async () => {
     const rows = await prisma.$queryRaw<{ name: string }[]>`
       SELECT TABLE_NAME AS name FROM information_schema.TABLES
       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'`;
-    expect(ALL_TABLES).toHaveLength(63);
-    expect(new Set(ALL_TABLES).size).toBe(63);
+    expect(ALL_TABLES).toHaveLength(66);
+    expect(new Set(ALL_TABLES).size).toBe(66);
     expect(rows.map((r) => r.name).sort()).toEqual([...ALL_TABLES, '_prisma_migrations'].sort());
   });
 
@@ -461,6 +465,8 @@ async function scratchOrganizations(count: number) {
   const ids = organizations.map((o) => o.id);
   const cleanup = async () => {
     await prisma.threatIndicator.deleteMany({ where: { organizationId: { in: ids } } });
+    // Networks cascade with their connector; recipient addresses cascade with their domain.
+    await prisma.smtpConnector.deleteMany({ where: { organizationId: { in: ids } } });
     await prisma.domain.deleteMany({ where: { organizationId: { in: ids } } });
     await prisma.organization.deleteMany({ where: { id: { in: ids } } });
     await prisma.organizationPlan.deleteMany({ where: { id: plan.id } });
@@ -837,6 +843,218 @@ describe('domain onboarding schema (step 2.1, §3)', () => {
       WHERE k.TABLE_SCHEMA = DATABASE() AND k.TABLE_NAME = 'domain_dns_records'
         AND k.COLUMN_NAME = 'dkim_key_id'`;
     expect(rows).toEqual([{ referencedTable: 'domain_dkim_keys', deleteRule: 'SET NULL' }]);
+  });
+});
+
+describe('SMTP gateway schema (step 2.2, §3)', () => {
+  /** 4- or 16-byte big-endian address, as the api stores range_start/range_end. */
+  const ipv4 = (address: string) => Buffer.from(address.split('.').map((part) => Number(part)));
+
+  it('has the step 2.2 unique keys and indexes', async () => {
+    const connectors = await indexColumnSets('smtp_connectors');
+    for (const key of ['public_id', 'sasl_username', 'cert_fingerprint_sha256']) {
+      expect(connectors, key).toContainEqual(expect.objectContaining({ key, unique: true }));
+    }
+    expect(connectors).toContainEqual(
+      expect.objectContaining({ key: 'organization_id,name', unique: true }),
+    );
+    expect(connectors).toContainEqual(
+      expect.objectContaining({ key: 'organization_id,status', unique: false }),
+    );
+
+    const networks = await indexColumnSets('smtp_connector_networks');
+    expect(networks).toContainEqual(
+      expect.objectContaining({ key: 'connector_id,cidr', unique: true }),
+    );
+    expect(networks).toContainEqual(
+      expect.objectContaining({ key: 'ip_version,range_start', unique: false }),
+    );
+
+    const recipients = await indexColumnSets('domain_recipient_addresses');
+    expect(recipients).toContainEqual(
+      expect.objectContaining({ key: 'domain_id,local_part', unique: true }),
+    );
+    expect(recipients).toContainEqual(
+      expect.objectContaining({ key: 'organization_id', unique: false }),
+    );
+  });
+
+  it('declares the column types of the data model', async () => {
+    const cols = await columns([
+      'smtp_connectors',
+      'smtp_connector_networks',
+      'domain_recipient_addresses',
+    ]);
+    const type = (table: string, column: string) => cols.get(`${table}.${column}`)?.columnType;
+    expect(type('smtp_connectors', 'auth_type')).toBe(
+      "enum('sasl','source_ip','client_certificate')",
+    );
+    expect(type('smtp_connectors', 'status')).toBe("enum('active','disabled')");
+    expect(type('smtp_connectors', 'cert_fingerprint_sha256')).toBe('char(64)');
+    expect(type('smtp_connectors', 'secret_hash')).toBe('varchar(255)');
+    expect(type('smtp_connector_networks', 'range_start')).toBe('varbinary(16)');
+    expect(type('smtp_connector_networks', 'range_end')).toBe('varbinary(16)');
+    expect(type('smtp_connector_networks', 'ip_version')).toBe('tinyint unsigned');
+    expect(type('smtp_connector_networks', 'cidr')).toBe('varchar(49)');
+    expect(type('domain_recipient_addresses', 'local_part')).toBe('varchar(64)');
+  });
+
+  it('cascades networks with their connector and recipients with their domain; restricts organizations', async () => {
+    const rows = await prisma.$queryRaw<
+      { tableName: string; columnName: string; referencedTable: string; deleteRule: string }[]
+    >`
+      SELECT k.TABLE_NAME AS tableName, k.COLUMN_NAME AS columnName,
+             k.REFERENCED_TABLE_NAME AS referencedTable, r.DELETE_RULE AS deleteRule
+      FROM information_schema.KEY_COLUMN_USAGE k
+      JOIN information_schema.REFERENTIAL_CONSTRAINTS r
+        ON r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+      WHERE k.TABLE_SCHEMA = DATABASE()
+        AND k.TABLE_NAME IN ('smtp_connectors', 'smtp_connector_networks', 'domain_recipient_addresses')
+      ORDER BY k.TABLE_NAME, k.COLUMN_NAME`;
+    expect(rows.map((r) => [r.tableName, r.columnName, r.referencedTable, r.deleteRule])).toEqual([
+      ['domain_recipient_addresses', 'created_by_user_id', 'users', 'SET NULL'],
+      ['domain_recipient_addresses', 'domain_id', 'domains', 'CASCADE'],
+      ['domain_recipient_addresses', 'organization_id', 'organizations', 'RESTRICT'],
+      ['smtp_connector_networks', 'connector_id', 'smtp_connectors', 'CASCADE'],
+      ['smtp_connector_networks', 'organization_id', 'organizations', 'RESTRICT'],
+      ['smtp_connectors', 'created_by_user_id', 'users', 'SET NULL'],
+      ['smtp_connectors', 'organization_id', 'organizations', 'RESTRICT'],
+    ]);
+  });
+
+  it('keeps SASL usernames and certificate fingerprints globally unique, NULLs never collide', async () => {
+    const { suffix, ids, cleanup } = await scratchOrganizations(2);
+    const [a, b] = ids as [bigint, bigint];
+    const username = `egc-it${suffix}`;
+    const fingerprint = randomUUID().replaceAll('-', '').padEnd(64, '0');
+    try {
+      await prisma.smtpConnector.create({
+        data: { organizationId: a, name: 'sasl', authType: 'sasl', saslUsername: username },
+      });
+      await expect(
+        prisma.smtpConnector.create({
+          data: { organizationId: b, name: 'sasl', authType: 'sasl', saslUsername: username },
+        }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+      await prisma.smtpConnector.create({
+        data: {
+          organizationId: a,
+          name: 'cert',
+          authType: 'client_certificate',
+          certFingerprintSha256: fingerprint,
+        },
+      });
+      await expect(
+        prisma.smtpConnector.create({
+          data: {
+            organizationId: b,
+            name: 'cert',
+            authType: 'client_certificate',
+            certFingerprintSha256: fingerprint,
+          },
+        }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+      // Several source_ip connectors without a username or fingerprint; names unique per org.
+      await prisma.smtpConnector.create({
+        data: { organizationId: a, name: 'ip-1', authType: 'source_ip' },
+      });
+      const second = await prisma.smtpConnector.create({
+        data: { organizationId: a, name: 'ip-2', authType: 'source_ip' },
+      });
+      expect(second).toMatchObject({ status: 'active', requireTls: true, saslUsername: null });
+      await expect(
+        prisma.smtpConnector.create({
+          data: { organizationId: a, name: 'ip-1', authType: 'source_ip' },
+        }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+      await prisma.smtpConnector.create({
+        data: { organizationId: b, name: 'ip-1', authType: 'source_ip' },
+      });
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('answers the design range lookup from (ip_version, range_start) and cascades networks', async () => {
+    const { ids, cleanup } = await scratchOrganizations(1);
+    const organizationId = ids[0]!;
+    // Test-only 240.0.0.0/4 space (reserved), so no real connector row can interfere.
+    try {
+      const connector = await prisma.smtpConnector.create({
+        data: { organizationId, name: 'ranges', authType: 'source_ip' },
+      });
+      const network = (cidr: string, start: string, end: string) => ({
+        organizationId,
+        connectorId: connector.id,
+        cidr,
+        ipVersion: 4,
+        rangeStart: ipv4(start),
+        rangeEnd: ipv4(end),
+      });
+      await prisma.smtpConnectorNetwork.createMany({
+        data: [
+          network('240.10.0.0/16', '240.10.0.0', '240.10.255.255'),
+          network('240.20.0.0/24', '240.20.0.0', '240.20.0.255'),
+        ],
+      });
+      await expect(
+        prisma.smtpConnectorNetwork.create({
+          data: network('240.10.0.0/16', '240.10.0.0', '240.10.255.255'),
+        }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+
+      const lookup = async (ip: string) => {
+        const rows = await prisma.$queryRaw<{ cidr: string; rangeEnd: Uint8Array }[]>`
+          SELECT cidr, range_end AS rangeEnd FROM smtp_connector_networks
+          WHERE ip_version = 4 AND range_start <= ${ipv4(ip)}
+            AND connector_id = ${connector.id}
+          ORDER BY range_start DESC LIMIT 1`;
+        const row = rows[0];
+        return row && Buffer.compare(Buffer.from(row.rangeEnd), ipv4(ip)) >= 0 ? row.cidr : null;
+      };
+      expect(await lookup('240.10.3.4')).toBe('240.10.0.0/16');
+      expect(await lookup('240.20.0.255')).toBe('240.20.0.0/24');
+      expect(await lookup('240.20.1.0')).toBeNull();
+      expect(await lookup('240.9.255.255')).toBeNull();
+
+      await prisma.smtpConnector.delete({ where: { id: connector.id } });
+      expect(await prisma.smtpConnectorNetwork.count({ where: { organizationId } })).toBe(0);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('keeps recipient local parts unique per domain and removes them with the domain', async () => {
+    const { suffix, ids, cleanup } = await scratchOrganizations(1);
+    const organizationId = ids[0]!;
+    try {
+      const one = await prisma.domain.create({
+        data: { organizationId, name: `it-${suffix}.rcpt-one.test` },
+      });
+      const two = await prisma.domain.create({
+        data: { organizationId, name: `it-${suffix}.rcpt-two.test` },
+      });
+      await prisma.domainRecipientAddress.create({
+        data: { organizationId, domainId: one.id, localPart: 'alice' },
+      });
+      await expect(
+        prisma.domainRecipientAddress.create({
+          data: { organizationId, domainId: one.id, localPart: 'alice' },
+        }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+      await prisma.domainRecipientAddress.create({
+        data: { organizationId, domainId: two.id, localPart: 'alice' },
+      });
+      const found = await prisma.domainRecipientAddress.findUnique({
+        where: { domainId_localPart: { domainId: one.id, localPart: 'alice' } },
+      });
+      expect(found?.organizationId).toBe(organizationId);
+
+      await prisma.domain.delete({ where: { id: one.id } });
+      expect(await prisma.domainRecipientAddress.count({ where: { organizationId } })).toBe(1);
+    } finally {
+      await cleanup();
+    }
   });
 });
 

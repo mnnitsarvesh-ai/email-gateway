@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {
+  DEMO,
   PERMISSIONS,
   PLATFORM_ORGANIZATION_SLUG,
   PrismaClient,
@@ -14,7 +15,7 @@ import { stack } from './support/env';
 
 /**
  * db:seed (step 1.1 D7, step 1.2/1.3 D8 and D10) against the dev schema, with the DML account:
- * the catalog (31 permissions, the 8 system roles, the platform organization), the retired
+ * the catalog (33 permissions, the 8 system roles, the platform organization), the retired
  * role-key remap, and idempotency (running it twice leaves the same row counts). The seeded
  * rows are dev data and are deliberately left in place.
  */
@@ -92,13 +93,13 @@ describe('db:seed', () => {
     expect(await counts()).toEqual(afterFirst);
 
     expect(afterFirst).toMatchObject({
-      permissions: 31,
+      permissions: 33,
       systemRoles: 8,
       plans: expect.any(Number) as unknown,
       demoOrganizations: 2,
       demoUsers: 2,
       demoUserRoles: 2,
-      demoLimits: 7,
+      demoLimits: 10,
       demoFeatures: 11,
       demoDeployments: 1,
       demoDomains: 1,
@@ -107,20 +108,50 @@ describe('db:seed', () => {
       platformUsers: 1,
       platformUserRoles: 1,
       platformSettings: 1,
-      platformLimits: 7,
+      platformLimits: 10,
       platformFeatures: 11,
       platformDeployments: 1,
     });
     expect(afterFirst.plans).toBeGreaterThanOrEqual(4);
 
+    // Step 2.2 (D6): the SMTP recipient limits are materialized from the plan (demo = standard).
+    const demo = await prisma.organization.findUniqueOrThrow({ where: { slug: 'demo' } });
+    const smtpLimits = await prisma.organizationLimit.findMany({
+      where: {
+        organizationId: demo.id,
+        limitKey: {
+          in: [
+            'inbound_recipients_per_minute',
+            'outbound_recipients_per_minute',
+            'outbound_recipients_per_day',
+          ],
+        },
+      },
+      select: { limitKey: true, limitValue: true, source: true },
+      orderBy: { limitKey: 'asc' },
+    });
+    expect(smtpLimits).toEqual([
+      { limitKey: 'inbound_recipients_per_minute', limitValue: 3_000n, source: 'plan' },
+      { limitKey: 'outbound_recipients_per_day', limitValue: 50_000n, source: 'plan' },
+      { limitKey: 'outbound_recipients_per_minute', limitValue: 300n, source: 'plan' },
+    ]);
+    const standard = await prisma.organizationPlan.findUniqueOrThrow({
+      where: { code: 'standard' },
+    });
+    expect(standard.defaultLimits).toMatchObject({
+      inbound_recipients_per_minute: 3_000,
+      outbound_recipients_per_minute: 300,
+      outbound_recipients_per_day: 50_000,
+    });
+
     // The demo domain is the owner of its name (tenant resolution key) and active (step 2.1).
     const domain = await prisma.domain.findUnique({
-      where: { verifiedName: stack.relayDomain() },
+      where: { verifiedName: DEMO.domain },
     });
     expect(domain?.status).toBe('active');
     expect(domain?.verifiedAt).toBeInstanceOf(Date);
     expect(domain?.activatedAt).toBeInstanceOf(Date);
-    expect(domain?.liveName).toBe(stack.relayDomain());
+    expect(domain?.liveName).toBe(DEMO.domain);
     // Scheduled for the api's domain-check job, which materializes its configuration (D11, D12).
     expect(domain?.nextCheckAt).toBeInstanceOf(Date);
   });
@@ -129,7 +160,7 @@ describe('db:seed', () => {
     const demo = await prisma.organization.findUniqueOrThrow({ where: { slug: 'demo' } });
     const domain = await prisma.domain.findUniqueOrThrow({
       where: {
-        organizationId_liveName: { organizationId: demo.id, liveName: stack.relayDomain() },
+        organizationId_liveName: { organizationId: demo.id, liveName: DEMO.domain },
       },
     });
     // Simulate the step 1.1 seed state (never scheduled for checks).
@@ -158,7 +189,7 @@ describe('db:seed', () => {
     await prisma.domain.update({ where: { id: domain.id }, data: { nextCheckAt: new Date() } });
   });
 
-  it('seeds exactly the 31 permissions and the 8 system roles of D8, with their permissions', async () => {
+  it('seeds exactly the 33 permissions and the 8 system roles of D8, with their permissions', async () => {
     expect(seed().status).toBe(0);
     const permissions = await prisma.permission.findMany({ select: { key: true } });
     expect(permissions.map((p) => p.key).sort()).toEqual(PERMISSIONS.map((p) => p.key).sort());
@@ -181,6 +212,27 @@ describe('db:seed', () => {
         [...def.permissions].sort(),
       );
     }
+    // Step 2.2: SMTP connector permissions.
+    const holders = (key: string) =>
+      roles
+        .filter((r) => r.permissions.some((p) => p.permission.key === key))
+        .map((r) => r.key)
+        .sort();
+    expect(holders('connector:manage')).toEqual([
+      'domain_admin',
+      'organization_admin',
+      'super_admin',
+    ]);
+    expect(holders('connector:read')).toEqual(
+      [
+        'compliance_auditor',
+        'domain_admin',
+        'organization_admin',
+        'platform_admin',
+        'read_only_user',
+        'super_admin',
+      ].sort(),
+    );
     for (const retired of Object.keys(RETIRED_ROLE_KEYS)) {
       expect(roles.map((r) => r.key)).not.toContain(retired);
     }

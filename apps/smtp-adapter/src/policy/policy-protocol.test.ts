@@ -1,9 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DUNNO,
+  POLICY_TEMPFAIL,
+  RATE_LIMITED,
+  RELAY_DENIED,
+  TOO_BIG,
+  UNKNOWN_USER,
+} from '../shared/replies';
+import {
   formatResponse,
   MAX_REQUEST_BYTES,
   PolicyProtocolError,
   PolicyRequestParser,
+  postfixAction,
 } from './policy-protocol';
 
 const request = 'request=smtpd_access_policy\nprotocol_state=RCPT\nrecipient=user@example.test\n\n';
@@ -50,5 +59,19 @@ describe('formatResponse', () => {
 
   it('refuses response splitting', () => {
     expect(() => formatResponse('DUNNO\n\naction=OK')).toThrow(PolicyProtocolError);
+  });
+});
+
+describe('postfixAction', () => {
+  it("sends permanent rejections as 550 without repeating Postfix's prefix", () => {
+    expect(postfixAction(UNKNOWN_USER)).toBe('550 5.1.1 User unknown');
+    expect(postfixAction(RELAY_DENIED)).toBe('550 5.7.1 Relay access denied');
+    expect(postfixAction(TOO_BIG)).toBe('550 5.3.4 Message too big');
+  });
+
+  it('passes DUNNO and deferrals through unchanged', () => {
+    for (const action of [DUNNO, POLICY_TEMPFAIL, RATE_LIMITED]) {
+      expect(postfixAction(action)).toBe(action);
+    }
   });
 });

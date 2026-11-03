@@ -70,7 +70,7 @@ describe('seed catalog', () => {
   const sorted = (list: readonly string[]) => [...list].sort();
   const role = (key: string) => SYSTEM_ROLES.find((r) => r.key === key)!.permissions;
 
-  it('contains the 31 permissions of D7, D8 and step 2.1 D14, without duplicates', () => {
+  it('contains the 33 permissions of D7, D8, step 2.1 D14 and step 2.2, without duplicates', () => {
     expect(new Set(keys).size).toBe(keys.length);
     expect(sorted(keys)).toEqual(
       sorted([
@@ -105,9 +105,13 @@ describe('seed catalog', () => {
         'platform:operations',
         'platform:tenant_override',
         'domain:dkim_rotate',
+        'connector:read',
+        'connector:manage',
       ]),
     );
-    expect(keys).toHaveLength(31);
+    expect(keys).toHaveLength(33);
+    // Appended in catalog order (permission ids follow it on a fresh database).
+    expect(keys.slice(-2)).toEqual(['connector:read', 'connector:manage']);
     for (const key of keys) expect(key).toMatch(/^[a-z]+:[a-z_]+$/);
     for (const p of PERMISSIONS) expect(p.description.length, p.key).toBeGreaterThan(0);
   });
@@ -134,6 +138,7 @@ describe('seed catalog', () => {
         'quarantine:read',
         'report:read',
         'archive:read',
+        'connector:read',
       ]),
     );
   });
@@ -193,6 +198,8 @@ describe('seed catalog', () => {
         'domain:read',
         'domain:manage',
         'domain:dkim_rotate',
+        'connector:read',
+        'connector:manage',
         'policy:read',
         'message:read',
         'quarantine:read',
@@ -237,6 +244,13 @@ describe('seed catalog', () => {
     // Content access stays with the roles that investigate messages.
     expect(role('platform_admin')).not.toContain('message:read_content');
     expect(role('quarantine_reviewer')).not.toContain('message:read_content');
+    // SMTP connectors (step 2.2): managed by domain admin, organization admin and super admin.
+    const connectorManagers = SYSTEM_ROLES.filter((r) =>
+      (r.permissions as readonly string[]).includes('connector:manage'),
+    ).map((r) => r.key);
+    expect(connectorManagers).toEqual(['super_admin', 'organization_admin', 'domain_admin']);
+    expect(TENANT_READ_PERMISSIONS).toContain('connector:read');
+    expect(TENANT_READ_PERMISSIONS).not.toContain('connector:manage');
   });
 
   it('maps every retired step-1.1 role key to an existing, non-retired role', () => {
@@ -285,6 +299,26 @@ describe('seed catalog', () => {
       for (const value of Object.values(plan.limits))
         expect(Number.isInteger(value) && value >= 0).toBe(true);
     }
+  });
+
+  it('defines the step 2.2 SMTP recipient rate limits per plan (D6)', () => {
+    const smtpLimits = Object.fromEntries(
+      PLANS.map((p) => [
+        p.code,
+        [
+          p.limits.inbound_recipients_per_minute,
+          p.limits.outbound_recipients_per_minute,
+          p.limits.outbound_recipients_per_day,
+        ],
+      ]),
+    );
+    // Design plan names: starter = trial, business = standard.
+    expect(smtpLimits).toEqual({
+      trial: [600, 60, 2_000],
+      standard: [3_000, 300, 50_000],
+      enterprise: [12_000, 1_200, 500_000],
+      dedicated: [30_000, 3_000, 2_000_000],
+    });
   });
 
   it('has unique system setting keys', () => {

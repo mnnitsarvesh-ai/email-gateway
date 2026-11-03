@@ -19,6 +19,10 @@ export const DomainAuditAction = {
   DkimKeyActivated: 'domain.dkim_key_activated',
   DkimKeyRetired: 'domain.dkim_key_retired',
   OwnershipRecordMissing: 'domain.ownership_record_missing',
+  // Step 2.2 (D3, §4.1): inbound recipient validation; metadata carries modes and counts only.
+  RecipientValidationChanged: 'domain.recipient_validation_changed',
+  RecipientsAdded: 'domain.recipients_added',
+  RecipientsRemoved: 'domain.recipients_removed',
 } as const;
 export type DomainAuditAction = (typeof DomainAuditAction)[keyof typeof DomainAuditAction];
 
@@ -38,6 +42,8 @@ export const domainKvKeys = {
   verifyCounter: (domainId: bigint) => `domains:verify:${domainId}`,
   /** Per-domain DKIM rotation counter (§4, D9). */
   rotateCounter: (domainId: bigint) => `domains:rotate:${domainId}`,
+  /** DKIM signing-key sync tick lock: one replica publishes per tick (step 2.2 D12). */
+  dkimSyncLock: 'jobs:dkim-signing-sync',
 };
 
 /** Per-domain check lock lifetime (D11). */

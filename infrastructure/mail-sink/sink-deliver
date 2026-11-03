@@ -1,0 +1,22 @@
+#!/bin/sh
+# sink-deliver DOMAIN LOCALPART: stores the message on stdin as one Maildir message under
+# /var/mail/sink/<domain>/<localpart>/new/ (TEST-ONLY mail-sink, step 2.2 §6). Runs as `sink`
+# from pipe(8). Exit 67 (EX_NOUSER) for names outside the safe character set, 75 (EX_TEMPFAIL)
+# for I/O errors, so a full disk never turns into a permanent bounce.
+set -u
+
+domain=${1:-}
+user=${2:-}
+case "$domain" in
+  '' | .* | *..* | *[!a-z0-9.-]*) exit 67 ;;
+esac
+case "$user" in
+  '' | .* | *[!a-z0-9._+=-]*) exit 67 ;;
+esac
+
+dir=/var/mail/sink/$domain/$user
+mkdir -p "$dir/tmp" "$dir/new" "$dir/cur" || exit 75
+name="$(date +%s).M$$P$(od -An -N4 -tx4 /dev/urandom | tr -d ' ').$(hostname)"
+cat > "$dir/tmp/$name" || exit 75
+mv "$dir/tmp/$name" "$dir/new/$name" || exit 75
+exit 0

@@ -14,7 +14,7 @@ flowchart TB
 
   subgraph ec2["EC2 Auto Scaling Groups, EBS spool"]
     pfIn["Postfix inbound<br/>PLANNED 10.1, image local only"]:::planned
-    pfOut["Postfix outbound<br/>PLANNED 2.2 / 10.1"]:::planned
+    pfOut["Postfix outbound<br/>PLANNED 10.1, image local only<br/>(model: docs/deployment/smtp-gateway.md)"]:::planned
   end
 
   subgraph eks["EKS namespace email-gateway, Pod Security restricted"]
@@ -41,7 +41,7 @@ flowchart TB
   internet -.-> alb
   nlb -.->|"P 10.1"| pfIn
   alb -.->|"P 10.1"| deps
-  pfIn -.->|"policy :10040, milter, LMTP<br/>needs a Service port, P 2.2"| deps
+  pfIn -.->|"policy, socketmap, SASL, LMTP<br/>needs internal ports, P 10.1"| deps
   deps -.->|"SMTP reinject, P 2.3"| pfOut
   overlay --> deps
   cfg --> deps
@@ -61,16 +61,16 @@ flowchart TB
 
 ## Status
 
-| Element                                           | Status       | Evidence or delivering step                                                                                                                                                                           |
-| ------------------------------------------------- | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Kustomize base: 8 Deployments, Services, HPA, PDB | IMPLEMENTED  | `infrastructure/kubernetes/base/*.yaml`; rendered by the CI `iac` job. Probes `/health/live` and `/health/ready`, zone spread, read-only root filesystem                                              |
-| `overlays/saas`                                   | IMPLEMENTED  | `infrastructure/kubernetes/overlays/saas/kustomization.yaml`                                                                                                                                          |
-| Secret mount and `<KEY>_FILE` convention          | IMPLEMENTED  | `packages/config` (`load-config.test.ts`); manifests read `DATABASE_URL_FILE`, `DATABASE_READ_URL_FILE` (api only), `RABBITMQ_URL_FILE`, `REDIS_URL_FILE`                                             |
-| S3 buckets with SSE-KMS, versioning, TLS-only     | IMPLEMENTED  | `infrastructure/terraform/modules/mail-storage`; `terraform validate` in CI. Never applied                                                                                                            |
-| EKS cluster, NLB, ALB, Postfix ASGs               | PLANNED 10.1 | `infrastructure/terraform/README.md` lists the planned modules                                                                                                                                        |
-| RDS/Aurora, Amazon MQ, ElastiCache, OpenSearch    | PLANNED 10.1 |                                                                                                                                                                                                       |
-| External Secrets operator and Secrets Manager     | PLANNED 10.1 | ADR-0010                                                                                                                                                                                              |
-| Migration Job                                     | PLANNED      | `docs/deployment/README.md`: "not in base yet"                                                                                                                                                        |
-| Partition maintenance CronJob                     | IMPLEMENTED  | `infrastructure/kubernetes/base/db-maintenance.yaml`, rendered by the CI Kustomize step; the job logic is covered by `partitions.test.ts` and the partitioning unit tests. Never applied to a cluster |
-| smtp-adapter policy port on the Service           | PLANNED 2.2  | The `smtp-adapter` Service exposes only `http` (port 80 → 3010). Postfix on EC2 needs a reachable `:10040` (and later LMTP), for example an internal NLB                                              |
-| Rspamd and ClamAV placement in AWS                | PLANNED 10.1 | Not in the Kustomize base                                                                                                                                                                             |
+| Element                                           | Status       | Evidence or delivering step                                                                                                                                                                                                                                                 |
+| ------------------------------------------------- | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Kustomize base: 8 Deployments, Services, HPA, PDB | IMPLEMENTED  | `infrastructure/kubernetes/base/*.yaml`; rendered by the CI `iac` job. Probes `/health/live` and `/health/ready`, zone spread, read-only root filesystem                                                                                                                    |
+| `overlays/saas`                                   | IMPLEMENTED  | `infrastructure/kubernetes/overlays/saas/kustomization.yaml`                                                                                                                                                                                                                |
+| Secret mount and `<KEY>_FILE` convention          | IMPLEMENTED  | `packages/config` (`load-config.test.ts`); manifests read `DATABASE_URL_FILE`, `DATABASE_READ_URL_FILE` (api only), `RABBITMQ_URL_FILE`, `REDIS_URL_FILE`                                                                                                                   |
+| S3 buckets with SSE-KMS, versioning, TLS-only     | IMPLEMENTED  | `infrastructure/terraform/modules/mail-storage`; `terraform validate` in CI. Never applied                                                                                                                                                                                  |
+| EKS cluster, NLB, ALB, Postfix ASGs               | PLANNED 10.1 | `infrastructure/terraform/README.md` lists the planned modules                                                                                                                                                                                                              |
+| RDS/Aurora, Amazon MQ, ElastiCache, OpenSearch    | PLANNED 10.1 |                                                                                                                                                                                                                                                                             |
+| External Secrets operator and Secrets Manager     | PLANNED 10.1 | ADR-0010                                                                                                                                                                                                                                                                    |
+| Migration Job                                     | PLANNED      | `docs/deployment/README.md`: "not in base yet"                                                                                                                                                                                                                              |
+| Partition maintenance CronJob                     | IMPLEMENTED  | `infrastructure/kubernetes/base/db-maintenance.yaml`, rendered by the CI Kustomize step; the job logic is covered by `partitions.test.ts` and the partitioning unit tests. Never applied to a cluster                                                                       |
+| smtp-adapter mail ports on the Service            | PLANNED 10.1 | The `smtp-adapter` Service exposes only `http` (port 80 → 3010). Postfix on EC2 needs `:10040`–`:10042` and `:10050`–`:10052` through an internal NLB; Kubernetes manifests were out of scope in step 2.2 (design D18, [smtp-gateway.md](../../deployment/smtp-gateway.md)) |
+| Rspamd and ClamAV placement in AWS                | PLANNED 10.1 | Not in the Kustomize base                                                                                                                                                                                                                                                   |

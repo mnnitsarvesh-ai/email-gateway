@@ -1,0 +1,2 @@
+# Every domain under the reserved .test TLD (RFC 2606).
+/^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+test$/	OK

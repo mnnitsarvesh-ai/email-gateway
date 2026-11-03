@@ -46,23 +46,23 @@ One codebase ships as **shared SaaS** (many tenants) and as **dedicated** single
 
 The 15 logical services are kept as **modules with clear boundaries**. Modules are grouped into a small number of deployables, split only where scaling or isolation needs differ. Any module can be extracted later without changing its contract, because modules talk through `packages/*` contracts and RabbitMQ events, never through each other's internals. The modules inside each deployable are shown in [diagram 3](diagrams/03-components.md).
 
-| #   | Logical service             | Deployable (`apps/*`)                                   | Why it lives there                                                      |
-| --- | --------------------------- | ------------------------------------------------------- | ----------------------------------------------------------------------- |
-| 1   | Identity                    | `api`                                                   | Request/response, low volume                                            |
-| 2   | Tenant Management           | `api`                                                   | Control plane CRUD                                                      |
-| 3   | Domain Management           | `api`                                                   | Control plane; DNS verification job added in step 2.1                   |
-| 4   | SMTP Gateway                | Postfix + `smtp-adapter`                                | Postfix speaks SMTP; the adapter answers in-session policy checks       |
-| 5   | Email Ingestion             | `smtp-adapter` (LMTP listener, steps 2.2 and 3.1)       | Must persist before Postfix gets a 250                                  |
-| 6   | Email Processing            | `email-worker`                                          | CPU/IO-heavy and scales with mail volume                                |
-| 7   | Security Engine             | `email-worker` (engine adapters) → Rspamd, ClamAV, YARA | Engines are external daemons or in-process; adapters share one contract |
-| 8   | Policy Engine               | `policy-engine`                                         | Scales independently; deterministic decision logic                      |
-| 9   | Quarantine                  | `api` (release/review) + `policy-engine` (writes)       | Admin and end-user actions are request/response                         |
-| 10  | Email Delivery              | `delivery-worker` → Postfix outbound                    | Postfix owns retries (ADR-0006)                                         |
-| 11  | Archive                     | `archive-worker`                                        | Optional per tenant; isolates S3 write load                             |
-| 12  | Notification                | `notification-worker`                                   | Digests and alerts; must not slow the mail path                         |
-| 13  | Reporting                   | `api` (reads ClickHouse/OpenSearch)                     | Read-only queries                                                       |
-| 14  | Audit                       | `api` + `audit_logs` table                              | Append-only; ClickHouse copy later                                      |
-| 15  | Integration (M365 / Google) | `api` now, `integration-worker` when API sync lands     | Connector setup in the API; mailbox sync is async work                  |
+| #   | Logical service             | Deployable (`apps/*`)                                       | Why it lives there                                                       |
+| --- | --------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------ |
+| 1   | Identity                    | `api`                                                       | Request/response, low volume                                             |
+| 2   | Tenant Management           | `api`                                                       | Control plane CRUD                                                       |
+| 3   | Domain Management           | `api`                                                       | Control plane; DNS verification job added in step 2.1                    |
+| 4   | SMTP Gateway                | `postfix` (inbound MX), `postfix-outbound` + `smtp-adapter` | Postfix speaks SMTP; the adapter serves policy, socketmap and SASL (2.2) |
+| 5   | Email Ingestion             | `smtp-adapter` (LMTP listeners, step 2.2; MIME in 3.1)      | Must persist before Postfix gets a 250                                   |
+| 6   | Email Processing            | `email-worker`                                              | CPU/IO-heavy and scales with mail volume                                 |
+| 7   | Security Engine             | `email-worker` (engine adapters) → Rspamd, ClamAV, YARA     | Engines are external daemons or in-process; adapters share one contract  |
+| 8   | Policy Engine               | `policy-engine`                                             | Scales independently; deterministic decision logic                       |
+| 9   | Quarantine                  | `api` (release/review) + `policy-engine` (writes)           | Admin and end-user actions are request/response                          |
+| 10  | Email Delivery              | `delivery-worker` → Postfix outbound                        | Postfix owns retries (ADR-0006)                                          |
+| 11  | Archive                     | `archive-worker`                                            | Optional per tenant; isolates S3 write load                              |
+| 12  | Notification                | `notification-worker`                                       | Digests and alerts; must not slow the mail path                          |
+| 13  | Reporting                   | `api` (reads ClickHouse/OpenSearch)                         | Read-only queries                                                        |
+| 14  | Audit                       | `api` + `audit_logs` table                                  | Append-only; ClickHouse copy later                                       |
+| 15  | Integration (M365 / Google) | `api` now, `integration-worker` when API sync lands         | Connector setup in the API; mailbox sync is async work                   |
 
 The admin console is `admin-portal` (Next.js). It talks only to `api`, and holds no data-store credentials.
 
@@ -76,12 +76,15 @@ flowchart LR
   classDef planned fill:#fff8e1,stroke:#b26a00,stroke-width:2px,stroke-dasharray:6 4,color:#1b1b1b
   classDef ext fill:#eceff1,stroke:#546e7a,stroke-width:1px,color:#1b1b1b
 
-  S["Sending MTA"]:::ext -->|"SMTP :25"| PF["Postfix inbound"]:::impl
-  PF -->|"check_policy_service"| SA["smtp-adapter<br/>policy server"]:::impl
+  S["Sending MTA"]:::ext -->|"SMTP :25"| PF["postfix<br/>inbound MX"]:::impl
+  TS["Tenant mail servers"]:::ext -->|"587 SASL / 25 connector"| PO["postfix-outbound"]:::impl
+  PF -->|"policy, socketmap"| SA["smtp-adapter<br/>policy, socketmap, SASL"]:::impl
+  PO -->|"policy, socketmap, SASL"| SA
   PF -->|"milter"| RS["Rspamd"]:::impl
-  PF -.->|"LMTP after queueing, P 2.2"| ING["Ingestion<br/>smtp-adapter, PLANNED 3.1"]:::planned
-  ING -.->|"stream EML"| S3[("S3")]:::impl
-  ING -.->|"1 txn: message + outbox"| DB[("MySQL writer")]:::impl
+  PF -->|"LMTP 10050 after queueing"| ING["smtp-adapter<br/>LMTP ingestion"]:::impl
+  PO -->|"LMTP 10051 (content_filter)"| ING
+  ING -->|"stream EML"| S3[("S3")]:::impl
+  ING -->|"1 txn per tenant: message + outbox"| DB[("MySQL writer")]:::impl
   DB -.->|"outbox relay, P 3.2"| MQ{{"RabbitMQ"}}:::impl
   MQ -.->|"P 4.1"| EW["email-worker<br/>Rspamd, ClamAV, YARA, URL, BEC, DLP<br/>PLANNED 4.x"]:::planned
   EW -.-> MQ
@@ -89,17 +92,21 @@ flowchart LR
   PE -.->|"deliver / tag"| MQ
   PE -.->|"quarantine"| DB
   MQ -.->|"P 2.3"| DW["delivery-worker<br/>PLANNED 2.3"]:::planned
-  DW -.->|"SMTP reinject"| PO["Postfix outbound<br/>PLANNED 2.2"]:::planned
-  PO -.-> T["Tenant mail server / Internet"]:::ext
+  DW -.->|"reinject 10026 / 10027"| PO
+  PO -->|"10027: DKIM milter"| RO["rspamd-outbound"]:::impl
+  RO -->|"keys"| RD[("redis-dkim")]:::impl
+  PO -->|"MX / tenant destination"| T["Tenant mail server / Internet"]:::ext
+  PO -->|"DSN copies, LMTP 10052"| BH["smtp-adapter<br/>bounce handler"]:::impl
+  BH --> DB
   MQ -.->|"P 8.1"| AW["archive-worker<br/>PLANNED 8.1"]:::planned
   AW -.-> S3
   MQ -.->|"P 6.2"| NW["notification-worker<br/>PLANNED 6.2"]:::planned
 ```
 
-1. **In-session (pre-queue).** Postfix calls `smtp-adapter` through the policy delegation protocol (recipient validation, tenant resolution, rate limits) and Rspamd as a milter. **Only these two may reject (5xx) or defer (4xx).** Rejecting during the session creates no backscatter. Both fail **closed to 4xx**: if the policy service or Rspamd is unreachable, Postfix tempfails, so the sender retries later. Mail is never accepted unchecked. The integration tests check this behaviour for the policy service. Today the policy service answers `DUNNO`; tenant resolution, recipient validation and rate limits arrive in step 2.2.
-2. **Handoff.** Postfix queues the message on disk, then delivers it over LMTP to ingestion. Ingestion streams the EML to S3 and commits the message row and an outbox row in **one MySQL transaction**. It answers `250` only after the commit. Any failure answers `4xx`, so Postfix keeps the message and retries. _Until LMTP ingestion exists (steps 2.2 and 3.1), the local Postfix discards accepted mail._
-3. **Post-queue.** The outbox relay publishes `mail.message.received.v1`. `email-worker` runs the security engines and publishes `mail.message.scanned.v1`. `policy-engine` decides `deliver | tag | quarantine | discard` and publishes `mail.policy.decided.v1`. **Post-queue processing never bounces.** Once Postfix has said 250, policy never generates an NDR. `discard` is silent to the sender, so it is always audited.
-4. **Delivery.** `delivery-worker` reinjects approved mail into a dedicated outbound Postfix. From then on, Postfix owns MX lookup, TLS, retries, backoff and DSNs.
+1. **In-session (pre-queue).** Postfix calls `smtp-adapter` through the policy delegation protocol (tenant resolution, recipient validation, rate limits, size, sender ownership and suppressions on the outbound listeners), socketmap tables (relay domains, connector IPs and certificates, transport and TLS maps) and the Dovecot SASL protocol (submission AUTH), and Rspamd as a milter on the inbound MX. **Only these may reject (5xx) or defer (4xx).** Rejecting during the session creates no backscatter. All of them fail **closed to 4xx**: if the adapter, its database or Redis, or Rspamd is unreachable, Postfix tempfails, so the sender retries later. Mail is never accepted unchecked. Implemented in step 2.2 and verified by the stack SMTP suites (`tests/integration/smtp-*.test.ts`).
+2. **Handoff.** Postfix queues the message on disk, then delivers it over LMTP to ingestion (`direction` = the listener: 10050 inbound, 10051 outbound). Ingestion streams the EML to S3 once and commits, **per organization**, the registry, message, recipient, event and outbox rows in one MySQL writer transaction. It answers `250` per recipient only after its organization's commit; any failure answers `451 4.3.0`, so Postfix keeps the message and retries, and a retry is deduplicated by the ingest key (step 2.2, [contracts](contracts.md#3-postfix--smtp-adapter-lmtp-ingestion)). MIME parsing and header/attachment rows come in step 3.1.
+3. **Post-queue.** The outbox relay publishes `mail.message.received.v1` (step 3.2). `email-worker` runs the security engines and publishes `mail.message.scanned.v1`. `policy-engine` decides `deliver | tag | quarantine | discard` and publishes `mail.policy.decided.v1`. **Post-queue processing never bounces.** Once Postfix has said 250, policy never generates an NDR. `discard` is silent to the sender, so it is always audited. (Two documented exceptions at ingestion, ADR-0019: a genuine gateway loop `554 5.4.6` and an outbound `From` header that does not match the authenticated sender domain.)
+4. **Delivery.** `delivery-worker` (step 2.3) reinjects approved mail into `postfix-outbound`: `10026` for inbound mail to the tenant's own server (transport and TLS maps from the adapter), `10027` for outbound mail to the Internet, DKIM-signed by `rspamd-outbound` with keys the api publishes to `redis-dkim`. The listeners, maps and signing exist and are tested now; nothing reinjects automatically yet. From then on, Postfix owns MX lookup, TLS, retries, backoff and DSNs; postmaster copies of DSNs feed `bounce_events` and `delivery_suppressions`.
 
 **Direction** (inbound, outbound or internal) is derived from the listener or connector the mail arrived on and the tenant's verified domains. **Headers never decide direction** ([diagram 8](diagrams/08-internal-inspection-sequence.md)).
 
@@ -182,7 +189,7 @@ The ESLint configuration enforces module boundaries: apps cannot import other ap
 - Tenant management ([API](../api/README.md#organizations-organizations-tag)): the organization catalog (create with plan-materialized limits/features, settings, deployment row and an invited administrator; plan changes that keep overrides; suspension that cuts off sessions and API keys), settings with validation, feature and limit overrides, usage counters from the read replica, and the four-eyes deletion workflow with legal-hold and archive-retention safeguards ([runbook](../runbooks/organization-deletion.md); the purge job itself is deferred).
 - Tenant isolation: the tenant comes only from the authenticated principal (`TenantScope`); repositories are the only Prisma users and take the scope first; another tenant's resource is `404`. Proven by the API integration suites against real MySQL and Redis, including the tenant isolation suites.
 
-**Step 2.1 (domain onboarding), this step** ([design](../plan/steps/03-domain-onboarding.md), [ADR-0017](adr/0017-dns-resolution-strategy.md), [ADR-0018](adr/0018-dkim-key-custody.md)):
+**Step 2.1 (domain onboarding)** ([design](../plan/steps/03-domain-onboarding.md), [ADR-0017](adr/0017-dns-resolution-strategy.md), [ADR-0018](adr/0018-dkim-key-custody.md)):
 
 - The domains API ([API](../api/README.md#domains-domains-tag-step-21), [customer guide](../domains/onboarding.md)): add a domain (name normalization incl. IDN, reserved names, `max_domains`), DNS TXT ownership proof with "first to verify wins" across organizations, generated MX/SPF/DKIM/DMARC records with per-record checks, warnings and recommendations (SPF merge and the 10-lookup limit, DMARC none → quarantine → reject), the lifecycle `pending_verification → verified → active ⇄ suspended → deleted` (soft delete that frees the name; `failed` on expiry or a lost claim), and DKIM rotation with an overlap window. New permission `domain:dkim_rotate` ([rbac.md](../security/rbac.md#domain-permissions-step-21)).
 - DNS resolution behind a port in `apps/api/src/dns`: system (`node:dns`) or DNS-over-HTTPS upstreams, MX propagation upstreams, a TTL-capped Redis cache, and the rule that an indeterminate lookup (timeout, SERVFAIL, …) never changes any state.
@@ -191,6 +198,13 @@ The ESLint configuration enforces module boundaries: apps cannot import other ap
 - Audit rows for every transition and the `domain.status.changed.v1` event written to `message_outbox` in the same transaction (published once the relay exists, step 3.2); `resolveActiveDomain` in `@email-gateway/database` for the mail path of step 2.2 ([contracts](contracts.md)).
 - Proven by unit tests, e2e tests and the API integration suites `domains.test.ts`, `domain-jobs.test.ts` and `tenant-isolation-domains.test.ts` against MySQL, Redis and an in-process test DNS/DoH server (no public DNS).
 
-No mail-processing feature exists yet: no ingestion, consumers, engine adapters, policies, quarantine actions or delivery. The smtp-adapter does not resolve tenants by domain yet (2.2), DKIM signing does not exist yet (2.2), and the admin-portal pages (7.x), SSO, per-organization API rate limits (6.1), the outbox relay (3.2) and the organization purge job are not built.
+**Step 2.2 (Postfix SMTP gateway), this step** ([design and verification record](../plan/steps/04-smtp-gateway.md), [ADR-0019](adr/0019-smtp-gateway-topology.md), [ADR-0020](adr/0020-dkim-signing.md)):
 
-**Next (see the [execution plan](../plan/execution-plan.md)):** the Postfix gateway with LMTP ingestion and outbound Postfix (2.2) and routing (2.3) → ingestion, RabbitMQ architecture and the message lifecycle (3.1–3.3) → engine adapters (4.x) → scoring, policy and quarantine (5.x) → the REST API and webhooks (6.x) → the admin portal (7.x) → archiving, connectors and the deployment manager (8.x) → performance (9.x) → AWS, DR and monitoring (10.x).
+- Two Postfix instances: `postfix` (inbound MX: postscreen, anvil limits, TLS ≥ 1.2, relay domains from the adapter, policy at RCPT and end of data, Rspamd milter, LMTP to ingestion) and `postfix-outbound` (587 SASL submission after STARTTLS, 25 connector relay by source IP or client-certificate fingerprint, internal reinjection 10026/10027, bounce notices). Every listener's relay permission is explicit; the defaults refuse everything.
+- smtp-adapter: policy contexts `inbound`, `submission`, `relay`, `reinject-inbound`, `reinject-outbound`; socketmap maps `relay_domain`, `transport`, `tls_policy`, `relay_client`, `relay_ccert`; a Dovecot-auth-protocol SASL server (Argon2id connector secrets); Redis caches, rate limits and outbox-tail cache invalidation; durable LMTP ingestion (S3 + one writer transaction per organization, ingest-key dedupe, multi-tenant split with server-side copies, loop guard, outbound From check); the bounce handler; reputation counters; `/metrics`.
+- api: SMTP connectors and recipient allow-lists (`/api/v1/smtp-connectors`, `/api/v1/domains/{id}/recipient-validation`, `/recipients`), and the DKIM signing publisher (redis-dkim, one-shot `dkim:sync`).
+- Verified by unit and in-process integration suites and by the stack SMTP suites against the real Compose stack (inbound and outbound delivery, relay refusals on every listener, TLS, MinIO outage, Postfix restart, LMTP retry dedupe, multi-tenant split, 40 × 1 000 messages with zero loss, DKIM verification, bounces, loops, fail-closed); results in the step note's §12.
+
+Not built yet: MIME parsing (3.1), the outbox relay (3.2), engine adapters, policies, quarantine actions, the delivery-worker that reinjects (2.3/5.x), per-recipient routing and destination failover (2.3), outbound content scanning (4.5), LDAP / SMTP-callout recipient validation, Ed25519 dual signing, MTA-STS/DANE; and the admin-portal pages (7.x), SSO, per-organization API rate limits (6.1) and the organization purge job.
+
+**Next (see the [execution plan](../plan/execution-plan.md)):** routing and the delivery-worker (2.3) → ingestion, RabbitMQ architecture and the message lifecycle (3.1–3.3) → engine adapters (4.x) → scoring, policy and quarantine (5.x) → the REST API and webhooks (6.x) → the admin portal (7.x) → archiving, connectors and the deployment manager (8.x) → performance (9.x) → AWS, DR and monitoring (10.x).

@@ -313,8 +313,11 @@ export class Fixtures {
     await p.apiKey.deleteMany({
       where: { OR: [{ organizationId: { in: orgs } }, { createdByUserId: { in: users } }] },
     });
+    // SMTP connectors (step 2.2) of the fixture organizations; their networks cascade.
+    await p.smtpConnector.deleteMany({ where: { organizationId: { in: orgs } } });
     // Domains (step 2.1) of the fixture organizations, deleted ones included; verifications,
-    // DNS records, DKIM keys, MX observations and settings cascade. Outbox and audit rows stay.
+    // DNS records, DKIM keys, MX observations, settings and (step 2.2) recipient allow-lists
+    // cascade. Outbox and audit rows stay.
     await p.domain.deleteMany({ where: { organizationId: { in: orgs } } });
     await p.userRole.deleteMany({ where: byOrgOrUser });
     await p.role.deleteMany({ where: { organizationId: { in: orgs } } });

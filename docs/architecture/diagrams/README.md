@@ -1,6 +1,6 @@
 # Architecture diagrams
 
-Fifteen Mermaid diagrams describe the gateway from system context down to message states, failure handling, isolation and the AWS regions. GitHub renders them inline. They are written against the repository as it is on branch `build/platform` after step 1.1 (database). Where a diagram shows something that does not exist yet, it says so and names the step in [`docs/plan/execution-plan.md`](../../plan/execution-plan.md) that delivers it.
+Fifteen Mermaid diagrams describe the gateway from system context down to message states, failure handling, isolation and the AWS regions. GitHub renders them inline. They are written against the repository as it is on branch `build/platform` (mail-path diagrams updated for step 2.2). Where a diagram shows something that does not exist yet, it says so and names the step in [`docs/plan/execution-plan.md`](../../plan/execution-plan.md) that delivers it.
 
 ## Status convention
 
@@ -24,23 +24,23 @@ classDef ext fill:#eceff1,stroke:#546e7a,stroke-width:1px,color:#1b1b1b
 
 ## Index
 
-| #   | Diagram                                                         | Type             | Contains PLANNED elements                                                                                |
-| --- | --------------------------------------------------------------- | ---------------- | -------------------------------------------------------------------------------------------------------- |
-| 1   | [System context](01-system-context.md)                          | flowchart (C4-1) | Yes: tenant connectors (2.2, 8.2), outbound path (2.2), notifications (6.2), threat feeds, AWS (10.1)    |
-| 2   | [Container architecture](02-containers.md)                      | flowchart (C4-2) | Yes: LMTP (2.2), outbound Postfix (2.2), all consumers (3.x–8.x), OpenSearch/ClickHouse feeds            |
-| 3   | [Component architecture](03-components.md)                      | flowchart        | Yes: every business module (1.2–8.3)                                                                     |
-| 4   | [SaaS deployment](04-deployment-saas.md)                        | flowchart        | Yes: EKS cluster, ALB, Postfix ASG, managed data stores (10.1)                                           |
-| 5   | [Dedicated deployment](05-deployment-dedicated.md)              | flowchart        | Yes: per-customer account/VPC provisioning (8.3, 10.1)                                                   |
-| 6   | [Inbound SMTP sequence](06-inbound-smtp-sequence.md)            | sequence         | Yes: tenant resolution (2.2), LMTP ingestion (2.2/3.1), outbox relay (3.2)                               |
-| 7   | [Outbound SMTP sequence](07-outbound-smtp-sequence.md)          | sequence         | Yes, entirely (2.2, 2.3, 4.x, 5.2, 6.x)                                                                  |
-| 8   | [Internal email inspection](08-internal-inspection-sequence.md) | sequence + flow  | Yes, entirely (2.3, 8.2)                                                                                 |
-| 9   | [Email scanning sequence](09-scanning-sequence.md)              | sequence         | Yes: consumer and engine adapters (4.1–4.6, 5.1). Contract, queue and daemons are implemented            |
-| 10  | [Quarantine and release](10-quarantine-release-sequence.md)     | sequence         | Yes, entirely (5.2, 5.3, 6.1, 1.3). Tables are implemented                                               |
-| 11  | [Message state machine](11-message-state-machine.md)            | stateDiagram-v2  | Yes: every transition (3.3). The status enum is implemented                                              |
-| 12  | [Failure handling](12-failure-handling.md)                      | flowchart        | Yes: ingestion 4xx, outbox relay, consumers, replay and reconciliation (3.x), alerts (10.3)              |
-| 13  | [Multi-tenant isolation](13-multi-tenant-isolation.md)          | flowchart        | Yes: auth guard (1.3), repository filters (1.2), key-prefix equality check (3.x), limits (1.2, 2.2, 6.1) |
-| 14  | [AWS Mumbai (ap-south-1) production](14-aws-mumbai.md)          | flowchart        | Yes: everything except the S3 + KMS Terraform module (10.1)                                              |
-| 15  | [Hyderabad (ap-south-2) DR](15-dr-hyderabad.md)                 | flowchart        | Yes, entirely (10.2)                                                                                     |
+| #   | Diagram                                                         | Type             | Contains PLANNED elements                                                                             |
+| --- | --------------------------------------------------------------- | ---------------- | ----------------------------------------------------------------------------------------------------- |
+| 1   | [System context](01-system-context.md)                          | flowchart (C4-1) | Yes: M365/Google connectors (8.2), notifications (6.2), threat feeds, AWS (10.1)                      |
+| 2   | [Container architecture](02-containers.md)                      | flowchart (C4-2) | Yes: outbox relay (3.2), all consumers (3.x–8.x), OpenSearch/ClickHouse feeds                         |
+| 3   | [Component architecture](03-components.md)                      | flowchart        | Yes: every business module (1.2–8.3)                                                                  |
+| 4   | [SaaS deployment](04-deployment-saas.md)                        | flowchart        | Yes: EKS cluster, ALB, Postfix ASG, managed data stores (10.1)                                        |
+| 5   | [Dedicated deployment](05-deployment-dedicated.md)              | flowchart        | Yes: per-customer account/VPC provisioning (8.3, 10.1)                                                |
+| 6   | [Inbound SMTP sequence](06-inbound-smtp-sequence.md)            | sequence         | Yes: MIME parsing (3.1), outbox relay (3.2)                                                           |
+| 7   | [Outbound SMTP sequence](07-outbound-smtp-sequence.md)          | sequence         | Yes: scanning and policy (4.x, 5.2), delivery-worker (2.3); the SMTP path itself is implemented (2.2) |
+| 8   | [Internal email inspection](08-internal-inspection-sequence.md) | sequence + flow  | Yes, entirely (2.3, 8.2)                                                                              |
+| 9   | [Email scanning sequence](09-scanning-sequence.md)              | sequence         | Yes: consumer and engine adapters (4.1–4.6, 5.1). Contract, queue and daemons are implemented         |
+| 10  | [Quarantine and release](10-quarantine-release-sequence.md)     | sequence         | Yes, entirely (5.2, 5.3, 6.1, 1.3). Tables are implemented                                            |
+| 11  | [Message state machine](11-message-state-machine.md)            | stateDiagram-v2  | Yes: every transition (3.3). The status enum is implemented                                           |
+| 12  | [Failure handling](12-failure-handling.md)                      | flowchart        | Yes: ingestion 4xx, outbox relay, consumers, replay and reconciliation (3.x), alerts (10.3)           |
+| 13  | [Multi-tenant isolation](13-multi-tenant-isolation.md)          | flowchart        | Yes: key-prefix equality check (3.x), API rate limits (6.1)                                           |
+| 14  | [AWS Mumbai (ap-south-1) production](14-aws-mumbai.md)          | flowchart        | Yes: everything except the S3 + KMS Terraform module (10.1)                                           |
+| 15  | [Hyderabad (ap-south-2) DR](15-dr-hyderabad.md)                 | flowchart        | Yes, entirely (10.2)                                                                                  |
 
 **Every diagram contains PLANNED elements.** Diagrams 7, 8, 10 and 15 are entirely planned (apart from the tables and contracts they rely on), which reflects the state of the product: Phase 0 plus the step 1.1 database.
 

@@ -5,7 +5,9 @@
  *
  * - Real MySQL (writer + replica) and Redis from the local `.env` (loaded by `setup.ts`).
  * - `HTTP_TRUST_PROXY=1`, so each test can choose its client IP with `X-Forwarded-For`
- *   (`uniqueIp()`), and `AUTH_BACKGROUND_JOBS_ENABLED=false`.
+ *   (`uniqueIp()`), and every background job off (`AUTH_BACKGROUND_JOBS_ENABLED`,
+ *   `DOMAIN_BACKGROUND_JOBS_ENABLED`, `DKIM_SIGNING_SYNC_ENABLED` = false). Passing
+ *   `REDIS_DKIM_URL: ''` disables the DKIM signing publisher entirely.
  * - `EmailSender` is always a `RecordingEmailSender`: tests never send real email (D13).
  * - Logs go to an in-memory buffer (`logs`) so tests can assert that secrets never appear.
  * - The server listens on an ephemeral 127.0.0.1 port for the app's lifetime, so concurrent
@@ -48,6 +50,8 @@ export async function createIntegrationApp(
     HTTP_TRUST_PROXY: '1',
     AUTH_BACKGROUND_JOBS_ENABLED: 'false',
     DOMAIN_BACKGROUND_JOBS_ENABLED: 'false',
+    // No periodic DKIM sync: suites call DkimSigningPublisher.reconcile() themselves.
+    DKIM_SIGNING_SYNC_ENABLED: 'false',
     ...envOverrides,
   });
   const emails = new RecordingEmailSender();

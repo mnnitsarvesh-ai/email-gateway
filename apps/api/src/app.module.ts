@@ -20,6 +20,7 @@ import { DomainsModule } from './modules/domains/domains.module';
 import { LoginAuditModule } from './modules/login-audit/login-audit.module';
 import { OrganizationsModule } from './modules/organizations/organizations.module';
 import { RolesModule } from './modules/roles/roles.module';
+import { SmtpConnectorsModule } from './modules/smtp-connectors/smtp-connectors.module';
 import { TenantDataModule } from './modules/tenant-data/tenant-data.module';
 import { UsersModule } from './modules/users/users.module';
 
@@ -58,6 +59,7 @@ export class AppModule {
         TenantDataModule,
         OrganizationsModule,
         DomainsModule,
+        SmtpConnectorsModule,
       ],
       providers: [{ provide: API_CONFIG, useValue: config }],
       exports: [API_CONFIG],

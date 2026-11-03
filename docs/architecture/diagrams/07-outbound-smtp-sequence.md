@@ -1,70 +1,100 @@
 # 7. Outbound SMTP sequence
 
-A tenant's mail system (Microsoft 365, Google Workspace or on-premises) relays outbound mail through the gateway. The gateway authenticates the **connection**, never a header: either the client IP is in the tenant's allow-list (`domain_mail_servers` rows with `role = outbound_source` and an `ip_cidr`) or the connector authenticates (SMTP AUTH or a TLS client certificate). The envelope sender's domain must be a verified domain of the **same** organization with `outbound_enabled`. The message is then ingested and scanned like inbound mail, DKIM-signed, and handed to an outbound Postfix that owns MX lookup, TLS, retries and DSNs.
+A tenant's mail system (Microsoft 365, Google Workspace or on-premises) relays outbound mail through the gateway. The gateway authenticates the **connection**, never a header: an organization-level **SMTP connector** authorizes it — SASL (`AUTH PLAIN/LOGIN` after STARTTLS on 587), a registered source network, or a pinned TLS client-certificate fingerprint (25). The envelope sender's domain must be an active domain of the **same** organization with `outbound_enabled`. The message is then ingested like inbound mail (`direction = outbound`), and later reinjected for delivery into `postfix-outbound` 10027, where `rspamd-outbound` DKIM-signs it and Postfix owns MX lookup, TLS, retries and DSNs (step 2.2, [design D9–D13](../../plan/steps/04-smtp-gateway.md), [ADR-0019](../adr/0019-smtp-gateway-topology.md), [ADR-0020](../adr/0020-dkim-signing.md)).
 
-**Everything in this sequence is PLANNED.** The tables it uses exist (step 1.1). Steps: listener and relay authentication 2.2, direction and routing 2.3, scanning 4.x (DLP 4.5), policy 5.2, delivery tracking 2.3, suppressions 6.x, connectors 8.2.
+**There is no direct submission-to-Internet path.** In step 2.2 nothing reinjects automatically: scanning (4.x/4.5), policy (5.2) and the delivery-worker (2.3) are planned; the reinjection listeners, DKIM signing and bounce processing exist and the stack tests act as the delivery-worker.
 
 ```mermaid
 sequenceDiagram
   autonumber
   participant T as Tenant mail server
-  participant PO as Postfix outbound listener (PLANNED 2.2)
-  participant SA as smtp-adapter policy (PLANNED 2.2)
-  participant DB as MySQL writer
-  participant ING as Ingestion (PLANNED 3.1)
-  participant W as email-worker and policy-engine (PLANNED 4.x, 5.2)
+  participant PO as postfix-outbound (587 submission, 25 connector relay)
+  participant SA as smtp-adapter (SASL :10042, socketmap :10041, policy :10040)
+  participant ING as smtp-adapter LMTP :10051 (direction outbound)
+  participant DB as MySQL writer + S3
+  participant W as email-worker, policy-engine (PLANNED 4.x, 5.2)
   participant DW as delivery-worker (PLANNED 2.3)
-  participant PX as Postfix outbound MTA with DKIM signer (PLANNED 2.2)
+  participant PR as postfix-outbound 10027 reinject-outbound
+  participant RO as rspamd-outbound (DKIM) + redis-dkim
   participant MX as Recipient MX
+  participant BH as smtp-adapter bounce LMTP :10052
 
+  alt 587 submission
+    T->>PO: EHLO, STARTTLS (required, no AUTH offered before), AUTH PLAIN
+    PO->>SA: Dovecot auth: AUTH secured, PLAIN
+    alt valid connector secret (Argon2id), connector and organization active
+      SA-->>PO: OK user=egc-…
+    else wrong credentials
+      SA-->>PO: FAIL (PO answers 535 5.7.8)
+    else DB/Redis failure or throttled
+      SA-->>PO: connection closed (PO answers 454 4.7.0)
+    end
+  else 25 connector relay
+    T->>PO: EHLO, optional STARTTLS with client certificate
+    PO->>SA: socketmap relay_ccert (certificate SHA-256) or relay_client (client IP)
+    alt no matching connector
+      PO-->>T: 554 5.7.1 Access denied
+    end
+  end
+  T->>PO: MAIL FROM, RCPT TO
+  PO->>SA: policy_context=submission or relay
+  alt sender domain of another organization / not outbound-enabled
+    PO-->>T: 550 5.7.1 Sender address not authorized
+  else recipient suppressed
+    PO-->>T: 550 5.7.1 Recipient address suppressed
+  else per-tenant per-minute/day limit
+    PO-->>T: 450 4.7.1 Rate limit exceeded
+  else source-IP connector with require_tls and no TLS
+    PO-->>T: 550 5.7.1 Must issue a STARTTLS command first
+  else Redis/DB failure or adapter unreachable
+    PO-->>T: 4xx (fail closed)
+  else pass
+    SA-->>PO: DUNNO
+  end
+  T->>PO: DATA
+  PO->>PO: spool, 250 queued (content_filter = LMTP 10051)
+  PO->>ING: LMTP with XFORWARD IDENT
+  alt From header domain differs from the authenticated sender domain
+    ING-->>PO: 550 5.7.1 From header does not match … (DSN to the authenticated sender)
+  else stored
+    ING->>DB: S3 EML + one transaction (email_messages direction=outbound, outbox), then 250
+  end
   rect rgb(255, 248, 225)
-    T->>PO: connect from client IP, optional STARTTLS with client cert, optional AUTH
-    PO->>SA: policy request: client_address, sasl_username, ccert_fingerprint, sender, recipient
-    SA->>DB: domains by sender domain, domain_mail_servers role outbound_source
-    alt client IP not in ip_cidr and no authenticated connector
-      SA-->>PO: action=REJECT 5.7.1 relay not permitted
-      PO-->>T: 554 5.7.1
-    else sender domain not verified for that organization or outbound disabled
-      SA-->>PO: action=REJECT 5.7.1 sender domain not authorized
-    else lookup fails (MySQL or Redis down)
-      SA-->>PO: action=DEFER_IF_PERMIT 4.3.5, fail closed
-      PO-->>T: 4xx, the tenant server retries
-    else authorized, per-tenant outbound rate limit ok
-      SA-->>PO: action=DUNNO, organization from the connection
-    end
-    T->>PO: DATA
-    PO->>PO: spool, 250 queued
-    PO->>ING: LMTP, direction resolved from listener + connector (see diagram 8)
-    ING->>DB: registry, email_messages direction=outbound, outbox, COMMIT, then 250
-    Note over W: scanning (diagram 9) with outbound engines such as DLP 4.5,<br/>then policy decides deliver, tag, quarantine or discard. Never a bounce.
+    Note over W: scanning (diagram 9) incl. DLP 4.5, then policy: deliver, tag, quarantine or discard
     W->>DW: mail.policy.decided.v1 action=deliver
-    DW->>DB: processOnce, INSERT email_deliveries status in_progress
-    DW->>PX: SMTP reinject with the routing decision, record outbound_queue_id
-    PX->>PX: DKIM sign with the active domain_dkim_keys selector<br/>(private key fetched by private_key_ref, never stored in MySQL)
-    PX->>MX: MX lookup, TLS per policy, SMTP
-    alt 2xx
-      MX-->>PX: 250
-    else 4xx or connection failure
-      MX-->>PX: deferred, Postfix retries with backoff until maximal_queue_lifetime
-    else 5xx or queue lifetime exceeded
-      PX-->>T: DSN to the envelope sender (a real bounce, the sender is authenticated)
-    end
-    PX-->>DW: delivery status (mechanism decided in 2.3: DSN NOTIFY with ENVID or log feed)
-    DW->>DB: delivery_attempts, email_deliveries status, bounce_events,<br/>delivery_suppressions on hard bounce
+    DW->>PR: SMTP reinject from POSTFIX_REINJECT_NETWORKS, XFORWARD, X-Gateway-Trace
+  end
+  PR->>SA: policy_context=reinject-outbound: sender tenant + outbound-enabled,<br/>suppression, HEXISTS dkim_selectors (fail closed: 4.7.0)
+  PR->>RO: milter: sign with the domain's active RSA key (keys published by the api)
+  PR->>MX: MX lookup, TLS (may / per-destination policy), SMTP
+  alt 2xx
+    MX-->>PR: 250
+  else 4xx or connection failure
+    MX-->>PR: deferred, Postfix retries with backoff until maximal_queue_lifetime
+  else 5xx or queue lifetime exceeded
+    PR-->>T: DSN to the envelope sender (authenticated tenant user)
+    PR->>BH: postmaster copy from double-bounce@ (notify_classes bounce, delay)
+    Note over BH: counted only with the outbound X-Gateway-Trace of the sender organization
+    BH->>DB: bounce_events; hard address failure: delivery_suppressions (hard_bounce)
   end
 ```
 
-**Legend.** Every participant and message is PLANNED (shaded block). The DKIM signing component (Rspamd `dkim_signing` or a separate milter on the outbound Postfix) is chosen in step 2.2.
+**Legend.** Plain messages: IMPLEMENTED. Messages inside the shaded (amber) block and participants marked `(PLANNED x.y)`: PLANNED. Locally "the Internet" is `mail-sink`, reached through `dns-sink` MX records (profile `smtp-test`); `postfix-outbound` resolves nothing else.
 
 ## Status
 
-| Step in the sequence                           | Status           | Evidence or delivering step                                                                        |
-| ---------------------------------------------- | ---------------- | -------------------------------------------------------------------------------------------------- |
-| Outbound listener and relay authentication     | PLANNED 2.2      | `domain_mail_servers` (`role`, `ip_cidr`, `tls_mode`), `domains.outbound_enabled` exist (step 1.1) |
-| Connector types for M365 / Google              | PLANNED 8.2      |                                                                                                    |
-| Direction `outbound` from listener + connector | PLANNED 2.3      | `email_messages.direction` enum exists                                                             |
-| Outbound scanning and policy                   | PLANNED 4.5, 5.2 | `organization_features` (`outbound_filtering`, `dlp`)                                              |
-| DKIM signing                                   | PLANNED 2.2      | Key lifecycle in 2.1 (`domain_dkim_keys.private_key_ref`, `status`)                                |
-| Outbound Postfix retries, backoff and DSNs     | PLANNED 2.2      | ADR-0006: no retry scheduler in Node                                                               |
-| Delivery tracking, bounces, suppressions       | PLANNED 2.3, 6.x | `email_deliveries`, `delivery_attempts`, `bounce_events`, `delivery_suppressions` exist            |
-| Outbound TLS policy (MTA-STS, DANE)            | PLANNED 2.2      | `docs/security/README.md` lists it for the delivery phase                                          |
+| Step in the sequence                                          | Status                  | Evidence or delivering step                                                                                                        |
+| ------------------------------------------------------------- | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| 587: STARTTLS required, AUTH only after STARTTLS, `530`/`535` | IMPLEMENTED             | `infrastructure/postfix-outbound/master.cf`; `smtp-relay-control.test.ts` suites 3, 4                                              |
+| SASL against `smtp_connectors` (Argon2id), temp → `454`       | IMPLEMENTED             | `sasl-server.service.test.ts`, `apps/smtp-adapter/integration/sasl.test.ts`, `smtp-fail-closed.test.ts`                            |
+| Source-IP and client-certificate connectors on 25             | IMPLEMENTED             | `socketmap-lookup.service.test.ts`, `smtp-outbound.test.ts` (cert fingerprint, smtp-tools /32, `require_tls`)                      |
+| Sender ownership, suppressions, per-tenant limits             | IMPLEMENTED             | `policy-decision.service.test.ts`, `smtp-outbound.test.ts` (`550 5.7.1`, `450 4.7.1`)                                              |
+| Outbound ingestion (`direction = outbound`), From check       | IMPLEMENTED             | `ingestion.service.test.ts`, `smtp-outbound.test.ts` (stored; mismatch bounced)                                                    |
+| Connector API, recipient allow-lists                          | IMPLEMENTED             | `apps/api/integration/smtp-connectors.test.ts`, `tenant-isolation-smtp.test.ts`                                                    |
+| Reinject-outbound 10027 + DKIM signing                        | IMPLEMENTED             | `smtp-outbound.test.ts` (signature verified with mailauth against `domain_dkim_keys.public_key`), `dkim-signing-publisher.test.ts` |
+| Reinject-inbound 10026 via transport and TLS maps             | IMPLEMENTED             | `smtp-outbound.test.ts` (tenant destination `mx.sink.test`, `required` → TLS)                                                      |
+| Bounce notices → `bounce_events`, `delivery_suppressions`     | IMPLEMENTED             | `bounces.test.ts`, `smtp-outbound.test.ts` (hard bounce from mail-sink; counted only with the outbound trace, §12.7)               |
+| Connector types for M365 / Google                             | PLANNED 8.2             |                                                                                                                                    |
+| Outbound scanning and policy                                  | PLANNED 4.5, 5.2        | `organization_features` (`outbound_filtering`, `dlp`)                                                                              |
+| delivery-worker reinjection, `email_deliveries` tracking      | PLANNED 2.3             | contract in [contracts.md §15](../contracts.md#15-reinjection-delivery-worker--postfix-outbound)                                   |
+| Ed25519 dual signing, MTA-STS / DANE                          | PLANNED (not scheduled) | design §10                                                                                                                         |

@@ -196,6 +196,46 @@ const domainConfigShape = {
   DKIM_ROTATION_OVERLAP_DAYS: int(1, 90).default(7),
 };
 
+/**
+ * `REDIS_DKIM_URL`: optional `redis://` / `rediss://` URL of the DKIM key store (step 2.2 D12,
+ * ADR-0020), connecting as `dkim-writer`. Empty or unset disables the signing publisher.
+ */
+const optionalRedisUrl = z
+  .string()
+  .default('')
+  .transform((value, ctx): string | undefined => {
+    const trimmed = value.trim();
+    if (trimmed === '') return undefined;
+    let url: URL;
+    try {
+      url = new URL(trimmed);
+    } catch {
+      ctx.addIssue({ code: 'custom', message: 'must be a redis:// or rediss:// URL' });
+      return z.NEVER;
+    }
+    if (url.protocol !== 'redis:' && url.protocol !== 'rediss:') {
+      ctx.addIssue({ code: 'custom', message: 'must be a redis:// or rediss:// URL' });
+      return z.NEVER;
+    }
+    return trimmed;
+  });
+
+/** SMTP gateway control plane (step 2.2 §5): connectors, recipient lists, DKIM signing keys. */
+const smtpGatewayConfigShape = {
+  REDIS_DKIM_URL: optionalRedisUrl,
+  /** Periodic DKIM signing-key reconciliation into redis-dkim (D12). Disabled in tests. */
+  DKIM_SIGNING_SYNC_ENABLED: bool.default(true),
+  DKIM_SIGNING_SYNC_INTERVAL_SECONDS: int(5, 3600).default(30),
+  SMTP_CONNECTORS_MAX_PER_ORGANIZATION: int(1, 10_000).default(50),
+  /**
+   * Accept connector networks in private, loopback, link-local, shared, documentation and
+   * reserved ranges (step 2.2 §12.7). Off for the multi-tenant SaaS; a dedicated deployment
+   * whose customer relays from its own private networks turns it on.
+   */
+  SMTP_CONNECTOR_ALLOW_NON_PUBLIC_NETWORKS: bool.default(false),
+  DOMAIN_RECIPIENTS_MAX_PER_DOMAIN: int(1, 10_000_000).default(100_000),
+};
+
 const DOH_URL_MESSAGES: Record<DohUrlProblem, string> = {
   invalid: 'must be an absolute http(s) URL without a fragment',
   insecure: 'must be an https:// URL unless APP_ENV is local or ci',
@@ -278,6 +318,7 @@ export const apiConfigSchema = baseConfigSchema
   .extend(notifySmtpFieldsSchema.shape)
   .extend(authConfigShape)
   .extend(domainConfigShape)
+  .extend(smtpGatewayConfigShape)
   .extend({
     /** Comma-separated allow-list of admin portal origins. */
     CORS_ORIGINS: z

@@ -198,7 +198,7 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     );
   });
 
-  it('documents every domain endpoint of step 2.1 §4 for bearer tokens and API keys', () => {
+  it('documents every domain endpoint of steps 2.1 §4 and 2.2 §4.1 for tokens and API keys', () => {
     const expected = [
       'POST /api/v1/domains',
       'GET /api/v1/domains',
@@ -209,6 +209,12 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
       'POST /api/v1/domains/{id}/dkim/rotate',
       'PATCH /api/v1/domains/{id}/status',
       'DELETE /api/v1/domains/{id}',
+      // Step 2.2 §4.1: inbound recipient validation.
+      'GET /api/v1/domains/{id}/recipient-validation',
+      'PUT /api/v1/domains/{id}/recipient-validation',
+      'GET /api/v1/domains/{id}/recipients',
+      'POST /api/v1/domains/{id}/recipients',
+      'POST /api/v1/domains/{id}/recipients/remove',
     ];
     const byKey = new Map(operations(doc).map((op) => [op.key, op]));
     for (const key of expected) {
@@ -219,6 +225,31 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     }
     const domainOps = operations(doc).filter((op) => op.key.includes(' /api/v1/domains'));
     expect(domainOps.map((op) => op.key).sort()).toEqual([...expected].sort());
+  });
+
+  it('documents every SMTP connector endpoint of step 2.2 §4.1, with the shared-IP warning', () => {
+    const expected = [
+      'POST /api/v1/smtp-connectors',
+      'GET /api/v1/smtp-connectors',
+      'GET /api/v1/smtp-connectors/{id}',
+      'PATCH /api/v1/smtp-connectors/{id}',
+      'POST /api/v1/smtp-connectors/{id}/rotate-secret',
+      'DELETE /api/v1/smtp-connectors/{id}',
+    ];
+    const ops = operations(doc).filter((op) => op.key.includes(' /api/v1/smtp-connectors'));
+    expect(ops.map((op) => op.key).sort()).toEqual([...expected].sort());
+    for (const op of ops) {
+      expect(op.tags, op.key).toEqual(['smtp-connectors']);
+      const schemes = op.security.flatMap((s) => Object.keys(s)).sort();
+      expect(schemes, op.key).toEqual([ACCESS_TOKEN_SCHEME, API_KEY_SCHEME].sort());
+    }
+    const create = (
+      doc.paths['/api/v1/smtp-connectors'] as Record<string, { description?: string }>
+    ).post!;
+    expect(create.description).toContain('Microsoft 365');
+    expect(create.description).toContain('Google Workspace');
+    // The secret hash is never part of any response schema.
+    expect(JSON.stringify(doc)).not.toMatch(/secretHash|secret_hash/);
   });
 
   it('matches the committed snapshot docs/api/openapi.json', async () => {

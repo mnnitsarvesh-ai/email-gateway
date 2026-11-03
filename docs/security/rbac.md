@@ -17,6 +17,7 @@ The `permissions` table is seeded from `PERMISSIONS` in `packages/database/src/s
 
 | Key                          | Meaning                                                          |
 | ---------------------------- | ---------------------------------------------------------------- |
+| `organization:read`          | View organization profile, settings and limits                   |
 | `organization:manage`        | Change organization profile and settings                         |
 | `user:read`                  | View users and their roles                                       |
 | `user:manage`                | Invite, disable and assign roles to users                        |
@@ -47,6 +48,8 @@ The `permissions` table is seeded from `PERMISSIONS` in `packages/database/src/s
 | `platform:organizations`     | Platform: create, suspend and manage customer organizations      |
 | `platform:operations`        | Platform: view operational health, queues and maintenance status |
 | `platform:tenant_override`   | Platform: start an audited override into a customer organization |
+| `connector:read`             | View SMTP connectors (never secrets) (step 2.2)                  |
+| `connector:manage`           | Create, rotate and disable SMTP connectors (step 2.2)            |
 
 `GET /permissions` lists `platform:*` keys only to users of the platform organization who are not under an override; customer users and API keys see the tenant permissions only.
 
@@ -101,6 +104,8 @@ Generated from the seed catalog (`SYSTEM_ROLES`); if the catalog changes, regene
 | `platform:organizations`     |  ✓  |  ✓  |     |     |     |     |     |     |
 | `platform:operations`        |  ✓  |  ✓  |     |     |     |     |     |     |
 | `platform:tenant_override`   |  ✓  |  ✓  |     |     |     |     |     |     |
+| `connector:read`             |  ✓  |  ✓  |  ✓  |  ✓  |     |     |  ✓  |  ✓  |
+| `connector:manage`           |  ✓  |     |  ✓  |  ✓  |     |     |     |     |
 
 **Platform roles** are the roles that hold any `platform:*` permission: `super_admin` and `platform_admin` (`PLATFORM_ROLE_KEYS`). They can be assigned only to users of the platform organization (`kind = platform`); assigning one in a customer organization is `400`. Customer organizations never see platform roles in `GET /roles` or `GET /roles/{key}` (`404`). Domain Admin is organization-wide; per-domain scoping of roles is out of scope for now.
 
@@ -118,6 +123,20 @@ The domain routes (`/domains`, design [docs/plan/steps/03-domain-onboarding.md](
 - Another tenant's domain, a deleted domain and an unknown id are all `404` on every route; the tenant is the caller's organization (or the override target), never a request field.
 - Platform users without an override see only their own (platform) organization's domains. Under an override, `super_admin` can manage the target's domains (every mutation's audit row carries `metadata.override`) and `platform_admin` can only read them (`403` on mutations).
 - `apps/api/integration/tenant-isolation-domains.test.ts` proves these rules end to end (tenant A admin and an A API key with every domain scope get `404` on every route of a tenant B domain; read-only `403` on mutations; domain admin manages and rotates; the custom role cannot rotate; override behaviour as above).
+
+## SMTP connector permissions (step 2.2)
+
+Outbound SMTP connectors (SASL credentials, source-IP networks, client-certificate fingerprints; design [docs/plan/steps/04-smtp-gateway.md](../plan/steps/04-smtp-gateway.md) D10 and §4.1) have their own two permissions, because a connector authorizes a server to send mail as the organization.
+
+| Permission         | Routes (§4.1)                                                                                                                      | System roles                                                                                      |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `connector:read`   | `GET /smtp-connectors`, `GET /smtp-connectors/{id}`                                                                                | super admin, platform admin, organization admin, domain admin, compliance auditor, read-only user |
+| `connector:manage` | `POST /smtp-connectors`, `PATCH /smtp-connectors/{id}`, `POST /smtp-connectors/{id}/rotate-secret`, `DELETE /smtp-connectors/{id}` | super admin, organization admin (holds every tenant permission), domain admin                     |
+
+- `connector:read` is part of `TENANT_READ_PERMISSIONS`, so every system role built on the read set (platform admin, compliance auditor, read-only user) can list connectors. Responses never contain the secret hash; a SASL password is returned **once**, by create and rotate, to a caller holding `connector:manage`.
+- `connector:manage` is held by the domain admin (who already configures the organization's mail domains), the organization admin and the super admin. Security analysts and quarantine reviewers hold neither key.
+- The recipient allow-list routes (`/domains/{id}/recipient-validation`, `/domains/{id}/recipients`) use the existing `domain:read` and `domain:manage`.
+- Tenant scoping is unchanged: the organization comes from the principal (or the audited override target), a foreign connector id is `404`.
 
 ## Custom roles
 

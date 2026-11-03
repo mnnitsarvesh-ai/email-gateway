@@ -13,10 +13,10 @@ flowchart TB
   classDef ext fill:#eceff1,stroke:#546e7a,stroke-width:1px,color:#1b1b1b
 
   arrive["Message arrives<br/>PLANNED 2.3"]:::planned
-  listener{"Which listener?<br/>PLANNED 2.2"}:::planned
+  listener{"Which listener?<br/>IMPLEMENTED 2.2 (port decides the LMTP direction)"}:::impl
   mxRcpt["Inbound MX listener:<br/>organization = verified owner of the recipient domain<br/>domains.verified_name, inbound_enabled"]:::planned
   inbound["direction = inbound<br/>even when the sender domain is the tenant's own:<br/>spoofed internal senders are handled by SPF, DMARC, BEC"]:::planned
-  conn["Outbound listener:<br/>organization = authenticated connector or<br/>client IP in domain_mail_servers outbound_source"]:::planned
+  conn["Outbound listener:<br/>organization = authenticated SMTP connector<br/>(SASL, source IP, client certificate)<br/>IMPLEMENTED 2.2"]:::impl
   senderOk{"Envelope sender domain verified<br/>for the same organization?"}:::planned
   reject["REJECT 5.7.1 in-session"]:::planned
   perRcpt{"For each recipient: is the recipient<br/>domain a verified domain of the<br/>same organization?"}:::planned
@@ -42,13 +42,13 @@ flowchart TB
 sequenceDiagram
   autonumber
   participant U as Tenant mail system (connector)
-  participant PO as Postfix outbound listener (PLANNED 2.2)
-  participant SA as smtp-adapter policy and ingestion (PLANNED 2.2, 3.1)
+  participant PO as postfix-outbound connector listener
+  participant SA as smtp-adapter policy and ingestion (direction internal PLANNED 2.3)
   participant DB as MySQL writer
   participant EW as email-worker (PLANNED 4.x)
   participant PE as policy-engine (PLANNED 5.2)
   participant DW as delivery-worker (PLANNED 2.3)
-  participant PX as Postfix outbound MTA (PLANNED 2.2)
+  participant PX as postfix-outbound 10026 reinject-inbound
   participant UD as Tenant inbound destination
 
   rect rgb(255, 248, 225)
@@ -67,15 +67,16 @@ sequenceDiagram
   end
 ```
 
-**Legend.** All elements are PLANNED (amber dashed boxes, shaded sequence block). The grey "Headers" node is an external input that is deliberately **not** connected to the decision (the `-.-x` arrow).
+**Legend.** The listener decision and the connector authentication are IMPLEMENTED (step 2.2); everything else is PLANNED (amber dashed boxes, shaded sequence block). The grey "Headers" node is an external input that is deliberately **not** connected to the decision (the `-.-x` arrow).
 
 ## Status
 
-| Element                                     | Status      | Evidence or delivering step                                                                           |
-| ------------------------------------------- | ----------- | ----------------------------------------------------------------------------------------------------- |
-| "Never from headers" rule                   | Documented  | `packages/shared-types` (`MailDirection` comment), overview, ADR-0012. No code resolves direction yet |
-| Direction resolution, per-recipient split   | PLANNED 2.3 | `email_messages.direction`, `domains`, `domain_mail_servers` exist                                    |
-| Listeners and connector authentication      | PLANNED 2.2 |                                                                                                       |
-| M365 / Google connector specifics           | PLANNED 8.2 |                                                                                                       |
-| Internal-inspection feature flag            | PLANNED 1.2 | `organization_features.feature_key = internal_inspection` (table exists)                              |
-| Routing back to the tenant, loop prevention | PLANNED 2.3 | `delivery_routes`, `domain_mail_servers` (`inbound_destination`) exist                                |
+| Element                                     | Status      | Evidence or delivering step                                                                                                                                                                          |
+| ------------------------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| "Never from headers" rule                   | Documented  | `packages/shared-types` (`MailDirection` comment), overview, ADR-0012. No code resolves direction yet                                                                                                |
+| Direction resolution, per-recipient split   | PLANNED 2.3 | `email_messages.direction`, `domains`, `domain_mail_servers` exist                                                                                                                                   |
+| Listeners and connector authentication      | IMPLEMENTED | `infrastructure/postfix-outbound/master.cf`, smtp-adapter connectors; `smtp-outbound.test.ts`. Today such mail is ingested with `direction = outbound` (the listener's direction); `internal` is 2.3 |
+| Reinjection to the tenant's own server      | IMPLEMENTED | 10026 + transport/TLS maps; `smtp-outbound.test.ts` ("reinject-inbound … transport and TLS maps")                                                                                                    |
+| M365 / Google connector specifics           | PLANNED 8.2 |                                                                                                                                                                                                      |
+| Internal-inspection feature flag            | PLANNED 1.2 | `organization_features.feature_key = internal_inspection` (table exists)                                                                                                                             |
+| Routing back to the tenant, loop prevention | PLANNED 2.3 | `delivery_routes`, `domain_mail_servers` (`inbound_destination`) exist                                                                                                                               |

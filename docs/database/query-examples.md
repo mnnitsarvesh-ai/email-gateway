@@ -223,6 +223,8 @@ SELECT d.id, d.public_id, d.organization_id, d.name, d.status, d.inbound_enabled
 
 Use `resolveActiveDomain(writer, rawName)` from `@email-gateway/database` (step 2.1 D13): it normalizes the name like the api stores it (`normalizeDomainName`: case, trailing dot, IDN), runs `domain.findUnique({ where: { verifiedName } })` with the organization's status, and returns the owner only when the domain is `active` and the organization is `active`. `verified_name` is a MySQL generated column (`name` while `status` is `verified`, `active` or `suspended`, otherwise NULL) with a unique index, so the lookup is a `const` single-row read and **only the owner** can match: several organizations may hold a pending claim on the same `name` (unique per `(organization_id, live_name)`), and a pending claim never resolves a tenant. Never resolve a tenant with `WHERE name = ?`. Callers then check `inbound_enabled` / `outbound_enabled` for the direction. It runs for every SMTP transaction, so the ingestion step (3.x) can cache it in Redis.
 
+**Post-queue owner** (step 2.2 D7, D13): `resolveDomainOwner(writer, rawName)` runs the same single-row lookup with the same normalization, but also resolves `suspended` domains and organizations (it returns `status` and `organizationStatus` with the owner). LMTP ingestion and the bounce handler use it for mail Postfix has already accepted in-session, so a suspension between acceptance and ingestion never loses a message; `pending_verification`, `verified` (not activated), `failed`, `disabled`, `deleted` domains and `pending_deletion`/`deleted` organizations still resolve to `null`. In-session decisions keep using `resolveActiveDomain`. Both are writer-only.
+
 ## Q14: Suppression check
 
 ```sql

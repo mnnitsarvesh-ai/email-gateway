@@ -1,0 +1,4 @@
+# Scripted refusals used by the stack tests (step 2.2 §6, §9 suite 10).
+/^hard-bounce@/	550 5.1.1 User unknown
+/^soft-bounce@/	450 4.2.1 Mailbox busy
+/^policy-block@/	550 5.7.1 Blocked

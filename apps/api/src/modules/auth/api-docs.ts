@@ -20,6 +20,7 @@ const DESCRIPTIONS: Record<number, string> = {
   403: 'Authenticated but not allowed (permission, MFA, enrollment restriction)',
   404: 'Not found (also for resources of another tenant)',
   409: 'Conflicts with the current state',
+  422: 'Valid request for a feature that is not implemented',
   429: 'Rate limited (`Retry-After` header when known)',
   503: 'Authentication backend unavailable (fail closed)',
 };

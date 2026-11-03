@@ -13,17 +13,19 @@ flowchart LR
   tenantMx["Tenant mail server"]:::ext
 
   subgraph edge["Mail edge"]
-    pfIn["Postfix inbound MX<br/>:25"]:::impl
-    pfOut["Postfix outbound<br/>PLANNED 2.2"]:::planned
+    pfIn["postfix inbound MX<br/>:25 (postscreen)"]:::impl
+    pfOut["postfix-outbound<br/>587 submission, 25 connector relay,<br/>10026/10027 reinjection"]:::impl
     rspamd["Rspamd 3.12<br/>milter :11332, HTTP :11333"]:::impl
+    rspamdOut["rspamd-outbound<br/>DKIM signing milter"]:::impl
+    redisDkim[("redis-dkim<br/>signing keys, ACLs,<br/>no persistence")]:::impl
     clamav["ClamAV 1.4<br/>clamd :3310"]:::impl
   end
 
   subgraph apps["Deployables"]
     portal["admin-portal<br/>Next.js :3001"]:::impl
     api["api<br/>:3000"]:::impl
-    smtp["smtp-adapter<br/>policy :10040, HTTP :3010"]:::impl
-    lmtp["smtp-adapter LMTP ingestion<br/>PLANNED 2.2 / 3.1"]:::planned
+    smtp["smtp-adapter<br/>policy :10040, socketmap :10041,<br/>SASL :10042, HTTP :3010"]:::impl
+    lmtp["smtp-adapter LMTP<br/>ingestion :10050/:10051,<br/>bounces :10052"]:::impl
     ew["email-worker<br/>:3020"]:::impl
     pe["policy-engine<br/>:3030"]:::impl
     dw["delivery-worker<br/>:3040"]:::impl
@@ -44,12 +46,20 @@ flowchart LR
   obs["OTel Collector, Prometheus, Grafana<br/>observability profile"]:::impl
 
   sender -->|"SMTP"| pfIn
-  pfIn -->|"policy delegation"| smtp
+  tenantMx -->|"587 SASL / 25 connector"| pfOut
+  pfIn -->|"policy, socketmap"| smtp
+  pfOut -->|"policy, socketmap, SASL"| smtp
   pfIn -->|"milter"| rspamd
   rspamd -->|"own state"| redis
-  pfIn -.->|"LMTP, P 2.2"| lmtp
-  lmtp -.->|"EML, P 3.1"| s3
-  lmtp -.->|"message + outbox txn, P 3.1"| mysqlW
+  pfIn -->|"LMTP inbound"| lmtp
+  pfOut -->|"LMTP outbound, DSN copies"| lmtp
+  lmtp -->|"EML"| s3
+  lmtp -->|"message + outbox txn per tenant"| mysqlW
+  smtp -->|"caches, rate limits"| redis
+  pfOut -->|"10027 milter"| rspamdOut
+  rspamdOut -->|"read keys"| redisDkim
+  api -->|"publish keys"| redisDkim
+  smtp -->|"selector probe"| redisDkim
   mysqlW -.->|"outbox relay, P 3.2"| mq
   mq -.->|"message.received, P 4.1"| ew
   ew -.->|"/checkv2, P 4.1"| rspamd
@@ -60,7 +70,7 @@ flowchart LR
   mq -.->|"policy.decided, P 8.1"| aw
   mq -.->|"policy.decided, P 6.2"| nw
   dw -.->|"SMTP reinject, P 2.3"| pfOut
-  pfOut -.->|"SMTP, P 2.2"| tenantMx
+  pfOut -->|"SMTP: tenant destination / MX"| tenantMx
   aw -.->|"archive copy, P 8.1"| s3
   mq -.->|"indexing feed, no step yet"| os
   mq -.->|"event history feed, no step yet"| ch
@@ -92,7 +102,9 @@ flowchart LR
 
 | Element                                                | Status          | Evidence or delivering step                                                                                              |
 | ------------------------------------------------------ | --------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| Postfix inbound, policy delegation, milter             | IMPLEMENTED     | `infrastructure/postfix/*`; `mail-plane.test.ts`                                                                         |
+| Postfix inbound, policy delegation, socketmap, milter  | IMPLEMENTED     | `infrastructure/postfix/*`; `mail-plane.test.ts`, `smtp-inbound.test.ts`, `smtp-relay-control.test.ts`                   |
+| postfix-outbound (587, 25, 10026, 10027), SASL         | IMPLEMENTED     | `infrastructure/postfix-outbound/*`; `smtp-relay-control.test.ts`, `smtp-outbound.test.ts`                               |
+| rspamd-outbound + redis-dkim (DKIM signing)            | IMPLEMENTED     | `infrastructure/rspamd-outbound/*`, `infrastructure/redis-dkim/*`; `smtp-outbound.test.ts` (signature verifies)          |
 | Rspamd, ClamAV daemons                                 | IMPLEMENTED     | `mail-plane.test.ts` (`/checkv2` verdict, EICAR)                                                                         |
 | 7 Nest deployables + admin-portal                      | IMPLEMENTED     | `apps/*/src/app.module.ts`, `app.module.test.ts` per app; `services.test.ts`. Shells only: health and topology           |
 | MySQL primary + replica, GTID replication              | IMPLEMENTED     | `docker-compose.yml`; `replication.test.ts`                                                                              |
@@ -101,8 +113,9 @@ flowchart LR
 | Redis, MinIO                                           | IMPLEMENTED     | `rabbitmq-redis.test.ts` (auth, TTL), `storage.test.ts` (buckets, tenant-prefixed key, anonymous denied)                 |
 | OpenSearch, ClickHouse containers                      | IMPLEMENTED     | Compose `analytics` profile, validated by `docker compose config` in CI. Not exercised by tests                          |
 | Observability containers, OTLP export                  | IMPLEMENTED     | Compose `observability` profile, `packages/logger/src/tracing.ts`. Validated by `docker compose config`; no runtime test |
-| LMTP ingestion, S3 write, ingestion transaction        | PLANNED 2.2/3.1 | Locally Postfix discards accepted mail (`POSTFIX_RELAY_TRANSPORT=discard:`)                                              |
+| LMTP ingestion, S3 write, ingestion transaction        | IMPLEMENTED     | `apps/smtp-adapter/src/{lmtp,ingestion}`; `smtp-inbound.test.ts`, `smtp-durability.test.ts`, `smtp-concurrency.test.ts`  |
+| Bounce notices → bounce_events, suppressions           | IMPLEMENTED     | `apps/smtp-adapter/src/bounces`; `bounces.test.ts`, `smtp-outbound.test.ts`                                              |
+| MIME parsing (headers, attachments rows)               | PLANNED 3.1     |                                                                                                                          |
 | Outbox relay                                           | PLANNED 3.2     | `message_outbox` table exists                                                                                            |
 | Consumers (email-worker, policy-engine, delivery, ...) | PLANNED 4.1–8.1 | Queues exist; no consumer code                                                                                           |
-| Postfix outbound                                       | PLANNED 2.2     |                                                                                                                          |
 | OpenSearch and ClickHouse feeds                        | PLANNED         | ADR-0009. **No execution-plan step owns them yet** (reported as an open item)                                            |

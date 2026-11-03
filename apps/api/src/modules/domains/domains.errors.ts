@@ -35,3 +35,10 @@ export class TooManyRotationsException extends DomainRateLimitedException {
     super('Too many DKIM rotations for this domain', retryAfterSeconds);
   }
 }
+
+/** `PUT /domains/{id}/recipient-validation` for a mode the mail path does not implement (D3). */
+export const RECIPIENT_MODE_NOT_IMPLEMENTED = 'Not implemented';
+/** Enforcing an empty allow-list would reject every recipient of the domain (§4.1). */
+export const ALLOW_LIST_EMPTY = 'Add recipients before enforcing the allow-list';
+export const recipientLimitReached = (max: number): ConflictException =>
+  new ConflictException(`Recipient limit reached: at most ${max} per domain`);

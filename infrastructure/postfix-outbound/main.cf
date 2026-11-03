@@ -1,0 +1,161 @@
+# Outbound MTA of the Email Security Gateway (step 2.2, docs/plan/steps/04-smtp-gateway.md
+# D9-D13/D15).
+#
+# Listeners (master.cf): 25 connector relay, 587 submission, 10026 reinject-inbound, 10027
+# reinject-outbound. Every listener states its own relay permission with -o overrides; the
+# global defaults below REFUSE EVERYTHING, so a listener that forgets an override relays nothing.
+#
+# Every environment-specific value is rendered by entrypoint.sh with `postconf -e` and validated
+# there. No credential lives in this file or in the container: SASL is verified by smtp-adapter
+# (Dovecot auth protocol), tenant data comes over socketmap and policy delegation.
+
+compatibility_level = 3.6
+maillog_file = /dev/stdout
+smtpd_banner = $myhostname ESMTP
+biff = no
+append_dot_mydomain = no
+readme_directory = no
+
+# --- Identity --------------------------------------------------------------
+myhostname = out.gateway.local
+mydestination =
+inet_interfaces = all
+inet_protocols = ipv4
+
+# Never delivers locally, never relays for a domain by itself.
+local_recipient_maps =
+local_transport = error:5.1.1 local delivery is disabled
+alias_maps =
+alias_database =
+relay_domains =
+relay_recipient_maps =
+mynetworks = 127.0.0.0/8
+
+# --- User-defined parameters (rendered from the environment) -----------------------------------
+# SMTP_ADAPTER_HOST: policy 10040, socketmap 10041, SASL 10042, LMTP 10051 (outbound
+# ingestion) and 10052 (bounce notices).
+smtp_adapter_host = smtp-adapter
+# POSTFIX_REINJECT_NETWORKS: the only clients of 10026/10027 (delivery-worker subnet).
+reinject_networks = 127.0.0.0/8
+# POSTFIX_BOUNCE_DOMAIN: reserved, unroutable domain of the bounce-notice recipient (D13).
+gw_bounce_domain = bounces.gateway.internal
+
+# All accepted submissions and connector relays go to outbound ingestion (D1, D9).
+gw_ingest_content_filter = lmtp:inet:${smtp_adapter_host}:10051
+
+# Restriction lists used by the master.cf listeners (-o name=$gw_...). Policy calls fail closed.
+gw_relay_relay_restrictions =
+    check_ccert_access socketmap:inet:${smtp_adapter_host}:10041:relay_ccert,
+    check_client_access socketmap:inet:${smtp_adapter_host}:10041:relay_client,
+    reject
+gw_relay_recipient_restrictions =
+    reject_non_fqdn_recipient,
+    reject_non_fqdn_sender,
+    check_policy_service { inet:${smtp_adapter_host}:10040, timeout=10s, { default_action = DEFER_IF_PERMIT 4.3.5 Policy service unavailable }, policy_context=relay }
+gw_submission_recipient_restrictions =
+    reject_non_fqdn_recipient,
+    reject_non_fqdn_sender,
+    check_policy_service { inet:${smtp_adapter_host}:10040, timeout=10s, { default_action = DEFER_IF_PERMIT 4.3.5 Policy service unavailable }, policy_context=submission }
+# END-OF-MESSAGE: the real size against the per-tenant limit the policy recorded at RCPT for
+# this smtpd instance (D11 step 7). Without it a client that leaves out SIZE= could submit up to
+# message_size_limit whatever organization_limits.max_message_size_bytes says (review finding,
+# docs/plan/steps/04-smtp-gateway.md §12.7).
+gw_relay_end_of_data_restrictions =
+    check_policy_service { inet:${smtp_adapter_host}:10040, timeout=10s, { default_action = DEFER_IF_PERMIT 4.3.5 Policy service unavailable }, policy_context=relay }
+gw_submission_end_of_data_restrictions =
+    check_policy_service { inet:${smtp_adapter_host}:10040, timeout=10s, { default_action = DEFER_IF_PERMIT 4.3.5 Policy service unavailable }, policy_context=submission }
+gw_reinject_inbound_recipient_restrictions =
+    check_policy_service { inet:${smtp_adapter_host}:10040, timeout=10s, { default_action = DEFER_IF_PERMIT 4.3.5 Policy service unavailable }, policy_context=reinject-inbound },
+    permit_mynetworks,
+    reject
+gw_reinject_outbound_recipient_restrictions =
+    check_policy_service { inet:${smtp_adapter_host}:10040, timeout=10s, { default_action = DEFER_IF_PERMIT 4.3.5 Policy service unavailable }, policy_context=reinject-outbound },
+    permit_mynetworks,
+    reject
+
+# --- Global smtpd defaults: refuse everything (D9) ------------------------------------------
+smtpd_client_restrictions =
+smtpd_relay_restrictions = reject
+smtpd_recipient_restrictions = reject
+smtpd_sasl_auth_enable = no
+smtpd_sasl_authenticated_header = no
+smtpd_helo_required = yes
+disable_vrfy_command = yes
+strict_rfc821_envelopes = yes
+smtpd_data_restrictions = reject_unauth_pipelining, reject_multi_recipient_bounce
+smtpd_end_of_data_restrictions =
+smtpd_policy_service_timeout = 10s
+smtpd_policy_service_max_idle = 300s
+smtpd_policy_service_default_action = DEFER_IF_PERMIT 4.3.5 Policy service unavailable
+# Only the 10027 listener sets a milter (rspamd-outbound, DKIM signing).
+smtpd_milters =
+non_smtpd_milters =
+milter_protocol = 6
+milter_default_action = tempfail
+milter_mail_macros = i {mail_addr} {client_addr} {client_name} {auth_authen}
+milter_connect_timeout = 10s
+milter_content_timeout = 60s
+
+# --- Routing (D11, D13) ---------------------------------------------------------------------
+# Static entry for the bounce-notice domain (written by the entrypoint), then the tenant
+# destinations from smtp-adapter. NOTFOUND = Postfix's own MX resolution.
+transport_maps = texthash:/etc/postfix/transport, socketmap:inet:${smtp_adapter_host}:10041:transport
+smtp_tls_policy_maps = socketmap:inet:${smtp_adapter_host}:10041:tls_policy
+lmtp_send_xforward_command = yes
+lmtp_destination_recipient_limit = 100
+lmtp_destination_concurrency_limit = 20
+lmtp_data_done_timeout = 600s
+# LMTP next hops are always internal (smtp-adapter 10051 ingestion, 10052 bounce notices), so they
+# are resolved with the system resolver only (/etc/hosts from extra_hosts, Docker's service names,
+# the VPC resolver in production). `dns` first would ask dns-sink locally (authoritative only for
+# sink.test, REFUSED otherwise): Postfix treats that as a temporary error and never falls back to
+# native, so every outbound message would stay deferred with "Host not found, try again".
+lmtp_host_lookup = native
+enable_long_queue_ids = yes
+hopcount_limit = 30
+
+# --- Bounce notices to the bounce handler (D13) ----------------------------------------------
+notify_classes = bounce, delay
+bounce_notice_recipient = bounce-notices@${gw_bounce_domain}
+delay_notice_recipient = bounce-notices@${gw_bounce_domain}
+2bounce_notice_recipient = bounce-notices@${gw_bounce_domain}
+delay_warning_time = 4h
+
+# --- Queue (rendered from the environment) ----------------------------------------------------
+minimal_backoff_time = 300s
+maximal_backoff_time = 4000s
+queue_run_delay = 300s
+maximal_queue_lifetime = 5d
+bounce_queue_lifetime = 5d
+
+# --- Limits (D15; rendered from the environment) ------------------------------------------------
+message_size_limit = 52428800
+smtpd_recipient_limit = 100
+smtpd_client_connection_count_limit = 50
+smtpd_client_connection_rate_limit = 300
+smtpd_client_message_rate_limit = 2000
+smtpd_client_recipient_rate_limit = 5000
+smtpd_client_new_tls_session_rate_limit = 300
+smtpd_client_auth_rate_limit = 30
+smtpd_client_event_limit_exceptions = $mynetworks
+anvil_rate_time_unit = 60s
+smtpd_timeout = 60s
+
+# --- TLS server (D15). Paths rendered from POSTFIX_OUTBOUND_TLS_CERT_PATH / _KEY_PATH. ---------
+smtpd_tls_security_level = may
+smtpd_tls_cert_file = /etc/ssl/certs/ssl-cert-snakeoil.pem
+smtpd_tls_key_file = /etc/ssl/private/ssl-cert-snakeoil.key
+smtpd_tls_protocols = >=TLSv1.2
+smtpd_tls_mandatory_protocols = >=TLSv1.2
+smtpd_tls_mandatory_ciphers = high
+smtpd_tls_fingerprint_digest = sha256
+tls_preempt_cipherlist = yes
+smtpd_tls_session_cache_database = btree:${data_directory}/smtpd_scache
+smtpd_tls_received_header = yes
+smtpd_tls_loglevel = 1
+
+# --- TLS client (delivery). Per-destination policy comes from the tls_policy socketmap. ---------
+smtp_tls_security_level = may
+smtp_tls_CAfile = /etc/ssl/certs/ca-certificates.crt
+smtp_tls_session_cache_database = btree:${data_directory}/smtp_scache
+smtp_tls_loglevel = 1

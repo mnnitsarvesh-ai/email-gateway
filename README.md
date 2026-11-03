@@ -2,7 +2,7 @@
 
 A multi-tenant email security gateway: inbound, outbound and internal mail inspection, spam and phishing detection, malware and attachment scanning, URL protection, BEC detection, DLP, quarantine and optional archiving. It runs as shared SaaS or as a dedicated per-customer deployment. The design target is **1M emails/day**, scaling horizontally beyond that.
 
-> **Status: Phase 2 in progress (step 2.1: domain onboarding).** Phase 0 (monorepo, local stack, health, CI, architecture docs), step 1.1 (the MySQL schema with the read/write split) and steps 1.2/1.3 (tenants, first-party authentication with MFA and API keys, eight default roles, tenant-scoped authorization with an audited platform override, the organizations API) are in place. Step 2.1 adds the domains API: DNS TXT ownership verification (system resolver or DNS-over-HTTPS, a Redis cache, timeouts that never change state), generated MX/SPF/DKIM/DMARC records with checks and recommendations, DKIM keys encrypted at rest with rotation, the domain lifecycle (activate, suspend, delete) and background re-verification inside the api. Mail-processing features come in later steps. See [docs/architecture/overview.md](docs/architecture/overview.md#what-exists-now-and-what-comes-next) and [docs/plan/execution-plan.md](docs/plan/execution-plan.md).
+> **Status: Phase 2 in progress (step 2.2: Postfix SMTP gateway).** Phase 0 (monorepo, local stack, health, CI, architecture docs), step 1.1 (the MySQL schema with the read/write split), steps 1.2/1.3 (tenants, first-party authentication with MFA and API keys, eight default roles, tenant-scoped authorization with an audited platform override, the organizations API) and step 2.1 (domain onboarding: DNS verification, generated MX/SPF/DKIM/DMARC records, encrypted DKIM keys with rotation, the domain lifecycle) are in place. Step 2.2 adds the mail plane: an inbound MX (`postfix`, postscreen, relay domains and policy from smtp-adapter, Rspamd milter) and an outbound MTA (`postfix-outbound`: SASL submission, source-IP / client-certificate connector relay, internal reinjection listeners), durable LMTP ingestion into S3 + MySQL (`250` only after both), outbound connectors and recipient allow-lists in the api, DKIM signing in a dedicated Rspamd fed by the api through an isolated Redis, bounce processing into suppressions, loop prevention and Prometheus metrics. Message processing after ingestion (MIME parsing, the outbox relay, scanning, policies, delivery) comes in later steps. See [docs/architecture/overview.md](docs/architecture/overview.md#what-exists-now-and-what-comes-next) and [docs/plan/execution-plan.md](docs/plan/execution-plan.md).
 
 ## Stack
 
@@ -11,7 +11,7 @@ A multi-tenant email security gateway: inbound, outbound and internal mail inspe
 | Services                     | Node.js 22, TypeScript (strict), NestJS 11, REST          |
 | Portal                       | Next.js 15, React 19, Tailwind CSS 4, shadcn/ui           |
 | Database                     | MySQL 8.4 + Prisma (version-controlled migrations)        |
-| Mail plane                   | Postfix, Rspamd, ClamAV, YARA                             |
+| Mail plane                   | Postfix (inbound MX + outbound MTA), Rspamd, ClamAV, YARA |
 | Messaging / cache            | RabbitMQ (quorum queues), Redis                           |
 | Storage / search / analytics | AWS S3 (MinIO locally), OpenSearch, ClickHouse            |
 | Platform                     | Docker, Kubernetes (Kustomize), Terraform, GitHub Actions |
@@ -24,7 +24,7 @@ A multi-tenant email security gateway: inbound, outbound and internal mail inspe
 ```bash
 pnpm install
 pnpm env:init                       # creates .env with random local secrets (git-ignored)
-docker compose up -d --wait         # MySQL primary + replica, RabbitMQ, Redis, MinIO, Postfix, Rspamd, ClamAV
+docker compose up -d --wait         # MySQL primary + replica, RabbitMQ, Redis, MinIO, both Postfix MTAs, Rspamd, ClamAV, redis-dkim
 pnpm db:migrate                     # history preflight + apply database migrations
 pnpm test:integration               # verify every infrastructure service
 ```
@@ -55,6 +55,14 @@ grep -q '^GATEWAY_MX_HOSTS=' .env || sed -n '/^# --- Domain onboarding and DNS (
 
 The local values point at `.test` names; in a real deployment set `GATEWAY_MX_HOSTS`/`GATEWAY_SPF_INCLUDE` to the gateway's public names and choose the DNS resolver ([runbook](docs/runbooks/domain-verification.md#dns-resolver-modes)). The API integration tests never use public DNS: they run their own in-process DNS server.
 
+Step 2.2 (SMTP gateway) adds the section "SMTP gateway (step 2.2)" of `.env.example`: host ports of the outbound MTA and redis-dkim, `SMTP_ADAPTER_HOST` (where both Postfix containers reach smtp-adapter: `smtp-adapter` for the apps profile and CI, `host.docker.internal` when the adapter runs on the host with `pnpm --filter @email-gateway/smtp-adapter dev`), Postfix limits, TLS certificate paths (`POSTFIX_*TLS_*_PATH`) and queue timings, the redis-dkim passwords (`REDIS_DKIM_*_PASSWORD`, secrets) and URLs, `GATEWAY_TRACE_SECRET` (secret), and the adapter's cache, rate-limit, SASL and ingestion tuning. `POSTFIX_RELAY_DOMAINS` is deprecated: relay domains now come from the database through smtp-adapter. If your `.env` predates the section, append it and fill its placeholders yourself (never `env:init --force`):
+
+```bash
+grep -q '^GATEWAY_TRACE_SECRET=' .env || sed -n '/^# --- SMTP gateway (step 2.2) ---/,$p' .env.example >> .env
+# then replace each __GENERATE__ / __GENERATE_64__ in the appended lines, e.g. with
+node -e "console.log(require('crypto').randomBytes(24).toString('hex'))"
+```
+
 The API serves business routes under `/api/v1` ([ADR-0015](docs/architecture/adr/0015-api-base-path.md)); health endpoints stay at `/health/*`, and outside production the OpenAPI UI is at `/docs` (snapshot: [docs/api/openapi.json](docs/api/openapi.json)). Endpoints and conventions: [docs/api/README.md](docs/api/README.md).
 
 ### First login (local)
@@ -84,24 +92,44 @@ Optional profiles: `--profile analytics` (OpenSearch, ClickHouse) and `--profile
 
 All ports bind to `127.0.0.1`. You can change any host port in `.env` (`*_HOST_PORT`) if it clashes with something else on your machine.
 
-| Service             | Port                                          | Health                                                                                |
-| ------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------- |
-| api                 | 3000                                          | `/health/live`, `/health/ready`, OpenAPI at `/docs` (business routes under `/api/v1`) |
-| admin-portal        | 3001                                          | `/api/health`                                                                         |
-| smtp-adapter        | 3010 (HTTP), 10040 (Postfix policy, internal) | `/health/ready`                                                                       |
-| email-worker        | 3020                                          | `/health/ready`                                                                       |
-| policy-engine       | 3030                                          | `/health/ready`                                                                       |
-| delivery-worker     | 3040                                          | `/health/ready`                                                                       |
-| notification-worker | 3050                                          | `/health/ready`                                                                       |
-| archive-worker      | 3060                                          | `/health/ready`                                                                       |
-| Postfix (SMTP)      | 2525 → 25                                     | Container health check                                                                |
-| MySQL (primary)     | 3306 (`MYSQL_HOST_PORT`)                      | Container health check                                                                |
-| MySQL (replica)     | 3308 (`MYSQL_REPLICA_HOST_PORT`)              | Healthy only while replication runs                                                   |
-| RabbitMQ            | 5672, management 15672                        |                                                                                       |
-| Redis               | 6379                                          |                                                                                       |
-| MinIO               | 9000, console 9001                            |                                                                                       |
-| Rspamd              | 11333 (scan), 11334 (controller)              |                                                                                       |
-| ClamAV              | 3310                                          |                                                                                       |
+| Service              | Port                                                                                                  | Health                                                                                                                                                   |
+| -------------------- | ----------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| api                  | 3000                                                                                                  | `/health/live`, `/health/ready`, OpenAPI at `/docs` (business routes under `/api/v1`)                                                                    |
+| admin-portal         | 3001                                                                                                  | `/api/health`                                                                                                                                            |
+| smtp-adapter         | 3010 (HTTP, `/metrics`)                                                                               | `/health/ready`; internal Postfix listeners: policy 10040, socketmap 10041, SASL 10042, LMTP 10050 (inbound) / 10051 (outbound) / 10052 (bounce notices) |
+| email-worker         | 3020                                                                                                  | `/health/ready`                                                                                                                                          |
+| policy-engine        | 3030                                                                                                  | `/health/ready`                                                                                                                                          |
+| delivery-worker      | 3040                                                                                                  | `/health/ready`                                                                                                                                          |
+| notification-worker  | 3050                                                                                                  | `/health/ready`                                                                                                                                          |
+| archive-worker       | 3060                                                                                                  | `/health/ready`                                                                                                                                          |
+| postfix (inbound MX) | 2525 → 25 (`SMTP_HOST_PORT`)                                                                          | Container health check                                                                                                                                   |
+| postfix-outbound     | 2587 → 587 submission, 2527 → 25 connector relay (`SUBMISSION_HOST_PORT`, `OUTBOUND_RELAY_HOST_PORT`) | Container health check; reinjection 10026/10027 are never published                                                                                      |
+| rspamd-outbound      | none (milter of postfix-outbound 10027 only)                                                          | Container health check                                                                                                                                   |
+| redis-dkim           | 6391 (`REDIS_DKIM_HOST_PORT`)                                                                         | ACL users per role, no persistence (ADR-0020)                                                                                                            |
+| postfix-notify       | 2526 (`NOTIFY_SMARTHOST_HOST_PORT`)                                                                   | Platform transactional mail smarthost                                                                                                                    |
+| MySQL (primary)      | 3306 (`MYSQL_HOST_PORT`)                                                                              | Container health check                                                                                                                                   |
+| MySQL (replica)      | 3308 (`MYSQL_REPLICA_HOST_PORT`)                                                                      | Healthy only while replication runs                                                                                                                      |
+| RabbitMQ             | 5672, management 15672                                                                                |                                                                                                                                                          |
+| Redis                | 6379                                                                                                  |                                                                                                                                                          |
+| MinIO                | 9000, console 9001                                                                                    |                                                                                                                                                          |
+| Rspamd               | 11333 (scan), 11334 (controller)                                                                      |                                                                                                                                                          |
+| ClamAV               | 3310                                                                                                  |                                                                                                                                                          |
+
+Test-only services (Compose profile `smtp-test`, never deployed; no host ports): `mail-sink` (a Postfix that stores whatever it receives under `/var/mail/sink/<domain>/<local>/` and refuses `hard-bounce@`, `soft-bounce@` and `policy-block@`), `dns-sink` (CoreDNS authoritative for `sink.test` only: the outbound MTA's only resolver, so locally it can never reach the Internet) and `smtp-tools` (swaks, `smtp-source`, openssl).
+
+### SMTP stack tests
+
+`pnpm test:integration` includes the stack SMTP suites `tests/integration/smtp-*.test.ts` (real SMTP through both Postfix instances, swaks/smtp-source from `smtp-tools`, S3 and MySQL assertions, MinIO/Redis/Postfix outages, a 40-session × 1 000-message zero-loss run). They need the `smtp-test` profile and a running smtp-adapter, and **fail** with an explanation when either is missing:
+
+```bash
+docker compose up -d --wait
+docker compose --profile smtp-test up -d --wait mail-sink dns-sink smtp-tools
+pnpm build                                          # the suites run the api's dkim:sync CLI from dist/
+pnpm --filter @email-gateway/smtp-adapter dev       # with SMTP_ADAPTER_HOST=host.docker.internal in .env
+pnpm test:integration
+```
+
+With the apps profile instead (`SMTP_ADAPTER_HOST=smtp-adapter`, as in CI) the adapter and the api run as containers and the suites publish DKIM keys inside the api container. `SMTP_STACK_TESTS=skip` skips the SMTP suites explicitly (with a visible notice); `SMTP_LOAD_SESSIONS` / `SMTP_LOAD_MESSAGES` scale the load test down on a small machine.
 
 ## Common commands
 
@@ -117,6 +145,7 @@ All ports bind to `127.0.0.1`. You can change any host port in `.env` (`*_HOST_P
 | `pnpm db:partitions -- plan\|apply`                   | Partition maintenance (create ahead, drop expired)                                  |
 | `pnpm db:seed`                                        | Seed the catalog and demo data (idempotent)                                         |
 | `pnpm --filter @email-gateway/api auth:bootstrap`     | Invite the first platform super admin (after `build`; prints the link to stdout)    |
+| `pnpm --filter @email-gateway/api dkim:sync`          | Publish DKIM signing keys to redis-dkim once (after `build`; e.g. after a restart)  |
 | `pnpm db:perf`                                        | Database performance test (throwaway schema)                                        |
 | `pnpm infra:up` / `pnpm stack:up` / `pnpm stack:down` | Compose shortcuts                                                                   |
 
@@ -126,7 +155,7 @@ All ports bind to `127.0.0.1`. You can change any host port in `.env` (`*_HOST_P
 apps/
   api/                  REST API: identity, tenants, domains, quarantine, reporting, audit, integrations
   admin-portal/         Next.js admin console
-  smtp-adapter/         Postfix policy server (in-session checks); LMTP ingestion next
+  smtp-adapter/         Postfix extension services: policy, socketmap, SASL, LMTP ingestion, bounces
   email-worker/         Email processing + security engine orchestration
   policy-engine/        Tenant policy evaluation → deliver | tag | quarantine | discard
   delivery-worker/      Reinjection into outbound Postfix
@@ -162,6 +191,10 @@ scripts/                Developer tooling
 - [Adding a domain (customer guide: verification, MX, SPF, DKIM, DMARC)](docs/domains/onboarding.md)
 - [Runbook: domain verification and DNS checks](docs/runbooks/domain-verification.md)
 - [DNS resolution (ADR-0017)](docs/architecture/adr/0017-dns-resolution-strategy.md) and [DKIM key custody (ADR-0018)](docs/architecture/adr/0018-dkim-key-custody.md)
+- [SMTP gateway topology (ADR-0019)](docs/architecture/adr/0019-smtp-gateway-topology.md), [DKIM signing (ADR-0020)](docs/architecture/adr/0020-dkim-signing.md) and the [step 2.2 design and verification record](docs/plan/steps/04-smtp-gateway.md)
+- [Deployment: SMTP gateway (EC2 Auto Scaling Groups, ports, drain)](docs/deployment/smtp-gateway.md)
+- Runbooks: [policy service down](docs/runbooks/smtp-policy-service-down.md), [persistence failure](docs/runbooks/smtp-persistence-failure.md), [queue backlog](docs/runbooks/smtp-queue-backlog.md), [gateway restart](docs/runbooks/smtp-gateway-restart.md), [TLS certificate rotation](docs/runbooks/smtp-tls-cert-rotation.md), [DKIM signing](docs/runbooks/smtp-dkim-signing.md), [tenant reputation (bounce ratio PromQL and thresholds)](docs/runbooks/smtp-tenant-reputation.md)
+- [SMTP concurrency results (smtp-source, zero loss)](docs/performance/smtp-concurrency.md)
 
 ## Engineering rules (short version)
 

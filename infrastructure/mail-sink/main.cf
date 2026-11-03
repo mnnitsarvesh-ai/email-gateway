@@ -1,0 +1,48 @@
+# mail-sink: TEST-ONLY Postfix (Compose profile smtp-test, step 2.2 §6). It plays "the Internet"
+# and "tenant destination servers" for postfix-outbound: every *.test domain is accepted into a
+# Maildir under /var/mail/sink/<domain>/<local>/, scripted local parts are refused, and nothing
+# is ever relayed anywhere else. Never deploy it outside local/CI.
+
+compatibility_level = 3.6
+maillog_file = /dev/stdout
+smtpd_banner = $myhostname ESMTP
+biff = no
+append_dot_mydomain = no
+readme_directory = no
+
+myhostname = mx.sink.test
+mydestination =
+inet_interfaces = all
+inet_protocols = ipv4
+mynetworks = 127.0.0.0/8
+local_recipient_maps =
+local_transport = error:5.1.1 local delivery is disabled
+alias_maps =
+alias_database =
+
+# Never relays: everything that is not a *.test virtual mailbox domain is refused, and the
+# delivery transports for other destinations are hard errors.
+relay_domains =
+relay_transport = error:5.7.1 This sink never relays
+default_transport = error:5.7.1 This sink never relays
+smtpd_relay_restrictions = reject_unauth_destination
+smtpd_recipient_restrictions = check_recipient_access regexp:/etc/postfix/sink/recipients.regexp
+smtpd_helo_required = yes
+disable_vrfy_command = yes
+
+# Every *.test domain, one Maildir per recipient, written by the `sink` pipe(8) transport
+# (master.cf; /usr/local/bin/sink-deliver as user sink), one recipient per delivery.
+virtual_mailbox_domains = regexp:/etc/postfix/sink/domains.regexp
+virtual_mailbox_maps = regexp:/etc/postfix/sink/mailboxes.regexp
+virtual_transport = sink
+sink_destination_recipient_limit = 1
+# Above the gateway's 50 MiB limit so size tests are decided by the gateway, not by the sink.
+message_size_limit = 62914560
+smtpd_recipient_limit = 1000
+
+smtpd_tls_security_level = may
+smtpd_tls_cert_file = /etc/ssl/certs/ssl-cert-snakeoil.pem
+smtpd_tls_key_file = /etc/ssl/private/ssl-cert-snakeoil.key
+smtpd_tls_protocols = >=TLSv1.2
+smtpd_tls_received_header = yes
+smtpd_tls_loglevel = 1

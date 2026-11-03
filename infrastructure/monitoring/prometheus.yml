@@ -10,6 +10,12 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: ['rabbitmq:15692']
+  # smtp-adapter (step 2.2 D16): policy, socketmap, SASL, ingestion, bounce and reputation
+  # metrics. Metric names are a contract for the dashboards of step 10.3.
+  - job_name: smtp-adapter
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['smtp-adapter:3010']
   - job_name: prometheus
     static_configs:
       - targets: ['localhost:9090']

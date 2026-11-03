@@ -1,0 +1,9 @@
+; Zone sink.test (TEST-ONLY). Every name under sink.test has its MX at the mail-sink container.
+$ORIGIN sink.test.
+$TTL 60
+@       IN SOA  ns.sink.test. hostmaster.sink.test. ( 2026110201 3600 600 86400 60 )
+@       IN NS   ns.sink.test.
+@       IN MX   10 mx.sink.test.
+*       IN MX   10 mx.sink.test.
+ns      IN A    172.31.250.53
+mx      IN A    172.31.250.25

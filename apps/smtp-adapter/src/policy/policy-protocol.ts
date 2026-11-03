@@ -50,3 +50,26 @@ export function formatResponse(action: string): string {
   if (/[\r\n]/.test(action)) throw new PolicyProtocolError('action must be a single line');
   return `action=${action}\n\n`;
 }
+
+/** Postfix adds this prefix itself (`<rcpt>: Recipient address rejected: <text>`). */
+const POSTFIX_RCPT_PREFIX = 'Recipient address rejected: ';
+
+/**
+ * Wire form of a policy action. Postfix answers `REJECT <text>` with `access_map_reject_code`
+ * (554 by default), while step 2.2 specifies permanent policy rejections as `550` (D3:
+ * `550 5.1.1`; §9 test plan: `550 5.7.1`). Postfix's numeric action `550 <text>` has the same
+ * meaning as REJECT with an explicit code, so `REJECT` is sent as `550`. Postfix also prefixes
+ * every restriction reply with `Recipient address rejected:` (or `End-of-data rejected:`), so a
+ * leading copy of that phrase in our text is dropped to avoid saying it twice. `DUNNO` and
+ * `DEFER_IF_PERMIT` (450, `defer_code`) pass through unchanged.
+ */
+export function postfixAction(action: string): string {
+  if (!action.startsWith('REJECT ')) return action;
+  const text = action.slice('REJECT '.length);
+  const enhanced = /^5\.\d{1,3}\.\d{1,3} /.exec(text)?.[0] ?? '';
+  const rest = text.slice(enhanced.length);
+  const message = rest.startsWith(POSTFIX_RCPT_PREFIX)
+    ? rest.slice(POSTFIX_RCPT_PREFIX.length)
+    : rest;
+  return `550 ${enhanced}${message}`;
+}

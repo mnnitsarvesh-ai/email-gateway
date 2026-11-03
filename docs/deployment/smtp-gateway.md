@@ -1,0 +1,205 @@
+# SMTP gateway deployment (step 2.2)
+
+How the mail plane is deployed: the two Postfix instances, the DKIM signer and its key store, the test-only sinks, their environment, and the production model on EC2. Design and decision ids (D*n*): [docs/plan/steps/04-smtp-gateway.md](../plan/steps/04-smtp-gateway.md). Decisions: [ADR-0019](../architecture/adr/0019-smtp-gateway-topology.md) (topology) and [ADR-0020](../architecture/adr/0020-dkim-signing.md) (DKIM signing). Runbooks: [queue backlog](../runbooks/smtp-queue-backlog.md), [persistence failure](../runbooks/smtp-persistence-failure.md), [policy service down](../runbooks/smtp-policy-service-down.md), [TLS certificate rotation](../runbooks/smtp-tls-cert-rotation.md), [gateway restart](../runbooks/smtp-gateway-restart.md), [DKIM signing](../runbooks/smtp-dkim-signing.md).
+
+## Components
+
+```
+ Internet ──25──▶ postfix (inbound MX, postscreen → smtpd)
+                    ├─ socketmap 10041 relay_domain ─┐
+                    ├─ policy 10040 (inbound) ───────┤
+                    ├─ milter 11332 ──▶ rspamd       ├──▶ smtp-adapter ──▶ MySQL writer, Redis, S3
+                    └─ LMTP 10050 ───────────────────┘
+ Tenant servers ──587 (STARTTLS+SASL)/25 (IP, client cert)──▶ postfix-outbound ──LMTP 10051──▶ smtp-adapter
+ delivery-worker ──10026/10027──▶ postfix-outbound ──▶ tenant servers / Internet (10027: milter ──▶ rspamd-outbound ◀── redis-dkim ◀── api)
+ postfix-outbound bounce/delay notices ──LMTP 10052──▶ smtp-adapter
+```
+
+| Service            | Image / source                                                    | Role                                                                                                                      |
+| ------------------ | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `postfix`          | `infrastructure/postfix` (Debian bookworm, Postfix 3.7)           | Inbound MX. Relay domains, policy and ingestion all come from smtp-adapter. Never delivers to a tenant directly           |
+| `postfix-outbound` | `infrastructure/postfix-outbound` (Debian bookworm, Postfix 3.7)  | Submission 587, connector relay 25, reinjection 10026/10027, bounce notices to the adapter                                |
+| `rspamd`           | `rspamd/rspamd:3.12` + `infrastructure/rspamd`                    | Inbound content milter (unchanged)                                                                                        |
+| `rspamd-outbound`  | `rspamd/rspamd:3.12` + `infrastructure/rspamd-outbound`           | DKIM signer, milter of the 10027 listener only. Never rejects or adds scan headers; tempfails a message it could not sign |
+| `redis-dkim`       | `redis:7.4-alpine` + `infrastructure/redis-dkim/entrypoint.sh`    | DKIM signing keys. ACL user per role, default user off, no persistence                                                    |
+| `smtp-adapter`     | Node service (`apps/smtp-adapter`)                                | Policy 10040, socketmap 10041, SASL 10042, LMTP 10050/10051/10052, HTTP 3010 (`/health/*`, `/metrics`)                    |
+| `postfix-notify`   | `infrastructure/postfix-notify`                                   | Platform transactional mail (unchanged, see [why it stays separate](#why-postfix-notify-stays-separate-d19))              |
+| `mail-sink`        | `infrastructure/mail-sink` (Postfix), profile `smtp-test`         | **Test only.** Accepts every `*.test` domain into Maildirs, scripted refusals. Never relays                               |
+| `dns-sink`         | `coredns/coredns:1.11.3` + `infrastructure/dns-sink`, `smtp-test` | **Test only.** Authoritative for `sink.test`, refuses everything else                                                     |
+| `smtp-tools`       | `infrastructure/smtp-tools`, profile `smtp-test`                  | **Test only.** swaks, `smtp-source`/`smtp-sink`, openssl, dig, nc (`sleep infinity`)                                      |
+
+## Listeners and relay permissions (D9)
+
+| Instance           | Container port | Host port (local, 127.0.0.1)      | Who may relay                                                                         | Policy context      |
+| ------------------ | -------------- | --------------------------------- | ------------------------------------------------------------------------------------- | ------------------- |
+| `postfix`          | 25             | `SMTP_HOST_PORT` (2525)           | Nobody; mail only for active tenant domains (socketmap `relay_domain`)                | `inbound`           |
+| `postfix-outbound` | 587            | `SUBMISSION_HOST_PORT` (2587)     | SASL-authenticated connectors, after STARTTLS (`smtpd_tls_auth_only`)                 | `submission`        |
+| `postfix-outbound` | 25             | `OUTBOUND_RELAY_HOST_PORT` (2527) | Active `source_ip` connector networks or `client_certificate` fingerprints            | `relay`             |
+| `postfix-outbound` | 10026          | **not published**                 | `POSTFIX_REINJECT_NETWORKS` only, to active tenant domains only                       | `reinject-inbound`  |
+| `postfix-outbound` | 10027          | **not published**                 | `POSTFIX_REINJECT_NETWORKS` only, tenant senders only, DKIM-signed by rspamd-outbound | `reinject-outbound` |
+| `redis-dkim`       | 6379           | `REDIS_DKIM_HOST_PORT` (6391)     | ACL users only (`default` is off)                                                     | —                   |
+
+`postfix-outbound`'s `main.cf` defaults are `smtpd_relay_restrictions = reject`, `smtpd_recipient_restrictions = reject`, `smtpd_sasl_auth_enable = no`; each listener overrides them in `master.cf` through named restriction lists (`gw_*_restrictions` in `main.cf`). A listener that forgets an override refuses everything. Submission and relay listeners hand all accepted mail to outbound ingestion (`content_filter = lmtp:inet:${SMTP_ADAPTER_HOST}:10051`); the reinjection listeners have no content filter and route through `transport_maps` (static bounce-domain entry, then the adapter's `transport` socketmap; `NOTFOUND` = Postfix's MX resolution) with `smtp_tls_policy_maps` from the adapter's `tls_policy` socketmap.
+
+The 587 and 25 listeners also run the policy at END-OF-MESSAGE (`smtpd_end_of_data_restrictions = $gw_submission_end_of_data_restrictions` / `$gw_relay_end_of_data_restrictions`): the real size is checked against the per-tenant `max_message_size_bytes` the policy recorded at RCPT, so a client that leaves out `SIZE=` cannot exceed it (`554 5.3.4 Message too big`). The reserved recipient `bounce-notices@${POSTFIX_BOUNCE_DOMAIN}` (and its subdomains) is refused by the policy on every listener (`550 5.7.1 Relay access denied`); only Postfix's own bounce daemon reaches the bounce handler.
+
+Every policy call is `check_policy_service { inet:${SMTP_ADAPTER_HOST}:10040, timeout=10s, { default_action = DEFER_IF_PERMIT 4.3.5 Policy service unavailable }, policy_context=<context> }`. The inner braces protect the spaces of the default action (Postfix `attr_override` syntax).
+
+### Behaviour without smtp-adapter (fail closed; verified locally)
+
+| Path                                        | Reply                                                                                                                                                                                                                                                                                               |
+| ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Inbound RCPT (any domain)                   | `451 4.3.0 <rcpt>: Temporary lookup failure` (the `relay_domain` socketmap is unreachable)                                                                                                                                                                                                          |
+| Submission 587, before STARTTLS             | `STARTTLS` advertised, no `AUTH`; `MAIL FROM` → `530 5.7.0 Must issue a STARTTLS command first`                                                                                                                                                                                                     |
+| Submission 587, after STARTTLS              | smtpd logs `SASL: Connect to Dovecot auth socket … failed` and `fatal: no SASL authentication mechanisms`, then closes the session (Postfix behaviour; the client retries later). Nothing is accepted                                                                                               |
+| Connector relay 25, no TLS                  | `451 4.3.5 … Client host rejected: Server configuration error` (`relay_client` lookup failed)                                                                                                                                                                                                       |
+| Connector relay 25, self-signed client cert | `451 4.3.5 … Client certificate rejected: Server configuration error` (`relay_ccert` lookup attempted for an **unverified** certificate: Postfix 3.7 `check_ccert_access` does not require a CA-verified certificate; risk §8 of the design concerns only the policy attribute `ccert_fingerprint`) |
+| Reinjection 10026/10027                     | `450 4.3.5 <rcpt>: Recipient address rejected: Policy service unavailable`                                                                                                                                                                                                                          |
+| Queued mail (LMTP 10050/10051/10052)        | Deferred in the Postfix queue, retried with the configured backoff                                                                                                                                                                                                                                  |
+
+## Environment
+
+All keys are in `.env.example` (section `SMTP gateway (step 2.2)`) with comments. Postfix and Rspamd read no file containing secrets from the repository; every value is rendered at container start.
+
+| Key(s)                                                                                                                                                                                               | Read by                        | Notes                                                                                                                                                                                                                             |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SMTP_ADAPTER_HOST`                                                                                                                                                                                  | postfix, postfix-outbound      | `smtp-adapter` (apps profile, CI), `host.docker.internal` (adapter on the host, this repository's local `.env`). Rendered into the user parameter `smtp_adapter_host`; adapter ports are fixed (10040-10042, 10050-10052)         |
+| `POSTFIX_MYHOSTNAME`, `POSTFIX_OUTBOUND_MYHOSTNAME`                                                                                                                                                  | postfix / postfix-outbound     | `mx.gateway.local`, `out.gateway.local`. Production: the public PTR names                                                                                                                                                         |
+| `POSTFIX_TLS_CERT_PATH`, `POSTFIX_TLS_KEY_PATH`, `POSTFIX_OUTBOUND_TLS_CERT_PATH`, `POSTFIX_OUTBOUND_TLS_KEY_PATH`                                                                                   | postfix / postfix-outbound     | Absolute paths inside the container; the entrypoint refuses to start if a file is not readable. Default: the image's snakeoil pair                                                                                                |
+| `POSTFIX_MESSAGE_SIZE_LIMIT`                                                                                                                                                                         | both                           | Bytes (≥ 1 MiB); advertised `SIZE`                                                                                                                                                                                                |
+| `POSTFIX_CLIENT_CONNECTION_COUNT_LIMIT`, `…_CONNECTION_RATE_LIMIT`, `…_MESSAGE_RATE_LIMIT`, `…_RECIPIENT_RATE_LIMIT`, `POSTFIX_CLIENT_TLS_SESSION_RATE_LIMIT`                                        | both                           | anvil, per client IP (`anvil_rate_time_unit = 60s`). The reinjection listeners exempt `$reinject_networks` (`smtpd_client_event_limit_exceptions`), the inbound instance only loopback                                            |
+| `POSTFIX_CLIENT_AUTH_RATE_LIMIT`                                                                                                                                                                     | postfix-outbound               | AUTH commands per minute per client                                                                                                                                                                                               |
+| `POSTFIX_SMTPD_PROCESS_LIMIT`                                                                                                                                                                        | both                           | `maxproc` of the inbound `smtpd pass` service and of each outbound smtpd listener                                                                                                                                                 |
+| `POSTFIX_POSTSCREEN_GREET_ACTION`, `POSTFIX_POSTSCREEN_DNSBL_SITES`                                                                                                                                  | postfix                        | `ignore` / empty locally; production `enforce` and e.g. `zen.spamhaus.org*2 bl.spamcop.net*1` (with `postscreen_dnsbl_action = enforce`). With `ignore` the pregreet teaser banner is disabled and `postscreen_greet_wait` is 1 s |
+| `POSTFIX_MINIMAL_BACKOFF_TIME`, `POSTFIX_MAXIMAL_BACKOFF_TIME`, `POSTFIX_QUEUE_RUN_DELAY`, `POSTFIX_MAXIMAL_QUEUE_LIFETIME`                                                                          | both                           | Production `300s`/`4000s`/`300s`/`5d`; local `.env` `30s`/`120s`/`30s`. The lifetime also sets `bounce_queue_lifetime`                                                                                                            |
+| `POSTFIX_DELAY_WARNING_TIME`                                                                                                                                                                         | postfix-outbound               | `4h`                                                                                                                                                                                                                              |
+| `POSTFIX_REINJECT_NETWORKS`                                                                                                                                                                          | postfix-outbound               | Space/comma separated CIDRs. Local: Docker private ranges. **Production: the delivery-worker subnet only**                                                                                                                        |
+| `POSTFIX_BOUNCE_DOMAIN`                                                                                                                                                                              | postfix-outbound, smtp-adapter | Reserved, unroutable domain (`bounces.gateway.internal`); the entrypoint writes `/etc/postfix/transport` with `<domain> lmtp:inet:${SMTP_ADAPTER_HOST}:10052`                                                                     |
+| `REDIS_DKIM_WRITER_PASSWORD`, `REDIS_DKIM_READER_PASSWORD`, `REDIS_DKIM_PROBE_PASSWORD`                                                                                                              | redis-dkim, rspamd-outbound    | At least 32 characters, no whitespace (the reader password: `[A-Za-z0-9._~+/=-]` only, it is embedded in Rspamd UCL)                                                                                                              |
+| `REDIS_DKIM_URL` / `REDIS_DKIM_PROBE_URL`                                                                                                                                                            | api / smtp-adapter             | Compose sets `redis://dkim-writer:…@redis-dkim:6379/0` / `redis://dkim-probe:…@redis-dkim:6379/0`                                                                                                                                 |
+| `SUBMISSION_HOST_PORT`, `OUTBOUND_RELAY_HOST_PORT`, `REDIS_DKIM_HOST_PORT`                                                                                                                           | Compose                        | 2587, 2527, 6391 (checked free on the development machine)                                                                                                                                                                        |
+| smtp-adapter keys (`SOCKETMAP_PORT` … `SUPPRESSION_HARD_BOUNCE_DAYS`, `GATEWAY_TRACE_*`) and api keys (`DKIM_SIGNING_*`, `SMTP_CONNECTORS_MAX_PER_ORGANIZATION`, `DOMAIN_RECIPIENTS_MAX_PER_DOMAIN`) | smtp-adapter / api             | Passed by Compose (§5 of the design). `GATEWAY_TRACE_SECRET` is required                                                                                                                                                          |
+| `POSTFIX_RELAY_DOMAINS`                                                                                                                                                                              | —                              | **Deprecated**: no longer read by Postfix                                                                                                                                                                                         |
+
+### Input validation at start
+
+Both Postfix entrypoints validate every value before rendering it (`postconf -e`): integers, Postfix time values, the postscreen action enum, host names (no spaces, `$` or `;`), CIDR lists, absolute and readable certificate paths. Error messages name the variable, never the value, and the container exits with status 64. After rendering, `postfix check` must print nothing: any warning is treated as an error. `redis-dkim` and `rspamd-outbound` refuse to start without their passwords; `rspamd-outbound` also runs `rspamadm configtest`.
+
+### Existing `.env` files
+
+Append the `SMTP gateway (step 2.2)` section of `.env.example` and generate the three `REDIS_DKIM_*_PASSWORD` values and `GATEWAY_TRACE_SECRET` (64 hex) yourself, e.g. `node -e "console.log(require('crypto').randomBytes(24).toString('hex'))"`. Never re-run `pnpm env:init --force` (it rotates every secret). Compose refuses to start `redis-dkim`, `rspamd-outbound`, the api and smtp-adapter until the passwords exist (`required variable … append the SMTP gateway keys from .env.example`).
+
+## Running locally
+
+```bash
+docker compose build postfix && docker compose build postfix-outbound     # one image at a time (8 GB VM)
+docker compose up -d --wait postfix postfix-outbound rspamd-outbound redis-dkim
+docker compose --profile smtp-test build mail-sink && docker compose --profile smtp-test build smtp-tools
+docker compose --profile smtp-test up -d --wait mail-sink dns-sink smtp-tools
+```
+
+### smtp-adapter on the host vs the apps profile (D20)
+
+- **Host (this repository's local `.env`)**: `SMTP_ADAPTER_HOST=host.docker.internal`, then `pnpm --filter @email-gateway/smtp-adapter dev`. Both Postfix containers have `extra_hosts: host.docker.internal:host-gateway`, and the LMTP clients honour `/etc/hosts`: the inbound MX uses `lmtp_host_lookup = dns, native`, `postfix-outbound` uses `native` only (its DNS is dns-sink, which REFUSES every name outside `sink.test`; Postfix treats that as a temporary error and would never fall back to `/etc/hosts`, found by the step 2.2 stack tests). The submission listener runs with `max_use=1` (one session per `smtpd` process) so a fresh SASL connection is opened after an adapter restart. The adapter binds `MAIL_LISTEN_HOST`/`POLICY_HOST` (`0.0.0.0`) and refuses peers outside `SMTP_INTERNAL_CLIENT_NETWORKS`.
+- **Apps profile (CI)**: `SMTP_ADAPTER_HOST=smtp-adapter` (the `.env.example` default) and `docker compose --profile apps up -d --build --wait`. Changing `SMTP_ADAPTER_HOST` requires recreating both Postfix containers (`docker compose up -d postfix postfix-outbound`).
+- Never run both at once against the same Postfix: Postfix talks to exactly one adapter address.
+
+### Local network isolation (D17)
+
+`rspamd-outbound` signs for every peer that speaks milter to it, so it is attached **only** to the internal Compose network `dkim-signing` (`internal: true`, no published port), shared with `postfix-outbound` (its only milter client) and `redis-dkim` (its key store; also on the default network for the api, the adapter and the host port). No other container can resolve or reach it (stack test `smtp-relay-control.test.ts`). Its Rspamd maps cannot be fetched from `maps.rspamd.com` there (logged as `cannot resolve maps.rspamd.com`); the signing path uses none of them. `sign_networks` stays `0.0.0.0/0`: Rspamd matches it against the client address that the milter peer itself reports, so it cannot authenticate the peer; reachability is the control.
+
+`postfix-outbound` is attached to the default network, to `dkim-signing` and to `mailtest` (172.31.250.0/24) and uses `dns: [172.31.250.53]`: Docker's embedded resolver still answers service names (`rspamd-outbound`, `smtp-adapter`) and forwards everything else **only** to `dns-sink`, which is authoritative for `sink.test` and refuses all other names. So locally the outbound MTA can never deliver to the Internet; without the `smtp-test` profile every external lookup fails and mail stays queued. Mail to `<anything>@<name>.sink.test` is routed by MX to `mail-sink` (172.31.250.25). Read the sink with `docker compose exec mail-sink find /var/mail/sink -type f`.
+
+### Test sinks (profile `smtp-test`, never deployed)
+
+- `mail-sink`: every `*.test` domain is a virtual mailbox domain; a `pipe(8)` transport (`sink-deliver`, user `sink`) writes `/var/mail/sink/<domain>/<local>/new/<file>` (Postfix's `virtual(8)` forbids regexp substitution in `virtual_mailbox_maps`, so the path is built from the `${domain}`/`${user}` macros after a character-set check). Scripted refusals at RCPT: `hard-bounce@` → `550 5.1.1 User unknown`, `soft-bounce@` → `450 4.2.1 Mailbox busy`, `policy-block@` → `550 5.7.1 Blocked`. `smtpd_relay_restrictions = reject_unauth_destination` without `permit_mynetworks` and error transports for everything else: it never relays.
+- `dns-sink`: zone `sink.test` (`MX 10 mx.sink.test.`, wildcard `*.sink.test MX 10 mx.sink.test.`, `mx.sink.test A 172.31.250.25`); no `forward` plugin.
+- `smtp-tools`: e.g. `docker compose exec smtp-tools swaks --server postfix-outbound --port 10027 …`, `smtp-source -s 40 -m 1000 -f a@x.test -t b@y.test postfix:25`.
+
+## TLS certificates
+
+- Server certificates: `POSTFIX_TLS_*` (inbound) and `POSTFIX_OUTBOUND_TLS_*` (outbound) point at files inside the container; mount the chain (leaf first) and key read-only, key mode 0600 owned by root. Protocols `>=TLSv1.2` (also mandatory), `smtpd_tls_mandatory_ciphers = high`, `tls_preempt_cipherlist = yes`, session cache, `smtpd_tls_received_header = yes`. Submission (587) requires TLS (`smtpd_tls_security_level = encrypt`); 25 is opportunistic (`may`).
+- Client certificates (connector relay 25): `smtpd_tls_ask_ccert = yes`, `smtpd_tls_fingerprint_digest = sha256`. Postfix looks up the certificate fingerprint and then the public-key fingerprint in `relay_ccert`, formatted as **upper-case hex with colons** (`AB:CD:…`); the adapter normalizes before comparing with the stored lower-case value.
+- Outbound delivery: `smtp_tls_security_level = may` globally, per destination from `tls_policy` (`verify` uses `smtp_tls_CAfile = /etc/ssl/certs/ca-certificates.crt`).
+- **AWS**: ACM certificates cannot be exported. Use a certificate from your CA (or Let's Encrypt via DNS-01) stored in Secrets Manager or an encrypted S3 object, pulled at instance boot and on rotation. Procedure: [smtp-tls-cert-rotation.md](../runbooks/smtp-tls-cert-rotation.md).
+
+## DKIM signer and redis-dkim isolation (D12, ADR-0020)
+
+- `redis-dkim` runs `redis-server --aclfile /run/redis-dkim/users.acl --save '' --appendonly no --maxmemory 64mb --maxmemory-policy noeviction`. The ACL file is rendered at start into a tmpfs (directory 0700, file 0600, owner `redis`) with **SHA-256 password hashes** (`#<hash>`), never plaintext; the working directory `/data` is a tmpfs too, so no key ever touches a disk. Users:
+
+  | User          | Used by                    | Grants                                                                                                                                |
+  | ------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+  | `default`     | —                          | `off`, no keys, no commands                                                                                                           |
+  | `dkim-writer` | api `DkimSigningPublisher` | `~dkim_selectors ~dkim_keys` `+ping +hget +hgetall +hkeys +hset +hdel +hexists +multi +exec +del`                                     |
+  | `dkim-reader` | rspamd-outbound            | `~dkim_selectors ~dkim_keys` `+ping +hget +select` (Rspamd 3.12 sends `AUTH` and `HGET`; `SELECT` only when a database is configured) |
+  | `dkim-probe`  | smtp-adapter               | `%R~dkim_selectors` `+ping +hexists +hget` (selectors only; `HGET dkim_keys` → `NOPERM`)                                              |
+
+  No user can run `INFO`, `CONFIG`, `KEYS` or `ACL`. Clients must not depend on them: ioredis' ready check sends `INFO` and only logs a warning on `NOPERM`; set `enableReadyCheck: false` for these connections.
+
+- `rspamd-outbound` copies `infrastructure/rspamd-outbound/local.d` into a tmpfs and appends the Redis connection (`servers`, `username = dkim-reader`, `password`) to `dkim_signing.conf` (0600, user `_rspamd`). Normal worker and controller listen on `127.0.0.1` only; only the milter port 11332 is reachable on the network. Network-dependent modules are disabled (rbl, fuzzy_check, asn, phishing, spf, dmarc, arc, hfilter, url_redirector, whitelist) as are Redis-backed ones (neural, replies, history_redis, greylist, ratelimit). Actions are disabled, `milter_headers` adds nothing.
+- Signing settings: `use_redis`, `selector_prefix = dkim_selectors`, `key_prefix = dkim_keys` (option names verified in Rspamd 3.12 `lua_dkim_tools.lua`: `HGET dkim_selectors <domain>`, then `HGET dkim_keys <selector>.<domain>`), `use_domain = header`, `allow_hdrfrom_mismatch = false`, `allow_username_mismatch = true`, `sign_local = true`, `sign_networks = 0.0.0.0/0, ::/0`, `use_esld = false`, **`try_fallback = true`** (deviation, see below).
+- **Never unsigned**: `force_actions.conf` turns a message without `DKIM_SIGNED` into a `soft reject` (milter tempfail, `Signing key not available, try again later`). The reinject-outbound policy already defers when `dkim_selectors` has no entry for the sender domain; this closes the window between RCPT and end of DATA (key removed, redis-dkim restarted, Redis error).
+- Production: a dedicated store, never the shared ElastiCache. Either a small self-managed instance in a private subnet running this same image, or a **dedicated** ElastiCache for Redis replication group with automatic backups/snapshots disabled, in-transit encryption on, and an RBAC user group reproducing the four users above (`default` disabled). Security group: inbound 6379 only from the api, smtp-adapter and rspamd-outbound security groups.
+
+### Deviations from the design (WP2)
+
+| Decision                   | Design                                               | Implemented                                                                                                                                                                                                                                                                                                                                              |
+| -------------------------- | ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| D12 `try_fallback`         | `false`                                              | `true`. In Rspamd 3.12 `prepare_dkim_signing` returns "dkim unconfigured and fallback disabled" before Redis is consulted when no static `domain {}` entry exists, so `false` signs nothing. With `use_redis` the fallback entry only supplies the From domain; selector and key still come from Redis per domain and the default key path is never used |
+| D12 actions                | all disabled (no reject, no add_header)              | all disabled, **plus** one `force_actions` rule: unsigned → `soft reject` (4xx). Strengthens invariant 3 and ADR-0020 decision 4 (never send unsigned)                                                                                                                                                                                                   |
+| D15 postscreen pregreet    | greet action from env                                | as designed, plus: with `ignore`, `postscreen_greet_banner =` and `postscreen_greet_wait = 1s` (otherwise every first contact waits 6 s after a `220-` teaser whose result is ignored, and single-line banner expectations break). `enforce`/`drop` keep Postfix's defaults                                                                              |
+| D15 DNSBL                  | sites from env                                       | as designed, plus `postscreen_dnsbl_action = enforce` (only effective when sites are configured)                                                                                                                                                                                                                                                         |
+| Debian default `master.cf` | full default service list                            | default list without the third-party `pipe(8)` transports (maildrop, uucp, ifmail, bsmtp, scalemail-backend, mailman): their programs and users do not exist and nothing routes to them                                                                                                                                                                  |
+| §6 mail-sink storage       | virtual mailboxes `/var/mail/sink/<domain>/<local>/` | same layout, written by a `pipe(8)` transport (`virtual(8)` forbids regexp substitution)                                                                                                                                                                                                                                                                 |
+| Inbound env                | —                                                    | `POSTFIX_RELAY_DOMAINS`, `POSTFIX_RELAY_TRANSPORT`, `POSTFIX_POLICY_SERVICE`, `POSTFIX_MILTER` and `POSTFIX_MYNETWORKS` are no longer read by the inbound entrypoint (relay domains/transport/policy from the adapter, milter `inet:rspamd:11332` and `mynetworks = 127.0.0.0/8` fixed by D9)                                                            |
+
+## Production model on EC2 (D18)
+
+Kubernetes manifests do not include Postfix: the spool must survive any rescheduling, and the outbound tier needs fixed egress IPs. Both tiers run the same images as Compose.
+
+### Inbound ASG
+
+- Instances in at least two AZs, each with an **EBS gp3 volume** for `/var/spool/postfix` (encrypted with KMS, `DeleteOnTermination = false`, tagged with the instance id), Docker or a systemd unit running the `postfix` image.
+- **NLB** (TCP 25, cross-zone) in front; target health check TCP 25. Client IPs are preserved (NLB with instance targets), so postscreen and anvil see real addresses.
+- `SMTP_ADAPTER_HOST` points at an internal NLB/DNS name of the smtp-adapter service (EKS, `type: LoadBalancer` internal, or an internal NLB) reachable **only** from the Postfix security groups.
+- Capacity: start with 2 × c7g.large per AZ; one Postfix instance handles hundreds of concurrent sessions (`POSTFIX_SMTPD_PROCESS_LIMIT` 100 per instance, raise with memory: ~2-4 MB per smtpd). Scale on active connections (NLB `ActiveFlowCount`) and on queue size (custom metric from `postqueue -j | wc -l`), not CPU alone.
+
+### Outbound ASG
+
+- Separate ASG and EBS spools (a long-lived spool for tenant-server outages: size for `POSTFIX_MAXIMAL_QUEUE_LIFETIME` × peak volume).
+- **Static egress**: each instance has an Elastic IP (attach at boot from a pool via lifecycle hook) or sits behind NAT gateways with fixed EIPs dedicated to mail. Every egress IP has a **PTR** record matching `POSTFIX_OUTBOUND_MYHOSTNAME` (`smtp_helo_name = $myhostname`), and the SPF include (`GATEWAY_SPF_INCLUDE`) lists exactly these IPs. Request removal of the EC2 port 25 egress throttle for these instances. Track reputation per IP (Postmaster Tools, SNDS); warm up new IPs gradually.
+- Ingress: 587 and 25 via an NLB (connector relay needs real client IPs: instance targets, client IP preservation on). 10026/10027 only from the delivery-worker security group.
+
+### Security groups (per listener of D9)
+
+| Security group               | Inbound rules                                                                                                                                                                                                                      |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sg-postfix-inbound`         | 25/tcp from 0.0.0.0/0 and ::/0 (via NLB)                                                                                                                                                                                           |
+| `sg-postfix-outbound`        | 587/tcp and 25/tcp from 0.0.0.0/0 (via NLB; relay is authorized per connector); 10026, 10027/tcp from `sg-delivery-worker` only                                                                                                    |
+| `sg-smtp-adapter`            | 10040, 10041/tcp from `sg-postfix-inbound` and `sg-postfix-outbound`; 10042, 10051, 10052/tcp from `sg-postfix-outbound`; 10050/tcp from `sg-postfix-inbound`; 3010/tcp from the monitoring SG and the load balancer health checks |
+| `sg-rspamd-outbound`         | 11332/tcp from `sg-postfix-outbound` only                                                                                                                                                                                          |
+| `sg-redis-dkim`              | 6379/tcp from `sg-api`, `sg-smtp-adapter`, `sg-rspamd-outbound` only                                                                                                                                                               |
+| Egress `sg-postfix-outbound` | 25/tcp to 0.0.0.0/0 (delivery), 53 to the VPC resolver, the adapter, rspamd-outbound                                                                                                                                               |
+
+Set `POSTFIX_REINJECT_NETWORKS` to the delivery-worker subnets and `SMTP_INTERNAL_CLIENT_NETWORKS` (adapter) to the Postfix subnets; the security groups are the primary control, these are the second line.
+
+### Drain and instance refresh
+
+Never terminate an instance whose queue is not empty. Lifecycle hook `autoscaling:EC2_INSTANCE_TERMINATING` (heartbeat 1 h, default result `ABANDON`), handled by a script on the instance:
+
+1. Deregister the instance from the NLB target groups (stop new sessions), wait for the deregistration delay.
+2. Stop accepting mail: `postconf -M# smtp/inet` (inbound; outbound also `submission/inet`, `10026/inet`, `10027/inet`) and `postfix reload`. Existing sessions finish.
+3. Flush and wait: `postqueue -f`; poll `postqueue -j | wc -l` until 0 (or until the hook times out).
+4. Empty → `complete-lifecycle-action CONTINUE`. Not empty (destination down for hours) → keep the instance (`record-lifecycle-heartbeat`), or move the spool: stop Postfix, detach the EBS volume, attach it to a healthy instance's spare mount point and import with `postsuper`-safe copying of `deferred/` and `active/` into that instance's queue (`postfix stop`, copy queue files keeping names, `postsuper -s`, `postfix start`), then CONTINUE.
+
+Instance refresh (new AMI or image): `aws autoscaling start-instance-refresh` with `MinHealthyPercentage = 100` and the same lifecycle hook; one AZ at a time. Full procedure: [smtp-gateway-restart.md](../runbooks/smtp-gateway-restart.md).
+
+### Monitoring
+
+Prometheus scrapes `smtp-adapter:3010/metrics` (job `smtp-adapter`, `infrastructure/monitoring/prometheus.yml`). On the Postfix hosts export queue size (`postqueue -j`), deferred reasons and log counts (e.g. postfix_exporter or CloudWatch agent on the JSON log). Alert on: queue size growth, `smtp_ingest_messages_total{outcome="tempfail"}` rate, `smtp_policy_decisions_total{action="tempfail"}`, adapter readiness, redis-dkim down, rspamd-outbound soft rejects (`FORCE_ACTION_GATEWAY_DKIM_UNSIGNED` in its log).
+
+Tenant sending reputation (`smtp_tenant_mail_events_total{organization_id, event}` and the daily `rep:{orgId}:{yyyymmdd}` Redis hashes) is recorded but not yet consumed by any API, job or alert rule (alert rules are step 10.3). The bounce-ratio, suppression and delay PromQL and the recommended thresholds are in [smtp-tenant-reputation.md](../runbooks/smtp-tenant-reputation.md).
+
+## Why postfix-notify stays separate (D19)
+
+Platform transactional mail (invitations, password resets, verification) must not depend on tenant outbound health, tenant reputation, customer DKIM keys or the post-queue pipeline, and it relays to its own upstream with SASL and a pinned certificate. It therefore stays a separate smarthost, unchanged by this step. A later step may move it onto `postfix-outbound` with a platform DKIM domain and a dedicated reputation pool (own egress IPs).

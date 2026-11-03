@@ -1,5 +1,9 @@
-# Inbound MX for the Email Security Gateway (local development profile).
-# Environment-specific values are applied by entrypoint.sh with `postconf -e`.
+# Inbound MX of the Email Security Gateway (step 2.2, docs/plan/steps/04-smtp-gateway.md D2/D4/D15).
+#
+# Every environment-specific value is rendered by entrypoint.sh with `postconf -e` and validated
+# there; the values below are the defaults the entrypoint overwrites. No credential ever lives in
+# this file: Postfix holds no data-store credentials (security boundary Z2). Tenant data comes
+# from smtp-adapter over Postfix's own extension protocols (socketmap, policy delegation, LMTP).
 
 compatibility_level = 3.6
 maillog_file = /dev/stdout
@@ -14,30 +18,77 @@ mydestination =
 inet_interfaces = all
 inet_protocols = ipv4
 
-# The gateway relays mail for tenant domains; it never delivers locally.
+# The gateway relays mail for tenant domains to ingestion; it never delivers locally.
 local_recipient_maps =
 local_transport = error:5.1.1 local delivery is disabled
 alias_maps =
 alias_database =
 
-# --- Relay / tenant domains -------------------------------------------------
-# relay_domains and relay_transport are set from the environment by the entrypoint.
-# Production: relay_domains comes from the Domain Management Service (verified tenant domains)
-# and relay_transport hands mail to the Email Ingestion Service over LMTP.
+# --- smtp-adapter -----------------------------------------------------------
+# User-defined parameter (rendered from SMTP_ADAPTER_HOST). Ports are fixed by the contract of
+# step 2.2 §4: policy 10040, socketmap 10041, LMTP inbound 10050.
+smtp_adapter_host = smtp-adapter
+
+# --- Relay / tenant domains (D2) --------------------------------------------
+# A domain is a relay domain while smtp-adapter answers OK for it (active, verified, inbound
+# enabled). Unknown domains fail at reject_unauth_destination with a permanent 554; when the
+# adapter is unreachable the lookup fails and Postfix answers 451 4.3.0 (fail closed).
+relay_domains = socketmap:inet:${smtp_adapter_host}:10041:relay_domain
 relay_recipient_maps =
+# Every accepted message goes to durable ingestion over LMTP; never directly to a tenant.
+relay_transport = lmtp:inet:${smtp_adapter_host}:10050
+transport_maps =
 mynetworks = 127.0.0.0/8
 
-# --- Limits ---------------------------------------------------------------
+# --- LMTP client (handoff to ingestion, D2/D7) --------------------------------
+# XFORWARD carries the client address, HELO and the queue id (the ingest key needs it).
+lmtp_send_xforward_command = yes
+# = smtpd_recipient_limit: one LMTP transaction per message.
+lmtp_destination_recipient_limit = 100
+lmtp_destination_concurrency_limit = 20
+lmtp_data_done_timeout = 600s
+# The adapter host may come from /etc/hosts (host.docker.internal via extra_hosts) or DNS.
+lmtp_host_lookup = dns, native
+# Queue ids are never reused (they feed the ingest key).
+enable_long_queue_ids = yes
+
+# --- Queue (D2; timings rendered from the environment) ------------------------
+minimal_backoff_time = 300s
+maximal_backoff_time = 4000s
+queue_run_delay = 300s
+maximal_queue_lifetime = 5d
+bounce_queue_lifetime = 5d
+# Postfix counts Received: headers during DATA and rejects loops in-session (554 5.4.0).
+hopcount_limit = 30
+
+# --- Limits (D15; rendered from the environment) ------------------------------
 message_size_limit = 52428800
 smtpd_recipient_limit = 100
 smtpd_client_connection_count_limit = 50
-smtpd_client_connection_rate_limit = 100
+smtpd_client_connection_rate_limit = 300
+smtpd_client_message_rate_limit = 2000
+smtpd_client_recipient_rate_limit = 5000
+smtpd_client_new_tls_session_rate_limit = 300
+smtpd_client_event_limit_exceptions = $mynetworks
 anvil_rate_time_unit = 60s
 smtpd_timeout = 60s
 
+# --- postscreen (D15) --------------------------------------------------------
+# Deep protocol tests stay off: they defer every first contact.
+postscreen_access_list = permit_mynetworks
+postscreen_greet_action = ignore
+postscreen_dnsbl_sites =
+# Only effective when DNSBL sites are configured (production).
+postscreen_dnsbl_action = enforce
+postscreen_pipelining_enable = no
+postscreen_non_smtp_command_enable = no
+postscreen_bare_newline_enable = no
+postscreen_client_connection_count_limit = $smtpd_client_connection_count_limit
+postscreen_cache_map = btree:$data_directory/postscreen_cache
+
 # --- In-session checks (pre-queue) ----------------------------------------
 # Only two components may reject or defer during the SMTP session:
-#  1. smtp-adapter via the policy delegation protocol (recipient/tenant/rate-limit checks)
+#  1. smtp-adapter via the policy delegation protocol (tenant, rate limits, recipients, size)
 #  2. Rspamd via milter
 # Both fail CLOSED to a 4xx tempfail, never to accept-all.
 smtpd_helo_required = yes
@@ -50,7 +101,11 @@ smtpd_recipient_restrictions =
     reject_non_fqdn_recipient,
     reject_non_fqdn_sender,
     reject_unauth_destination,
-    check_policy_service inet:smtp-adapter:10040
+    check_policy_service { inet:${smtp_adapter_host}:10040, timeout=10s, { default_action = DEFER_IF_PERMIT 4.3.5 Policy service unavailable }, policy_context=inbound }
+smtpd_data_restrictions = reject_unauth_pipelining, reject_multi_recipient_bounce
+# Message-size enforcement against the tenant limit recorded at RCPT (D4).
+smtpd_end_of_data_restrictions =
+    check_policy_service { inet:${smtp_adapter_host}:10040, timeout=10s, { default_action = DEFER_IF_PERMIT 4.3.5 Policy service unavailable }, policy_context=inbound }
 smtpd_policy_service_timeout = 10s
 smtpd_policy_service_max_idle = 300s
 smtpd_policy_service_default_action = DEFER_IF_PERMIT 4.3.5 Policy service unavailable
@@ -63,10 +118,16 @@ milter_mail_macros = i {mail_addr} {client_addr} {client_name} {auth_authen}
 milter_connect_timeout = 10s
 milter_content_timeout = 60s
 
-# --- TLS (opportunistic). Local dev uses the Debian snakeoil certificate. ------
+# --- TLS (D15). Paths rendered from POSTFIX_TLS_CERT_PATH / POSTFIX_TLS_KEY_PATH. -------------
 smtpd_tls_security_level = may
 smtpd_tls_cert_file = /etc/ssl/certs/ssl-cert-snakeoil.pem
 smtpd_tls_key_file = /etc/ssl/private/ssl-cert-snakeoil.key
 smtpd_tls_protocols = >=TLSv1.2
+smtpd_tls_mandatory_protocols = >=TLSv1.2
+smtpd_tls_mandatory_ciphers = high
+tls_preempt_cipherlist = yes
+smtpd_tls_session_cache_database = btree:${data_directory}/smtpd_scache
+smtpd_tls_received_header = yes
 smtpd_tls_loglevel = 1
 smtp_tls_security_level = may
+smtp_tls_loglevel = 1

@@ -1,0 +1,4 @@
+# Valid recipients of the sink: <local>@<domain>.test with a conservative character set.
+# (virtual(8) forbids regexp substitution, so the Maildir path is built by sink-deliver from the
+# pipe(8) ${domain} and ${user} macros instead; this table only decides who exists.)
+/^[a-z0-9][a-z0-9._+=-]{0,63}@([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+test$/	OK
