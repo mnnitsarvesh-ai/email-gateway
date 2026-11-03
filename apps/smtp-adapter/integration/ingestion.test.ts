@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { LmtpInboundListener, LmtpOutboundListener } from '../src/ingestion/ingestion.module';
 import { IngestionRepository } from '../src/ingestion/ingestion.repository';
 import { deliver, LmtpTestClient } from './support/lmtp-client';
-import { Fixtures, queueId, wireBytes } from './support/fixtures';
+import { EMAIL_WORKER_EVENT_TYPES, Fixtures, queueId, wireBytes } from './support/fixtures';
 import { requireEnv, startAdapterStack } from './support/stack';
 
 /**
@@ -130,7 +130,12 @@ describe('LMTP ingestion: inbound', () => {
       [1, `bob@${fx.name('a2')}`, 'pending', orgA],
     ]);
 
-    const events = await fx.prisma.emailEvent.findMany({ where: { messageId: identity.id } });
+    // Ingestion's own rows: since step 3.1 a running email-worker also parses the message and adds
+    // its `parsed` event and `mail.message.parsed.v1` outbox row (docs/plan/steps/06-mime-ingestion.md
+    // M3), the same way a running delivery-worker adds `mail.delivery.*` rows (step 2.3 R5).
+    const events = await fx.prisma.emailEvent.findMany({
+      where: { messageId: identity.id, sourceService: { not: 'email-worker' } },
+    });
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
       eventType: 'received',
@@ -145,7 +150,9 @@ describe('LMTP ingestion: inbound', () => {
       },
     });
 
-    const outbox = await fx.prisma.messageOutbox.findMany({ where: { organizationId: orgA } });
+    const outbox = await fx.prisma.messageOutbox.findMany({
+      where: { organizationId: orgA, eventType: { notIn: [...EMAIL_WORKER_EVENT_TYPES] } },
+    });
     expect(outbox).toHaveLength(1);
     expect(outbox[0]).toMatchObject({
       eventType: 'mail.message.received.v1',
@@ -174,7 +181,8 @@ describe('LMTP ingestion: inbound', () => {
     const before = await Promise.all([
       fx.messageCount(orgA),
       fx.prisma.messageOutbox.count({ where: ingestionOutbox }),
-      fx.objectKeys(orgA),
+      // EML objects only: a running email-worker adds `org/{id}/part/…` objects (step 3.1 M11).
+      fx.emlObjectKeys(orgA),
     ]);
     const result = await deliver({
       port: inboundPort,
@@ -188,7 +196,7 @@ describe('LMTP ingestion: inbound', () => {
     expect(result.data.map((r) => r.code)).toEqual([250, 250]);
     expect(await fx.messageCount(orgA)).toBe(before[0]);
     expect(await fx.prisma.messageOutbox.count({ where: ingestionOutbox })).toBe(before[1]);
-    expect(await fx.objectKeys(orgA)).toEqual(before[2]);
+    expect(await fx.emlObjectKeys(orgA)).toEqual(before[2]);
   });
 
   it('splits a message over two organizations: two messages, two prefixes, per-recipient replies', async () => {

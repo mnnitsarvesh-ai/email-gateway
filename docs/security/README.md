@@ -37,12 +37,13 @@ Details, parameters and procedures: [authentication.md](authentication.md). Deci
 - The in-session policy service and the Rspamd milter **fail closed** (4xx tempfail).
 - `VRFY` is disabled, HELO is required, connection/rate/recipient limits are set and messages are capped at 50 MB.
 - Post-queue processing never bounces, which prevents backscatter. `discard` is always audited.
+- Message content is untrusted after the `250` too: the post-queue MIME parser (step 3.1) streams under limits, never renders, executes or extracts anything, stores only allow-listed and sanitized header metadata, sanitizes and flags attachment filenames, and keeps bodies and attachments out of MySQL, events and logs ([security boundaries](../architecture/security-boundaries.md#untrusted-message-content-step-31)).
 - Opportunistic inbound TLS (TLS 1.2+). Outbound TLS policy (MTA-STS/DANE) comes in the delivery phase.
 
 ## Application controls
 
 - Input validation with zod at every boundary: configuration, events and (as endpoints are added) request bodies.
-- Event payloads must carry tenant-prefixed S3 keys, which are checked against the envelope tenant.
+- Event payloads must carry tenant-prefixed S3 keys, which are checked against the envelope tenant (the email-worker checks the message row's organization and EML key prefix since step 3.1; every later consumer must do the same).
 - The policy protocol parser bounds request size (16 KiB), rejects malformed lines and refuses response splitting.
 - Correlation ids are validated to prevent log injection.
 - `helmet` security headers on the API. The portal sets `X-Frame-Options: DENY`, `nosniff`, a referrer policy and a permissions policy, and omits `X-Powered-By`.

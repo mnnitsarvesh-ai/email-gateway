@@ -1,7 +1,6 @@
+import { isUniqueViolation, uuidv7 } from '@email-gateway/common';
 import { type DeliveryReinjection, Prisma, type PrismaClient } from '@email-gateway/database';
 import { recipientSetSha256, reinjectionIdempotencyKey } from '@email-gateway/mail-routing';
-import { isUniqueViolation } from '../shared/db';
-import { uuidv7 } from '../shared/uuidv7';
 
 /** A claimed `delivery_reinjections` row (status `in_progress`, attempts already incremented). */
 export type ClaimedReinjection = Pick<

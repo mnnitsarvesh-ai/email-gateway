@@ -1,0 +1,12 @@
+From: Alice <alice@example.com>
+To: bob@example.net
+Date: Mon, 2 Nov 2026 10:00:00 +0000
+Message-ID: <encoded-words@fixtures.example>
+Subject: =?UTF-8?B?w5xiZXJ3ZWlzdW5nIOKckw==?=
+Reply-To: =?ISO-8859-1?Q?Andr=E9?= <andre@example.com>
+Sender: =?Shift_JIS?B?k/qWe4zq?= <jp@example.jp>
+Cc: =?KOI8-R?Q?=F0=D2=C9=D7=C5=D4?= <ru@example.ru>
+In-Reply-To: =?utf-8?Q?broken=ZZ?= =?utf-8?B?not-base64!?= =?utf-8?Q?unterminated
+References: =?x-unknown?Q?abc?=
+
+body

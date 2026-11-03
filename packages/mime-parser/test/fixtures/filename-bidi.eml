@@ -1,0 +1,16 @@
+From: Alice <alice@example.com>
+To: bob@example.net
+Date: Mon, 2 Nov 2026 10:00:00 +0000
+Message-ID: <bidi@fixtures.example>
+MIME-Version: 1.0
+Subject: bidi
+Content-Type: multipart/mixed; boundary="b"
+
+This is a multi-part message in MIME format.
+--b
+Content-Type: application/pdf
+Content-Disposition: attachment; filename*=UTF-8''invoice%E2%80%AEfdp.exe
+Content-Transfer-Encoding: base64
+
+TVqQAA==
+--b--

@@ -1,10 +1,10 @@
+import { isUniqueViolation } from '@email-gateway/common';
 import { Prisma, type PrismaClient } from '@email-gateway/database';
 import type { Logger } from '@email-gateway/logger';
 import { reconcileSignalKey, recordDeliverySignal } from '@email-gateway/mail-routing';
 import type { DeliveryMetrics } from '../metrics/delivery-metrics';
 import { SOURCE_SERVICE } from '../planning/delivery-planner';
 import { type ActiveDelivery, ReinjectionStore } from '../reinjection/reinjection-store';
-import { isUniqueViolation } from '../shared/db';
 
 export interface ReconcilerConfig {
   DELIVERY_RECONCILE_INTERVAL_MS: number;

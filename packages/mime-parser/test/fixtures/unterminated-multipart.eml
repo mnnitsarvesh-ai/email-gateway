@@ -1,0 +1,19 @@
+From: Alice <alice@example.com>
+To: bob@example.net
+Date: Mon, 2 Nov 2026 10:00:00 +0000
+Message-ID: <unterminated@fixtures.example>
+MIME-Version: 1.0
+Subject: unterminated
+Content-Type: multipart/mixed; boundary="open"
+
+This is a multi-part message in MIME format.
+--open
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+first part
+--open
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+second part, no closing delimiter follows

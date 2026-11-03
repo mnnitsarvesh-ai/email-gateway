@@ -1,0 +1,10 @@
+import { defineConfig } from 'vitest/config';
+
+// Unit tests (src/**/*.test.ts) and the corpus and stress tests (test/**/*.test.ts).
+export default defineConfig({
+  test: {
+    include: ['src/**/*.test.ts', 'test/**/*.test.ts'],
+    testTimeout: 60_000,
+    hookTimeout: 60_000,
+  },
+});

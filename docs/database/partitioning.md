@@ -1,6 +1,6 @@
 # Partitioning
 
-Eighteen high-volume tables are range-partitioned by time ([ADR-0014](../architecture/adr/0014-mysql-data-model-partitioning-read-write-split.md) §3, design [D3](../plan/steps/01-database.md#d3-partitioning-adr-0014-3); step 2.3 added `delivery_reinjections` and `delivery_status_events`, [§3](../plan/steps/05-routing.md#3-data-model-one-forward-migration-mail_routing-wp1)). Dropping a partition removes a month (or a day) of rows as a metadata operation, without the undo, purge lag and binlog volume of a batched `DELETE`.
+Nineteen high-volume tables are range-partitioned by time ([ADR-0014](../architecture/adr/0014-mysql-data-model-partitioning-read-write-split.md) §3, design [D3](../plan/steps/01-database.md#d3-partitioning-adr-0014-3); step 2.3 added `delivery_reinjections` and `delivery_status_events`, [§3](../plan/steps/05-routing.md#3-data-model-one-forward-migration-mail_routing-wp1); step 3.1 added the parse stage table `email_message_parses`, [§3](../plan/steps/06-mime-ingestion.md#3-data-model-one-forward-migration-mime_ingestion-wp1)). Dropping a partition removes a month (or a day) of rows as a metadata operation, without the undo, purge lag and binlog volume of a batched `DELETE`.
 
 ## MySQL constraints we design for
 
@@ -14,7 +14,7 @@ Eighteen high-volume tables are range-partitioned by time ([ADR-0014](../archite
 - **Syntax.** `PARTITION BY RANGE COLUMNS(<col>)` on a `DATETIME(3)` column. MySQL 8.4 accepts `DATETIME(3)` in RANGE COLUMNS, so the `TO_DAYS()` fallback was not needed. Bounds are literals such as `'2026-12-01 00:00:00'`.
 - **Migrations create only the catch-all** `PARTITION pmax VALUES LESS THAN (MAXVALUE)`, so they do not depend on the date they run. The maintenance job creates dated partitions by splitting `pmax`.
 - **Naming.** Monthly `pYYYYMM` holds `[YYYY-MM-01, next month)`, daily `pYYYYMMDD` holds one UTC day, and `pmax` holds everything above the last bound. Because the first dated partition is created by splitting `pmax`, it also holds every older row.
-- **One message, one partition.** Child rows of a message (recipients, headers, attachments, scans, engine results, events, status history, policy logs, deliveries, attempts, reinjections, delivery status events, archives) copy the **message's** `received_at`. So `WHERE message_id = ? AND received_at = ?` prunes to one partition, and the whole graph of a message is dropped together.
+- **One message, one partition.** Child rows of a message (recipients, headers, attachments, scans, engine results, events, status history, policy logs, deliveries, attempts, reinjections, delivery status events, parse rows, archives) copy the **message's** `received_at`. So `WHERE message_id = ? AND received_at = ?` prunes to one partition, and the whole graph of a message is dropped together.
 - **The identity registry** (`message_identities`, not partitioned) allocates message ids and maps `public_id → (id, received_at)`, so reads by public id reach the partitioned tables with the partition key. Event payloads carry `receivedAt` for the same reason.
 - **Integrity without foreign keys.** Rows of partitioned tables are written in the same transaction as their parent. Unique keys that end with `received_at` (for example `(message_id, rcpt_seq, received_at)`) make writes idempotent.
 - **Prisma.** Models declare `@@id([id, receivedAt])` and no `@relation`. Joins to partitioned tables are explicit queries. Prisma does not introspect partitions, so `prisma migrate diff` stays clean after maintenance has split `pmax` (verified locally and in CI).
@@ -38,6 +38,7 @@ The registry is `packages/database/src/partitioning/registry.ts`. "Retention N m
 | `delivery_attempts`            | `received_at`       | month       | 3 months   | detail      |                                         |
 | `delivery_reinjections`        | `received_at`       | month       | 6 months   | core        |                                         |
 | `delivery_status_events`       | `received_at`       | month       | 3 months   | detail      |                                         |
+| `email_message_parses`         | `received_at`       | month       | 6 months   | core        |                                         |
 | `email_archives`               | `received_at`       | month       | never      | compliance  | `drop: false` (legal hold, step 8.1)    |
 | `bounce_events`                | `occurred_at`       | month       | 6 months   | core        |                                         |
 | `audit_logs`                   | `created_at`        | month       | never      | compliance  | `drop: false` (export is an ops action) |

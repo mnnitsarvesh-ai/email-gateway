@@ -1,9 +1,9 @@
+import type { AdvisoryLocks } from '@email-gateway/common';
 import type { Logger } from '@email-gateway/logger';
 import type { DeliveryApprovalConsumer } from './approvals/delivery-approval.consumer';
 import type { DevPassThroughApprover } from './approvals/dev-passthrough.approver';
 import type { DeliveryReconciler } from './reconciler/delivery-reconciler';
 import type { ReinjectionScheduler } from './reinjection/reinjection-scheduler';
-import type { AdvisoryLocks } from './shared/advisory-locks';
 import type { PostfixLogTailer } from './status/postfix-log-tailer';
 
 export interface WorkerRoles {

@@ -1,0 +1,22 @@
+From: Alice <alice@example.com>
+To: bob@example.net
+Date: Mon, 2 Nov 2026 10:00:00 +0000
+Message-ID: <double-ext@fixtures.example>
+MIME-Version: 1.0
+Subject: double extension
+Content-Type: multipart/mixed; boundary="d"
+
+This is a multi-part message in MIME format.
+--d
+Content-Type: application/pdf
+Content-Disposition: attachment; filename="report.pdf.exe"
+Content-Transfer-Encoding: base64
+
+TVqQAA==
+--d
+Content-Type: application/pdf
+Content-Disposition: attachment; filename="invoice.pdf          .exe"
+Content-Transfer-Encoding: base64
+
+TVqQAA==
+--d--

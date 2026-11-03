@@ -1,0 +1,16 @@
+From: Alice <alice@example.com>
+To: bob@example.net
+Date: Mon, 2 Nov 2026 10:00:00 +0000
+Message-ID: <reserved@fixtures.example>
+MIME-Version: 1.0
+Subject: reserved
+Content-Type: multipart/mixed; boundary="r"
+
+This is a multi-part message in MIME format.
+--r
+Content-Type: text/plain
+Content-Disposition: attachment; filename="CON.txt"
+Content-Transfer-Encoding: base64
+
+Y29u
+--r--

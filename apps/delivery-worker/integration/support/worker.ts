@@ -1,4 +1,4 @@
-import { RedisService } from '@email-gateway/common';
+import { RedisService, withTransactionDefaults } from '@email-gateway/common';
 import { processOnce } from '@email-gateway/database';
 import type { DeliveryApprovedV1, EventEnvelope } from '@email-gateway/event-contracts';
 import type { WorkerConfig } from '../../src/config';
@@ -10,7 +10,6 @@ import { DeliveryReconciler } from '../../src/reconciler/delivery-reconciler';
 import { ReinjectionScheduler } from '../../src/reinjection/reinjection-scheduler';
 import { ReinjectionStore } from '../../src/reinjection/reinjection-store';
 import { Reinjector } from '../../src/reinjection/reinjector';
-import { withTransactionDefaults } from '../../src/shared/db';
 import { type Fixtures, newMetrics, silentLogger } from './fixtures';
 
 export interface TestWorker {

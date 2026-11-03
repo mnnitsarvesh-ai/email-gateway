@@ -1,0 +1,28 @@
+From: Alice <alice@example.com>
+To: bob@example.net
+Date: Mon, 2 Nov 2026 10:00:00 +0000
+Message-ID: <traversal@fixtures.example>
+MIME-Version: 1.0
+Subject: traversal
+Content-Type: multipart/mixed; boundary="t"
+
+This is a multi-part message in MIME format.
+--t
+Content-Type: text/plain
+Content-Disposition: attachment; filename="../../etc/passwd"
+Content-Transfer-Encoding: base64
+
+cm9vdDp4OjA6MA==
+--t
+Content-Type: text/plain
+Content-Disposition: attachment; filename="..\\..\\win.ini"
+Content-Transfer-Encoding: base64
+
+W2ZvbnRzXQ==
+--t
+Content-Type: application/octet-stream
+Content-Disposition: attachment; filename="C:\\x.exe"
+Content-Transfer-Encoding: base64
+
+TVqQAA==
+--t--

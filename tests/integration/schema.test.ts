@@ -14,8 +14,9 @@ import { stack } from './support/env';
  * foreign keys on partitioned tables, the tenancy column and the identity registry's unique key;
  * plus the identity/tenancy changes of docs/plan/steps/02-tenants-auth-rbac.md (D10), the
  * domain onboarding changes of docs/plan/steps/03-domain-onboarding.md (§3), the SMTP gateway
- * tables of docs/plan/steps/04-smtp-gateway.md (§3) and the mail routing and delivery tracking
- * changes of docs/plan/steps/05-routing.md (§3).
+ * tables of docs/plan/steps/04-smtp-gateway.md (§3), the mail routing and delivery tracking
+ * changes of docs/plan/steps/05-routing.md (§3) and the MIME ingestion changes of
+ * docs/plan/steps/06-mime-ingestion.md (§3).
  */
 const prisma = new PrismaClient({ datasourceUrl: stack.databaseUrl() });
 
@@ -23,7 +24,7 @@ afterAll(async () => {
   await prisma.$disconnect();
 });
 
-/** Partitioned tables and their RANGE COLUMNS partition column (D3, step 2.3 §3). */
+/** Partitioned tables and their RANGE COLUMNS partition column (D3, step 2.3 §3, step 3.1 §3). */
 const PARTITIONED: Record<string, string> = {
   email_messages: 'received_at',
   email_recipients: 'received_at',
@@ -43,6 +44,7 @@ const PARTITIONED: Record<string, string> = {
   message_outbox: 'created_at',
   delivery_reinjections: 'received_at',
   delivery_status_events: 'received_at',
+  email_message_parses: 'received_at',
 };
 
 /** Tables with no `organization_id`: platform catalogs, the root, a join table, the ledger and
@@ -102,6 +104,7 @@ const TENANT_OWNED = [
   'email_attachments',
   'email_events',
   'email_message_status_history',
+  'email_message_parses',
   'email_scans',
   'scan_engine_results',
   'threat_indicators',
@@ -135,17 +138,17 @@ const TENANT_OWNED = [
 const ALL_TABLES = [...NOT_TENANT_OWNED, ...TENANT_OWNED];
 
 describe('MySQL schema', () => {
-  it('has exactly the 70 data-model tables plus _prisma_migrations', async () => {
+  it('has exactly the 71 data-model tables plus _prisma_migrations', async () => {
     const rows = await prisma.$queryRaw<{ name: string }[]>`
       SELECT TABLE_NAME AS name FROM information_schema.TABLES
       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'`;
-    expect(ALL_TABLES).toHaveLength(70);
-    expect(new Set(ALL_TABLES).size).toBe(70);
+    expect(ALL_TABLES).toHaveLength(71);
+    expect(new Set(ALL_TABLES).size).toBe(71);
     expect(rows.map((r) => r.name).sort()).toEqual([...ALL_TABLES, '_prisma_migrations'].sort());
   });
 
-  it('partitions the 18 high-volume tables by RANGE COLUMNS with a pmax partition', async () => {
-    expect(Object.keys(PARTITIONED)).toHaveLength(18);
+  it('partitions the 19 high-volume tables by RANGE COLUMNS with a pmax partition', async () => {
+    expect(Object.keys(PARTITIONED)).toHaveLength(19);
     const rows = await prisma.$queryRaw<
       { tableName: string; method: string; expression: string; partitionName: string }[]
     >`
@@ -1270,6 +1273,138 @@ describe('mail routing and delivery tracking schema (step 2.3, §3)', () => {
     } finally {
       await prisma.deliveryReinjection.deleteMany({ where: { organizationId } });
       await prisma.deliveryStatusEvent.deleteMany({ where: { organizationId } });
+    }
+  });
+});
+
+describe('MIME ingestion schema (step 3.1, §3)', () => {
+  const PARSE_STATUS =
+    "enum('parsing','parsed','parsed_with_defects','parse_limit_exceeded','parse_failed')";
+
+  it('creates email_message_parses with the data-model column types', async () => {
+    const cols = await columns(['email_message_parses']);
+    const col = (column: string) => cols.get(`email_message_parses.${column}`);
+    for (const [column, type, nullable] of [
+      ['id', 'bigint unsigned', 'NO'],
+      ['received_at', 'datetime(3)', 'NO'],
+      ['message_id', 'bigint unsigned', 'NO'],
+      ['organization_id', 'bigint unsigned', 'NO'],
+      ['status', PARSE_STATUS, 'NO'],
+      ['attempts', 'smallint unsigned', 'NO'],
+      ['parser_version', 'varchar(32)', 'NO'],
+      ['event_id', 'char(36)', 'YES'],
+      ['failure_reason', 'varchar(64)', 'YES'],
+      ['limits_exceeded', 'json', 'YES'],
+      ['defects', 'json', 'YES'],
+      ['part_count', 'smallint unsigned', 'YES'],
+      ['attachment_count', 'smallint unsigned', 'YES'],
+      ['max_depth', 'tinyint unsigned', 'YES'],
+      ['header_count', 'int unsigned', 'YES'],
+      ['bytes_read', 'bigint unsigned', 'YES'],
+      ['decoded_bytes', 'bigint unsigned', 'YES'],
+      ['text_body_object_key', 'varchar(512)', 'YES'],
+      ['html_body_object_key', 'varchar(512)', 'YES'],
+      ['text_body_sha256', 'char(64)', 'YES'],
+      ['html_body_sha256', 'char(64)', 'YES'],
+      ['text_body_size_bytes', 'int unsigned', 'YES'],
+      ['html_body_size_bytes', 'int unsigned', 'YES'],
+      ['text_body_charset', 'varchar(64)', 'YES'],
+      ['html_body_charset', 'varchar(64)', 'YES'],
+      ['structure', 'json', 'YES'],
+      ['started_at', 'datetime(3)', 'NO'],
+      ['completed_at', 'datetime(3)', 'YES'],
+      ['duration_ms', 'int unsigned', 'YES'],
+      ['created_at', 'datetime(3)', 'NO'],
+      ['updated_at', 'datetime(3)', 'NO'],
+    ] as const) {
+      expect(col(column), column).toMatchObject({ columnType: type, nullable });
+    }
+    expect(cols.size).toBe(31);
+    expect(col('attempts')?.columnDefault).toBe('0');
+  });
+
+  it('adds the nullable attachment metadata columns to email_attachments', async () => {
+    const cols = await columns(['email_attachments']);
+    for (const [column, type] of [
+      ['part_path', 'varchar(128)'],
+      ['depth', 'tinyint unsigned'],
+      ['disposition', "enum('attachment','inline')"],
+      ['encoded_size_bytes', 'int unsigned'],
+      ['original_filename', 'varchar(1024)'],
+      ['flags', 'json'],
+      ['archive_info', 'json'],
+    ] as const) {
+      expect(cols.get(`email_attachments.${column}`), column).toMatchObject({
+        columnType: type,
+        nullable: 'YES',
+        columnDefault: null,
+      });
+    }
+  });
+
+  it('has the step 3.1 keys and indexes; unique keys end with received_at; no foreign keys', async () => {
+    const parses = await indexColumnSets('email_message_parses');
+    expect(parses).toContainEqual(expect.objectContaining({ key: 'id,received_at', unique: true }));
+    expect(parses).toContainEqual(
+      expect.objectContaining({ key: 'message_id,received_at', unique: true }),
+    );
+    expect(parses).toContainEqual(
+      expect.objectContaining({ key: 'organization_id,received_at,id', unique: false }),
+    );
+    expect(parses).toContainEqual(
+      expect.objectContaining({ key: 'status,updated_at', unique: false }),
+    );
+    expect(parses).toHaveLength(4);
+    for (const index of parses.filter((i) => i.unique)) {
+      expect(index.columns.at(-1), index.key).toBe('received_at');
+    }
+    // email_attachments keeps its keys unchanged.
+    const attachments = await indexColumnSets('email_attachments');
+    expect(attachments).toContainEqual(
+      expect.objectContaining({ key: 'message_id,part_index,received_at', unique: true }),
+    );
+
+    const fks = await prisma.$queryRaw<{ n: bigint }[]>`
+      SELECT COUNT(*) AS n FROM information_schema.KEY_COLUMN_USAGE
+      WHERE TABLE_SCHEMA = DATABASE() AND REFERENCED_TABLE_NAME IS NOT NULL
+        AND (TABLE_NAME = 'email_message_parses' OR REFERENCED_TABLE_NAME = 'email_message_parses')`;
+    expect(Number(fks[0]?.n)).toBe(0);
+  });
+
+  it('keeps one parse row per message and partition key', async () => {
+    const organizationId = 999_999_002n;
+    const receivedAt = new Date();
+    const messageId = BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000));
+    const row = {
+      receivedAt,
+      messageId,
+      organizationId,
+      status: 'parsing' as const,
+      attempts: 1,
+      parserVersion: 'it-1',
+      startedAt: receivedAt,
+    };
+    try {
+      const created = await prisma.emailMessageParse.create({ data: row });
+      expect(created.status).toBe('parsing');
+      await expect(prisma.emailMessageParse.create({ data: row })).rejects.toMatchObject({
+        code: 'P2002',
+      });
+      // The final transition is a conditional update on status = 'parsing' (M3.9.1).
+      const finalize = () =>
+        prisma.emailMessageParse.updateMany({
+          where: { messageId, receivedAt, organizationId, status: 'parsing' },
+          data: {
+            status: 'parsed',
+            limitsExceeded: [],
+            defects: ['missing_boundary'],
+            completedAt: new Date(),
+          },
+        });
+      expect((await finalize()).count).toBe(1);
+      expect((await finalize()).count).toBe(0);
+    } finally {
+      await prisma.emailMessageParse.deleteMany({ where: { organizationId } });
     }
   });
 });

@@ -80,7 +80,7 @@ sequenceDiagram
   end
 ```
 
-**Legend.** Plain messages: IMPLEMENTED. Messages inside the shaded (amber) block and participants marked `(PLANNED x.y)`: PLANNED. MIME parsing, `email_headers` and `email_attachments` rows are step 3.1; the RabbitMQ relay of the outbox is step 3.2. Since step 2.3 the delivery-worker reads the outbox itself (interim outbox poller, design R6) for its approvals and, in local/CI only, the development pass-through (diagram 16).
+**Legend.** Plain messages: IMPLEMENTED. Messages inside the shaded (amber) block and participants marked `(PLANNED x.y)`: PLANNED. MIME parsing, `email_headers` and `email_attachments` rows are implemented post-queue by the email-worker (step 3.1, [diagram 20](20-mime-ingestion-sequence.md)); the RabbitMQ relay of the outbox is step 3.2. Since step 2.3 the delivery-worker reads the outbox itself (interim outbox poller, design R6) for its approvals and, in local/CI only, the development pass-through (diagram 16).
 
 ## Status
 
@@ -98,6 +98,6 @@ sequenceDiagram
 | Duplicate delivery (lost `250`) answers `250`, no new rows  | IMPLEMENTED | `smtp-durability.test.ts` suite 7 (raw LMTP replay with the same IDENT and bytes)                                                                  |
 | Loop guard `554 5.4.6`                                      | IMPLEMENTED | `ingestion.service.test.ts`, `smtp-inbound.test.ts` suite 11                                                                                       |
 | 40 sessions × 1 000 messages, zero loss                     | IMPLEMENTED | `smtp-concurrency.test.ts` suite 9 (figures in the step note §12)                                                                                  |
-| MIME parsing, `email_headers`, `email_attachments`          | PLANNED 3.1 | tables exist                                                                                                                                       |
+| MIME parsing, `email_headers`, `email_attachments`          | IMPLEMENTED | step 3.1, post-queue in the email-worker ([diagram 20](20-mime-ingestion-sequence.md)); `tests/integration/mime-ingestion.test.ts`                 |
 | Outbox relay with publisher confirms                        | PLANNED 3.2 | `RabbitMqService` opens a confirm channel today; no relay exists                                                                                   |
 | Delivery to the tenant after ingestion                      | IMPLEMENTED | step 2.3, [diagram 16](16-inbound-routing-sequence.md); `tests/integration/routing-inbound.test.ts`                                                |

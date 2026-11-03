@@ -1,0 +1,51 @@
+From: Alice <alice@example.com>
+To: bob@example.net
+Date: Mon, 2 Nov 2026 10:00:00 +0000
+Message-ID: <multi@fixtures.example>
+MIME-Version: 1.0
+Subject: five attachments
+Content-Type: multipart/mixed; boundary="multi"
+
+This is a multi-part message in MIME format.
+--multi
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+see attachments
+--multi
+Content-Type: application/pdf
+Content-Disposition: attachment; filename="one.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQKJSBmaXh0dXJlCjEgMCBvYmogPDwgPj4gZW5kb2JqCnRyYWlsZXIgPDwgPj4KJSVF
+T0YK
+--multi
+Content-Type: image/png
+Content-Disposition: inline; filename="two.png"
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP4//8/AAX+Av6n1qSr
+AAAAAElFTkSuQmCC
+--multi
+Content-Type: text/plain
+Content-Disposition: attachment; filename="three.txt"
+Content-Transfer-Encoding: base64
+
+dGhpcmQ=
+--multi
+Content-Type: application/octet-stream
+Content-Disposition: attachment; filename="four.bin"
+Content-Transfer-Encoding: base64
+
+AAECAw==
+--multi
+Content-Type: text/calendar
+Content-Disposition: inline; filename="five.ics"
+Content-Transfer-Encoding: base64
+
+QkVHSU46VkNBTEVOREFSCkVORDpWQ0FMRU5EQVIK
+--multi
+Content-Type: text/plain; charset=utf-8
+
+second inline text part
+--multi--

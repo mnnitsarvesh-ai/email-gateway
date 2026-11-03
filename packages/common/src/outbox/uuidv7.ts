@@ -5,9 +5,9 @@ let sequence = 0;
 
 /**
  * RFC 9562 UUID version 7: 48-bit Unix milliseconds, version 7, 12 bits of a per-millisecond
- * counter (monotonic within this process), variant 10, 62 random bits. Used for
- * `delivery_reinjections.public_id` (its token `dw1-<32 hex>` is the XFORWARD IDENT and ENVID)
- * and for outbox event ids written by the worker.
+ * counter (monotonic within this process), variant 10, 62 random bits. Used for outbox event
+ * ids written by the workers and for delivery-worker's `delivery_reinjections.public_id` (its
+ * token `dw1-<32 hex>` is the XFORWARD IDENT and ENVID).
  */
 export function uuidv7(now: number = Date.now()): string {
   let ms = Math.max(0, Math.floor(now));

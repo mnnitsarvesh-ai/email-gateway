@@ -3,6 +3,7 @@ import {
   CorrelationModule,
   DatabaseModule,
   HealthModule,
+  MetricsModule,
   PrismaService,
   RabbitMqModule,
   RabbitMqService,
@@ -12,21 +13,30 @@ import {
   S3Service,
 } from '@email-gateway/common';
 import { QUEUES } from '@email-gateway/event-contracts';
+import { createLogger } from '@email-gateway/logger';
 import type { WorkerConfig } from './config';
+import { MimeIngestionModule } from './mime-ingestion/mime-ingestion.module';
 
 export const SERVICE_NAME = 'email-worker';
 
 /**
- * Email Processing Service and Security Engine orchestration: parses messages from S3, fans out to
- * security engines (Rspamd, ClamAV, YARA, URL, BEC, DLP) and aggregates verdicts.
+ * Email Processing Service: post-queue MIME ingestion (step 3.1,
+ * docs/plan/steps/06-mime-ingestion.md) and, in later steps, the security engine orchestration
+ * (Rspamd, ClamAV, YARA, URL, BEC, DLP) and verdict aggregation.
  *
- * Phase 0: connects to its dependencies, asserts its queue topology and exposes health probes.
- * Consumers are added in later phases; each must ack only after its effects are committed and
- * use `processOnce` from @email-gateway/database for idempotency.
+ * Data plane: the MySQL **writer** only (no PrismaReadService, ADR-0014), S3 (EML reads and part
+ * objects), Prometheus metrics on GET /metrics. RabbitMQ (`QUEUES.emailProcessing`) and Redis
+ * stay connected and in readiness as in phase 0; the parse path uses neither (the transport is
+ * the shared outbox feed until step 3.2).
  */
 @Module({})
 export class AppModule {
   static forRoot(config: Readonly<WorkerConfig>): DynamicModule {
+    const logger = createLogger({
+      service: SERVICE_NAME,
+      level: config.LOG_LEVEL,
+      version: config.SERVICE_VERSION,
+    });
     return {
       module: AppModule,
       imports: [
@@ -40,6 +50,8 @@ export class AppModule {
         }),
         RedisModule.forRoot({ url: config.REDIS_URL }),
         S3Module.forRoot(config),
+        MetricsModule.forRoot({ service: SERVICE_NAME }),
+        ...(config.MIME_INGESTION_ENABLED ? [MimeIngestionModule.forRoot(config, logger)] : []),
         HealthModule.forRoot({
           service: { name: SERVICE_NAME, version: config.SERVICE_VERSION },
           indicators: [PrismaService, RabbitMqService, RedisService, S3Service],

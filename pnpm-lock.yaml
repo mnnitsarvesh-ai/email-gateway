@@ -300,6 +300,12 @@ importers:
 
   apps/email-worker:
     dependencies:
+      '@aws-sdk/client-s3':
+        specifier: ^3.890.0
+        version: 3.1161.0
+      '@aws-sdk/lib-storage':
+        specifier: ^3.1152.0
+        version: 3.1152.0(@aws-sdk/client-s3@3.1161.0)
       '@email-gateway/common':
         specifier: workspace:*
         version: link:../../packages/common
@@ -315,6 +321,9 @@ importers:
       '@email-gateway/logger':
         specifier: workspace:*
         version: link:../../packages/logger
+      '@email-gateway/mime-parser':
+        specifier: workspace:*
+        version: link:../../packages/mime-parser
       '@email-gateway/shared-types':
         specifier: workspace:*
         version: link:../../packages/shared-types
@@ -349,9 +358,15 @@ importers:
       '@types/express':
         specifier: ^5.0.3
         version: 5.0.6
+      '@types/yazl':
+        specifier: 3.3.1
+        version: 3.3.1
       unplugin-swc:
         specifier: ^1.5.7
         version: 1.6.0(@swc/core@1.16.21)(esbuild@0.28.2)(rollup@4.67.4)(vite@7.3.7(@types/node@22.20.5)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.51.2)(yaml@2.9.1))(webpack@5.106.2(@swc/core@1.16.21)(esbuild@0.28.2)(lightningcss@1.32.0))
+      yazl:
+        specifier: 3.3.1
+        version: 3.3.1
 
   apps/notification-worker:
     dependencies:
@@ -683,6 +698,37 @@ importers:
       zod:
         specifier: ^4.1.5
         version: 4.6.7
+
+  packages/mime-parser:
+    dependencies:
+      '@zone-eu/mailsplit':
+        specifier: 5.4.29
+        version: 5.4.29
+      iconv-lite:
+        specifier: 0.7.3
+        version: 0.7.3
+      libbase64:
+        specifier: 1.4.1
+        version: 1.4.1
+      libmime:
+        specifier: 5.6.3
+        version: 5.6.3
+      libqp:
+        specifier: 3.0.1
+        version: 3.0.1
+      yauzl:
+        specifier: 3.4.0
+        version: 3.4.0
+    devDependencies:
+      '@types/yauzl':
+        specifier: 3.4.0
+        version: 3.4.0
+      '@types/yazl':
+        specifier: 3.3.1
+        version: 3.3.1
+      yazl:
+        specifier: 3.3.1
+        version: 3.3.1
 
   packages/security-contracts:
     dependencies:
@@ -2644,6 +2690,12 @@ packages:
   '@types/supertest@6.0.3':
     resolution: {integrity: sha512-8WzXq62EXFhJ7QsH3Ocb/iKQ/Ty9ZVWnVzoTKc9tyyFRRF3a74Tk2+TLFgaFFw364Ere+npzHKEJ6ga2LzIL7w==}
 
+  '@types/yauzl@3.4.0':
+    resolution: {integrity: sha512-NRPn5w6h8dhcnmx3YIRQcqMywY/+nND/uOkJessedcrowO3C0AssHp3tMJpxKAwOhFOo0OV1y9VtsC5hbKKBAw==}
+
+  '@types/yazl@3.3.1':
+    resolution: {integrity: sha512-DIWfCKpsTp6hE5BDBHV3+fIL/bLUF9Bv13iDrWnMlmhQpH67buNvI291ZauQ1xcccxK3FqQ9honnXpq4R8NMuQ==}
+
   '@typescript-eslint/eslint-plugin@8.72.1':
     resolution: {integrity: sha512-5CokTWXpmbylfFabsbvHC0CAw3XLaGnoa+nFJX5FR592h/LoZsENUE6p/rg5xvkKrFEXz6pYmgI29AgXc2N3BQ==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
@@ -2785,6 +2837,10 @@ packages:
 
   '@zone-eu/mailsplit@5.4.26':
     resolution: {integrity: sha512-yY8wRjvC5WVbjf4b+3Gms2J/XXS6kFpf9D+rl41s1/VAkk6DNN6hprEqVMQxgZJvsNRxxPdUY9J9bpI4Af7BoA==}
+
+  '@zone-eu/mailsplit@5.4.29':
+    resolution: {integrity: sha512-CCUNycmUjrV5M0wNf23waWAt9eOHczhjLbUQS7k0FNJvR0py9VSqHFt+tSl/D0+XI73VLG0U+PwYtq9R0zsm9Q==}
+    engines: {node: '>=20.0.0'}
 
   accepts@2.0.0:
     resolution: {integrity: sha512-5cvg6CtKwfgdmVqY1WIiXKc3Q1bkRqGLi+2W/6ao+6Y7gu/RCwRuAhGEzh5B4KlszSuTLgZYuqFqo5bImjNKng==}
@@ -2948,6 +3004,10 @@ packages:
     resolution: {integrity: sha512-khTmKu5NGYTotqcYo8Bew2k4RAE9PuXRSFRXG2lQBrCEQHyeQ/vX6gKMxfokwywBsLiXZMnHsmWMG1pnO8J7uQ==}
     engines: {node: ^6 || ^7 || ^8 || ^9 || ^10 || ^11 || ^12 || >=13.7}
     hasBin: true
+
+  buffer-crc32@1.0.0:
+    resolution: {integrity: sha512-Db1SbgBS/fg/392AblrMJk97KggmvYhr4pB5ZIMTWtaivCPMWLkmb7m21cJvpvgK+J3nsU2CmmixNBZx4vFj/w==}
+    engines: {node: '>=8.0.0'}
 
   buffer-from@1.1.2:
     resolution: {integrity: sha512-E+XQCRwSbaaiChtv6k6Dwgc+bx+Bs6vuKJHHl5kox/BaKbhiXzqQOwK4cO22yElGp2OCmjwVhT3HmxgyPGnJfQ==}
@@ -3806,6 +3866,10 @@ packages:
     resolution: {integrity: sha512-VdthsjEKxO6r0lLEysXkJSYy8A3MoMUF2jc+YCEdHsg5ywBZjxdnj01XSWhocpGToZnniq+aKMkCGdtW3R8HOg==}
     engines: {node: '>=20.0.0'}
 
+  libmime@5.6.3:
+    resolution: {integrity: sha512-cuTUW/Jybvh5O4/U9p61gyutHOjDtZyGQYuY99+bfnaFwqcDf2Nb+R6hMHY6DDen2H9wLKQSMpofWUgn2TI5JQ==}
+    engines: {node: '>=20.0.0'}
+
   libqp@2.1.2:
     resolution: {integrity: sha512-rp+U80tl9Os4K7GnVbPzPRmghPu6eqB8rcF+ontvNAnoga0JhMFG/bkTD/reC8yoznKMgOc5/ttZHJasiWeFPw==}
 
@@ -4228,6 +4292,9 @@ packages:
 
   peberminta@0.10.0:
     resolution: {integrity: sha512-80B2AsU+I4Qdb0ZAPSfe9UwvGzwkM37IKIFEvdS3D/3Ndgv2bsuJ0bfG1+iEYO+l7Gfd4EUJmuRyq7efLgRMzQ==}
+
+  pend@1.2.0:
+    resolution: {integrity: sha512-F3asv42UuXchdzt+xXqfW1OGlVBe+mxa2mqI0pg5yAHZPvFmY3Y6drSf/GQ1A86WgWEN9Kzh/WrgKa6iGcHXLg==}
 
   perfect-debounce@1.0.0:
     resolution: {integrity: sha512-xCy9V055GLEqoFaHoC1SoLIaLmWctgCUaBaWxDZ7/Zx4CTyX7cJQLJOok/orfjZAh9kEYpjJa4d0KcJmCbctZA==}
@@ -5062,6 +5129,13 @@ packages:
   yargs@17.7.3:
     resolution: {integrity: sha512-GZtjxm/J/4TSxuL3FNYjCmLktBTnIw/rVmKSIyKeYAZpmJB2ig9VauCC5xsa82GNKVKDAqpOn3KVzNt0zmrU0g==}
     engines: {node: '>=12'}
+
+  yauzl@3.4.0:
+    resolution: {integrity: sha512-jIH9yLR9wqr0wOS0TpBvo/g/2UgZH5qePVbjgRliiF0BYvOZyaBknKsF+x9Iht0O6sqgnB93rCICdOZFecJuDw==}
+    engines: {node: '>=12'}
+
+  yazl@3.3.1:
+    resolution: {integrity: sha512-BbETDVWG+VcMUle37k5Fqp//7SDOK2/1+T7X8TD96M3D9G8jK5VLUdQVdVjGi8im7FGkazX7kk5hkU8X4L5Bng==}
 
   yocto-queue@0.1.0:
     resolution: {integrity: sha512-rVksvsnNCdJ/ohGc6xgPwyN8eheCxsiLM8mxuE/t/mOVqJewPuO1miLpTHQiRgTKCLexL4MeAFVagts7HmNZ2Q==}
@@ -7093,6 +7167,14 @@ snapshots:
       '@types/methods': 1.1.4
       '@types/superagent': 8.1.11
 
+  '@types/yauzl@3.4.0':
+    dependencies:
+      '@types/node': 22.20.5
+
+  '@types/yazl@3.3.1':
+    dependencies:
+      '@types/node': 22.20.5
+
   '@typescript-eslint/eslint-plugin@8.72.1(@typescript-eslint/parser@8.72.1(eslint@9.39.5(jiti@2.7.0))(typescript@5.9.3))(eslint@9.39.5(jiti@2.7.0))(typescript@5.9.3)':
     dependencies:
       '@eslint-community/regexpp': 4.12.2
@@ -7312,6 +7394,12 @@ snapshots:
       libmime: 5.5.1
       libqp: 3.0.1
 
+  '@zone-eu/mailsplit@5.4.29':
+    dependencies:
+      libbase64: 1.4.1
+      libmime: 5.6.3
+      libqp: 3.0.1
+
   accepts@2.0.0:
     dependencies:
       mime-types: 3.0.2
@@ -7471,6 +7559,8 @@ snapshots:
       electron-to-chromium: 1.5.472
       node-releases: 2.0.63
       update-browserslist-db: 1.3.4(browserslist@4.29.5)
+
+  buffer-crc32@1.0.0: {}
 
   buffer-from@1.1.2: {}
 
@@ -8366,6 +8456,13 @@ snapshots:
       libbase64: 1.4.1
       libqp: 3.0.1
 
+  libmime@5.6.3:
+    dependencies:
+      encoding-japanese: 2.4.0
+      iconv-lite: 0.7.3
+      libbase64: 1.4.1
+      libqp: 3.0.1
+
   libqp@2.1.2: {}
 
   libqp@3.0.1: {}
@@ -8732,6 +8829,8 @@ snapshots:
   pathval@2.0.1: {}
 
   peberminta@0.10.0: {}
+
+  pend@1.2.0: {}
 
   perfect-debounce@1.0.0: {}
 
@@ -9603,6 +9702,14 @@ snapshots:
       string-width: 4.2.3
       y18n: 5.0.8
       yargs-parser: 21.1.1
+
+  yauzl@3.4.0:
+    dependencies:
+      pend: 1.2.0
+
+  yazl@3.3.1:
+    dependencies:
+      buffer-crc32: 1.0.0
 
   yocto-queue@0.1.0: {}
 

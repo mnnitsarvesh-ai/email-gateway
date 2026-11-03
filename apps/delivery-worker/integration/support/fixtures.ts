@@ -1,6 +1,6 @@
 import { DeleteObjectCommand, ListObjectsV2Command, PutObjectCommand } from '@aws-sdk/client-s3';
 import { randomUUID } from 'node:crypto';
-import { MetricsService, RedisService, S3Service } from '@email-gateway/common';
+import { MetricsService, RedisService, S3Service, uuidv7 } from '@email-gateway/common';
 import { s3ConfigSchema, type S3Config } from '@email-gateway/config';
 import {
   type DomainStatus,
@@ -17,7 +17,6 @@ import {
 import { createLogger, type Logger } from '@email-gateway/logger';
 import { loadWorkerConfig, type WorkerConfig } from '../../src/config';
 import { DeliveryMetrics } from '../../src/metrics/delivery-metrics';
-import { uuidv7 } from '../../src/shared/uuidv7';
 
 /** Values from the repository's .env (loaded by vitest.integration.config.ts). Never printed. */
 export function requireEnv(name: string): string {

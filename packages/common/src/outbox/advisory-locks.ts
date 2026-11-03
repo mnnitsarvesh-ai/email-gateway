@@ -11,7 +11,7 @@ const MAX_LOCK_NAME = 64;
 
 /**
  * MySQL advisory locks (`GET_LOCK(name, 0)`) held on ONE dedicated connection
- * (`connection_limit=1`), so "single active consumer across replicas" (R6, R9) survives the
+ * (`connection_limit=1`), so "single active consumer across replicas" (step 2.3 R6, R9) survives the
  * writer pool handing queries to arbitrary connections. A lock is owned by a session: when the
  * connection drops (network, MySQL restart) the server releases it. `ensure()` therefore
  * re-verifies ownership with `IS_USED_LOCK(name) = CONNECTION_ID()` on every call and
@@ -52,6 +52,21 @@ export class AdvisoryLocks {
     if (acquired) this.held.add(name);
     else this.held.delete(name);
     return acquired;
+  }
+
+  /** True when the last `ensure(name)` of this process acquired or re-verified `name`. */
+  isHeld(name: string): boolean {
+    return this.held.has(name);
+  }
+
+  /**
+   * Number of locks this process believes it holds whose name starts with `prefix` (e.g. the
+   * shard locks of one outbox consumer). Ownership is re-verified only by `ensure()`.
+   */
+  heldCount(prefix: string): number {
+    let count = 0;
+    for (const name of this.held) if (name.startsWith(prefix)) count += 1;
+    return count;
   }
 
   /** Releases `name` if held (best effort; the session end releases it anyway). */

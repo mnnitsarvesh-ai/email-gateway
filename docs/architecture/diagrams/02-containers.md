@@ -64,7 +64,8 @@ flowchart LR
   mq -.->|"message.received, P 4.1"| ew
   ew -.->|"/checkv2, P 4.1"| rspamd
   ew -.->|"INSTREAM, P 4.2"| clamav
-  ew -.->|"read EML, P 4.1"| s3
+  ew -->|"read EML, write parts (3.1)"| s3
+  mysqlW -->|"outbox poller: mail.message.received.v1 (3.1, interim until 3.2)"| ew
   mq -.->|"message.scanned, P 5.2"| pe
   mq -.->|"policy.decided, P 2.3"| dw
   mq -.->|"policy.decided, P 8.1"| aw
@@ -115,7 +116,7 @@ flowchart LR
 | Observability containers, OTLP export                  | IMPLEMENTED     | Compose `observability` profile, `packages/logger/src/tracing.ts`. Validated by `docker compose config`; no runtime test |
 | LMTP ingestion, S3 write, ingestion transaction        | IMPLEMENTED     | `apps/smtp-adapter/src/{lmtp,ingestion}`; `smtp-inbound.test.ts`, `smtp-durability.test.ts`, `smtp-concurrency.test.ts`  |
 | Bounce notices → bounce_events, suppressions           | IMPLEMENTED     | `apps/smtp-adapter/src/bounces`; `bounces.test.ts`, `smtp-outbound.test.ts`                                              |
-| MIME parsing (headers, attachments rows)               | PLANNED 3.1     |                                                                                                                          |
+| MIME parsing (headers, attachments rows)               | IMPLEMENTED     | step 3.1: email-worker `MimeIngestionModule` (outbox feed); `tests/integration/mime-ingestion.test.ts`                   |
 | Outbox relay                                           | PLANNED 3.2     | `message_outbox` table exists                                                                                            |
 | Consumers (email-worker, policy-engine, delivery, ...) | PLANNED 4.1–8.1 | Queues exist; no consumer code                                                                                           |
 | OpenSearch and ClickHouse feeds                        | PLANNED         | ADR-0009. **No execution-plan step owns them yet** (reported as an open item)                                            |

@@ -1,0 +1,9 @@
+From: Alice <alice@example.com>
+To: bob@example.net
+Date: Mon, 2 Nov 2026 10:00:00 +0000
+Message-ID: <mislabelled@fixtures.example>
+Subject: mislabelled charset
+Content-Type: text/plain; charset=us-ascii
+Content-Transfer-Encoding: 8bit
+
+café crème

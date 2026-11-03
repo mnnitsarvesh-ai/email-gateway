@@ -1,9 +1,9 @@
 import { renameSync, writeFileSync } from 'node:fs';
+import { AdvisoryLocks } from '@email-gateway/common';
 import { reinjectionToken } from '@email-gateway/mail-routing';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { RECORDER_TX_TIMEOUT_MS } from '../src/delivery.module';
 import { DeliveryReconciler } from '../src/reconciler/delivery-reconciler';
-import { AdvisoryLocks } from '../src/shared/advisory-locks';
 import { PostfixLogTailer } from '../src/status/postfix-log-tailer';
 import { StatusSignalApplier } from '../src/status/status-signal-applier';
 import { FakePostfix } from './support/fake-postfix';

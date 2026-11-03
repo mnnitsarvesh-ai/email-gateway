@@ -14,7 +14,7 @@
 // - Timestamps are DATETIME(3) UTC. Append-only tables have no `updated_at`.
 // - snake_case table and column names via @@map / @map. Enum values are only ever appended.
 // - No email bodies or attachment content: only S3 object keys, sizes and hashes.
-// - Partitioned tables (18, marked PARTITIONED below) use a composite primary key
+// - Partitioned tables (19, marked PARTITIONED below) use a composite primary key
 //   (id, <partition column>), have no foreign keys in either direction, and every unique key
 //   ends with the partition column. The PARTITION BY clause is hand-written in the migration
 //   SQL; Prisma does not model partitions. Child rows of a message copy the message's
@@ -252,6 +252,22 @@ enum AttachmentVerdict {
   malicious
   error
   skipped
+}
+
+/// Step 3.1 (docs/plan/steps/06-mime-ingestion.md M13): post-queue parse stage of a message.
+/// `parsing` is the only non-final value; a final row is never changed by step 3.1.
+enum MessageParseStatus {
+  parsing
+  parsed
+  parsed_with_defects
+  parse_limit_exceeded
+  parse_failed
+}
+
+/// Step 3.1 (M9): Content-Disposition of an attachment leaf as recorded by the parser.
+enum AttachmentDisposition {
+  attachment
+  inline
 }
 
 enum ActorType {
@@ -1361,27 +1377,119 @@ model EmailHeader {
 /// PARTITIONED by RANGE COLUMNS(received_at), monthly. Metadata and an S3 key only, never
 /// content. No foreign keys.
 model EmailAttachment {
-  id                  BigInt             @default(autoincrement()) @db.UnsignedBigInt
-  receivedAt          DateTime           @map("received_at") @db.DateTime(3)
-  messageId           BigInt             @map("message_id") @db.UnsignedBigInt
-  organizationId      BigInt             @map("organization_id") @db.UnsignedBigInt
-  partIndex           Int                @map("part_index") @db.UnsignedSmallInt
-  /// Set for files extracted from archives.
-  parentPartIndex     Int?               @map("parent_part_index") @db.UnsignedSmallInt
-  filename            String?            @db.VarChar(255)
-  declaredContentType String?            @map("declared_content_type") @db.VarChar(255)
-  detectedContentType String?            @map("detected_content_type") @db.VarChar(255)
-  sizeBytes           Int                @map("size_bytes") @db.UnsignedInt
-  sha256              String             @db.Char(64)
-  objectKey           String?            @map("object_key") @db.VarChar(512)
+  id                  BigInt                 @default(autoincrement()) @db.UnsignedBigInt
+  receivedAt          DateTime               @map("received_at") @db.DateTime(3)
+  messageId           BigInt                 @map("message_id") @db.UnsignedBigInt
+  organizationId      BigInt                 @map("organization_id") @db.UnsignedBigInt
+  /// Index of the leaf in the parse structure (email_message_parses.structure, step 3.1 M9).
+  partIndex           Int                    @map("part_index") @db.UnsignedSmallInt
+  /// Set for files extracted from archives (step 4.2); step 3.1 leaves it NULL.
+  parentPartIndex     Int?                   @map("parent_part_index") @db.UnsignedSmallInt
+  /// Step 3.1 M9: MIME part path of the leaf (for example `1.2.1`); NULL for rows before 3.1.
+  partPath            String?                @map("part_path") @db.VarChar(128)
+  /// Step 3.1 M9: nesting depth of the leaf (0 = root).
+  depth               Int?                   @db.UnsignedTinyInt
+  /// Step 3.1 M9: `attachment` or `inline`.
+  disposition         AttachmentDisposition?
+  /// Sanitized display filename (step 3.1 M9 `sanitizeFilename`); NULL when empty.
+  filename            String?                @db.VarChar(255)
+  /// Step 3.1 M9: the decoded original filename with non-printable, bidi and zero-width code
+  /// points and `\` written as `\u{XXXX}` escapes, ≤ 1024 characters. Escaped metadata only:
+  /// never used as a path or an S3 key, never logged.
+  originalFilename    String?                @map("original_filename") @db.VarChar(1024)
+  declaredContentType String?                @map("declared_content_type") @db.VarChar(255)
+  detectedContentType String?                @map("detected_content_type") @db.VarChar(255)
+  /// Decoded size in bytes.
+  sizeBytes           Int                    @map("size_bytes") @db.UnsignedInt
+  /// Step 3.1 M9: transfer-encoded size in bytes as read from the EML.
+  encodedSizeBytes    Int?                   @map("encoded_size_bytes") @db.UnsignedInt
+  /// Hex SHA-256 of the decoded bytes.
+  sha256              String                 @db.Char(64)
+  /// `org/{organizationId}/part/{yyyy}/{mm}/{dd}/{messageId}/{partIndex}.att` (step 3.1 M11);
+  /// NULL when the part was not stored (flag `not_stored_size_limit`).
+  objectKey           String?                @map("object_key") @db.VarChar(512)
+  /// Step 3.1 M9: JSON array of ATTACHMENT_FLAGS codes (`@email-gateway/mime-parser`), for
+  /// the scanning steps (4.x). Codes only.
+  flags               Json?
+  /// Step 3.1 M10: archive metadata `{ type, inspected, entries, declaredUncompressedBytes,
+  /// maxRatio, encryptedEntries, nestedArchives }`. Numbers and the type only, never entry
+  /// names. NULL when the part is not an archive.
+  archiveInfo         Json?                  @map("archive_info")
   verdict             AttachmentVerdict?
-  createdAt           DateTime           @default(now()) @map("created_at") @db.DateTime(3)
-  updatedAt           DateTime           @updatedAt @map("updated_at") @db.DateTime(3)
+  createdAt           DateTime               @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt           DateTime               @updatedAt @map("updated_at") @db.DateTime(3)
 
   @@id([id, receivedAt])
   @@unique([messageId, partIndex, receivedAt])
   @@index([organizationId, sha256])
   @@map("email_attachments")
+}
+
+/// PARTITIONED by RANGE COLUMNS(received_at), monthly (6 months, core). Post-queue MIME parse
+/// stage of one message (step 3.1, docs/plan/steps/06-mime-ingestion.md §3, M3, M13), written
+/// by email-worker only. One row per message: inserted as `parsing` (M3.4), `attempts`
+/// incremented per try, finalized once by a conditional update `WHERE status = 'parsing'`
+/// (M3.9.1). `email_messages.status` is not changed by step 3.1 (step 3.3 owns it). Holds S3
+/// keys, hashes, sizes, codes and counts only; never body bytes, filenames or header values.
+/// No foreign keys.
+model EmailMessageParse {
+  id                BigInt             @default(autoincrement()) @db.UnsignedBigInt
+  /// Copied from the message (one message's graph lives in one partition).
+  receivedAt        DateTime           @map("received_at") @db.DateTime(3)
+  messageId         BigInt             @map("message_id") @db.UnsignedBigInt
+  organizationId    BigInt             @map("organization_id") @db.UnsignedBigInt
+  /// `parsing` until finalized (M13); transitions none → parsing → final only.
+  status            MessageParseStatus
+  /// Parse attempts started (M3.4). An infrastructure error gives its attempt back; a crash
+  /// does not, so `attempts > MIME_MAX_ATTEMPTS` is the poison-message guard.
+  attempts          Int                @default(0) @db.UnsignedSmallInt
+  /// `PARSER_VERSION` of `@email-gateway/mime-parser` that produced the row.
+  parserVersion     String             @map("parser_version") @db.VarChar(32)
+  /// Envelope id of the `mail.message.received.v1` event that started the parse.
+  eventId           String?            @map("event_id") @db.Char(36)
+  /// `parse_failed` reason (PARSE_FAILURE_REASONS of `@email-gateway/event-contracts`).
+  failureReason     String?            @map("failure_reason") @db.VarChar(64)
+  /// JSON array of MIME_LIMIT_NAMES that were exceeded.
+  limitsExceeded    Json?              @map("limits_exceeded")
+  /// JSON array of defect codes (M6, M7); codes only.
+  defects           Json?
+  partCount         Int?               @map("part_count") @db.UnsignedSmallInt
+  attachmentCount   Int?               @map("attachment_count") @db.UnsignedSmallInt
+  maxDepth          Int?               @map("max_depth") @db.UnsignedTinyInt
+  /// Every field of the top-level header block (not only the stored ones).
+  headerCount       Int?               @map("header_count") @db.UnsignedInt
+  /// EML bytes read (must equal email_messages.size_bytes, M3.8).
+  bytesRead         BigInt?            @map("bytes_read") @db.UnsignedBigInt
+  /// Sum of transfer-decoded part bytes.
+  decodedBytes      BigInt?            @map("decoded_bytes") @db.UnsignedBigInt
+  /// `org/{organizationId}/part/{yyyy}/{mm}/{dd}/{messageId}/{partIndex}.text` (M11); NULL
+  /// when there is no text body or it was not stored.
+  textBodyObjectKey String?            @map("text_body_object_key") @db.VarChar(512)
+  /// `…/{partIndex}.html` (M11); NULL when there is no HTML body or it was not stored.
+  htmlBodyObjectKey String?            @map("html_body_object_key") @db.VarChar(512)
+  /// Hex SHA-256 of the stored (decoded, UTF-8) body bytes.
+  textBodySha256    String?            @map("text_body_sha256") @db.Char(64)
+  htmlBodySha256    String?            @map("html_body_sha256") @db.Char(64)
+  textBodySizeBytes Int?               @map("text_body_size_bytes") @db.UnsignedInt
+  htmlBodySizeBytes Int?               @map("html_body_size_bytes") @db.UnsignedInt
+  /// Declared charset of the body part (normalized).
+  textBodyCharset   String?            @map("text_body_charset") @db.VarChar(64)
+  htmlBodyCharset   String?            @map("html_body_charset") @db.VarChar(64)
+  /// M13: one object per MIME node in document order (≤ MIME_MAX_PARTS); never filenames or
+  /// header values.
+  structure         Json?
+  /// Start of the last attempt.
+  startedAt         DateTime           @map("started_at") @db.DateTime(3)
+  completedAt       DateTime?          @map("completed_at") @db.DateTime(3)
+  durationMs        Int?               @map("duration_ms") @db.UnsignedInt
+  createdAt         DateTime           @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt         DateTime           @updatedAt @map("updated_at") @db.DateTime(3)
+
+  @@id([id, receivedAt])
+  @@unique([messageId, receivedAt])
+  @@index([organizationId, receivedAt, id])
+  @@index([status, updatedAt])
+  @@map("email_message_parses")
 }
 
 /// PARTITIONED by RANGE COLUMNS(received_at), monthly. Append-only; idempotency comes from

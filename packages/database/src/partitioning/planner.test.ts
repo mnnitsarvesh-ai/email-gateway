@@ -36,9 +36,9 @@ const daily = (...names: string[]): ExistingPartition[] => [
 const utc = (iso: string) => new Date(iso);
 
 describe('registry', () => {
-  it('lists the 18 partitioned tables (D3 and step 2.3) with their retention', () => {
-    expect(PARTITION_REGISTRY).toHaveLength(18);
-    expect(new Set(PARTITION_REGISTRY.map((s) => s.table)).size).toBe(18);
+  it('lists the 19 partitioned tables (D3, steps 2.3 and 3.1) with their retention', () => {
+    expect(PARTITION_REGISTRY).toHaveLength(19);
+    expect(new Set(PARTITION_REGISTRY.map((s) => s.table)).size).toBe(19);
     const byTable = Object.fromEntries(PARTITION_REGISTRY.map((s) => [s.table, s]));
     expect(byTable.email_messages).toMatchObject({
       column: 'received_at',
@@ -63,6 +63,14 @@ describe('registry', () => {
       retention: 3,
       drop: true,
       tier: 'detail',
+    });
+    // Step 3.1 parse stage table.
+    expect(byTable.email_message_parses).toMatchObject({
+      column: 'received_at',
+      granularity: 'month',
+      retention: 6,
+      drop: true,
+      tier: 'core',
     });
     expect(byTable.audit_logs).toMatchObject({
       column: 'created_at',

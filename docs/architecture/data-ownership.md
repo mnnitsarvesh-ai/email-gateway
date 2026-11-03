@@ -7,7 +7,7 @@ Which deployable owns (writes) each table, bucket, queue and cache, and who may 
 3. **Schema changes are owned by migrations.** Only `db-migrate` and partition maintenance use the DDL account (`MIGRATION_DATABASE_URL`). Runtime services have DML only.
 4. **Content is never in MySQL.** Bodies and attachments live in S3; MySQL holds keys, sizes and hashes.
 
-Status: all 66 tables are IMPLEMENTED (step 1.1 schema, the steps 1.2 + 1.3 migration `identity_tenancy`, the step 2.1 `domain_onboarding` migration and the step 2.2 `smtp_gateway` migration: `smtp_connectors`, `smtp_connector_networks`, `domain_recipient_addresses`; `tests/integration/schema.test.ts`). The api writes the control-plane tables (steps 1.2–2.2); since step 2.2 **smtp-adapter writes the ingestion and bounce tables below**; the other data-plane writers arrive with their steps.
+Status: all 71 tables are IMPLEMENTED (step 1.1 schema, the steps 1.2 + 1.3 migration `identity_tenancy`, the step 2.1 `domain_onboarding` migration, the step 2.2 `smtp_gateway` migration: `smtp_connectors`, `smtp_connector_networks`, `domain_recipient_addresses`; the step 2.3 `mail_routing` migration: `mail_destination_presets`, `delivery_reinjections`, `delivery_status_events`, `stream_cursors`; and the step 3.1 `mime_ingestion` migration: `email_message_parses`; `tests/integration/schema.test.ts`). The api writes the control-plane tables (steps 1.2–2.2); since step 2.2 **smtp-adapter writes the ingestion and bounce tables below**; since step 3.1 **email-worker writes the parse stage and the parsed metadata** (below); the other data-plane writers arrive with their steps.
 
 ## MySQL tables by owner
 
@@ -33,16 +33,18 @@ Status: all 66 tables are IMPLEMENTED (step 1.1 schema, the steps 1.2 + 1.3 migr
 | Tables                                                                                                                                | Notes                                                                                                                                             | Writing step      |
 | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- |
 | `message_identities`, `email_messages` (insert, status `received`), `email_recipients`, `email_events` (`received`), `message_outbox` | One writer transaction **per organization** of the message (LMTP ingestion, step 2.2 D7); the registry allocates the message id and `received_at` | 2.2 (IMPLEMENTED) |
-| `email_headers`, `email_attachments`                                                                                                  | Written once MIME parsing exists                                                                                                                  | 3.1               |
 | `bounce_events`, `delivery_suppressions` (`reason hard_bounce`, `source bounce`)                                                      | Bounce handler on LMTP 10052 (postmaster copies of `postfix-outbound` DSNs, D13); never shortens or replaces a `manual`/`complaint` suppression   | 2.2 (IMPLEMENTED) |
 
-### email-worker (scanning)
+### email-worker (MIME ingestion and scanning)
 
-| Tables                                                                                           | Notes                                                         | Writing step |
-| ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------- | ------------ |
-| `email_scans`, `scan_engine_results`                                                             | One scan row per scan kind and attempt; one result per engine | 4.1–4.6      |
-| `email_messages` status `scanning` and `scanned`, `email_message_status_history`, `email_events` |                                                               | 3.3, 4.1     |
-| `threat_indicators` sightings (`last_seen_at`)                                                   |                                                               | 4.x          |
+| Tables                                                                                                                                                                | Notes                                                                                                                                                 | Writing step |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
+| `email_message_parses` (**owner**)                                                                                                                                    | The parse stage record, one row per message: `parsing` (insert, attempts), then one conditional final update (step 3.1 M3, M13)                       | 3.1          |
+| `email_headers`, `email_attachments` (insert); `email_events` (`parsed`, `parse_failed`); `message_outbox` (`mail.message.parsed.v1`, `mail.message.parse_failed.v1`) | Written in the one finalizing writer transaction, through `processOnce` (consumer `email-worker.mime-parser`)                                         | 3.1          |
+| `email_messages`: **`subject` and `attachment_count` only**                                                                                                           | The decoded subject and the attachment count. `status`, `status_changed_at` and `version` are never touched by step 3.1 (step 3.3 owns the lifecycle) | 3.1          |
+| `email_scans`, `scan_engine_results`                                                                                                                                  | One scan row per scan kind and attempt; one result per engine                                                                                         | 4.1–4.6      |
+| `email_messages` status `scanning` and `scanned`, `email_message_status_history`, `email_events`                                                                      |                                                                                                                                                       | 3.3, 4.1     |
+| `threat_indicators` sightings (`last_seen_at`)                                                                                                                        |                                                                                                                                                       | 4.x          |
 
 ### policy-engine (decisions)
 
@@ -100,11 +102,11 @@ The reader is IMPLEMENTED and registered only in `api` (`apps/api/src/app.module
 
 ## Object storage
 
-| Bucket (`env`)                | Prefix                          | Writer                      | Readers                                                                                               | Status                                        |
-| ----------------------------- | ------------------------------- | --------------------------- | ----------------------------------------------------------------------------------------------------- | --------------------------------------------- |
-| Mail (`S3_BUCKET_MAIL`)       | `org/{organizationId}/eml/`     | `smtp-adapter` (ingestion)  | `email-worker` (scan), `delivery-worker` (reinject), `api` (preview with `message:read_content`, 6.1) | IMPLEMENTED (writer since 2.2; key format D8) |
-| Mail (`S3_BUCKET_MAIL`)       | `org/{organizationId}/part/`    | Ingestion or `email-worker` | `email-worker`, `api`                                                                                 | PLANNED 3.1, 4.2                              |
-| Archive (`S3_BUCKET_ARCHIVE`) | `org/{organizationId}/archive/` | `archive-worker`            | `api` (search, export, 8.1)                                                                           | Bucket IMPLEMENTED; writer PLANNED 8.1        |
+| Bucket (`env`)                | Prefix                          | Writer                          | Readers                                                                                               | Status                                                                                                        |
+| ----------------------------- | ------------------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| Mail (`S3_BUCKET_MAIL`)       | `org/{organizationId}/eml/`     | `smtp-adapter` (ingestion)      | `email-worker` (scan), `delivery-worker` (reinject), `api` (preview with `message:read_content`, 6.1) | IMPLEMENTED (writer since 2.2; key format D8)                                                                 |
+| Mail (`S3_BUCKET_MAIL`)       | `org/{organizationId}/part/`    | `email-worker` (MIME ingestion) | `email-worker` (archive inspection, scanning 4.x), `api` (6.1)                                        | IMPLEMENTED 3.1 (key format in [contracts §11](contracts.md#11-s3-key-conventions)); 4.2 adds extracted files |
+| Archive (`S3_BUCKET_ARCHIVE`) | `org/{organizationId}/archive/` | `archive-worker`                | `api` (search, export, 8.1)                                                                           | Bucket IMPLEMENTED; writer PLANNED 8.1                                                                        |
 
 Every key carries the organization prefix. Lifecycle: the Terraform module expires mail objects after 30 days by default, while message rows are kept 6 months; alignment is PLANNED 8.1.
 

@@ -9,8 +9,13 @@ import {
   domainRoutingChangedV1,
   domainStatusChangedV1,
   EventTypes,
+  MESSAGE_PARSE_STATUSES,
+  MIME_LIMIT_NAMES,
+  messageParsedV1,
+  messageParseFailedV1,
   messageReceivedV1,
   messageScannedV1,
+  PARSE_FAILURE_REASONS,
   policyDecidedV1,
 } from './events';
 import { QUEUES, queueArguments } from './topology';
@@ -195,6 +200,8 @@ describe('event types', () => {
       DeliveryApproved: 'mail.delivery.approved.v1',
       DeliveryStatusChanged: 'mail.delivery.status_changed.v1',
       DomainRoutingChanged: 'domain.routing.changed.v1',
+      MessageParsed: 'mail.message.parsed.v1',
+      MessageParseFailed: 'mail.message.parse_failed.v1',
     });
   });
 });
@@ -337,6 +344,223 @@ describe('mail.delivery.status_changed.v1', () => {
       unknown
     >;
     expect(parsed).not.toHaveProperty('address');
+  });
+});
+
+describe('mail.message.parsed.v1', () => {
+  const sha = 'a'.repeat(64);
+  const partPrefix = `org/${organizationId}/part/2026/11/01/9007199254740993`;
+  const parsed = (overrides: Record<string, unknown> = {}) => ({
+    messageId: '9007199254740993',
+    receivedAt,
+    direction: 'inbound',
+    emlS3Key: `org/${organizationId}/eml/2026/11/01/abc.eml`,
+    parseStatus: 'parsed',
+    parserVersion: '1.0.0',
+    limitsExceeded: [],
+    defects: [],
+    textBody: { s3Key: `${partPrefix}/1.text`, sha256: sha, sizeBytes: 120 },
+    htmlBody: { s3Key: `${partPrefix}/2.html`, sha256: 'b'.repeat(64), sizeBytes: 480 },
+    attachmentCount: 2,
+    flaggedAttachmentCount: 1,
+    attachmentFlags: ['filename_double_extension', 'executable'],
+    partCount: 5,
+    maxDepth: 2,
+    headerCount: 14,
+    ...overrides,
+  });
+  const parse = (payload: unknown) =>
+    parseEvent(envelope(payload, { eventType: EventTypes.MessageParsed }), messageParsedV1);
+
+  it('exports the limit names, parse statuses and failure reasons of the design', () => {
+    expect(MIME_LIMIT_NAMES).toEqual([
+      'message_size',
+      'nesting_depth',
+      'part_count',
+      'header_count',
+      'header_line_length',
+      'header_block_size',
+      'attachment_count',
+      'attachment_size',
+      'body_size',
+      'decoded_ratio',
+      'total_decoded_size',
+      'parse_timeout',
+    ]);
+    expect(MESSAGE_PARSE_STATUSES).toEqual([
+      'parsed',
+      'parsed_with_defects',
+      'parse_limit_exceeded',
+    ]);
+    expect(PARSE_FAILURE_REASONS).toEqual([
+      'eml_missing',
+      'eml_key_mismatch',
+      'integrity_mismatch',
+      'max_attempts_exceeded',
+      'parser_error',
+    ]);
+  });
+
+  it('accepts every final status with consistent limits and defects', () => {
+    expect(parse(parsed()).payload.parseStatus).toBe('parsed');
+    expect(
+      parse(parsed({ parseStatus: 'parsed_with_defects', defects: ['missing_closing_boundary'] }))
+        .payload.defects,
+    ).toEqual(['missing_closing_boundary']);
+    const limited = parse(
+      parsed({
+        parseStatus: 'parse_limit_exceeded',
+        limitsExceeded: ['attachment_size', 'parse_timeout'],
+        defects: ['invalid_base64'],
+      }),
+    ).payload;
+    expect(limited.limitsExceeded).toEqual(['attachment_size', 'parse_timeout']);
+  });
+
+  it('accepts every limit name once, absent bodies, an unstored body and zero counts', () => {
+    expect(
+      parse(parsed({ parseStatus: 'parse_limit_exceeded', limitsExceeded: [...MIME_LIMIT_NAMES] }))
+        .payload.limitsExceeded,
+    ).toHaveLength(12);
+    const empty = parse(
+      parsed({
+        parseStatus: 'parse_limit_exceeded',
+        limitsExceeded: ['message_size'],
+        textBody: null,
+        htmlBody: { s3Key: null, sha256: sha, sizeBytes: 0 },
+        attachmentCount: 0,
+        flaggedAttachmentCount: 0,
+        attachmentFlags: [],
+        partCount: 0,
+        maxDepth: 0,
+        headerCount: 0,
+      }),
+    ).payload;
+    expect(empty.textBody).toBeNull();
+    expect(empty.htmlBody).toEqual({ s3Key: null, sha256: sha, sizeBytes: 0 });
+    const codes = Array.from({ length: 64 }, (_, i) => `code_${i}`);
+    expect(
+      parse(parsed({ parseStatus: 'parsed_with_defects', defects: codes, attachmentFlags: codes }))
+        .payload.attachmentFlags,
+    ).toHaveLength(64);
+  });
+
+  it('rejects keys that are not organization-prefixed', () => {
+    for (const overrides of [
+      { emlS3Key: 'eml/2026/11/01/abc.eml' },
+      { emlS3Key: 'org/0/eml/abc.eml' },
+      { textBody: { s3Key: 'part/1.text', sha256: sha, sizeBytes: 1 } },
+      { htmlBody: { s3Key: '/org/42/part/2.html', sha256: sha, sizeBytes: 1 } },
+    ]) {
+      expect(() => parse(parsed(overrides)), JSON.stringify(overrides)).toThrow();
+    }
+  });
+
+  it('rejects bad hashes', () => {
+    for (const sha256 of ['A'.repeat(64), 'a'.repeat(63), 'a'.repeat(65), 'g'.repeat(64), '']) {
+      expect(
+        () => parse(parsed({ textBody: { s3Key: null, sha256, sizeBytes: 1 } })),
+        sha256,
+      ).toThrow();
+    }
+  });
+
+  it('rejects unknown limit names, duplicates, bad codes and oversized arrays', () => {
+    const limitExceeded = { parseStatus: 'parse_limit_exceeded' };
+    const tooMany = Array.from({ length: 65 }, (_, i) => `code_${i}`);
+    for (const overrides of [
+      { ...limitExceeded, limitsExceeded: ['message_bytes'] },
+      { ...limitExceeded, limitsExceeded: ['part_count', 'part_count'] },
+      { attachmentFlags: ['executable', 'executable'] },
+      { parseStatus: 'parsed_with_defects', defects: tooMany },
+      { attachmentFlags: tooMany },
+      { parseStatus: 'parsed_with_defects', defects: ['Invalid Base64'] },
+      { parseStatus: 'parsed_with_defects', defects: ['x'.repeat(49)] },
+      { parseStatus: 'parsed_with_defects', defects: [''] },
+      { attachmentFlags: ['report.pdf.exe'] },
+    ]) {
+      expect(() => parse(parsed(overrides)), JSON.stringify(overrides).slice(0, 80)).toThrow();
+    }
+  });
+
+  it('rejects inconsistent statuses, bad ids, versions and counts', () => {
+    for (const overrides of [
+      { parseStatus: 'parsing' },
+      { parseStatus: 'parse_failed' },
+      { parseStatus: 'parse_limit_exceeded' },
+      { limitsExceeded: ['body_size'] },
+      { parseStatus: 'parsed_with_defects' },
+      { defects: ['invalid_base64'] },
+      { flaggedAttachmentCount: 3 },
+      { messageId: '07' },
+      { messageId: 42 },
+      { receivedAt: '2026-11-01' },
+      { direction: 'sideways' },
+      { parserVersion: '' },
+      { parserVersion: 'v'.repeat(33) },
+      { attachmentCount: -1 },
+      { partCount: 1.5 },
+      { maxDepth: '2' },
+      { headerCount: undefined },
+      { textBody: undefined },
+      { textBody: { s3Key: null, sha256: sha, sizeBytes: -1 } },
+    ]) {
+      expect(() => parse(parsed(overrides)), JSON.stringify(overrides)).toThrow();
+    }
+  });
+
+  it('carries no subject, address, filename or header value', () => {
+    const payload = parse(
+      parsed({ subject: 'Hello', envelopeFrom: 'a@example.com', filename: 'x.pdf' }),
+    ).payload as Record<string, unknown>;
+    for (const field of ['subject', 'envelopeFrom', 'filename', 'headerFrom']) {
+      expect(payload).not.toHaveProperty(field);
+    }
+  });
+});
+
+describe('mail.message.parse_failed.v1', () => {
+  const failed = (overrides: Record<string, unknown> = {}) => ({
+    messageId: '9007199254740993',
+    receivedAt,
+    direction: 'outbound',
+    emlS3Key: `org/${organizationId}/eml/2026/11/01/abc.eml`,
+    reason: 'integrity_mismatch',
+    attempts: 1,
+    parserVersion: '1.0.0',
+    ...overrides,
+  });
+  const parse = (payload: unknown) =>
+    parseEvent(
+      envelope(payload, { eventType: EventTypes.MessageParseFailed }),
+      messageParseFailedV1,
+    );
+
+  it('accepts every failure reason', () => {
+    for (const reason of PARSE_FAILURE_REASONS) {
+      expect(parse(failed({ reason, attempts: 6 })).payload.reason).toBe(reason);
+    }
+  });
+
+  it('carries a null key when the stored key is not organization-prefixed (eml_key_mismatch)', () => {
+    expect(
+      parse(failed({ reason: 'eml_key_mismatch', emlS3Key: null })).payload.emlS3Key,
+    ).toBeNull();
+  });
+
+  it('rejects unknown reasons, zero attempts and malformed fields', () => {
+    for (const overrides of [
+      { reason: 'timeout' },
+      { attempts: 0 },
+      { attempts: 1.5 },
+      { emlS3Key: 'eml/abc.eml' },
+      { emlS3Key: undefined },
+      { messageId: 'abc' },
+      { parserVersion: '' },
+      { direction: undefined },
+    ]) {
+      expect(() => parse(failed(overrides)), JSON.stringify(overrides)).toThrow();
+    }
   });
 });
 

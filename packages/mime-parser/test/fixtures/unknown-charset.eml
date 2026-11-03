@@ -1,0 +1,8 @@
+From: Alice <alice@example.com>
+To: bob@example.net
+Date: Mon, 2 Nov 2026 10:00:00 +0000
+Message-ID: <unknown-charset@fixtures.example>
+Subject: unknown charset
+Content-Type: text/plain; charset=x-unknown
+
+plain text in an unknown charset

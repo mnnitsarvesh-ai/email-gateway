@@ -51,7 +51,10 @@ const monthly = (
   tier,
 });
 
-/** The 18 partitioned tables: the 16 of D3 plus the two delivery tables of step 2.3 (§3). */
+/**
+ * The 19 partitioned tables: the 16 of D3, the two delivery tables of step 2.3 (§3) and the
+ * parse stage table of step 3.1 (§3).
+ */
 export const PARTITION_REGISTRY: readonly PartitionSpec[] = Object.freeze([
   monthly('email_messages', 'received_at', 6, 'core'),
   monthly('email_recipients', 'received_at', 6, 'core'),
@@ -68,6 +71,9 @@ export const PARTITION_REGISTRY: readonly PartitionSpec[] = Object.freeze([
   // deliveries they carry; the status audit trail is detail data.
   monthly('delivery_reinjections', 'received_at', 6, 'core'),
   monthly('delivery_status_events', 'received_at', 3, 'detail'),
+  // Step 3.1 (docs/plan/steps/06-mime-ingestion.md §3): the parse stage record lives as long
+  // as the message and its attachments.
+  monthly('email_message_parses', 'received_at', 6, 'core'),
   // Legal hold and per-tenant archive retention are row-level (step 8.1).
   monthly('email_archives', 'received_at', null, 'compliance'),
   monthly('bounce_events', 'occurred_at', 6, 'core'),

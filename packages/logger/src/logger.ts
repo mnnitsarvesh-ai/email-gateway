@@ -35,9 +35,31 @@ const SECRET_FIELDS = [
   'privateKeyCiphertext',
 ];
 
+/**
+ * Mail-content field names censored at the top level and one level down (step 3.1 M15). Defence
+ * in depth: services log ids, codes and counts, never subjects, filenames, addresses, header
+ * values or bodies. `recipients`, `from` and `to` are deliberately absent: they are used as
+ * counts, status names and masked addresses.
+ */
+const MAIL_CONTENT_FIELDS = [
+  'subject',
+  'filename',
+  'originalFilename',
+  'envelopeFrom',
+  'headerFrom',
+  'headerValue',
+  'textBody',
+  'htmlBody',
+  'rawHeaders',
+];
+
 /** Paths that must never reach logs. Extend rather than bypass. */
 export const REDACT_PATHS = [
   ...SECRET_FIELDS.flatMap((field) => [field, `*.${field}`]),
+  ...MAIL_CONTENT_FIELDS.flatMap((field) => [field, `*.${field}`]),
+  // An event envelope logged whole (`{ event }` or the envelope itself).
+  'payload.envelopeFrom',
+  '*.payload.envelopeFrom',
   'req.headers.authorization',
   'req.headers.cookie',
   'req.headers["x-api-key"]',

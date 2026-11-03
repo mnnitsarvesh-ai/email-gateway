@@ -36,6 +36,40 @@ spec:
             - configMapRef: { name: email-gateway-config }
           env:
             - { name: HTTP_PORT, value: '3020' }
+            # MIME ingestion (step 3.1, docs/plan/steps/06-mime-ingestion.md §5); defaults.
+            - { name: MIME_INGESTION_ENABLED, value: 'true' }
+            - { name: MIME_CONCURRENCY, value: '4' }
+            - { name: MIME_OUTBOX_POLL_INTERVAL_MS, value: '1000' }
+            - { name: MIME_OUTBOX_SAFETY_LAG_MS, value: '120000' }
+            - { name: MIME_OUTBOX_BATCH_SIZE, value: '100' }
+            - { name: MIME_OUTBOX_SHARDS, value: '1' }
+            - { name: MIME_OUTBOX_MAX_HELD_SHARDS, value: '1' }
+            - { name: MIME_RETRY_BASE_MS, value: '1000' }
+            - { name: MIME_RETRY_MAX_MS, value: '60000' }
+            - { name: MIME_MAX_ATTEMPTS, value: '5' }
+            - { name: MIME_DB_TIMEOUT_MS, value: '15000' }
+            - { name: MIME_S3_TIMEOUT_MS, value: '30000' }
+            - { name: MIME_S3_PART_SIZE_BYTES, value: '5242880' }
+            - { name: MIME_S3_QUEUE_SIZE, value: '2' }
+            - { name: MIME_MEMORY_BUDGET_BYTES, value: '268435456' }
+            - { name: MIME_MAX_MESSAGE_BYTES, value: '53477376' }
+            - { name: MIME_MAX_DEPTH, value: '10' }
+            - { name: MIME_MAX_PARTS, value: '250' }
+            - { name: MIME_MAX_HEADERS, value: '1000' }
+            - { name: MIME_MAX_HEADER_LINE_BYTES, value: '32768' }
+            - { name: MIME_MAX_HEADER_BLOCK_BYTES, value: '262144' }
+            - { name: MIME_MAX_ATTACHMENTS, value: '100' }
+            - { name: MIME_MAX_ATTACHMENT_BYTES, value: '26214400' }
+            - { name: MIME_MAX_BODY_BYTES, value: '10485760' }
+            - { name: MIME_MAX_DECODED_RATIO, value: '1.1' }
+            - { name: MIME_MAX_TOTAL_DECODED_BYTES, value: '104857600' }
+            - { name: MIME_PARSE_TIMEOUT_MS, value: '120000' }
+            - { name: MIME_MAX_STORED_HEADERS, value: '200' }
+            - { name: MIME_FILENAME_MAX_CHARS, value: '200' }
+            - { name: MIME_ARCHIVE_MAX_ENTRIES, value: '1000' }
+            - { name: MIME_ARCHIVE_MAX_RATIO, value: '100' }
+            - { name: MIME_ARCHIVE_MAX_TOTAL_UNCOMPRESSED_BYTES, value: '1073741824' }
+            - { name: MIME_ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES, value: '8388608' }
             # Secrets are mounted as files by External Secrets and read via the <KEY>_FILE convention.
             - { name: DATABASE_URL_FILE, value: /var/run/secrets/gateway/database-url }
             - { name: RABBITMQ_URL_FILE, value: /var/run/secrets/gateway/rabbitmq-url }

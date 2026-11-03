@@ -1,0 +1,13 @@
+From: Alice <alice@example.com>
+To: bob@example.net
+Date: Mon, 2 Nov 2026 10:00:00 +0000
+Message-ID: <no-boundary@fixtures.example>
+MIME-Version: 1.0
+Subject: no boundary
+Content-Type: multipart/mixed
+
+--x
+Content-Type: text/plain
+
+hello
+--x--

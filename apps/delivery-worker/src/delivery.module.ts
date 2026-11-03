@@ -6,7 +6,14 @@ import {
   type OnApplicationBootstrap,
   type OnModuleDestroy,
 } from '@nestjs/common';
-import { MetricsService, PrismaService, RedisService, S3Service } from '@email-gateway/common';
+import {
+  AdvisoryLocks,
+  MetricsService,
+  OutboxPoller,
+  PrismaService,
+  RedisService,
+  S3Service,
+} from '@email-gateway/common';
 import {
   deliveryApprovedV1,
   type DeliveryApprovedV1,
@@ -20,7 +27,6 @@ import {
   DEV_PASSTHROUGH_CONSUMER,
   DevPassThroughApprover,
 } from './approvals/dev-passthrough.approver';
-import { OutboxPoller } from './approvals/outbox-poller';
 import { WORKER_CONFIG, WORKER_LOGGER, type WorkerConfig } from './config';
 import { DeliveryMetrics } from './metrics/delivery-metrics';
 import { DeliveryPlanner } from './planning/delivery-planner';
@@ -29,7 +35,6 @@ import { DeliveryReconciler } from './reconciler/delivery-reconciler';
 import { ReinjectionScheduler } from './reinjection/reinjection-scheduler';
 import { ReinjectionStore } from './reinjection/reinjection-store';
 import { Reinjector } from './reinjection/reinjector';
-import { AdvisoryLocks } from './shared/advisory-locks';
 import { PostfixLogTailer } from './status/postfix-log-tailer';
 import { StatusSignalApplier } from './status/status-signal-applier';
 import { WorkerLifecycle } from './worker-lifecycle';
@@ -38,6 +43,8 @@ import { WorkerLifecycle } from './worker-lifecycle';
 export const PLANNING_TX_TIMEOUT_MS = 60_000;
 /** Writer transaction budget of one signal or result commit (as the 2.2 INGEST_DB_TIMEOUT_MS). */
 export const RECORDER_TX_TIMEOUT_MS = 15_000;
+/** Advisory lock namespace of this worker: `dw:outbox:<consumer>` (step 2.3 R6). */
+export const OUTBOX_LOCK_PREFIX = 'dw';
 
 /** Runs the lifecycle from Nest's hooks (non-global module: stopped before the DB closes). */
 @Injectable()
@@ -54,10 +61,11 @@ export class WorkerRuntime implements OnApplicationBootstrap, OnModuleDestroy {
 }
 
 /**
- * The delivery pipeline of step 2.3 (docs/plan/steps/05-routing.md): approvals feed (outbox
- * poller, R5/R6) → planner (R7) → reinjection scheduler and reinjector (R8, R10, R11) →
- * Postfix delivery-log tailer (R9) → reconciler (R12), with the metrics of R14. Components are
- * plain classes wired here, so the integration tests build the same graph without Nest.
+ * The delivery pipeline of step 2.3 (docs/plan/steps/05-routing.md): approvals feed (the shared
+ * outbox poller of `@email-gateway/common`, R5/R6 and step 3.1 M2) → planner (R7) → reinjection
+ * scheduler and reinjector (R8, R10, R11) → Postfix delivery-log tailer (R9) → reconciler (R12),
+ * with the metrics of R14. Components are plain classes wired here, so the integration tests
+ * build the same graph without Nest.
  */
 @Module({})
 export class DeliveryModule {
@@ -95,7 +103,7 @@ export class DeliveryModule {
               prisma,
               locks,
               logger,
-              metrics,
+              metrics: metrics.outboxPoller(),
               consumer: PLANNER_CONSUMER,
               eventType: EventTypes.DeliveryApproved,
               schema: deliveryApprovedV1,
@@ -103,9 +111,12 @@ export class DeliveryModule {
               pollIntervalMs: config.DELIVERY_OUTBOX_POLL_INTERVAL_MS,
               safetyLagMs: config.DELIVERY_OUTBOX_SAFETY_LAG_MS,
               batchSize: config.DELIVERY_OUTBOX_BATCH_SIZE,
-              txTimeoutMs: PLANNING_TX_TIMEOUT_MS,
+              lockPrefix: OUTBOX_LOCK_PREFIX,
+              concurrency: 1,
             }),
             planner,
+            prisma,
+            PLANNING_TX_TIMEOUT_MS,
           ),
         inject: [PrismaService, AdvisoryLocks, DeliveryMetrics, DeliveryPlanner],
       },
@@ -117,7 +128,7 @@ export class DeliveryModule {
               prisma,
               locks,
               logger,
-              metrics,
+              metrics: metrics.outboxPoller(),
               consumer: DEV_PASSTHROUGH_CONSUMER,
               eventType: EventTypes.MessageReceived,
               schema: messageReceivedV1,
@@ -125,8 +136,11 @@ export class DeliveryModule {
               pollIntervalMs: config.DELIVERY_OUTBOX_POLL_INTERVAL_MS,
               safetyLagMs: config.DELIVERY_OUTBOX_SAFETY_LAG_MS,
               batchSize: config.DELIVERY_OUTBOX_BATCH_SIZE,
-              txTimeoutMs: RECORDER_TX_TIMEOUT_MS,
+              lockPrefix: OUTBOX_LOCK_PREFIX,
+              concurrency: 1,
             }),
+            prisma,
+            RECORDER_TX_TIMEOUT_MS,
             logger,
           ),
         inject: [PrismaService, AdvisoryLocks, DeliveryMetrics],

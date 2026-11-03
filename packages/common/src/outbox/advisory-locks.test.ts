@@ -65,6 +65,25 @@ describe('AdvisoryLocks', () => {
     expect(session.calls.filter((q) => q.includes('GET_LOCK'))).toHaveLength(2);
   });
 
+  it('counts held locks by prefix and forgets a lock lost to another session', async () => {
+    const holders = new Map<string, number>();
+    const session = fakeSession(holders);
+    const locks = new AdvisoryLocks(session);
+    await locks.ensure('ew:outbox:c#0/4');
+    await locks.ensure('ew:outbox:c#1/4');
+    await locks.ensure('ew:outbox:other');
+    expect(locks.heldCount('ew:outbox:c#')).toBe(2);
+    expect(locks.heldCount('ew:outbox:')).toBe(3);
+    expect(locks.isHeld('ew:outbox:c#1/4')).toBe(true);
+    session.reconnect();
+    holders.set('ew:outbox:c#1/4', 999); // another replica took it meanwhile
+    expect(await locks.ensure('ew:outbox:c#1/4')).toBe(false);
+    expect(locks.isHeld('ew:outbox:c#1/4')).toBe(false);
+    expect(locks.heldCount('ew:outbox:c#')).toBe(1);
+    await locks.release('ew:outbox:c#0/4');
+    expect(locks.heldCount('ew:outbox:c#')).toBe(0);
+  });
+
   it('releases one lock or all of them on close, and validates names', async () => {
     const holders = new Map<string, number>();
     const locks = new AdvisoryLocks(fakeSession(holders));

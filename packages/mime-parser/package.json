@@ -1,0 +1,30 @@
+{
+  "name": "@email-gateway/mime-parser",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src test",
+    "test": "vitest run",
+    "fixtures:generate": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON test/fixtures/generate.ts"
+  },
+  "dependencies": {
+    "@zone-eu/mailsplit": "5.4.29",
+    "iconv-lite": "0.7.3",
+    "libbase64": "1.4.1",
+    "libmime": "5.6.3",
+    "libqp": "3.0.1",
+    "yauzl": "3.4.0"
+  },
+  "devDependencies": {
+    "@types/yauzl": "3.4.0",
+    "@types/yazl": "3.3.1",
+    "yazl": "3.3.1"
+  }
+}

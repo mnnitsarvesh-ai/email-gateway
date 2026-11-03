@@ -68,7 +68,8 @@ describe.skipIf(gate.skip)('SMTP stack: concurrency (suite 9)', { timeout: 900_0
         where: { organizationId: org, eventType: 'mail.message.received.v1' },
       }),
     ).toBe(MESSAGES);
-    expect(await fx.objectKeys(org)).toHaveLength(MESSAGES);
+    // Step 3.1: the email-worker adds the parsed parts under org/{id}/part/; EMLs are counted.
+    expect(await fx.emlObjectKeys(org)).toHaveLength(MESSAGES);
     const distinctQueueIds = await fx.prisma.emailMessage.groupBy({
       by: ['mtaQueueId'],
       where: { organizationId: org },

@@ -1,3 +1,4 @@
+import { uuidv7 } from '@email-gateway/common';
 import type { Prisma } from '@email-gateway/database';
 import type { DeliveryApprovedV1, EventEnvelope } from '@email-gateway/event-contracts';
 import type { Logger } from '@email-gateway/logger';
@@ -15,7 +16,6 @@ import {
 } from '@email-gateway/mail-routing';
 import type { DeliveryMetrics } from '../metrics/delivery-metrics';
 import { retryDelayMs } from '../shared/backoff';
-import { uuidv7 } from '../shared/uuidv7';
 
 export const SOURCE_SERVICE = 'delivery-worker';
 

@@ -147,6 +147,127 @@ describe('redaction of DKIM key material (step 2.1 §6)', () => {
   });
 });
 
+describe('redaction of mail content (step 3.1 M15)', () => {
+  const fields = [
+    'subject',
+    'filename',
+    'originalFilename',
+    'envelopeFrom',
+    'headerFrom',
+    'headerValue',
+    'textBody',
+    'htmlBody',
+    'rawHeaders',
+  ];
+
+  it.each(fields)('censors %s at the top level and one level down', (field) => {
+    const out = capture();
+    const logger = createLogger({ service: 'test-svc', destination: out.stream });
+    const top = `top-${field}-marker-1234`;
+    const nested = `nested-${field}-marker-5678`;
+    logger.info(
+      {
+        messageId: '9007199254740993',
+        [field]: top,
+        attachment: { partIndex: 3, [field]: nested },
+      },
+      'parsed',
+    );
+    const line = out.lines()[0]!;
+    const serialized = JSON.stringify(line);
+    expect(serialized).not.toContain(top);
+    expect(serialized).not.toContain(nested);
+    expect(line[field]).toBe('[REDACTED]');
+    expect(line.attachment).toEqual({ partIndex: 3, [field]: '[REDACTED]' });
+    expect(line.messageId).toBe('9007199254740993');
+  });
+
+  it('censors structured values (header arrays, body objects) as a whole', () => {
+    const out = capture();
+    const logger = createLogger({ service: 'test-svc', destination: out.stream });
+    logger.info(
+      {
+        rawHeaders: [{ name: 'Subject', value: 'raw-header-marker' }],
+        textBody: { s3Key: 'org/1/part/x.text', preview: 'body-marker' },
+      },
+      'parse',
+    );
+    const serialized = JSON.stringify(out.lines()[0]);
+    expect(serialized).not.toContain('raw-header-marker');
+    expect(serialized).not.toContain('body-marker');
+  });
+
+  it('censors the envelope sender of a logged event envelope, keeping its ids', () => {
+    const out = capture();
+    const logger = createLogger({ service: 'test-svc', destination: out.stream });
+    const payload = { messageId: '77', envelopeFrom: 'sender-marker@example.test', sizeBytes: 10 };
+    logger.info({ eventId: 'e-1', payload }, 'envelope');
+    logger.warn({ event: { eventId: 'e-2', payload } }, 'nested envelope');
+    const [top, nested] = out.lines();
+    expect(JSON.stringify([top, nested])).not.toContain('sender-marker');
+    expect(top!.payload).toEqual({ messageId: '77', envelopeFrom: '[REDACTED]', sizeBytes: 10 });
+    expect((nested!.event as { payload: unknown }).payload).toEqual({
+      messageId: '77',
+      envelopeFrom: '[REDACTED]',
+      sizeBytes: 10,
+    });
+  });
+
+  it('keeps recipients, from and to, and the existing ids, counts and codes', () => {
+    const out = capture();
+    const logger = createLogger({ service: 'test-svc', destination: out.stream });
+    logger.info(
+      {
+        eventId: 'e-3',
+        messageId: '9',
+        organizationId: '42',
+        status: 'parsed_with_defects',
+        limitsExceeded: ['attachment_size'],
+        defects: ['invalid_base64'],
+        attachmentCount: 2,
+        recipients: 3,
+        from: 'queued',
+        to: 'delivered',
+        errName: 'TimeoutError',
+        errCode: 'ETIMEDOUT',
+      },
+      'parsed',
+    );
+    expect(out.lines()[0]).toMatchObject({
+      eventId: 'e-3',
+      messageId: '9',
+      organizationId: '42',
+      status: 'parsed_with_defects',
+      limitsExceeded: ['attachment_size'],
+      defects: ['invalid_base64'],
+      attachmentCount: 2,
+      recipients: 3,
+      from: 'queued',
+      to: 'delivered',
+      errName: 'TimeoutError',
+      errCode: 'ETIMEDOUT',
+    });
+  });
+
+  it('lists the paths, their *. variants and the envelope paths, and keeps every earlier path', () => {
+    expect(REDACT_PATHS).toEqual(
+      expect.arrayContaining([
+        ...fields.flatMap((f) => [f, `*.${f}`]),
+        'payload.envelopeFrom',
+        '*.payload.envelopeFrom',
+        'password',
+        '*.password',
+        'privateKey',
+        'req.headers.authorization',
+        'headers["x-api-key"]',
+      ]),
+    );
+    for (const absent of ['recipients', 'from', 'to', '*.recipients', '*.from', '*.to']) {
+      expect(REDACT_PATHS).not.toContain(absent);
+    }
+  });
+});
+
 describe('setContextTenant', () => {
   it('adds the tenant to the current context and to later log lines', () => {
     const out = capture();

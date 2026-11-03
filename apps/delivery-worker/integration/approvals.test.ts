@@ -6,14 +6,22 @@ import {
   messageReceivedV1,
   type MessageReceivedV1,
 } from '@email-gateway/event-contracts';
+import {
+  AdvisoryLocks,
+  type EventHandler,
+  OutboxPoller,
+  processOnceHandler,
+  uuidv7,
+} from '@email-gateway/common';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { FeedHandler } from '../src/approvals/approval-feed';
 import { DevPassThroughApprover } from '../src/approvals/dev-passthrough.approver';
-import { OutboxPoller } from '../src/approvals/outbox-poller';
 import { DEV_PASSTHROUGH_REFUSAL, loadWorkerConfig } from '../src/config';
-import { PLANNING_TX_TIMEOUT_MS } from '../src/delivery.module';
-import { AdvisoryLocks } from '../src/shared/advisory-locks';
-import { uuidv7 } from '../src/shared/uuidv7';
+import {
+  OUTBOX_LOCK_PREFIX,
+  PLANNING_TX_TIMEOUT_MS,
+  RECORDER_TX_TIMEOUT_MS,
+} from '../src/delivery.module';
 import { FakePostfix } from './support/fake-postfix';
 import { Fixtures, newMetrics, requireEnv, silentLogger, workerConfig } from './support/fixtures';
 import { buildWorker, FAST, type TestWorker } from './support/worker';
@@ -49,7 +57,7 @@ function poller<T>(
     prisma: fx.prisma,
     locks,
     logger: silentLogger,
-    metrics: newMetrics(),
+    metrics: newMetrics().outboxPoller(),
     consumer,
     eventType,
     schema: schema as never,
@@ -57,17 +65,28 @@ function poller<T>(
     pollIntervalMs: 100,
     safetyLagMs,
     batchSize: 500,
-    txTimeoutMs: PLANNING_TX_TIMEOUT_MS,
+    lockPrefix: OUTBOX_LOCK_PREFIX,
   });
 }
 
-/** Only this run's organizations (other suites may write outbox rows concurrently). */
-const ours =
-  <T>(handler: FeedHandler<T>): FeedHandler<T> =>
-  (event, tx) =>
-    fx.organizationIds.some((id) => id.toString() === event.organizationId)
-      ? handler(event, tx)
-      : Promise.resolve();
+/**
+ * The consumer's handler as delivery-worker builds it (processOnce on the writer), applied only
+ * to this run's organizations (other suites may write outbox rows concurrently).
+ */
+const ours = <T>(
+  consumer: string,
+  handler: FeedHandler<T>,
+  txTimeoutMs = PLANNING_TX_TIMEOUT_MS,
+): EventHandler<T> =>
+  processOnceHandler<T>(
+    fx.prisma,
+    consumer,
+    (event, tx) =>
+      fx.organizationIds.some((id) => id.toString() === event.organizationId)
+        ? handler(event, tx)
+        : Promise.resolve(),
+    { txTimeoutMs },
+  );
 
 describe('outbox poller (R6) on the real writer', () => {
   it('handles a row committed out of order inside the safety lag, then advances the cursor past both', async () => {
@@ -80,8 +99,11 @@ describe('outbox poller (R6) on the real writer', () => {
     );
     const seen: string[] = [];
     const handler = ours<DeliveryApprovedV1>(
+      consumer,
       (event) => (seen.push(event.eventId), Promise.resolve()),
     );
+    expect(p.cursorName).toBe(`outbox:${consumer}`);
+    expect(p.lockName).toBe(`dw:outbox:${consumer}`);
     await p.pollOnce(handler); // initializes the cursor at MAX(id)
     const start = (
       await fx.prisma.streamCursor.findUniqueOrThrow({ where: { name: `outbox:${consumer}` } })
@@ -158,7 +180,7 @@ describe('outbox poller (R6) on the real writer', () => {
       deliveryApprovedV1,
       0,
     );
-    const noop: FeedHandler<DeliveryApprovedV1> = () => Promise.resolve();
+    const noop: EventHandler<DeliveryApprovedV1> = () => Promise.resolve('handled');
     expect((await a.pollOnce(noop)).active).toBe(true);
     expect((await b.pollOnce(noop)).active).toBe(false);
     await a.stop();
@@ -176,6 +198,7 @@ describe('outbox poller (R6) on the real writer', () => {
     );
     const seen: string[] = [];
     const handler = ours<DeliveryApprovedV1>(
+      consumer,
       (event) => (seen.push(event.eventId), Promise.resolve()),
     );
     await p.pollOnce(handler);
@@ -203,23 +226,34 @@ describe('outbox poller (R6) on the real writer', () => {
 
 describe('development pass-through (R5) end to end', () => {
   it('turns mail.message.received.v1 into an approval the planner plans and the scheduler reinjects', async () => {
+    const ptConsumer = fx.consumer('dev-passthrough');
+    const plannerConsumer = fx.consumer('dev-planner');
     const pt = poller<MessageReceivedV1>(
-      fx.consumer('dev-passthrough'),
+      ptConsumer,
       EventTypes.MessageReceived,
       messageReceivedV1,
       0,
     );
     const planner = poller<DeliveryApprovedV1>(
-      fx.consumer('dev-planner'),
+      plannerConsumer,
       EventTypes.DeliveryApproved,
       deliveryApprovedV1,
       0,
     );
-    const approver = new DevPassThroughApprover(pt, silentLogger);
-    const ptHandler = ours<MessageReceivedV1>(async (event, tx) => {
-      await approver.approve(event, tx);
-    });
-    const planHandler = ours<DeliveryApprovedV1>(async (event, tx) => {
+    const approver = new DevPassThroughApprover(
+      pt,
+      fx.prisma,
+      RECORDER_TX_TIMEOUT_MS,
+      silentLogger,
+    );
+    const ptHandler = ours<MessageReceivedV1>(
+      ptConsumer,
+      async (event, tx) => {
+        await approver.approve(event, tx);
+      },
+      RECORDER_TX_TIMEOUT_MS,
+    );
+    const planHandler = ours<DeliveryApprovedV1>(plannerConsumer, async (event, tx) => {
       await worker.planner.plan(event, tx);
     });
     await pt.pollOnce(ptHandler); // first start: MAX(id), never replays old mail

@@ -1,0 +1,17 @@
+From: Alice <alice@example.com>
+To: bob@example.net
+Date: Mon, 2 Nov 2026 10:00:00 +0000
+Message-ID: <zero-width@fixtures.example>
+MIME-Version: 1.0
+Subject: zero width
+Content-Type: multipart/mixed; boundary="z"
+
+This is a multi-part message in MIME format.
+--z
+Content-Type: application/pdf
+Content-Disposition: attachment; filename*=UTF-8''re%E2%80%8Bport%EF%BB%BF.pdf
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQKJSBmaXh0dXJlCjEgMCBvYmogPDwgPj4gZW5kb2JqCnRyYWlsZXIgPDwgPj4KJSVF
+T0YK
+--z--

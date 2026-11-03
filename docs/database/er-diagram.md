@@ -29,6 +29,7 @@ flowchart LR
   subgraph mail[Email metadata - partitioned]
     message_identities
     email_messages[(email_messages P)]
+    email_message_parses[(email_message_parses P)]
   end
   subgraph security[Security]
     email_scans[(email_scans P)]
@@ -60,6 +61,7 @@ flowchart LR
   organizations --> message_identities
   message_identities -.-> email_messages
   domains -.-> email_messages
+  email_messages -.-> email_message_parses
   email_messages -.-> email_scans
   email_messages -.-> email_deliveries
   delivery_reinjections -.-> email_deliveries
@@ -326,6 +328,7 @@ erDiagram
   email_messages ||..o{ email_attachments : "message_id + received_at"
   email_messages ||..o{ email_events : "message_id + received_at"
   email_messages ||..|{ email_message_status_history : "message_id + received_at"
+  email_messages ||..o| email_message_parses : "message_id + received_at, one per message"
   message_identities {
     bigint id PK "allocates the message id"
     char public_id UK
@@ -356,7 +359,10 @@ erDiagram
     bigint id PK
     datetime received_at PK "PARTITIONED month"
     bigint message_id
+    smallint part_index "UQ with message_id, received_at; node index in the parse structure"
     char sha256
+    varchar object_key "S3 key org/ORG/part/YYYY/MM/DD/MSG/IDX.att, NULL when not stored"
+    json flags "ATTACHMENT_FLAGS codes (step 3.1)"
   }
   email_events {
     bigint id PK
@@ -369,7 +375,18 @@ erDiagram
     bigint message_id
     int version
   }
+  email_message_parses {
+    bigint id PK
+    datetime received_at PK "PARTITIONED month"
+    bigint message_id "UQ with received_at"
+    bigint organization_id
+    enum status "parsing, parsed, parsed_with_defects, parse_limit_exceeded, parse_failed"
+    varchar text_body_object_key "S3 key org/ORG/part/YYYY/MM/DD/MSG/IDX.text, no content"
+    varchar html_body_object_key "S3 key .../IDX.html"
+  }
 ```
+
+`email_message_parses` (step 3.1) is the parse stage record written by email-worker: at most one row per message, in the message's partition. Headers and attachment rows of the same message are written in the transaction that finalizes it.
 
 ## Security
 

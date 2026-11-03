@@ -168,6 +168,155 @@ export const domainRoutingChangedV1 = z.object({
 });
 export type DomainRoutingChangedV1 = z.infer<typeof domainRoutingChangedV1>;
 
+/**
+ * MIME limit names (step 3.1 M5), as carried in `limitsExceeded` and stored in
+ * `email_message_parses.limits_exceeded`. `@email-gateway/mime-parser` keeps its own copy (it does
+ * not depend on this package); an email-worker unit test asserts the two lists are equal.
+ */
+export const MIME_LIMIT_NAMES = [
+  'message_size',
+  'nesting_depth',
+  'part_count',
+  'header_count',
+  'header_line_length',
+  'header_block_size',
+  'attachment_count',
+  'attachment_size',
+  'body_size',
+  'decoded_ratio',
+  'total_decoded_size',
+  'parse_timeout',
+] as const;
+export const mimeLimitNameSchema = z.enum(MIME_LIMIT_NAMES);
+export type MimeLimitName = z.infer<typeof mimeLimitNameSchema>;
+
+/**
+ * Final parse statuses carried by `mail.message.parsed.v1` (step 3.1 M13). `parsing` is never
+ * published, and `parse_failed` is carried by `mail.message.parse_failed.v1`.
+ */
+export const MESSAGE_PARSE_STATUSES = [
+  'parsed',
+  'parsed_with_defects',
+  'parse_limit_exceeded',
+] as const;
+export const messageParseStatusSchema = z.enum(MESSAGE_PARSE_STATUSES);
+export type MessageParseStatusValue = z.infer<typeof messageParseStatusSchema>;
+
+/** `parse_failed` reasons (step 3.1 M3), stored in `email_message_parses.failure_reason`. */
+export const PARSE_FAILURE_REASONS = [
+  'eml_missing',
+  'eml_key_mismatch',
+  'integrity_mismatch',
+  'max_attempts_exceeded',
+  'parser_error',
+] as const;
+export const parseFailureReasonSchema = z.enum(PARSE_FAILURE_REASONS);
+export type ParseFailureReason = z.infer<typeof parseFailureReasonSchema>;
+
+const sha256Hex = z.string().regex(/^[0-9a-f]{64}$/, 'Expected a lower-case hex SHA-256');
+/** A defect or attachment flag code: snake_case, never free text. */
+const code = z.string().regex(/^[a-z0-9_]{1,48}$/, 'Expected a snake_case code');
+const unique = <T>(values: readonly T[]) => new Set(values).size === values.length;
+const parserVersion = z.string().min(1).max(32);
+const count = z.number().int().nonnegative();
+/** A stored body: `s3Key` is null when the body exceeded `body_size` and was not stored. */
+const storedBody = z
+  .object({ s3Key: s3Key.nullable(), sha256: sha256Hex, sizeBytes: count })
+  .nullable();
+
+/**
+ * Published by the email-worker's MIME ingestion stage (step 3.1 M14) for the final statuses
+ * `parsed`, `parsed_with_defects` and `parse_limit_exceeded`. Written through `message_outbox`
+ * in the transaction that finalizes `email_message_parses` (`aggregate_type = 'message'`,
+ * `aggregate_id` = decimal message id, `correlation_id` copied from the
+ * `mail.message.received.v1` event). The envelope's `organizationId` is the message's
+ * organization.
+ *
+ * Ids, keys, hashes, codes and counts only: never an address, the subject, a filename or a
+ * header value. Consumers (scanning 4.x, lifecycle 3.3) read `email_attachments` and
+ * `email_message_parses` from the writer.
+ *
+ * Consistency (M5, M6): `parse_limit_exceeded` iff `limitsExceeded` is non-empty;
+ * `parsed_with_defects` has at least one defect; `parsed` has neither.
+ */
+export const messageParsedV1 = z
+  .object({
+    messageId: decimalIdSchema,
+    receivedAt: z.iso.datetime(),
+    direction,
+    emlS3Key: s3Key,
+    parseStatus: messageParseStatusSchema,
+    parserVersion,
+    /** Every limit hit, in order (M5). */
+    limitsExceeded: z
+      .array(mimeLimitNameSchema)
+      .max(16)
+      .refine(unique, { message: 'Duplicate limit name' }),
+    /** `MIME_DEFECT_CODES` (M6, M7). */
+    defects: z.array(code).max(64),
+    textBody: storedBody,
+    htmlBody: storedBody,
+    attachmentCount: count,
+    /** Attachments with at least one flag. */
+    flaggedAttachmentCount: count,
+    /** Union of `ATTACHMENT_FLAGS` over all attachments (M9, M10). */
+    attachmentFlags: z.array(code).max(64).refine(unique, { message: 'Duplicate attachment flag' }),
+    partCount: count,
+    maxDepth: count,
+    headerCount: count,
+  })
+  .superRefine((payload, ctx) => {
+    const limited = payload.limitsExceeded.length > 0;
+    if (limited !== (payload.parseStatus === 'parse_limit_exceeded')) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['limitsExceeded'],
+        message: 'parse_limit_exceeded requires limitsExceeded, and only it may carry them',
+      });
+    }
+    if (payload.parseStatus === 'parsed_with_defects' && payload.defects.length === 0) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['defects'],
+        message: 'parsed_with_defects requires at least one defect',
+      });
+    }
+    if (payload.parseStatus === 'parsed' && payload.defects.length > 0) {
+      ctx.addIssue({ code: 'custom', path: ['defects'], message: 'parsed carries no defects' });
+    }
+    if (payload.flaggedAttachmentCount > payload.attachmentCount) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['flaggedAttachmentCount'],
+        message: 'flaggedAttachmentCount exceeds attachmentCount',
+      });
+    }
+  });
+export type MessageParsedV1 = z.infer<typeof messageParsedV1>;
+
+/**
+ * Published by the email-worker's MIME ingestion stage (step 3.1 M14) when a message ends
+ * `parse_failed`: the EML is missing or not under the organization's prefix, its bytes do not
+ * match the ingested SHA-256 and size, the poison-message guard tripped, or the parser failed.
+ * Written through `message_outbox` like `mail.message.parsed.v1` (`aggregate_type = 'message'`,
+ * correlation id copied from the received event). Ids, keys and codes only.
+ */
+export const messageParseFailedV1 = z.object({
+  messageId: decimalIdSchema,
+  receivedAt: z.iso.datetime(),
+  direction,
+  /**
+   * The message's `eml_object_key`; null when that key is not organization-prefixed at all (an
+   * `eml_key_mismatch` whose key cannot be carried in an event, so the failure still publishes).
+   */
+  emlS3Key: s3Key.nullable(),
+  reason: parseFailureReasonSchema,
+  /** Attempts started, including the failing one. */
+  attempts: z.number().int().min(1),
+  parserVersion,
+});
+export type MessageParseFailedV1 = z.infer<typeof messageParseFailedV1>;
+
 export const EventTypes = {
   MessageReceived: 'mail.message.received.v1',
   MessageScanned: 'mail.message.scanned.v1',
@@ -176,4 +325,6 @@ export const EventTypes = {
   DeliveryApproved: 'mail.delivery.approved.v1',
   DeliveryStatusChanged: 'mail.delivery.status_changed.v1',
   DomainRoutingChanged: 'domain.routing.changed.v1',
+  MessageParsed: 'mail.message.parsed.v1',
+  MessageParseFailed: 'mail.message.parse_failed.v1',
 } as const;

@@ -108,7 +108,8 @@ describe.skipIf(gate.skip)(
       await waitForQueueDrained('postfix', [domain.name]);
       expect(await stored(queueId)).toBe(1);
       expect(await fx.prisma.messageIdentity.count({ where: { organizationId: org } })).toBe(1);
-      expect(await fx.objectKeys(org)).toHaveLength(1);
+      // Step 3.1: the email-worker adds the parsed parts under org/{id}/part/; the EML is counted.
+      expect(await fx.emlObjectKeys(org)).toHaveLength(1);
     });
   },
 );
@@ -170,7 +171,7 @@ describe.skipIf(gate.skip)(
         recipients: await fx.prisma.emailRecipient.count({ where: { organizationId: org } }),
         events: await fx.prisma.emailEvent.count({ where: ingestionEvents }),
         outbox: await fx.prisma.messageOutbox.count({ where: ingestionOutbox }),
-        objects: (await fx.objectKeys(org)).length,
+        objects: (await fx.emlObjectKeys(org)).length,
       };
       const mtaId = (await composeExec('postfix', ['postconf', '-h', 'myhostname'])).stdout.trim();
 
@@ -196,7 +197,7 @@ describe.skipIf(gate.skip)(
         recipients: await fx.prisma.emailRecipient.count({ where: { organizationId: org } }),
         events: await fx.prisma.emailEvent.count({ where: ingestionEvents }),
         outbox: await fx.prisma.messageOutbox.count({ where: ingestionOutbox }),
-        objects: (await fx.objectKeys(org)).length,
+        objects: (await fx.emlObjectKeys(org)).length,
       }).toEqual(before);
       // The deterministic object key was overwritten with identical bytes, never orphaned.
       expect(sha256(await fx.object(original.emlObjectKey))).toBe(original.emlSha256);

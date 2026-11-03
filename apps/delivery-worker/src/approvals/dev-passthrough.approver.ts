@@ -1,4 +1,5 @@
-import type { Prisma } from '@email-gateway/database';
+import { processOnceHandler, uuidv7 } from '@email-gateway/common';
+import type { Prisma, PrismaClient } from '@email-gateway/database';
 import {
   deliveryApprovedV1,
   type EventEnvelope,
@@ -7,7 +8,6 @@ import {
 } from '@email-gateway/event-contracts';
 import type { Logger } from '@email-gateway/logger';
 import { SOURCE_SERVICE } from '../planning/delivery-planner';
-import { uuidv7 } from '../shared/uuidv7';
 import type { ApprovalFeed } from './approval-feed';
 
 /** `message_idempotency.consumer` of the development pass-through (R5). */
@@ -33,16 +33,18 @@ export interface PassThroughResult {
  * `local` or `ci`; it starts from the outbox position at its first start (never replays old
  * mail). Step 5.x replaces it with the policy engine's approvals.
  *
- * In the feed's idempotency transaction it writes the approval outbox row(s) and one
- * `email_events` row `delivery.approved` per approval (`details.source = dev_passthrough`). The
- * message and its EML key come from the writer row of the envelope's organization, never from
- * the event payload alone.
+ * In the consumer's idempotency transaction (`processOnceHandler`, budget `txTimeoutMs`) it
+ * writes the approval outbox row(s) and one `email_events` row `delivery.approved` per approval
+ * (`details.source = dev_passthrough`). The message and its EML key come from the writer row of
+ * the envelope's organization, never from the event payload alone.
  */
 export class DevPassThroughApprover {
   private readonly logger: Logger;
 
   constructor(
     private readonly feed: ApprovalFeed<MessageReceivedV1>,
+    private readonly prisma: PrismaClient,
+    private readonly txTimeoutMs: number,
     logger: Logger,
     private readonly now: () => Date = () => new Date(),
   ) {
@@ -51,9 +53,16 @@ export class DevPassThroughApprover {
 
   start(): void {
     this.logger.warn(DEV_PASSTHROUGH_WARNING);
-    this.feed.start(async (event, tx) => {
-      await this.approve(event, tx);
-    });
+    this.feed.start(
+      processOnceHandler<MessageReceivedV1>(
+        this.prisma,
+        DEV_PASSTHROUGH_CONSUMER,
+        async (event, tx) => {
+          await this.approve(event, tx);
+        },
+        { txTimeoutMs: this.txTimeoutMs },
+      ),
+    );
   }
 
   stop(): Promise<void> {

@@ -33,13 +33,14 @@ flowchart TB
     conn["ConnectorResolver, Suppressions,<br/>DkimReadiness (redis-dkim probe)"]:::impl
     lmtpL["LMTP listeners :10050 / :10051<br/>(smtp-server, XFORWARD)"]:::impl
     ingest["IngestionService: S3 stream + copy,<br/>header scan, ingest key, loop guard,<br/>txn per organization, outbox"]:::impl
-    mime["MIME parsing, header and<br/>attachment rows PLANNED 3.1"]:::planned
     bounce["BounceNoticeService :10052<br/>DSN parser, bounce_events,<br/>suppressions"]:::impl
     smtpInfra["DatabaseModule writer, RedisModule, S3Module,<br/>MetricsModule /metrics, HealthModule:<br/>mysql, redis, s3, 6 listeners"]:::impl
   end
 
   subgraph ew["email-worker"]
-    ewInfra["DatabaseModule writer, RabbitMqModule,<br/>RedisModule, S3Module, HealthModule"]:::impl
+    ewInfra["DatabaseModule writer, RabbitMqModule,<br/>RedisModule, S3Module, HealthModule, MetricsModule"]:::impl
+    ewMime["MimeIngestionModule (3.1): ShardedOutboxFeed,<br/>MimeIngestionService, S3 EML source + part sink,<br/>MimeRepository (writer), MimeMetrics"]:::impl
+    pMime["mime-parser (3.1)<br/>streaming parse, limits, defects, headers,<br/>filenames, sniffer, zip inspector"]:::impl
     ewCons["Consumer of<br/>email-worker.message-received<br/>PLANNED 4.1"]:::planned
     ewEng["Engine adapters: Rspamd 4.1,<br/>ClamAV + YARA 4.2, URL 4.3,<br/>BEC 4.4, DLP 4.5, sandbox 4.6"]:::planned
     ewAgg["Verdict aggregation, risk score<br/>PLANNED 5.1"]:::planned
@@ -75,7 +76,9 @@ flowchart TB
   sockSrv --> conn
   sasl --> conn
   lmtpL --> ingest
-  ingest -.->|"P 3.1"| mime
+  ingest -->|"outbox mail.message.received.v1"| ewMime
+  ewMime --> pMime
+  ewMime -.->|"mail.message.parsed.v1, P 4.1"| ewCons
   ewCons -.-> ewEng
   ewEng -.-> ewAgg
   peEval -.-> peQ
@@ -94,13 +97,15 @@ flowchart TB
 
 ## Status
 
-| Component                                         | Status      | Evidence or delivering step                                                                                         |
-| ------------------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------- |
-| Shared infrastructure modules (`packages/common`) | IMPLEMENTED | `health.service.test.ts`, `database.module.test.ts`, `prisma-read.service.test.ts`, `all-exceptions.filter.test.ts` |
-| `api` health and meta                             | IMPLEMENTED | `apps/api/test/app.e2e.test.ts`, `services.test.ts`                                                                 |
-| Policy server, protocol, decision                 | IMPLEMENTED | `policy-protocol.test.ts`, `policy-server.service.test.ts`, `mail-plane.test.ts`                                    |
-| Worker shells (DB writer, RabbitMQ, health)       | IMPLEMENTED | `apps/*/src/app.module.test.ts` (also assert `PrismaReadService` is not resolvable)                                 |
-| `packages/database` (`processOnce`, `ids`)        | IMPLEMENTED | `idempotency.test.ts`, `ids.test.ts`, `mysql.test.ts`                                                               |
-| `packages/event-contracts`                        | IMPLEMENTED | `events.test.ts`                                                                                                    |
-| `packages/security-contracts`                     | IMPLEMENTED | Types and zod schema only; no engine implements it yet                                                              |
-| Business modules listed in the diagram            | PLANNED     | Step numbers in the boxes                                                                                           |
+| Component                                         | Status      | Evidence or delivering step                                                                                                                                     |
+| ------------------------------------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Shared infrastructure modules (`packages/common`) | IMPLEMENTED | `health.service.test.ts`, `database.module.test.ts`, `prisma-read.service.test.ts`, `all-exceptions.filter.test.ts`                                             |
+| `api` health and meta                             | IMPLEMENTED | `apps/api/test/app.e2e.test.ts`, `services.test.ts`                                                                                                             |
+| Policy server, protocol, decision                 | IMPLEMENTED | `policy-protocol.test.ts`, `policy-server.service.test.ts`, `mail-plane.test.ts`                                                                                |
+| Worker shells (DB writer, RabbitMQ, health)       | IMPLEMENTED | `apps/*/src/app.module.test.ts` (also assert `PrismaReadService` is not resolvable)                                                                             |
+| `packages/database` (`processOnce`, `ids`)        | IMPLEMENTED | `idempotency.test.ts`, `ids.test.ts`, `mysql.test.ts`                                                                                                           |
+| `packages/event-contracts`                        | IMPLEMENTED | `events.test.ts`                                                                                                                                                |
+| `packages/security-contracts`                     | IMPLEMENTED | Types and zod schema only; no engine implements it yet                                                                                                          |
+| email-worker `MimeIngestionModule`, `mime-parser` | IMPLEMENTED | step 3.1: `apps/email-worker/src/mime-ingestion/*.test.ts`, `apps/email-worker/integration`, `packages/mime-parser`, `tests/integration/mime-ingestion.test.ts` |
+| Shared outbox feed (`packages/common/src/outbox`) | IMPLEMENTED | step 3.1: `outbox-poller.test.ts`, `advisory-locks.test.ts`; used by delivery-worker and email-worker                                                           |
+| Business modules listed in the diagram            | PLANNED     | Step numbers in the boxes                                                                                                                                       |

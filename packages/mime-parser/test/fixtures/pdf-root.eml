@@ -1,0 +1,11 @@
+From: Alice <alice@example.com>
+To: bob@example.net
+Date: Mon, 2 Nov 2026 10:00:00 +0000
+Message-ID: <pdf-root@fixtures.example>
+MIME-Version: 1.0
+Subject: bare pdf
+Content-Type: application/pdf; name="bare.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQKJSBmaXh0dXJlCjEgMCBvYmogPDwgPj4gZW5kb2JqCnRyYWlsZXIgPDwgPj4KJSVF
+T0YK

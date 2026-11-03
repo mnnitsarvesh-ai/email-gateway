@@ -1,0 +1,58 @@
+From: Alice <alice@example.com>
+To: bob@example.net
+Date: Mon, 2 Nov 2026 10:00:00 +0000
+Message-ID: <nested@fixtures.example>
+MIME-Version: 1.0
+Subject: forwarded twice
+Content-Type: multipart/mixed; boundary="outer"
+
+This is a multi-part message in MIME format.
+--outer
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+outer text
+--outer
+Content-Type: message/rfc822
+
+From: inner1@example.org
+Subject: inner
+Content-Type: multipart/mixed; boundary="inner1"
+
+This is a multi-part message in MIME format.
+--inner1
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+inner text
+--inner1
+Content-Type: text/csv
+Content-Disposition: attachment; filename="data.csv"
+Content-Transfer-Encoding: base64
+
+YSxiCjEsMgo=
+--inner1
+Content-Type: message/rfc822
+
+From: inner2@example.org
+Subject: innermost
+Content-Type: multipart/mixed; boundary="inner2"
+
+This is a multi-part message in MIME format.
+--inner2
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+innermost text
+--inner2
+Content-Type: application/pdf
+Content-Disposition: attachment; filename="deep.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQKJSBmaXh0dXJlCjEgMCBvYmogPDwgPj4gZW5kb2JqCnRyYWlsZXIgPDwgPj4KJSVF
+T0YK
+--inner2--
+
+--inner1--
+
+--outer--

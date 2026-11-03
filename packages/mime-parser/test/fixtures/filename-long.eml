@@ -1,0 +1,17 @@
+From: Alice <alice@example.com>
+To: bob@example.net
+Date: Mon, 2 Nov 2026 10:00:00 +0000
+Message-ID: <long-name@fixtures.example>
+MIME-Version: 1.0
+Subject: long name
+Content-Type: multipart/mixed; boundary="l"
+
+This is a multi-part message in MIME format.
+--l
+Content-Type: application/pdf
+Content-Disposition: attachment; filename="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQKJSBmaXh0dXJlCjEgMCBvYmogPDwgPj4gZW5kb2JqCnRyYWlsZXIgPDwgPj4KJSVF
+T0YK
+--l--

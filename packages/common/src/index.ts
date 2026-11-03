@@ -16,4 +16,5 @@ export * from './messaging/rabbitmq.module';
 export * from './metrics/metrics.controller';
 export * from './metrics/metrics.module';
 export * from './metrics/metrics.service';
+export * from './outbox';
 export * from './storage/s3.module';

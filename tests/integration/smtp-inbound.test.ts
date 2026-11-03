@@ -129,7 +129,9 @@ describe.skipIf(gate.skip)('SMTP stack: inbound delivery (suite 1)', { timeout: 
     // Step 2.3 (docs/plan/steps/05-routing.md R5, R9.1): with the delivery-worker running, the
     // development pass-through and the delivery recorder add their own email_events
     // (`delivery.*`, source delivery-worker) and outbox rows (`mail.delivery.*`) for this message;
-    // this suite checks what INGESTION wrote, so it counts only those rows.
+    // this suite checks what INGESTION wrote, so it counts only those rows. Step 3.1
+    // (docs/plan/steps/06-mime-ingestion.md M3.9) adds the email-worker's `parsed` event and its
+    // `mail.message.parsed.v1` / `parse_failed.v1` outbox row, excluded the same way.
     const events = await fx.prisma.emailEvent.findMany({
       where: { messageId: message.id, organizationId: orgA, sourceService: 'smtp-adapter' },
     });
@@ -141,7 +143,12 @@ describe.skipIf(gate.skip)('SMTP stack: inbound delivery (suite 1)', { timeout: 
       where: {
         organizationId: orgA,
         aggregateId: message.id.toString(),
-        eventType: { not: { startsWith: 'mail.delivery.' } },
+        AND: [
+          { eventType: { not: { startsWith: 'mail.delivery.' } } },
+          {
+            eventType: { notIn: ['mail.message.parsed.v1', 'mail.message.parse_failed.v1'] },
+          },
+        ],
       },
     });
     expect(outbox).toHaveLength(1);

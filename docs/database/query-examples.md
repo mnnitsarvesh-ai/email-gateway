@@ -354,3 +354,25 @@ SELECT id, delivery_id, source, from_status, to_status, applied, occurred_at, qu
 ```
 
 Prisma: `deliveryStatusEvent.findMany({ where: { messageId, receivedAt, organizationId, deliveryId: { in: ids }, id: { gt: cursor } }, orderBy: { id: 'asc' }, take: 100 })`. Index `(message_id, received_at)`; `id` is allocated in insert order, so ordering by id is oldest first for one message. **Pruning:** one partition. Rows older than 3 months are gone (detail tier); the delivery row keeps the final status.
+
+## Q23: Parse outcome and attachments of one message (step 3.1)
+
+What the scanning steps (4.x) and the lifecycle (3.3) read after `mail.message.parsed.v1`, with `(messageId, receivedAt)` from the event payload and `organization_id` from the envelope (checked against the message row):
+
+```sql
+SELECT status, attempts, parser_version, failure_reason, limits_exceeded, defects,
+       part_count, attachment_count, max_depth, header_count,
+       text_body_object_key, text_body_sha256, text_body_size_bytes,
+       html_body_object_key, html_body_sha256, html_body_size_bytes, completed_at
+  FROM email_message_parses
+ WHERE message_id = ? AND received_at = ? AND organization_id = ?;
+
+SELECT part_index, part_path, depth, disposition, filename, declared_content_type,
+       detected_content_type, size_bytes, encoded_size_bytes, sha256, object_key,
+       flags, archive_info, verdict
+  FROM email_attachments
+ WHERE message_id = ? AND received_at = ? AND organization_id = ?
+ ORDER BY part_index;
+```
+
+Prisma: `emailMessageParse.findUnique({ where: { messageId_receivedAt: { messageId, receivedAt } } })` (then compare `organizationId`), and `emailAttachment.findMany({ where: { messageId, receivedAt, organizationId }, orderBy: { partIndex: 'asc' } })`. The parse row is a point lookup on UQ `(message_id, received_at)` (`const` in the plan); the attachments are a `ref` read on UQ `(message_id, part_index, received_at)` in index order, no filesort. **Pruning:** one partition for each (`p<yyyymm>` of `received_at`, verified with `EXPLAIN` on the local stack). `original_filename` is escaped metadata for display and forensics; it is never used as a path or an S3 key. Not part of `pnpm db:perf` (like Q19–Q22).

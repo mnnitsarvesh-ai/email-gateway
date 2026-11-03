@@ -1,8 +1,8 @@
 import { resolve } from 'node:path';
+import type { AdvisoryLocks } from '@email-gateway/common';
 import type { PrismaClient } from '@email-gateway/database';
 import type { Logger } from '@email-gateway/logger';
 import type { DeliveryMetrics } from '../metrics/delivery-metrics';
-import type { AdvisoryLocks } from '../shared/advisory-locks';
 import { LogFollower } from './log-follower';
 import { parsePostfixLogLine, type PostfixLogEvent } from './postfix-log-parser';
 import type { StatusSignalApplier } from './status-signal-applier';

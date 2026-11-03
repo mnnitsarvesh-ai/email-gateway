@@ -1,0 +1,22 @@
+From: Alice <alice@example.com>
+To: bob@example.net
+Date: Mon, 2 Nov 2026 10:00:00 +0000
+Message-ID: <inline-image@fixtures.example>
+MIME-Version: 1.0
+Subject: inline image
+Content-Type: multipart/related; boundary="rel"
+
+This is a multi-part message in MIME format.
+--rel
+Content-Type: text/html; charset=utf-8
+
+<html><body><img src="cid:img1"></body></html>
+--rel
+Content-Type: image/png
+Content-ID: <img1>
+Content-Disposition: inline
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP4//8/AAX+Av6n1qSr
+AAAAAElFTkSuQmCC
+--rel--

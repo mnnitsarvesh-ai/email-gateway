@@ -13,13 +13,15 @@ Mail content (EML, attachments) lives in S3 and follows S3 lifecycle rules. MySQ
 
 | Tier        | Tables                                                                                                                                                         | Retention                                    |
 | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
-| Core        | `email_messages`, `email_recipients`, `email_attachments`, `email_scans`, `email_deliveries`, `delivery_reinjections`, `bounce_events`                         | 6 months                                     |
+| Core        | `email_messages`, `email_recipients`, `email_attachments`, `email_scans`, `email_deliveries`, `delivery_reinjections`, `email_message_parses`, `bounce_events` | 6 months                                     |
 | Detail      | `email_headers`, `email_events`, `email_message_status_history`, `scan_engine_results`, `policy_execution_logs`, `delivery_attempts`, `delivery_status_events` | 3 months                                     |
 | Operational | `webhook_deliveries`                                                                                                                                           | 2 months                                     |
 | Operational | `message_outbox`                                                                                                                                               | 7 days, and never while rows are unpublished |
 | Compliance  | `email_archives`, `audit_logs`                                                                                                                                 | Never dropped automatically                  |
 
 Step 2.3: `delivery_reinjections` lives as long as the deliveries it groups (core). The delivery audit trail `delivery_status_events` is detail data: after 3 months the delivery status itself remains on `email_deliveries` (final status, codes, error class) until the core tier drops it, and the per-signal history is gone. `stream_cursors` (one row per consumer) and `mail_destination_presets` (seeded configuration) are not purged.
+
+Step 3.1: `email_message_parses` (the parse stage record) lives as long as the message and its attachment rows (core), so the scanning and lifecycle steps can read the parse outcome, the body object keys and the MIME structure for as long as the message exists. The S3 part objects it and `email_attachments` reference (`org/{organizationId}/part/…`) follow the mail bucket's lifecycle like the EML (alignment with the MySQL tiers is step 8.1).
 
 `email_archives` is governed row by row by archive retention policies and legal holds (step 8.1). `audit_logs` is kept until an operator exports and drops old partitions as a deliberate, recorded operation.
 

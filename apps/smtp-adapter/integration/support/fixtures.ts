@@ -12,8 +12,18 @@ import {
   type OrganizationStatus,
   PrismaClient,
 } from '@email-gateway/database';
+import { EventTypes } from '@email-gateway/event-contracts';
 import { Redis } from 'ioredis';
 import { requireEnv, s3Config } from './stack';
+
+/**
+ * Outbox event types the running email-worker writes for every ingested message (step 3.1,
+ * docs/plan/steps/06-mime-ingestion.md M14). Suites that assert what INGESTION wrote exclude them.
+ */
+export const EMAIL_WORKER_EVENT_TYPES = [
+  EventTypes.MessageParsed,
+  EventTypes.MessageParseFailed,
+] as const;
 
 /**
  * Per-run fixtures with random names (organizations, domains) and cleanup of everything the
@@ -86,6 +96,15 @@ export class Fixtures {
       select: { id: true },
     });
     return row.id;
+  }
+
+  /**
+   * The EML objects of ingestion (`org/{id}/eml/…`) only. Since step 3.1 a running email-worker
+   * also stores the parsed parts of every message under `org/{id}/part/…` (M11).
+   */
+  async emlObjectKeys(organizationId: bigint): Promise<string[]> {
+    const prefix = `org/${organizationId.toString()}/eml/`;
+    return (await this.objectKeys(organizationId)).filter((key) => key.startsWith(prefix));
   }
 
   async object(key: string): Promise<Buffer> {
@@ -224,6 +243,11 @@ export class Fixtures {
     try {
       if (ids.length > 0) {
         const where = { organizationId: { in: ids } };
+        // Consumer ledger rows are found through the outbox rows deleted below: remember the
+        // event ids, a late consumer may still record one during this pass.
+        const eventIds = await this.outboxEventIds(ids);
+        await this.deleteLedgerRows(eventIds);
+        await this.deleteParseRows(ids);
         await this.prisma.messageOutbox.deleteMany({ where });
         await this.prisma.deliveryStatusEvent.deleteMany({ where });
         await this.prisma.deliveryAttempt.deleteMany({ where });
@@ -237,6 +261,17 @@ export class Fixtures {
         await this.prisma.bounceEvent.deleteMany({ where });
         await this.prisma.deliverySuppression.deleteMany({ where });
         await this.prisma.domain.deleteMany({ where });
+        // A running email-worker (step 3.1) or delivery-worker (step 2.3 dev pass-through) may
+        // have been committing for this run during the first pass: its rows go too, and the part
+        // objects with the org prefix below.
+        await new Promise((r) => setTimeout(r, 1_500));
+        await this.deleteLedgerRows([...eventIds, ...(await this.outboxEventIds(ids))]);
+        await this.deleteParseRows(ids);
+        await this.prisma.deliveryStatusEvent.deleteMany({ where });
+        await this.prisma.deliveryAttempt.deleteMany({ where });
+        await this.prisma.emailDelivery.deleteMany({ where });
+        await this.prisma.deliveryReinjection.deleteMany({ where });
+        await this.prisma.emailMessageStatusHistory.deleteMany({ where });
         await this.prisma.organization.deleteMany({ where: { id: { in: ids } } });
         for (const id of ids) {
           for (const key of await this.objectKeys(id)) {
@@ -253,6 +288,37 @@ export class Fixtures {
       await this.prisma.$disconnect();
       this.redis.disconnect();
       this.s3.destroy();
+    }
+  }
+
+  /**
+   * Step 3.1 rows (docs/plan/steps/06-mime-ingestion.md §3): with the email-worker running, every
+   * ingested message is also parsed (parse row, allow-listed headers, attachments, `parsed` event
+   * and `mail.message.parsed.v1` outbox row; the part objects go with the org prefix).
+   */
+  private async deleteParseRows(ids: readonly bigint[]): Promise<void> {
+    const where = { organizationId: { in: [...ids] } };
+    await this.prisma.emailAttachment.deleteMany({ where });
+    await this.prisma.emailHeader.deleteMany({ where });
+    await this.prisma.emailMessageParse.deleteMany({ where });
+    await this.prisma.messageOutbox.deleteMany({ where });
+    await this.prisma.emailEvent.deleteMany({ where });
+  }
+
+  private async outboxEventIds(ids: readonly bigint[]): Promise<string[]> {
+    const events = await this.prisma.messageOutbox.findMany({
+      where: { organizationId: { in: [...ids] } },
+      select: { eventId: true },
+    });
+    return events.map((e) => e.eventId);
+  }
+
+  /** Consumer ledger rows (`message_idempotency`) of these outbox events, any consumer. */
+  private async deleteLedgerRows(eventIds: readonly string[]): Promise<void> {
+    for (let i = 0; i < eventIds.length; i += 1000) {
+      await this.prisma.messageIdempotency.deleteMany({
+        where: { eventId: { in: eventIds.slice(i, i + 1000) } },
+      });
     }
   }
 }

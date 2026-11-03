@@ -9,3 +9,4 @@ infrastructure/clamav/**
 infrastructure/mysql/**
 infrastructure/rabbitmq/**
 infrastructure/rspamd-outbound/**
+packages/mime-parser/test/fixtures/**

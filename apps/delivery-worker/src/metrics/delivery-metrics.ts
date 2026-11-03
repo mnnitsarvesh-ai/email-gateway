@@ -1,4 +1,10 @@
-import type { Counter, Gauge, Histogram, MetricsService } from '@email-gateway/common';
+import type {
+  Counter,
+  Gauge,
+  Histogram,
+  MetricsService,
+  OutboxPollerMetrics,
+} from '@email-gateway/common';
 import type { RecordResult } from '@email-gateway/mail-routing';
 
 export type ReinjectionOutcome =
@@ -83,6 +89,17 @@ export class DeliveryMetrics {
       'Outbox rows that failed envelope or payload validation and were skipped',
       ['consumer'],
     );
+  }
+
+  /**
+   * The shared outbox poller's metrics (step 3.1 M2) on this worker's existing series
+   * `delivery_outbox_poll_lag_seconds{consumer}` and `delivery_outbox_invalid_events_total{consumer}`.
+   */
+  outboxPoller(): OutboxPollerMetrics {
+    return {
+      pollLag: (consumer, seconds) => this.outboxPollLag.set({ consumer }, seconds),
+      invalid: (consumer) => this.outboxInvalid.inc({ consumer }),
+    };
   }
 
   /** Counts one recorder result and, when applied, the transition. */

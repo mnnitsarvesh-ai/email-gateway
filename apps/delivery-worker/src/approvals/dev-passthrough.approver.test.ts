@@ -4,10 +4,17 @@ import {
   type MessageReceivedV1,
   type EventEnvelope,
 } from '@email-gateway/event-contracts';
+import type { EventHandler } from '@email-gateway/common';
+import type { PrismaClient } from '@email-gateway/database';
 import { createLogger, type Logger } from '@email-gateway/logger';
 import { describe, expect, it, vi } from 'vitest';
+import { RECORDER_TX_TIMEOUT_MS } from '../delivery.module';
 import type { ApprovalFeed } from './approval-feed';
-import { DEV_PASSTHROUGH_WARNING, DevPassThroughApprover } from './dev-passthrough.approver';
+import {
+  DEV_PASSTHROUGH_CONSUMER,
+  DEV_PASSTHROUGH_WARNING,
+  DevPassThroughApprover,
+} from './dev-passthrough.approver';
 
 const NOW = new Date('2026-11-03T12:00:00Z');
 const event: EventEnvelope<MessageReceivedV1> = {
@@ -68,19 +75,48 @@ function fakeTx(options: { message?: boolean; recipients?: number }) {
   return { tx, outbox, events };
 }
 
-const feed = (): ApprovalFeed<MessageReceivedV1> & { started: number } => ({
+const feed = (): ApprovalFeed<MessageReceivedV1> & {
+  started: number;
+  handler?: EventHandler<MessageReceivedV1>;
+} => ({
   started: 0,
-  start() {
+  start(handler) {
     this.started += 1;
+    this.handler = handler;
   },
   stop: () => Promise.resolve(),
 });
+
+/** The writer as processOnce sees it: one interactive transaction per event, with a ledger. */
+function fakeWriter(tx: object) {
+  const ledger: { consumer: string; eventId: string }[] = [];
+  const options: unknown[] = [];
+  const prisma = {
+    $transaction(fn: (t: unknown) => Promise<unknown>, opts?: unknown) {
+      options.push(opts);
+      return fn({
+        ...tx,
+        messageIdempotency: {
+          create: ({ data }: { data: { consumer: string; eventId: string } }) => (
+            ledger.push(data),
+            Promise.resolve(data)
+          ),
+        },
+      });
+    },
+  };
+  return { prisma: prisma as unknown as PrismaClient, ledger, options };
+}
+
+const noWriter = {} as PrismaClient;
 
 describe('DevPassThroughApprover (R5, development only)', () => {
   it('writes one approval for every pending recipient, from the stored message row', async () => {
     const { tx, outbox, events } = fakeTx({});
     const approver = new DevPassThroughApprover(
       feed(),
+      noWriter,
+      RECORDER_TX_TIMEOUT_MS,
       createLogger({ service: 't', level: 'silent' }),
       () => NOW,
     );
@@ -137,6 +173,8 @@ describe('DevPassThroughApprover (R5, development only)', () => {
     const { tx, outbox } = fakeTx({ recipients: 2500 });
     const approver = new DevPassThroughApprover(
       feed(),
+      noWriter,
+      RECORDER_TX_TIMEOUT_MS,
       createLogger({ service: 't', level: 'silent' }),
       () => NOW,
     );
@@ -151,6 +189,8 @@ describe('DevPassThroughApprover (R5, development only)', () => {
   it('approves nothing for an unknown message or without pending recipients', async () => {
     const approver = new DevPassThroughApprover(
       feed(),
+      noWriter,
+      RECORDER_TX_TIMEOUT_MS,
       createLogger({ service: 't', level: 'silent' }),
       () => NOW,
     );
@@ -171,8 +211,27 @@ describe('DevPassThroughApprover (R5, development only)', () => {
     const warn = vi.fn();
     const logger = { child: () => ({ warn, info: vi.fn() }) } as unknown as Logger;
     const f = feed();
-    new DevPassThroughApprover(f, logger).start();
+    new DevPassThroughApprover(f, noWriter, RECORDER_TX_TIMEOUT_MS, logger).start();
     expect(warn).toHaveBeenCalledWith(DEV_PASSTHROUGH_WARNING);
     expect(f.started).toBe(1);
+  });
+
+  it('approves inside the dev-passthrough idempotency transaction with the recorder budget', async () => {
+    const { tx, outbox } = fakeTx({});
+    const writer = fakeWriter(tx);
+    const f = feed();
+    new DevPassThroughApprover(
+      f,
+      writer.prisma,
+      RECORDER_TX_TIMEOUT_MS,
+      createLogger({ service: 't', level: 'silent' }),
+      () => NOW,
+    ).start();
+    expect(await f.handler!(event)).toBe('handled');
+    expect(writer.ledger).toEqual([{ consumer: DEV_PASSTHROUGH_CONSUMER, eventId: event.eventId }]);
+    expect(writer.options).toEqual([
+      { timeout: RECORDER_TX_TIMEOUT_MS, maxWait: RECORDER_TX_TIMEOUT_MS },
+    ]);
+    expect(outbox).toHaveLength(1);
   });
 });
