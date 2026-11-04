@@ -1,11 +1,14 @@
 import { deliveryStatusChangedV1, EventTypes } from '@email-gateway/event-contracts';
 import { reinjectionIdempotencyKey, recipientSetSha256 } from '@email-gateway/mail-routing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { ApprovalPipeline, Broker } from './support/approvals';
 import { Fixtures, workerConfig } from './support/fixtures';
 import { buildWorker, FAST, type TestWorker } from './support/worker';
 
 const fx = new Fixtures();
 let worker: TestWorker;
+let broker: Broker;
+let pipeline: ApprovalPipeline;
 let org: bigint;
 let other: bigint;
 let domainA: bigint;
@@ -19,13 +22,22 @@ beforeAll(async () => {
   domainB = await fx.domain(org, fx.name('b'));
   await fx.domain(other, fx.name('other'));
   await fx.domain(org, fx.name('held'), { status: 'suspended' });
+  // Approvals reach the planner through RabbitMQ (step 3.2 Q13): a throwaway vhost, published
+  // as the event-relay publishes them, consumed by the production QueueConsumer.
+  broker = await Broker.start();
+  pipeline = await ApprovalPipeline.start(fx, broker, worker.planner);
 });
 afterAll(async () => {
+  await pipeline?.stop();
+  await broker?.close();
   await worker.close();
   await fx.cleanup();
 });
 
-describe('planning (R7) against the real writer', () => {
+/** Publishes the approval as the relay would; the planner consumer's result. */
+const plan = (event: Parameters<ApprovalPipeline['plan']>[1]) => pipeline.plan(broker, event);
+
+describe('planning (R7) through email.delivery.pending against the real writer', () => {
   it('plans an approval into deliveries, reinjection groups and planner signals; a duplicate plans nothing', async () => {
     const message = await fx.message(org, {
       direction: 'inbound',
@@ -36,7 +48,7 @@ describe('planning (R7) against the real writer', () => {
       ],
     });
     const approval = fx.approval(message);
-    const result = await worker.plan(approval);
+    const result = await plan(approval);
     expect(result).toMatchObject({ status: 'planned', deliveries: 3, reinjections: 2, refused: 0 });
 
     const reinjections = await fx.reinjections(message);
@@ -91,9 +103,9 @@ describe('planning (R7) against the real writer', () => {
     expect(before.outbox).toBe(0); // initial pending signals publish nothing
 
     // Same event again: the processOnce ledger.
-    expect(await worker.plan(approval)).toBe('duplicate');
+    expect(await plan(approval)).toBe('duplicate');
     // A second approval with the same deliverySeq: the unique keys, no second plan.
-    expect(await worker.plan(fx.approval(message))).toMatchObject({
+    expect(await plan(fx.approval(message))).toMatchObject({
       status: 'duplicate',
       alreadyPlanned: 3,
     });
@@ -121,7 +133,7 @@ describe('planning (R7) against the real writer', () => {
         { address: 'moved@ext-one.test', direction: 'internal' },
       ],
     });
-    const result = await worker.plan(fx.approval(message));
+    const result = await plan(fx.approval(message));
     expect(result).toMatchObject({ status: 'planned', deliveries: 10, refused: 2 });
     const groups = (await fx.reinjections(message))
       .map((r) => `${r.listener}|${r.destinationKey}|${r.recipientCount}`)
@@ -180,7 +192,7 @@ describe('planning (R7) against the real writer', () => {
       recipients: [{ address: `h@${fx.name('held')}` }, { address: `x@${fx.name('other')}` }],
     });
     const before = Date.now();
-    expect(await worker.plan(fx.approval(message))).toMatchObject({
+    expect(await plan(fx.approval(message))).toMatchObject({
       status: 'planned',
       held: 1,
       refused: 1,
@@ -202,14 +214,12 @@ describe('planning (R7) against the real writer', () => {
       ...fx.approval(message, { emlS3Key: `org/${other}/eml/x.eml` }),
       organizationId: other.toString(),
     };
-    expect(await worker.plan(foreign)).toMatchObject({
+    expect(await plan(foreign)).toMatchObject({
       status: 'rejected',
       reason: 'message_not_found',
     });
     // Key outside the organization prefix.
-    expect(
-      await worker.plan(fx.approval(message, { emlS3Key: `org/${other}/eml/x.eml` })),
-    ).toMatchObject({
+    expect(await plan(fx.approval(message, { emlS3Key: `org/${other}/eml/x.eml` }))).toMatchObject({
       status: 'rejected',
       reason: 'eml_key_prefix',
     });
@@ -221,7 +231,7 @@ describe('planning (R7) against the real writer', () => {
         { recipientId: second.recipients[0]!.id.toString(), rcptSeq: 0 },
       ],
     });
-    expect(await worker.plan(mixed)).toMatchObject({
+    expect(await plan(mixed)).toMatchObject({
       status: 'planned',
       deliveries: 1,
       unknownRecipients: 1,

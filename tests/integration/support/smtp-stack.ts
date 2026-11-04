@@ -78,7 +78,9 @@ async function detect(): Promise<SmtpStackGate> {
         'reachability-probe.invalid',
         `socketmap:inet:${adapterHost}:10041:relay_domain`,
       ]);
-      if (probe.exitCode !== 1) {
+      // postmap also exits 1 on `fatal: … query error: Connection refused`, so a NOTFOUND is
+      // exit 1 with nothing on stderr.
+      if (probe.exitCode !== 1 || /fatal|error|warning/i.test(probe.stderr)) {
         problems.push(
           `postfix cannot reach smtp-adapter at ${adapterHost}:10041 (postmap exit ${probe.exitCode}); ` +
             'check SMTP_ADAPTER_HOST and recreate postfix/postfix-outbound',

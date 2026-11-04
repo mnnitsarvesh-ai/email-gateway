@@ -8,21 +8,25 @@ import {
 } from '@nestjs/common';
 import {
   AdvisoryLocks,
+  AMQP_MESSAGING_METRICS,
+  AmqpConnection,
+  ConfirmPublisher,
+  type MessagingMetrics,
   MetricsService,
   OutboxPoller,
+  PrismaConsumerProgress,
   PrismaService,
   RedisService,
   S3Service,
 } from '@email-gateway/common';
 import {
-  deliveryApprovedV1,
-  type DeliveryApprovedV1,
   EventTypes,
   messageReceivedV1,
   type MessageReceivedV1,
 } from '@email-gateway/event-contracts';
 import type { Logger } from '@email-gateway/logger';
-import { DeliveryApprovalConsumer, PLANNER_CONSUMER } from './approvals/delivery-approval.consumer';
+import { createApprovalFeed } from './approvals/approval-feed';
+import { DeliveryApprovalConsumer } from './approvals/delivery-approval.consumer';
 import {
   DEV_PASSTHROUGH_CONSUMER,
   DevPassThroughApprover,
@@ -43,13 +47,21 @@ import { WorkerLifecycle } from './worker-lifecycle';
 export const PLANNING_TX_TIMEOUT_MS = 60_000;
 /** Writer transaction budget of one signal or result commit (as the 2.2 INGEST_DB_TIMEOUT_MS). */
 export const RECORDER_TX_TIMEOUT_MS = 15_000;
-/** Advisory lock namespace of this worker: `dw:outbox:<consumer>` (step 2.3 R6). */
+/** Advisory lock namespace of this worker's outbox poller (dev pass-through): `dw:outbox:<consumer>` (R6). */
 export const OUTBOX_LOCK_PREFIX = 'dw';
 
-/** Runs the lifecycle from Nest's hooks (non-global module: stopped before the DB closes). */
+/**
+ * Runs the lifecycle from Nest's hooks (non-global module: stopped before the DB closes). On
+ * shutdown: the roles (consumers first, then the lock connection), then the AMQP publisher and
+ * connection, then (DatabaseModule) the writer; `AmqpModule`'s own close afterwards is a no-op.
+ */
 @Injectable()
 export class WorkerRuntime implements OnApplicationBootstrap, OnModuleDestroy {
-  constructor(@Inject(WorkerLifecycle) private readonly lifecycle: WorkerLifecycle) {}
+  constructor(
+    @Inject(WorkerLifecycle) private readonly lifecycle: WorkerLifecycle,
+    @Inject(AmqpConnection) private readonly connection: AmqpConnection,
+    @Inject(ConfirmPublisher) private readonly publisher: ConfirmPublisher,
+  ) {}
 
   onApplicationBootstrap(): void {
     this.lifecycle.start();
@@ -57,12 +69,15 @@ export class WorkerRuntime implements OnApplicationBootstrap, OnModuleDestroy {
 
   async onModuleDestroy(): Promise<void> {
     await this.lifecycle.stop();
+    await this.publisher.close().catch(() => undefined);
+    await this.connection.close().catch(() => undefined);
   }
 }
 
 /**
- * The delivery pipeline of step 2.3 (docs/plan/steps/05-routing.md): approvals feed (the shared
- * outbox poller of `@email-gateway/common`, R5/R6 and step 3.1 M2) → planner (R7) → reinjection
+ * The delivery pipeline of step 2.3 (docs/plan/steps/05-routing.md): approvals feed (RabbitMQ
+ * queue `email.delivery.pending` since step 3.2 Q13, needs the global `AmqpModule`; the dev
+ * pass-through stays on the shared outbox poller) → planner (R7) → reinjection
  * scheduler and reinjector (R8, R10, R11) → Postfix delivery-log tailer (R9) → reconciler (R12),
  * with the metrics of R14. Components are plain classes wired here, so the integration tests
  * build the same graph without Nest.
@@ -94,31 +109,31 @@ export class DeliveryModule {
         provide: DeliveryApprovalConsumer,
         useFactory: (
           prisma: PrismaService,
-          locks: AdvisoryLocks,
-          metrics: DeliveryMetrics,
+          connection: AmqpConnection,
+          publisher: ConfirmPublisher,
+          messaging: MessagingMetrics | null,
           planner: DeliveryPlanner,
         ) =>
           new DeliveryApprovalConsumer(
-            new OutboxPoller<DeliveryApprovedV1>({
-              prisma,
-              locks,
+            createApprovalFeed({
+              connection,
+              publisher,
+              prefetch: config.DELIVERY_APPROVAL_PREFETCH,
               logger,
-              metrics: metrics.outboxPoller(),
-              consumer: PLANNER_CONSUMER,
-              eventType: EventTypes.DeliveryApproved,
-              schema: deliveryApprovedV1,
-              initialPosition: 'oldest',
-              pollIntervalMs: config.DELIVERY_OUTBOX_POLL_INTERVAL_MS,
-              safetyLagMs: config.DELIVERY_OUTBOX_SAFETY_LAG_MS,
-              batchSize: config.DELIVERY_OUTBOX_BATCH_SIZE,
-              lockPrefix: OUTBOX_LOCK_PREFIX,
-              concurrency: 1,
+              ...(messaging ? { metrics: messaging } : {}),
+              progress: new PrismaConsumerProgress(prisma),
             }),
             planner,
             prisma,
             PLANNING_TX_TIMEOUT_MS,
           ),
-        inject: [PrismaService, AdvisoryLocks, DeliveryMetrics, DeliveryPlanner],
+        inject: [
+          PrismaService,
+          AmqpConnection,
+          ConfirmPublisher,
+          AMQP_MESSAGING_METRICS,
+          DeliveryPlanner,
+        ],
       },
       {
         provide: DevPassThroughApprover,

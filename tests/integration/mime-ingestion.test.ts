@@ -187,8 +187,16 @@ describe.skipIf(gate.skip)('MIME ingestion stack (step 3.1 §9)', { timeout: 180
       aggregateType: 'message',
       aggregateId: stored.id.toString(),
       correlationId: received.correlationId,
-      publishedAt: null,
     });
+    // Step 3.2: the event-relay publishes the parse event (confirmed) and marks the row.
+    await waitFor(
+      'the mail.message.parsed.v1 row published by the event-relay',
+      async () =>
+        (await fx.prisma.messageOutbox.findFirst({
+          where: { id: outbox.id, publishedAt: { not: null } },
+        })) !== null,
+      { timeoutMs: 30_000 },
+    );
     expect(parsedEvents[0]!.eventId).toBe(outbox.eventId);
     const payload = messageParsedV1.parse(outbox.payload);
     expect(payload).toMatchObject({

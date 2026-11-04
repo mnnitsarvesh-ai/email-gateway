@@ -75,6 +75,12 @@ export const PERMISSIONS = Object.freeze([
     key: 'delivery:read',
     description: 'View per-recipient delivery status and the delivery audit trail',
   },
+  // Step 3.2 (Q9): replaying dead letters re-runs pipeline stages across tenants, so it is
+  // separate from platform:operations (which only reads queue state).
+  {
+    key: 'platform:dead_letter_replay',
+    description: 'Platform: replay dead-lettered pipeline messages',
+  },
 ] as const satisfies readonly PermissionDef[]);
 
 /** Every permission key of the catalog. */
@@ -170,6 +176,7 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'platform:organizations',
       'platform:operations',
       'platform:tenant_override',
+      'platform:dead_letter_replay',
       ...TENANT_READ_PERMISSIONS,
       'audit:read',
     ],

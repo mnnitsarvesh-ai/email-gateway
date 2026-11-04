@@ -1,9 +1,9 @@
 import {
+  amqpUrlListSchema,
   baseConfigSchema,
   databaseConfigSchema,
   httpConfigSchema,
   loadConfig,
-  rabbitmqConfigSchema,
   redisConfigSchema,
   s3ConfigSchema,
 } from '@email-gateway/config';
@@ -43,7 +43,12 @@ export const deliveryConfigShape = {
   DELIVERY_REINJECT_RETRY_MAX_SECONDS: positiveInt.default(900),
   DELIVERY_REINJECT_MAX_AGE_SECONDS: positiveInt.default(432_000),
 
-  // Scheduler and approval outbox poller (R6, R8).
+  // Approvals from RabbitMQ (step 3.2 Q13): prefetch of the `email.delivery.pending` consumer
+  // (= approvals planned at the same time by one replica).
+  DELIVERY_APPROVAL_PREFETCH: positiveInt.max(64).default(4),
+
+  // Scheduler (R8) and the dev pass-through's outbox poller (R6; since step 3.2 the poller
+  // serves only the development pass-through, the planner consumes from RabbitMQ).
   DELIVERY_POLL_INTERVAL_MS: z.coerce.number().int().min(10).default(1000),
   DELIVERY_OUTBOX_POLL_INTERVAL_MS: z.coerce.number().int().min(10).default(1000),
   DELIVERY_OUTBOX_SAFETY_LAG_MS: nonNegativeInt.default(120_000),
@@ -142,10 +147,20 @@ export function validateWorkerConfig(
   }
 }
 
+/**
+ * RabbitMQ (step 3.2 Q10): the delivery-worker's own least-privilege role user on the topology
+ * vhost (read `email.delivery.pending`, write `email.delivery` / `email.events` for delay and
+ * dead-letter copies), one URL per cluster node, comma-separated
+ * (`RABBITMQ_DELIVERY_WORKER_URL_FILE` for a mounted secret).
+ */
+export const amqpConfigShape = {
+  RABBITMQ_DELIVERY_WORKER_URL: amqpUrlListSchema,
+};
+
 const objectSchema = baseConfigSchema
   .extend(httpConfigSchema(3040).shape)
   .extend(databaseConfigSchema.shape)
-  .extend(rabbitmqConfigSchema.shape)
+  .extend(amqpConfigShape)
   .extend(redisConfigSchema.shape)
   .extend(s3ConfigSchema.shape)
   .extend(deliveryConfigShape);

@@ -1,4 +1,4 @@
-import { MetricsService } from '@email-gateway/common';
+import { MetricsService, NonRetryableError } from '@email-gateway/common';
 import type { DeliveryApprovedV1, EventEnvelope } from '@email-gateway/event-contracts';
 import { createLogger } from '@email-gateway/logger';
 import { describe, expect, it, vi } from 'vitest';
@@ -38,9 +38,74 @@ const approval = (
   },
 });
 
-const tx = (message: unknown, recipients: unknown[] = []) => ({
+/** The approval's outbox row (provenance): by default the one the gateway wrote for `approval()`. */
+const issued = (payload: unknown = approval().payload) => ({ payload });
+
+const tx = (message: unknown, recipients: unknown[] = [], outbox: unknown = issued()) => ({
+  messageOutbox: { findFirst: vi.fn(() => Promise.resolve(outbox)) },
   emailMessage: { findFirst: vi.fn(() => Promise.resolve(message)) },
   emailRecipient: { findMany: vi.fn(() => Promise.resolve(recipients)) },
+});
+
+describe('DeliveryPlanner approval provenance (review round 1)', () => {
+  it('dead-letters an approval without an outbox row (forged on the broker) before planning anything', async () => {
+    const t = tx({ id: 100n, direction: 'outbound' }, [], null);
+    const error = await planner()
+      .plan(approval(), t as never)
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(NonRetryableError);
+    expect((error as NonRetryableError).code).toBe('approval_not_issued');
+    expect(t.messageOutbox.findFirst).toHaveBeenCalledWith({
+      where: {
+        eventId: approval().eventId,
+        eventType: 'mail.delivery.approved.v1',
+        organizationId: 7n,
+        createdAt: { gte: new Date(Date.parse('2026-11-03T11:00:00.000Z') - 5 * 60_000) },
+      },
+      select: { payload: true },
+    });
+    expect(t.emailRecipient.findMany).not.toHaveBeenCalled();
+  });
+
+  it('dead-letters a real event id carrying another payload (approval_mismatch)', async () => {
+    const t = tx({ id: 100n, direction: 'outbound' }, [], issued());
+    for (const forged of [
+      approval({ recipients: [{ recipientId: '501', rcptSeq: 0 }] }),
+      approval({ messageId: '101' }),
+      approval({ deliverySeq: 1 }),
+    ]) {
+      const error = await planner()
+        .plan(forged, t as never)
+        .catch((e: unknown) => e);
+      expect((error as NonRetryableError).code).toBe('approval_mismatch');
+    }
+    const stored = tx({ id: 100n, direction: 'outbound' }, [], issued({ not: 'an approval' }));
+    const error = await planner()
+      .plan(approval(), stored as never)
+      .catch((e: unknown) => e);
+    expect((error as NonRetryableError).code).toBe('approval_mismatch');
+    expect(t.emailRecipient.findMany).not.toHaveBeenCalled();
+  });
+
+  it('acknowledges an approval of a message that no longer exists as rejected, without a provenance lookup', async () => {
+    const t = tx(null, [], null);
+    expect(await planner().plan(approval(), t as never)).toMatchObject({
+      status: 'rejected',
+      reason: 'message_not_found',
+    });
+    expect(t.messageOutbox.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('plans an approval whose outbox row matches (a replay keeps the event id and payload)', async () => {
+    // Passes provenance and reaches the recipient lookup (none known here).
+    const t = tx({ id: 100n, direction: 'outbound' }, []);
+    expect(await planner().plan(approval(), t as never)).toMatchObject({
+      status: 'rejected',
+      reason: 'no_known_recipients',
+    });
+    expect(t.messageOutbox.findFirst).toHaveBeenCalled();
+    expect(t.emailRecipient.findMany).toHaveBeenCalled();
+  });
 });
 
 describe('DeliveryPlanner (R7) trust checks', () => {
@@ -56,8 +121,9 @@ describe('DeliveryPlanner (R7) trust checks', () => {
   });
 
   it('loads the message with the envelope organization and rejects a foreign message', async () => {
-    const t = tx(null);
-    const result = await planner().plan(approval({ emlS3Key: 'org/9/eml/x.eml' }, '9'), t as never);
+    const foreign = approval({ emlS3Key: 'org/9/eml/x.eml' }, '9');
+    const t = tx(null, [], issued(foreign.payload));
+    const result = await planner().plan(foreign, t as never);
     expect(result).toMatchObject({ status: 'rejected', reason: 'message_not_found' });
     expect(t.emailMessage.findFirst).toHaveBeenCalledWith(
       expect.objectContaining({

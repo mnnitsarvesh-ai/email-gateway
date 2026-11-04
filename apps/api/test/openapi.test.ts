@@ -296,6 +296,28 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     }
   });
 
+  it('documents the step 3.2 dead-letter endpoints (Q9) for access tokens only', () => {
+    const expected = [
+      'GET /api/v1/platform/dead-letters',
+      'POST /api/v1/platform/dead-letters/replay',
+    ];
+    const byKey = new Map(operations(doc).map((op) => [op.key, op]));
+    for (const key of expected) {
+      const op = byKey.get(key);
+      expect(op?.tags, key).toEqual(['platform']);
+      const schemes = op!.security.flatMap((s) => Object.keys(s));
+      expect(schemes, key).toEqual([ACCESS_TOKEN_SCHEME]);
+    }
+    const replay = (doc.paths['/api/v1/platform/dead-letters/replay'] as Record<string, unknown>)
+      .post as { responses: Record<string, unknown>; description?: string };
+    expect(Object.keys(replay.responses).sort()).toEqual(
+      ['200', '400', '401', '403', '404', '409', '503'].sort(),
+    );
+    expect(replay.description).toContain('source_queue_not_replayable');
+    // The internal Prometheus endpoint is not part of the contract.
+    expect(doc.paths['/metrics']).toBeUndefined();
+  });
+
   it('matches the committed snapshot docs/api/openapi.json', async () => {
     const serialized = await serialize(doc);
     if (UPDATE) {

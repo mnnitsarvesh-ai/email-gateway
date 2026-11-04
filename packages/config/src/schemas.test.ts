@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ConfigValidationError, loadConfig } from './load-config';
+import * as schemas from './schemas';
 import { databaseReadConfigSchema } from './schemas';
 
 describe('databaseReadConfigSchema', () => {
@@ -44,5 +45,14 @@ describe('databaseReadConfigSchema', () => {
       expect((err as Error).message).toContain(key);
       expect((err as Error).message).not.toContain('TopSecret');
     }
+  });
+});
+
+describe('RabbitMQ configuration (step 3.2 Q10)', () => {
+  it('has no shared administrator URL schema: each service reads its own role URL list', () => {
+    expect(Object.keys(schemas)).not.toContain('rabbitmqConfigSchema');
+    expect(schemas.amqpUrlListSchema.parse('amqp://u:p@rabbitmq:5672/email-gateway')).toEqual([
+      'amqp://u:p@rabbitmq:5672/email-gateway',
+    ]);
   });
 });

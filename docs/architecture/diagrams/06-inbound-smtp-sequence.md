@@ -13,8 +13,8 @@ sequenceDiagram
   participant ING as smtp-adapter LMTP ingestion :10050
   participant S3 as S3 mail bucket
   participant DB as MySQL writer
-  participant RL as Outbox relay (PLANNED 3.2)
-  participant MQ as RabbitMQ mail.events
+  participant RL as event-relay (3.2)
+  participant MQ as RabbitMQ email.ingestion
 
   S->>PF: EHLO (STARTTLS, TLS >= 1.2), MAIL FROM, RCPT TO
   PF->>SM: relay_domain (recipient domain)
@@ -72,32 +72,30 @@ sequenceDiagram
   alt S3 or MySQL failure or timeout
     ING-->>PF: 451 4.3.0 for that organization's recipients; Postfix keeps them queued and retries
   end
-  rect rgb(255, 248, 225)
-    RL->>DB: SELECT unpublished rows FOR UPDATE SKIP LOCKED (PLANNED 3.2)
-    RL->>MQ: publish with publisher confirms, routing key mail.message.received.v1
-    MQ-->>RL: confirm
-    RL->>DB: SET published_at
-  end
+  RL->>DB: SELECT unpublished rows of its shard (GET_LOCK er:relay#i/n), id order
+  RL->>MQ: publish with confirms, mandatory, routing key org.<id>.mail.message.received.v1
+  MQ-->>RL: confirm (routed to email.received and the email.analytics firehose)
+  RL->>DB: SET published_at = NOW(3) WHERE published_at IS NULL (confirmed rows only)
 ```
 
-**Legend.** Plain messages: IMPLEMENTED. Messages inside the shaded (amber) block and participants marked `(PLANNED x.y)`: PLANNED. MIME parsing, `email_headers` and `email_attachments` rows are implemented post-queue by the email-worker (step 3.1, [diagram 20](20-mime-ingestion-sequence.md)); the RabbitMQ relay of the outbox is step 3.2. Since step 2.3 the delivery-worker reads the outbox itself (interim outbox poller, design R6) for its approvals and, in local/CI only, the development pass-through (diagram 16).
+**Legend.** Plain messages: IMPLEMENTED. Messages inside the shaded (amber) block and participants marked `(PLANNED x.y)`: PLANNED. MIME parsing, `email_headers` and `email_attachments` rows are implemented post-queue by the email-worker (step 3.1, [diagram 20](20-mime-ingestion-sequence.md)); the event-relay (step 3.2, [diagram 21](21-event-relay-sequence.md)) publishes the outbox; the email-worker consumes `email.received` and the delivery-worker `email.delivery.pending`. Only the development pass-through (local/CI) still reads the outbox itself (diagram 16).
 
 ## Status
 
-| Step in the sequence                                        | Status      | Evidence or delivering step                                                                                                                        |
-| ----------------------------------------------------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Relay domains from the adapter, `554` for unknown domains   | IMPLEMENTED | `infrastructure/postfix/main.cf` `relay_domains = socketmap:…`; `smtp-inbound.test.ts` suite 2/3; `mail-plane.test.ts` (451 without the adapter)   |
-| STARTTLS (TLS ≥ 1.2), no AUTH on 25                         | IMPLEMENTED | `smtp-relay-control.test.ts` suite 4                                                                                                               |
-| Policy `inbound`: tenant, rates, recipient validation, size | IMPLEMENTED | `policy-decision.service.test.ts`, `apps/smtp-adapter/integration/policy.test.ts`, `smtp-inbound.test.ts` (550 5.1.1 allow-list, monitor accepted) |
-| Fail closed (policy, Redis, adapter)                        | IMPLEMENTED | `smtp-fail-closed.test.ts` (Redis down; adapter container stopped in CI), `mail-plane.test.ts`                                                     |
-| Rspamd milter, `reject = 15`, `milter_default_action`       | IMPLEMENTED | `main.cf`, `local.d/actions.conf`; every stack suite message passes through it                                                                     |
-| Disk spool, `250 queued`, survives `docker compose restart` | IMPLEMENTED | `smtp-durability.test.ts` suite 6                                                                                                                  |
-| LMTP handoff with XFORWARD, per-recipient replies           | IMPLEMENTED | `lmtp-listener.test.ts`, `apps/smtp-adapter/integration/ingestion.test.ts`, `smtp-inbound.test.ts` suite 1                                         |
-| S3 write, per-organization transaction, outbox row          | IMPLEMENTED | `smtp-inbound.test.ts` suite 1 (bytes + SHA-256, rows, `messageReceivedV1`), suite 8 (multi-tenant split)                                          |
-| `451` on S3 failure, stored exactly once after recovery     | IMPLEMENTED | `smtp-durability.test.ts` suite 5 (`docker compose stop minio`)                                                                                    |
-| Duplicate delivery (lost `250`) answers `250`, no new rows  | IMPLEMENTED | `smtp-durability.test.ts` suite 7 (raw LMTP replay with the same IDENT and bytes)                                                                  |
-| Loop guard `554 5.4.6`                                      | IMPLEMENTED | `ingestion.service.test.ts`, `smtp-inbound.test.ts` suite 11                                                                                       |
-| 40 sessions × 1 000 messages, zero loss                     | IMPLEMENTED | `smtp-concurrency.test.ts` suite 9 (figures in the step note §12)                                                                                  |
-| MIME parsing, `email_headers`, `email_attachments`          | IMPLEMENTED | step 3.1, post-queue in the email-worker ([diagram 20](20-mime-ingestion-sequence.md)); `tests/integration/mime-ingestion.test.ts`                 |
-| Outbox relay with publisher confirms                        | PLANNED 3.2 | `RabbitMqService` opens a confirm channel today; no relay exists                                                                                   |
-| Delivery to the tenant after ingestion                      | IMPLEMENTED | step 2.3, [diagram 16](16-inbound-routing-sequence.md); `tests/integration/routing-inbound.test.ts`                                                |
+| Step in the sequence                                        | Status          | Evidence or delivering step                                                                                                                        |
+| ----------------------------------------------------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Relay domains from the adapter, `554` for unknown domains   | IMPLEMENTED     | `infrastructure/postfix/main.cf` `relay_domains = socketmap:…`; `smtp-inbound.test.ts` suite 2/3; `mail-plane.test.ts` (451 without the adapter)   |
+| STARTTLS (TLS ≥ 1.2), no AUTH on 25                         | IMPLEMENTED     | `smtp-relay-control.test.ts` suite 4                                                                                                               |
+| Policy `inbound`: tenant, rates, recipient validation, size | IMPLEMENTED     | `policy-decision.service.test.ts`, `apps/smtp-adapter/integration/policy.test.ts`, `smtp-inbound.test.ts` (550 5.1.1 allow-list, monitor accepted) |
+| Fail closed (policy, Redis, adapter)                        | IMPLEMENTED     | `smtp-fail-closed.test.ts` (Redis down; adapter container stopped in CI), `mail-plane.test.ts`                                                     |
+| Rspamd milter, `reject = 15`, `milter_default_action`       | IMPLEMENTED     | `main.cf`, `local.d/actions.conf`; every stack suite message passes through it                                                                     |
+| Disk spool, `250 queued`, survives `docker compose restart` | IMPLEMENTED     | `smtp-durability.test.ts` suite 6                                                                                                                  |
+| LMTP handoff with XFORWARD, per-recipient replies           | IMPLEMENTED     | `lmtp-listener.test.ts`, `apps/smtp-adapter/integration/ingestion.test.ts`, `smtp-inbound.test.ts` suite 1                                         |
+| S3 write, per-organization transaction, outbox row          | IMPLEMENTED     | `smtp-inbound.test.ts` suite 1 (bytes + SHA-256, rows, `messageReceivedV1`), suite 8 (multi-tenant split)                                          |
+| `451` on S3 failure, stored exactly once after recovery     | IMPLEMENTED     | `smtp-durability.test.ts` suite 5 (`docker compose stop minio`)                                                                                    |
+| Duplicate delivery (lost `250`) answers `250`, no new rows  | IMPLEMENTED     | `smtp-durability.test.ts` suite 7 (raw LMTP replay with the same IDENT and bytes)                                                                  |
+| Loop guard `554 5.4.6`                                      | IMPLEMENTED     | `ingestion.service.test.ts`, `smtp-inbound.test.ts` suite 11                                                                                       |
+| 40 sessions × 1 000 messages, zero loss                     | IMPLEMENTED     | `smtp-concurrency.test.ts` suite 9 (figures in the step note §12)                                                                                  |
+| MIME parsing, `email_headers`, `email_attachments`          | IMPLEMENTED     | step 3.1, post-queue in the email-worker ([diagram 20](20-mime-ingestion-sequence.md)); `tests/integration/mime-ingestion.test.ts`                 |
+| Outbox relay with publisher confirms                        | IMPLEMENTED 3.2 | `apps/event-relay`; `relay.test.ts`, stack `messaging-*.test.ts` (every outbox row of each run published)                                          |
+| Delivery to the tenant after ingestion                      | IMPLEMENTED     | step 2.3, [diagram 16](16-inbound-routing-sequence.md); `tests/integration/routing-inbound.test.ts`                                                |

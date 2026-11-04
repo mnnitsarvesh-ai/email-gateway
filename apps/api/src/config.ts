@@ -1,4 +1,5 @@
 import {
+  amqpUrlListSchema,
   baseConfigSchema,
   databaseConfigSchema,
   databaseReadConfigSchema,
@@ -376,6 +377,17 @@ function validateDomainConfig(
   }
 }
 
+/**
+ * Dead-letter replay (step 3.2 Q9, Q10): the `eg-ops` role user on the topology vhost (read
+ * `email.dead-letter`, write `retry.<work queue>.…` keys to `email.ingestion` and `email.delivery`), connected per replay request and closed after
+ * it. Optional: without it the dead-letter routes answer 503 `dead_letter_replay_unavailable`.
+ */
+const deadLetterConfigShape = {
+  RABBITMQ_OPS_URL: amqpUrlListSchema.optional(),
+  /** Most dead letters one replay request fetches (and holds) while looking for matches. */
+  DEAD_LETTER_REPLAY_SCAN_MAX: int(1, 100_000).default(10_000),
+};
+
 export const apiConfigSchema = baseConfigSchema
   .extend(httpConfigSchema(3000).shape)
   .extend(databaseConfigSchema.shape)
@@ -388,6 +400,7 @@ export const apiConfigSchema = baseConfigSchema
   .extend(domainConfigShape)
   .extend(smtpGatewayConfigShape)
   .extend(routingConfigShape)
+  .extend(deadLetterConfigShape)
   .extend({
     /** Comma-separated allow-list of admin portal origins. */
     CORS_ORIGINS: z

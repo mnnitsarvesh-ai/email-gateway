@@ -1,6 +1,11 @@
-import { uuidv7 } from '@email-gateway/common';
+import { isDeepStrictEqual } from 'node:util';
+import { NonRetryableError, uuidv7 } from '@email-gateway/common';
 import type { Prisma } from '@email-gateway/database';
-import type { DeliveryApprovedV1, EventEnvelope } from '@email-gateway/event-contracts';
+import {
+  type DeliveryApprovedV1,
+  deliveryApprovedV1,
+  type EventEnvelope,
+} from '@email-gateway/event-contracts';
 import type { Logger } from '@email-gateway/logger';
 import {
   type DeliverySignal,
@@ -18,6 +23,49 @@ import type { DeliveryMetrics } from '../metrics/delivery-metrics';
 import { retryDelayMs } from '../shared/backoff';
 
 export const SOURCE_SERVICE = 'delivery-worker';
+
+/**
+ * Clock skew allowed between the message's `received_at` and its approval's outbox `created_at`
+ * (both written by gateway services; the bound only prunes `message_outbox` partitions).
+ */
+export const PROVENANCE_SKEW_MS = 5 * 60_000;
+
+/** Dead-letter reasons of an approval the gateway never issued (`NonRetryableError` codes). */
+export const APPROVAL_NOT_ISSUED = 'approval_not_issued';
+export const APPROVAL_MISMATCH = 'approval_mismatch';
+
+/**
+ * Provenance of an approval (step 3.2 review round 1): since approvals arrive from the broker,
+ * the broker is a trust boundary. An approval is planned only when the gateway wrote it: a
+ * `message_outbox` row with the same `event_id`, `event_type` and `organization_id` (index
+ * `event_id`, partitions pruned by `created_at ≥ received_at − skew`) whose payload equals the
+ * delivered one. A replayed or re-driven approval keeps its event id and payload, so it passes;
+ * a forged one (any broker user that can publish to `email.delivery`) or an altered copy of a
+ * real one is a fatal `NonRetryableError` (dead-lettered, never planned). Approvals older than
+ * the outbox retention (7 days) can no longer be proven and are dead-lettered the same way.
+ */
+export async function assertApprovalIssued(
+  tx: Prisma.TransactionClient,
+  event: EventEnvelope<DeliveryApprovedV1>,
+  organizationId: bigint,
+  receivedAt: Date,
+): Promise<void> {
+  const row = await tx.messageOutbox.findFirst({
+    where: {
+      eventId: event.eventId,
+      eventType: event.eventType,
+      organizationId,
+      createdAt: { gte: new Date(receivedAt.getTime() - PROVENANCE_SKEW_MS) },
+    },
+    select: { payload: true },
+  });
+  if (!row) throw new NonRetryableError(APPROVAL_NOT_ISSUED);
+  const issued = deliveryApprovedV1.safeParse(row.payload);
+  const delivered = deliveryApprovedV1.safeParse(event.payload);
+  if (!issued.success || !delivered.success || !isDeepStrictEqual(issued.data, delivered.data)) {
+    throw new NonRetryableError(APPROVAL_MISMATCH);
+  }
+}
 
 export interface PlannerConfig {
   DELIVERY_BATCH_MAX_RECIPIENTS: number;
@@ -63,10 +111,11 @@ const empty = (status: PlanResult['status'], reason?: PlanResult['reason']): Pla
  * `mail.delivery.approved.v1`. Runs inside the consumer's `processOnce` transaction, so the
  * ledger row, the delivery rows, the reinjection rows and the planner signals commit together.
  *
- * Trust: the message and the recipients are loaded from the writer by `(id, received_at,
- * organization_id)` with the envelope's organization; recipient ids of another message or
- * organization are logged and skipped, and the EML key must be under `org/<organizationId>/`.
- * Nothing in the payload is trusted alone.
+ * Trust: the approval must have been issued by the gateway (`assertApprovalIssued`: its outbox
+ * row exists with the same payload, else a fatal dead letter); the message and the recipients
+ * are loaded from the writer by `(id, received_at, organization_id)` with the envelope's
+ * organization; recipient ids of another message or organization are logged and skipped, and
+ * the EML key must be under `org/<organizationId>/`. Nothing in the payload is trusted alone.
  *
  * Idempotency: `(recipient_id, delivery_seq)` is unique per delivery and
  * `(message_id, idempotency_key)` per reinjection; a second approval with the same
@@ -102,6 +151,10 @@ export class DeliveryPlanner {
       this.logger.error(ids, 'approval EML key is outside the organization prefix; rejected');
       return empty('rejected', 'eml_key_prefix');
     }
+    // The message first: an approval of a message that does not exist (any more) has nothing to
+    // plan, whoever sent it, and is acknowledged as rejected. In one transaction snapshot, a
+    // message that is visible also has its approval's outbox row visible (both are retained far
+    // longer than an approval waits), so the order adds no window for forged approvals.
     const message = await tx.emailMessage.findFirst({
       where: { id: messageId, receivedAt, organizationId },
       select: { id: true, direction: true },
@@ -109,6 +162,17 @@ export class DeliveryPlanner {
     if (!message) {
       this.logger.warn(ids, 'approved message not found for the organization; rejected');
       return empty('rejected', 'message_not_found');
+    }
+    try {
+      await assertApprovalIssued(tx, event, organizationId, receivedAt);
+    } catch (error) {
+      if (error instanceof NonRetryableError) {
+        this.logger.error(
+          { ...ids, reason: error.code },
+          'approval was not issued by the gateway (no matching outbox row or payload); dead-lettered',
+        );
+      }
+      throw error;
     }
 
     const wanted = payload.recipients.map((r) => BigInt(r.recipientId));

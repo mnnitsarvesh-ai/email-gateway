@@ -462,6 +462,10 @@ export class SmtpFixtures {
         // Reinjection rows early, so the worker claims nothing more of this run. Consumer
         // ledger rows before them: they are found through the outbox rows deleted below.
         await this.deleteLedgerRows(ids);
+        // Messages before their outbox rows (step 3.2): an approval still in flight then finds
+        // no message (rejected and acked) instead of a message whose approval's outbox row is
+        // gone (which the planner dead-letters as `approval_not_issued`).
+        await this.prisma.emailMessage.deleteMany({ where });
         await this.deleteDeliveryRows(ids);
         await this.deleteParseRows(ids);
         await this.prisma.messageOutbox.deleteMany({ where });
@@ -530,7 +534,10 @@ export class SmtpFixtures {
     await this.prisma.emailEvent.deleteMany({ where });
   }
 
-  /** Consumer ledger rows (`message_idempotency`) of this run's outbox events, any consumer. */
+  /**
+   * Consumer ledger rows (`message_idempotency`) and consumer progress rows
+   * (`message_consumer_progress`, step 3.2) of this run's outbox events, any consumer.
+   */
   private async deleteLedgerRows(ids: readonly bigint[]): Promise<void> {
     const events = await this.prisma.messageOutbox.findMany({
       where: { organizationId: { in: [...ids] } },
@@ -539,6 +546,9 @@ export class SmtpFixtures {
     const eventIds = events.map((e) => e.eventId);
     for (let i = 0; i < eventIds.length; i += 1000) {
       await this.prisma.messageIdempotency.deleteMany({
+        where: { eventId: { in: eventIds.slice(i, i + 1000) } },
+      });
+      await this.prisma.messageConsumerProgress.deleteMany({
         where: { eventId: { in: eventIds.slice(i, i + 1000) } },
       });
     }

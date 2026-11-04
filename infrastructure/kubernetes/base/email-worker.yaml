@@ -39,11 +39,6 @@ spec:
             # MIME ingestion (step 3.1, docs/plan/steps/06-mime-ingestion.md §5); defaults.
             - { name: MIME_INGESTION_ENABLED, value: 'true' }
             - { name: MIME_CONCURRENCY, value: '4' }
-            - { name: MIME_OUTBOX_POLL_INTERVAL_MS, value: '1000' }
-            - { name: MIME_OUTBOX_SAFETY_LAG_MS, value: '120000' }
-            - { name: MIME_OUTBOX_BATCH_SIZE, value: '100' }
-            - { name: MIME_OUTBOX_SHARDS, value: '1' }
-            - { name: MIME_OUTBOX_MAX_HELD_SHARDS, value: '1' }
             - { name: MIME_RETRY_BASE_MS, value: '1000' }
             - { name: MIME_RETRY_MAX_MS, value: '60000' }
             - { name: MIME_MAX_ATTEMPTS, value: '5' }
@@ -72,7 +67,12 @@ spec:
             - { name: MIME_ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES, value: '8388608' }
             # Secrets are mounted as files by External Secrets and read via the <KEY>_FILE convention.
             - { name: DATABASE_URL_FILE, value: /var/run/secrets/gateway/database-url }
-            - { name: RABBITMQ_URL_FILE, value: /var/run/secrets/gateway/rabbitmq-url }
+            # Role user eg-email-worker (step 3.2 Q10): consumes email.received; comma-separated
+            # amqps:// URLs of the broker nodes.
+            - {
+                name: RABBITMQ_EMAIL_WORKER_URL_FILE,
+                value: /var/run/secrets/gateway/rabbitmq-email-worker-url,
+              }
             - { name: REDIS_URL_FILE, value: /var/run/secrets/gateway/redis-url }
           volumeMounts:
             - { name: secrets, mountPath: /var/run/secrets/gateway, readOnly: true }

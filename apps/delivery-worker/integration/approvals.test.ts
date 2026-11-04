@@ -2,6 +2,7 @@ import { ConfigValidationError } from '@email-gateway/config';
 import {
   deliveryApprovedV1,
   type DeliveryApprovedV1,
+  type EventEnvelope,
   EventTypes,
   messageReceivedV1,
   type MessageReceivedV1,
@@ -9,12 +10,15 @@ import {
 import {
   AdvisoryLocks,
   type EventHandler,
+  HEADERS,
   OutboxPoller,
   processOnceHandler,
   uuidv7,
 } from '@email-gateway/common';
+import { PrismaClient } from '@email-gateway/database';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { FeedHandler } from '../src/approvals/approval-feed';
+import { PLANNER_CONSUMER } from '../src/approvals/delivery-approval.consumer';
 import { DevPassThroughApprover } from '../src/approvals/dev-passthrough.approver';
 import { DEV_PASSTHROUGH_REFUSAL, loadWorkerConfig } from '../src/config';
 import {
@@ -22,6 +26,8 @@ import {
   PLANNING_TX_TIMEOUT_MS,
   RECORDER_TX_TIMEOUT_MS,
 } from '../src/delivery.module';
+import { ApprovalPipeline, Broker, counter } from './support/approvals';
+import { eventually, TcpProxy, urlVia } from './support/broker';
 import { FakePostfix } from './support/fake-postfix';
 import { Fixtures, newMetrics, requireEnv, silentLogger, workerConfig } from './support/fixtures';
 import { buildWorker, FAST, type TestWorker } from './support/worker';
@@ -31,14 +37,17 @@ const postfix = new FakePostfix();
 const lockConnections: AdvisoryLocks[] = [];
 let worker: TestWorker;
 let org: bigint;
+let broker: Broker;
 
 beforeAll(async () => {
   await postfix.start();
   worker = buildWorker(fx, workerConfig({ ...FAST, ...postfix.configOverrides }));
   org = await fx.organization('approvals');
+  broker = await Broker.start();
 });
 afterEach(() => postfix.reset());
 afterAll(async () => {
+  await broker?.close();
   await worker.close();
   await postfix.stop();
   for (const locks of lockConnections) await locks.close();
@@ -88,7 +97,7 @@ const ours = <T>(
     { txTimeoutMs },
   );
 
-describe('outbox poller (R6) on the real writer', () => {
+describe('outbox poller (R6, the dev pass-through feed since step 3.2) on the real writer', () => {
   it('handles a row committed out of order inside the safety lag, then advances the cursor past both', async () => {
     const consumer = fx.consumer('poller');
     const p = poller<DeliveryApprovedV1>(
@@ -225,21 +234,19 @@ describe('outbox poller (R6) on the real writer', () => {
 });
 
 describe('development pass-through (R5) end to end', () => {
-  it('turns mail.message.received.v1 into an approval the planner plans and the scheduler reinjects', async () => {
+  it('turns mail.message.received.v1 into an approval the planner plans (via RabbitMQ) and the scheduler reinjects', async () => {
     const ptConsumer = fx.consumer('dev-passthrough');
-    const plannerConsumer = fx.consumer('dev-planner');
     const pt = poller<MessageReceivedV1>(
       ptConsumer,
       EventTypes.MessageReceived,
       messageReceivedV1,
       0,
     );
-    const planner = poller<DeliveryApprovedV1>(
-      plannerConsumer,
-      EventTypes.DeliveryApproved,
-      deliveryApprovedV1,
-      0,
-    );
+    // The planner consumes email.delivery.pending (step 3.2 Q13); the approval outbox row
+    // reaches it as the event-relay publishes it.
+    const planner = await ApprovalPipeline.start(fx, broker, worker.planner, {
+      consumer: fx.consumer('dev-planner'),
+    });
     const approver = new DevPassThroughApprover(
       pt,
       fx.prisma,
@@ -253,11 +260,7 @@ describe('development pass-through (R5) end to end', () => {
       },
       RECORDER_TX_TIMEOUT_MS,
     );
-    const planHandler = ours<DeliveryApprovedV1>(plannerConsumer, async (event, tx) => {
-      await worker.planner.plan(event, tx);
-    });
     await pt.pollOnce(ptHandler); // first start: MAX(id), never replays old mail
-    await planner.pollOnce(planHandler);
 
     // What ingestion commits: the message rows and mail.message.received.v1.
     const message = await fx.message(org, {
@@ -312,7 +315,9 @@ describe('development pass-through (R5) end to end', () => {
       approvalEventId: approvals[0]!.eventId,
     });
 
-    await planner.pollOnce(planHandler);
+    // outbox -> event-relay -> email.delivery.pending -> planner.
+    const relayed = Broker.envelopeOf(approvals[0]!) as EventEnvelope<DeliveryApprovedV1>;
+    expect(await planner.plan(broker, relayed)).toMatchObject({ status: 'planned', deliveries: 1 });
     expect(await fx.deliveries(message)).toHaveLength(1);
     await worker.reinjectOnce();
     expect(postfix.transactions.map((t) => t.rcpts.map((r) => r.address))).toEqual([
@@ -343,5 +348,219 @@ describe('development pass-through (R5) end to end', () => {
         DELIVERY_DEV_PASSTHROUGH_ENABLED: 'true',
       }).DELIVERY_DEV_PASSTHROUGH_ENABLED,
     ).toBe(true);
+  });
+});
+
+describe('approvals through RabbitMQ (step 3.2 Q8, Q13)', () => {
+  it('a duplicate approval (same envelope twice) plans once', async () => {
+    const message = await fx.message(org, {
+      recipients: [{ address: 'd1@ext-dup.test' }, { address: 'd2@ext-dup.test' }],
+    });
+    const approval = fx.approval(message);
+    const consumer = fx.consumer('dup-planner');
+    const pipe = await ApprovalPipeline.start(fx, broker, worker.planner, { consumer });
+    try {
+      await fx.issue(approval);
+      await broker.publish([approval, approval]);
+      expect([...(await pipe.settled(approval.eventId, 2))].sort()).toEqual([
+        'duplicate',
+        'handled',
+      ]);
+      const deliveries = await fx.deliveries(message);
+      expect(deliveries).toHaveLength(2);
+      const reinjections = await fx.reinjections(message);
+      // Once more, later (a relay re-drive): nothing changes.
+      expect(await pipe.plan(broker, approval)).toBe('duplicate');
+      expect(await fx.deliveries(message)).toEqual(deliveries);
+      expect(await fx.reinjections(message)).toEqual(reinjections);
+      expect(
+        await fx.prisma.messageIdempotency.count({
+          where: { consumer: PLANNER_CONSUMER, eventId: approval.eventId },
+        }),
+      ).toBe(1);
+    } finally {
+      await pipe.stop();
+    }
+    expect(await broker.depth('email.delivery.pending')).toBe(0);
+  });
+
+  it('a database outage: delay hops through email.delivery.retry and back, planned once, no dead letter', async () => {
+    const target = new URL(requireEnv('DATABASE_URL'));
+    const proxy = await TcpProxy.start(target.hostname, Number(target.port || 3306));
+    const prisma = new PrismaClient({
+      datasourceUrl: urlVia(requireEnv('DATABASE_URL'), '127.0.0.1', proxy.port),
+    });
+    const message = await fx.message(org, { recipients: [{ address: 'db@ext-outage.test' }] });
+    const approval = fx.approval(message);
+    const consumer = fx.consumer('outage-planner');
+    const deadBefore = await broker.depth('email.dead-letter');
+    const pipe = await ApprovalPipeline.start(fx, broker, worker.planner, {
+      consumer,
+      prisma,
+      // Small delays instead of 5 s .. 15 min (the topology's bounds are validated).
+      retry: { baseDelayMs: 300, maxDelayMs: 600 },
+    });
+    let sawDelayed = false;
+    try {
+      await fx.issue(approval);
+      proxy.cut();
+      await broker.publish([approval]);
+      await eventually(
+        async () => {
+          if ((await broker.depth('email.delivery.retry')) > 0) sawDelayed = true;
+          return sawDelayed && pipe.failuresOf(approval.eventId) >= 2;
+        },
+        60_000,
+        'a delay hop in email.delivery.retry',
+        25,
+      );
+      expect(await fx.deliveries(message)).toEqual([]);
+      proxy.restore();
+      expect(await pipe.settled(approval.eventId, 1, 120_000)).toEqual(['handled']);
+      const text = await pipe.metrics();
+      expect(
+        counter(text, 'amqp_consumer_retries_total', {
+          queue: 'email.delivery.pending',
+          class: 'transient',
+        }),
+      ).toBeGreaterThanOrEqual(2);
+      expect(
+        counter(text, 'amqp_consumer_retries_total', {
+          queue: 'email.delivery.pending',
+          class: 'retryable',
+        }),
+      ).toBe(0);
+      // The delay copies were published to email.delivery (routed to email.delivery.retry).
+      expect(
+        counter(text, 'amqp_publish_total', { exchange: 'email.delivery', outcome: 'confirmed' }),
+      ).toBeGreaterThanOrEqual(2);
+    } finally {
+      await pipe.stop();
+      await prisma.$disconnect();
+      await proxy.close();
+    }
+    expect(sawDelayed).toBe(true);
+    expect(await fx.deliveries(message)).toHaveLength(1);
+    expect(
+      await fx.prisma.messageIdempotency.count({
+        where: { consumer: PLANNER_CONSUMER, eventId: approval.eventId },
+      }),
+    ).toBe(1);
+    expect(await broker.depth('email.dead-letter')).toBe(deadBefore);
+    expect(await broker.depth('email.delivery.retry')).toBe(0);
+    expect(await broker.depth('email.delivery.pending')).toBe(0);
+  });
+
+  it('a deterministic failure is dead-lettered after maxAttempts with the failure headers', async () => {
+    const message = await fx.message(org, { recipients: [{ address: 'dl@ext-dead.test' }] });
+    const approval = fx.approval(message);
+    const consumer = fx.consumer('dead-planner');
+    expect(await broker.depth('email.dead-letter')).toBe(0);
+    const pipe = await ApprovalPipeline.start(fx, broker, worker.planner, {
+      consumer,
+      retry: { maxAttempts: 3, baseDelayMs: 100, maxDelayMs: 200 },
+      // Test-only: the handler fails the same way every time (a retryable failure).
+      wrap: (handler) => (event) =>
+        event.eventId === approval.eventId
+          ? Promise.reject(new Error('deterministic planner failure'))
+          : handler(event),
+    });
+    try {
+      await fx.issue(approval);
+      await broker.publish([approval]);
+      await eventually(
+        async () => (await broker.depth('email.dead-letter')) === 1,
+        60_000,
+        'the dead letter',
+      );
+      expect(pipe.failuresOf(approval.eventId)).toBe(3);
+      const text = await pipe.metrics();
+      expect(
+        counter(text, 'amqp_consumer_dead_lettered_total', {
+          queue: 'email.delivery.pending',
+          reason: 'max_attempts_exceeded',
+        }),
+      ).toBe(1);
+    } finally {
+      await pipe.stop();
+    }
+    const dead = await broker.take('email.dead-letter');
+    expect(dead).not.toBeNull();
+    expect(dead!.routingKey).toBe(
+      `dead-letter.email.delivery.pending.org.${org.toString()}.${EventTypes.DeliveryApproved}`,
+    );
+    expect(dead!.headers).toMatchObject({
+      [HEADERS.sourceQueue]: 'email.delivery.pending',
+      [HEADERS.failureReason]: 'max_attempts_exceeded',
+      [HEADERS.failureClass]: 'retryable',
+      [HEADERS.attempts]: 3,
+      [HEADERS.deadLetteredBy]: consumer,
+      [HEADERS.organizationId]: org.toString(),
+      [HEADERS.eventType]: EventTypes.DeliveryApproved,
+    });
+    // The unchanged envelope (replayable, Q9); no plan and no ledger row; a progress row tells
+    // the outbox reconciler the event was dead-lettered on purpose (review round 1).
+    expect(dead!.envelope.eventId).toBe(approval.eventId);
+    expect(
+      await fx.prisma.messageConsumerProgress.findUnique({
+        where: { consumer_eventId: { consumer, eventId: approval.eventId } },
+      }),
+    ).toMatchObject({ state: 'dead_lettered', reason: 'max_attempts_exceeded', attempt: 3 });
+    expect(await fx.deliveries(message)).toEqual([]);
+    expect(
+      await fx.prisma.messageIdempotency.count({
+        where: { consumer: PLANNER_CONSUMER, eventId: approval.eventId },
+      }),
+    ).toBe(0);
+    expect(await broker.depth('email.delivery.pending')).toBe(0);
+  });
+
+  it('a forged approval (no outbox row) or a real event id with another payload is dead-lettered, never planned', async () => {
+    // Review round 1: any broker user that can publish to email.delivery could mint approvals;
+    // the planner plans only approvals the gateway issued (a matching message_outbox row).
+    const message = await fx.message(org, { recipients: [{ address: 'f1@ext-forged.test' }] });
+    const forged = fx.approval(message); // never issued
+    const real = fx.approval(message);
+    await fx.issue(real);
+    const tampered = { ...real, payload: { ...real.payload, deliverySeq: 7 } };
+    const consumer = fx.consumer('forged-planner');
+    const deadBefore = await broker.depth('email.dead-letter');
+    const pipe = await ApprovalPipeline.start(fx, broker, worker.planner, { consumer });
+    try {
+      await broker.publish([forged, tampered]);
+      await eventually(
+        async () => (await broker.depth('email.dead-letter')) === deadBefore + 2,
+        30_000,
+        'two dead letters',
+      );
+      expect(await fx.deliveries(message)).toEqual([]);
+      expect(pipe.failuresOf(forged.eventId)).toBe(1);
+      expect(pipe.failuresOf(real.eventId)).toBe(1);
+      // The genuine approval is still planned (the tampered copy left no ledger row).
+      expect(await pipe.plan(broker, real)).toMatchObject({ status: 'planned', deliveries: 1 });
+    } finally {
+      await pipe.stop();
+    }
+    const reasons = new Map<string, unknown>();
+    for (let i = 0; i < 2; i += 1) {
+      const dead = await broker.take('email.dead-letter');
+      reasons.set(
+        `${dead!.envelope.eventId}/${String((dead!.envelope.payload as { deliverySeq: number }).deliverySeq)}`,
+        dead!.headers[HEADERS.failureReason],
+      );
+    }
+    expect(reasons).toEqual(
+      new Map([
+        [`${forged.eventId}/0`, 'approval_not_issued'],
+        [`${real.eventId}/7`, 'approval_mismatch'],
+      ]),
+    );
+    expect(
+      await fx.prisma.messageConsumerProgress.findUnique({
+        where: { consumer_eventId: { consumer, eventId: forged.eventId } },
+      }),
+    ).toMatchObject({ state: 'dead_lettered', reason: 'approval_not_issued' });
+    expect(await fx.deliveries(message)).toHaveLength(1);
+    expect(await broker.depth('email.delivery.pending')).toBe(0);
   });
 });

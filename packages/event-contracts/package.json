@@ -11,7 +11,8 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run --passWithNoTests",
+    "topology:export": "pnpm run build && node dist/cli/export-definitions.js ../../infrastructure/rabbitmq/definitions.json && prettier --write ../../infrastructure/rabbitmq/definitions.json"
   },
   "dependencies": {
     "zod": "^4.1.5",

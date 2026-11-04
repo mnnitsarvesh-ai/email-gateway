@@ -11,8 +11,15 @@ import { execFileSync } from 'node:child_process';
  * live worker is PAUSED for the duration of the suites and resumed afterwards
  * (`docker compose pause|unpause email-worker`, or SIGSTOP/SIGCONT of the process listening on
  * EMAIL_WORKER_HOST_PORT). Nothing is stopped, restarted or reconfigured.
+ *
+ * Step 3.2 (WP5 fix): the live `event-relay` is paused too. It publishes every unpublished outbox
+ * row to the real vhost and marks it, so it would publish (and mark) the fixtures' rows that the
+ * suites assert on (`published_at IS NULL`) or publish through their throwaway vhost themselves.
  */
-const PORT = Number(process.env.EMAIL_WORKER_HOST_PORT ?? 3020);
+const SERVICES: { service: string; port: number }[] = [
+  { service: 'email-worker', port: Number(process.env.EMAIL_WORKER_HOST_PORT ?? 3020) },
+  { service: 'event-relay', port: Number(process.env.EVENT_RELAY_HOST_PORT ?? 3070) },
+];
 const COMPOSE = ['compose', '--project-name', process.env.COMPOSE_PROJECT_NAME || 'email-gateway'];
 
 function run(file: string, args: string[]): string {
@@ -23,34 +30,45 @@ function run(file: string, args: string[]): string {
   }
 }
 
-function containerRunning(): boolean {
-  return run('docker', [...COMPOSE, 'ps', '--status', 'running', '--services'])
-    .split('\n')
-    .map((l) => l.trim())
-    .includes('email-worker');
+function runningContainers(): Set<string> {
+  return new Set(
+    run('docker', [...COMPOSE, 'ps', '--status', 'running', '--services'])
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0),
+  );
 }
 
-function hostPids(): number[] {
-  return run('lsof', ['-nP', `-iTCP:${PORT}`, '-sTCP:LISTEN', '-t'])
+function hostPids(port: number): number[] {
+  return run('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'])
     .split('\n')
     .map((l) => Number(l.trim()))
     .filter((n) => Number.isInteger(n) && n > 0 && n !== process.pid);
 }
 
 export default function setup(): () => void {
-  if (containerRunning()) {
-    run('docker', [...COMPOSE, 'pause', 'email-worker']);
-    process.stderr.write('[email-worker integration] paused the email-worker container\n');
-    return () => {
-      run('docker', [...COMPOSE, 'unpause', 'email-worker']);
-    };
+  const running = runningContainers();
+  const paused: string[] = [];
+  const stopped: number[] = [];
+  for (const { service, port } of SERVICES) {
+    if (running.has(service)) {
+      run('docker', [...COMPOSE, 'pause', service]);
+      paused.push(service);
+      continue;
+    }
+    for (const pid of hostPids(port)) {
+      process.kill(pid, 'SIGSTOP');
+      stopped.push(pid);
+    }
   }
-  const pids = hostPids();
-  for (const pid of pids) process.kill(pid, 'SIGSTOP');
-  if (pids.length > 0)
-    process.stderr.write('[email-worker integration] paused the host email-worker\n');
+  if (paused.length > 0 || stopped.length > 0) {
+    process.stderr.write(
+      `[email-worker integration] paused ${[...paused, ...stopped.map(() => 'host process')].join(', ')}\n`,
+    );
+  }
   return () => {
-    for (const pid of pids) {
+    for (const service of paused) run('docker', [...COMPOSE, 'unpause', service]);
+    for (const pid of stopped) {
       try {
         process.kill(pid, 'SIGCONT');
       } catch {

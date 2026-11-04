@@ -70,11 +70,15 @@ describe.skipIf(gate.skip)('SMTP stack: concurrency (suite 9)', { timeout: 900_0
     ).toBe(MESSAGES);
     // Step 3.1: the email-worker adds the parsed parts under org/{id}/part/; EMLs are counted.
     expect(await fx.emlObjectKeys(org)).toHaveLength(MESSAGES);
-    const distinctQueueIds = await fx.prisma.emailMessage.groupBy({
-      by: ['mtaQueueId'],
+    // Postfix queue ids are case-sensitive (base 52), but `mta_queue_id` uses the table's
+    // case-insensitive collation, so a SQL GROUP BY can merge two ids that differ only in case
+    // (seen: 4jKFxV5fmHz12JnW / 4jKFxV5fMHz12Jnw). Distinct ids are counted case-sensitively.
+    const queueIds = await fx.prisma.emailMessage.findMany({
       where: { organizationId: org },
+      select: { mtaQueueId: true },
     });
-    expect(distinctQueueIds).toHaveLength(MESSAGES);
+    expect(queueIds.every((m) => m.mtaQueueId !== null)).toBe(true);
+    expect(new Set(queueIds.map((m) => m.mtaQueueId))).toHaveProperty('size', MESSAGES);
 
     const seconds = (ms: number) => (ms / 1000).toFixed(1);
     process.stdout.write(

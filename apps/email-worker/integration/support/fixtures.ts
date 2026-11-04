@@ -213,6 +213,30 @@ export class Fixtures {
     };
   }
 
+  /**
+   * A `mail.message.received.v1` envelope of a message that does not exist in the organization
+   * (the stage records `message_missing` and a ledger row; used for queue backlogs).
+   */
+  missingReceived(organizationId: bigint, n: number): EventEnvelope<MessageReceivedV1> {
+    const receivedAt = new Date();
+    return this.received({
+      messageId: 9_000_000_000_000n + BigInt(n),
+      receivedAt,
+      organizationId,
+      direction: 'inbound',
+      emlObjectKey: `org/${organizationId.toString()}/eml/it/missing-${String(n)}.eml`,
+      emlSha256: 'a'.repeat(64),
+      sizeBytes: 1,
+    });
+  }
+
+  /** Ledger rows of a consumer for these events. */
+  ledgerRows(consumer: string, eventIds: string[]): Promise<number> {
+    return this.prisma.messageIdempotency.count({
+      where: { consumer, eventId: { in: eventIds } },
+    });
+  }
+
   /** Writes the event to message_outbox (as step 2.2 ingestion does). */
   async outboxReceived(event: EventEnvelope<MessageReceivedV1>): Promise<bigint> {
     const row = await this.prisma.messageOutbox.create({
@@ -232,14 +256,19 @@ export class Fixtures {
 
   /** The stage wired exactly as MimeIngestionModule does, with a per-run consumer. */
   ingestion(
-    options: { overrides?: Record<string, string>; s3Client?: S3Client; consumer?: string } = {},
+    options: {
+      overrides?: Record<string, string>;
+      s3Client?: S3Client;
+      consumer?: string;
+      prisma?: PrismaClient;
+    } = {},
   ): TestIngestion {
     const config = workerConfig(options.overrides);
     const registry = new MetricsService({ service: `email-worker-it-${randomUUID().slice(0, 6)}` });
     const metrics = new MimeMetrics(registry);
     const service = createMimeIngestionService({
       config,
-      prisma: this.prisma,
+      prisma: options.prisma ?? this.prisma,
       s3: { client: options.s3Client ?? this.s3.client, mailBucket: this.s3.mailBucket },
       metrics,
       logger: silentLogger,

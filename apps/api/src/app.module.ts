@@ -3,6 +3,7 @@ import {
   CorrelationModule,
   DatabaseModule,
   HealthModule,
+  MetricsModule,
   PrismaReadService,
   PrismaService,
   RedisModule,
@@ -16,6 +17,7 @@ import type { ApiConfig } from './config';
 import { MetaModule } from './meta/meta.module';
 import { ApiKeysModule } from './modules/api-keys/api-keys.module';
 import { AuthModule } from './modules/auth/auth.module';
+import { DeadLettersModule } from './modules/dead-letters/dead-letters.module';
 import { DeliveriesModule } from './modules/deliveries/deliveries.module';
 import { DomainDestinationsModule } from './modules/domain-destinations/domain-destinations.module';
 import { DomainsModule } from './modules/domains/domains.module';
@@ -50,6 +52,8 @@ export class AppModule {
           service: { name: SERVICE_NAME, version: config.SERVICE_VERSION },
           indicators: [PrismaService, PrismaReadService, RedisService, S3Service],
         }),
+        // Prometheus series of the api (GET /metrics, outside the /api prefix; step 3.2 §5.3).
+        MetricsModule.forRoot({ service: SERVICE_NAME }),
         ApiCommonModule,
         // Registers the global AuthGuard → PermissionsGuard and the override audit interceptor.
         AuthModule,
@@ -65,6 +69,8 @@ export class AppModule {
         // Step 2.3: destination servers and per-recipient delivery status.
         DomainDestinationsModule,
         DeliveriesModule,
+        // Step 3.2 Q9: dead-letter view and audited replay (platform).
+        DeadLettersModule,
       ],
       providers: [{ provide: API_CONFIG, useValue: config }],
       exports: [API_CONFIG],

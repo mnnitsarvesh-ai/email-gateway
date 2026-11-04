@@ -6,16 +6,18 @@ import { withTransactionDefaults } from './db';
 export type HandleOutcome = 'handled' | 'duplicate';
 
 /**
- * Handles one event. Must be idempotent (feeds deliver at least once) and throws on a retryable
- * failure: the feed then redelivers the event later and never skips it.
+ * Handles one event. Must be idempotent (feeds deliver at least once) and throws on a failure:
+ * the feed then redelivers the event later (RabbitMQ: a retry hop or, after the queue's attempt
+ * limit or for a `NonRetryableError`, a dead letter) and never acks it without a result.
  */
 export type EventHandler<T> = (event: EventEnvelope<T>) => Promise<HandleOutcome>;
 
 /**
- * The transport that delivers events of one type to one consumer (step 2.3 R5, step 3.1 M2).
- * Until step 3.2 it is the outbox poller (`OutboxPoller`, `ShardedOutboxFeed`); **step 3.2
- * replaces it with a RabbitMQ consumer of the same event behind this interface**, with the
- * handler unchanged.
+ * The transport that delivers events of one type to one consumer (step 2.3 R5, step 3.1 M2,
+ * step 3.2 Q13). Since step 3.2 the production feed is the RabbitMQ `QueueConsumer`
+ * (`messaging/consumer.ts`: manual acks, retry with backoff, dead-letter) fed by the outbox relay
+ * (`apps/event-relay`); `OutboxPoller` remains only for the delivery-worker dev pass-through
+ * (development only, not a pipeline stage). Handlers are the same for both.
  */
 export interface EventFeed<T> {
   /** Starts delivering events to `handler` (in the background). */

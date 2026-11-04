@@ -263,6 +263,7 @@ describe('runPartitionMaintenance', () => {
     });
     expect(result.purged).toEqual([
       { table: 'message_idempotency', rows: 23, batches: 3, capped: false },
+      { table: 'message_consumer_progress', rows: 0, batches: 1, capped: false },
     ]);
     expect(executed.filter((s) => s.includes('message_idempotency'))).toHaveLength(3);
     expect(sleep).toHaveBeenCalledTimes(2);
@@ -270,6 +271,11 @@ describe('runPartitionMaintenance', () => {
       .mocked(client.$executeRawUnsafe)
       .mock.calls.find(([sql]) => sql.includes('message_idempotency'))!;
     expect(idempotencyCall[1]).toBe('2026-10-11 06:00:00');
+    const progressCall = vi
+      .mocked(client.$executeRawUnsafe)
+      .mock.calls.find(([sql]) => sql.includes('message_consumer_progress'))!;
+    expect(progressCall[0]).toContain('`updated_at` < ?');
+    expect(progressCall[1]).toBe('2026-10-11 06:00:00');
   });
 
   it('purges the registry in id ranges from MIN(id), keeping referenced rows, with a cap', async () => {
@@ -368,7 +374,10 @@ describe('runPartitionMaintenance', () => {
       now: NOW,
       specs: [],
     });
-    expect(result.purged.map((p) => p.table)).toEqual(['message_idempotency']);
+    expect(result.purged.map((p) => p.table)).toEqual([
+      'message_idempotency',
+      'message_consumer_progress',
+    ]);
     expect(executed.some((s) => s.includes('message_identities'))).toBe(false);
   });
 });

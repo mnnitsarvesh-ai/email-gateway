@@ -1,12 +1,13 @@
 import {
+  amqpUrlListSchema,
   baseConfigSchema,
   databaseConfigSchema,
   httpConfigSchema,
   loadConfig,
-  rabbitmqConfigSchema,
   redisConfigSchema,
   s3ConfigSchema,
 } from '@email-gateway/config';
+import { HOLD_MAX_DELAY_MS, queueDefinition } from '@email-gateway/event-contracts';
 import { MAX_PART_PATH_CHARS } from '@email-gateway/mime-parser';
 import { z } from 'zod';
 
@@ -17,11 +18,16 @@ const flag = z.enum(['true', 'false', '1', '0']).transform((v) => v === 'true' |
 /** S3 multipart uploads need parts of at least 5 MiB (except the last). */
 export const MIN_S3_PART_SIZE_BYTES = 5 * 1024 * 1024;
 
+/** The queue the stage consumes (step 3.2 Q13): `mail.message.received.v1`, work policy. */
+export const MIME_QUEUE = 'email.received';
+
 /**
- * smtp-adapter's ingestion transaction budget (step 2.2 `INGEST_DB_TIMEOUT_MS` ceiling): an outbox
- * row may commit this long after its id was allocated, so the safety lag must exceed it.
+ * Counted (retryable) failures after which the consumer dead-letters a delivery of
+ * `email.received` (topology v1 retry policy, step 3.2 Q8). MIME_MAX_ATTEMPTS must stay below
+ * it, so the stage's own poison guard (3.1 M3.4) finalizes `max_attempts_exceeded` first and a
+ * received message always ends with a parse row instead of a dead letter.
  */
-export const MIN_OUTBOX_SAFETY_LAG_MS = 30_000;
+export const MIME_QUEUE_MAX_ATTEMPTS: number = queueDefinition(MIME_QUEUE).retry?.maxAttempts ?? 0;
 
 /** `email_attachments.part_path` is VARCHAR(128) (migration `mime_ingestion`). */
 export const PART_PATH_COLUMN_CHARS = MAX_PART_PATH_CHARS;
@@ -42,18 +48,17 @@ export function worstCasePartPathChars(maxDepth: number, maxParts: number): numb
 export const mimeConfigShape = {
   /** Role flag (M1): scanning-only replicas of later steps switch the parse stage off. */
   MIME_INGESTION_ENABLED: flag.default(true),
-  /** Events handled at the same time by one replica (per shard poller page). */
+  /**
+   * Events handled at the same time by one replica: the prefetch of its `email.received`
+   * consumer (step 3.2 Q13, Q16), so also the bound on unacknowledged deliveries per replica.
+   */
   MIME_CONCURRENCY: positiveInt.max(64).default(4),
 
-  // Interim outbox feed (M2).
-  MIME_OUTBOX_POLL_INTERVAL_MS: int.min(10).default(1000),
-  MIME_OUTBOX_SAFETY_LAG_MS: int.min(0).default(120_000),
-  MIME_OUTBOX_BATCH_SIZE: positiveInt.max(5000).default(100),
-  MIME_OUTBOX_SHARDS: positiveInt.max(256).default(1),
-  MIME_OUTBOX_MAX_HELD_SHARDS: positiveInt.max(256).default(1),
+  // Retry backoff of the queue consumer (step 3.2 Q8 `hold`: a held delivery keeps its prefetch
+  // slot for the delay, so the maximum is capped at 60 s).
   MIME_RETRY_BASE_MS: positiveInt.default(1000),
-  MIME_RETRY_MAX_MS: positiveInt.default(60_000),
-  /** Poison-message guard (M3.4, M12). */
+  MIME_RETRY_MAX_MS: positiveInt.max(HOLD_MAX_DELAY_MS).default(60_000),
+  /** Poison-message guard (M3.4, M12); below the queue's attempt limit (step 3.2 Q13). */
   MIME_MAX_ATTEMPTS: positiveInt.max(1000).default(5),
 
   // Budgets of one attempt.
@@ -92,15 +97,15 @@ type MimeShapeConfig = {
 };
 
 /**
- * Worst-case parse buffers of one replica (design M5): every shard poller it holds runs up to
- * MIME_CONCURRENCY parses, and each parse holds one part upload (part size x (queue + 1)) and at
- * most one zip central directory.
+ * Worst-case parse buffers of one replica (design M5, step 3.2 Q13): its queue consumer runs at
+ * most MIME_CONCURRENCY (= prefetch) parses, and each parse holds one part upload (part size x
+ * (queue + 1)) and at most one zip central directory.
  */
 export function parseMemoryBytes(cfg: MimeShapeConfig): number {
   const perParse =
     cfg.MIME_S3_PART_SIZE_BYTES * (cfg.MIME_S3_QUEUE_SIZE + 1) +
     cfg.MIME_ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES;
-  return cfg.MIME_CONCURRENCY * cfg.MIME_OUTBOX_MAX_HELD_SHARDS * perParse;
+  return cfg.MIME_CONCURRENCY * perParse;
 }
 
 /** The cross-field refusals of design M5 (startup fails with every violated rule listed). */
@@ -143,17 +148,15 @@ export function validateMimeConfig(cfg: MimeShapeConfig, ctx: z.RefinementCtx): 
   if (cfg.MIME_FILENAME_MAX_CHARS < 16 || cfg.MIME_FILENAME_MAX_CHARS > 240) {
     refuse('MIME_FILENAME_MAX_CHARS', 'must be between 16 and 240');
   }
-  if (cfg.MIME_OUTBOX_SAFETY_LAG_MS < MIN_OUTBOX_SAFETY_LAG_MS) {
-    refuse(
-      'MIME_OUTBOX_SAFETY_LAG_MS',
-      `must be at least ${MIN_OUTBOX_SAFETY_LAG_MS} (above smtp-adapter's ingestion transaction budget)`,
-    );
-  }
-  if (cfg.MIME_OUTBOX_MAX_HELD_SHARDS > cfg.MIME_OUTBOX_SHARDS) {
-    refuse('MIME_OUTBOX_MAX_HELD_SHARDS', 'must not exceed MIME_OUTBOX_SHARDS');
-  }
   if (cfg.MIME_RETRY_MAX_MS < cfg.MIME_RETRY_BASE_MS) {
     refuse('MIME_RETRY_MAX_MS', 'must be at least MIME_RETRY_BASE_MS');
+  }
+  if (cfg.MIME_MAX_ATTEMPTS >= MIME_QUEUE_MAX_ATTEMPTS) {
+    refuse(
+      'MIME_MAX_ATTEMPTS',
+      `must be below ${String(MIME_QUEUE_MAX_ATTEMPTS)}, the attempt limit of queue ${MIME_QUEUE} ` +
+        '(the parse poison guard must finalize before the consumer dead-letters)',
+    );
   }
   if (cfg.MIME_S3_TIMEOUT_MS >= cfg.MIME_PARSE_TIMEOUT_MS) {
     // A stalled S3 call must fail as an infrastructure retry before the parse budget runs out.
@@ -162,16 +165,25 @@ export function validateMimeConfig(cfg: MimeShapeConfig, ctx: z.RefinementCtx): 
   if (parseMemoryBytes(cfg) > cfg.MIME_MEMORY_BUDGET_BYTES) {
     refuse(
       'MIME_MEMORY_BUDGET_BYTES',
-      'MIME_CONCURRENCY x MIME_OUTBOX_MAX_HELD_SHARDS x (MIME_S3_PART_SIZE_BYTES x ' +
-        '(MIME_S3_QUEUE_SIZE + 1) + MIME_ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES) exceeds the budget',
+      'MIME_CONCURRENCY x (MIME_S3_PART_SIZE_BYTES x (MIME_S3_QUEUE_SIZE + 1) + ' +
+        'MIME_ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES) exceeds the budget',
     );
   }
 }
 
+/**
+ * RabbitMQ (step 3.2 Q10): the email-worker's own least-privilege role user on the topology
+ * vhost (read `email.received`, write `email.ingestion` / `email.events`), one URL per cluster
+ * node, comma-separated (`RABBITMQ_EMAIL_WORKER_URL_FILE` for a mounted secret).
+ */
+export const amqpConfigShape = {
+  RABBITMQ_EMAIL_WORKER_URL: amqpUrlListSchema,
+};
+
 const objectSchema = baseConfigSchema
   .extend(httpConfigSchema(3020).shape)
   .extend(databaseConfigSchema.shape)
-  .extend(rabbitmqConfigSchema.shape)
+  .extend(amqpConfigShape)
   .extend(redisConfigSchema.shape)
   .extend(s3ConfigSchema.shape)
   .extend(mimeConfigShape);

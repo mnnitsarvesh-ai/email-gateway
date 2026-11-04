@@ -17,7 +17,7 @@
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
     "test:e2e": "turbo run test:e2e",
-    "test:integration": "turbo run build --filter=@email-gateway/api^... --filter=@email-gateway/mail-routing... --filter=@email-gateway/delivery-worker^... --filter=@email-gateway/email-worker^... --output-logs=errors-only && pnpm --filter @email-gateway/integration-tests run test:integration && pnpm --filter @email-gateway/api run test:integration && pnpm --filter @email-gateway/smtp-adapter run test:integration && pnpm --filter @email-gateway/mail-routing run test:integration && pnpm --filter @email-gateway/delivery-worker run --if-present test:integration && pnpm --filter @email-gateway/email-worker run --if-present test:integration",
+    "test:integration": "turbo run build --filter=@email-gateway/api^... --filter=@email-gateway/mail-routing... --filter=@email-gateway/delivery-worker^... --filter=@email-gateway/email-worker^... --filter=@email-gateway/event-relay^... --output-logs=errors-only && pnpm --filter @email-gateway/integration-tests run test:integration && pnpm --filter @email-gateway/api run test:integration && pnpm --filter @email-gateway/smtp-adapter run test:integration && pnpm --filter @email-gateway/mail-routing run test:integration && pnpm --filter @email-gateway/delivery-worker run --if-present test:integration && pnpm --filter @email-gateway/email-worker run --if-present test:integration && pnpm --filter @email-gateway/event-relay run --if-present test:integration",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "db:generate": "pnpm --filter @email-gateway/database run generate",
@@ -31,6 +31,7 @@
     "env:init": "node scripts/init-env.mjs",
     "infra:up": "docker compose up -d --wait",
     "infra:down": "docker compose down",
+    "rabbitmq:init": "node --env-file=.env infrastructure/rabbitmq/init.mjs --users",
     "stack:up": "docker compose --profile apps up -d --build --wait",
     "stack:down": "docker compose --profile apps --profile analytics --profile observability down"
   },

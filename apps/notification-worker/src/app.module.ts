@@ -4,10 +4,7 @@ import {
   DatabaseModule,
   HealthModule,
   PrismaService,
-  RabbitMqModule,
-  RabbitMqService,
 } from '@email-gateway/common';
-import { QUEUES } from '@email-gateway/event-contracts';
 import type { WorkerConfig } from './config';
 
 export const SERVICE_NAME = 'notification-worker';
@@ -15,9 +12,11 @@ export const SERVICE_NAME = 'notification-worker';
 /**
  * Notification Service: quarantine digests, admin alerts and end-user notifications.
  *
- * Phase 0: connects to its dependencies, asserts its queue topology and exposes health probes.
- * Consumers are added in later phases; each must ack only after its effects are committed and
- * use `processOnce` from @email-gateway/database for idempotency.
+ * Phase 0: connects to its dependencies and exposes health probes. It consumes nothing yet, so
+ * since step 3.2 (docs/plan/steps/07-rabbitmq.md Q10) it does not connect to RabbitMQ at all and
+ * its readiness has no `rabbitmq` check. Its own step (6.2) adds a least-privilege role user, its
+ * queue and its `QueueConsumer` (`AmqpModule` from @email-gateway/common), which acks only after
+ * its effects committed through `processOnce` (@email-gateway/database).
  */
 @Module({})
 export class AppModule {
@@ -27,15 +26,9 @@ export class AppModule {
       imports: [
         CorrelationModule,
         DatabaseModule.forRoot({ url: config.DATABASE_URL }),
-        RabbitMqModule.forRoot({
-          url: config.RABBITMQ_URL,
-          prefetch: config.RABBITMQ_PREFETCH,
-          queues: [QUEUES.notification],
-          connectionName: SERVICE_NAME,
-        }),
         HealthModule.forRoot({
           service: { name: SERVICE_NAME, version: config.SERVICE_VERSION },
-          indicators: [PrismaService, RabbitMqService],
+          indicators: [PrismaService],
         }),
       ],
     };

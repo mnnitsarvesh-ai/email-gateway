@@ -8,6 +8,8 @@
 #   docker compose --profile observability up -d --wait    # + OTel Collector, Prometheus, Grafana
 #   docker compose --profile smtp-test up -d --wait # + test-only SMTP sinks, test PKI, DNS,
 #                                                   #   client tools and the reinject-forwarder
+#   docker compose --profile rabbitmq-cluster up -d --wait rabbitmq-node1 rabbitmq-node2 \
+#     rabbitmq-node3                                # TEST-ONLY 3-node broker (node-failure test)
 #
 # Every published port binds to 127.0.0.1 only. Credentials come from .env (never defaults).
 # MySQL runs as a GTID primary (`mysql`, writer) plus a read replica (`mysql-replica`); only the
@@ -26,6 +28,15 @@
 # Mail routing (step 2.3, docs/deployment/mail-routing.md): the delivery-worker reinjects approved
 # mail into postfix-outbound 10026 (tenant destinations) / 10027 (Internet MX, transport_maps
 # bypassed) and reads postfix-outbound's delivery log (${POSTFIX_OUTBOUND_LOG_DIR}, read-only).
+#
+# Messaging (step 3.2, docs/architecture/messaging-topology.md): `rabbitmq-init` (one-shot,
+# default profile) provisions vhost ${RABBITMQ_VHOST} from infrastructure/rabbitmq/definitions.json
+# (6 exchanges, 14 quorum queues, bindings, policies) and the least-privilege role users, and
+# removes the empty ADR-0005 objects on vhost "/". Every app waits for it. Services never declare
+# topology and each one gets only its own role URL (no RABBITMQ_URL): email-worker
+# RABBITMQ_EMAIL_WORKER_URL, delivery-worker RABBITMQ_DELIVERY_WORKER_URL, api RABBITMQ_OPS_URL,
+# event-relay (outbox relay and reconciler, ADR-0023) RABBITMQ_RELAY_URL. policy-engine,
+# archive-worker and notification-worker consume nothing yet and do not connect to RabbitMQ.
 
 name: ${COMPOSE_PROJECT_NAME:-email-gateway}
 
@@ -35,6 +46,7 @@ x-node-service: &node-service
   depends_on: &app-deps
     db-migrate: { condition: service_completed_successfully }
     rabbitmq: { condition: service_healthy }
+    rabbitmq-init: { condition: service_completed_successfully }
     redis: { condition: service_healthy }
     minio-init: { condition: service_completed_successfully }
 
@@ -46,7 +58,6 @@ x-node-env: &node-env
   SERVICE_VERSION: ${SERVICE_VERSION:-0.1.0-local}
   HTTP_HOST: 0.0.0.0
   DATABASE_URL: mysql://${MYSQL_APP_USER:?}:${MYSQL_APP_PASSWORD:?}@mysql:3306/${MYSQL_DATABASE:?}
-  RABBITMQ_URL: amqp://${RABBITMQ_USER:?}:${RABBITMQ_PASSWORD:?}@rabbitmq:5672
   REDIS_URL: redis://:${REDIS_PASSWORD:?}@redis:6379/0
   S3_REGION: ${S3_REGION:-ap-south-1}
   S3_ENDPOINT: http://minio:9000
@@ -56,6 +67,23 @@ x-node-env: &node-env
   S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:?}
   S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?}
   OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+
+x-rabbitmq-cluster-node: &rabbitmq-cluster-node
+  image: rabbitmq:4.1-management-alpine
+  profiles: [rabbitmq-cluster]
+  restart: 'no'
+  mem_limit: 448m
+  entrypoint: ['sh', '/cluster-entrypoint.sh']
+  environment:
+    RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:?}
+    RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?}
+    RABBITMQ_CLUSTER_ERLANG_COOKIE: ${RABBITMQ_CLUSTER_ERLANG_COOKIE:?append the RabbitMQ keys from .env.example}
+  healthcheck:
+    test: ['CMD', 'rabbitmq-diagnostics', '-q', 'check_port_connectivity']
+    interval: 10s
+    timeout: 10s
+    start_period: 60s
+    retries: 12
 
 x-node-healthcheck: &node-healthcheck
   interval: 10s
@@ -165,6 +193,7 @@ services:
       [
         '127.0.0.1:${RABBITMQ_HOST_PORT:-5672}:5672',
         '127.0.0.1:${RABBITMQ_MGMT_HOST_PORT:-15672}:15672',
+        '127.0.0.1:${RABBITMQ_PROMETHEUS_HOST_PORT:-15692}:15692',
       ]
     healthcheck:
       test: ['CMD', 'rabbitmq-diagnostics', '-q', 'check_port_connectivity']
@@ -172,6 +201,29 @@ services:
       timeout: 10s
       start_period: 30s
       retries: 10
+
+  # Topology v1 and role users (step 3.2 Q5, Q10). Idempotent: re-running it changes nothing.
+  # The ADR-0005 queues/exchanges on "/" are deleted only when empty (otherwise a warning).
+  rabbitmq-init:
+    image: node:22-bookworm-slim
+    command: ['node', '/rabbitmq/init.mjs', '--users', '--cleanup-legacy']
+    environment:
+      RABBITMQ_MGMT_URL: http://rabbitmq:15672
+      RABBITMQ_USER: ${RABBITMQ_USER:?}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?}
+      RABBITMQ_VHOST: ${RABBITMQ_VHOST:-email-gateway}
+      RABBITMQ_RELAY_USER: ${RABBITMQ_RELAY_USER:-eg-relay}
+      RABBITMQ_RELAY_PASSWORD: ${RABBITMQ_RELAY_PASSWORD:?append the RabbitMQ keys from .env.example}
+      RABBITMQ_EMAIL_WORKER_USER: ${RABBITMQ_EMAIL_WORKER_USER:-eg-email-worker}
+      RABBITMQ_EMAIL_WORKER_PASSWORD: ${RABBITMQ_EMAIL_WORKER_PASSWORD:?append the RabbitMQ keys from .env.example}
+      RABBITMQ_DELIVERY_WORKER_USER: ${RABBITMQ_DELIVERY_WORKER_USER:-eg-delivery-worker}
+      RABBITMQ_DELIVERY_WORKER_PASSWORD: ${RABBITMQ_DELIVERY_WORKER_PASSWORD:?append the RabbitMQ keys from .env.example}
+      RABBITMQ_OPS_USER: ${RABBITMQ_OPS_USER:-eg-ops}
+      RABBITMQ_OPS_PASSWORD: ${RABBITMQ_OPS_PASSWORD:?append the RabbitMQ keys from .env.example}
+    volumes: ['./infrastructure/rabbitmq:/rabbitmq:ro']
+    depends_on:
+      rabbitmq: { condition: service_healthy }
+    restart: 'no'
 
   redis:
     image: redis:7.4-alpine
@@ -636,6 +688,9 @@ services:
       <<: *node-env
       HTTP_PORT: 3000
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3001}
+      # Dead-letter replay and queue stats (step 3.2 Q9): role user eg-ops.
+      RABBITMQ_OPS_URL: amqp://${RABBITMQ_OPS_USER:-eg-ops}:${RABBITMQ_OPS_PASSWORD:?append the RabbitMQ keys from .env.example}@rabbitmq:5672/${RABBITMQ_VHOST:-email-gateway}
+      DEAD_LETTER_REPLAY_SCAN_MAX: ${DEAD_LETTER_REPLAY_SCAN_MAX:-10000}
       # Only the api reads from the replica (control-plane reads). Data-plane services are writer-only.
       DATABASE_READ_URL: mysql://${MYSQL_READER_USER:?}:${MYSQL_READER_PASSWORD:?}@mysql-replica:3306/${MYSQL_DATABASE:?}
       DATABASE_READ_MAX_LAG_SECONDS: ${DATABASE_READ_MAX_LAG_SECONDS:-10}
@@ -794,17 +849,14 @@ services:
     environment:
       <<: *node-env
       HTTP_PORT: 3020
+      # Consumes email.received (step 3.2): role user eg-email-worker.
+      RABBITMQ_EMAIL_WORKER_URL: amqp://${RABBITMQ_EMAIL_WORKER_USER:-eg-email-worker}:${RABBITMQ_EMAIL_WORKER_PASSWORD:?append the RabbitMQ keys from .env.example}@rabbitmq:5672/${RABBITMQ_VHOST:-email-gateway}
       RSPAMD_URL: http://rspamd:11333
       CLAMAV_HOST: clamav
       CLAMAV_PORT: 3310
       # MIME ingestion (step 3.1, docs/plan/steps/06-mime-ingestion.md §5).
       MIME_INGESTION_ENABLED: ${MIME_INGESTION_ENABLED:-true}
       MIME_CONCURRENCY: ${MIME_CONCURRENCY:-4}
-      MIME_OUTBOX_POLL_INTERVAL_MS: ${MIME_OUTBOX_POLL_INTERVAL_MS:-1000}
-      MIME_OUTBOX_SAFETY_LAG_MS: ${MIME_OUTBOX_SAFETY_LAG_MS:-120000}
-      MIME_OUTBOX_BATCH_SIZE: ${MIME_OUTBOX_BATCH_SIZE:-100}
-      MIME_OUTBOX_SHARDS: ${MIME_OUTBOX_SHARDS:-1}
-      MIME_OUTBOX_MAX_HELD_SHARDS: ${MIME_OUTBOX_MAX_HELD_SHARDS:-1}
       MIME_RETRY_BASE_MS: ${MIME_RETRY_BASE_MS:-1000}
       MIME_RETRY_MAX_MS: ${MIME_RETRY_MAX_MS:-60000}
       MIME_MAX_ATTEMPTS: ${MIME_MAX_ATTEMPTS:-5}
@@ -880,6 +932,9 @@ services:
     environment:
       <<: *node-env
       HTTP_PORT: 3040
+      # Consumes email.delivery.pending (step 3.2): role user eg-delivery-worker.
+      RABBITMQ_DELIVERY_WORKER_URL: amqp://${RABBITMQ_DELIVERY_WORKER_USER:-eg-delivery-worker}:${RABBITMQ_DELIVERY_WORKER_PASSWORD:?append the RabbitMQ keys from .env.example}@rabbitmq:5672/${RABBITMQ_VHOST:-email-gateway}
+      DELIVERY_APPROVAL_PREFETCH: ${DELIVERY_APPROVAL_PREFETCH:-4}
       # Mail routing and delivery (step 2.3, docs/plan/steps/05-routing.md §5). Container values:
       # reinjection straight into postfix-outbound (on the host: the reinject-forwarder ports).
       DELIVERY_REINJECT_HOST: postfix-outbound
@@ -932,6 +987,52 @@ services:
           'node',
           '-e',
           "fetch('http://127.0.0.1:3040/health/ready').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))",
+        ]
+
+  # Outbox relay and reconciliation (step 3.2 Q11, Q12; ADR-0023): writer only, role user eg-relay.
+  event-relay:
+    <<: *node-service
+    build:
+      {
+        context: .,
+        dockerfile: infrastructure/docker/node-service.Dockerfile,
+        args: { APP: event-relay },
+      }
+    image: email-gateway/event-relay:local
+    environment:
+      <<: *node-env
+      HTTP_PORT: 3070
+      RABBITMQ_RELAY_URL: amqp://${RABBITMQ_RELAY_USER:-eg-relay}:${RABBITMQ_RELAY_PASSWORD:?append the RabbitMQ keys from .env.example}@rabbitmq:5672/${RABBITMQ_VHOST:-email-gateway}
+      RELAY_ENABLED: ${RELAY_ENABLED:-true}
+      RECONCILE_ENABLED: ${RECONCILE_ENABLED:-true}
+      RELAY_SHARDS: ${RELAY_SHARDS:-4}
+      RELAY_MAX_HELD_SHARDS: ${RELAY_MAX_HELD_SHARDS:-4}
+      RELAY_BATCH_SIZE: ${RELAY_BATCH_SIZE:-200}
+      RELAY_SCAN_LIMIT: ${RELAY_SCAN_LIMIT:-1000}
+      RELAY_POLL_INTERVAL_MS: ${RELAY_POLL_INTERVAL_MS:-250}
+      RELAY_CONFIRM_TIMEOUT_MS: ${RELAY_CONFIRM_TIMEOUT_MS:-15000}
+      RELAY_BROKER_BACKOFF_BASE_MS: ${RELAY_BROKER_BACKOFF_BASE_MS:-500}
+      RELAY_BROKER_BACKOFF_MAX_MS: ${RELAY_BROKER_BACKOFF_MAX_MS:-30000}
+      RELAY_ROW_BACKOFF_BASE_MS: ${RELAY_ROW_BACKOFF_BASE_MS:-1000}
+      RELAY_ROW_BACKOFF_MAX_MS: ${RELAY_ROW_BACKOFF_MAX_MS:-300000}
+      RELAY_MAX_ATTEMPTS: ${RELAY_MAX_ATTEMPTS:-10}
+      RELAY_MAX_MESSAGE_BYTES: ${RELAY_MAX_MESSAGE_BYTES:-131072}
+      RECONCILE_INTERVAL_MS: ${RECONCILE_INTERVAL_MS:-60000}
+      RECONCILE_UNCONSUMED_AFTER_SECONDS: ${RECONCILE_UNCONSUMED_AFTER_SECONDS:-900}
+      RECONCILE_MAX_REDRIVES: ${RECONCILE_MAX_REDRIVES:-3}
+      RECONCILE_LOOKBACK_HOURS: ${RECONCILE_LOOKBACK_HOURS:-72}
+      RECONCILE_BATCH_SIZE: ${RECONCILE_BATCH_SIZE:-1000}
+      RECONCILE_QUEUES: ${RECONCILE_QUEUES:-email.received,email.delivery.pending}
+      RECONCILE_START_POSITION: ${RECONCILE_START_POSITION:-oldest}
+    ports: ['127.0.0.1:${EVENT_RELAY_HOST_PORT:-3070}:3070']
+    healthcheck:
+      <<: *node-healthcheck
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3070/health/ready').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))",
         ]
 
   notification-worker:
@@ -1000,6 +1101,51 @@ services:
           "fetch('http://127.0.0.1:3001/api/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))",
         ]
 
+  # ---------------------------------------------------------------- TEST-ONLY broker cluster (profile: rabbitmq-cluster)
+  # Three quorum-replicating nodes for the broker node-failure test (step 3.2 §7, §10). Never
+  # started by infra:up/stack:up; never run together with the apps profile on an 8 GB VM. The
+  # test procedure removes the three rabbitmq-cluster-*-data volumes explicitly (never down -v).
+  # AMQP 127.0.0.1:5701-5703, management (node 1) 127.0.0.1:15701.
+  rabbitmq-node1:
+    <<: *rabbitmq-cluster-node
+    hostname: rmq1
+    networks:
+      default:
+        aliases: [rmq1]
+    volumes:
+      - rabbitmq-cluster-1-data:/var/lib/rabbitmq
+      - ./infrastructure/rabbitmq/cluster/rabbitmq.conf:/etc/rabbitmq/conf.d/20-cluster.conf:ro
+      - ./infrastructure/rabbitmq/cluster/entrypoint.sh:/cluster-entrypoint.sh:ro
+    ports:
+      [
+        '127.0.0.1:${RABBITMQ_CLUSTER_NODE1_HOST_PORT:-5701}:5672',
+        '127.0.0.1:${RABBITMQ_CLUSTER_MGMT_HOST_PORT:-15701}:15672',
+      ]
+
+  rabbitmq-node2:
+    <<: *rabbitmq-cluster-node
+    hostname: rmq2
+    networks:
+      default:
+        aliases: [rmq2]
+    volumes:
+      - rabbitmq-cluster-2-data:/var/lib/rabbitmq
+      - ./infrastructure/rabbitmq/cluster/rabbitmq.conf:/etc/rabbitmq/conf.d/20-cluster.conf:ro
+      - ./infrastructure/rabbitmq/cluster/entrypoint.sh:/cluster-entrypoint.sh:ro
+    ports: ['127.0.0.1:${RABBITMQ_CLUSTER_NODE2_HOST_PORT:-5702}:5672']
+
+  rabbitmq-node3:
+    <<: *rabbitmq-cluster-node
+    hostname: rmq3
+    networks:
+      default:
+        aliases: [rmq3]
+    volumes:
+      - rabbitmq-cluster-3-data:/var/lib/rabbitmq
+      - ./infrastructure/rabbitmq/cluster/rabbitmq.conf:/etc/rabbitmq/conf.d/20-cluster.conf:ro
+      - ./infrastructure/rabbitmq/cluster/entrypoint.sh:/cluster-entrypoint.sh:ro
+    ports: ['127.0.0.1:${RABBITMQ_CLUSTER_NODE3_HOST_PORT:-5703}:5672']
+
   # ---------------------------------------------------------------- search & analytics (profile: analytics)
   opensearch:
     profiles: [analytics]
@@ -1063,6 +1209,8 @@ services:
     restart: unless-stopped
     volumes:
       - ./infrastructure/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # Alert rules (step 3.2 Q15), loaded through rule_files in prometheus.yml.
+      - ./infrastructure/monitoring/rules:/etc/prometheus/rules:ro
       - prometheus-data:/prometheus
     ports: ['127.0.0.1:${PROMETHEUS_HOST_PORT:-9090}:9090']
     healthcheck:
@@ -1094,6 +1242,10 @@ volumes:
   mysql-data:
   mysql-replica-data:
   rabbitmq-data:
+  # TEST-ONLY 3-node cluster (profile rabbitmq-cluster).
+  rabbitmq-cluster-1-data:
+  rabbitmq-cluster-2-data:
+  rabbitmq-cluster-3-data:
   redis-data:
   minio-data:
   rspamd-data:

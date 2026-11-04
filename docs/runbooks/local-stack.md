@@ -4,7 +4,8 @@
 
 ```bash
 pnpm env:init                                         # once
-docker compose up -d --wait                           # infrastructure, including the MySQL replica
+docker compose up -d --wait                           # infrastructure, including the MySQL replica and rabbitmq-init
+pnpm rabbitmq:init                                    # (re)apply the RabbitMQ topology and role users from the host (idempotent)
 pnpm db:migrate                                       # history preflight + apply migrations from the host
 pnpm db:partitions -- apply && pnpm db:seed           # partitions ahead + catalog/demo data (idempotent)
 docker compose --profile apps up -d --build --wait    # everything, including services
@@ -13,11 +14,45 @@ docker compose --profile apps down                    # stop (keep data)
 docker compose --profile apps down -v                 # stop and wipe all volumes
 ```
 
-The default (infrastructure) set includes the mail plane of step 2.2: `postfix` (inbound MX, host port `SMTP_HOST_PORT` 2525), `postfix-outbound` (submission `SUBMISSION_HOST_PORT` 2587, connector relay `OUTBOUND_RELAY_HOST_PORT` 2527; reinjection 10026/10027 are not published), `rspamd-outbound` (DKIM signer, no host port) and `redis-dkim` (`REDIS_DKIM_HOST_PORT` 6391, ACL users only). Both Postfix instances need smtp-adapter at `SMTP_ADAPTER_HOST`: in this repository's `.env` that is `host.docker.internal`, so run `pnpm --filter @email-gateway/smtp-adapter dev` on the host; with `smtp-adapter` (the `.env.example` default) the apps profile provides it. Without the adapter every SMTP path answers 4xx (fail closed). Details: [docs/deployment/smtp-gateway.md](../deployment/smtp-gateway.md).
+The default (infrastructure) set includes the mail plane of step 2.2: `postfix` (inbound MX, host port `SMTP_HOST_PORT` 2525), `postfix-outbound` (submission `SUBMISSION_HOST_PORT` 2587, connector relay `OUTBOUND_RELAY_HOST_PORT` 2527; reinjection 10026/10027 are not published), `rspamd-outbound` (DKIM signer, no host port) and `redis-dkim` (`REDIS_DKIM_HOST_PORT` 6391, ACL users only). Both Postfix instances need smtp-adapter at `SMTP_ADAPTER_HOST`: with `smtp-adapter` (the `.env.example` default, and this repository's local `.env` since step 3.2 WP5) the apps profile provides it; with `host.docker.internal` run `pnpm --filter @email-gateway/smtp-adapter dev` on the host. After changing it, recreate `postfix` and `postfix-outbound` (`docker compose up -d postfix postfix-outbound`). Without the adapter every SMTP path answers 4xx (fail closed). Details: [docs/deployment/smtp-gateway.md](../deployment/smtp-gateway.md).
 
 Profile `smtp-test` (never deployed) adds `mail-sink` (accepts every `*.test` domain into `/var/mail/sink/<domain>/<local>/`; `hard-bounce@` → 550 5.1.1, `soft-bounce@` → 450 4.2.1, `policy-block@` → 550 5.7.1), `dns-sink` (CoreDNS, authoritative for `sink.test` only; the only resolver of `postfix-outbound`, so local outbound mail can never reach the Internet) and `smtp-tools` (swaks, `smtp-source`, openssl, dig, nc, socat). Step 2.3 adds `sink-m365`, `sink-google`, `sink-google-alt` (Microsoft 365 / Google Workspace stand-ins with test-CA certificates), `relay-sink`, the one-shot `test-pki` and `reinject-forwarder` (`127.0.0.1:2626`/`2627` → postfix-outbound 10026/10027, so a delivery-worker on the host can reinject), and `postfix` joins `mailtest` as `172.31.250.10`. postfix-outbound's delivery log is `./.local/postfix-outbound-log/maillog` (git-ignored). Stacks created before step 2.3 must recreate the `mailtest` network once ([mail-routing.md](../deployment/mail-routing.md#test-profile-smtp-test-never-deployed)). Build images one at a time: `for s in postfix postfix-outbound; do docker compose build $s; done; for s in mail-sink smtp-tools; do docker compose --profile smtp-test build $s; done`.
 
 The stack SMTP suites (`tests/integration/smtp-*.test.ts`, part of `pnpm test:integration`) need all of the above plus a running adapter and a built api (`pnpm build`; they run its `dkim:sync` CLI, or inside the `api` container when the apps profile runs). They fail with the list of what is missing; `SMTP_STACK_TESTS=skip` skips them explicitly, `SMTP_LOAD_SESSIONS`/`SMTP_LOAD_MESSAGES` shrink the 40 × 1 000 load test. They stop and restart MinIO, Redis and `postfix` themselves and always bring them back.
+
+## RabbitMQ
+
+Topology v1 (step 3.2, [messaging-topology.md](../architecture/messaging-topology.md)) lives in the vhost `email-gateway` (`RABBITMQ_VHOST`): 6 exchanges, 14 quorum queues, 32 bindings, one policy per queue, and the role users `eg-relay`, `eg-email-worker`, `eg-delivery-worker`, `eg-ops` (no tags, least privilege). The one-shot `rabbitmq-init` (default profile) applies it after the broker is healthy, on every `docker compose up`; every app service waits for it.
+
+```bash
+pnpm rabbitmq:init                                              # from the host: topology + role users, then verification
+docker compose run --rm rabbitmq-init                           # the same inside the network, plus --cleanup-legacy
+node --env-file=.env infrastructure/rabbitmq/init.mjs --vhost eg-it-1234   # a throwaway test vhost (no users)
+node --env-file=.env infrastructure/rabbitmq/init.mjs --delete-vhost eg-it-1234
+pnpm --filter @email-gateway/event-contracts topology:export    # after changing topology.ts: regenerate definitions.json
+```
+
+- `init.mjs` is idempotent and exits non-zero when anything is missing, unexpected or different (it never deletes topology objects it finds extra: remove them by hand after a topology change). It prints object names and counts only, never passwords.
+- `--cleanup-legacy` (the Compose default) deletes the ADR-0005 objects on vhost `/` (`mail.events`, `mail.dlx`, the five `<service>.<event>` queues and their `.dlq`) only when each queue is empty (no messages, no consumers) and each exchange unbound; otherwise it warns and keeps them. The legacy queues are quorum queues, for which RabbitMQ 4.x refuses `DELETE …?if-empty=true` (HTTP 400), so the script checks emptiness itself and then deletes (fixed in step 3.2 WP5; `tests/integration/messaging-legacy-cleanup.test.ts`). Images built before step 3.2 WP4 re-assert those objects when they start. `pnpm rabbitmq:init` does not clean up.
+- The broker publishes its Prometheus endpoint on `127.0.0.1:15692`. Changing its ports needs `docker compose up -d --no-deps rabbitmq` (recreates the broker only; queue contents survive in `rabbitmq-data`).
+- Dormant queues (`scan.*`, `email.policy.evaluate`, `email.quarantine`, `email.archive`, `email.analytics`) have no consumer and keep at most 10 000 messages (`drop-head`); that is expected until their stage exists.
+
+**Test-only 3-node cluster** (profile `rabbitmq-cluster`, broker node-failure test; never with the apps profile on an 8 GB VM, `mem_limit 448m` per node). Stop the app containers **by name** first: `docker compose --profile apps stop` also stops MySQL and the rest of the default profile, which the test needs.
+
+```bash
+docker compose stop api admin-portal smtp-adapter email-worker policy-engine delivery-worker \
+  event-relay notification-worker archive-worker
+docker compose --profile rabbitmq-cluster up -d --wait rabbitmq-node1 rabbitmq-node2 rabbitmq-node3
+docker compose --profile rabbitmq-cluster exec rabbitmq-node1 rabbitmq-diagnostics cluster_status   # 3 running nodes
+node --env-file=.env infrastructure/rabbitmq/init.mjs --mgmt-url http://127.0.0.1:15701 --users
+# AMQP: 127.0.0.1:5701, 5702, 5703 (RABBITMQ_CLUSTER_NODE{1,2,3}_HOST_PORT), administrator = RABBITMQ_USER
+pnpm --filter @email-gateway/integration-tests test:cluster      # tests/integration/cluster/node-failure.test.ts
+docker compose --profile rabbitmq-cluster rm -sf rabbitmq-node1 rabbitmq-node2 rabbitmq-node3
+docker volume rm email-gateway_rabbitmq-cluster-1-data email-gateway_rabbitmq-cluster-2-data email-gateway_rabbitmq-cluster-3-data
+docker compose --profile apps up -d --wait
+```
+
+Remove exactly those three volumes (never `down -v`, which would wipe every volume of the stack). The nodes share `RABBITMQ_CLUSTER_ERLANG_COOKIE`, written by `infrastructure/rabbitmq/cluster/entrypoint.sh`.
 
 ## Symptoms and fixes
 
@@ -30,7 +65,8 @@ The stack SMTP suites (`tests/integration/smtp-*.test.ts`, part of `pnpm test:in
 | `mysql-replica-setup` exited 1                                                                                                                                                                | The log names the cause: `Last_IO_Error`/`Last_SQL_Error`, a CLONE error, or a replication password longer than 32 characters                                   | Fix the cause, then `docker compose run --rm mysql-replica-setup`. If the replica diverged or the binlogs it needs were purged, re-seed it (next row)                                                                                                                                                          |
 | The replica needs a fresh copy (re-seed)                                                                                                                                                      | Diverged, too far behind, or a broken volume                                                                                                                    | `docker compose rm -sf mysql-replica mysql-replica-setup && docker volume rm email-gateway_mysql-replica-data && docker compose up -d --wait`. Only the replica's volume is deleted                                                                                                                            |
 | "Access denied" for `gateway_reader` or `gateway_repl` after regenerating `.env`                                                                                                              | The accounts already exist on `mysql-data` with the old passwords; `01-users.sh` never changes a password                                                       | Either restore the old `.env` values, or set the new ones on the primary (`ALTER USER … IDENTIFIED BY …` as root), then re-seed the replica. `docker compose down -v` also works but wipes all local data                                                                                                      |
-| `docker compose up -d --wait` exits 1 with `minio-init exited (0)` (or `mysql-replica-setup exited (0)`)                                                                                      | Compose v5 treats a one-shot container that has finished as a failure when nothing in the started profiles depends on it                                        | Harmless with infrastructure only: check `docker compose ps`. With `--profile apps`, the services depend on both one-shots, so `--wait` handles them                                                                                                                                                           |
+| `docker compose up -d --wait` exits 1 with `minio-init exited (0)` (or `mysql-replica-setup exited (0)`, `rabbitmq-init exited (0)`)                                                          | Compose v5 treats a one-shot container that has finished as a failure when nothing in the started profiles depends on it                                        | Harmless with infrastructure only: check `docker compose ps`. With `--profile apps`, the services depend on the one-shots, so `--wait` handles them                                                                                                                                                            |
+| `rabbitmq-init` exited 1, or `required variable RABBITMQ_RELAY_PASSWORD … append the RabbitMQ keys from .env.example`                                                                         | `.env` predates step 3.2, or the topology verification failed (the log lists each missing or unexpected object)                                                 | Append the RabbitMQ keys of `.env.example` (generate the four role passwords and the cluster cookie yourself, 48 hex characters, and expand the URLs), then `docker compose logs rabbitmq-init` / `pnpm rabbitmq:init`. Never `pnpm env:init --force`                                                          |
 | `clamav` stays `starting` on first run                                                                                                                                                        | freshclam is downloading signatures (~300 MB)                                                                                                                   | Wait. The health check allows a 10-minute start period, and later starts reuse the `clamav-db` volume                                                                                                                                                                                                          |
 | `clamav` turns `unhealthy` ("Unable to contact server") while the container stays up                                                                                                          | clamd was OOM-killed inside the container (`docker inspect … OOMKilled=true`); freshclam keeps the container alive, so Docker does not restart it               | `docker compose restart clamav`. `infrastructure/clamav/clamd.conf` sets `ConcurrentDatabaseReload no` to halve peak memory on reload; avoid image builds while the stack suite runs                                                                                                                           |
 | Inbound RCPT returns `451 4.3.0 Temporary lookup failure`; outbound `450 4.3.5 Policy service unavailable` / `451 4.3.5 … Server configuration error`; 587 drops the session after `STARTTLS` | `smtp-adapter` isn't reachable at `SMTP_ADAPTER_HOST` (expected with infra only)                                                                                | Run the adapter on the host (`pnpm --filter @email-gateway/smtp-adapter dev`, `SMTP_ADAPTER_HOST=host.docker.internal`) or start the `apps` profile with `SMTP_ADAPTER_HOST=smtp-adapter`. This tempfail is the intended fail-closed behaviour. See [smtp-policy-service-down.md](smtp-policy-service-down.md) |
@@ -49,13 +85,14 @@ The stack SMTP suites (`tests/integration/smtp-*.test.ts`, part of `pnpm test:in
 
 ## Useful endpoints (default ports)
 
-| What                            | URL                                                             |
-| ------------------------------- | --------------------------------------------------------------- |
-| API OpenAPI                     | http://localhost:3000/docs                                      |
-| Admin portal                    | http://localhost:3001                                           |
-| RabbitMQ management             | http://localhost:15672 (user/password from `.env`)              |
-| MinIO console                   | http://localhost:9001 (`MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD`) |
-| Grafana (observability profile) | http://localhost:3100 (`admin` / `GRAFANA_ADMIN_PASSWORD`)      |
+| What                            | URL                                                                                 |
+| ------------------------------- | ----------------------------------------------------------------------------------- |
+| API OpenAPI                     | http://localhost:3000/docs                                                          |
+| Admin portal                    | http://localhost:3001                                                               |
+| RabbitMQ management             | http://localhost:15672 (`RABBITMQ_USER`/`RABBITMQ_PASSWORD`; vhost `email-gateway`) |
+| RabbitMQ Prometheus             | http://localhost:15692/metrics (`RABBITMQ_PROMETHEUS_HOST_PORT`)                    |
+| MinIO console                   | http://localhost:9001 (`MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD`)                     |
+| Grafana (observability profile) | http://localhost:3100 (`admin` / `GRAFANA_ADMIN_PASSWORD`)                          |
 
 ## Sending a test message
 
@@ -77,7 +114,7 @@ Accepted inbound mail is handed to smtp-adapter's LMTP ingestion (S3 + MySQL) an
 ```bash
 docker compose exec mysql sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot email_gateway'
 docker compose exec mysql-replica sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot -e "SHOW REPLICA STATUS\G"'
-docker compose exec rabbitmq rabbitmq-diagnostics list_queues name type messages consumers
+docker compose exec rabbitmq rabbitmq-diagnostics list_queues -p email-gateway name type messages consumers policy
 docker compose exec redis sh -c 'redis-cli info keyspace'
 docker compose logs -f postfix rspamd
 docker compose logs -f postfix-outbound rspamd-outbound

@@ -1,0 +1,107 @@
+import type { RegisteredEventType } from './registry';
+
+/**
+ * One valid, metadata-only example payload per registered event type (organization `42`).
+ * Used by contract tests (registry, content guard) and documentation; never by production code.
+ * Each example passes its registry schema (asserted by `registry.test.ts`).
+ */
+const receivedAt = '2026-11-01T10:15:30.123Z';
+const messageId = '9007199254740993';
+const emlS3Key = 'org/42/eml/2026/11/01/9007199254740993.eml';
+const partPrefix = 'org/42/part/2026/11/01/9007199254740993';
+
+export const EXAMPLE_EVENT_PAYLOADS: Readonly<Record<RegisteredEventType, unknown>> = {
+  'mail.message.received.v1': {
+    messageId,
+    receivedAt,
+    direction: 'inbound',
+    emlS3Key,
+    sizeBytes: 1024,
+    envelopeFrom: 'sender@example.com',
+    recipientCount: 1,
+  },
+  'mail.message.parsed.v1': {
+    messageId,
+    receivedAt,
+    direction: 'inbound',
+    emlS3Key,
+    parseStatus: 'parsed',
+    parserVersion: '1.0.0',
+    limitsExceeded: [],
+    defects: [],
+    textBody: { s3Key: `${partPrefix}/1.text`, sha256: 'a'.repeat(64), sizeBytes: 120 },
+    htmlBody: { s3Key: `${partPrefix}/2.html`, sha256: 'b'.repeat(64), sizeBytes: 480 },
+    attachmentCount: 2,
+    flaggedAttachmentCount: 1,
+    attachmentFlags: ['filename_double_extension', 'executable'],
+    partCount: 5,
+    maxDepth: 2,
+    headerCount: 14,
+  },
+  'mail.message.parse_failed.v1': {
+    messageId,
+    receivedAt,
+    direction: 'outbound',
+    emlS3Key,
+    reason: 'integrity_mismatch',
+    attempts: 1,
+    parserVersion: '1.0.0',
+  },
+  'mail.message.scanned.v1': {
+    messageId,
+    receivedAt,
+    scanIds: ['11', '12'],
+    timedOutStages: [],
+  },
+  'mail.policy.decided.v1': {
+    messageId,
+    receivedAt,
+    action: 'quarantine',
+    matchedPolicyVersionIds: ['3'],
+    archive: true,
+  },
+  'mail.delivery.approved.v1': {
+    messageId,
+    receivedAt,
+    deliverySeq: 0,
+    source: 'policy',
+    emlS3Key,
+    recipients: [
+      { recipientId: '11', rcptSeq: 0 },
+      { recipientId: '12', rcptSeq: 1 },
+    ],
+    approvedAt: '2026-11-01T10:16:00.000Z',
+  },
+  'mail.delivery.status_changed.v1': {
+    messageId,
+    receivedAt,
+    deliveryId: '501',
+    recipientId: '11',
+    rcptSeq: 0,
+    deliverySeq: 0,
+    direction: 'outbound',
+    previousStatus: 'queued',
+    status: 'delivered',
+    occurredAt: '2026-11-01T10:20:00.000Z',
+    attemptCount: 1,
+    smtpCode: 250,
+    enhancedStatus: '2.0.0',
+    queueId: '4ZkQ2s1Hb7z9',
+  },
+  'domain.status.changed.v1': {
+    domainId: '77',
+    domainPublicId: '01890a5d-ac96-774b-bcce-b302099a8057',
+    name: 'acme.example',
+    previousStatus: 'verified',
+    status: 'active',
+    reason: null,
+    changedAt: '2026-11-02T09:00:00.000Z',
+  },
+  'domain.routing.changed.v1': {
+    domainId: '77',
+    domainPublicId: '01890a5d-ac96-774b-bcce-b302099a8057',
+    name: 'acme.example',
+    hosts: ['mx1.acme.example', 'acme-example.mail.protection.outlook.com'],
+    changedAt: '2026-11-03T09:00:00.000Z',
+  },
+};

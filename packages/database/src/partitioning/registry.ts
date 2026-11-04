@@ -104,7 +104,10 @@ export interface RetentionPurgeConfig {
 
 /** Retention purges that are batched DML rather than partition drops (D3.4). */
 export const RETENTION_PURGES: Readonly<RetentionPurgeConfig> = Object.freeze({
-  /** `message_idempotency` rows processed more than this many days ago are deleted. */
+  /**
+   * `message_idempotency` rows processed, and `message_consumer_progress` rows updated, more than
+   * this many days ago are deleted.
+   */
   idempotencyDays: 30,
   batchSize: 5000,
   /** Safety cap per purge per run (batchSize × maxBatches rows at most). */

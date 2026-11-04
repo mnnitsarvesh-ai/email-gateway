@@ -12,7 +12,7 @@ export * from './health/health.module';
 export * from './health/health.service';
 export * from './logging/nest-logger';
 export * from './mail/gateway-trace';
-export * from './messaging/rabbitmq.module';
+export * from './messaging';
 export * from './metrics/metrics.controller';
 export * from './metrics/metrics.module';
 export * from './metrics/metrics.service';

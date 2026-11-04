@@ -1,6 +1,6 @@
 # ADR-0005: RabbitMQ quorum queues, transactional outbox, idempotent consumers
 
-**Status:** Accepted. Amended by [ADR-0014](0014-mysql-data-model-partitioning-read-write-split.md): the tables are now `message_outbox` and `message_idempotency`, and the envelope carries `organizationId`
+**Status:** Superseded by [ADR-0024](0024-rabbitmq-topology-retry-dead-letter.md) (step 3.2): the topology below (`mail.events`, `mail.dlx`, `<queue>.dlq`) is replaced; the transactional outbox, the `processOnce` ledger and the envelope are carried forward there unchanged. Earlier amended by [ADR-0014](0014-mysql-data-model-partitioning-read-write-split.md): the tables are now `message_outbox` and `message_idempotency`, and the envelope carries `organizationId`
 
 **Context.** Pipeline stages must survive crashes and redeliveries without losing mail or applying an action twice. At-least-once delivery is the realistic guarantee.
 

@@ -15,7 +15,24 @@ export const stack = {
   migrationDatabaseUrl: () => required('MIGRATION_DATABASE_URL'),
   /** Reader account on the replica (SELECT + REPLICATION CLIENT). */
   databaseReadUrl: () => required('DATABASE_READ_URL'),
+  /** Administrator on vhost `/` (tests and tools only, step 3.2 Q10). Never logged. */
   rabbitmqUrl: () => required('RABBITMQ_URL'),
+  /** Management HTTP API base URL (no credentials). */
+  rabbitmqMgmtUrl: () => required('RABBITMQ_MGMT_URL'),
+  /** Topology v1 vhost (`email-gateway`). */
+  rabbitmqVhost: () => process.env.RABBITMQ_VHOST || 'email-gateway',
+  /** Administrator credentials for the management API (header only, never logged). */
+  rabbitmqAdmin: () => ({
+    user: required('RABBITMQ_USER'),
+    password: required('RABBITMQ_PASSWORD'),
+  }),
+  /** Least-privilege role URLs on the topology vhost (step 3.2 Q10). Never logged. */
+  rabbitmqRoleUrls: () => ({
+    relay: required('RABBITMQ_RELAY_URL'),
+    emailWorker: required('RABBITMQ_EMAIL_WORKER_URL'),
+    deliveryWorker: required('RABBITMQ_DELIVERY_WORKER_URL'),
+    ops: required('RABBITMQ_OPS_URL'),
+  }),
   redisUrl: () => required('REDIS_URL'),
   s3: () => ({
     endpoint: required('S3_ENDPOINT'),
@@ -48,6 +65,8 @@ export const stack = {
       'delivery-worker': port('DELIVERY_WORKER_HOST_PORT', 3040),
       'notification-worker': port('NOTIFICATION_WORKER_HOST_PORT', 3050),
       'archive-worker': port('ARCHIVE_WORKER_HOST_PORT', 3060),
+      /** Outbox relay and reconciler (step 3.2 Q11/Q12). */
+      'event-relay': port('EVENT_RELAY_HOST_PORT', 3070),
     },
   },
 };

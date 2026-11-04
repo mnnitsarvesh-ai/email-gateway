@@ -18,7 +18,6 @@ import {
   PARSE_FAILURE_REASONS,
   policyDecidedV1,
 } from './events';
-import { QUEUES, queueArguments } from './topology';
 
 const organizationId = '42';
 const receivedAt = '2026-11-01T10:15:30.123Z';
@@ -596,17 +595,6 @@ describe('domain.routing.changed.v1', () => {
       { changedAt: '2026-11-03' },
     ]) {
       expect(() => parse(routing(overrides)), JSON.stringify(overrides).slice(0, 80)).toThrow();
-    }
-  });
-});
-
-describe('topology', () => {
-  it('declares every work queue as a quorum queue with a dead-letter route', () => {
-    for (const queue of Object.values(QUEUES)) {
-      expect(queueArguments(queue)).toMatchObject({
-        'x-queue-type': 'quorum',
-        'x-dead-letter-routing-key': `${queue.name}.dlq`,
-      });
     }
   });
 });

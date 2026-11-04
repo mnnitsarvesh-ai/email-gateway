@@ -38,7 +38,6 @@ spec:
             - { name: HTTP_PORT, value: '3010' }
             # Secrets are mounted as files by External Secrets and read via the <KEY>_FILE convention.
             - { name: DATABASE_URL_FILE, value: /var/run/secrets/gateway/database-url }
-            - { name: RABBITMQ_URL_FILE, value: /var/run/secrets/gateway/rabbitmq-url }
             - { name: REDIS_URL_FILE, value: /var/run/secrets/gateway/redis-url }
           volumeMounts:
             - { name: secrets, mountPath: /var/run/secrets/gateway, readOnly: true }

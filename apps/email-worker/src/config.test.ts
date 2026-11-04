@@ -1,11 +1,16 @@
 import { DEFAULT_MIME_LIMITS } from '@email-gateway/mime-parser';
 import { describe, expect, it } from 'vitest';
-import { loadWorkerConfig, parseMemoryBytes, worstCasePartPathChars } from './config';
+import {
+  loadWorkerConfig,
+  MIME_QUEUE_MAX_ATTEMPTS,
+  parseMemoryBytes,
+  worstCasePartPathChars,
+} from './config';
 import { mimeLimitsFromConfig } from './mime-ingestion/limits';
 
 const base = {
   DATABASE_URL: 'mysql://test:test@localhost:3306/test',
-  RABBITMQ_URL: 'amqp://test:test@localhost:5672',
+  RABBITMQ_EMAIL_WORKER_URL: 'amqp://ew:secret-pw@localhost:5672/email-gateway',
   REDIS_URL: 'redis://localhost:6379',
   S3_REGION: 'ap-south-1',
   S3_BUCKET_MAIL: 'test-mail',
@@ -23,11 +28,6 @@ describe('email-worker MIME config (design §5, M5)', () => {
     const config = load();
     expect(config.MIME_INGESTION_ENABLED).toBe(true);
     expect(config.MIME_CONCURRENCY).toBe(4);
-    expect(config.MIME_OUTBOX_POLL_INTERVAL_MS).toBe(1000);
-    expect(config.MIME_OUTBOX_SAFETY_LAG_MS).toBe(120_000);
-    expect(config.MIME_OUTBOX_BATCH_SIZE).toBe(100);
-    expect(config.MIME_OUTBOX_SHARDS).toBe(1);
-    expect(config.MIME_OUTBOX_MAX_HELD_SHARDS).toBe(1);
     expect(config.MIME_RETRY_BASE_MS).toBe(1000);
     expect(config.MIME_RETRY_MAX_MS).toBe(60_000);
     expect(config.MIME_MAX_ATTEMPTS).toBe(5);
@@ -44,13 +44,10 @@ describe('email-worker MIME config (design §5, M5)', () => {
     const config = load({
       MIME_INGESTION_ENABLED: 'false',
       MIME_MAX_DECODED_RATIO: '1.5',
-      MIME_OUTBOX_SHARDS: '4',
-      MIME_OUTBOX_MAX_HELD_SHARDS: '2',
     });
     expect(config.MIME_INGESTION_ENABLED).toBe(false);
     expect(config.MIME_MAX_DECODED_RATIO).toBe(1.5);
     expect(mimeLimitsFromConfig(config).maxDecodedRatio).toBe(1.5);
-    expect(config.MIME_OUTBOX_SHARDS).toBe(4);
   });
 
   it('refuses per-part limits above the message limit', () => {
@@ -109,20 +106,20 @@ describe('email-worker MIME config (design §5, M5)', () => {
     refusal({ MIME_FILENAME_MAX_CHARS: '241' }, 'MIME_FILENAME_MAX_CHARS');
   });
 
-  it('refuses a safety lag below the ingestion transaction budget', () => {
-    refusal({ MIME_OUTBOX_SAFETY_LAG_MS: '29999' }, 'MIME_OUTBOX_SAFETY_LAG_MS');
-    expect(load({ MIME_OUTBOX_SAFETY_LAG_MS: '30000' }).MIME_OUTBOX_SAFETY_LAG_MS).toBe(30_000);
-  });
-
-  it('refuses holding more shards than exist and a retry cap below its base', () => {
-    refusal(
-      { MIME_OUTBOX_SHARDS: '2', MIME_OUTBOX_MAX_HELD_SHARDS: '3' },
-      'MIME_OUTBOX_MAX_HELD_SHARDS',
-    );
+  it('refuses a retry cap below its base and above the 60 s hold limit (step 3.2 Q8)', () => {
     refusal({ MIME_RETRY_BASE_MS: '5000', MIME_RETRY_MAX_MS: '4000' }, 'MIME_RETRY_MAX_MS');
+    refusal({ MIME_RETRY_MAX_MS: '60001' }, 'MIME_RETRY_MAX_MS');
+    expect(load({ MIME_RETRY_MAX_MS: '60000' }).MIME_RETRY_MAX_MS).toBe(60_000);
   });
 
-  it('refuses a parse memory footprint above MIME_MEMORY_BUDGET_BYTES', () => {
+  it('refuses MIME_MAX_ATTEMPTS at or above the attempt limit of email.received (Q13)', () => {
+    expect(MIME_QUEUE_MAX_ATTEMPTS).toBe(8);
+    refusal({ MIME_MAX_ATTEMPTS: '8' }, 'MIME_MAX_ATTEMPTS');
+    refusal({ MIME_MAX_ATTEMPTS: '9' }, 'MIME_MAX_ATTEMPTS');
+    expect(load({ MIME_MAX_ATTEMPTS: '7' }).MIME_MAX_ATTEMPTS).toBe(7);
+  });
+
+  it('refuses a parse memory footprint above MIME_MEMORY_BUDGET_BYTES (x MIME_CONCURRENCY only)', () => {
     // Per parse 5 MiB x 3 + 8 MiB = 23 MiB: 11 x 23 = 253 MiB fits 256 MiB, 12 x 23 does not.
     expect(parseMemoryBytes(load())).toBe(4 * 23 * 1024 * 1024);
     expect(load({ MIME_CONCURRENCY: '11' }).MIME_CONCURRENCY).toBe(11);
@@ -134,24 +131,26 @@ describe('email-worker MIME config (design §5, M5)', () => {
     );
   });
 
-  it('counts every shard one replica may hold in the memory footprint', () => {
-    // Each held shard runs its own MIME_CONCURRENCY parses: 4 x 8 x 23 MiB = 736 MiB.
-    refusal(
-      { MIME_CONCURRENCY: '4', MIME_OUTBOX_SHARDS: '8', MIME_OUTBOX_MAX_HELD_SHARDS: '8' },
-      'MIME_MEMORY_BUDGET_BYTES',
-    );
+  it('reads its own least-privilege RabbitMQ URL list and never echoes it (step 3.2 Q10)', () => {
+    expect(load().RABBITMQ_EMAIL_WORKER_URL).toEqual([
+      'amqp://ew:secret-pw@localhost:5672/email-gateway',
+    ]);
     expect(
-      load({ MIME_CONCURRENCY: '4', MIME_OUTBOX_SHARDS: '8', MIME_OUTBOX_MAX_HELD_SHARDS: '2' })
-        .MIME_OUTBOX_MAX_HELD_SHARDS,
-    ).toBe(2);
-    expect(
-      load({
-        MIME_CONCURRENCY: '4',
-        MIME_OUTBOX_SHARDS: '8',
-        MIME_OUTBOX_MAX_HELD_SHARDS: '8',
-        MIME_MEMORY_BUDGET_BYTES: String(4 * 8 * 23 * 1024 * 1024),
-      }).MIME_OUTBOX_MAX_HELD_SHARDS,
-    ).toBe(8);
+      load({ RABBITMQ_EMAIL_WORKER_URL: 'amqp://a:b@rmq1:5672/v, amqp://a:b@rmq2:5672/v' })
+        .RABBITMQ_EMAIL_WORKER_URL,
+    ).toEqual(['amqp://a:b@rmq1:5672/v', 'amqp://a:b@rmq2:5672/v']);
+    const { RABBITMQ_EMAIL_WORKER_URL: _omitted, ...withoutUrl } = base;
+    expect(() => loadWorkerConfig(withoutUrl)).toThrow(/RABBITMQ_EMAIL_WORKER_URL/);
+    let message = '';
+    try {
+      load({ RABBITMQ_EMAIL_WORKER_URL: 'http://ew:secret-pw@localhost' });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toMatch(/RABBITMQ_EMAIL_WORKER_URL/);
+    expect(message).not.toContain('secret-pw');
+    // The pre-3.2 administrator URL is not read any more.
+    expect(Object.keys(load())).not.toContain('RABBITMQ_URL');
   });
 
   it('refuses S3 parts below the 5 MiB multipart minimum', () => {

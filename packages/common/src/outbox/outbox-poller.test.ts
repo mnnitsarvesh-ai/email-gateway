@@ -5,7 +5,6 @@ import { describe, expect, it } from 'vitest';
 import type { AdvisoryLocks } from './advisory-locks';
 import { type EventHandler, processOnceHandler } from './event-feed';
 import { OutboxPoller, type OutboxPollerOptions, type PayloadSchema } from './outbox-poller';
-import { ShardedOutboxFeed } from './sharded-outbox-feed';
 
 interface Row {
   id: bigint;
@@ -535,75 +534,54 @@ describe('OutboxPoller sharding (step 3.1 M2)', () => {
     expect(db.cursors.get('outbox:c')).toBe(50n);
   });
 
-  it('ShardedOutboxFeed covers every row once and maxHeldLocks spreads shards over replicas', async () => {
+  it('shard pollers cover every row once and maxHeldLocks spreads shards over replicas', async () => {
     const db = fakePrisma(Array.from({ length: 8 }, (_, i) => row(i + 1, old)));
     const replicaA = lockSet();
     const m = fakeMetrics();
-    const feed = (locksOfReplica: ReturnType<typeof lockSet>) =>
-      new ShardedOutboxFeed<Payload>({
-        prisma: db.prisma,
-        locks: locksOfReplica as unknown as AdvisoryLocks,
-        logger: silent,
-        metrics: { pollLag: m.pollLag, invalid: m.invalidRow },
-        consumer: 'c',
-        eventType: 'test.event.v1',
-        schema,
-        initialPosition: 'oldest',
-        pollIntervalMs: 1000,
-        safetyLagMs: 0,
-        batchSize: 100,
-        lockPrefix: 'ew',
-        maxHeldLocks: 2,
-        shards: 4,
-        now: () => NOW,
-      });
-    const a = feed(replicaA);
+    const shards = 4;
+    // One poller per MOD(id, n) residue, all with the same lock connection of the replica.
+    const replica = (locksOfReplica: ReturnType<typeof lockSet>) =>
+      Array.from(
+        { length: shards },
+        (_, index) =>
+          new OutboxPoller<Payload>({
+            prisma: db.prisma,
+            locks: locksOfReplica as unknown as AdvisoryLocks,
+            logger: silent,
+            metrics: { pollLag: m.pollLag, invalid: m.invalidRow },
+            consumer: 'c',
+            eventType: 'test.event.v1',
+            schema,
+            initialPosition: 'oldest',
+            pollIntervalMs: 1000,
+            safetyLagMs: 0,
+            batchSize: 100,
+            lockPrefix: 'ew',
+            maxHeldLocks: 2,
+            shard: { index, count: shards },
+            now: () => NOW,
+          }),
+      );
+    const a = replica(replicaA);
     const seenA: number[] = [];
     const handlerA = ledgerHandler(db.prisma, seenA);
-    const reportsA = await Promise.all(a.pollers.map((p) => p.pollOnce(handlerA)));
+    const reportsA = await Promise.all(a.map((p) => p.pollOnce(handlerA)));
     // Pollers race for locks; exactly two shards are active on replica A.
     expect(reportsA.filter((r) => r.active)).toHaveLength(2);
     expect(replicaA.heldCount('ew:outbox:c#')).toBe(2);
 
     const replicaB = lockSet(new Set(replicaA.held));
-    const b = feed(replicaB);
+    const b = replica(replicaB);
     const seenB: number[] = [];
-    const reportsB = await Promise.all(
-      b.pollers.map((p) => p.pollOnce(ledgerHandler(db.prisma, seenB))),
-    );
+    const reportsB = await Promise.all(b.map((p) => p.pollOnce(ledgerHandler(db.prisma, seenB))));
     expect(reportsB.filter((r) => r.active)).toHaveLength(2);
     expect([...seenA, ...seenB].sort()).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
     expect(new Set([...replicaA.held, ...replicaB.held]).size).toBe(4);
     // A third poll on A does not try to take another shard while it holds two.
     replicaA.ensured.length = 0;
-    await Promise.all(a.pollers.map((p) => p.pollOnce(handlerA)));
+    await Promise.all(a.map((p) => p.pollOnce(handlerA)));
     expect(replicaA.ensured.sort()).toEqual([...replicaA.held].sort());
     expect(db.ledger.size).toBe(8);
-  });
-
-  it('reports the maximum lag over the shards this process runs', async () => {
-    const db = fakePrisma([row(1, old), row(2, old)]);
-    const m = fakeMetrics();
-    const sharded = new ShardedOutboxFeed<Payload>({
-      prisma: db.prisma,
-      locks: lockSet() as unknown as AdvisoryLocks,
-      logger: silent,
-      metrics: { pollLag: m.pollLag, invalid: m.invalidRow },
-      consumer: 'c',
-      eventType: 'test.event.v1',
-      schema,
-      initialPosition: 'oldest',
-      pollIntervalMs: 1000,
-      safetyLagMs: 0,
-      batchSize: 100,
-      lockPrefix: 'ew',
-      shards: 2,
-      now: () => NOW,
-    });
-    const [even, oddShard] = sharded.pollers;
-    await oddShard!.pollOnce(() => Promise.reject(new Error('down'))); // row 1 fails: 300 s
-    await even!.pollOnce(recorder().handler); // row 2 ok: 0 s
-    expect(m.lag.get('c')).toBe(300);
   });
 });
 

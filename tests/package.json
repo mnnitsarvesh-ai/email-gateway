@@ -5,6 +5,7 @@
   "description": "Integration and smoke tests that run against the Docker Compose stack.",
   "scripts": {
     "test:integration": "vitest run",
+    "test:cluster": "vitest run --config vitest.cluster.config.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint integration"
   },

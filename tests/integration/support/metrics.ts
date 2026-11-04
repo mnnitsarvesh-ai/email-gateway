@@ -1,12 +1,12 @@
 import { stack } from './env';
 
 /**
- * Prometheus text exposition of a service's `GET /metrics` (step 2.2 D16, step 2.3 R14) as seen
- * from the host: smtp-adapter (SMTP_ADAPTER_HOST_PORT) or delivery-worker
- * (DELIVERY_WORKER_HOST_PORT). Sums every series of `name` whose labels include `labels`.
+ * Prometheus text exposition of a service's `GET /metrics` (step 2.2 D16, step 2.3 R14, step 3.2
+ * §5.3) as seen from the host: smtp-adapter, delivery-worker, email-worker, event-relay or api
+ * (their `*_HOST_PORT`). Sums every series of `name` whose labels include `labels`.
  */
 export async function metricValue(
-  service: 'smtp-adapter' | 'delivery-worker',
+  service: 'smtp-adapter' | 'delivery-worker' | 'email-worker' | 'event-relay' | 'api',
   name: string,
   labels: Record<string, string> = {},
 ): Promise<number> {

@@ -150,6 +150,8 @@ A platform job, not tenant-scoped. **Pruning:** none (no `received_at` predicate
 
 ## Q8: Outbox relay poll
 
+> Step 3.2 note: the event-relay (ADR-0023) does not use `FOR UPDATE SKIP LOCKED`. It claims shards with advisory locks (`GET_LOCK('er:relay#<i>/<n>')`, shard = `MOD(CRC32(CONCAT(aggregate_type, ':', aggregate_id)), n)`), reads `WHERE published_at IS NULL AND attempts < :max AND <shard> ORDER BY id LIMIT :scan` without a transaction, publishes with confirms, then marks the confirmed rows `UPDATE … SET published_at = NOW(3) WHERE published_at IS NULL AND (id, created_at) IN (…)` (design Q11). The query below is the original step 1.1 access-path example; the index and pruning notes apply to both.
+
 ```sql
 SELECT id, created_at, event_id, event_type, organization_id, payload
   FROM message_outbox

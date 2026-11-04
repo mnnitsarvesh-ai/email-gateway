@@ -71,7 +71,7 @@ describe('seed catalog', () => {
   const sorted = (list: readonly string[]) => [...list].sort();
   const role = (key: string) => SYSTEM_ROLES.find((r) => r.key === key)!.permissions;
 
-  it('contains the 35 permissions of D7, D8, steps 2.1 D14, 2.2 and 2.3, without duplicates', () => {
+  it('contains the 36 permissions of D7, D8, steps 2.1 D14, 2.2, 2.3 and 3.2, without duplicates', () => {
     expect(new Set(keys).size).toBe(keys.length);
     expect(sorted(keys)).toEqual(
       sorted([
@@ -110,15 +110,17 @@ describe('seed catalog', () => {
         'connector:manage',
         'domain:routing_manage',
         'delivery:read',
+        'platform:dead_letter_replay',
       ]),
     );
-    expect(keys).toHaveLength(35);
+    expect(keys).toHaveLength(36);
     // Appended in catalog order (permission ids follow it on a fresh database).
-    expect(keys.slice(-4)).toEqual([
+    expect(keys.slice(-5)).toEqual([
       'connector:read',
       'connector:manage',
       'domain:routing_manage',
       'delivery:read',
+      'platform:dead_letter_replay',
     ]);
     for (const key of keys) expect(key).toMatch(/^[a-z]+:[a-z_]+$/);
     for (const p of PERMISSIONS) expect(p.description.length, p.key).toBeGreaterThan(0);
@@ -126,6 +128,7 @@ describe('seed catalog', () => {
 
   it('splits the catalog into platform and tenant permissions', () => {
     expect(sorted(PLATFORM_PERMISSIONS)).toEqual([
+      'platform:dead_letter_replay',
       'platform:operations',
       'platform:organizations',
       'platform:tenant_override',
@@ -197,6 +200,7 @@ describe('seed catalog', () => {
         'platform:organizations',
         'platform:operations',
         'platform:tenant_override',
+        'platform:dead_letter_replay',
         ...read,
         'audit:read',
       ],

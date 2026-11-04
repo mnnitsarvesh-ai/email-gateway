@@ -1,6 +1,6 @@
 # ADR-0002: NestJS modular services; 15 logical services on 8 deployables
 
-**Status:** Accepted. Amended by [ADR-0015](0015-api-base-path.md): business routes are served under `/api/v1`
+**Status:** Accepted. Amended by [ADR-0015](0015-api-base-path.md): business routes are served under `/api/v1`; amended by [ADR-0023](0023-outbox-relay-and-reconciliation.md): a ninth deployable, `event-relay` (outbox relay and reconciliation)
 
 **Context.** The requirements name 15 services. Running each as its own microservice from day one multiplies deployment, observability and on-call cost without a matching benefit at 1M messages/day. Some boundaries do need independent scaling, though. Scanning, for example, scales with mail volume, while tenant CRUD doesn't.
 

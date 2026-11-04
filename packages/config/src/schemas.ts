@@ -39,9 +39,37 @@ export const databaseReadConfigSchema = z.object({
   DATABASE_READ_LAG_CHECK_INTERVAL_MS: z.coerce.number().int().min(1000).max(60000).default(5000),
 });
 
-export const rabbitmqConfigSchema = z.object({
-  RABBITMQ_URL: z.string().regex(/^amqps?:\/\//, 'RABBITMQ_URL must be an amqp(s):// URL'),
-  RABBITMQ_PREFETCH: z.coerce.number().int().min(1).max(1000).default(20),
+/**
+ * A comma-separated list of `amqp://` or `amqps://` URLs (one per cluster node, tried in rotation
+ * by the AMQP client, step 3.2 Q6), trimmed, transformed to `string[]`. Each entry needs a host.
+ * Issues name the entry's position only: URLs carry credentials, so a value is never echoed.
+ */
+export const amqpUrlListSchema = z.string().transform((value, ctx): string[] => {
+  const entries = value.split(',').map((entry) => entry.trim());
+  if (entries.length === 1 && entries[0] === '') {
+    ctx.addIssue({ code: 'custom', message: 'must list at least one amqp(s):// URL' });
+    return z.NEVER;
+  }
+  entries.forEach((entry, index) => {
+    const position = `entry ${index + 1}`;
+    if (entry === '') {
+      ctx.addIssue({ code: 'custom', message: `${position} is empty` });
+      return;
+    }
+    let url: URL;
+    try {
+      url = new URL(entry);
+    } catch {
+      ctx.addIssue({ code: 'custom', message: `${position} is not a valid URL` });
+      return;
+    }
+    if (url.protocol !== 'amqp:' && url.protocol !== 'amqps:') {
+      ctx.addIssue({ code: 'custom', message: `${position} must be an amqp(s):// URL` });
+    } else if (url.hostname === '') {
+      ctx.addIssue({ code: 'custom', message: `${position} has no host` });
+    }
+  });
+  return entries;
 });
 
 export const redisConfigSchema = z.object({
@@ -64,7 +92,6 @@ export type BaseConfig = z.infer<typeof baseConfigSchema>;
 export type HttpConfig = z.infer<ReturnType<typeof httpConfigSchema>>;
 export type DatabaseConfig = z.infer<typeof databaseConfigSchema>;
 export type DatabaseReadConfig = z.infer<typeof databaseReadConfigSchema>;
-export type RabbitmqConfig = z.infer<typeof rabbitmqConfigSchema>;
 export type RedisConfig = z.infer<typeof redisConfigSchema>;
 export type S3Config = z.infer<typeof s3ConfigSchema>;
 

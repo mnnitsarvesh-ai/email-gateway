@@ -20,7 +20,10 @@ export interface TestWorker {
   reinjector: Reinjector;
   scheduler: ReinjectionScheduler;
   reconciler: DeliveryReconciler;
-  /** Plans an approval exactly as the planner consumer does (processOnce + planner). */
+  /**
+   * Plans an approval exactly as the planner consumer does (processOnce + planner), after issuing
+   * it as the gateway does (its outbox row, the planner's provenance check).
+   */
   plan(event: EventEnvelope<DeliveryApprovedV1>): Promise<PlanResult | 'duplicate'>;
   /** One claim round scoped to the fixture organizations; waits for the sessions. */
   reinjectOnce(): Promise<number>;
@@ -91,6 +94,7 @@ export function buildWorker(
     scheduler,
     reconciler,
     async plan(event) {
+      await fx.issue(event);
       const result = await processOnce(txPrisma, consumer, event.eventId, (tx) =>
         planner.plan(event, tx),
       );

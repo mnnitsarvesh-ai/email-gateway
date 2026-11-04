@@ -44,8 +44,8 @@ const config = loadApiConfig({
   AUTH_BACKGROUND_JOBS_ENABLED: 'false',
 });
 
-/** Probes stay outside the `/api` prefix (configureApiApp). */
-const PREFIX_EXCLUDED = new Set(['health/live', 'health/ready']);
+/** Probes and the Prometheus scrape stay outside the `/api` prefix (configureApiApp). */
+const PREFIX_EXCLUDED = new Set(['health/live', 'health/ready', 'metrics']);
 const DEFAULT_VERSION = '1';
 
 interface DiscoveredRoute {
@@ -177,6 +177,8 @@ describe('route security (e2e, dependencies stubbed)', () => {
       [
         'get /health/live',
         'get /health/ready',
+        // Step 3.2 §5.3: Prometheus series (internal port only, never routed publicly).
+        'get /metrics',
         'get /api/v1/meta',
         'post /api/v1/auth/login',
         'post /api/v1/auth/mfa/verify',
@@ -213,6 +215,18 @@ describe('route security (e2e, dependencies stubbed)', () => {
       'get /api/v1/messages/:messageId/deliveries': 'delivery:read',
       'get /api/v1/messages/:messageId/deliveries/events': 'delivery:read',
       'get /api/v1/deliveries': 'delivery:read',
+    };
+    for (const [key, permission] of Object.entries(expected)) {
+      const route = routes.find((r) => `${r.method} ${r.path}` === key);
+      expect(route?.isPublic, key).toBe(false);
+      expect(route?.requirement, key).toEqual({ mode: 'all', permissions: [permission] });
+    }
+  });
+
+  it('the step 3.2 dead-letter routes require their platform permissions (Q9)', () => {
+    const expected: Record<string, string> = {
+      'get /api/v1/platform/dead-letters': 'platform:operations',
+      'post /api/v1/platform/dead-letters/replay': 'platform:dead_letter_replay',
     };
     for (const [key, permission] of Object.entries(expected)) {
       const route = routes.find((r) => `${r.method} ${r.path}` === key);

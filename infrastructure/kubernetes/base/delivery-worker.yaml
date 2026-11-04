@@ -36,9 +36,15 @@ spec:
             - configMapRef: { name: email-gateway-config }
           env:
             - { name: HTTP_PORT, value: '3040' }
+            # Approvals consumed from email.delivery.pending (step 3.2): in flight per replica.
+            - { name: DELIVERY_APPROVAL_PREFETCH, value: '4' }
             # Secrets are mounted as files by External Secrets and read via the <KEY>_FILE convention.
             - { name: DATABASE_URL_FILE, value: /var/run/secrets/gateway/database-url }
-            - { name: RABBITMQ_URL_FILE, value: /var/run/secrets/gateway/rabbitmq-url }
+            # Role user eg-delivery-worker (step 3.2 Q10): consumes email.delivery.pending.
+            - {
+                name: RABBITMQ_DELIVERY_WORKER_URL_FILE,
+                value: /var/run/secrets/gateway/rabbitmq-delivery-worker-url,
+              }
             - { name: REDIS_URL_FILE, value: /var/run/secrets/gateway/redis-url }
           volumeMounts:
             - { name: secrets, mountPath: /var/run/secrets/gateway, readOnly: true }

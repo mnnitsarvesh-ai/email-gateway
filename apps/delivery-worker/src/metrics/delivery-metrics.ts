@@ -94,6 +94,8 @@ export class DeliveryMetrics {
   /**
    * The shared outbox poller's metrics (step 3.1 M2) on this worker's existing series
    * `delivery_outbox_poll_lag_seconds{consumer}` and `delivery_outbox_invalid_events_total{consumer}`.
+   * Since step 3.2 only the development pass-through polls the outbox; the planner's transport
+   * reports the shared `amqp_consumer_*` series of `email.delivery.pending`.
    */
   outboxPoller(): OutboxPollerMetrics {
     return {

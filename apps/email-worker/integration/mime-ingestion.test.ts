@@ -4,23 +4,41 @@ import { EventTypes, messageParsedV1, messageParseFailedV1 } from '@email-gatewa
 import { PARSER_VERSION } from '@email-gateway/mime-parser';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PART_CONTENT_DISPOSITION } from '../src/mime-ingestion/s3-part-sink';
+import type { S3Client } from '@aws-sdk/client-s3';
 import { Fixtures, type MessageFixture, sha256, unreachableS3 } from './support/fixtures';
 import { largeMessage, multipartMessage, nestedArchive, zipBomb } from './support/messages';
+import { Broker, MimePipeline, withPipeline } from './support/pipeline';
 
 const CORPUS = resolve(__dirname, '../../../packages/mime-parser/test/fixtures');
 const FINAL = ['parsed', 'parsed_with_defects', 'parse_limit_exceeded', 'parse_failed'];
 
 let fx: Fixtures;
 let org: bigint;
+let broker: Broker;
 
 beforeAll(async () => {
   fx = new Fixtures();
   org = await fx.organization('main');
+  // A throwaway vhost with topology v1: events reach the stage through RabbitMQ (step 3.2 Q13).
+  broker = await Broker.start();
 });
 
 afterAll(async () => {
+  await broker?.close();
   await fx?.cleanup();
 });
+
+/** Counter value of a series line matching all `labels` (0 when absent). */
+function counter(text: string, name: string, labels: Record<string, string>): number {
+  let total = 0;
+  for (const line of text.split('\n')) {
+    if (!line.startsWith(`${name}{`)) continue;
+    if (Object.entries(labels).every(([k, v]) => line.includes(`${k}="${v}"`))) {
+      total += Number(line.split(' ').pop());
+    }
+  }
+  return total;
+}
 
 /** Every stored object's SHA-256 equals its row; keys are under the org and the message. */
 async function expectObjectsMatchRows(message: MessageFixture) {
@@ -42,7 +60,7 @@ async function expectObjectsMatchRows(message: MessageFixture) {
   return state;
 }
 
-describe('MIME ingestion against MySQL and MinIO (step 3.1 §9)', () => {
+describe('MIME ingestion through RabbitMQ against MySQL and MinIO (step 3.1 §9, step 3.2)', () => {
   it('parses a multipart message end to end: rows, objects, subject, event and outbox', async () => {
     const pdf = Buffer.from('%PDF-1.7\n% integration\n');
     const eml = multipartMessage({
@@ -57,10 +75,11 @@ describe('MIME ingestion against MySQL and MinIO (step 3.1 §9)', () => {
       ],
     });
     const message = await fx.message(org, { eml });
-    const { service } = fx.ingestion();
     const event = fx.received(message);
 
-    await expect(service.handle(event)).resolves.toBe('handled');
+    await expect(withPipeline(fx, broker, {}, (p) => p.deliver(broker, event))).resolves.toBe(
+      'handled',
+    );
 
     const state = await expectObjectsMatchRows(message);
     expect(state.parses).toHaveLength(1);
@@ -137,7 +156,7 @@ describe('MIME ingestion against MySQL and MinIO (step 3.1 §9)', () => {
   });
 
   it('parses the mime-parser corpus end to end with a final status and valid events', async () => {
-    const { service } = fx.ingestion();
+    const pipeline = await MimePipeline.start(fx, broker);
     const files = readdirSync(CORPUS)
       .filter((f) => f.endsWith('.eml'))
       .sort();
@@ -146,7 +165,7 @@ describe('MIME ingestion against MySQL and MinIO (step 3.1 §9)', () => {
     for (const file of files) {
       const eml = readFileSync(resolve(CORPUS, file));
       const message = await fx.message(org, { eml });
-      await expect(service.handle(fx.received(message))).resolves.toBe('handled');
+      await expect(pipeline.deliver(broker, fx.received(message))).resolves.toBe('handled');
       const state = await expectObjectsMatchRows(message);
       const parse = state.parses[0]!;
       expect(FINAL).toContain(parse.status);
@@ -158,6 +177,7 @@ describe('MIME ingestion against MySQL and MinIO (step 3.1 §9)', () => {
       else messageParsedV1.parse(outbox.payload);
       expect(parse.bytesRead).toBe(BigInt(eml.length));
     }
+    await pipeline.stop();
     // A few fixed expectations of the corpus (the rest is covered by the parser's unit tests).
     expect(statuses['alternative.eml']).toBe('parsed');
     expect(statuses['unterminated-multipart.eml']).toBe('parsed_with_defects');
@@ -175,9 +195,8 @@ describe('MIME ingestion against MySQL and MinIO (step 3.1 §9)', () => {
       ],
     });
     const message = await fx.message(org, { eml });
-    const { service } = fx.ingestion();
 
-    await service.handle(fx.received(message));
+    await withPipeline(fx, broker, {}, (p) => p.deliver(broker, fx.received(message)));
 
     const state = await expectObjectsMatchRows(message);
     const [bombRow, nestedRow] = state.attachments;
@@ -205,7 +224,8 @@ describe('MIME ingestion against MySQL and MinIO (step 3.1 §9)', () => {
   it('streams a large email near MIME_MAX_MESSAGE_BYTES with bounded memory', async () => {
     const large = largeMessage();
     const message = await fx.streamedMessage(org, { chunks: large.chunks });
-    const { service, config } = fx.ingestion();
+    const pipeline = await MimePipeline.start(fx, broker);
+    const { config } = pipeline.ingestion;
     expect(message.sizeBytes).toBeGreaterThan(50 * 1024 * 1024);
     expect(message.sizeBytes).toBeLessThanOrEqual(config.MIME_MAX_MESSAGE_BYTES);
 
@@ -223,9 +243,10 @@ describe('MIME ingestion against MySQL and MinIO (step 3.1 §9)', () => {
       peak = Math.max(peak, live() - before);
     }, 25);
     try {
-      await expect(service.handle(fx.received(message))).resolves.toBe('handled');
+      await expect(pipeline.deliver(broker, fx.received(message))).resolves.toBe('handled');
     } finally {
       clearInterval(sampler);
+      await pipeline.stop();
     }
 
     const state = await expectObjectsMatchRows(message);
@@ -248,15 +269,18 @@ describe('MIME ingestion against MySQL and MinIO (step 3.1 §9)', () => {
     });
     // Over the message limit: recorded from size_bytes, never downloaded.
     const tooLarge = await fx.message(org, { eml });
-    await fx
-      .ingestion({
+    await withPipeline(
+      fx,
+      broker,
+      {
         overrides: {
           MIME_MAX_MESSAGE_BYTES: String(eml.length - 1),
           MIME_MAX_ATTACHMENT_BYTES: '1024',
           MIME_MAX_BODY_BYTES: '1024',
         },
-      })
-      .service.handle(fx.received(tooLarge));
+      },
+      (p) => p.deliver(broker, fx.received(tooLarge)),
+    );
     let state = await fx.state(tooLarge);
     expect(state.parses[0]).toMatchObject({
       status: 'parse_limit_exceeded',
@@ -268,11 +292,14 @@ describe('MIME ingestion against MySQL and MinIO (step 3.1 §9)', () => {
 
     // Over the attachment and body limits: rows with full size and hash, no objects.
     const perPart = await fx.message(org, { eml });
-    await fx
-      .ingestion({
+    await withPipeline(
+      fx,
+      broker,
+      {
         overrides: { MIME_MAX_ATTACHMENT_BYTES: String(1024 * 1024), MIME_MAX_BODY_BYTES: '1024' },
-      })
-      .service.handle(fx.received(perPart));
+      },
+      (p) => p.deliver(broker, fx.received(perPart)),
+    );
     state = await fx.state(perPart);
     expect(state.parses[0]!.status).toBe('parse_limit_exceeded');
     expect(state.parses[0]!.limitsExceeded).toEqual(
@@ -292,19 +319,20 @@ describe('MIME ingestion against MySQL and MinIO (step 3.1 §9)', () => {
   });
 
   it('records eml_missing, eml_key_mismatch and integrity_mismatch as parse_failed', async () => {
-    const { service } = fx.ingestion();
+    const pipeline = await MimePipeline.start(fx, broker);
     const eml = multipartMessage();
 
     const missing = await fx.message(org, { eml, upload: false });
-    await service.handle(fx.received(missing));
+    await pipeline.deliver(broker, fx.received(missing));
     const other = await fx.organization('keys');
     const mismatchedKey = await fx.message(org, {
       eml,
       emlObjectKey: `org/${other.toString()}/eml/it/foreign.eml`,
     });
-    await service.handle(fx.received(mismatchedKey));
+    await pipeline.deliver(broker, fx.received(mismatchedKey));
     const tampered = await fx.message(org, { eml, emlSha256: 'a'.repeat(64) });
-    await service.handle(fx.received(tampered));
+    await pipeline.deliver(broker, fx.received(tampered));
+    await pipeline.stop();
 
     for (const [message, reason] of [
       [missing, 'eml_missing'],
@@ -326,7 +354,6 @@ describe('MIME ingestion against MySQL and MinIO (step 3.1 §9)', () => {
   });
 
   it('finalizes eml_key_mismatch for a stored key without any org/<id>/ prefix (null key)', async () => {
-    const { service } = fx.ingestion();
     const message = await fx.message(org, { eml: multipartMessage(), upload: false });
     // The event carries the ingested key; the writer row (the only source of keys) does not.
     await fx.prisma.emailMessage.updateMany({
@@ -334,7 +361,9 @@ describe('MIME ingestion against MySQL and MinIO (step 3.1 §9)', () => {
       data: { emlObjectKey: `eml/it/${message.messageId.toString()}.eml` },
     });
 
-    await expect(service.handle(fx.received(message))).resolves.toBe('handled');
+    await expect(
+      withPipeline(fx, broker, {}, (p) => p.deliver(broker, fx.received(message))),
+    ).resolves.toBe('handled');
     const state = await fx.state(message);
     expect(state.parses[0]).toMatchObject({
       status: 'parse_failed',
@@ -354,14 +383,24 @@ describe('MIME ingestion against MySQL and MinIO (step 3.1 §9)', () => {
     const message = await fx.message(org, { eml: multipartMessage() });
     const event = fx.received(message);
     const consumer = fx.consumer('outage');
-    const outage = fx.ingestion({
+    // Transient failures are held and republished to the queue's tail (hold strategy, Q8)
+    // without consuming an attempt; the short backoff keeps the test fast.
+    const outage = await MimePipeline.start(fx, broker, {
       s3Client: unreachableS3(),
       consumer,
-      overrides: { MIME_S3_TIMEOUT_MS: '3000' },
+      overrides: {
+        MIME_S3_TIMEOUT_MS: '3000',
+        MIME_RETRY_BASE_MS: '100',
+        MIME_RETRY_MAX_MS: '200',
+      },
     });
-
-    await expect(outage.service.handle(event)).rejects.toThrow();
-    await expect(outage.service.handle(event)).rejects.toThrow();
+    try {
+      await broker.publish([event]);
+      await eventuallyCount(() => outage.failures(event.eventId), 2);
+    } finally {
+      // The held (or already republished) delivery returns to the queue: nothing is lost.
+      await outage.stop();
+    }
     let state = await fx.state(message);
     expect(state.parses).toHaveLength(1);
     expect(state.parses[0]).toMatchObject({ status: 'parsing', attempts: 0 });
@@ -370,16 +409,63 @@ describe('MIME ingestion against MySQL and MinIO (step 3.1 §9)', () => {
     expect(
       await fx.prisma.messageIdempotency.count({ where: { consumer, eventId: event.eventId } }),
     ).toBe(0);
-    expect(await outage.registry.metrics()).toMatch(/mime_retries_total\{[^}]*class="s3"[^}]*\} 2/);
+    const text = await outage.metrics();
+    expect(counter(text, 'mime_retries_total', { class: 's3' })).toBeGreaterThanOrEqual(2);
+    expect(
+      counter(text, 'amqp_consumer_retries_total', { queue: 'email.received', class: 'transient' }),
+    ).toBeGreaterThanOrEqual(1);
+    expect(await broker.depth('email.dead-letter')).toBe(0);
 
-    await expect(fx.ingestion({ consumer }).service.handle(event)).resolves.toBe('handled');
+    await expect(
+      withPipeline(fx, broker, { consumer }, (p) => p.outcome(event.eventId)),
+    ).resolves.toBe('handled');
     state = await fx.state(message);
     expect(state.parses[0]).toMatchObject({ status: 'parsed', attempts: 1 });
+    expect(await broker.depth('email.received')).toBe(0);
+  });
+
+  it('a deterministic failure counts attempts until the poison guard finalizes it, no dead letter', async () => {
+    const message = await fx.message(org, { eml: multipartMessage() });
+    const event = fx.received(message);
+    // An S3 client that fails the same way every time (not an outage: no $metadata, no code).
+    const broken = {
+      send: () => Promise.reject(new Error('deterministic failure')),
+    } as unknown as S3Client;
+    const outcome = await withPipeline(
+      fx,
+      broker,
+      {
+        s3Client: broken,
+        overrides: { MIME_MAX_ATTEMPTS: '2', MIME_RETRY_BASE_MS: '50', MIME_RETRY_MAX_MS: '100' },
+      },
+      async (p) => {
+        const result = await p.deliver(broker, event);
+        expect(p.failures(event.eventId)).toBe(2);
+        const text = await p.metrics();
+        expect(
+          counter(text, 'amqp_consumer_retries_total', {
+            queue: 'email.received',
+            class: 'retryable',
+          }),
+        ).toBe(2);
+        return result;
+      },
+    );
+    expect(outcome).toBe('handled');
+    const state = await fx.state(message);
+    expect(state.parses[0]).toMatchObject({
+      status: 'parse_failed',
+      failureReason: 'max_attempts_exceeded',
+      attempts: 3,
+    });
+    expect(state.objects).toEqual([]);
+    expect(await broker.depth('email.dead-letter')).toBe(0);
   });
 
   it('fails a message whose attempts reached MIME_MAX_ATTEMPTS (simulated crash loop)', async () => {
     const message = await fx.message(org, { eml: multipartMessage() });
-    const { service, config } = fx.ingestion();
+    const pipeline = await MimePipeline.start(fx, broker);
+    const { config } = pipeline.ingestion;
     await fx.prisma.emailMessageParse.create({
       data: {
         receivedAt: message.receivedAt,
@@ -392,7 +478,8 @@ describe('MIME ingestion against MySQL and MinIO (step 3.1 §9)', () => {
       },
     });
 
-    await service.handle(fx.received(message));
+    await pipeline.deliver(broker, fx.received(message));
+    await pipeline.stop();
 
     const state = await fx.state(message);
     expect(state.parses[0]).toMatchObject({
@@ -410,11 +497,12 @@ describe('MIME ingestion against MySQL and MinIO (step 3.1 §9)', () => {
   it('ignores a cross-tenant envelope: no parse row, no objects, no events', async () => {
     const victim = await fx.message(org, { eml: multipartMessage() });
     const attacker = await fx.organization('attacker');
-    const { service } = fx.ingestion();
 
-    await expect(service.handle(fx.received(victim, { organizationId: attacker }))).resolves.toBe(
-      'handled',
-    );
+    await expect(
+      withPipeline(fx, broker, {}, (p) =>
+        p.deliver(broker, fx.received(victim, { organizationId: attacker })),
+      ),
+    ).resolves.toBe('handled');
 
     const state = await fx.state(victim);
     expect(state.parses).toEqual([]);
@@ -432,3 +520,11 @@ describe('MIME ingestion against MySQL and MinIO (step 3.1 §9)', () => {
     ).toBe(0);
   });
 });
+
+async function eventuallyCount(read: () => number, atLeast: number, timeoutMs = 60_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (read() < atLeast) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${String(atLeast)}`);
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}

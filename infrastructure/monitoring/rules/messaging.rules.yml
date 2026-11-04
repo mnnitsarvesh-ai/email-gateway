@@ -1,0 +1,164 @@
+# Messaging alerts (step 3.2 Q15). Series: application metrics of §5.3 (event-relay,
+# email-worker, delivery-worker, api) and the RabbitMQ per-queue series of the job
+# `rabbitmq-detailed` (rabbitmq_detailed_queue_*, labels vhost and queue). Every alert links its
+# section of docs/runbooks/rabbitmq-messaging.md. Validate with `promtool check rules`.
+groups:
+  - name: outbox-relay
+    rules:
+      - alert: OutboxRelayLagHigh
+        expr: max by (shard) (outbox_relay_lag_seconds) > 60
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Outbox relay lag above 60 s
+          description: >-
+            The oldest publishable message_outbox row of shard {{ $labels.shard }} has waited more
+            than 60 s for 5 minutes (max lag {{ $value | humanizeDuration }}). Pipeline stages
+            receive events late; the outbox keeps every row, nothing is lost.
+          runbook_url: docs/runbooks/rabbitmq-messaging.md#outboxrelaylaghigh
+      - alert: OutboxRelayNoShardOwner
+        # Every replica reports a lag series per shard (owned or not), so the number of distinct
+        # shard labels is RELAY_SHARDS; the held shard locks of all replicas must cover it.
+        expr: >-
+          (sum(outbox_relay_shards_held) or vector(0))
+          < (count(count by (shard) (outbox_relay_lag_seconds)) or vector(1))
+          or max(up{job="event-relay"}) == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Outbox relay shards without an owner (or the relay is down)
+          description: >-
+            Fewer shard locks are held than RELAY_SHARDS, or no event-relay target is up. Rows of
+            unowned shards are not published. Shards must be <= replicas x RELAY_MAX_HELD_SHARDS.
+          runbook_url: docs/runbooks/rabbitmq-messaging.md#outboxrelaynoshardowner
+      - alert: OutboxPoisonRows
+        expr: max(outbox_poison_rows) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Poison outbox rows need operator action
+          description: >-
+            {{ $value }} message_outbox rows reached RELAY_MAX_ATTEMPTS (contract or content-guard
+            violation, or repeated nacks) and are excluded from publishing. Their events never
+            reach a consumer and their partitions cannot be dropped.
+          runbook_url: docs/runbooks/rabbitmq-messaging.md#outboxpoisonrows
+      - alert: OutboxUnpublishedOld
+        expr: max(outbox_unpublished_oldest_seconds) > 900
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Unpublished outbox rows older than 15 minutes
+          description: >-
+            The oldest unpublished, non-poison outbox row is {{ $value | humanizeDuration }} old
+            (reconciler view). The relay is not keeping up, a row is in a long backoff, or the
+            broker refuses publishes.
+          runbook_url: docs/runbooks/rabbitmq-messaging.md#outboxunpublishedold
+
+  - name: rabbitmq-queues
+    rules:
+      - alert: DeadLetterQueueNotEmpty
+        expr: max(rabbitmq_detailed_queue_messages{vhost="email-gateway",queue="email.dead-letter"}) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Messages in email.dead-letter
+          description: >-
+            {{ $value }} dead-lettered messages wait for an operator decision (inspect, fix,
+            replay through POST /api/v1/platform/dead-letters/replay).
+          runbook_url: docs/runbooks/rabbitmq-messaging.md#deadletterqueuenotempty
+      - alert: DeadLetterRateHigh
+        expr: sum(rate(amqp_consumer_dead_lettered_total[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: Consumers dead-letter more than 0.1 messages per second
+          description: >-
+            Queue consumers dead-lettered {{ $value | humanize }} msg/s over 10 minutes. A
+            deterministic failure (contract, poison input, tenant mismatch) or a bug in a stage.
+          runbook_url: docs/runbooks/rabbitmq-messaging.md#deadletterratehigh
+      - alert: WorkQueueBacklog
+        expr: >-
+          max by (queue) (rabbitmq_detailed_queue_messages_ready{vhost="email-gateway",queue=~"email\\.received|email\\.delivery\\.pending"})
+          > 10000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Work queue {{ $labels.queue }} backlog above 10000
+          description: >-
+            {{ $labels.queue }} has {{ $value }} ready messages for 10 minutes. Consumers are too
+            slow or blocked by a dependency; scale the worker or check its readiness.
+          runbook_url: docs/runbooks/rabbitmq-messaging.md#workqueuebacklog
+      - alert: WorkQueueNoConsumer
+        expr: >-
+          max by (queue) (rabbitmq_detailed_queue_consumers{vhost="email-gateway",queue=~"email\\.received|email\\.delivery\\.pending"})
+          == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Work queue {{ $labels.queue }} has no consumer
+          description: >-
+            Nobody consumes {{ $labels.queue }}: email-worker (email.received) or delivery-worker
+            (email.delivery.pending) is down, not ready, or cannot reach the broker.
+          runbook_url: docs/runbooks/rabbitmq-messaging.md#workqueuenoconsumer
+      - alert: DormantQueueAtLimit
+        expr: >-
+          max by (queue) (rabbitmq_detailed_queue_messages{vhost="email-gateway",queue=~"scan\\..+|email\\.policy\\.evaluate|email\\.quarantine|email\\.archive|email\\.analytics"})
+          >= 9000
+        for: 15m
+        labels:
+          severity: info
+        annotations:
+          summary: Dormant queue {{ $labels.queue }} at 90 % of its 10000 limit
+          description: >-
+            {{ $labels.queue }} (no consumer until its stage is built) holds {{ $value }}
+            messages; with drop-head the oldest are discarded. Expected while its stage does not
+            exist; never the source of truth (the stage onboards from MySQL).
+          runbook_url: docs/runbooks/rabbitmq-messaging.md#dormantqueueatlimit
+
+  - name: amqp-clients
+    rules:
+      - alert: AmqpConnectionDown
+        expr: min by (job, instance, connection) (amqp_connection_up) == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: AMQP connection {{ $labels.connection }} down
+          description: >-
+            {{ $labels.job }} ({{ $labels.instance }}) has had no broker connection for 2 minutes.
+            The client reconnects on its own; publishes wait in the outbox, consumption pauses.
+          runbook_url: docs/runbooks/rabbitmq-messaging.md#amqpconnectiondown
+      - alert: RedeliveryRateHigh
+        expr: >-
+          sum by (queue) (rate(amqp_consumer_deliveries_total{redelivered="true"}[5m])) > 0.05
+          and
+          sum by (queue) (rate(amqp_consumer_deliveries_total{redelivered="true"}[5m]))
+          > 0.1 * sum by (queue) (rate(amqp_consumer_deliveries_total[5m]))
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Many redeliveries on {{ $labels.queue }}
+          description: >-
+            More than 10 % of the deliveries of {{ $labels.queue }} are redeliveries (consumer
+            crashes, channel losses or requeues on stop). A crash loop ends in email.dead-letter
+            through delivery-limit.
+          runbook_url: docs/runbooks/rabbitmq-messaging.md#redeliveryratehigh
+      - alert: ReconcileExhausted
+        expr: sum by (queue) (increase(reconcile_exhausted_total[30m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Reconciliation exhausted its re-drives on {{ $labels.queue }}
+          description: >-
+            Published events bound to {{ $labels.queue }} have no ledger row of its consumer after
+            RECONCILE_MAX_REDRIVES re-drives. The warn log of the reconciler lists their ids.
+          runbook_url: docs/runbooks/rabbitmq-messaging.md#reconcileexhausted

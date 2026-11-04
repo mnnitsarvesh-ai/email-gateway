@@ -399,6 +399,18 @@ async function runRetentionPurges(
   }
 
   try {
+    // Consumer progress (step 3.2 review round 1) is kept as long as the ledger it complements.
+    const cutoff = new Date(now.getTime() - cfg.idempotencyDays * 24 * 60 * 60 * 1000);
+    await purge(
+      'message_consumer_progress',
+      `DELETE FROM ${q('message_consumer_progress')} WHERE ${q('updated_at')} < ? LIMIT ${cfg.batchSize}`,
+      [formatBound(cutoff)],
+    );
+  } catch (err) {
+    fail('message_consumer_progress', err);
+  }
+
+  try {
     await purgeRegistry(options, cfg, result, sleep);
   } catch (err) {
     fail('message_identities', err);

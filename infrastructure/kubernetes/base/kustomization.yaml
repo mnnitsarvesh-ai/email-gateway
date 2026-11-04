@@ -14,6 +14,8 @@ resources:
   - delivery-worker.yaml
   - notification-worker.yaml
   - archive-worker.yaml
+  # Outbox relay and reconciliation (step 3.2, ADR-0023).
+  - event-relay.yaml
   - admin-portal.yaml
   # Daily partition maintenance (CronJob, migrator account).
   - db-maintenance.yaml

@@ -7,61 +7,75 @@ import {
   type OnModuleDestroy,
 } from '@nestjs/common';
 import {
-  AdvisoryLocks,
+  AMQP_MESSAGING_METRICS,
+  AmqpConnection,
+  ConfirmPublisher,
+  type ConsumerProgressRecorder,
   type EventFeed,
+  type FailureClass,
+  type MessagingMetrics,
   MetricsService,
+  PrismaConsumerProgress,
   PrismaService,
+  QueueConsumer,
   S3Service,
-  ShardedOutboxFeed,
 } from '@email-gateway/common';
-import {
-  EventTypes,
-  messageReceivedV1,
-  type MessageReceivedV1,
-} from '@email-gateway/event-contracts';
+import { EventTypes, type MessageReceivedV1 } from '@email-gateway/event-contracts';
 import type { PrismaClient } from '@email-gateway/database';
 import type { Logger } from '@email-gateway/logger';
-import type { WorkerConfig } from '../config';
+import { MIME_QUEUE, type WorkerConfig } from '../config';
 import { S3EmlSource } from './eml-source';
+import { errorFields, isTransientFailure } from './error-fields';
 import { mimeLimitsFromConfig } from './limits';
 import { MIME_CONSUMER, MimeIngestionService } from './mime-ingestion.service';
 import { MimeMetrics } from './mime-metrics';
 import { MimeRepository } from './mime-repository';
 import { S3PartSink } from './s3-part-sink';
 
-/** Advisory lock namespace of this worker: `ew:outbox:<consumer>[#i/n]` (M2). */
-export const OUTBOX_LOCK_PREFIX = 'ew';
 export const MIME_FEED = Symbol('MIME_FEED');
 export const MIME_LOGGER = Symbol('MIME_LOGGER');
 
-/** Builds the shared outbox feed of the consumer (M2); step 3.2 swaps it for a queue consumer. */
-export function createMimeFeed(options: {
+/**
+ * How the `email.received` consumer treats a failed attempt (step 3.2 Q13): the stage's own
+ * transient check (3.1 M3.10: MySQL, S3 or network outage; the attempt was given back) →
+ * `transient` (retried with backoff, no attempt consumed, bounded by the retry age); anything
+ * else → `retryable` (`x-eg-attempt + 1`). The stage's poison guard finalizes
+ * `max_attempts_exceeded` after MIME_MAX_ATTEMPTS, below the queue's attempt limit, so a
+ * deterministic failure ends with a parse row, not a dead letter.
+ */
+export function classifyMimeFailure(error: unknown): FailureClass {
+  return isTransientFailure(error) ? 'transient' : 'retryable';
+}
+
+/**
+ * The stage's feed (step 3.2 Q13): a `QueueConsumer` of `email.received` accepting
+ * `mail.message.received.v1`, prefetch = MIME_CONCURRENCY, `hold` retries with the MIME backoff
+ * (`MIME_RETRY_BASE_MS` / `MIME_RETRY_MAX_MS`) and `classifyMimeFailure`, and `progress`
+ * (`message_consumer_progress`, so the outbox reconciler leaves retrying and dead-lettered events
+ * alone). Also used by the integration tests (with a per-run consumer name).
+ */
+export function createMimeConsumer(options: {
   config: Readonly<WorkerConfig>;
-  prisma: PrismaClient;
-  locks: AdvisoryLocks;
-  metrics: MimeMetrics;
+  connection: AmqpConnection;
+  publisher: ConfirmPublisher;
   logger: Logger;
+  metrics?: MessagingMetrics;
   consumer?: string;
-}): ShardedOutboxFeed<MessageReceivedV1> {
+  progress?: ConsumerProgressRecorder;
+}): QueueConsumer<MessageReceivedV1> {
   const { config } = options;
-  return new ShardedOutboxFeed<MessageReceivedV1>({
-    prisma: options.prisma,
-    locks: options.locks,
-    logger: options.logger,
-    metrics: options.metrics.outboxPoller(),
+  return new QueueConsumer<MessageReceivedV1>({
+    connection: options.connection,
+    publisher: options.publisher,
+    queue: MIME_QUEUE,
     consumer: options.consumer ?? MIME_CONSUMER,
-    eventType: EventTypes.MessageReceived,
-    schema: messageReceivedV1,
-    // Every received message must be parsed; the ledger and parse rows make re-reads free.
-    initialPosition: 'oldest',
-    pollIntervalMs: config.MIME_OUTBOX_POLL_INTERVAL_MS,
-    safetyLagMs: config.MIME_OUTBOX_SAFETY_LAG_MS,
-    batchSize: config.MIME_OUTBOX_BATCH_SIZE,
-    lockPrefix: OUTBOX_LOCK_PREFIX,
-    concurrency: config.MIME_CONCURRENCY,
-    shards: config.MIME_OUTBOX_SHARDS,
-    maxHeldLocks: config.MIME_OUTBOX_MAX_HELD_SHARDS,
-    failureBackoff: { baseMs: config.MIME_RETRY_BASE_MS, maxMs: config.MIME_RETRY_MAX_MS },
+    eventTypes: [EventTypes.MessageReceived],
+    prefetch: config.MIME_CONCURRENCY,
+    retry: { baseDelayMs: config.MIME_RETRY_BASE_MS, maxDelayMs: config.MIME_RETRY_MAX_MS },
+    classify: classifyMimeFailure,
+    logger: options.logger,
+    ...(options.metrics ? { metrics: options.metrics } : {}),
+    ...(options.progress ? { progress: options.progress } : {}),
   });
 }
 
@@ -96,9 +110,10 @@ export function createMimeIngestionService(options: {
 }
 
 /**
- * Starts the feed after the application bootstrapped (clients connected) and stops it, then the
- * lock connection, before the database closes (non-global module, destroyed before
- * DatabaseModule; the delivery-worker `WorkerRuntime` pattern).
+ * Starts the consumer after the application bootstrapped (clients connected) and, on shutdown,
+ * stops it (no new deliveries; in-flight handlers finish, held retries are requeued), then closes
+ * the AMQP publisher and connection, all before the database closes (non-global module,
+ * destroyed before DatabaseModule; `AmqpModule`'s own close afterwards is a no-op).
  */
 @Injectable()
 export class MimeIngestionRuntime implements OnApplicationBootstrap, OnModuleDestroy {
@@ -107,7 +122,8 @@ export class MimeIngestionRuntime implements OnApplicationBootstrap, OnModuleDes
   constructor(
     @Inject(MIME_FEED) private readonly feed: EventFeed<MessageReceivedV1>,
     @Inject(MimeIngestionService) private readonly service: MimeIngestionService,
-    @Inject(AdvisoryLocks) private readonly locks: AdvisoryLocks,
+    @Inject(AmqpConnection) private readonly connection: AmqpConnection,
+    @Inject(ConfirmPublisher) private readonly publisher: ConfirmPublisher,
     @Inject(MIME_LOGGER) private readonly logger: Logger,
   ) {}
 
@@ -118,7 +134,10 @@ export class MimeIngestionRuntime implements OnApplicationBootstrap, OnModuleDes
   onApplicationBootstrap(): void {
     this.feed.start((event) => this.service.handle(event));
     this.started = true;
-    this.logger.info({ consumer: this.service.consumer }, 'MIME ingestion started');
+    this.logger.info(
+      { consumer: this.service.consumer, queue: MIME_QUEUE },
+      'MIME ingestion started',
+    );
   }
 
   async onModuleDestroy(): Promise<void> {
@@ -127,19 +146,22 @@ export class MimeIngestionRuntime implements OnApplicationBootstrap, OnModuleDes
       try {
         await this.feed.stop();
       } catch (err) {
-        this.logger.warn({ errName: (err as Error).name }, 'MIME feed did not stop cleanly');
+        this.logger.warn(errorFields(err), 'MIME consumer did not stop cleanly');
       }
     }
-    await this.locks.close().catch(() => this.logger.warn('lock connection close failed'));
+    await this.publisher.close().catch(() => this.logger.warn('AMQP publisher close failed'));
+    await this.connection.close().catch(() => this.logger.warn('AMQP connection close failed'));
   }
 }
 
 /**
- * The post-queue MIME ingestion stage of step 3.1 (docs/plan/steps/06-mime-ingestion.md):
- * `mail.message.received.v1` from the shared outbox feed (M2) → `MimeIngestionService` (M3) →
- * parse rows, headers, attachments, S3 part objects and the parse events. Components are plain
- * classes wired here, so the integration tests build the same graph without Nest. Imported by
- * `AppModule` only when `MIME_INGESTION_ENABLED` is true.
+ * The post-queue MIME ingestion stage of step 3.1 (docs/plan/steps/06-mime-ingestion.md) on
+ * RabbitMQ (step 3.2 Q13, docs/plan/steps/07-rabbitmq.md): `mail.message.received.v1` from queue
+ * `email.received` (`createMimeConsumer`) → `MimeIngestionService` (M3, unchanged) → parse rows,
+ * headers, attachments, S3 part objects and the parse events (outbox → event-relay). Components
+ * are plain classes wired here, so the integration tests build the same graph without Nest.
+ * Imported by `AppModule` only when `MIME_INGESTION_ENABLED` is true; needs the global
+ * `AmqpModule`.
  */
 @Module({})
 export class MimeIngestionModule {
@@ -153,12 +175,23 @@ export class MimeIngestionModule {
           useFactory: (metrics: MetricsService) => new MimeMetrics(metrics),
           inject: [MetricsService],
         },
-        { provide: AdvisoryLocks, useFactory: () => new AdvisoryLocks(config.DATABASE_URL) },
         {
           provide: MIME_FEED,
-          useFactory: (prisma: PrismaService, locks: AdvisoryLocks, metrics: MimeMetrics) =>
-            createMimeFeed({ config, prisma, locks, metrics, logger }),
-          inject: [PrismaService, AdvisoryLocks, MimeMetrics],
+          useFactory: (
+            connection: AmqpConnection,
+            publisher: ConfirmPublisher,
+            metrics: MessagingMetrics | null,
+            prisma: PrismaService,
+          ) =>
+            createMimeConsumer({
+              config,
+              connection,
+              publisher,
+              logger,
+              ...(metrics ? { metrics } : {}),
+              progress: new PrismaConsumerProgress(prisma),
+            }),
+          inject: [AmqpConnection, ConfirmPublisher, AMQP_MESSAGING_METRICS, PrismaService],
         },
         {
           provide: MimeIngestionService,

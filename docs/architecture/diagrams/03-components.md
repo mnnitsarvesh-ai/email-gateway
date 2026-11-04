@@ -38,31 +38,39 @@ flowchart TB
   end
 
   subgraph ew["email-worker"]
-    ewInfra["DatabaseModule writer, RabbitMqModule,<br/>RedisModule, S3Module, HealthModule, MetricsModule"]:::impl
-    ewMime["MimeIngestionModule (3.1): ShardedOutboxFeed,<br/>MimeIngestionService, S3 EML source + part sink,<br/>MimeRepository (writer), MimeMetrics"]:::impl
+    ewInfra["DatabaseModule writer, AmqpModule (eg-email-worker),<br/>RedisModule, S3Module, HealthModule, MetricsModule"]:::impl
+    ewMime["MimeIngestionModule (3.1; 3.2): QueueConsumer of email.received<br/>(prefetch = MIME_CONCURRENCY, hold retries),<br/>MimeIngestionService, S3 EML source + part sink,<br/>MimeRepository (writer), MimeMetrics"]:::impl
     pMime["mime-parser (3.1)<br/>streaming parse, limits, defects, headers,<br/>filenames, sniffer, zip inspector"]:::impl
-    ewCons["Consumer of<br/>email-worker.message-received<br/>PLANNED 4.1"]:::planned
+    ewCons["Consumers of scan.auth, scan.spam,<br/>scan.url, scan.attachment, scan.dlp<br/>(queues dormant) PLANNED 4.x"]:::planned
     ewEng["Engine adapters: Rspamd 4.1,<br/>ClamAV + YARA 4.2, URL 4.3,<br/>BEC 4.4, DLP 4.5, sandbox 4.6"]:::planned
     ewAgg["Verdict aggregation, risk score<br/>PLANNED 5.1"]:::planned
   end
 
   subgraph pe["policy-engine"]
-    peInfra["DatabaseModule writer, RabbitMqModule,<br/>RedisModule, HealthModule"]:::impl
+    peInfra["DatabaseModule writer,<br/>RedisModule, HealthModule<br/>(no RabbitMQ until 5.x)"]:::impl
     peEval["Policy evaluator, execution logs<br/>PLANNED 5.2"]:::planned
     peQ["Quarantine writer<br/>PLANNED 5.3"]:::planned
   end
 
   subgraph dw["delivery-worker"]
-    dwInfra["DatabaseModule writer, RabbitMqModule,<br/>HealthModule: mysql, rabbitmq"]:::impl
-    dwRe["SMTP reinjection, routes,<br/>DSN and bounce handling<br/>PLANNED 2.3"]:::planned
+    dwInfra["DatabaseModule writer, AmqpModule (eg-delivery-worker),<br/>RedisModule, S3Module,<br/>HealthModule: mysql, rabbitmq, redis, s3"]:::impl
+    dwCons["DeliveryApprovalConsumer (3.2): QueueConsumer of<br/>email.delivery.pending, delay-queue retries,<br/>processOnce delivery-worker.planner"]:::impl
+    dwRe["Planner, reinjection, rate limits,<br/>delivery-log status, reconciler (2.3)"]:::impl
+    dwDev["DevPassThroughApprover<br/>outbox poller, local/CI only"]:::impl
+  end
+
+  subgraph er["event-relay (3.2)"]
+    erRelay["OutboxRelay: advisory-lock shards,<br/>batch walk, confirmed publish, mark,<br/>row and broker backoff, lag"]:::impl
+    erRec["OutboxReconciler: outbox health,<br/>unconsumed sweep vs ledgers,<br/>bounded re-drives"]:::impl
+    erInfra["DatabaseModule writer, AmqpModule (eg-relay),<br/>MetricsModule, HealthModule: mysql, rabbitmq"]:::impl
   end
 
   subgraph pkgs["Shared packages"]
     pConfig["config<br/>zod schemas, _FILE secrets"]:::impl
     pLogger["logger<br/>pino, context, OTel"]:::impl
-    pCommon["common<br/>bootstrap, health, database,<br/>rabbitmq, redis, s3, errors"]:::impl
+    pCommon["common<br/>bootstrap, health, database, redis, s3, errors,<br/>outbox poller, advisory locks,<br/>messaging: AmqpConnection, ConfirmPublisher,<br/>QueueConsumer, content guard (3.2)"]:::impl
     pDb["database<br/>Prisma schema, processOnce, ids"]:::impl
-    pEvents["event-contracts<br/>envelope, events, topology"]:::impl
+    pEvents["event-contracts<br/>envelope, events, registry,<br/>topology v1, routing keys, definitions"]:::impl
     pSec["security-contracts<br/>SecurityEngine, EngineVerdict"]:::impl
     pTypes["shared-types<br/>health, enums"]:::impl
   end
@@ -76,9 +84,15 @@ flowchart TB
   sockSrv --> conn
   sasl --> conn
   lmtpL --> ingest
-  ingest -->|"outbox mail.message.received.v1"| ewMime
+  ingest -->|"outbox mail.message.received.v1"| erRelay
+  erRelay -->|"email.received"| ewMime
   ewMime --> pMime
-  ewMime -.->|"mail.message.parsed.v1, P 4.1"| ewCons
+  ewMime -->|"outbox mail.message.parsed.v1"| erRelay
+  erRelay -.->|"scan.* (dormant), P 4.x"| ewCons
+  erRelay -->|"email.delivery.pending"| dwCons
+  dwDev -->|"outbox mail.delivery.approved.v1"| erRelay
+  dwCons --> dwRe
+  erRec -->|"re-drive (published_at = NULL)"| erRelay
   ewCons -.-> ewEng
   ewEng -.-> ewAgg
   peEval -.-> peQ
@@ -93,19 +107,22 @@ flowchart TB
   ingest -.-> pEvents
 ```
 
-**Legend.** Green solid: IMPLEMENTED module or package. Amber dashed: PLANNED module with its step. `archive-worker` and `notification-worker` have the same shell as `delivery-worker` (writer, RabbitMQ, health, plus S3 for the archive worker); their business modules are PLANNED 8.1 and 6.2.
+**Legend.** Green solid: IMPLEMENTED module or package. Amber dashed: PLANNED module with its step. `archive-worker` and `notification-worker` are shells (writer and health, plus S3 for the archive worker; no RabbitMQ since step 3.2); their business modules are PLANNED 8.1 and 6.2. Broker hops are drawn between components for readability: every one goes `message_outbox` → event-relay → exchange → queue → consumer (diagram [21](21-event-relay-sequence.md)).
 
 ## Status
 
-| Component                                         | Status      | Evidence or delivering step                                                                                                                                     |
-| ------------------------------------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Shared infrastructure modules (`packages/common`) | IMPLEMENTED | `health.service.test.ts`, `database.module.test.ts`, `prisma-read.service.test.ts`, `all-exceptions.filter.test.ts`                                             |
-| `api` health and meta                             | IMPLEMENTED | `apps/api/test/app.e2e.test.ts`, `services.test.ts`                                                                                                             |
-| Policy server, protocol, decision                 | IMPLEMENTED | `policy-protocol.test.ts`, `policy-server.service.test.ts`, `mail-plane.test.ts`                                                                                |
-| Worker shells (DB writer, RabbitMQ, health)       | IMPLEMENTED | `apps/*/src/app.module.test.ts` (also assert `PrismaReadService` is not resolvable)                                                                             |
-| `packages/database` (`processOnce`, `ids`)        | IMPLEMENTED | `idempotency.test.ts`, `ids.test.ts`, `mysql.test.ts`                                                                                                           |
-| `packages/event-contracts`                        | IMPLEMENTED | `events.test.ts`                                                                                                                                                |
-| `packages/security-contracts`                     | IMPLEMENTED | Types and zod schema only; no engine implements it yet                                                                                                          |
-| email-worker `MimeIngestionModule`, `mime-parser` | IMPLEMENTED | step 3.1: `apps/email-worker/src/mime-ingestion/*.test.ts`, `apps/email-worker/integration`, `packages/mime-parser`, `tests/integration/mime-ingestion.test.ts` |
-| Shared outbox feed (`packages/common/src/outbox`) | IMPLEMENTED | step 3.1: `outbox-poller.test.ts`, `advisory-locks.test.ts`; used by delivery-worker and email-worker                                                           |
-| Business modules listed in the diagram            | PLANNED     | Step numbers in the boxes                                                                                                                                       |
+| Component                                               | Status                 | Evidence or delivering step                                                                                                                                         |
+| ------------------------------------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Shared infrastructure modules (`packages/common`)       | IMPLEMENTED            | `health.service.test.ts`, `database.module.test.ts`, `prisma-read.service.test.ts`, `all-exceptions.filter.test.ts`                                                 |
+| `api` health and meta                                   | IMPLEMENTED            | `apps/api/test/app.e2e.test.ts`, `services.test.ts`                                                                                                                 |
+| Policy server, protocol, decision                       | IMPLEMENTED            | `policy-protocol.test.ts`, `policy-server.service.test.ts`, `mail-plane.test.ts`                                                                                    |
+| Worker shells (DB writer, health)                       | IMPLEMENTED            | `apps/*/src/app.module.test.ts` (also assert `PrismaReadService` is not resolvable)                                                                                 |
+| Messaging library (`packages/common/src/messaging`)     | IMPLEMENTED 3.2        | `connection/publisher/consumer/codec/content-guard/backoff.test.ts`; `messaging-client.test.ts`, `messaging-permissions.test.ts`                                    |
+| event-relay relay and reconciler                        | IMPLEMENTED 3.2        | `apps/event-relay/src/**/*.test.ts`, `apps/event-relay/integration`, stack `messaging-*.test.ts`                                                                    |
+| delivery-worker approval consumer, planner, reinjection | IMPLEMENTED (2.3, 3.2) | `apps/delivery-worker/src/**/*.test.ts`, `apps/delivery-worker/integration`, `routing-*.test.ts`                                                                    |
+| `packages/database` (`processOnce`, `ids`)              | IMPLEMENTED            | `idempotency.test.ts`, `ids.test.ts`, `mysql.test.ts`                                                                                                               |
+| `packages/event-contracts`                              | IMPLEMENTED            | `events.test.ts`                                                                                                                                                    |
+| `packages/security-contracts`                           | IMPLEMENTED            | Types and zod schema only; no engine implements it yet                                                                                                              |
+| email-worker `MimeIngestionModule`, `mime-parser`       | IMPLEMENTED            | step 3.1: `apps/email-worker/src/mime-ingestion/*.test.ts`, `apps/email-worker/integration`, `packages/mime-parser`, `tests/integration/mime-ingestion.test.ts`     |
+| Shared outbox feed (`packages/common/src/outbox`)       | IMPLEMENTED            | `outbox-poller.test.ts`, `advisory-locks.test.ts`; since 3.2 only the dev pass-through polls (and event-relay uses the advisory locks); `ShardedOutboxFeed` removed |
+| Business modules listed in the diagram                  | PLANNED                | Step numbers in the boxes                                                                                                                                           |

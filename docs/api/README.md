@@ -41,11 +41,12 @@ All paths are under `/api/v1`. Access: **P** = public (no credentials); **U** = 
 
 ### Operational
 
-| Method | Path            | Access | Description                                                  |
-| ------ | --------------- | ------ | ------------------------------------------------------------ |
-| GET    | `/health/live`  | P      | Process liveness (unprefixed). No dependency checks          |
-| GET    | `/health/ready` | P      | Dependency readiness (unprefixed). `200` when ok, else `503` |
-| GET    | `/api/v1/meta`  | P      | API build/version information                                |
+| Method | Path            | Access | Description                                                                                                                                                                          |
+| ------ | --------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| GET    | `/health/live`  | P      | Process liveness (unprefixed). No dependency checks                                                                                                                                  |
+| GET    | `/health/ready` | P      | Dependency readiness (unprefixed). `200` when ok, else `503`                                                                                                                         |
+| GET    | `/api/v1/meta`  | P      | API build/version information                                                                                                                                                        |
+| GET    | `/metrics`      | P      | Prometheus series (unprefixed, step 3.2 §5.3, e.g. `dead_letter_replay_total{source_queue,outcome}`). Internal port only: the ingress must not route it. Not in the OpenAPI document |
 
 ### Authentication and self-service (`auth`, `platform` tags)
 
@@ -324,6 +325,27 @@ Per-recipient delivery state of the caller's organization (R9, R13), from the re
 **Audit trail.** Every status signal is kept, applied or not (`applied: false` for stale, conflicting or same-state signals). `source`: `planner`, `reinjection`, `postfix_log` (the MTA delivery log), `bounce_notice` (postmaster DSN copies), `reconciler`. `detail` is the remote reply or the reason text, never message content.
 
 **List range.** `from` (inclusive) and `to` (exclusive) are ISO 8601 date-times; `to` defaults to now and `from` to `to` − 24 h. The range must be at most 31 days and `from` before `to` (`400`). The cursor is opaque (keyset on received-at and id); filters must stay the same between pages.
+
+### Dead letters (`platform` tag, step 3.2)
+
+Pipeline messages that a consumer could not process end in the RabbitMQ queue `email.dead-letter` (design [07-rabbitmq.md](../plan/steps/07-rabbitmq.md) Q8, Q9; [ADR-0024](../architecture/adr/0024-rabbitmq-topology-retry-dead-letter.md)). Platform users only (API keys and override tokens get `403`). The api connects to the broker per request with `RABBITMQ_OPS_URL` (role user `eg-ops`: read `email.dead-letter`, write the six exchanges) and closes the connection afterwards; without that key both routes answer `503 dead_letter_replay_unavailable`.
+
+| Method | Path                            | Access                                | Description                                                                                                                                                                                                                                                                                                            |
+| ------ | ------------------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/platform/dead-letters`        | `platform:operations`, U              | `{ queue: 'email.dead-letter', messages, consumers }` (passive check of the queue)                                                                                                                                                                                                                                     |
+| POST   | `/platform/dead-letters/replay` | `platform:dead_letter_replay`, U, MFA | `{ sourceQueue, limit (1–1000), eventType?, organizationId? (public id), failureReason?, dryRun? (false), reason (10–500 characters) }` → `{ replayId, dryRun, scanned, matched, replayed, skipped: { invalid, notMatching }, items: [{ eventId, eventType, organizationId, sourceQueue, failureReason, replayed }] }` |
+
+```bash
+curl -s -X POST http://127.0.0.1:${API_HOST_PORT}/api/v1/platform/dead-letters/replay \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"sourceQueue":"email.received","limit":50,"failureReason":"max_attempts_exceeded","dryRun":true,"reason":"after fixing the S3 credentials"}'
+```
+
+**What a replay does.** One replay runs at a time platform-wide (Redis lock `dlq:replay:lock`, 5 minutes; otherwise `409 replay_in_progress`). The api fetches dead letters one by one with manual acks and **holds** them until `limit` matched, the queue is empty or `DEAD_LETTER_REPLAY_SCAN_MAX` (default 10 000) were scanned. A message matches when its source queue (`x-eg-source-queue`, or the broker's `x-first-death-queue` for a delivery-limit dead letter) equals `sourceQueue` and every given filter matches (`eventType`; `organizationId`; `failureReason` = `x-eg-failure-reason` or the broker reason such as `delivery_limit`). Each match is decoded against the event registry (schema version, payload schema, tenant agreement of header, routing key and envelope) and passes the content guard; an invalid one stays in the queue (`skipped.invalid`). A valid one is republished **unchanged** (same body, `messageId` = `eventId`, `correlationId`, type, timestamp, appId) to `retry.<sourceQueue>.org.<id>.<eventType>` on the source queue's home exchange with fresh headers (the base headers, `x-eg-attempt: 0`, `x-eg-transient-retries: 0`, `x-eg-replay-id`, `x-eg-replay-count` + 1, `x-eg-replayed-at`; no failure or `x-death` headers), and the dead letter is acked **only after the broker confirmed the copy**. Everything not replayed is returned to the queue at the end (also on a dry run and on errors). `sourceQueue` must be a work queue (`email.received`, `email.delivery.pending`); a dormant, delay or dead-letter queue is `400` with `sourceQueue: source_queue_not_replayable`. An unknown `organizationId` is `404`.
+
+**Safety.** A replayed event keeps its `eventId`: a consumer that already processed it records a ledger duplicate (`processOnce`), so replaying twice is harmless. A crash between the confirm and the ack leaves a copy in both queues, which is again a duplicate. Replay is cross-tenant by nature; the organization filter narrows it.
+
+**Audit.** Every replay writes one `audit_logs` row (`action: platform.dead_letters_replayed`, `resource_type: queue`, `resource_id: <sourceQueue>`, the platform user as actor) with `metadata: { replayId, dryRun, filters, scanned, matched, replayed, skipped, reason, outcome, eventIds (≤ 100) }`, also when nothing matched. When the broker fails half-way the row says `outcome: partial` and the request answers `503 dead_letter_replay_unavailable`; what was replayed before stays replayed, the rest is back in the queue.
 
 ## Errors
 

@@ -1,0 +1,624 @@
+{
+  "topology_version": 1,
+  "exchanges": [
+    {
+      "name": "email.ingestion",
+      "vhost": "email-gateway",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    },
+    {
+      "name": "email.security",
+      "vhost": "email-gateway",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    },
+    {
+      "name": "email.policy",
+      "vhost": "email-gateway",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    },
+    {
+      "name": "email.delivery",
+      "vhost": "email-gateway",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    },
+    {
+      "name": "email.archive",
+      "vhost": "email-gateway",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    },
+    {
+      "name": "email.events",
+      "vhost": "email-gateway",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    }
+  ],
+  "queues": [
+    {
+      "name": "email.received",
+      "vhost": "email-gateway",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-queue-type": "quorum"
+      }
+    },
+    {
+      "name": "scan.auth",
+      "vhost": "email-gateway",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-queue-type": "quorum"
+      }
+    },
+    {
+      "name": "scan.spam",
+      "vhost": "email-gateway",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-queue-type": "quorum"
+      }
+    },
+    {
+      "name": "scan.url",
+      "vhost": "email-gateway",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-queue-type": "quorum"
+      }
+    },
+    {
+      "name": "scan.attachment",
+      "vhost": "email-gateway",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-queue-type": "quorum"
+      }
+    },
+    {
+      "name": "scan.dlp",
+      "vhost": "email-gateway",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-queue-type": "quorum"
+      }
+    },
+    {
+      "name": "scan.sandbox",
+      "vhost": "email-gateway",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-queue-type": "quorum"
+      }
+    },
+    {
+      "name": "email.policy.evaluate",
+      "vhost": "email-gateway",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-queue-type": "quorum"
+      }
+    },
+    {
+      "name": "email.delivery.pending",
+      "vhost": "email-gateway",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-queue-type": "quorum"
+      }
+    },
+    {
+      "name": "email.delivery.retry",
+      "vhost": "email-gateway",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-queue-type": "quorum"
+      }
+    },
+    {
+      "name": "email.quarantine",
+      "vhost": "email-gateway",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-queue-type": "quorum"
+      }
+    },
+    {
+      "name": "email.archive",
+      "vhost": "email-gateway",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-queue-type": "quorum"
+      }
+    },
+    {
+      "name": "email.analytics",
+      "vhost": "email-gateway",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-queue-type": "quorum"
+      }
+    },
+    {
+      "name": "email.dead-letter",
+      "vhost": "email-gateway",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-queue-type": "quorum"
+      }
+    }
+  ],
+  "bindings": [
+    {
+      "source": "email.archive",
+      "vhost": "email-gateway",
+      "destination": "email.events",
+      "destination_type": "exchange",
+      "routing_key": "org.#",
+      "arguments": {}
+    },
+    {
+      "source": "email.archive",
+      "vhost": "email-gateway",
+      "destination": "email.archive",
+      "destination_type": "queue",
+      "routing_key": "retry.email.archive.#",
+      "arguments": {}
+    },
+    {
+      "source": "email.delivery",
+      "vhost": "email-gateway",
+      "destination": "email.events",
+      "destination_type": "exchange",
+      "routing_key": "org.#",
+      "arguments": {}
+    },
+    {
+      "source": "email.delivery",
+      "vhost": "email-gateway",
+      "destination": "email.delivery.pending",
+      "destination_type": "queue",
+      "routing_key": "org.*.mail.delivery.approved.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.delivery",
+      "vhost": "email-gateway",
+      "destination": "email.delivery.pending",
+      "destination_type": "queue",
+      "routing_key": "retry.email.delivery.pending.#",
+      "arguments": {}
+    },
+    {
+      "source": "email.delivery",
+      "vhost": "email-gateway",
+      "destination": "email.delivery.retry",
+      "destination_type": "queue",
+      "routing_key": "delay.email.delivery.pending.#",
+      "arguments": {}
+    },
+    {
+      "source": "email.events",
+      "vhost": "email-gateway",
+      "destination": "email.analytics",
+      "destination_type": "queue",
+      "routing_key": "org.#",
+      "arguments": {}
+    },
+    {
+      "source": "email.events",
+      "vhost": "email-gateway",
+      "destination": "email.analytics",
+      "destination_type": "queue",
+      "routing_key": "retry.email.analytics.#",
+      "arguments": {}
+    },
+    {
+      "source": "email.events",
+      "vhost": "email-gateway",
+      "destination": "email.dead-letter",
+      "destination_type": "queue",
+      "routing_key": "dead-letter.#",
+      "arguments": {}
+    },
+    {
+      "source": "email.ingestion",
+      "vhost": "email-gateway",
+      "destination": "email.events",
+      "destination_type": "exchange",
+      "routing_key": "org.#",
+      "arguments": {}
+    },
+    {
+      "source": "email.ingestion",
+      "vhost": "email-gateway",
+      "destination": "email.policy.evaluate",
+      "destination_type": "queue",
+      "routing_key": "org.*.mail.message.parse_failed.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.ingestion",
+      "vhost": "email-gateway",
+      "destination": "email.received",
+      "destination_type": "queue",
+      "routing_key": "org.*.mail.message.received.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.ingestion",
+      "vhost": "email-gateway",
+      "destination": "email.received",
+      "destination_type": "queue",
+      "routing_key": "retry.email.received.#",
+      "arguments": {}
+    },
+    {
+      "source": "email.ingestion",
+      "vhost": "email-gateway",
+      "destination": "scan.attachment",
+      "destination_type": "queue",
+      "routing_key": "org.*.mail.message.parsed.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.ingestion",
+      "vhost": "email-gateway",
+      "destination": "scan.auth",
+      "destination_type": "queue",
+      "routing_key": "org.*.mail.message.parsed.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.ingestion",
+      "vhost": "email-gateway",
+      "destination": "scan.dlp",
+      "destination_type": "queue",
+      "routing_key": "org.*.mail.message.parsed.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.ingestion",
+      "vhost": "email-gateway",
+      "destination": "scan.spam",
+      "destination_type": "queue",
+      "routing_key": "org.*.mail.message.parsed.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.ingestion",
+      "vhost": "email-gateway",
+      "destination": "scan.url",
+      "destination_type": "queue",
+      "routing_key": "org.*.mail.message.parsed.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.policy",
+      "vhost": "email-gateway",
+      "destination": "email.events",
+      "destination_type": "exchange",
+      "routing_key": "org.#",
+      "arguments": {}
+    },
+    {
+      "source": "email.policy",
+      "vhost": "email-gateway",
+      "destination": "email.archive",
+      "destination_type": "queue",
+      "routing_key": "org.*.mail.policy.decided.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.policy",
+      "vhost": "email-gateway",
+      "destination": "email.policy.evaluate",
+      "destination_type": "queue",
+      "routing_key": "retry.email.policy.evaluate.#",
+      "arguments": {}
+    },
+    {
+      "source": "email.policy",
+      "vhost": "email-gateway",
+      "destination": "email.quarantine",
+      "destination_type": "queue",
+      "routing_key": "org.*.mail.policy.decided.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.policy",
+      "vhost": "email-gateway",
+      "destination": "email.quarantine",
+      "destination_type": "queue",
+      "routing_key": "retry.email.quarantine.#",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
+      "destination": "email.events",
+      "destination_type": "exchange",
+      "routing_key": "org.#",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
+      "destination": "email.policy.evaluate",
+      "destination_type": "queue",
+      "routing_key": "org.*.mail.message.scanned.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
+      "destination": "scan.attachment",
+      "destination_type": "queue",
+      "routing_key": "retry.scan.attachment.#",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
+      "destination": "scan.auth",
+      "destination_type": "queue",
+      "routing_key": "retry.scan.auth.#",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
+      "destination": "scan.dlp",
+      "destination_type": "queue",
+      "routing_key": "retry.scan.dlp.#",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
+      "destination": "scan.sandbox",
+      "destination_type": "queue",
+      "routing_key": "org.*.mail.attachment.sandbox_requested.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
+      "destination": "scan.sandbox",
+      "destination_type": "queue",
+      "routing_key": "retry.scan.sandbox.#",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
+      "destination": "scan.spam",
+      "destination_type": "queue",
+      "routing_key": "retry.scan.spam.#",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
+      "destination": "scan.url",
+      "destination_type": "queue",
+      "routing_key": "retry.scan.url.#",
+      "arguments": {}
+    }
+  ],
+  "policies": [
+    {
+      "vhost": "email-gateway",
+      "name": "eg.email.received",
+      "pattern": "^email\\.received$",
+      "apply-to": "queues",
+      "priority": 10,
+      "definition": {
+        "delivery-limit": 20,
+        "dead-letter-exchange": "email.events",
+        "dead-letter-routing-key": "dead-letter.email.received",
+        "dead-letter-strategy": "at-least-once",
+        "overflow": "reject-publish",
+        "max-length": 1000000
+      }
+    },
+    {
+      "vhost": "email-gateway",
+      "name": "eg.scan.auth",
+      "pattern": "^scan\\.auth$",
+      "apply-to": "queues",
+      "priority": 10,
+      "definition": {
+        "delivery-limit": -1,
+        "max-length": 10000,
+        "overflow": "drop-head"
+      }
+    },
+    {
+      "vhost": "email-gateway",
+      "name": "eg.scan.spam",
+      "pattern": "^scan\\.spam$",
+      "apply-to": "queues",
+      "priority": 10,
+      "definition": {
+        "delivery-limit": -1,
+        "max-length": 10000,
+        "overflow": "drop-head"
+      }
+    },
+    {
+      "vhost": "email-gateway",
+      "name": "eg.scan.url",
+      "pattern": "^scan\\.url$",
+      "apply-to": "queues",
+      "priority": 10,
+      "definition": {
+        "delivery-limit": -1,
+        "max-length": 10000,
+        "overflow": "drop-head"
+      }
+    },
+    {
+      "vhost": "email-gateway",
+      "name": "eg.scan.attachment",
+      "pattern": "^scan\\.attachment$",
+      "apply-to": "queues",
+      "priority": 10,
+      "definition": {
+        "delivery-limit": -1,
+        "max-length": 10000,
+        "overflow": "drop-head"
+      }
+    },
+    {
+      "vhost": "email-gateway",
+      "name": "eg.scan.dlp",
+      "pattern": "^scan\\.dlp$",
+      "apply-to": "queues",
+      "priority": 10,
+      "definition": {
+        "delivery-limit": -1,
+        "max-length": 10000,
+        "overflow": "drop-head"
+      }
+    },
+    {
+      "vhost": "email-gateway",
+      "name": "eg.scan.sandbox",
+      "pattern": "^scan\\.sandbox$",
+      "apply-to": "queues",
+      "priority": 10,
+      "definition": {
+        "delivery-limit": -1,
+        "max-length": 10000,
+        "overflow": "drop-head"
+      }
+    },
+    {
+      "vhost": "email-gateway",
+      "name": "eg.email.policy.evaluate",
+      "pattern": "^email\\.policy\\.evaluate$",
+      "apply-to": "queues",
+      "priority": 10,
+      "definition": {
+        "delivery-limit": -1,
+        "max-length": 10000,
+        "overflow": "drop-head"
+      }
+    },
+    {
+      "vhost": "email-gateway",
+      "name": "eg.email.delivery.pending",
+      "pattern": "^email\\.delivery\\.pending$",
+      "apply-to": "queues",
+      "priority": 10,
+      "definition": {
+        "delivery-limit": 20,
+        "dead-letter-exchange": "email.events",
+        "dead-letter-routing-key": "dead-letter.email.delivery.pending",
+        "dead-letter-strategy": "at-least-once",
+        "overflow": "reject-publish",
+        "max-length": 1000000
+      }
+    },
+    {
+      "vhost": "email-gateway",
+      "name": "eg.email.delivery.retry",
+      "pattern": "^email\\.delivery\\.retry$",
+      "apply-to": "queues",
+      "priority": 10,
+      "definition": {
+        "delivery-limit": -1,
+        "dead-letter-exchange": "email.delivery",
+        "dead-letter-routing-key": "retry.email.delivery.pending.expired",
+        "dead-letter-strategy": "at-least-once",
+        "overflow": "reject-publish",
+        "max-length": 1000000
+      }
+    },
+    {
+      "vhost": "email-gateway",
+      "name": "eg.email.quarantine",
+      "pattern": "^email\\.quarantine$",
+      "apply-to": "queues",
+      "priority": 10,
+      "definition": {
+        "delivery-limit": -1,
+        "max-length": 10000,
+        "overflow": "drop-head"
+      }
+    },
+    {
+      "vhost": "email-gateway",
+      "name": "eg.email.archive",
+      "pattern": "^email\\.archive$",
+      "apply-to": "queues",
+      "priority": 10,
+      "definition": {
+        "delivery-limit": -1,
+        "max-length": 10000,
+        "overflow": "drop-head"
+      }
+    },
+    {
+      "vhost": "email-gateway",
+      "name": "eg.email.analytics",
+      "pattern": "^email\\.analytics$",
+      "apply-to": "queues",
+      "priority": 10,
+      "definition": {
+        "delivery-limit": -1,
+        "max-length": 10000,
+        "overflow": "drop-head"
+      }
+    },
+    {
+      "vhost": "email-gateway",
+      "name": "eg.email.dead-letter",
+      "pattern": "^email\\.dead-letter$",
+      "apply-to": "queues",
+      "priority": 10,
+      "definition": {
+        "delivery-limit": -1,
+        "overflow": "reject-publish",
+        "max-length": 1000000
+      }
+    }
+  ]
+}

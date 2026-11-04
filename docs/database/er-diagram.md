@@ -633,12 +633,21 @@ erDiagram
     bigint id PK
     datetime created_at PK "PARTITIONED day"
     char event_id
-    datetime published_at
+    datetime published_at "set by event-relay after the confirm"
+    int attempts
+    smallint redrive_count "reconciler, step 3.2"
+    datetime last_redriven_at
   }
   message_idempotency {
     varchar consumer PK
     char event_id PK
     datetime processed_at
+  }
+  message_consumer_progress {
+    varchar consumer PK
+    char event_id PK
+    enum state "retrying, dead_lettered"
+    datetime updated_at
   }
   audit_logs {
     bigint id PK
@@ -672,4 +681,4 @@ erDiagram
   }
 ```
 
-`message_idempotency` stands alone: its key is the consumer name and the event id. `stream_cursors` (step 2.3) holds the durable positions of the delivery-worker's outbox pollers and Postfix log tailers; it references nothing. `maintenance_watermarks` belongs to the partition-maintenance job (the registry purge watermark, see [retention.md](retention.md)).
+`message_idempotency` stands alone: its key is the consumer name and the event id. So does `message_consumer_progress` (step 3.2 review round 1), with the same key. `stream_cursors` (step 2.3) holds the durable positions of the delivery-worker's outbox pollers and Postfix log tailers; it references nothing. `maintenance_watermarks` belongs to the partition-maintenance job (the registry purge watermark, see [retention.md](retention.md)).

@@ -20,7 +20,10 @@ export function buildOpenApiDocument(app: INestApplication): OpenAPIObject {
     .addBearerAuth({ type: 'http', scheme: 'bearer', bearerFormat: 'JWT' }, ACCESS_TOKEN_SCHEME)
     .addApiKey({ type: 'apiKey', in: 'header', name: 'X-API-Key' }, API_KEY_SCHEME)
     .build();
-  return SwaggerModule.createDocument(app, config);
+  const document = SwaggerModule.createDocument(app, config);
+  // The Prometheus scrape endpoint (internal port only) is not part of the API contract.
+  delete document.paths['/metrics'];
+  return document;
 }
 
 /** Serves Swagger UI at `/docs` (and the JSON at `/docs-json`). Callers skip it in production. */

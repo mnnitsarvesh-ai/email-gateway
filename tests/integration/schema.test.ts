@@ -60,6 +60,7 @@ const NOT_TENANT_OWNED = [
   'malware_signatures',
   'system_settings',
   'message_idempotency',
+  'message_consumer_progress',
   'maintenance_watermarks',
   'mail_destination_presets',
   'stream_cursors',
@@ -138,12 +139,12 @@ const TENANT_OWNED = [
 const ALL_TABLES = [...NOT_TENANT_OWNED, ...TENANT_OWNED];
 
 describe('MySQL schema', () => {
-  it('has exactly the 71 data-model tables plus _prisma_migrations', async () => {
+  it('has exactly the 72 data-model tables plus _prisma_migrations', async () => {
     const rows = await prisma.$queryRaw<{ name: string }[]>`
       SELECT TABLE_NAME AS name FROM information_schema.TABLES
       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'`;
-    expect(ALL_TABLES).toHaveLength(71);
-    expect(new Set(ALL_TABLES).size).toBe(71);
+    expect(ALL_TABLES).toHaveLength(72);
+    expect(new Set(ALL_TABLES).size).toBe(72);
     expect(rows.map((r) => r.name).sort()).toEqual([...ALL_TABLES, '_prisma_migrations'].sort());
   });
 
@@ -1406,6 +1407,60 @@ describe('MIME ingestion schema (step 3.1, §3)', () => {
     } finally {
       await prisma.emailMessageParse.deleteMany({ where: { organizationId } });
     }
+  });
+});
+
+describe('event relay schema (step 3.2, §4)', () => {
+  it('adds the reconciliation columns to message_outbox', async () => {
+    const cols = await columns(['message_outbox']);
+    expect(cols.get('message_outbox.redrive_count')).toMatchObject({
+      columnType: 'smallint unsigned',
+      nullable: 'NO',
+      columnDefault: '0',
+    });
+    expect(cols.get('message_outbox.last_redriven_at')).toMatchObject({
+      columnType: 'datetime(3)',
+      nullable: 'YES',
+      columnDefault: null,
+    });
+    expect(cols.size).toBe(15);
+  });
+
+  it('indexes last_redriven_at and keeps the outbox keys unchanged', async () => {
+    const outbox = await indexColumnSets('message_outbox');
+    expect(outbox).toContainEqual(expect.objectContaining({ key: 'id,created_at', unique: true }));
+    expect(outbox).toContainEqual(
+      expect.objectContaining({ key: 'published_at,id', unique: false }),
+    );
+    expect(outbox).toContainEqual(
+      expect.objectContaining({ key: 'last_redriven_at', unique: false }),
+    );
+    // Review round 1: the planner's approval provenance lookup.
+    expect(outbox).toContainEqual(expect.objectContaining({ key: 'event_id', unique: false }));
+    expect(outbox).toHaveLength(4);
+  });
+
+  it('adds message_consumer_progress keyed like the ledger (review round 1)', async () => {
+    const cols = await columns(['message_consumer_progress']);
+    expect(cols.get('message_consumer_progress.state')).toMatchObject({
+      columnType: "enum('retrying','dead_lettered')",
+      nullable: 'NO',
+    });
+    expect(cols.get('message_consumer_progress.reason')).toMatchObject({
+      columnType: 'varchar(48)',
+      nullable: 'YES',
+    });
+    expect(cols.get('message_consumer_progress.updated_at')).toMatchObject({
+      columnType: 'datetime(3)',
+      nullable: 'NO',
+    });
+    expect(cols.size).toBe(7);
+    const keys = await indexColumnSets('message_consumer_progress');
+    expect(keys).toContainEqual(
+      expect.objectContaining({ key: 'consumer,event_id', unique: true }),
+    );
+    expect(keys).toContainEqual(expect.objectContaining({ key: 'updated_at', unique: false }));
+    expect(keys).toHaveLength(2);
   });
 });
 

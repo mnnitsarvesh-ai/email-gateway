@@ -3,14 +3,12 @@ import {
   databaseConfigSchema,
   httpConfigSchema,
   loadConfig,
-  rabbitmqConfigSchema,
 } from '@email-gateway/config';
 import type { z } from 'zod';
 
 export const configSchema = baseConfigSchema
   .extend(httpConfigSchema(3050).shape)
-  .extend(databaseConfigSchema.shape)
-  .extend(rabbitmqConfigSchema.shape);
+  .extend(databaseConfigSchema.shape);
 
 export type WorkerConfig = z.infer<typeof configSchema>;
 

@@ -1,0 +1,127 @@
+# Outbox relay and reconciliation (step 3.2 Q11, Q12; ADR-0023): publishes message_outbox rows
+# to RabbitMQ with publisher confirms (role user eg-relay, publish-only) and re-drives rows whose
+# consumer left no ledger row. Writer only (ADR-0014). Replicas share the shards through MySQL
+# advisory locks; replicas x RELAY_MAX_HELD_SHARDS must be >= RELAY_SHARDS. Here
+# RELAY_MAX_HELD_SHARDS = RELAY_SHARDS = 4, so either replica alone holds every shard while the
+# other restarts (the reconciler is a single active instance as well).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: event-relay
+  labels: { app.kubernetes.io/name: event-relay, app.kubernetes.io/part-of: email-gateway }
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels: { app.kubernetes.io/name: event-relay }
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: event-relay, app.kubernetes.io/part-of: email-gateway }
+      annotations:
+        prometheus.io/scrape: 'true'
+        prometheus.io/port: '3070'
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: event-relay
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile: { type: RuntimeDefault }
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app.kubernetes.io/name: event-relay }
+      containers:
+        - name: event-relay
+          image: email-gateway/event-relay:latest
+          ports:
+            - { name: http, containerPort: 3070 }
+          envFrom:
+            - configMapRef: { name: email-gateway-config }
+          env:
+            - { name: HTTP_PORT, value: '3070' }
+            # Relay and reconciler (docs/plan/steps/07-rabbitmq.md §6); defaults. Each replica
+            # may hold every shard, so one replica keeps publishing while the other restarts.
+            - { name: RELAY_ENABLED, value: 'true' }
+            - { name: RECONCILE_ENABLED, value: 'true' }
+            - { name: RELAY_SHARDS, value: '4' }
+            - { name: RELAY_MAX_HELD_SHARDS, value: '4' }
+            - { name: RELAY_BATCH_SIZE, value: '200' }
+            - { name: RELAY_SCAN_LIMIT, value: '1000' }
+            - { name: RELAY_POLL_INTERVAL_MS, value: '250' }
+            - { name: RELAY_CONFIRM_TIMEOUT_MS, value: '15000' }
+            - { name: RELAY_BROKER_BACKOFF_BASE_MS, value: '500' }
+            - { name: RELAY_BROKER_BACKOFF_MAX_MS, value: '30000' }
+            - { name: RELAY_ROW_BACKOFF_BASE_MS, value: '1000' }
+            - { name: RELAY_ROW_BACKOFF_MAX_MS, value: '300000' }
+            - { name: RELAY_MAX_ATTEMPTS, value: '10' }
+            - { name: RELAY_MAX_MESSAGE_BYTES, value: '131072' }
+            - { name: RECONCILE_INTERVAL_MS, value: '60000' }
+            - { name: RECONCILE_UNCONSUMED_AFTER_SECONDS, value: '900' }
+            - { name: RECONCILE_MAX_REDRIVES, value: '3' }
+            - { name: RECONCILE_LOOKBACK_HOURS, value: '72' }
+            - { name: RECONCILE_BATCH_SIZE, value: '1000' }
+            - { name: RECONCILE_QUEUES, value: 'email.received,email.delivery.pending' }
+            - { name: RECONCILE_START_POSITION, value: oldest }
+            # Secrets are mounted as files by External Secrets and read via the <KEY>_FILE convention.
+            - { name: DATABASE_URL_FILE, value: /var/run/secrets/gateway/database-url }
+            # Role user eg-relay (step 3.2 Q10): publish event keys (org.<id>.…) to the six exchanges, read nothing;
+            # comma-separated amqps:// URLs of the broker nodes.
+            - { name: RABBITMQ_RELAY_URL_FILE, value: /var/run/secrets/gateway/rabbitmq-relay-url }
+          volumeMounts:
+            - { name: secrets, mountPath: /var/run/secrets/gateway, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+          readinessProbe:
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /health/live, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          startupProbe:
+            httpGet: { path: /health/live, port: http }
+            periodSeconds: 5
+            failureThreshold: 24
+          resources:
+            requests: { cpu: 250m, memory: 256Mi }
+            limits: { memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+      volumes:
+        - name: secrets
+          secret: { secretName: email-gateway-secrets }
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: event-relay
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: event-relay
+  labels: { app.kubernetes.io/name: event-relay }
+spec:
+  selector: { app.kubernetes.io/name: event-relay }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: event-relay
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: event-relay }

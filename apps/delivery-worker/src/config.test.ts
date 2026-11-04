@@ -4,7 +4,7 @@ import { DEV_PASSTHROUGH_REFUSAL, loadWorkerConfig } from './config';
 
 const base = {
   DATABASE_URL: 'mysql://test:test@localhost:3306/test',
-  RABBITMQ_URL: 'amqp://test:test@localhost:5672',
+  RABBITMQ_DELIVERY_WORKER_URL: 'amqp://dw:dw-secret@localhost:5672/email-gateway',
   REDIS_URL: 'redis://localhost:6379',
   S3_REGION: 'ap-south-1',
   S3_BUCKET_MAIL: 'test-mail',
@@ -39,6 +39,8 @@ describe('delivery-worker config', () => {
       DELIVERY_REINJECT_RETRY_BASE_SECONDS: 30,
       DELIVERY_REINJECT_RETRY_MAX_SECONDS: 900,
       DELIVERY_REINJECT_MAX_AGE_SECONDS: 432_000,
+      RABBITMQ_DELIVERY_WORKER_URL: ['amqp://dw:dw-secret@localhost:5672/email-gateway'],
+      DELIVERY_APPROVAL_PREFETCH: 4,
       DELIVERY_POLL_INTERVAL_MS: 1000,
       DELIVERY_OUTBOX_POLL_INTERVAL_MS: 1000,
       DELIVERY_OUTBOX_SAFETY_LAG_MS: 120_000,
@@ -138,6 +140,34 @@ describe('delivery-worker config', () => {
     expect(
       issues({ DELIVERY_REINJECT_INBOUND_PORT: '2626', DELIVERY_REINJECT_OUTBOUND_PORT: '2626' }),
     ).toEqual([expect.stringContaining('DELIVERY_REINJECT_OUTBOUND_PORT')]);
+  });
+
+  it('reads its own RabbitMQ role URL list and approval prefetch (step 3.2 Q10, Q13)', () => {
+    expect(
+      loadWorkerConfig({
+        ...base,
+        RABBITMQ_DELIVERY_WORKER_URL: 'amqp://a:b@rmq1:5672/v,amqp://a:b@rmq2:5672/v',
+        DELIVERY_APPROVAL_PREFETCH: '64',
+      }),
+    ).toMatchObject({
+      RABBITMQ_DELIVERY_WORKER_URL: ['amqp://a:b@rmq1:5672/v', 'amqp://a:b@rmq2:5672/v'],
+      DELIVERY_APPROVAL_PREFETCH: 64,
+    });
+    expect(issues({ DELIVERY_APPROVAL_PREFETCH: '0' })).toEqual([
+      expect.stringContaining('DELIVERY_APPROVAL_PREFETCH'),
+    ]);
+    expect(issues({ DELIVERY_APPROVAL_PREFETCH: '65' })).toEqual([
+      expect.stringContaining('DELIVERY_APPROVAL_PREFETCH'),
+    ]);
+    const bad = issues({ RABBITMQ_DELIVERY_WORKER_URL: 'redis://dw:dw-secret@localhost' });
+    expect(bad).toEqual([expect.stringContaining('RABBITMQ_DELIVERY_WORKER_URL')]);
+    expect(bad.join(' ')).not.toContain('dw-secret');
+    const { RABBITMQ_DELIVERY_WORKER_URL: _omit, ...withoutUrl } = base;
+    expect(() => loadWorkerConfig(withoutUrl)).toThrow(/RABBITMQ_DELIVERY_WORKER_URL/);
+    // The pre-3.2 administrator URL is not read any more.
+    expect(
+      Object.keys(loadWorkerConfig({ ...base, RABBITMQ_URL: 'amqp://admin:x@rabbitmq:5672' })),
+    ).not.toContain('RABBITMQ_URL');
   });
 
   it('ignores foreign *_FILE keys of other services', () => {

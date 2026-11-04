@@ -1,0 +1,184 @@
+# promtool unit tests of rules/messaging.rules.yml (step 3.2 Q15):
+#   docker run --rm -v "$PWD/infrastructure/monitoring:/m:ro" --entrypoint promtool \
+#     prom/prometheus:v3.6.0 test rules /m/tests/messaging.rules.test.yml
+rule_files:
+  - ../rules/messaging.rules.yml
+evaluation_interval: 1m
+tests:
+  - name: relay lag and shard ownership
+    interval: 1m
+    input_series:
+      # Two replicas, four shards; replica b stops holding its shards after 5 minutes.
+      - series: 'outbox_relay_shards_held{job="event-relay",instance="a"}'
+        values: '2x20'
+      - series: 'outbox_relay_shards_held{job="event-relay",instance="b"}'
+        values: '2x5 0x15'
+      - series: 'up{job="event-relay",instance="a"}'
+        values: '1x20'
+      - series: 'up{job="event-relay",instance="b"}'
+        values: '1x20'
+      - series: 'outbox_relay_lag_seconds{job="event-relay",instance="a",shard="0"}'
+        values: '0x20'
+      - series: 'outbox_relay_lag_seconds{job="event-relay",instance="a",shard="1"}'
+        values: '0x20'
+      - series: 'outbox_relay_lag_seconds{job="event-relay",instance="a",shard="2"}'
+        values: '0x5 60+60x15'
+      - series: 'outbox_relay_lag_seconds{job="event-relay",instance="a",shard="3"}'
+        values: '0x5 60+60x15'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: OutboxRelayNoShardOwner
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: OutboxRelayNoShardOwner
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: Outbox relay shards without an owner (or the relay is down)
+              description: >-
+                Fewer shard locks are held than RELAY_SHARDS, or no event-relay target is up.
+                Rows of unowned shards are not published. Shards must be <= replicas x
+                RELAY_MAX_HELD_SHARDS.
+              runbook_url: docs/runbooks/rabbitmq-messaging.md#outboxrelaynoshardowner
+      - eval_time: 12m
+        alertname: OutboxRelayLagHigh
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              shard: '2'
+            exp_annotations:
+              summary: Outbox relay lag above 60 s
+              description: >-
+                The oldest publishable message_outbox row of shard 2 has waited more than 60 s
+                for 5 minutes (max lag 7m 0s). Pipeline stages receive events late; the outbox keeps
+                every row, nothing is lost.
+              runbook_url: docs/runbooks/rabbitmq-messaging.md#outboxrelaylaghigh
+          - exp_labels:
+              severity: critical
+              shard: '3'
+            exp_annotations:
+              summary: Outbox relay lag above 60 s
+              description: >-
+                The oldest publishable message_outbox row of shard 3 has waited more than 60 s
+                for 5 minutes (max lag 7m 0s). Pipeline stages receive events late; the outbox keeps
+                every row, nothing is lost.
+              runbook_url: docs/runbooks/rabbitmq-messaging.md#outboxrelaylaghigh
+
+  - name: relay down
+    interval: 1m
+    input_series:
+      - series: 'up{job="event-relay",instance="a"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: OutboxRelayNoShardOwner
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: Outbox relay shards without an owner (or the relay is down)
+              description: >-
+                Fewer shard locks are held than RELAY_SHARDS, or no event-relay target is up.
+                Rows of unowned shards are not published. Shards must be <= replicas x
+                RELAY_MAX_HELD_SHARDS.
+              runbook_url: docs/runbooks/rabbitmq-messaging.md#outboxrelaynoshardowner
+
+  - name: work queues and dead letters
+    interval: 1m
+    input_series:
+      - series: 'rabbitmq_detailed_queue_consumers{job="rabbitmq-detailed",vhost="email-gateway",queue="email.received"}'
+        values: '1x3 0x10'
+      - series: 'rabbitmq_detailed_queue_consumers{job="rabbitmq-detailed",vhost="email-gateway",queue="scan.auth"}'
+        values: '0x13'
+      - series: 'rabbitmq_detailed_queue_messages{job="rabbitmq-detailed",vhost="email-gateway",queue="email.dead-letter"}'
+        values: '0x2 3x12'
+      - series: 'rabbitmq_detailed_queue_messages{job="rabbitmq-detailed",vhost="email-gateway",queue="scan.spam"}'
+        values: '9500x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: WorkQueueNoConsumer
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              queue: email.received
+            exp_annotations:
+              summary: Work queue email.received has no consumer
+              description: >-
+                Nobody consumes email.received: email-worker (email.received) or delivery-worker
+                (email.delivery.pending) is down, not ready, or cannot reach the broker.
+              runbook_url: docs/runbooks/rabbitmq-messaging.md#workqueuenoconsumer
+      - eval_time: 13m
+        alertname: DeadLetterQueueNotEmpty
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Messages in email.dead-letter
+              description: >-
+                3 dead-lettered messages wait for an operator decision (inspect, fix, replay
+                through POST /api/v1/platform/dead-letters/replay).
+              runbook_url: docs/runbooks/rabbitmq-messaging.md#deadletterqueuenotempty
+      - eval_time: 16m
+        alertname: DormantQueueAtLimit
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              queue: scan.spam
+            exp_annotations:
+              summary: Dormant queue scan.spam at 90 % of its 10000 limit
+              description: >-
+                scan.spam (no consumer until its stage is built) holds 9500 messages; with
+                drop-head the oldest are discarded. Expected while its stage does not exist;
+                never the source of truth (the stage onboards from MySQL).
+              runbook_url: docs/runbooks/rabbitmq-messaging.md#dormantqueueatlimit
+
+  - name: outbox health, connections and reconciliation
+    interval: 1m
+    input_series:
+      - series: 'outbox_poison_rows{job="event-relay",instance="a"}'
+        values: '0 0 2x10'
+      - series: 'amqp_connection_up{job="email-worker",instance="w",connection="email-worker"}'
+        values: '1 1 0x10'
+      - series: 'reconcile_exhausted_total{job="event-relay",instance="a",queue="email.received"}'
+        values: '0 0 0 1x10'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: OutboxPoisonRows
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: Poison outbox rows need operator action
+              description: >-
+                2 message_outbox rows reached RELAY_MAX_ATTEMPTS (contract or content-guard
+                violation, or repeated nacks) and are excluded from publishing. Their events
+                never reach a consumer and their partitions cannot be dropped.
+              runbook_url: docs/runbooks/rabbitmq-messaging.md#outboxpoisonrows
+      - eval_time: 5m
+        alertname: AmqpConnectionDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: email-worker
+              instance: w
+              connection: email-worker
+            exp_annotations:
+              summary: AMQP connection email-worker down
+              description: >-
+                email-worker (w) has had no broker connection for 2 minutes. The client
+                reconnects on its own; publishes wait in the outbox, consumption pauses.
+              runbook_url: docs/runbooks/rabbitmq-messaging.md#amqpconnectiondown
+      - eval_time: 5m
+        alertname: ReconcileExhausted
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              queue: email.received
+            exp_annotations:
+              summary: Reconciliation exhausted its re-drives on email.received
+              description: >-
+                Published events bound to email.received have no ledger row of its consumer
+                after RECONCILE_MAX_REDRIVES re-drives. The warn log of the reconciler lists
+                their ids.
+              runbook_url: docs/runbooks/rabbitmq-messaging.md#reconcileexhausted

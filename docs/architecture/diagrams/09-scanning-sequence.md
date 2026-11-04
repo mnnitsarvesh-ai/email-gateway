@@ -53,17 +53,17 @@ sequenceDiagram
 
 ## Status
 
-| Element                                              | Status               | Evidence or delivering step                                                                                                                      |
-| ---------------------------------------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Queue `email-worker.message-received` and its DLQ    | IMPLEMENTED          | `topology.ts`; asserted by `RabbitMqService` at email-worker startup; `events.test.ts`                                                           |
-| Event schema `messageReceivedV1`, `messageScannedV1` | IMPLEMENTED          | `events.test.ts` (decimal ids, `org/{id}/` keys, `scanIds`)                                                                                      |
-| `processOnce` on `message_idempotency`               | IMPLEMENTED          | `idempotency.test.ts`, `mysql.test.ts`                                                                                                           |
-| Security engine contract                             | IMPLEMENTED          | `packages/security-contracts` (types and `engineVerdictSchema`)                                                                                  |
-| Rspamd `/checkv2`, ClamAV `INSTREAM` daemons         | IMPLEMENTED          | `mail-plane.test.ts` (verdict, EICAR)                                                                                                            |
-| `email_scans`, `scan_engine_results` tables          | IMPLEMENTED          | Step 1.1 schema, partitioned by `received_at` (`schema.test.ts`)                                                                                 |
-| Consumer, engine adapters, aggregation               | PLANNED 4.1–4.6, 5.1 |                                                                                                                                                  |
-| Key-prefix equality check against the envelope       | PLANNED 3.x          | The zod schema checks the **format** `org/{decimal}/` only, not that it equals the envelope's `organizationId`; consumers must add that check    |
-| Pausing consumption during infrastructure outages    | PLANNED 3.2          | Without it, a MySQL or S3 outage burns the 5 redeliveries and moves healthy messages to the DLQ (see [failure handling](../failure-handling.md)) |
+| Element                                              | Status               | Evidence or delivering step                                                                                                                                                                      |
+| ---------------------------------------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Queue `email-worker.message-received` and its DLQ    | IMPLEMENTED          | `topology.ts`; asserted by `RabbitMqService` at email-worker startup; `events.test.ts`                                                                                                           |
+| Event schema `messageReceivedV1`, `messageScannedV1` | IMPLEMENTED          | `events.test.ts` (decimal ids, `org/{id}/` keys, `scanIds`)                                                                                                                                      |
+| `processOnce` on `message_idempotency`               | IMPLEMENTED          | `idempotency.test.ts`, `mysql.test.ts`                                                                                                                                                           |
+| Security engine contract                             | IMPLEMENTED          | `packages/security-contracts` (types and `engineVerdictSchema`)                                                                                                                                  |
+| Rspamd `/checkv2`, ClamAV `INSTREAM` daemons         | IMPLEMENTED          | `mail-plane.test.ts` (verdict, EICAR)                                                                                                                                                            |
+| `email_scans`, `scan_engine_results` tables          | IMPLEMENTED          | Step 1.1 schema, partitioned by `received_at` (`schema.test.ts`)                                                                                                                                 |
+| Consumer, engine adapters, aggregation               | PLANNED 4.1–4.6, 5.1 |                                                                                                                                                                                                  |
+| Key-prefix equality check against the envelope       | PLANNED 3.x          | The zod schema checks the **format** `org/{decimal}/` only, not that it equals the envelope's `organizationId`; consumers must add that check                                                    |
+| Pausing consumption during infrastructure outages    | IMPLEMENTED 3.2      | Transient failures are held and republished without consuming an attempt (hold strategy), so an outage pauses consumption instead of dead-lettering ([failure handling](../failure-handling.md)) |
 
 ## Contract gaps to resolve in step 4.x
 

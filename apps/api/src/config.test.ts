@@ -570,3 +570,35 @@ describe('loadApiConfig: mail routing (step 2.3 R3, §5)', () => {
     expect(rejection({ ...valid, [key]: value })).toContain(key);
   });
 });
+
+describe('loadApiConfig: dead-letter replay (step 3.2 Q9)', () => {
+  it('has no ops broker by default and scans at most 10 000 dead letters', () => {
+    const cfg = loadApiConfig(valid);
+    expect(cfg.RABBITMQ_OPS_URL).toBeUndefined();
+    expect(cfg.DEAD_LETTER_REPLAY_SCAN_MAX).toBe(10_000);
+    expect(loadApiConfig({ ...valid, RABBITMQ_OPS_URL: '' }).RABBITMQ_OPS_URL).toBeUndefined();
+  });
+
+  it('reads the ops role URL list and the scan bound', () => {
+    const cfg = loadApiConfig({
+      ...valid,
+      RABBITMQ_OPS_URL:
+        'amqp://eg-ops:ops-secret@rmq1:5672/email-gateway,amqp://eg-ops:ops-secret@rmq2:5672/email-gateway',
+      DEAD_LETTER_REPLAY_SCAN_MAX: '100000',
+    });
+    expect(cfg.RABBITMQ_OPS_URL).toHaveLength(2);
+    expect(cfg.DEAD_LETTER_REPLAY_SCAN_MAX).toBe(100_000);
+  });
+
+  it('rejects a non-amqp URL without echoing it, and a scan bound outside 1..100 000', () => {
+    const message = rejection({ ...valid, RABBITMQ_OPS_URL: 'http://eg-ops:ops-secret@rmq1' });
+    expect(message).toContain('RABBITMQ_OPS_URL');
+    expect(message).not.toContain('ops-secret');
+    expect(rejection({ ...valid, DEAD_LETTER_REPLAY_SCAN_MAX: '0' })).toContain(
+      'DEAD_LETTER_REPLAY_SCAN_MAX',
+    );
+    expect(rejection({ ...valid, DEAD_LETTER_REPLAY_SCAN_MAX: '100001' })).toContain(
+      'DEAD_LETTER_REPLAY_SCAN_MAX',
+    );
+  });
+});

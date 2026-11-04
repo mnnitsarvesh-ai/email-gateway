@@ -82,6 +82,7 @@ export class Fixtures {
   readonly suffix = randomUUID().slice(0, 8);
   readonly organizationIds: bigint[] = [];
   private readonly consumers = new Set<string>();
+  private readonly eventIds = new Set<string>();
   private readonly cursors = new Set<string>();
   private readonly redisDomains = new Set<string>();
   private planId: bigint | undefined;
@@ -229,14 +230,21 @@ export class Fixtures {
     return { messageId, receivedAt, organizationId, emlObjectKey, recipients };
   }
 
+  /** Tracks an event id whose ledger rows (any consumer) are removed by `cleanup()`. */
+  trackEvent(eventId: string): void {
+    this.eventIds.add(eventId);
+  }
+
   /** A `mail.delivery.approved.v1` envelope for the message (the policy engine's shape). */
   approval(
     message: MessageFixture,
     overrides: Partial<DeliveryApprovedV1> & { eventId?: string } = {},
   ): EventEnvelope<DeliveryApprovedV1> {
-    const { eventId, ...payload } = overrides;
+    const { eventId: requested, ...payload } = overrides;
+    const eventId = requested ?? uuidv7();
+    this.trackEvent(eventId);
     return {
-      eventId: eventId ?? uuidv7(),
+      eventId,
       eventType: EventTypes.DeliveryApproved,
       occurredAt: new Date().toISOString(),
       correlationId: `it-${this.suffix}-approval`,
@@ -276,6 +284,20 @@ export class Fixtures {
       select: { id: true },
     });
     return row.id;
+  }
+
+  /**
+   * Issues the approval as the gateway does (its `message_outbox` row) unless it was issued
+   * already: the planner plans only approvals with a matching outbox row (provenance, step 3.2
+   * review round 1). The live event-relay is paused during these suites, so the row is never
+   * published to the real vhost.
+   */
+  async issue(event: EventEnvelope<DeliveryApprovedV1>): Promise<void> {
+    const existing = await this.prisma.messageOutbox.findFirst({
+      where: { eventId: event.eventId },
+      select: { id: true },
+    });
+    if (!existing) await this.outboxApproval(event);
   }
 
   async deliveries(message: MessageFixture) {
@@ -338,6 +360,15 @@ export class Fixtures {
       for (const domain of this.redisDomains) {
         const keys = await this.redis.client.keys(`dw:rl:dst:${domain}:*`);
         if (keys.length > 0) await this.redis.client.del(...keys);
+      }
+      if (this.eventIds.size > 0) {
+        // Ledger rows of the production consumer names (the queue pipelines) for fixture events.
+        await this.prisma.messageIdempotency.deleteMany({
+          where: { eventId: { in: [...this.eventIds] } },
+        });
+        await this.prisma.messageConsumerProgress.deleteMany({
+          where: { eventId: { in: [...this.eventIds] } },
+        });
       }
       if (this.consumers.size > 0) {
         await this.prisma.messageIdempotency.deleteMany({

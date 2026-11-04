@@ -1,10 +1,4 @@
-import type {
-  Counter,
-  Gauge,
-  Histogram,
-  MetricsService,
-  OutboxPollerMetrics,
-} from '@email-gateway/common';
+import type { Counter, Histogram, MetricsService } from '@email-gateway/common';
 import type { FinalOutcome } from './mime-store';
 
 /** `mime_parse_messages_total{status}`: the final statuses plus the no-op outcomes (M16). */
@@ -13,7 +7,12 @@ export type MessageOutcomeLabel = FinalOutcome['status'] | 'duplicate' | 'messag
 /** `mime_retries_total{class}`: which dependency failed an attempt. */
 export type RetryClass = 's3' | 'db' | 'other';
 
-/** Every series of design M16, registered once through MetricsService (GET /metrics). */
+/**
+ * Every series of design M16, registered once through MetricsService (GET /metrics). The 3.1
+ * outbox-poller series (`mime_outbox_poll_lag_seconds`, `mime_outbox_invalid_total`) were removed
+ * with the poller in step 3.2: the transport's series are the shared `amqp_consumer_*` ones of
+ * the `email.received` consumer (§5.3).
+ */
 export class MimeMetrics {
   readonly messages: Counter<'status'>;
   readonly duration: Histogram;
@@ -24,8 +23,6 @@ export class MimeMetrics {
   readonly attachments: Counter;
   readonly attachmentFlags: Counter<'flag'>;
   readonly retries: Counter<'class'>;
-  readonly outboxPollLag: Gauge<'consumer'>;
-  readonly outboxInvalid: Counter<'consumer'>;
 
   constructor(metrics: MetricsService) {
     this.messages = metrics.counter(
@@ -64,24 +61,6 @@ export class MimeMetrics {
       'Parse attempts given back after an infrastructure failure, by failing dependency',
       ['class'],
     );
-    this.outboxPollLag = metrics.gauge(
-      'mime_outbox_poll_lag_seconds',
-      'Age of the oldest outbox row the MIME consumer has not yet processed (0 when caught up)',
-      ['consumer'],
-    );
-    this.outboxInvalid = metrics.counter(
-      'mime_outbox_invalid_total',
-      'Outbox rows that failed envelope or payload validation and were skipped',
-      ['consumer'],
-    );
-  }
-
-  /** The shared outbox feed's series (step 3.1 M2) on this worker's names. */
-  outboxPoller(): OutboxPollerMetrics {
-    return {
-      pollLag: (consumer, seconds) => this.outboxPollLag.set({ consumer }, seconds),
-      invalid: (consumer) => this.outboxInvalid.inc({ consumer }),
-    };
   }
 
   outcome(status: MessageOutcomeLabel): void {
