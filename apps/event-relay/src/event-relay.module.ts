@@ -6,6 +6,7 @@ import {
   type OnApplicationBootstrap,
   type InjectionToken,
   type OnModuleDestroy,
+  type Provider,
 } from '@nestjs/common';
 import {
   AdvisoryLocks,
@@ -15,7 +16,12 @@ import {
   PrismaService,
 } from '@email-gateway/common';
 import type { Logger } from '@email-gateway/logger';
-import type { RelayConfig } from './config';
+import { transitionMessageWithRetry } from '@email-gateway/message-lifecycle';
+import { LIFECYCLE_DEADLINE_KEYS, type RelayConfig } from './config';
+import { ExpirySweeper } from './lifecycle/expiry-sweeper';
+import { LifecycleCheck, prismaRecoverDerived } from './lifecycle/lifecycle-check';
+import { LifecycleRelayMetrics } from './lifecycle/lifecycle-metrics';
+import { PrismaLifecycleStore } from './lifecycle/lifecycle-store';
 import { RelayMetrics } from './metrics/relay-metrics';
 import { OutboxReconciler } from './reconciler/outbox-reconciler';
 import { AmqpQueueDepth } from './reconciler/queue-depth';
@@ -63,6 +69,34 @@ export function reconcilerOptions(config: Readonly<RelayConfig>) {
     batchSize: config.RECONCILE_BATCH_SIZE,
     startPosition: config.RECONCILE_START_POSITION,
     maxAttempts: config.RELAY_MAX_ATTEMPTS,
+  };
+}
+
+/** Options of the expiry sweeper from the validated configuration (step 3.3 L13). */
+export function expiryOptions(config: Readonly<RelayConfig>) {
+  return {
+    shards: config.LIFECYCLE_EXPIRY_SHARDS,
+    maxHeldShards: config.LIFECYCLE_EXPIRY_MAX_HELD_SHARDS,
+    intervalMs: config.LIFECYCLE_EXPIRY_INTERVAL_MS,
+    batchSize: config.LIFECYCLE_EXPIRY_BATCH_SIZE,
+    lookbackDays: config.LIFECYCLE_EXPIRY_LOOKBACK_DAYS,
+    deadlinesSeconds: Object.fromEntries(
+      Object.entries(LIFECYCLE_DEADLINE_KEYS).map(([state, key]) => [state, config[key] * 3600]),
+    ),
+    backoff: {
+      baseMs: config.RELAY_BROKER_BACKOFF_BASE_MS,
+      maxMs: config.RELAY_BROKER_BACKOFF_MAX_MS,
+    },
+  };
+}
+
+/** Options of the lifecycle check from the validated configuration (step 3.3 L14). */
+export function lifecycleCheckOptions(config: Readonly<RelayConfig>) {
+  return {
+    intervalMs: config.LIFECYCLE_CHECK_INTERVAL_MS,
+    afterSeconds: config.LIFECYCLE_CHECK_AFTER_SECONDS,
+    batchSize: config.LIFECYCLE_CHECK_BATCH_SIZE,
+    lookbackHours: config.LIFECYCLE_CHECK_LOOKBACK_HOURS,
   };
 }
 
@@ -179,7 +213,73 @@ export class ReconcilerModule {
 }
 
 /**
- * The roles of this process (`RELAY_ENABLED`, `RECONCILE_ENABLED`) and their lifecycle.
+ * The message lifecycle jobs (step 3.3 L13, L14), when `LIFECYCLE_EXPIRY_ENABLED` or
+ * `LIFECYCLE_CHECK_ENABLED`: the expiry sweeper (sharded, shared lock connection) and the
+ * single-instance lifecycle check, both writer only, through @email-gateway/message-lifecycle.
+ */
+@Module({})
+export class LifecycleJobsModule {
+  static forRoot(
+    core: DynamicModule,
+    config: Readonly<RelayConfig>,
+    logger: Logger,
+  ): DynamicModule {
+    const providers: Provider[] = [
+      {
+        provide: LifecycleRelayMetrics,
+        useFactory: (metrics: MetricsService) => new LifecycleRelayMetrics(metrics),
+        inject: [MetricsService],
+      },
+    ];
+    const exports: InjectionToken[] = [LifecycleRelayMetrics];
+    if (config.LIFECYCLE_EXPIRY_ENABLED) {
+      providers.push({
+        provide: ExpirySweeper,
+        useFactory: (prisma: PrismaService, locks: AdvisoryLocks, metrics: LifecycleRelayMetrics) =>
+          new ExpirySweeper({
+            ...expiryOptions(config),
+            store: new PrismaLifecycleStore(prisma),
+            transition: (request) =>
+              transitionMessageWithRetry(
+                prisma,
+                request,
+                { timeoutMs: config.LIFECYCLE_TX_TIMEOUT_MS, maxAttempts: 3 },
+                { metrics: metrics.transitions, logger },
+              ),
+            locks,
+            metrics,
+            logger,
+          }),
+        inject: [PrismaService, AdvisoryLocks, LifecycleRelayMetrics],
+      });
+      exports.push(ExpirySweeper);
+    }
+    if (config.LIFECYCLE_CHECK_ENABLED) {
+      providers.push({
+        provide: LifecycleCheck,
+        useFactory: (prisma: PrismaService, locks: AdvisoryLocks, metrics: LifecycleRelayMetrics) =>
+          new LifecycleCheck({
+            ...lifecycleCheckOptions(config),
+            store: new PrismaLifecycleStore(prisma),
+            recover: prismaRecoverDerived(prisma, {
+              txTimeoutMs: config.LIFECYCLE_TX_TIMEOUT_MS,
+              metrics: metrics.transitions,
+            }),
+            locks,
+            metrics,
+            logger,
+          }),
+        inject: [PrismaService, AdvisoryLocks, LifecycleRelayMetrics],
+      });
+      exports.push(LifecycleCheck);
+    }
+    return { module: LifecycleJobsModule, imports: [core], providers, exports };
+  }
+}
+
+/**
+ * The roles of this process (`RELAY_ENABLED`, `RECONCILE_ENABLED`, `LIFECYCLE_EXPIRY_ENABLED`,
+ * `LIFECYCLE_CHECK_ENABLED`) and their lifecycle.
  * Components are plain classes wired here, so the integration tests build the same graph
  * without Nest.
  */
@@ -191,9 +291,14 @@ export class EventRelayModule {
     const imports: DynamicModule[] = [core];
     if (config.RELAY_ENABLED) imports.push(RelayModule.forRoot(core, config, logger));
     if (config.RECONCILE_ENABLED) imports.push(ReconcilerModule.forRoot(core, config, logger));
+    if (config.LIFECYCLE_EXPIRY_ENABLED || config.LIFECYCLE_CHECK_ENABLED) {
+      imports.push(LifecycleJobsModule.forRoot(core, config, logger));
+    }
     const inject: InjectionToken[] = [AdvisoryLocks, ConfirmPublisher, AmqpConnection];
     if (config.RELAY_ENABLED) inject.push(OutboxRelay);
     if (config.RECONCILE_ENABLED) inject.push(OutboxReconciler);
+    if (config.LIFECYCLE_EXPIRY_ENABLED) inject.push(ExpirySweeper);
+    if (config.LIFECYCLE_CHECK_ENABLED) inject.push(LifecycleCheck);
     return {
       module: EventRelayModule,
       imports,
@@ -204,11 +309,15 @@ export class EventRelayModule {
             locks: AdvisoryLocks,
             publisher: ConfirmPublisher,
             connection: AmqpConnection,
-            ...roles: (OutboxRelay | OutboxReconciler)[]
+            ...roles: (OutboxRelay | OutboxReconciler | ExpirySweeper | LifecycleCheck)[]
           ) => {
             const relay = roles.find((r): r is OutboxRelay => r instanceof OutboxRelay);
             const reconciler = roles.find(
               (r): r is OutboxReconciler => r instanceof OutboxReconciler,
+            );
+            const expiry = roles.find((r): r is ExpirySweeper => r instanceof ExpirySweeper);
+            const lifecycleCheck = roles.find(
+              (r): r is LifecycleCheck => r instanceof LifecycleCheck,
             );
             return new RelayLifecycle(
               {
@@ -217,6 +326,8 @@ export class EventRelayModule {
                 connection,
                 ...(relay ? { relay } : {}),
                 ...(reconciler ? { reconciler } : {}),
+                ...(expiry ? { expiry } : {}),
+                ...(lifecycleCheck ? { lifecycleCheck } : {}),
               },
               logger,
             );

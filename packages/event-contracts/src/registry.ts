@@ -8,7 +8,9 @@ import {
   messageParsedV1,
   messageParseFailedV1,
   messageReceivedV1,
+  messageRescanRequestedV1,
   messageScannedV1,
+  messageStateChangedV1,
   policyDecidedV1,
 } from './events';
 import type { ExchangeName } from './topology';
@@ -77,6 +79,18 @@ export const EVENT_REGISTRY = {
     EventTypes.MessageParseFailed,
     'email.ingestion',
     messageParseFailedV1,
+    'message',
+  ),
+  [EventTypes.MessageStateChanged]: define(
+    EventTypes.MessageStateChanged,
+    'email.events',
+    messageStateChangedV1,
+    'message',
+  ),
+  [EventTypes.MessageRescanRequested]: define(
+    EventTypes.MessageRescanRequested,
+    'email.security',
+    messageRescanRequestedV1,
     'message',
   ),
   [EventTypes.MessageScanned]: define(

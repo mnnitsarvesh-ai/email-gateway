@@ -143,7 +143,7 @@ export async function insertDeliveredMessage(
       receivedAt,
       organizationId: org.id,
       direction,
-      status: 'delivery_queued',
+      status: 'delivery_pending',
       statusChangedAt: receivedAt,
       envelopeFrom: `sender@${org.slug}.example`,
       sizeBytes: 512,

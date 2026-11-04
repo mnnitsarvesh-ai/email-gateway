@@ -293,7 +293,8 @@ describe('reinjection (R8) into a fake postfix-outbound listener', () => {
     const msg = await fx.prisma.emailMessage.findUniqueOrThrow({
       where: { id_receivedAt: { id: message.messageId, receivedAt: message.receivedAt } },
     });
-    expect(msg.status).toBe('failed'); // aggregate: every delivery terminal, none delivered
+    // The derived lifecycle state (step 3.3 L9): every recipient failed, none delivered.
+    expect(msg).toMatchObject({ status: 'rejected', statusReason: 'delivery_failed' });
   });
 
   it('fails the recipients with content_missing when the S3 object is gone, without connecting', async () => {

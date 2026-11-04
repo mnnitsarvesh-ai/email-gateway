@@ -1,6 +1,16 @@
 import { countGatewayPasses, GATEWAY_TRACE_HEADER } from '@email-gateway/common';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
+  DELIVERED_PATH,
+  expectConsistentHistory,
+  expectIngestionRows,
+  expectStateChangedRows,
+  historyOf,
+  pathOf,
+  waitForLifecycle,
+} from './support/lifecycle';
+import { purgeDormantQueues } from './support/broker';
+import {
   reinjectionsOf,
   statusEventsOf,
   waitForAllDeliveries,
@@ -52,6 +62,7 @@ afterAll(async () => {
   if (gate.skip) return;
   for (const domain of [custom, google].filter(Boolean)) await clearSinkDomain(domain.name, 'all');
   await fx.cleanup();
+  await purgeDormantQueues();
 }, 120_000);
 
 describe.skipIf(gate.skip)(
@@ -107,12 +118,22 @@ describe.skipIf(gate.skip)(
       expect(delivered).toHaveLength(1);
       expect(delivered[0]).toMatchObject({ source: 'postfix_log', applied: true, smtpCode: 250 });
       expect(audit.find((e) => e.toStatus === 'queued')).toBeDefined();
-      await waitFor(
-        'message aggregate delivered',
-        async () =>
-          (await fx.prisma.emailMessage.findFirst({ where: { id: message.id } }))?.status ===
-          'delivered',
+      // Step 3.3 lifecycle end to end (L5.2, E4, E20, E23): history received → persisted
+      // (SMTP commit) → approved (dev pass-through) → delivery_pending (planner) → delivered.
+      await waitForLifecycle(fx.prisma, message, 'delivered', 'delivery_complete');
+      expect(await pathOf(fx.prisma, message)).toEqual(
+        DELIVERED_PATH('delivered', 'delivery_complete'),
       );
+      await expectIngestionRows(fx.prisma, message);
+      await expectConsistentHistory(fx.prisma, message);
+      await expectStateChangedRows(fx.prisma, org, message);
+      const history = await historyOf(fx.prisma, message);
+      expect(history.slice(2).map((h) => [h.actorRole, h.actorService])).toEqual([
+        ['dev_passthrough', 'delivery-worker'],
+        ['delivery', 'delivery-worker'],
+        ['delivery', 'delivery-worker'],
+      ]);
+      expect(await sinkFiles(rcpt)).toHaveLength(1);
 
       // The delivery log line that produced it, and the binding of the queue id to the token.
       const queueId = delivery!.outboundQueueId!;

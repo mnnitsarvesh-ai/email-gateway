@@ -59,4 +59,33 @@ describe('RelayLifecycle', () => {
     await lifecycle.stop();
     expect(calls).toEqual(['close:locks', 'close:publisher', 'close:connection']);
   });
+
+  it('starts and stops the lifecycle jobs after the reconciler, before the connections', async () => {
+    const calls: string[] = [];
+    const lifecycle = new RelayLifecycle(
+      {
+        relay: component('relay', calls),
+        expiry: component('expiry', calls),
+        lifecycleCheck: component('check', calls, true),
+        locks: component('locks', calls),
+        publisher: component('publisher', calls),
+        connection: component('connection', calls),
+      },
+      silentLogger,
+    );
+    lifecycle.start();
+    expect(lifecycle.startedRoles).toEqual(['relay', 'expiry', 'lifecycleCheck']);
+    await lifecycle.stop();
+    expect(calls).toEqual([
+      'start:relay',
+      'start:expiry',
+      'start:check',
+      'stop:relay',
+      'stop:expiry',
+      'stop:check', // fails: the next steps still run
+      'close:locks',
+      'close:publisher',
+      'close:connection',
+    ]);
+  });
 });

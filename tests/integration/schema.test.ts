@@ -15,8 +15,9 @@ import { stack } from './support/env';
  * plus the identity/tenancy changes of docs/plan/steps/02-tenants-auth-rbac.md (D10), the
  * domain onboarding changes of docs/plan/steps/03-domain-onboarding.md (§3), the SMTP gateway
  * tables of docs/plan/steps/04-smtp-gateway.md (§3), the mail routing and delivery tracking
- * changes of docs/plan/steps/05-routing.md (§3) and the MIME ingestion changes of
- * docs/plan/steps/06-mime-ingestion.md (§3).
+ * changes of docs/plan/steps/05-routing.md (§3), the MIME ingestion changes of
+ * docs/plan/steps/06-mime-ingestion.md (§3) and the message lifecycle changes of
+ * docs/plan/steps/08-message-lifecycle.md (§3.1, §3.2).
  */
 const prisma = new PrismaClient({ datasourceUrl: stack.databaseUrl() });
 
@@ -134,17 +135,18 @@ const TENANT_OWNED = [
   'audit_logs',
   'webhook_subscriptions',
   'webhook_deliveries',
+  'api_idempotency_keys',
 ];
 
 const ALL_TABLES = [...NOT_TENANT_OWNED, ...TENANT_OWNED];
 
 describe('MySQL schema', () => {
-  it('has exactly the 72 data-model tables plus _prisma_migrations', async () => {
+  it('has exactly the 73 data-model tables plus _prisma_migrations', async () => {
     const rows = await prisma.$queryRaw<{ name: string }[]>`
       SELECT TABLE_NAME AS name FROM information_schema.TABLES
       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'`;
-    expect(ALL_TABLES).toHaveLength(72);
-    expect(new Set(ALL_TABLES).size).toBe(72);
+    expect(ALL_TABLES).toHaveLength(73);
+    expect(new Set(ALL_TABLES).size).toBe(73);
     expect(rows.map((r) => r.name).sort()).toEqual([...ALL_TABLES, '_prisma_migrations'].sort());
   });
 
@@ -1461,6 +1463,233 @@ describe('event relay schema (step 3.2, §4)', () => {
     );
     expect(keys).toContainEqual(expect.objectContaining({ key: 'updated_at', unique: false }));
     expect(keys).toHaveLength(2);
+  });
+});
+
+describe('message lifecycle schema (step 3.3, §3.1, §3.2)', () => {
+  const STATES =
+    "enum('received','persisted','scanning','scanned','scan_failed','policy_evaluated'," +
+    "'approved','quarantined','held_for_review','rejected','delivery_pending','delivery_retry'," +
+    "'delivered','archived','expired')";
+
+  it('replaces MessageStatus by the fifteen lifecycle states in L2 order', async () => {
+    const cols = await columns(['email_messages', 'email_message_status_history']);
+    expect(cols.get('email_messages.status')).toMatchObject({
+      columnType: STATES,
+      nullable: 'NO',
+      columnDefault: 'received',
+    });
+    expect(cols.get('email_message_status_history.from_status')).toMatchObject({
+      columnType: STATES,
+      nullable: 'YES',
+    });
+    expect(cols.get('email_message_status_history.to_status')).toMatchObject({
+      columnType: STATES,
+      nullable: 'NO',
+    });
+  });
+
+  it('adds lifecycle_round and status_reason to email_messages', async () => {
+    const cols = await columns(['email_messages']);
+    expect(cols.get('email_messages.lifecycle_round')).toMatchObject({
+      columnType: 'smallint unsigned',
+      nullable: 'NO',
+      columnDefault: '0',
+    });
+    expect(cols.get('email_messages.status_reason')).toMatchObject({
+      columnType: 'varchar(64)',
+      nullable: 'YES',
+      columnDefault: null,
+    });
+    expect(cols.size).toBe(27);
+  });
+
+  it('adds the actor, correlation, idempotency and occurrence columns to the history', async () => {
+    const cols = await columns(['email_message_status_history']);
+    const col = (column: string) => cols.get(`email_message_status_history.${column}`);
+    for (const [column, type, nullable, columnDefault] of [
+      ['lifecycle_round', 'smallint unsigned', 'NO', '0'],
+      ['actor_role', 'varchar(32)', 'NO', 'legacy'],
+      ['actor_service', 'varchar(64)', 'NO', 'legacy'],
+      ['actor_type', "enum('system','user','api_key')", 'NO', 'system'],
+      ['actor_id', 'varchar(64)', 'YES', null],
+      ['correlation_id', 'varchar(128)', 'YES', null],
+      ['transition_key', 'char(64)', 'YES', null],
+      ['state_event_id', 'char(36)', 'YES', null],
+      ['occurred_at', 'datetime(3)', 'YES', null],
+    ] as const) {
+      expect(col(column), column).toMatchObject({ columnType: type, nullable, columnDefault });
+    }
+    expect(cols.size).toBe(20);
+  });
+
+  it('keys the history by (message_id, version) and (message_id, transition_key), both ending with received_at', async () => {
+    const keys = await indexColumnSets('email_message_status_history');
+    expect(
+      keys
+        .filter((k) => k.unique)
+        .map((k) => k.key)
+        .sort(),
+    ).toEqual(
+      [
+        'id,received_at',
+        'message_id,transition_key,received_at',
+        'message_id,version,received_at',
+      ].sort(),
+    );
+    expect(keys).toHaveLength(3);
+  });
+
+  it('refuses a second history row with the same transition key, but not legacy NULL keys', async () => {
+    const organizationId = 999_999_033n;
+    const receivedAt = new Date();
+    const messageId = BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000));
+    const row = (version: number, transitionKey: string | null) => ({
+      receivedAt,
+      messageId,
+      organizationId,
+      version,
+      fromStatus: version === 0 ? null : ('persisted' as const),
+      toStatus: version === 0 ? ('received' as const) : ('approved' as const),
+      reasonCode: 'dev_passthrough',
+      changedAt: receivedAt,
+      transitionKey,
+    });
+    try {
+      const legacy = await prisma.emailMessageStatusHistory.create({ data: row(0, null) });
+      expect(legacy).toMatchObject({
+        actorRole: 'legacy',
+        actorService: 'legacy',
+        actorType: 'system',
+        lifecycleRound: 0,
+      });
+      await prisma.emailMessageStatusHistory.create({ data: row(1, null) });
+      await prisma.emailMessageStatusHistory.create({ data: row(2, 'a'.repeat(64)) });
+      await expect(
+        prisma.emailMessageStatusHistory.create({ data: row(3, 'a'.repeat(64)) }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+      // The retired step 1.1 values are refused (strict mode).
+      await expect(
+        prisma.$executeRawUnsafe(
+          `INSERT INTO email_message_status_history
+             (received_at, message_id, organization_id, version, to_status, changed_at)
+           VALUES (?, ?, ?, 9, 'delivery_queued', ?)`,
+          receivedAt,
+          messageId,
+          organizationId,
+          receivedAt,
+        ),
+      ).rejects.toThrow(/to_status/);
+    } finally {
+      await prisma.emailMessageStatusHistory.deleteMany({ where: { organizationId } });
+    }
+  });
+
+  it('creates api_idempotency_keys with a case-sensitive key unique per organization', async () => {
+    const cols = await columns(['api_idempotency_keys']);
+    const col = (column: string) => cols.get(`api_idempotency_keys.${column}`);
+    for (const [column, type, nullable] of [
+      ['id', 'bigint unsigned', 'NO'],
+      ['organization_id', 'bigint unsigned', 'NO'],
+      ['idempotency_key', 'varchar(128)', 'NO'],
+      ['operation', 'varchar(64)', 'NO'],
+      ['principal', 'varchar(80)', 'NO'],
+      ['request_sha256', 'char(64)', 'NO'],
+      ['resource_id', 'varchar(64)', 'NO'],
+      ['status_code', 'smallint unsigned', 'NO'],
+      ['response', 'json', 'NO'],
+      ['created_at', 'datetime(3)', 'NO'],
+      ['expires_at', 'datetime(3)', 'NO'],
+    ] as const) {
+      expect(col(column), column).toMatchObject({ columnType: type, nullable });
+    }
+    expect(cols.size).toBe(11);
+    const keys = await indexColumnSets('api_idempotency_keys');
+    expect(keys.map((k) => [k.key, k.unique]).sort()).toEqual(
+      [
+        ['id', true],
+        ['organization_id,idempotency_key', true],
+        ['expires_at', false],
+      ].sort(),
+    );
+
+    const organizationId = 999_999_034n;
+    const record = (idempotencyKey: string) => ({
+      organizationId,
+      idempotencyKey,
+      operation: 'message.rescan',
+      principal: 'user:schema-test',
+      requestSha256: 'a'.repeat(64),
+      resourceId: randomUUID(),
+      statusCode: 202,
+      response: { ok: true },
+      expiresAt: new Date(Date.now() + 86_400_000),
+    });
+    try {
+      await prisma.apiIdempotencyKey.create({ data: record('Key-1') });
+      await prisma.apiIdempotencyKey.create({ data: record('key-1') });
+      await expect(
+        prisma.apiIdempotencyKey.create({ data: record('Key-1') }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+      expect(
+        await prisma.apiIdempotencyKey.count({
+          where: { organizationId, idempotencyKey: 'Key-1' },
+        }),
+      ).toBe(1);
+    } finally {
+      await prisma.apiIdempotencyKey.deleteMany({ where: { organizationId } });
+    }
+  });
+
+  it('stores the five Postfix queue-id columns case-sensitively (utf8mb4_bin, L15)', async () => {
+    const rows = await prisma.$queryRaw<
+      { tableName: string; columnName: string; charset: string; collation: string; type: string }[]
+    >`
+      SELECT TABLE_NAME AS tableName, COLUMN_NAME AS columnName,
+             CHARACTER_SET_NAME AS charset, COLLATION_NAME AS collation, COLUMN_TYPE AS type
+      FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND COLLATION_NAME = 'utf8mb4_bin'
+      ORDER BY TABLE_NAME, COLUMN_NAME`;
+    expect(rows.map((r) => `${r.tableName}.${r.columnName}`)).toEqual([
+      'api_idempotency_keys.idempotency_key',
+      'delivery_reinjections.queue_id',
+      'delivery_status_events.queue_id',
+      'email_deliveries.dsn_queue_id',
+      'email_deliveries.outbound_queue_id',
+      'email_messages.mta_queue_id',
+    ]);
+    for (const r of rows) expect(r.charset, r.columnName).toBe('utf8mb4');
+    for (const r of rows.filter((x) => x.columnName !== 'idempotency_key')) {
+      expect(r.type, `${r.tableName}.${r.columnName}`).toBe('varchar(32)');
+    }
+
+    const organizationId = 999_999_035n;
+    const receivedAt = new Date();
+    const messageId = BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000));
+    const event = (deliveryId: bigint, queueId: string) => ({
+      receivedAt,
+      deliveryId,
+      messageId,
+      recipientId: deliveryId,
+      organizationId,
+      source: 'postfix_log' as const,
+      signalKey: 'd'.repeat(64),
+      occurredAt: receivedAt,
+      toStatus: 'queued' as const,
+      applied: true,
+      queueId,
+    });
+    try {
+      await prisma.deliveryStatusEvent.create({ data: event(1n, '4jKFxV5fmHz12JnW') });
+      await prisma.deliveryStatusEvent.create({ data: event(2n, '4jKFxV5fMHz12Jnw') });
+      const matches = await prisma.deliveryStatusEvent.findMany({
+        where: { organizationId, queueId: '4jKFxV5fmHz12JnW' },
+        select: { deliveryId: true },
+      });
+      expect(matches.map((m) => m.deliveryId)).toEqual([1n]);
+    } finally {
+      await prisma.deliveryStatusEvent.deleteMany({ where: { organizationId } });
+    }
   });
 });
 

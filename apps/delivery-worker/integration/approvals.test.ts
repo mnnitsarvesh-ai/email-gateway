@@ -252,6 +252,7 @@ describe('development pass-through (R5) end to end', () => {
       fx.prisma,
       RECORDER_TX_TIMEOUT_MS,
       silentLogger,
+      worker.metrics,
     );
     const ptHandler = ours<MessageReceivedV1>(
       ptConsumer,
@@ -262,17 +263,19 @@ describe('development pass-through (R5) end to end', () => {
     );
     await pt.pollOnce(ptHandler); // first start: MAX(id), never replays old mail
 
-    // What ingestion commits: the message rows and mail.message.received.v1.
+    // What ingestion commits: the message rows (persisted) and mail.message.received.v1.
     const message = await fx.message(org, {
+      state: 'persisted',
       recipients: [{ address: 'p1@ext-pt.test' }, { address: 'p2@ext-pt.test' }],
     });
     await fx.prisma.emailRecipient.update({
       where: { id_receivedAt: { id: message.recipients[1]!.id, receivedAt: message.receivedAt } },
       data: { status: 'failed' }, // not pending: never approved
     });
+    const receivedEventId = uuidv7();
     await fx.prisma.messageOutbox.create({
       data: {
-        eventId: uuidv7(),
+        eventId: receivedEventId,
         organizationId: org,
         eventType: EventTypes.MessageReceived,
         aggregateType: 'message',
@@ -298,7 +301,27 @@ describe('development pass-through (R5) end to end', () => {
     expect(payload).toMatchObject({
       source: 'dev_passthrough',
       deliverySeq: 0,
+      lifecycleRound: 0,
       emlS3Key: message.emlObjectKey,
+    });
+    // E4 (step 3.3 L8.3) in the pass-through's transaction, with its history row.
+    let lifecycle = await fx.lifecycle(message);
+    expect(lifecycle).toMatchObject({
+      status: 'approved',
+      statusReason: 'dev_passthrough',
+      version: 2,
+      lifecycleRound: 0,
+    });
+    expect(lifecycle.history[2]).toMatchObject({
+      version: 2,
+      fromStatus: 'persisted',
+      toStatus: 'approved',
+      reasonCode: 'dev_passthrough',
+      actorRole: 'dev_passthrough',
+      actorService: 'delivery-worker',
+      eventId: receivedEventId,
+      correlationId: 'it-ingest-0001',
+      lifecycleRound: 0,
     });
     expect(payload.recipients).toEqual([
       { recipientId: message.recipients[0]!.id.toString(), rcptSeq: 0 },
@@ -319,6 +342,8 @@ describe('development pass-through (R5) end to end', () => {
     const relayed = Broker.envelopeOf(approvals[0]!) as EventEnvelope<DeliveryApprovedV1>;
     expect(await planner.plan(broker, relayed)).toMatchObject({ status: 'planned', deliveries: 1 });
     expect(await fx.deliveries(message)).toHaveLength(1);
+    lifecycle = await fx.lifecycle(message);
+    expect(lifecycle).toMatchObject({ status: 'delivery_pending', version: 3 });
     await worker.reinjectOnce();
     expect(postfix.transactions.map((t) => t.rcpts.map((r) => r.address))).toEqual([
       ['p1@ext-pt.test'],
@@ -326,6 +351,84 @@ describe('development pass-through (R5) end to end', () => {
     expect((await fx.deliveries(message))[0]).toMatchObject({ status: 'queued' });
     await pt.stop();
     await planner.stop();
+  });
+
+  it('approves nothing for a message that is not persisted (ignored, counted, no approval)', async () => {
+    const approver = new DevPassThroughApprover(
+      { start: () => undefined, stop: () => Promise.resolve() },
+      fx.prisma,
+      RECORDER_TX_TIMEOUT_MS,
+      silentLogger,
+      worker.metrics,
+    );
+    const skipped = async () =>
+      (await worker.metrics.approvalsSkipped.get()).values.find(
+        (v) => v.labels.reason === 'lifecycle_invalid',
+      )?.value ?? 0;
+    const before = await skipped();
+    // Already past persisted (approved by policy, delivering): a late or replayed received event.
+    const message = await fx.message(org, {
+      state: 'delivery_pending',
+      recipients: [{ address: 'late@ext-pt.test' }],
+    });
+    const eventId = uuidv7();
+    const event: EventEnvelope<MessageReceivedV1> = {
+      eventId,
+      eventType: EventTypes.MessageReceived,
+      occurredAt: new Date().toISOString(),
+      correlationId: 'it-ingest-0002',
+      organizationId: org.toString(),
+      payload: messageReceivedV1.parse({
+        messageId: message.messageId.toString(),
+        receivedAt: message.receivedAt.toISOString(),
+        direction: 'outbound',
+        emlS3Key: message.emlObjectKey,
+        sizeBytes: 10,
+        envelopeFrom: 'sender@example.org',
+        recipientCount: 1,
+      }),
+    };
+    const result = await fx.prisma.$transaction((tx) => approver.approve(event, tx));
+    expect(result).toEqual({ approvals: [], recipients: 0 });
+    expect(
+      await fx.prisma.messageOutbox.count({
+        where: {
+          aggregateId: message.messageId.toString(),
+          eventType: EventTypes.DeliveryApproved,
+        },
+      }),
+    ).toBe(0);
+    expect(await fx.lifecycle(message)).toMatchObject({ status: 'delivery_pending', version: 3 });
+    // L6: the refused request is recorded once as lifecycle.ignored, caused by the received event.
+    const ignored = await fx.prisma.emailEvent.findMany({
+      where: {
+        messageId: message.messageId,
+        receivedAt: message.receivedAt,
+        eventType: 'lifecycle.ignored',
+      },
+    });
+    expect(ignored).toHaveLength(1);
+    expect(ignored[0]).toMatchObject({ eventId, sourceService: 'delivery-worker' });
+    expect(ignored[0]!.details).toMatchObject({
+      requested: 'approved',
+      current: 'delivery_pending',
+      // expectedFrom [persisted] (L4 step 3): not a stale event but an unexpected source state.
+      result: 'invalid',
+      why: 'unexpected_from',
+    });
+    expect(await skipped()).toBe(before + 1);
+
+    // Another organization's envelope for the same message: not found, nothing written.
+    const foreign = { ...event, eventId: uuidv7(), organizationId: (org + 999_999n).toString() };
+    expect(await fx.prisma.$transaction((tx) => approver.approve(foreign, tx))).toEqual({
+      approvals: [],
+      recipients: 0,
+    });
+    expect(
+      await fx.prisma.emailEvent.count({
+        where: { messageId: message.messageId, eventType: 'lifecycle.ignored' },
+      }),
+    ).toBe(1);
   });
 
   it('is refused by the config outside local and ci (real .env plus APP_ENV)', () => {

@@ -144,4 +144,120 @@ describe('event-relay config (§6)', () => {
     const config = loadRelayConfig({ ...base, REDIS_URL_FILE: '/nonexistent', OTHER: 'x' });
     expect(config).not.toHaveProperty('REDIS_URL');
   });
+
+  describe('message lifecycle keys (step 3.3 §5)', () => {
+    it('applies the design defaults', () => {
+      expect(loadRelayConfig(base)).toMatchObject({
+        LIFECYCLE_EXPIRY_ENABLED: true,
+        LIFECYCLE_EXPIRY_INTERVAL_MS: 60_000,
+        LIFECYCLE_EXPIRY_SHARDS: 4,
+        LIFECYCLE_EXPIRY_MAX_HELD_SHARDS: 4,
+        LIFECYCLE_EXPIRY_BATCH_SIZE: 200,
+        LIFECYCLE_EXPIRY_LOOKBACK_DAYS: 186,
+        LIFECYCLE_TX_TIMEOUT_MS: 5000,
+        LIFECYCLE_DEADLINE_PERSISTED_HOURS: 72,
+        LIFECYCLE_DEADLINE_SCANNING_HOURS: 24,
+        LIFECYCLE_DEADLINE_SCANNED_HOURS: 24,
+        LIFECYCLE_DEADLINE_SCAN_FAILED_HOURS: 72,
+        LIFECYCLE_DEADLINE_POLICY_EVALUATED_HOURS: 24,
+        LIFECYCLE_DEADLINE_APPROVED_HOURS: 24,
+        LIFECYCLE_DEADLINE_QUARANTINED_HOURS: 2160,
+        LIFECYCLE_DEADLINE_HELD_FOR_REVIEW_HOURS: 336,
+        LIFECYCLE_DEADLINE_DELIVERY_PENDING_HOURS: 168,
+        LIFECYCLE_DEADLINE_DELIVERY_RETRY_HOURS: 168,
+        LIFECYCLE_CHECK_ENABLED: true,
+        LIFECYCLE_CHECK_INTERVAL_MS: 60_000,
+        LIFECYCLE_CHECK_AFTER_SECONDS: 900,
+        LIFECYCLE_CHECK_BATCH_SIZE: 500,
+        LIFECYCLE_CHECK_LOOKBACK_HOURS: 192,
+      });
+    });
+
+    it.each([
+      ['LIFECYCLE_EXPIRY_ENABLED', 'yes'],
+      ['LIFECYCLE_EXPIRY_INTERVAL_MS', '999'],
+      ['LIFECYCLE_EXPIRY_INTERVAL_MS', '3600001'],
+      ['LIFECYCLE_EXPIRY_SHARDS', '0'],
+      ['LIFECYCLE_EXPIRY_SHARDS', '65'],
+      ['LIFECYCLE_EXPIRY_MAX_HELD_SHARDS', '0'],
+      ['LIFECYCLE_EXPIRY_BATCH_SIZE', '0'],
+      ['LIFECYCLE_EXPIRY_BATCH_SIZE', '5001'],
+      ['LIFECYCLE_EXPIRY_LOOKBACK_DAYS', '0'],
+      ['LIFECYCLE_EXPIRY_LOOKBACK_DAYS', '401'],
+      ['LIFECYCLE_TX_TIMEOUT_MS', '999'],
+      ['LIFECYCLE_TX_TIMEOUT_MS', '60001'],
+      ['LIFECYCLE_DEADLINE_SCANNING_HOURS', '-1'],
+      ['LIFECYCLE_DEADLINE_SCANNING_HOURS', '1.5'],
+      ['LIFECYCLE_CHECK_ENABLED', 'no'],
+      ['LIFECYCLE_CHECK_INTERVAL_MS', '999'],
+      ['LIFECYCLE_CHECK_AFTER_SECONDS', '299'],
+      ['LIFECYCLE_CHECK_AFTER_SECONDS', '86401'],
+      ['LIFECYCLE_CHECK_BATCH_SIZE', '5001'],
+      ['LIFECYCLE_CHECK_LOOKBACK_HOURS', '0'],
+      ['LIFECYCLE_CHECK_LOOKBACK_HOURS', '4465'],
+    ])('refuses %s=%s', (key, value) => {
+      const found = issues({ [key]: value });
+      expect(found.some((issue) => issue.startsWith(`${key}:`))).toBe(true);
+    });
+
+    it('accepts the bounds and 0 (never expire) for every deadline', () => {
+      expect(
+        issues({
+          LIFECYCLE_EXPIRY_INTERVAL_MS: '1000',
+          LIFECYCLE_EXPIRY_SHARDS: '64',
+          LIFECYCLE_EXPIRY_MAX_HELD_SHARDS: '64',
+          LIFECYCLE_EXPIRY_BATCH_SIZE: '5000',
+          LIFECYCLE_EXPIRY_LOOKBACK_DAYS: '400',
+          LIFECYCLE_TX_TIMEOUT_MS: '60000',
+          LIFECYCLE_DEADLINE_PERSISTED_HOURS: '0',
+          LIFECYCLE_DEADLINE_QUARANTINED_HOURS: '9600',
+          LIFECYCLE_DEADLINE_DELIVERY_PENDING_HOURS: '0',
+          LIFECYCLE_DEADLINE_DELIVERY_RETRY_HOURS: '121',
+          LIFECYCLE_CHECK_AFTER_SECONDS: '300',
+          LIFECYCLE_CHECK_LOOKBACK_HOURS: '4464',
+        }),
+      ).toEqual([]);
+    });
+
+    it('refuses delivery deadlines within the Postfix queue lifetime (1..120 hours)', () => {
+      expect(issues({ LIFECYCLE_DEADLINE_DELIVERY_PENDING_HOURS: '120' })).toEqual([
+        'LIFECYCLE_DEADLINE_DELIVERY_PENDING_HOURS: must be 0 or above 120 (Postfix maximal_queue_lifetime)',
+      ]);
+      expect(issues({ LIFECYCLE_DEADLINE_DELIVERY_RETRY_HOURS: '1' })).toEqual([
+        'LIFECYCLE_DEADLINE_DELIVERY_RETRY_HOURS: must be 0 or above 120 (Postfix maximal_queue_lifetime)',
+      ]);
+    });
+
+    it('applies the cross-field rules (held shards, lookback covers every deadline)', () => {
+      expect(
+        issues({ LIFECYCLE_EXPIRY_SHARDS: '2', LIFECYCLE_EXPIRY_MAX_HELD_SHARDS: '3' }),
+      ).toEqual(['LIFECYCLE_EXPIRY_MAX_HELD_SHARDS: must be at most LIFECYCLE_EXPIRY_SHARDS']);
+      expect(issues({ LIFECYCLE_EXPIRY_LOOKBACK_DAYS: '30' })).toEqual([
+        'LIFECYCLE_DEADLINE_QUARANTINED_HOURS: must not exceed LIFECYCLE_EXPIRY_LOOKBACK_DAYS (in hours)',
+      ]);
+      expect(
+        issues({
+          LIFECYCLE_EXPIRY_LOOKBACK_DAYS: '30',
+          LIFECYCLE_DEADLINE_QUARANTINED_HOURS: '0',
+        }),
+      ).toEqual([]);
+      expect(
+        issues({ LIFECYCLE_CHECK_LOOKBACK_HOURS: '1', LIFECYCLE_CHECK_AFTER_SECONDS: '3600' }),
+      ).toEqual([
+        'LIFECYCLE_CHECK_LOOKBACK_HOURS: must exceed LIFECYCLE_CHECK_AFTER_SECONDS (in hours)',
+      ]);
+      expect(
+        issues({ LIFECYCLE_CHECK_LOOKBACK_HOURS: '2', LIFECYCLE_CHECK_AFTER_SECONDS: '3600' }),
+      ).toEqual([]);
+    });
+
+    it('never echoes a lifecycle value in an error', () => {
+      const found = issues({
+        LIFECYCLE_EXPIRY_SHARDS: SECRET,
+        LIFECYCLE_DEADLINE_SCANNING_HOURS: SECRET,
+      });
+      expect(found.length).toBeGreaterThan(0);
+      for (const issue of found) expect(issue).not.toContain(SECRET);
+    });
+  });
 });

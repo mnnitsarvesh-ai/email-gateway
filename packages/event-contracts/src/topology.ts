@@ -7,8 +7,11 @@ import {
 } from './registry';
 
 /**
- * RabbitMQ topology v1 as data (step 3.2 §3, ADR-0024): exactly six topic exchanges and fourteen
- * quorum queues in the vhost `email-gateway`. `infrastructure/rabbitmq/definitions.json` is
+ * RabbitMQ topology v2 as data (step 3.2 §3, ADR-0024; v2: step 3.3 L7, ADR-0025): exactly six
+ * topic exchanges and fourteen quorum queues in the vhost `email-gateway`. v2 adds the bindings of
+ * `mail.message.rescan_requested.v1` (`email.security`) to the five scan queues; the exchanges,
+ * queues and policies of v1 are unchanged, and `mail.message.state_changed.v1` (`email.events`)
+ * reaches only the `email.analytics` firehose. `infrastructure/rabbitmq/definitions.json` is
  * generated from `TOPOLOGY` (`pnpm --filter @email-gateway/event-contracts topology:export`) and
  * imported by `infrastructure/rabbitmq/init.mjs`; services never declare, they verify passively.
  *
@@ -16,10 +19,10 @@ import {
  * target, overflow, length limits) is a per-queue policy `eg.<queue>` (Q4), so it changes without
  * re-declaring a queue.
  */
-export const TOPOLOGY_VERSION = 1;
+export const TOPOLOGY_VERSION = 2;
 export const DEFAULT_VHOST = 'email-gateway';
 
-/** The six exchanges of topology v1 (ADR-0024): all topic, durable, not internal. */
+/** The six exchanges of the topology (ADR-0024): all topic, durable, not internal. */
 export const EXCHANGE_NAMES = [
   'email.ingestion',
   'email.security',
@@ -241,6 +244,8 @@ function dormant(
 }
 
 const parsed = (): Binding => eventBinding('email.ingestion', 'mail.message.parsed.v1');
+/** Topology v2 (step 3.3 L7): an administrative rescan reaches every scan stage. */
+const rescan = (): Binding => eventBinding('email.security', 'mail.message.rescan_requested.v1');
 
 export const TOPOLOGY: Topology = {
   version: TOPOLOGY_VERSION,
@@ -277,17 +282,31 @@ export const TOPOLOGY: Topology = {
     dormant(
       'scan.auth',
       'email.security',
-      [parsed()],
+      [parsed(), rescan()],
       '4.1',
       'email-worker',
       'SPF/DKIM/DMARC results via Rspamd',
     ),
-    dormant('scan.spam', 'email.security', [parsed()], '4.1', 'email-worker', 'Rspamd verdict'),
-    dormant('scan.url', 'email.security', [parsed()], '4.3', 'email-worker', 'URL protection'),
+    dormant(
+      'scan.spam',
+      'email.security',
+      [parsed(), rescan()],
+      '4.1',
+      'email-worker',
+      'Rspamd verdict',
+    ),
+    dormant(
+      'scan.url',
+      'email.security',
+      [parsed(), rescan()],
+      '4.3',
+      'email-worker',
+      'URL protection',
+    ),
     dormant(
       'scan.attachment',
       'email.security',
-      [parsed()],
+      [parsed(), rescan()],
       '4.2',
       'email-worker',
       'ClamAV and YARA attachment scanning',
@@ -295,7 +314,7 @@ export const TOPOLOGY: Topology = {
     dormant(
       'scan.dlp',
       'email.security',
-      [parsed()],
+      [parsed(), rescan()],
       '4.5',
       'email-worker',
       'Data loss prevention',
@@ -493,7 +512,7 @@ function parseOrgPart(rest: string): { organizationId: string; eventType: string
 const QUEUES_LONGEST_FIRST = [...QUEUE_NAMES].sort((a, b) => b.length - a.length);
 
 /**
- * Parses any routing key of topology v1; `null` for keys this topology never produces. Queue
+ * Parses any routing key of the topology; `null` for keys this topology never produces. Queue
  * names contain dots, so the queue is the longest queue name that matches whole words.
  */
 export function parseRoutingKey(key: string): ParsedRoutingKey | null {

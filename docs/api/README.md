@@ -41,12 +41,12 @@ All paths are under `/api/v1`. Access: **P** = public (no credentials); **U** = 
 
 ### Operational
 
-| Method | Path            | Access | Description                                                                                                                                                                          |
-| ------ | --------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| GET    | `/health/live`  | P      | Process liveness (unprefixed). No dependency checks                                                                                                                                  |
-| GET    | `/health/ready` | P      | Dependency readiness (unprefixed). `200` when ok, else `503`                                                                                                                         |
-| GET    | `/api/v1/meta`  | P      | API build/version information                                                                                                                                                        |
-| GET    | `/metrics`      | P      | Prometheus series (unprefixed, step 3.2 §5.3, e.g. `dead_letter_replay_total{source_queue,outcome}`). Internal port only: the ingress must not route it. Not in the OpenAPI document |
+| Method | Path            | Access | Description                                                                                                                                                                                                                                                |
+| ------ | --------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/health/live`  | P      | Process liveness (unprefixed). No dependency checks                                                                                                                                                                                                        |
+| GET    | `/health/ready` | P      | Dependency readiness (unprefixed). `200` when ok, else `503`                                                                                                                                                                                               |
+| GET    | `/api/v1/meta`  | P      | API build/version information                                                                                                                                                                                                                              |
+| GET    | `/metrics`      | P      | Prometheus series (unprefixed, step 3.2 §5.3, e.g. `dead_letter_replay_total{source_queue,outcome}`, step 3.3 `api_message_lifecycle_operations_total{operation,outcome}`). Internal port only: the ingress must not route it. Not in the OpenAPI document |
 
 ### Authentication and self-service (`auth`, `platform` tags)
 
@@ -312,7 +312,7 @@ Per-recipient delivery state of the caller's organization (R9, R13), from the re
 
 | Method | Path                                      | Access             | Result                                                                                                                                                                                                               |
 | ------ | ----------------------------------------- | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| GET    | `/messages/{messageId}/deliveries`        | `delivery:read`, K | `{ message: { id, direction, status, receivedAt }, deliveries: [Delivery] }` by `rcptSeq`, then `deliverySeq`                                                                                                        |
+| GET    | `/messages/{messageId}/deliveries`        | `delivery:read`, K | `{ message: { id, direction, status, statusReason, receivedAt }, deliveries: [Delivery] }` by `rcptSeq`, then `deliverySeq`                                                                                          |
 | GET    | `/messages/{messageId}/deliveries/events` | `delivery:read`, K | `?rcptSeq&limit&cursor` → `{ data: [{ rcptSeq, deliverySeq, source, fromStatus, toStatus, applied, occurredAt, queueId, smtpCode, enhancedStatus, remoteHost, errorClass, detail }], nextCursor }`, **oldest first** |
 | GET    | `/deliveries`                             | `delivery:read`, K | `?from&to&status&direction&limit&cursor` → `{ data: [{ messageId, rcptSeq, recipient, direction, status, attemptCount, lastErrorClass, statusChangedAt }], nextCursor }`, newest first                               |
 
@@ -325,6 +325,53 @@ Per-recipient delivery state of the caller's organization (R9, R13), from the re
 **Audit trail.** Every status signal is kept, applied or not (`applied: false` for stale, conflicting or same-state signals). `source`: `planner`, `reinjection`, `postfix_log` (the MTA delivery log), `bounce_notice` (postmaster DSN copies), `reconciler`. `detail` is the remote reply or the reason text, never message content.
 
 **List range.** `from` (inclusive) and `to` (exclusive) are ISO 8601 date-times; `to` defaults to now and `from` to `to` − 24 h. The range must be at most 31 days and `from` before `to` (`400`). The cursor is opaque (keyset on received-at and id); filters must stay the same between pages.
+
+### Message lifecycle (`messages` tag, step 3.3)
+
+The lifecycle state of a message of the caller's organization ([ADR-0025](../architecture/adr/0025-message-lifecycle-state-machine.md), design [08-message-lifecycle.md](../plan/steps/08-message-lifecycle.md) L10–L12) and the two administrative operations that change it. Every state change goes through the shared transition service `@email-gateway/message-lifecycle` (history row, `email_events` row and `mail.message.state_changed.v1` in the same writer transaction). A message is addressed by its public id; another organization's message (or an unknown id) is `404 message_not_found`, for reads and writes alike. Responses carry ids, states, codes, counts and times only: never subjects, addresses or bodies.
+
+| Method | Path                                      | Access                  | Result                                                                                                                                                                                                                            |
+| ------ | ----------------------------------------- | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/messages/{messageId}/lifecycle`         | `message:read`, K       | `{ messageId, receivedAt, direction, state, statusReason, version, lifecycleRound, statusChangedAt, parse: { status, completedAt } \| null, recipients: { total, byStatus }, deliverySeq \| null, actions: { rescan, release } }` |
+| GET    | `/messages/{messageId}/lifecycle/history` | `message:read`, K       | `?limit&cursor` → `{ data: [{ version, fromState, toState, reasonCode, lifecycleRound, actor: { role, type, service, id }, causationEventId, correlationId, occurredAt, changedAt }], nextCursor }`, **oldest first**             |
+| POST   | `/messages/{messageId}/rescan`            | `message:rescan`, K     | `Idempotency-Key` + `{ expectedVersion, reason }` → `202 { messageId, state: "scanning", version, lifecycleRound, rescanEventId, note }`                                                                                          |
+| POST   | `/messages/{messageId}/release`           | `quarantine:release`, K | `Idempotency-Key` + `{ expectedVersion, reason }` → `202 { messageId, state: "approved", version, lifecycleRound, deliverySeq, approvalEventIds, recipientCount }`                                                                |
+
+**States.** `received`, `persisted`, `scanning`, `scanned`, `scan_failed`, `policy_evaluated`, `approved`, `quarantined`, `held_for_review`, `rejected`, `delivery_pending`, `delivery_retry`, `delivered`, `archived`, `expired`. Partial and failed deliveries are reasons, not states: `delivered` with `statusReason: delivery_partial`, `rejected` with `delivery_failed` (per-recipient detail: `GET …/deliveries`). `version` grows by one per applied transition and is the optimistic-concurrency token of the operations; `lifecycleRound` grows by one per rescan or release. `actions` says what the current state allows (from the transition table), not what the caller may do.
+
+**Reads** use the read replica (a few seconds behind; with the replica unusable the writer answers). Right after a rescan or release the previous state may still show; the `202` body carries the new `version`. The history is ordered by `version`; rows written before step 3.3 show `actor.role: "legacy"` and are shown as recorded (they may contain pairs the transition table no longer allows). `actor.id` is the public id of the operator (user or API key), `null` for system actors.
+
+**Rescan** (edge E19, from `scanning`, `scanned`, `scan_failed`, `policy_evaluated`, `quarantined`, `held_for_review` or `expired`): the message moves to `scanning` in a new round and `mail.message.rescan_requested.v1` is published to the scan stages. This step implements the state transition and the request contract only; the scan itself is deferred to step 4.1. Before Phase 4 no scan stage consumes the request; the response `note` says so, and the message stays `scanning` until the stages exist or the expiry sweeper moves it to `expired` (after which another rescan is allowed). Audited as `message.rescan_requested`.
+
+**Release** (edges E14 from `quarantined`, E15 from `held_for_review`): the message moves to `approved` in a new round and its `pending` and `quarantined` recipients (by `rcptSeq`) are approved for delivery (the released `quarantined` recipients read as `pending` from then on, until their own delivery result) with `mail.delivery.approved.v1` (`source: quarantine_release`, `deliverySeq` = highest existing + 1, or 1; at most 1000 recipients per approval; one `delivery.approved` timeline event each). The delivery-worker plans and delivers them through the normal path, and the message then moves on to `delivery_pending` and a final state. A message with per-recipient quarantine entries (`quarantine_messages`) is refused with `409 quarantine_workflow_required` (released through the quarantine workflow of step 5.3); no releasable recipient is `409 no_releasable_recipients`. Audited as `message.quarantine_released`.
+
+**Body** (both operations, strict): `expectedVersion` (integer ≥ 0, the `version` the operator saw) and `reason` (10–500 characters, stored in the audit row only, never in the history or events). The audit row (`resource_type: message`, `resource_id: <messageId>`) carries `metadata: { fromState, toState, version, lifecycleRound, reason, idempotencyKeyHash, eventIds, deliverySeq?, recipientCount? }`; the key itself is never stored outside `api_idempotency_keys`.
+
+**Refusals** (coded error body, see [Errors](#errors)):
+
+| Case                                                        | Response                                                   |
+| ----------------------------------------------------------- | ---------------------------------------------------------- |
+| No permission                                               | `403`                                                      |
+| Another organization's message, or an unknown id            | `404 message_not_found`                                    |
+| `messageId` not a UUID, invalid body                        | `400` (`message` lists the issues)                         |
+| Missing / invalid `Idempotency-Key`                         | `400 idempotency_key_required` / `idempotency_key_invalid` |
+| Same key, different request (body, path, operation, caller) | `422 idempotency_key_reused`                               |
+| `expectedVersion` is not the current version                | `409 message_version_conflict`                             |
+| The current state does not allow the operation              | `409 message_state_conflict`                               |
+| Release of a message with per-recipient quarantine entries  | `409 quarantine_workflow_required`                         |
+| Release without a `pending` or `quarantined` recipient      | `409 no_releasable_recipients`                             |
+
+`409` bodies add `currentState` and `currentVersion`: read them, decide, and retry with the new `expectedVersion`.
+
+**Idempotency-Key** (required on both operations): 1–128 characters of `[A-Za-z0-9._:-]`, case-sensitive, scoped to the organization. The first `2xx` response is stored for 24 hours in the same writer transaction as the change and its audit row. Repeating the request with the same key (same body, path, operation and caller) returns the stored status and body with the header `Idempotency-Replayed: true` and changes nothing; concurrent repeats are serialized (one applies, the others replay). Errors (`4xx`) are never stored: fix the request and retry with the same key. After 24 hours the key may be reused for a new request on another message; on the same message the earlier transition still holds the key, and the request is `422`.
+
+```bash
+curl -X POST "$API/api/v1/messages/$MESSAGE_ID/release" -H "X-API-Key: $KEY" \
+  -H "Idempotency-Key: release-$MESSAGE_ID-1" -H 'Content-Type: application/json' \
+  -d '{"expectedVersion":5,"reason":"false positive confirmed by the security team"}'
+# → 202 {"messageId":"…","state":"approved","version":6,"lifecycleRound":1,"deliverySeq":1,
+#        "approvalEventIds":["…"],"recipientCount":2}
+```
 
 ### Dead letters (`platform` tag, step 3.2)
 
@@ -360,16 +407,30 @@ Every error uses one shape, produced by the global exception filter:
 }
 ```
 
-| Status | Meaning                                                                                                                                                                                                        |
-| ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `400`  | Validation failed: `message` lists every issue as `"<path>: <issue>"` (input values are never echoed). Also malformed ids, unknown feature/limit keys, invalid or used tokens                                  |
-| `401`  | Missing, invalid, expired or revoked credentials (`Invalid credentials` on login, `Unauthorized` elsewhere). Also: user or organization no longer active, override ended                                       |
-| `403`  | Authenticated but not allowed: missing permission, user-only route called with an API key, `MFA required`, `MFA enrollment required`, four-eyes violation                                                      |
-| `404`  | Not found, **including resources of another tenant** and soft-deleted resources                                                                                                                                |
-| `409`  | Conflicts with the current state: duplicates (slug, email, domain), limit reached (`Organization limit reached: <key>`), invalid state transitions, active legal hold, a check or rotation already in progress |
-| `422`  | A valid request for a feature that is not implemented (`Not implemented`, e.g. `smtp_callout`/`ldap` recipient validation); a refused destination server (with `reason` and `field`, step 2.3)                 |
-| `429`  | Rate limited, with `Retry-After` (seconds)                                                                                                                                                                     |
-| `503`  | Authentication, rate-limit or domain-verification backend (Redis) unavailable: these paths fail closed                                                                                                         |
+| Status | Meaning                                                                                                                                                                                                                                                                            |
+| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `400`  | Validation failed: `message` lists every issue as `"<path>: <issue>"` (input values are never echoed). Also malformed ids, unknown feature/limit keys, invalid or used tokens                                                                                                      |
+| `401`  | Missing, invalid, expired or revoked credentials (`Invalid credentials` on login, `Unauthorized` elsewhere). Also: user or organization no longer active, override ended                                                                                                           |
+| `403`  | Authenticated but not allowed: missing permission, user-only route called with an API key, `MFA required`, `MFA enrollment required`, four-eyes violation                                                                                                                          |
+| `404`  | Not found, **including resources of another tenant** and soft-deleted resources                                                                                                                                                                                                    |
+| `409`  | Conflicts with the current state: duplicates (slug, email, domain), limit reached (`Organization limit reached: <key>`), invalid state transitions, active legal hold, a check or rotation already in progress; message lifecycle conflicts (coded, step 3.3)                      |
+| `422`  | A valid request for a feature that is not implemented (`Not implemented`, e.g. `smtp_callout`/`ldap` recipient validation); a refused destination server (with `reason` and `field`, step 2.3); an Idempotency-Key reused for another request (`idempotency_key_reused`, step 3.3) |
+| `429`  | Rate limited, with `Retry-After` (seconds)                                                                                                                                                                                                                                         |
+| `503`  | Authentication, rate-limit or domain-verification backend (Redis) unavailable: these paths fail closed                                                                                                                                                                             |
+
+**Coded errors (step 3.3).** The message lifecycle routes add a stable machine-readable `code` to the body (and, for `409`, the message's `currentState` and `currentVersion`); `message` stays human-readable:
+
+```json
+{
+  "statusCode": 409,
+  "error": "CONFLICT",
+  "code": "message_version_conflict",
+  "message": "The message changed since expectedVersion; read its lifecycle and retry",
+  "currentState": "quarantined",
+  "currentVersion": 6,
+  "correlationId": "..."
+}
+```
 
 Unexpected errors return a generic `500` message. Details go to the logs only, and can be found there by `correlationId`.
 

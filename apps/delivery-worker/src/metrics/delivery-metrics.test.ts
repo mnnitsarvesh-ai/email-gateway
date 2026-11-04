@@ -18,3 +18,27 @@ describe('DeliveryMetrics.outboxPoller', () => {
     );
   });
 });
+
+describe('DeliveryMetrics lifecycle series (step 3.3)', () => {
+  it('counts approval outcomes and adapts the transition service metrics', async () => {
+    const service = new MetricsService({ service: 'test' });
+    const metrics = new DeliveryMetrics(service);
+    metrics.approvalsSkipped.inc({ reason: 'lifecycle_stale' });
+    metrics.approvalsRejected.inc({ reason: 'lifecycle_state' });
+    metrics.lifecycle.transition('approved', 'delivery_pending', 'applied');
+    metrics.lifecycle.ignored('older_round');
+    metrics.lifecycle.versionConflict();
+    metrics.lifecycle.derivedSkipped('expired');
+    const text = await service.metrics();
+    for (const line of [
+      'delivery_approvals_skipped_total{reason="lifecycle_stale",service="test"} 1',
+      'delivery_approvals_rejected_total{reason="lifecycle_state",service="test"} 1',
+      'lifecycle_transitions_total{from="approved",to="delivery_pending",result="applied",service="test"} 1',
+      'lifecycle_transitions_ignored_total{reason="older_round",service="test"} 1',
+      'lifecycle_version_conflicts_total{service="test"} 1',
+      'lifecycle_derived_skipped_total{state="expired",service="test"} 1',
+    ]) {
+      expect(text).toContain(line);
+    }
+  });
+});

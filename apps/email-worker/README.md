@@ -93,6 +93,23 @@ the subject, filenames, addresses, header values, bodies, or error objects and m
 parser, S3 or decoders. `src/mime-ingestion/log-redaction.test.ts` proves this with marker
 strings.
 
+## Message lifecycle (step 3.3 L8.2)
+
+The MIME stage **does not change the message lifecycle state**
+([08-message-lifecycle.md](../../docs/plan/steps/08-message-lifecycle.md) L2 and L8.2,
+[ADR-0025](../../docs/architecture/adr/0025-message-lifecycle-state-machine.md)). The SMTP
+commit creates every message `persisted` (version 1), and the parse runs **within**
+`persisted`: it is a preparatory stage whose record is `email_message_parses` (its own stage
+table), not a lifecycle state, and the finalize transaction never writes `status`,
+`status_changed_at`, `version`, `lifecycle_round`, `status_reason` or
+`email_message_status_history` (one-door rule: only `@email-gateway/message-lifecycle` writes
+them). The consumers of the parse outcome own the next transition: `mail.message.parsed.v1` →
+the scan orchestration of step 4.1 moves `persisted → scanning`;
+`mail.message.parse_failed.v1` → the policy engine of step 5.2 moves
+`persisted → policy_evaluated` with its fail-safe. A parse state would be a sixteenth state or a
+fake producer of `scanning`/`scan_failed`. The lifecycle read API shows the parse outcome next to
+the state.
+
 ## Transport (step 3.2 Q13)
 
 `AmqpModule` (`@email-gateway/common`) holds one connection (reconnects with backoff, never

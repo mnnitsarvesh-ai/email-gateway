@@ -1,5 +1,6 @@
 import { messageParsedV1, messageReceivedV1 } from '@email-gateway/event-contracts';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { purgeDormantQueues } from './support/broker';
 import { waitFor } from './support/compose';
 import {
   encodedWord,
@@ -55,7 +56,9 @@ beforeAll(async () => {
 }, 60_000);
 
 afterAll(async () => {
-  if (!gate.skip) await fx.cleanup();
+  if (gate.skip) return;
+  await fx.cleanup();
+  await purgeDormantQueues();
 }, 120_000);
 
 describe.skipIf(gate.skip)('MIME ingestion stack (step 3.1 §9)', { timeout: 180_000 }, () => {

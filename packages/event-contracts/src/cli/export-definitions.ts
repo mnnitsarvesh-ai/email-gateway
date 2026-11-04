@@ -4,7 +4,7 @@ import { toRabbitDefinitions } from '../definitions';
 import { DEFAULT_VHOST, TOPOLOGY, validateTopology } from '../topology';
 
 /**
- * Writes the RabbitMQ definitions of topology v1 (step 3.2 Q5):
+ * Writes the RabbitMQ definitions of the topology (`TOPOLOGY_VERSION`, step 3.2 Q5):
  *
  *   node dist/cli/export-definitions.js <output.json>
  *

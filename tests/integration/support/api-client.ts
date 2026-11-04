@@ -9,10 +9,19 @@ import { stack } from './env';
  * The password is stored as an Argon2id hash with the api's parameters (AUTH_ARGON2_*), exactly
  * as the api's PasswordHasher stores it, and never printed. Removed by `remove()`.
  */
+export interface ApiResponse {
+  status: number;
+  body: unknown;
+  headers: Headers;
+}
+
 export interface ApiSession {
   userId: bigint;
-  get(path: string): Promise<{ status: number; body: unknown }>;
-  put(path: string, body: unknown): Promise<{ status: number; body: unknown }>;
+  /** Public id of the user (the operator id in lifecycle history and audit rows). */
+  userPublicId: string;
+  get(path: string): Promise<ApiResponse>;
+  put(path: string, body: unknown): Promise<ApiResponse>;
+  post(path: string, body: unknown, headers?: Record<string, string>): Promise<ApiResponse>;
   remove(): Promise<void>;
 }
 
@@ -57,7 +66,7 @@ export async function apiSession(
       passwordHash,
       emailVerifiedAt: new Date(),
     },
-    select: { id: true },
+    select: { id: true, publicId: true },
   });
   const role = await prisma.role.findFirstOrThrow({
     where: { key: roleKey, organizationId: null },
@@ -74,22 +83,34 @@ export async function apiSession(
   });
   if (login.status !== 200) throw new Error(`api login failed with ${login.status}`);
   const { accessToken } = (await login.json()) as { accessToken: string };
-  const call = async (method: string, path: string, body?: unknown) => {
+  const call = async (
+    method: string,
+    path: string,
+    body?: unknown,
+    headers: Record<string, string> = {},
+  ): Promise<ApiResponse> => {
     const res = await fetch(`${apiBaseUrl()}/api/v1${path}`, {
       method,
       headers: {
+        ...headers,
         authorization: `Bearer ${accessToken}`,
         ...(body === undefined ? {} : { 'content-type': 'application/json' }),
       },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const text = await res.text();
-    return { status: res.status, body: text ? (JSON.parse(text) as unknown) : null };
+    return {
+      status: res.status,
+      body: text ? (JSON.parse(text) as unknown) : null,
+      headers: res.headers,
+    };
   };
   return {
     userId: user.id,
+    userPublicId: user.publicId,
     get: (path) => call('GET', path),
     put: (path, body) => call('PUT', path, body),
+    post: (path, body, headers) => call('POST', path, body, headers),
     remove: async () => {
       // Roles, sessions and tokens cascade with the user; login audit rows reference the
       // organization (fixture data, removed like the api suites remove theirs).

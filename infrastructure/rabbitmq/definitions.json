@@ -1,5 +1,5 @@
 {
-  "topology_version": 1,
+  "topology_version": 2,
   "exchanges": [
     {
       "name": "email.ingestion",
@@ -390,6 +390,14 @@
       "vhost": "email-gateway",
       "destination": "scan.attachment",
       "destination_type": "queue",
+      "routing_key": "org.*.mail.message.rescan_requested.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
+      "destination": "scan.attachment",
+      "destination_type": "queue",
       "routing_key": "retry.scan.attachment.#",
       "arguments": {}
     },
@@ -398,7 +406,23 @@
       "vhost": "email-gateway",
       "destination": "scan.auth",
       "destination_type": "queue",
+      "routing_key": "org.*.mail.message.rescan_requested.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
+      "destination": "scan.auth",
+      "destination_type": "queue",
       "routing_key": "retry.scan.auth.#",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
+      "destination": "scan.dlp",
+      "destination_type": "queue",
+      "routing_key": "org.*.mail.message.rescan_requested.v1",
       "arguments": {}
     },
     {
@@ -430,7 +454,23 @@
       "vhost": "email-gateway",
       "destination": "scan.spam",
       "destination_type": "queue",
+      "routing_key": "org.*.mail.message.rescan_requested.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
+      "destination": "scan.spam",
+      "destination_type": "queue",
       "routing_key": "retry.scan.spam.#",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
+      "destination": "scan.url",
+      "destination_type": "queue",
+      "routing_key": "org.*.mail.message.rescan_requested.v1",
       "arguments": {}
     },
     {

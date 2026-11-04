@@ -6,6 +6,7 @@ import type {
   OutboxPollerMetrics,
 } from '@email-gateway/common';
 import type { RecordResult } from '@email-gateway/mail-routing';
+import type { LifecycleMetrics } from '@email-gateway/message-lifecycle';
 
 export type ReinjectionOutcome =
   'queued' | 'partial' | 'retry' | 'failed' | 'refused' | 'rate_limited' | 'loop';
@@ -24,10 +25,20 @@ export type ReconcilerAction =
 
 /**
  * Every series of step 2.3 R14, registered once through MetricsService (served on GET /metrics),
- * plus the counters the design asks for without naming them (invalid outbox rows).
+ * plus the counters the design asks for without naming them (invalid outbox rows), the approval
+ * outcomes of step 3.3 (L8.3, L8.4) and the shared lifecycle series (L5.5, L9) of the
+ * transitions this worker applies (dev pass-through, planner, recorder).
  */
 export class DeliveryMetrics {
   readonly approvals: Counter<'source'>;
+  readonly approvalsSkipped: Counter<'reason'>;
+  readonly approvalsRejected: Counter<'reason'>;
+  readonly lifecycleTransitions: Counter<'from' | 'to' | 'result'>;
+  readonly lifecycleIgnored: Counter<'reason'>;
+  readonly lifecycleVersionConflicts: Counter;
+  readonly lifecycleDerivedSkipped: Counter<'state'>;
+  /** The transition service's metrics interface on this registry (recorder contexts, planner). */
+  readonly lifecycle: LifecycleMetrics;
   readonly reinjections: Counter<'listener' | 'outcome'>;
   readonly reinjectionSeconds: Histogram<'listener'>;
   readonly signals: Counter<'source' | 'result'>;
@@ -44,6 +55,41 @@ export class DeliveryMetrics {
       'Delivery approvals planned, by approval source',
       ['source'],
     );
+    this.approvalsSkipped = metrics.counter(
+      'delivery_approvals_skipped_total',
+      'Received messages the dev pass-through did not approve because the lifecycle refused the approval (reason = lifecycle_<result>)',
+      ['reason'],
+    );
+    this.approvalsRejected = metrics.counter(
+      'delivery_approvals_rejected_total',
+      'Delivery approvals the planner acknowledged without planning, by reason (lifecycle_state, eml_key_prefix, message_not_found, no_known_recipients)',
+      ['reason'],
+    );
+    this.lifecycleTransitions = metrics.counter(
+      'lifecycle_transitions_total',
+      'Message lifecycle transition requests by current state, target and result (applied, duplicate, stale, invalid)',
+      ['from', 'to', 'result'],
+    );
+    this.lifecycleIgnored = metrics.counter(
+      'lifecycle_transitions_ignored_total',
+      'Stale or invalid lifecycle transition requests by reason (older_round, version_mismatch, overtaken, final_state, edge_not_allowed, actor_not_allowed, reason_not_allowed, unexpected_from, future_round)',
+      ['reason'],
+    );
+    this.lifecycleVersionConflicts = metrics.counter(
+      'lifecycle_version_conflicts_total',
+      'Lifecycle transactions retried after a compare-and-set conflict, deadlock, lock wait timeout or concurrent duplicate',
+    );
+    this.lifecycleDerivedSkipped = metrics.counter(
+      'lifecycle_derived_skipped_total',
+      'Derived delivery states not applied because the message is outside the delivery phase, by its state',
+      ['state'],
+    );
+    this.lifecycle = {
+      transition: (from, to, result) => this.lifecycleTransitions.inc({ from, to, result }),
+      ignored: (reason) => this.lifecycleIgnored.inc({ reason }),
+      versionConflict: () => this.lifecycleVersionConflicts.inc(),
+      derivedSkipped: (state) => this.lifecycleDerivedSkipped.inc({ state }),
+    };
     this.reinjections = metrics.counter(
       'delivery_reinjections_total',
       'Reinjection attempts into postfix-outbound, by listener and outcome',

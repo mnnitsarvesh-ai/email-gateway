@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { purgeDormantQueues } from './support/broker';
 import { composeOk, runningServices, waitFor } from './support/compose';
 import { stack } from './support/env';
 import { SmtpFixtures, type FixtureDomain } from './support/smtp-fixtures';
@@ -61,6 +62,7 @@ afterAll(async () => {
     await waitFor('smtp-adapter ready', adapterReady, { timeoutMs: 120_000, intervalMs: 1_000 });
   }
   await fx.cleanup();
+  await purgeDormantQueues();
 }, 300_000);
 
 describe.skipIf(gate.skip)('SMTP stack: fail closed (suite 12)', { timeout: 300_000 }, () => {

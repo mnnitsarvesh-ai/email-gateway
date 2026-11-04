@@ -1,4 +1,8 @@
-import { deliveryStatusChangedV1, EventTypes } from '@email-gateway/event-contracts';
+import {
+  deliveryStatusChangedV1,
+  EventTypes,
+  messageStateChangedV1,
+} from '@email-gateway/event-contracts';
 import { reinjectionIdempotencyKey, recipientSetSha256 } from '@email-gateway/mail-routing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ApprovalPipeline, Broker } from './support/approvals';
@@ -89,10 +93,38 @@ describe('planning (R7) through email.delivery.pending against the real writer',
     ]);
     expect(deliveries[0]!.reinjectionId).toBe(first.id);
     expect(deliveries[2]!.reinjectionId).toBe(reinjections[1]!.id);
-    const msg = await fx.prisma.emailMessage.findUniqueOrThrow({
-      where: { id_receivedAt: { id: message.messageId, receivedAt: message.receivedAt } },
+    // E20 (step 3.3 L8.4): approved → delivery_pending in the approval's transaction.
+    const lifecycle = await fx.lifecycle(message);
+    expect(lifecycle).toMatchObject({
+      status: 'delivery_pending',
+      statusReason: 'delivery_planned',
+      version: 3,
+      lifecycleRound: 0,
     });
-    expect(msg.status).toBe('delivery_queued');
+    expect(lifecycle.history.map((h) => [h.version, h.toStatus])).toEqual([
+      [0, 'received'],
+      [1, 'persisted'],
+      [2, 'approved'],
+      [3, 'delivery_pending'],
+    ]);
+    expect(lifecycle.history[3]).toMatchObject({
+      fromStatus: 'approved',
+      reasonCode: 'delivery_planned',
+      actorRole: 'delivery',
+      actorService: 'delivery-worker',
+      actorType: 'system',
+      eventId: approval.eventId,
+      correlationId: approval.correlationId,
+    });
+    const stateChanged = await fx.prisma.messageOutbox.findMany({
+      where: {
+        aggregateId: message.messageId.toString(),
+        eventType: EventTypes.MessageStateChanged,
+      },
+    });
+    expect(stateChanged.map((row) => messageStateChangedV1.parse(row.payload).state)).toEqual([
+      'delivery_pending',
+    ]);
     const audit = await fx.prisma.deliveryStatusEvent.findMany({
       where: { messageId: message.messageId, receivedAt: message.receivedAt },
     });
@@ -112,6 +144,7 @@ describe('planning (R7) through email.delivery.pending against the real writer',
     expect(await fx.reinjections(message)).toHaveLength(2);
     expect(await fx.deliveries(message)).toHaveLength(3);
     expect(await fx.counts(message)).toEqual(before);
+    expect((await fx.lifecycle(message)).version).toBe(3);
   });
 
   it('splits mixed routes: internal per tenant domain, outbound per recipient domain, refusals and suppressions', async () => {
@@ -205,6 +238,12 @@ describe('planning (R7) through email.delivery.pending against the real writer',
       ['deferred', 'gateway_hold'],
       ['failed', 'recipient_domain_inactive'],
     ]);
+    // A held (deferred) recipient: the derived message state is delivery_retry (L9).
+    expect(await fx.lifecycle(message)).toMatchObject({
+      status: 'delivery_retry',
+      statusReason: 'delivery_deferred',
+      version: 4,
+    });
   });
 
   it('rejects approvals that do not belong to the envelope organization', async () => {
@@ -237,5 +276,126 @@ describe('planning (R7) through email.delivery.pending against the real writer',
       unknownRecipients: 1,
     });
     expect(await fx.deliveries(second)).toHaveLength(0);
+  });
+});
+
+describe('planning and the message lifecycle (step 3.3 L8.4)', () => {
+  const rejected = (counter: string) =>
+    worker.metrics.approvalsRejected
+      .get()
+      .then((m) => m.values.find((v) => v.labels.reason === counter)?.value ?? 0);
+
+  it('plans a second chunk of the same approval round while delivery_pending, without a second transition', async () => {
+    const message = await fx.message(org, {
+      direction: 'outbound',
+      recipients: [{ address: 'c1@ext-chunk.test' }, { address: 'c2@ext-chunk.test' }],
+    });
+    const [r1, r2] = message.recipients;
+    const chunk = (r: typeof r1) =>
+      fx.approval(message, {
+        recipients: [{ recipientId: r!.id.toString(), rcptSeq: r!.rcptSeq }],
+      });
+    expect(await plan(chunk(r1))).toMatchObject({ status: 'planned', deliveries: 1 });
+    expect(await fx.lifecycle(message)).toMatchObject({ status: 'delivery_pending', version: 3 });
+    expect(await plan(chunk(r2))).toMatchObject({ status: 'planned', deliveries: 1 });
+    const lifecycle = await fx.lifecycle(message);
+    expect(lifecycle).toMatchObject({ status: 'delivery_pending', version: 3 });
+    expect(lifecycle.history.filter((h) => h.toStatus === 'delivery_pending')).toHaveLength(1);
+    expect(await fx.deliveries(message)).toHaveLength(2);
+  });
+
+  it('rejects an approval of an older round and plans the current round’s', async () => {
+    // As after a release (round 1): the round-0 approval must never be planned.
+    const message = await fx.message(org, {
+      direction: 'outbound',
+      state: 'approved',
+      lifecycleRound: 1,
+      recipients: [{ address: 'r@ext-round.test' }],
+    });
+    const before = await rejected('lifecycle_state');
+    expect(await plan(fx.approval(message))).toMatchObject({
+      status: 'rejected',
+      reason: 'lifecycle_state',
+      deliveries: 0,
+    });
+    expect(await plan(fx.approval(message, { lifecycleRound: 0 }))).toMatchObject({
+      status: 'rejected',
+      reason: 'lifecycle_state',
+    });
+    expect(await fx.deliveries(message)).toHaveLength(0);
+    expect(await fx.lifecycle(message)).toMatchObject({ status: 'approved', version: 2 });
+    expect(await rejected('lifecycle_state')).toBe(before + 2);
+
+    expect(await plan(fx.approval(message, { lifecycleRound: 1 }))).toMatchObject({
+      status: 'planned',
+      deliveries: 1,
+    });
+    expect(await fx.lifecycle(message)).toMatchObject({
+      status: 'delivery_pending',
+      lifecycleRound: 1,
+      version: 3,
+    });
+  });
+
+  it('rejects an approval of a message that is not approved (persisted, quarantined)', async () => {
+    for (const state of ['persisted', 'quarantined'] as const) {
+      const message = await fx.message(org, {
+        direction: 'outbound',
+        state,
+        recipients: [{ address: `${state}@ext-state.test` }],
+      });
+      const { version } = await fx.lifecycle(message);
+      expect(await plan(fx.approval(message))).toMatchObject({
+        status: 'rejected',
+        reason: 'lifecycle_state',
+      });
+      expect(await fx.deliveries(message)).toHaveLength(0);
+      expect(await fx.lifecycle(message)).toMatchObject({ status: state, version });
+    }
+  });
+
+  it('an all-refused first chunk does not finish the message while the next chunk is pending', async () => {
+    // A release of more than 1000 recipients (L10.3) approves in chunks; the api leaves every
+    // released recipient `pending`, so chunk 1 cannot derive a final state alone.
+    await fx.suppression(org, 'gone@ext-chunked.test');
+    const message = await fx.message(org, {
+      direction: 'outbound',
+      recipients: [{ address: 'gone@ext-chunked.test' }, { address: 'next@ext-chunked.test' }],
+    });
+    const [r1, r2] = message.recipients;
+    const chunk = (r: typeof r1) =>
+      fx.approval(message, {
+        recipients: [{ recipientId: r!.id.toString(), rcptSeq: r!.rcptSeq }],
+      });
+    expect(await plan(chunk(r1))).toMatchObject({ status: 'planned', deliveries: 1, refused: 1 });
+    expect(await fx.lifecycle(message)).toMatchObject({ status: 'delivery_pending' });
+    expect(await plan(chunk(r2))).toMatchObject({ status: 'planned', deliveries: 1, refused: 0 });
+    expect(await fx.lifecycle(message)).toMatchObject({ status: 'delivery_pending' });
+    expect((await fx.deliveries(message)).map((d) => d.status).sort()).toEqual([
+      'pending',
+      'suppressed',
+    ]);
+  });
+
+  it('an all-refused plan ends rejected/delivery_failed in the approval transaction', async () => {
+    await fx.suppression(org, 'nope1@ext-refused.test');
+    await fx.suppression(org, 'nope2@ext-refused.test');
+    const message = await fx.message(org, {
+      direction: 'outbound',
+      recipients: [{ address: 'nope1@ext-refused.test' }, { address: 'nope2@ext-refused.test' }],
+    });
+    const approval = fx.approval(message);
+    expect(await plan(approval)).toMatchObject({ status: 'planned', deliveries: 2, refused: 2 });
+    const lifecycle = await fx.lifecycle(message);
+    expect(lifecycle).toMatchObject({
+      status: 'rejected',
+      statusReason: 'delivery_failed',
+      version: 4,
+    });
+    expect(lifecycle.history.slice(2).map((h) => [h.fromStatus, h.toStatus, h.eventId])).toEqual([
+      ['persisted', 'approved', null],
+      ['approved', 'delivery_pending', approval.eventId],
+      ['delivery_pending', 'rejected', approval.eventId],
+    ]);
   });
 });

@@ -1,12 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
-  aggregateMessageStatus,
+  DELIVERY_TRANSITIONS,
   isTerminalDeliveryStatus,
   mapRecipientStatus,
   nextDeliveryState,
   TERMINAL_DELIVERY_STATUSES,
   type DeliverySignalSourceName,
+  type DeliveryStateSnapshot,
   type DeliveryStatus,
+  type TransitionDecision,
+  type TransitionResult,
   type TransitionSignal,
 } from './transitions';
 
@@ -219,21 +222,163 @@ describe('mapRecipientStatus', () => {
   });
 });
 
-describe('aggregateMessageStatus', () => {
-  it('is null while any delivery is non-terminal or unknown', () => {
-    expect(aggregateMessageStatus([])).toBeNull();
-    expect(aggregateMessageStatus(['delivered', 'queued'])).toBeNull();
-    expect(aggregateMessageStatus(['delivered', 'unknown'])).toBeNull();
-    expect(aggregateMessageStatus(['deferred'])).toBeNull();
+/**
+ * The step 2.3 implementation of nextDeliveryState (rules in code, `c8083d4`), kept verbatim as
+ * the oracle of the table-driven version (step 3.3 L9: identical behaviour).
+ */
+function oracleNextDeliveryState(
+  current: DeliveryStateSnapshot,
+  signal: TransitionSignal,
+): TransitionDecision {
+  const PENDING_LIKE: readonly DeliveryStatus[] = ['pending', 'in_progress'];
+  const OVERTAKING_SOURCES: readonly DeliverySignalSourceName[] = ['postfix_log', 'bounce_notice'];
+  const NON_TERMINAL_NEXT: Readonly<Record<string, readonly DeliveryStatus[]>> = {
+    pending: ['queued', 'deferred'],
+    in_progress: ['queued', 'deferred'],
+    queued: ['deferred', 'unknown'],
+    deferred: ['deferred', 'queued', 'unknown'],
+    unknown: [],
+  };
+  const later = (a: Date | null, b: Date): Date => (a !== null && a > b ? a : b);
+  const apply = (): TransitionDecision => ({
+    applied: true,
+    result: 'applied',
+    next: {
+      status: signal.status,
+      lastSignalAt: later(current.lastSignalAt, signal.occurredAt),
+      attemptCount: current.attemptCount + (signal.remoteAttempt ? 1 : 0),
+    },
+  });
+  const notApplied = (result: Exclude<TransitionResult, 'applied'>, note: string) => ({
+    applied: false,
+    result,
+    note,
   });
 
-  it('is delivered, partially_delivered or failed once all are terminal', () => {
-    expect(aggregateMessageStatus(['delivered'])).toBe('delivered');
-    expect(aggregateMessageStatus(['delivered', 'delivered'])).toBe('delivered');
-    expect(aggregateMessageStatus(['delivered', 'bounced'])).toBe('partially_delivered');
-    expect(aggregateMessageStatus(['suppressed', 'delivered', 'expired'])).toBe(
-      'partially_delivered',
-    );
-    expect(aggregateMessageStatus(['bounced', 'failed', 'expired', 'suppressed'])).toBe('failed');
+  if (
+    signal.status === 'delivered' &&
+    !(signal.source === 'postfix_log' && /^2\.\d{1,3}\.\d{1,3}$/.test(signal.enhancedStatus ?? ''))
+  ) {
+    return notApplied('conflict', 'delivered requires postfix_log status=sent with a 2.x.x DSN');
+  }
+  if (signal.status === 'in_progress') {
+    return notApplied('conflict', 'in_progress is not a signal status');
+  }
+  if (signal.status === 'pending') {
+    if (
+      signal.source === 'planner' &&
+      current.status === 'pending' &&
+      current.lastSignalAt === null
+    ) {
+      return apply();
+    }
+    return current.status === 'pending'
+      ? notApplied('duplicate', 'already pending')
+      : notApplied('stale', 'pending after a later status');
+  }
+  if (isTerminalDeliveryStatus(current.status)) {
+    return signal.status === current.status
+      ? notApplied('duplicate', `already ${current.status}`)
+      : notApplied('conflict', `${current.status} is terminal`);
+  }
+  if (isTerminalDeliveryStatus(signal.status)) {
+    if (
+      PENDING_LIKE.includes(current.status) &&
+      (signal.status === 'delivered' || signal.status === 'bounced') &&
+      !OVERTAKING_SOURCES.includes(signal.source)
+    ) {
+      return notApplied('conflict', `${signal.status} before queued needs the log or a DSN`);
+    }
+    return apply();
+  }
+  if (current.lastSignalAt !== null && signal.occurredAt < current.lastSignalAt) {
+    return notApplied('stale', 'older than the last applied signal');
+  }
+  if (signal.status === current.status && signal.status !== 'deferred') {
+    return notApplied('duplicate', `already ${current.status}`);
+  }
+  if (
+    signal.status === 'unknown' &&
+    PENDING_LIKE.includes(current.status) &&
+    signal.source === 'reconciler'
+  ) {
+    return apply();
+  }
+  if (!(NON_TERMINAL_NEXT[current.status] ?? []).includes(signal.status)) {
+    return current.status === 'unknown'
+      ? notApplied('stale', 'unknown only becomes terminal')
+      : notApplied('conflict', `${current.status} → ${signal.status} is not allowed`);
+  }
+  return apply();
+}
+
+describe('DELIVERY_TRANSITIONS (step 3.3 L9: the R9.1 rules as data)', () => {
+  it('equals the step 2.3 implementation for every (from, to, source, time, DSN) combination', () => {
+    const lastSignals: (Date | null)[] = [null, t1];
+    const times = [t0, t1, t2]; // older, same instant, newer than t1
+    const dsns: (string | null | undefined)[] = [
+      null,
+      undefined,
+      '2.0.0',
+      '2.6.0',
+      '4.3.0',
+      '5.1.1',
+      'x',
+    ];
+    let cases = 0;
+    for (const from of ALL) {
+      for (const lastSignalAt of lastSignals) {
+        for (const to of ALL) {
+          for (const source of SOURCES) {
+            for (const occurredAt of times) {
+              for (const enhancedStatus of dsns) {
+                for (const remoteAttempt of [false, true]) {
+                  const current = { status: from, lastSignalAt, attemptCount: 2 };
+                  const sig: TransitionSignal = {
+                    status: to,
+                    occurredAt,
+                    source,
+                    enhancedStatus,
+                    remoteAttempt,
+                  };
+                  const label = `${from}@${String(lastSignalAt?.toISOString())} → ${to} (${source}, ${occurredAt.toISOString()}, ${String(enhancedStatus)}, ${String(remoteAttempt)})`;
+                  expect(nextDeliveryState(current, sig), label).toEqual(
+                    oracleNextDeliveryState(current, sig),
+                  );
+                  cases += 1;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    expect(cases).toBe(10 * 2 * 10 * 5 * 3 * 7 * 2);
+  });
+
+  it('has no outgoing rows from terminal states and no duplicate rows', () => {
+    expect(DELIVERY_TRANSITIONS.filter((row) => isTerminalDeliveryStatus(row.from))).toEqual([]);
+    const keys = DELIVERY_TRANSITIONS.map((row) => `${row.from}>${row.to}`);
+    expect(new Set(keys).size).toBe(keys.length);
+    expect(Object.isFrozen(DELIVERY_TRANSITIONS)).toBe(true);
+  });
+
+  it('restricts the overtaking and reconciler moves to their sources', () => {
+    const row = (from: DeliveryStatus, to: DeliveryStatus) =>
+      DELIVERY_TRANSITIONS.find((r) => r.from === from && r.to === to);
+    expect(row('pending', 'pending')).toEqual({
+      from: 'pending',
+      to: 'pending',
+      sources: ['planner'],
+      condition: 'first_signal',
+    });
+    expect(row('pending', 'bounced')?.sources).toEqual(['postfix_log', 'bounce_notice']);
+    expect(row('in_progress', 'unknown')?.sources).toEqual(['reconciler']);
+    expect(row('queued', 'delivered')).toMatchObject({
+      sources: ['postfix_log'],
+      condition: 'dsn_2xx',
+    });
+    expect(row('unknown', 'queued')).toBeUndefined();
+    expect(row('queued', 'queued')).toBeUndefined();
   });
 });

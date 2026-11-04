@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import {
   type DomainStatus,
   type MessageDirection,
+  type MessageStatus,
   type OrganizationStatus,
   PrismaClient,
 } from '@email-gateway/database';
@@ -12,6 +13,38 @@ export function requireEnv(name: string): string {
   if (!value) throw new Error(`${name} must be set (see .env)`);
   return value;
 }
+
+/**
+ * Lifecycle paths a fixture message is set up with (step 3.3 L8.6: fixtures may insert rows in
+ * any state directly, with matching history rows). Each step is `[state, reason, actor role]`;
+ * the message ends in the last state with `version` = the number of transitions.
+ */
+const LIFECYCLE_PATHS = {
+  persisted: [
+    ['received', 'smtp_accepted', 'ingestion'],
+    ['persisted', 'committed', 'ingestion'],
+  ],
+  approved: [
+    ['received', 'smtp_accepted', 'ingestion'],
+    ['persisted', 'committed', 'ingestion'],
+    ['approved', 'dev_passthrough', 'dev_passthrough'],
+  ],
+  delivery_pending: [
+    ['received', 'smtp_accepted', 'ingestion'],
+    ['persisted', 'committed', 'ingestion'],
+    ['approved', 'dev_passthrough', 'dev_passthrough'],
+    ['delivery_pending', 'delivery_planned', 'delivery'],
+  ],
+  expired: [
+    ['received', 'smtp_accepted', 'ingestion'],
+    ['persisted', 'committed', 'ingestion'],
+    ['approved', 'dev_passthrough', 'dev_passthrough'],
+    ['delivery_pending', 'delivery_planned', 'delivery'],
+    ['expired', 'deadline_exceeded', 'sweeper'],
+  ],
+} as const satisfies Record<string, readonly (readonly [MessageStatus, string, string])[]>;
+
+export type FixtureState = keyof typeof LIFECYCLE_PATHS;
 
 export interface MessageFixture {
   messageId: bigint;
@@ -74,12 +107,18 @@ export class Fixtures {
     });
   }
 
-  /** A message with recipients, as ingestion writes it (status received). */
+  /**
+   * A message with recipients (`pending`), in lifecycle `state` (default `delivery_pending`, as
+   * the planner leaves a message whose deliveries exist) with its history rows.
+   */
   async message(
     organizationId: bigint,
     addresses: readonly string[],
     direction: MessageDirection = 'outbound',
+    state: FixtureState = 'delivery_pending',
   ): Promise<MessageFixture> {
+    const path = LIFECYCLE_PATHS[state];
+    const last = path[path.length - 1]!;
     const receivedAt = new Date();
     const identity = await this.prisma.messageIdentity.create({
       data: { organizationId, ingestKey: `it-${randomUUID()}`, receivedAt },
@@ -92,7 +131,9 @@ export class Fixtures {
         receivedAt,
         organizationId,
         direction,
-        status: 'received',
+        status: last[0],
+        version: path.length - 1,
+        statusReason: last[1],
         statusChangedAt: receivedAt,
         envelopeFrom: 'sender@it.test',
         sizeBytes: 100,
@@ -100,6 +141,21 @@ export class Fixtures {
         emlObjectKey: `org/${organizationId.toString()}/eml/it/${messageId.toString()}.eml`,
         emlSha256: '0'.repeat(64),
       },
+    });
+    await this.prisma.emailMessageStatusHistory.createMany({
+      data: path.map(([toStatus, reasonCode, actorRole], version) => ({
+        receivedAt,
+        messageId,
+        organizationId,
+        version,
+        fromStatus: version === 0 ? null : path[version - 1]![0],
+        toStatus,
+        reasonCode,
+        actorRole,
+        actorService: 'mail-routing-it',
+        changedAt: receivedAt,
+        occurredAt: receivedAt,
+      })),
     });
     await this.prisma.emailRecipient.createMany({
       data: addresses.map((address, rcptSeq) => ({

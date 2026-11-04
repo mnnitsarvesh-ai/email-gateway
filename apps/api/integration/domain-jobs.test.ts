@@ -6,6 +6,12 @@
  * fixed tick time in the past (`TICK`, 2001-01-01) and calls `runOnce(TICK)`, so only domains
  * whose `next_check_at` was moved before that time are due — never another suite's or the
  * seeded demo domain. After each test the suite's domains are parked far in the future.
+ *
+ * Other schedulers: an api running elsewhere against the same MySQL and Redis (the `apps`
+ * Compose profile) ticks with the real clock, for which every domain made due at `TICK` is due
+ * too. The suite therefore holds the shared tick lock (`fenceSchedulers`) whenever its own
+ * scheduler is not ticking, so such a replica's ticks return null instead of claiming the
+ * suite's domains.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { domainKvKeys } from '../src/modules/domains/domains.constants';
@@ -61,7 +67,14 @@ async function dueDomain(
   return domain;
 }
 
-/** One scheduler tick at `now` on `app`, with the tick lock cleared before and after. */
+const FENCE_OWNER = 'domain-jobs-integration-fence';
+
+/** Holds the tick lock for the suite, keeping every other replica's ticks out (see above). */
+async function fenceSchedulers(): Promise<void> {
+  await ctx.kv.set(domainKvKeys.tickLock, FENCE_OWNER, 300);
+}
+
+/** One scheduler tick at `now` on `app`: the fence is lifted just for this tick. */
 async function tick(now: Date, app: IntegrationApp = ctx): Promise<DomainJobSummary> {
   await ctx.kv.del(domainKvKeys.tickLock);
   try {
@@ -69,7 +82,7 @@ async function tick(now: Date, app: IntegrationApp = ctx): Promise<DomainJobSumm
     if (!summary) throw new Error('the tick lock was not acquired');
     return summary;
   } finally {
-    await ctx.kv.del(domainKvKeys.tickLock);
+    await fenceSchedulers();
   }
 }
 
@@ -85,6 +98,7 @@ beforeAll(async () => {
     data: { limitValue: 1000n },
   });
   api = await adminApi(org);
+  await fenceSchedulers();
 });
 
 afterEach(async () => {
@@ -93,10 +107,11 @@ afterEach(async () => {
     where: { organizationId: { in: suiteOrgs }, nextCheckAt: { not: null } },
     data: { nextCheckAt: PARKED },
   });
-  await ctx.kv.del(domainKvKeys.tickLock);
+  await fenceSchedulers();
 });
 
 afterAll(async () => {
+  await ctx?.kv.del(domainKvKeys.tickLock);
   await fx?.cleanup();
   await ctx?.close();
   await dns?.close();
@@ -301,7 +316,7 @@ describe('DomainCheckScheduler.runOnce', () => {
     await ctx.kv.set(domainKvKeys.tickLock, 'another-replica', 30);
     expect(await ctx.get(DomainCheckScheduler).runOnce(TICK)).toBeNull();
     expect((await domainRow(ctx, domain.id)).lastCheckedAt).toBeNull();
-    await ctx.kv.del(domainKvKeys.tickLock);
+    await fenceSchedulers();
 
     // A per-domain check lock (a manual verification running) skips that domain; the claim
     // keeps it away until the claim expires.

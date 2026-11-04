@@ -51,6 +51,7 @@ flowchart LR
   subgraph ops[Platform operations]
     message_outbox[(message_outbox P)]
     audit_logs[(audit_logs P)]
+    api_idempotency_keys
   end
   organization_plans --> organizations
   organizations --> users
@@ -71,6 +72,7 @@ flowchart LR
   email_messages -.-> message_outbox
   email_policies -.-> email_messages
   organizations -.-> audit_logs
+  organizations -.-> api_idempotency_keys
 ```
 
 Solid arrows are foreign keys, dotted arrows are logical references. Cylinders (`P`) are partitioned tables.
@@ -340,7 +342,11 @@ erDiagram
     bigint id PK "registry id"
     datetime received_at PK "PARTITIONED month"
     bigint organization_id
-    enum status
+    enum status "lifecycle state, 15 values (ADR-0025)"
+    int version "+1 per applied transition"
+    smallint lifecycle_round "+1 on rescan and release (step 3.3)"
+    varchar status_reason "reason code of the last transition"
+    varchar mta_queue_id "utf8mb4_bin, case-sensitive"
     varchar eml_object_key "S3 key org/ORG/eml/YYYY/MM/DD/REF.eml, no content"
   }
   email_recipients {
@@ -373,7 +379,12 @@ erDiagram
     bigint id PK
     datetime received_at PK "PARTITIONED month"
     bigint message_id
-    int version
+    int version "UQ with message_id, received_at; 0 = NULL to received"
+    enum from_status
+    enum to_status
+    varchar actor_role "legacy before step 3.3"
+    char transition_key "UQ with message_id, received_at; hex SHA-256"
+    char state_event_id "mail.message.state_changed.v1 event id"
   }
   email_message_parses {
     bigint id PK
@@ -385,6 +396,8 @@ erDiagram
     varchar html_body_object_key "S3 key .../IDX.html"
   }
 ```
+
+Every write of the lifecycle columns of `email_messages` (`status`, `status_changed_at`, `version`, `lifecycle_round`, `status_reason`) and every `email_message_status_history` row goes through `@email-gateway/message-lifecycle` (step 3.3 L5, one door). A message's history starts with version 0 (`NULL → received`) and its highest version equals `email_messages.version`; the migration `20261104130000_message_lifecycle` backfilled both for older rows.
 
 `email_message_parses` (step 3.1) is the parse stage record written by email-worker: at most one row per message, in the message's partition. Headers and attachment rows of the same message are written in the transaction that finalizes it.
 
@@ -518,7 +531,8 @@ erDiagram
     smallint delivery_seq
     bigint reinjection_id "step 2.3"
     enum status "pending ... queued, expired, unknown"
-    varchar outbound_queue_id "indexed: log and DSN matching"
+    varchar outbound_queue_id "indexed: log and DSN matching; utf8mb4_bin"
+    varchar dsn_queue_id "utf8mb4_bin"
   }
   delivery_reinjections {
     bigint id PK
@@ -527,7 +541,7 @@ erDiagram
     bigint message_id
     char idempotency_key "UQ with message_id, received_at"
     enum status "pending, in_progress, queued, failed"
-    varchar queue_id
+    varchar queue_id "utf8mb4_bin"
   }
   delivery_status_events {
     bigint id PK
@@ -536,6 +550,7 @@ erDiagram
     char signal_key "UQ with delivery_id, received_at"
     enum source "planner, reinjection, postfix_log, bounce_notice, reconciler"
     boolean applied
+    varchar queue_id "utf8mb4_bin"
   }
   delivery_attempts {
     bigint id PK
@@ -649,6 +664,14 @@ erDiagram
     enum state "retrying, dead_lettered"
     datetime updated_at
   }
+  organizations ||..o{ api_idempotency_keys : "no FK"
+  api_idempotency_keys {
+    bigint id PK
+    bigint organization_id "UQ with idempotency_key"
+    varchar idempotency_key "utf8mb4_bin, case-sensitive"
+    char request_sha256
+    datetime expires_at "indexed; purged 1 day after"
+  }
   audit_logs {
     bigint id PK
     datetime created_at PK "PARTITIONED month"
@@ -681,4 +704,4 @@ erDiagram
   }
 ```
 
-`message_idempotency` stands alone: its key is the consumer name and the event id. So does `message_consumer_progress` (step 3.2 review round 1), with the same key. `stream_cursors` (step 2.3) holds the durable positions of the delivery-worker's outbox pollers and Postfix log tailers; it references nothing. `maintenance_watermarks` belongs to the partition-maintenance job (the registry purge watermark, see [retention.md](retention.md)).
+`message_idempotency` stands alone: its key is the consumer name and the event id. So does `message_consumer_progress` (step 3.2 review round 1), with the same key. `stream_cursors` (step 2.3) holds the durable positions of the delivery-worker's outbox pollers and Postfix log tailers; it references nothing. `maintenance_watermarks` belongs to the partition-maintenance job (the registry purge watermark, see [retention.md](retention.md)). `api_idempotency_keys` (step 3.3 L11) is the api's Idempotency-Key store: unpartitioned and without a foreign key (the row outlives nothing it references and is purged one day after it expires), one row per organization and key.

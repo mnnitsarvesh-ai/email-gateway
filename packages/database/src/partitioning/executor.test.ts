@@ -264,6 +264,7 @@ describe('runPartitionMaintenance', () => {
     expect(result.purged).toEqual([
       { table: 'message_idempotency', rows: 23, batches: 3, capped: false },
       { table: 'message_consumer_progress', rows: 0, batches: 1, capped: false },
+      { table: 'api_idempotency_keys', rows: 0, batches: 1, capped: false },
     ]);
     expect(executed.filter((s) => s.includes('message_idempotency'))).toHaveLength(3);
     expect(sleep).toHaveBeenCalledTimes(2);
@@ -276,6 +277,89 @@ describe('runPartitionMaintenance', () => {
       .mock.calls.find(([sql]) => sql.includes('message_consumer_progress'))!;
     expect(progressCall[0]).toContain('`updated_at` < ?');
     expect(progressCall[1]).toBe('2026-10-11 06:00:00');
+  });
+
+  it('purges expired api idempotency keys one grace day after expiry, in batches', async () => {
+    const { client, executed } = fakeClient({
+      partitions: [],
+      minMessageId: null,
+      deletes: { api_idempotency_keys: [10, 10, 10] },
+    });
+    const sleep = vi.fn(async () => {});
+    const result = await runPartitionMaintenance({
+      client,
+      logger: logger(),
+      mode: 'apply',
+      now: NOW,
+      specs: [],
+      purgeOptions: { batchSize: 10, maxBatches: 3, sleepMs: 1 },
+      sleep,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.purged).toContainEqual({
+      table: 'api_idempotency_keys',
+      rows: 30,
+      batches: 3,
+      capped: true,
+    });
+    const calls = vi
+      .mocked(client.$executeRawUnsafe)
+      .mock.calls.filter(([sql]) => sql.includes('api_idempotency_keys'));
+    expect(calls).toHaveLength(3);
+    expect(calls[0]![0]).toBe('DELETE FROM `api_idempotency_keys` WHERE `expires_at` < ? LIMIT 10');
+    // NOW minus RETENTION_PURGES.apiIdempotencyGraceDays (1 day).
+    expect(calls[0]![1]).toBe('2026-11-09 06:00:00');
+    expect(executed.filter((s) => s.includes('api_idempotency_keys'))).toHaveLength(3);
+  });
+
+  it('honours a configured api idempotency grace and only plans the purge in plan mode', async () => {
+    const { client, executed } = fakeClient({ partitions: [], minMessageId: null });
+    const log = logger();
+    const result = await runPartitionMaintenance({
+      client,
+      logger: log,
+      mode: 'plan',
+      now: NOW,
+      specs: [],
+      purgeOptions: { apiIdempotencyGraceDays: 3 },
+    });
+    expect(executed.some((s) => s.includes('api_idempotency_keys'))).toBe(false);
+    expect(result.statements).toContainEqual({
+      table: 'api_idempotency_keys',
+      kind: 'purge',
+      sql: 'DELETE FROM `api_idempotency_keys` WHERE `expires_at` < ? LIMIT 5000',
+      applied: false,
+    });
+    expect(log.info).toHaveBeenCalledWith(
+      expect.objectContaining({ table: 'api_idempotency_keys', values: ['2026-11-07 06:00:00'] }),
+      'would purge',
+    );
+  });
+
+  it('records a failed api idempotency purge and still runs the registry purge', async () => {
+    const { client } = fakeClient({ partitions: [], minMessageId: 50n, watermark: 50n });
+    const execute = vi.mocked(client.$executeRawUnsafe);
+    const original = execute.getMockImplementation()!;
+    execute.mockImplementation((sql: string, ...values: unknown[]) =>
+      sql.includes('api_idempotency_keys')
+        ? Promise.reject(new Error("Table 'api_idempotency_keys' doesn't exist"))
+        : original(sql, ...values),
+    );
+    const result = await runPartitionMaintenance({
+      client,
+      logger: logger(),
+      mode: 'apply',
+      now: NOW,
+      specs: [],
+    });
+    expect(result.ok).toBe(false);
+    expect(result.errors).toEqual([
+      {
+        table: 'api_idempotency_keys',
+        message: expect.stringContaining("doesn't exist") as unknown,
+      },
+    ]);
+    expect(result.purged.map((p) => p.table)).toContain('message_consumer_progress');
   });
 
   it('purges the registry in id ranges from MIN(id), keeping referenced rows, with a cap', async () => {
@@ -377,6 +461,7 @@ describe('runPartitionMaintenance', () => {
     expect(result.purged.map((p) => p.table)).toEqual([
       'message_idempotency',
       'message_consumer_progress',
+      'api_idempotency_keys',
     ]);
     expect(executed.some((s) => s.includes('message_identities'))).toBe(false);
   });

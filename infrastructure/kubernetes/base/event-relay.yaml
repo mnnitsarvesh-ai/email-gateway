@@ -69,6 +69,30 @@ spec:
             - { name: RECONCILE_BATCH_SIZE, value: '1000' }
             - { name: RECONCILE_QUEUES, value: 'email.received,email.delivery.pending' }
             - { name: RECONCILE_START_POSITION, value: oldest }
+            # Message lifecycle jobs (docs/plan/steps/08-message-lifecycle.md §5, L13, L14); defaults.
+            # Each replica may hold every expiry shard; the lifecycle check is a single active instance.
+            - { name: LIFECYCLE_EXPIRY_ENABLED, value: 'true' }
+            - { name: LIFECYCLE_EXPIRY_INTERVAL_MS, value: '60000' }
+            - { name: LIFECYCLE_EXPIRY_SHARDS, value: '4' }
+            - { name: LIFECYCLE_EXPIRY_MAX_HELD_SHARDS, value: '4' }
+            - { name: LIFECYCLE_EXPIRY_BATCH_SIZE, value: '200' }
+            - { name: LIFECYCLE_EXPIRY_LOOKBACK_DAYS, value: '186' }
+            - { name: LIFECYCLE_TX_TIMEOUT_MS, value: '5000' }
+            - { name: LIFECYCLE_DEADLINE_PERSISTED_HOURS, value: '72' }
+            - { name: LIFECYCLE_DEADLINE_SCANNING_HOURS, value: '24' }
+            - { name: LIFECYCLE_DEADLINE_SCANNED_HOURS, value: '24' }
+            - { name: LIFECYCLE_DEADLINE_SCAN_FAILED_HOURS, value: '72' }
+            - { name: LIFECYCLE_DEADLINE_POLICY_EVALUATED_HOURS, value: '24' }
+            - { name: LIFECYCLE_DEADLINE_APPROVED_HOURS, value: '24' }
+            - { name: LIFECYCLE_DEADLINE_QUARANTINED_HOURS, value: '2160' }
+            - { name: LIFECYCLE_DEADLINE_HELD_FOR_REVIEW_HOURS, value: '336' }
+            - { name: LIFECYCLE_DEADLINE_DELIVERY_PENDING_HOURS, value: '168' }
+            - { name: LIFECYCLE_DEADLINE_DELIVERY_RETRY_HOURS, value: '168' }
+            - { name: LIFECYCLE_CHECK_ENABLED, value: 'true' }
+            - { name: LIFECYCLE_CHECK_INTERVAL_MS, value: '60000' }
+            - { name: LIFECYCLE_CHECK_AFTER_SECONDS, value: '900' }
+            - { name: LIFECYCLE_CHECK_BATCH_SIZE, value: '500' }
+            - { name: LIFECYCLE_CHECK_LOOKBACK_HOURS, value: '192' }
             # Secrets are mounted as files by External Secrets and read via the <KEY>_FILE convention.
             - { name: DATABASE_URL_FILE, value: /var/run/secrets/gateway/database-url }
             # Role user eg-relay (step 3.2 Q10): publish event keys (org.<id>.…) to the six exchanges, read nothing;

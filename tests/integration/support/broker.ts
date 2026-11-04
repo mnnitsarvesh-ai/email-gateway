@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { resolve } from 'node:path';
+import { queueDefinition } from '@email-gateway/event-contracts';
 import { stack } from './env';
 
 const REPO_ROOT = resolve(__dirname, '../../..');
@@ -39,7 +40,7 @@ export interface TestVhost {
   cleanup(): Promise<void>;
 }
 
-/** A throwaway vhost `eg-it-<8 hex>` with the full topology v1 (exchanges, queues, policies). */
+/** A throwaway vhost `eg-it-<8 hex>` with the full topology (exchanges, queues, policies). */
 export async function createTestVhost(): Promise<TestVhost> {
   const vhost = `${TEST_VHOST_PREFIX}${randomBytes(4).toString('hex')}`;
   await runInit(['--vhost', vhost]);
@@ -178,10 +179,92 @@ export class ManagementApi {
     }));
   }
 
+  /** Deletes every message of a queue (`DELETE /api/queues/<vhost>/<name>/contents`). */
+  async purge(vhost: string, name: string): Promise<void> {
+    const path = `/queues/${encodeURIComponent(vhost)}/${encodeURIComponent(name)}/contents`;
+    const response = await fetch(`${this.base}/api${path}`, {
+      method: 'DELETE',
+      headers: { authorization: this.authorization },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok && response.status !== 404) {
+      throw new Error(`management DELETE ${path}: HTTP ${response.status}`);
+    }
+  }
+
+  /**
+   * Reads up to `count` messages of a queue WITHOUT removing them (`ackmode
+   * reject_requeue_true`: each is returned to the queue). Payloads are JSON strings.
+   */
+  async peek(
+    vhost: string,
+    name: string,
+    count: number,
+  ): Promise<{ routingKey: string; payload: string; properties: Record<string, unknown> }[]> {
+    const path = `/queues/${encodeURIComponent(vhost)}/${encodeURIComponent(name)}/get`;
+    const response = await fetch(`${this.base}/api${path}`, {
+      method: 'POST',
+      headers: { authorization: this.authorization, 'content-type': 'application/json' },
+      body: JSON.stringify({ count, ackmode: 'reject_requeue_true', encoding: 'auto' }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) throw new Error(`management POST ${path}: HTTP ${response.status}`);
+    const list = (await response.json()) as {
+      routing_key: string;
+      payload: string;
+      properties?: Record<string, unknown>;
+    }[];
+    return list.map((m) => ({
+      routingKey: m.routing_key,
+      payload: m.payload,
+      properties: m.properties ?? {},
+    }));
+  }
+
   async vhosts(): Promise<string[]> {
     const list = await this.get<{ name: string }[]>('/vhosts');
     return list.map((v) => v.name);
   }
+}
+
+/**
+ * The queues without a consumer until their stage exists (step 3.2 topology role `dormant`, plus
+ * the analytics feed): every stack run that sends mail fills them up to their `max-length`.
+ * Step 3.3 L16: suites that send mail purge them in `afterAll`. Work, delay and dead-letter
+ * queues are never in this list (a purge there would lose real events).
+ */
+export const DORMANT_QUEUES = [
+  'scan.auth',
+  'scan.spam',
+  'scan.url',
+  'scan.attachment',
+  'scan.dlp',
+  'scan.sandbox',
+  'email.policy.evaluate',
+  'email.quarantine',
+  'email.archive',
+  'email.analytics',
+] as const;
+
+for (const name of DORMANT_QUEUES) {
+  const { role } = queueDefinition(name);
+  if (role !== 'dormant') throw new Error(`${name} is a ${role} queue, never purge it`);
+}
+
+/**
+ * Purges the dormant queues of the topology vhost (L16). Safe while the stack runs: nothing
+ * consumes them. Returns the depth each queue had just before the purge.
+ */
+export async function purgeDormantQueues(
+  api: ManagementApi = new ManagementApi(),
+  vhost: string = stack.rabbitmqVhost(),
+): Promise<Record<string, number>> {
+  const depths: Record<string, number> = {};
+  for (const name of DORMANT_QUEUES) {
+    depths[name] = (await api.queue(vhost, name).catch(() => ({ messages: 0 }))).messages;
+    await api.purge(vhost, name);
+  }
+  return depths;
 }
 
 /** Polls `condition` (async) until true. */

@@ -32,6 +32,8 @@ describe('EVENT_REGISTRY', () => {
       'mail.message.received.v1': ['email.ingestion', 'message'],
       'mail.message.parsed.v1': ['email.ingestion', 'message'],
       'mail.message.parse_failed.v1': ['email.ingestion', 'message'],
+      'mail.message.state_changed.v1': ['email.events', 'message'],
+      'mail.message.rescan_requested.v1': ['email.security', 'message'],
       'mail.message.scanned.v1': ['email.security', 'message'],
       'mail.policy.decided.v1': ['email.policy', 'message'],
       'mail.delivery.approved.v1': ['email.delivery', 'message'],

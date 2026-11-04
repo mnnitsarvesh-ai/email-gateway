@@ -1,5 +1,7 @@
 import { expect } from 'vitest';
+import { purgeDormantQueues } from './broker';
 import { waitFor } from './compose';
+import { lifecycleProblems } from './lifecycle';
 import { clearSinkDomain, sinkFiles } from './mail-sink';
 import {
   exactlyOnceProblems,
@@ -58,6 +60,7 @@ export class MessagingScenario {
     if (this.domain) await clearSinkDomain(this.domain.name).catch(() => undefined);
     await this.broker?.close().catch(() => undefined);
     await this.fx.cleanup();
+    await purgeDormantQueues(); // step 3.3 L16
   }
 
   progress(): ScenarioProgress {
@@ -138,6 +141,9 @@ export class MessagingScenario {
     await new Promise((r) => setTimeout(r, 5_000));
     const settled = await pipelineCounts(this.fx.prisma, [this.org]);
     expect(exactlyOnceProblems(settled, n)).toEqual([]);
+    // Step 3.3: every message delivered/delivery_complete with exactly one history row per
+    // transition (received, persisted, approved, delivery_pending, delivered).
+    expect(await lifecycleProblems(this.fx.prisma, [this.org], n)).toEqual([]);
     expect(await this.broker.depth(QUEUES.deadLetter)).toBe(deadLettersBefore);
     // Delivered exactly once to the destination mailbox.
     expect(await sinkFiles(this.recipient)).toHaveLength(n);

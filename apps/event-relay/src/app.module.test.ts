@@ -78,6 +78,12 @@ describe('AppModule wiring', () => {
         'outbox_relay_lag_seconds',
         'outbox_poison_rows',
         'reconcile_redriven_total',
+        'lifecycle_transitions_total',
+        'lifecycle_expired_total',
+        'lifecycle_expiry_shards_held',
+        'lifecycle_expiry_shards',
+        'lifecycle_recovered_total',
+        'lifecycle_stuck_messages',
         'amqp_connection_up',
         'amqp_publish_total',
       ]) {
@@ -89,11 +95,17 @@ describe('AppModule wiring', () => {
   });
 
   it('starts only the enabled roles', async () => {
+    const noLifecycle = { LIFECYCLE_EXPIRY_ENABLED: 'false', LIFECYCLE_CHECK_ENABLED: 'false' };
     for (const [env, roles] of [
-      [{}, ['relay', 'reconciler']],
-      [{ RELAY_ENABLED: 'false' }, ['reconciler']],
-      [{ RECONCILE_ENABLED: 'false' }, ['relay']],
-      [{ RELAY_ENABLED: 'false', RECONCILE_ENABLED: 'false' }, []],
+      [{}, ['relay', 'reconciler', 'expiry', 'lifecycleCheck']],
+      [{ ...noLifecycle, RELAY_ENABLED: 'false' }, ['reconciler']],
+      [{ ...noLifecycle, RECONCILE_ENABLED: 'false' }, ['relay']],
+      [{ LIFECYCLE_CHECK_ENABLED: 'false' }, ['relay', 'reconciler', 'expiry']],
+      [
+        { ...noLifecycle, LIFECYCLE_CHECK_ENABLED: 'true' },
+        ['relay', 'reconciler', 'lifecycleCheck'],
+      ],
+      [{ ...noLifecycle, RELAY_ENABLED: 'false', RECONCILE_ENABLED: 'false' }, []],
     ] as const) {
       const { moduleRef } = await compile(env);
       const app = moduleRef.createNestApplication();

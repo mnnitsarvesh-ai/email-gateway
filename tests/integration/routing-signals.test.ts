@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { DELIVERED_PATH, expectConsistentHistory, pathOf } from './support/lifecycle';
+import { purgeDormantQueues } from './support/broker';
 import { waitFor } from './support/compose';
 import {
   deliveriesOf,
@@ -19,12 +21,14 @@ import { assertStackReady } from './support/smtp-stack';
 
 /**
  * Duplicate and out-of-order status signals (docs/plan/steps/05-routing.md §9 item 7, R9.1):
- * with the worker STOPPED, the status tailer's cursor (`stream_cursors`) is deleted, so the
- * restarted worker re-reads the whole delivery log from offset 0 (every line of this run arrives
- * a second time, long after the deliveries became terminal); then a captured bounce notice of
- * the same failure is redelivered over LMTP 10052 with the step 2.2 raw-LMTP client. Neither may
- * produce a transition, an `email_events` row, an outbox row, an attempt, a bounce event or a
- * status-history row; the audit trail stays deduplicated.
+ * with the worker STOPPED, the status tailer's cursor (`stream_cursors`) is rewound to the byte
+ * offset the delivery log had before this test's mail was sent (file identity kept), so the
+ * restarted worker re-reads every line of this run a second time, long after the deliveries
+ * became terminal; then a captured bounce notice of the same failure is redelivered over LMTP
+ * 10052 with the step 2.2 raw-LMTP client. Neither may produce a transition, an `email_events`
+ * row, an outbox row, an attempt, a bounce event or a status-history row; the audit trail stays
+ * deduplicated. (Step 3.3 L16: rewinding instead of deleting the cursor keeps the re-read
+ * independent of the accumulated maillog size.)
  */
 const gate = await routingStackGate();
 const fx = new SmtpFixtures();
@@ -50,6 +54,7 @@ afterAll(async () => {
   await clearSinkDomain(out.name);
   await clearSinkDomain(extDomain());
   await fx.cleanup();
+  await purgeDormantQueues();
 }, 180_000);
 
 describe.skipIf(gate.skip)(
@@ -60,6 +65,8 @@ describe.skipIf(gate.skip)(
       const sender = `alice@${out.name}`;
       const ok = `ok@${extDomain()}`;
       const bad = `hard-bounce@${extDomain()}`;
+      // Every line of this test's mail is written after this offset (the re-read start point).
+      const rewindTo = await maillogOffset();
       const sent = await submit({
         credentials: sasl,
         from: sender,
@@ -77,8 +84,13 @@ describe.skipIf(gate.skip)(
           where: { deliveryId: bounced.id, source: 'bounce_notice' },
         });
         const msg = await fx.prisma.emailMessage.findFirstOrThrow({ where: { id: message.id } });
-        return notices > 0 && msg.status === 'partially_delivered';
+        return notices > 0 && msg.status === 'delivered' && msg.statusReason === 'delivery_partial';
       });
+      // Step 3.3 (L9, E23): one delivered, one bounced → delivered/delivery_partial.
+      expect(await pathOf(fx.prisma, message)).toEqual(
+        DELIVERED_PATH('delivered', 'delivery_partial'),
+      );
+      await expectConsistentHistory(fx.prisma, message);
       const dsnFile = await waitFor(
         'the DSN at the sender domain',
         async () => (await sinkFiles(sender))[0],
@@ -96,22 +108,33 @@ describe.skipIf(gate.skip)(
       });
       const logSize = await maillogOffset();
 
-      // 1. Re-read the whole log: worker stopped, cursor deleted, worker started.
+      // 1. Re-read this run's lines: worker stopped, cursor rewound (same file identity), worker
+      //    started; it must pass the check-point offset again.
       await stopWorker();
       try {
-        const deleted = await fx.prisma.streamCursor.deleteMany({ where: { name: cursorName() } });
-        expect(deleted.count).toBe(1);
+        const cursor = await fx.prisma.streamCursor.findUniqueOrThrow({
+          where: { name: cursorName() },
+        });
+        expect(cursor.fileId).not.toBeNull();
+        const rewound = await fx.prisma.streamCursor.updateMany({
+          where: { name: cursorName(), fileId: cursor.fileId },
+          data: { fileOffset: BigInt(rewindTo) },
+        });
+        expect(rewound.count).toBe(1);
       } finally {
         await startWorker();
       }
+      const reReadStarted = Date.now();
       await waitFor(
-        'the status tailer to re-read the whole delivery log',
+        "the status tailer to re-read this run's part of the delivery log",
         async () => {
           const cursor = await fx.prisma.streamCursor.findUnique({ where: { name: cursorName() } });
           return cursor !== null && Number(cursor.fileOffset ?? 0) >= logSize;
         },
-        { timeoutMs: 180_000, intervalMs: 1_000 },
+        { timeoutMs: 60_000, intervalMs: 500 },
       );
+      // Bounded by this run's lines, not by the size of the accumulated log.
+      expect(Date.now() - reReadStarted).toBeLessThan(30_000);
       // The restarted worker saw this run's lines again and found them all known.
       expect(
         await metricValue('delivery-worker', 'delivery_status_signals_total', {
@@ -165,10 +188,14 @@ describe.skipIf(gate.skip)(
       const messageAfter = await fx.prisma.emailMessage.findFirstOrThrow({
         where: { id: message.id },
       });
-      expect([messageAfter.status, messageAfter.version]).toEqual([
+      expect([messageAfter.status, messageAfter.statusReason, messageAfter.version]).toEqual([
         messageBefore.status,
+        messageBefore.statusReason,
         messageBefore.version,
       ]);
+      expect(await pathOf(fx.prisma, message)).toEqual(
+        DELIVERED_PATH('delivered', 'delivery_partial'),
+      );
       // The audit trail has one row per distinct signal key (deduplicated by the unique key).
       const audit = await statusEventsOf(fx.prisma, org, message.id);
       const keys = audit.map((e) => `${e.deliveryId.toString()}|${e.signalKey}`);

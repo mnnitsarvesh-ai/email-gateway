@@ -2,6 +2,7 @@ import {
   PARTITION_REGISTRY,
   PrismaClient,
   type PartitionSpec,
+  type SqlClient,
   createMaintenanceClientUrl,
   parsePartitionName,
   periodStart,
@@ -15,7 +16,9 @@ import { stack } from './support/env';
  * Partition maintenance (D3) against the dev schema, as the migrator account: after an apply,
  * every registered table has partitions ahead of today plus pmax, and a second apply is a
  * no-op. Retention purges are left to the CLI and unit tests so this suite never deletes dev
- * data. A scratch table checks exact names, splits and drops at fixed dates.
+ * data, except the api_idempotency_keys purge, which runs at a date in the year 2000 against
+ * rows of a test-only organization id (the registry purge is answered "no messages"). A scratch
+ * table checks exact names, splits and drops at fixed dates.
  */
 // One connection, as in the CLI: the advisory lock and lock_wait_timeout are per-connection.
 const prisma = new PrismaClient({
@@ -188,6 +191,64 @@ describe('partition maintenance', () => {
       purge: false,
     });
     expect(after.skippedLockHeld).toBe(false);
+  });
+
+  it('purges api idempotency keys one grace day after expiry (step 3.3 L11)', async () => {
+    // A test-only organization id: no foreign key on the table, so no organization row is needed.
+    const org = 9_000_000_000_000_000_001n;
+    const insert = (key: string, expiresAt: string) =>
+      prisma.$executeRawUnsafe(
+        `INSERT INTO \`api_idempotency_keys\`
+           (organization_id, idempotency_key, operation, principal, request_sha256, resource_id,
+            status_code, response, expires_at)
+         VALUES (?, ?, 'message.rescan', 'user:it', REPEAT('a', 64), 'it', 202, JSON_OBJECT(), ?)`,
+        org,
+        key,
+        expiresAt,
+      );
+    await prisma.$executeRawUnsafe(
+      'DELETE FROM `api_idempotency_keys` WHERE organization_id = ?',
+      org,
+    );
+    try {
+      await insert('it-expired', '2000-01-01 00:00:00.000');
+      await insert('it-in-grace', '2000-01-09 12:00:00.000');
+      // Case-sensitive key (utf8mb4_bin): a key differing only in case is a different row.
+      await insert('IT-EXPIRED', '2000-01-01 00:00:00.000');
+      // Only the purge under test may delete anything: the registry purge sees "no messages".
+      const client: SqlClient = {
+        $queryRawUnsafe: <T>(sql: string, ...values: unknown[]) =>
+          sql.includes('MIN(`id`) AS minId FROM `email_messages`')
+            ? Promise.resolve([{ minId: null }] as T)
+            : prisma.$queryRawUnsafe<T>(sql, ...values),
+        $executeRawUnsafe: (sql: string, ...values: unknown[]) =>
+          prisma.$executeRawUnsafe(sql, ...values),
+      };
+      const result = await runPartitionMaintenance({
+        client,
+        logger: silent,
+        mode: 'apply',
+        now: new Date('2000-01-10T00:00:00Z'),
+        specs: [],
+      });
+      expect(result.errors).toEqual([]);
+      expect(result.purged).toContainEqual({
+        table: 'api_idempotency_keys',
+        rows: 2,
+        batches: 1,
+        capped: false,
+      });
+      const left = await prisma.$queryRawUnsafe<{ k: string }[]>(
+        'SELECT idempotency_key AS k FROM `api_idempotency_keys` WHERE organization_id = ?',
+        org,
+      );
+      expect(left.map((r) => r.k)).toEqual(['it-in-grace']);
+    } finally {
+      await prisma.$executeRawUnsafe(
+        'DELETE FROM `api_idempotency_keys` WHERE organization_id = ?',
+        org,
+      );
+    }
   });
 
   it('gives up partition DDL after lock_wait_timeout instead of stalling the table', async () => {

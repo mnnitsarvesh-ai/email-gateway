@@ -11,7 +11,6 @@ import {
   type DeliverySignal,
   loadActiveSuppressions,
   loadDomainViews,
-  markMessageDeliveryQueued,
   planRecipientRoutes,
   planSignalKey,
   recipientDomain,
@@ -19,6 +18,7 @@ import {
   reinjectionIdempotencyKey,
   type RecipientDecision,
 } from '@email-gateway/mail-routing';
+import { lockLifecycle, transitionMessage } from '@email-gateway/message-lifecycle';
 import type { DeliveryMetrics } from '../metrics/delivery-metrics';
 import { retryDelayMs } from '../shared/backoff';
 
@@ -75,7 +75,7 @@ export interface PlannerConfig {
 
 export interface PlanResult {
   status: 'planned' | 'duplicate' | 'rejected';
-  reason?: 'eml_key_prefix' | 'message_not_found' | 'no_known_recipients';
+  reason?: 'eml_key_prefix' | 'message_not_found' | 'no_known_recipients' | 'lifecycle_state';
   reinjections: number;
   deliveries: number;
   refused: number;
@@ -121,6 +121,15 @@ const empty = (status: PlanResult['status'], reason?: PlanResult['reason']): Pla
  * `(message_id, idempotency_key)` per reinjection; a second approval with the same
  * `deliverySeq` finds the existing deliveries (after taking the message lock, which serializes
  * concurrent planners of one message) and plans nothing for those recipients.
+ *
+ * Lifecycle (step 3.3 L8.4, edge E20), under the message lock and with the approval's round
+ * (`lifecycleRound`, absent = 0): an `approved` message of that round moves to
+ * `delivery_pending` (key `evt:<approvalEventId>:delivery_pending`) and is planned; a
+ * `delivery_pending` / `delivery_retry` message of that round (a later chunk, a duplicate) is
+ * planned without a transition; anything else (another state, an older or newer round) is
+ * acknowledged as `rejected/lifecycle_state` and never planned. The planner signals then derive
+ * the message state through the recorder (an all-refused plan ends `rejected/delivery_failed`).
+ * Every rejection counts `delivery_approvals_rejected_total{reason}`.
  */
 export class DeliveryPlanner {
   private readonly logger: Logger;
@@ -132,6 +141,17 @@ export class DeliveryPlanner {
   }
 
   async plan(
+    event: EventEnvelope<DeliveryApprovedV1>,
+    tx: Prisma.TransactionClient,
+  ): Promise<PlanResult> {
+    const result = await this.planApproval(event, tx);
+    if (result.status === 'rejected' && result.reason) {
+      this.deps.metrics.approvalsRejected.inc({ reason: result.reason });
+    }
+    return result;
+  }
+
+  private async planApproval(
     event: EventEnvelope<DeliveryApprovedV1>,
     tx: Prisma.TransactionClient,
   ): Promise<PlanResult> {
@@ -203,14 +223,50 @@ export class DeliveryPlanner {
 
     const now = this.now();
     // Lock the message first (the recorder's lock order); serializes planners of one message.
-    await markMessageDeliveryQueued(
-      tx,
-      { id: messageId, receivedAt },
-      {
-        eventId: event.eventId,
-        changedAt: now,
-      },
-    );
+    const ref = { id: messageId, receivedAt, organizationId };
+    const snapshot = await lockLifecycle(tx, ref);
+    const round = payload.lifecycleRound ?? 0;
+    const lifecycleIds = {
+      ...ids,
+      state: snapshot?.state ?? null,
+      round: snapshot?.round ?? null,
+      approvalRound: round,
+    };
+    if (snapshot?.state === 'approved' && snapshot.round === round) {
+      const outcome = await transitionMessage(
+        tx,
+        {
+          message: ref,
+          to: 'delivery_pending',
+          reason: 'delivery_planned',
+          actor: { role: 'delivery', service: SOURCE_SERVICE, type: 'system' },
+          transitionKey: `evt:${event.eventId}:delivery_pending`,
+          causationEventId: event.eventId,
+          correlationId: event.correlationId,
+          occurredAt: now,
+          expectedRound: round,
+          expectedFrom: ['approved'],
+        },
+        { metrics: this.deps.metrics.lifecycle, logger: this.logger, now: () => now },
+      );
+      // Under the lock just taken the only outcome is `applied`; anything else is not planned.
+      if (outcome.result !== 'applied') {
+        this.logger.warn(
+          { ...lifecycleIds, result: outcome.result },
+          'approval not planned: the lifecycle refused delivery_pending',
+        );
+        return empty('rejected', 'lifecycle_state');
+      }
+    } else if (!(
+      (snapshot?.state === 'delivery_pending' || snapshot?.state === 'delivery_retry') &&
+      snapshot.round === round
+    )) {
+      this.logger.info(
+        lifecycleIds,
+        'approval not planned: the message is not approved (or not delivering) in this round',
+      );
+      return empty('rejected', 'lifecycle_state');
+    }
 
     const existing = await tx.emailDelivery.findMany({
       where: { recipientId: { in: recipients.map((r) => r.id) }, receivedAt, deliverySeq },
@@ -307,8 +363,8 @@ export class DeliveryPlanner {
       for (const recipientId of group.recipientIds) reinjectionOf.set(recipientId, reinjectionId);
     }
 
-    // Every delivery row first, then the signals: a refusal's terminal signal computes the
-    // message aggregate over all deliveries of this delivery_seq.
+    // Every delivery row first, then the signals: each applied signal derives the message state
+    // from all recipients (step 3.3 L9), so every delivery of this delivery_seq must exist.
     await tx.emailDelivery.createMany({
       data: plan.decisions.map((decision) => ({
         receivedAt,
@@ -344,6 +400,7 @@ export class DeliveryPlanner {
         timeoutMs: this.deps.recorderTimeoutMs,
         eventId: event.eventId,
         logger: this.logger,
+        lifecycleMetrics: this.deps.metrics.lifecycle,
       });
       this.deps.metrics.signal('planner', result.result, {
         direction: decision.direction,

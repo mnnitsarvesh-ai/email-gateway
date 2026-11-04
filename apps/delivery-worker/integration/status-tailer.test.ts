@@ -178,7 +178,8 @@ describe('Postfix delivery-log tailer (R9) over a log file', () => {
     const msg = await fx.prisma.emailMessage.findUniqueOrThrow({
       where: { id_receivedAt: { id: message.messageId, receivedAt: message.receivedAt } },
     });
-    expect(msg.status).toBe('partially_delivered');
+    // The derived lifecycle state (step 3.3 L9): settled, one recipient delivered.
+    expect(msg).toMatchObject({ status: 'delivered', statusReason: 'delivery_partial' });
     await reader.stop();
 
     // Reset the cursor and re-read the current file: no transition, no email_events/outbox row.

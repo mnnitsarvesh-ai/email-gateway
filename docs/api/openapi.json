@@ -16486,16 +16486,26 @@
                           "type": "string",
                           "enum": [
                             "received",
+                            "persisted",
                             "scanning",
                             "scanned",
+                            "scan_failed",
                             "policy_evaluated",
+                            "approved",
                             "quarantined",
-                            "delivery_queued",
+                            "held_for_review",
+                            "rejected",
+                            "delivery_pending",
+                            "delivery_retry",
                             "delivered",
-                            "partially_delivered",
-                            "discarded",
-                            "failed"
+                            "archived",
+                            "expired"
                           ]
+                        },
+                        "statusReason": {
+                          "nullable": true,
+                          "description": "Reason code of the last lifecycle transition, e.g. delivery_partial (some recipients failed) or delivery_failed (all failed); see GET /messages/{messageId}/lifecycle",
+                          "type": "string"
                         },
                         "receivedAt": {
                           "type": "string",
@@ -16503,7 +16513,7 @@
                           "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
                         }
                       },
-                      "required": ["id", "direction", "status", "receivedAt"],
+                      "required": ["id", "direction", "status", "statusReason", "receivedAt"],
                       "additionalProperties": false
                     },
                     "deliveries": {
@@ -17170,6 +17180,1045 @@
         "security": [{ "api-key": [] }, { "access-token": [] }],
         "summary": "List deliveries",
         "tags": ["deliveries"]
+      }
+    },
+    "/api/v1/messages/{messageId}/lifecycle": {
+      "get": {
+        "description": "The lifecycle state (one of the fifteen states of ADR-0025), its reason code, `version` (optimistic concurrency token for rescan and release), `lifecycleRound`, the MIME parse stage, recipient counts by status, the highest delivery sequence and the operations the state allows (`actions`, independent of the caller’s permissions). From the read replica: right after a rescan or release the previous state may still show.",
+        "operationId": "MessageLifecycleController_lifecycle_v1",
+        "parameters": [
+          {
+            "name": "messageId",
+            "required": true,
+            "in": "path",
+            "description": "Message public id",
+            "schema": { "format": "uuid", "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "messageId": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "receivedAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "direction": { "type": "string", "enum": ["inbound", "outbound", "internal"] },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "received",
+                        "persisted",
+                        "scanning",
+                        "scanned",
+                        "scan_failed",
+                        "policy_evaluated",
+                        "approved",
+                        "quarantined",
+                        "held_for_review",
+                        "rejected",
+                        "delivery_pending",
+                        "delivery_retry",
+                        "delivered",
+                        "archived",
+                        "expired"
+                      ]
+                    },
+                    "statusReason": {
+                      "nullable": true,
+                      "description": "Reason code of the last transition, e.g. delivery_partial",
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991,
+                      "description": "+1 per applied transition"
+                    },
+                    "lifecycleRound": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991,
+                      "description": "+1 per rescan or release"
+                    },
+                    "statusChangedAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "parse": {
+                      "nullable": true,
+                      "description": "MIME parse stage (step 3.1); null before the parse started",
+                      "type": "object",
+                      "properties": {
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "parsing",
+                            "parsed",
+                            "parsed_with_defects",
+                            "parse_limit_exceeded",
+                            "parse_failed"
+                          ]
+                        },
+                        "completedAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                        }
+                      },
+                      "required": ["status", "completedAt"],
+                      "additionalProperties": false
+                    },
+                    "recipients": {
+                      "type": "object",
+                      "properties": {
+                        "total": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "byStatus": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "description": "Non-zero counts"
+                        }
+                      },
+                      "required": ["total", "byStatus"],
+                      "additionalProperties": false
+                    },
+                    "deliverySeq": {
+                      "nullable": true,
+                      "description": "Highest delivery sequence planned (0 = initial); null before planning",
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "actions": {
+                      "type": "object",
+                      "properties": {
+                        "rescan": { "type": "boolean" },
+                        "release": { "type": "boolean" }
+                      },
+                      "required": ["rescan", "release"],
+                      "additionalProperties": false,
+                      "description": "Operations the current state allows (not the caller’s permissions)"
+                    }
+                  },
+                  "required": [
+                    "messageId",
+                    "receivedAt",
+                    "direction",
+                    "state",
+                    "statusReason",
+                    "version",
+                    "lifecycleRound",
+                    "statusChangedAt",
+                    "parse",
+                    "recipients",
+                    "deliverySeq",
+                    "actions"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown message, or a message of another organization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [404] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["message_not_found"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "Get the lifecycle state of a message",
+        "tags": ["messages"]
+      }
+    },
+    "/api/v1/messages/{messageId}/lifecycle/history": {
+      "get": {
+        "description": "Every applied transition, oldest first (by version), cursor-paginated: from and to state, reason code, round, actor (`role`, `type`, `service`, public `id` of an operator) and the causing event. Rows written before step 3.3 show `actor.role = legacy` and are shown as recorded. From the read replica.",
+        "operationId": "MessageLifecycleController_history_v1",
+        "parameters": [
+          {
+            "name": "messageId",
+            "required": true,
+            "in": "path",
+            "description": "Message public id",
+            "schema": { "format": "uuid", "type": "string" }
+          },
+          {
+            "name": "limit",
+            "required": false,
+            "in": "query",
+            "schema": { "default": 25, "type": "integer", "minimum": 1, "maximum": 100 }
+          },
+          {
+            "name": "cursor",
+            "required": false,
+            "in": "query",
+            "schema": { "type": "string", "minLength": 1, "maxLength": 64 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "version": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991,
+                            "description": "Message version after the transition"
+                          },
+                          "fromState": {
+                            "nullable": true,
+                            "type": "string",
+                            "enum": [
+                              "received",
+                              "persisted",
+                              "scanning",
+                              "scanned",
+                              "scan_failed",
+                              "policy_evaluated",
+                              "approved",
+                              "quarantined",
+                              "held_for_review",
+                              "rejected",
+                              "delivery_pending",
+                              "delivery_retry",
+                              "delivered",
+                              "archived",
+                              "expired"
+                            ]
+                          },
+                          "toState": {
+                            "type": "string",
+                            "enum": [
+                              "received",
+                              "persisted",
+                              "scanning",
+                              "scanned",
+                              "scan_failed",
+                              "policy_evaluated",
+                              "approved",
+                              "quarantined",
+                              "held_for_review",
+                              "rejected",
+                              "delivery_pending",
+                              "delivery_retry",
+                              "delivered",
+                              "archived",
+                              "expired"
+                            ]
+                          },
+                          "reasonCode": { "nullable": true, "type": "string" },
+                          "lifecycleRound": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991,
+                            "description": "+1 per rescan or release"
+                          },
+                          "actor": {
+                            "type": "object",
+                            "properties": {
+                              "role": {
+                                "type": "string",
+                                "enum": [
+                                  "ingestion",
+                                  "scanner",
+                                  "policy",
+                                  "dev_passthrough",
+                                  "delivery",
+                                  "operator",
+                                  "quarantine",
+                                  "archive",
+                                  "sweeper",
+                                  "recovery",
+                                  "legacy"
+                                ],
+                                "description": "`legacy` for rows written before step 3.3"
+                              },
+                              "type": { "type": "string", "enum": ["system", "user", "api_key"] },
+                              "service": { "type": "string" },
+                              "id": {
+                                "nullable": true,
+                                "description": "Public id of the user or API key; null for systems",
+                                "type": "string"
+                              }
+                            },
+                            "required": ["role", "type", "service", "id"],
+                            "additionalProperties": false
+                          },
+                          "causationEventId": { "nullable": true, "type": "string" },
+                          "correlationId": { "nullable": true, "type": "string" },
+                          "occurredAt": {
+                            "nullable": true,
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "changedAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          }
+                        },
+                        "required": [
+                          "version",
+                          "fromState",
+                          "toState",
+                          "reasonCode",
+                          "lifecycleRound",
+                          "actor",
+                          "causationEventId",
+                          "correlationId",
+                          "occurredAt",
+                          "changedAt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "description": "Oldest first (by version)"
+                    },
+                    "nextCursor": { "nullable": true, "type": "string" }
+                  },
+                  "required": ["data", "nextCursor"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown message, or a message of another organization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [404] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["message_not_found"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "Get the lifecycle history of a message",
+        "tags": ["messages"]
+      }
+    },
+    "/api/v1/messages/{messageId}/rescan": {
+      "post": {
+        "description": "Moves the message to `scanning` with a new lifecycle round (allowed from `scanning`, `scanned`, `scan_failed`, `policy_evaluated`, `quarantined`, `held_for_review`, `expired`) and publishes `mail.message.rescan_requested.v1` to the scan stages. Before Phase 4: scan stages are not deployed before Phase 4; the message stays in scanning until they are or until its expiry deadline. Audited as `message.rescan_requested`. Requires the Idempotency-Key header.",
+        "operationId": "MessageLifecycleController_rescan_v1",
+        "parameters": [
+          {
+            "name": "messageId",
+            "required": true,
+            "in": "path",
+            "description": "Message public id",
+            "schema": { "format": "uuid", "type": "string" }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]+$"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4294967295,
+                    "description": "The message `version` the operator saw (optimistic concurrency, 409 otherwise)"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 10,
+                    "maxLength": 500,
+                    "description": "Why the operator acts (audited; never stored in the lifecycle history or events)"
+                  }
+                },
+                "required": ["expectedVersion", "reason"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Rescan requested (or the stored response replayed)",
+            "headers": {
+              "Idempotency-Replayed": {
+                "description": "`true` when this is the stored response of an earlier identical request",
+                "schema": { "type": "string", "enum": ["true"] }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "messageId": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "state": { "type": "string", "enum": ["scanning"] },
+                    "version": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991,
+                      "description": "+1 per applied transition"
+                    },
+                    "lifecycleRound": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991,
+                      "description": "+1 per rescan or release"
+                    },
+                    "rescanEventId": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                      "description": "Event id of mail.message.rescan_requested.v1"
+                    },
+                    "note": {
+                      "type": "string",
+                      "description": "Present while no scan stage is deployed (before Phase 4)"
+                    }
+                  },
+                  "required": [
+                    "messageId",
+                    "state",
+                    "version",
+                    "lifecycleRound",
+                    "rescanEventId",
+                    "note"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`messageId` is not a UUID, the body is invalid (`message` lists the issues), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [400] },
+                    "error": { "type": "string" },
+                    "code": {
+                      "type": "string",
+                      "enum": ["idempotency_key_required", "idempotency_key_invalid"],
+                      "description": "Present for Idempotency-Key errors only"
+                    },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown message, or a message of another organization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [404] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["message_not_found"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`message_version_conflict`: `expectedVersion` is not the current version; `message_state_conflict`: the current state does not allow the operation. `currentState` and `currentVersion` describe the message now. Not stored under the Idempotency-Key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [409] },
+                    "error": { "type": "string" },
+                    "code": {
+                      "type": "string",
+                      "enum": ["message_version_conflict", "message_state_conflict"]
+                    },
+                    "message": { "type": "string" },
+                    "currentState": {
+                      "type": "string",
+                      "enum": [
+                        "received",
+                        "persisted",
+                        "scanning",
+                        "scanned",
+                        "scan_failed",
+                        "policy_evaluated",
+                        "approved",
+                        "quarantined",
+                        "held_for_review",
+                        "rejected",
+                        "delivery_pending",
+                        "delivery_retry",
+                        "delivered",
+                        "archived",
+                        "expired"
+                      ]
+                    },
+                    "currentVersion": { "type": "integer", "minimum": 0 },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The Idempotency-Key was already used for a different request (body, path, operation or caller)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [422] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["idempotency_key_reused"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "Request a rescan of a message",
+        "tags": ["messages"]
+      }
+    },
+    "/api/v1/messages/{messageId}/release": {
+      "post": {
+        "description": "Moves a `quarantined` or `held_for_review` message to `approved` with a new lifecycle round and approves its `pending` and `quarantined` recipients for delivery (released `quarantined` recipients become `pending`) (`mail.delivery.approved.v1`, `source: quarantine_release`, `deliverySeq` = highest + 1, at most 1000 recipients per approval); the delivery-worker then delivers it. Messages with per-recipient quarantine entries must go through the quarantine workflow. Audited as `message.quarantine_released`. Requires the Idempotency-Key header.",
+        "operationId": "MessageLifecycleController_release_v1",
+        "parameters": [
+          {
+            "name": "messageId",
+            "required": true,
+            "in": "path",
+            "description": "Message public id",
+            "schema": { "format": "uuid", "type": "string" }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]+$"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4294967295,
+                    "description": "The message `version` the operator saw (optimistic concurrency, 409 otherwise)"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 10,
+                    "maxLength": 500,
+                    "description": "Why the operator acts (audited; never stored in the lifecycle history or events)"
+                  }
+                },
+                "required": ["expectedVersion", "reason"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Released (or the stored response replayed)",
+            "headers": {
+              "Idempotency-Replayed": {
+                "description": "`true` when this is the stored response of an earlier identical request",
+                "schema": { "type": "string", "enum": ["true"] }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "messageId": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "state": { "type": "string", "enum": ["approved"] },
+                    "version": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991,
+                      "description": "+1 per applied transition"
+                    },
+                    "lifecycleRound": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991,
+                      "description": "+1 per rescan or release"
+                    },
+                    "deliverySeq": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991,
+                      "description": "Delivery sequence of the release (1, 2, …)"
+                    },
+                    "approvalEventIds": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "format": "uuid",
+                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                      },
+                      "description": "Event ids of mail.delivery.approved.v1 (one per 1000 recipients)"
+                    },
+                    "recipientCount": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991,
+                      "description": "Recipients approved for delivery"
+                    }
+                  },
+                  "required": [
+                    "messageId",
+                    "state",
+                    "version",
+                    "lifecycleRound",
+                    "deliverySeq",
+                    "approvalEventIds",
+                    "recipientCount"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`messageId` is not a UUID, the body is invalid (`message` lists the issues), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [400] },
+                    "error": { "type": "string" },
+                    "code": {
+                      "type": "string",
+                      "enum": ["idempotency_key_required", "idempotency_key_invalid"],
+                      "description": "Present for Idempotency-Key errors only"
+                    },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown message, or a message of another organization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [404] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["message_not_found"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`message_version_conflict`: `expectedVersion` is not the current version; `message_state_conflict`: the current state does not allow the operation; `quarantine_workflow_required`: the message has per-recipient quarantine entries (released through the quarantine workflow, 5.3); `no_releasable_recipients`: no `pending` or `quarantined` recipient. `currentState` and `currentVersion` describe the message now. Not stored under the Idempotency-Key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [409] },
+                    "error": { "type": "string" },
+                    "code": {
+                      "type": "string",
+                      "enum": [
+                        "message_version_conflict",
+                        "message_state_conflict",
+                        "quarantine_workflow_required",
+                        "no_releasable_recipients"
+                      ]
+                    },
+                    "message": { "type": "string" },
+                    "currentState": {
+                      "type": "string",
+                      "enum": [
+                        "received",
+                        "persisted",
+                        "scanning",
+                        "scanned",
+                        "scan_failed",
+                        "policy_evaluated",
+                        "approved",
+                        "quarantined",
+                        "held_for_review",
+                        "rejected",
+                        "delivery_pending",
+                        "delivery_retry",
+                        "delivered",
+                        "archived",
+                        "expired"
+                      ]
+                    },
+                    "currentVersion": { "type": "integer", "minimum": 0 },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The Idempotency-Key was already used for a different request (body, path, operation or caller)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [422] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["idempotency_key_reused"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "Release a quarantined or held message",
+        "tags": ["messages"]
       }
     },
     "/api/v1/platform/dead-letters": {

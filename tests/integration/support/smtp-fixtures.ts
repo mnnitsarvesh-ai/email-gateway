@@ -473,6 +473,8 @@ export class SmtpFixtures {
         await this.prisma.emailRecipient.deleteMany({ where });
         await this.prisma.emailMessage.deleteMany({ where });
         await this.prisma.messageIdentity.deleteMany({ where });
+        // Step 3.3: api Idempotency-Key records of lifecycle operations (no foreign key).
+        await this.prisma.apiIdempotencyKey.deleteMany({ where });
         await this.prisma.bounceEvent.deleteMany({ where });
         await this.prisma.deliverySuppression.deleteMany({ where });
         await this.prisma.organizationLimit.deleteMany({ where });

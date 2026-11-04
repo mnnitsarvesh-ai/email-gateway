@@ -110,6 +110,12 @@ export const deliveryApprovedV1 = z.object({
       { message: 'Duplicate recipientId' },
     ),
   approvedAt: z.iso.datetime(),
+  /**
+   * Lifecycle round the approval belongs to (step 3.3 L7, L8.4; ADR-0025). Optional and
+   * non-breaking: absent = 0. Written by the dev pass-through and the release from step 3.3 on;
+   * the policy engine (5.2) must write it. The planner never plans an approval of another round.
+   */
+  lifecycleRound: z.number().int().min(0).max(65_535).optional(),
 });
 export type DeliveryApprovedV1 = z.infer<typeof deliveryApprovedV1>;
 
@@ -317,6 +323,104 @@ export const messageParseFailedV1 = z.object({
 });
 export type MessageParseFailedV1 = z.infer<typeof messageParseFailedV1>;
 
+/**
+ * Message lifecycle states (step 3.3 L2, ADR-0025), in rank/enum order: the values of
+ * `email_messages.status` (Prisma `MessageStatus`). Defined once here (no dependency on the
+ * lifecycle package); `@email-gateway/message-lifecycle` re-exports it and asserts that its
+ * transition table and the Prisma enum use exactly these values.
+ */
+export const MESSAGE_STATES = [
+  'received',
+  'persisted',
+  'scanning',
+  'scanned',
+  'scan_failed',
+  'policy_evaluated',
+  'approved',
+  'quarantined',
+  'held_for_review',
+  'rejected',
+  'delivery_pending',
+  'delivery_retry',
+  'delivered',
+  'archived',
+  'expired',
+] as const;
+export const messageStateSchema = z.enum(MESSAGE_STATES);
+export type MessageStateValue = z.infer<typeof messageStateSchema>;
+
+/**
+ * Who applies a lifecycle transition (step 3.3 L3): ingestion (smtp-adapter), scanner (4.x),
+ * policy (5.2), dev_passthrough (delivery-worker, local/ci only), delivery (planner and the shared
+ * recorder), operator (api), quarantine (5.3), archive (8.1), sweeper (event-relay expiry) and
+ * recovery (event-relay lifecycle check).
+ */
+export const ACTOR_ROLES = [
+  'ingestion',
+  'scanner',
+  'policy',
+  'dev_passthrough',
+  'delivery',
+  'operator',
+  'quarantine',
+  'archive',
+  'sweeper',
+  'recovery',
+] as const;
+export const actorRoleSchema = z.enum(ACTOR_ROLES);
+export type ActorRoleValue = z.infer<typeof actorRoleSchema>;
+
+const lifecycleRound = z.number().int().min(0).max(65_535);
+
+/**
+ * One applied message lifecycle transition (step 3.3 L5.1, L7), written by the transition service
+ * of `@email-gateway/message-lifecycle` in the transaction of the transition, for every applied
+ * transition except creation (`received`, `persisted`: `mail.message.received.v1` is the
+ * notification of `persisted`). Through `message_outbox` (`aggregate_type = 'message'`,
+ * `event_id` = `email_message_status_history.state_event_id`, `correlation_id` from the request or
+ * `message:<id>`). Ids, states, codes and times only: no actor id, no address, no content.
+ */
+export const messageStateChangedV1 = z.object({
+  messageId: decimalIdSchema,
+  receivedAt: z.iso.datetime(),
+  direction,
+  /** `null` only for a transition out of creation (never published today). */
+  previousState: messageStateSchema.nullable(),
+  state: messageStateSchema,
+  /** Message version after the transition. */
+  version: z.number().int().nonnegative(),
+  lifecycleRound,
+  reasonCode: z.string().regex(/^[a-z0-9_]{1,64}$/, 'Expected a snake_case reason code'),
+  actorRole: actorRoleSchema,
+  actorType: z.enum(['system', 'user', 'api_key']),
+  actorService: z.string().min(1).max(64),
+  /** Envelope id of the event that caused the transition; null for api/sweeper actions. */
+  causationEventId: z.uuid().nullable(),
+  changedAt: z.iso.datetime(),
+});
+export type MessageStateChangedV1 = z.infer<typeof messageStateChangedV1>;
+
+/**
+ * An administrative rescan of a message's security pipeline (step 3.3 L10.2, edge E19), written
+ * by the api through `message_outbox` (`aggregate_type = 'message'`) in the transaction that moves
+ * the message to `scanning` with a new lifecycle round. Published to `email.security` and bound to
+ * the five scan queues (dormant until 4.x). Consumers must check `lifecycleRound` against the
+ * writer row before acting (a forged or stale request never scans another round).
+ */
+export const messageRescanRequestedV1 = z.object({
+  messageId: decimalIdSchema,
+  receivedAt: z.iso.datetime(),
+  direction,
+  emlS3Key: s3Key,
+  /** The new round (a rescan always starts round ≥ 1). */
+  lifecycleRound: z.number().int().min(1).max(65_535),
+  scanKind: z.literal('rescan'),
+  requestedAt: z.iso.datetime(),
+  /** Principal kind of the operator; the principal id stays in the audit row. */
+  requestedBy: z.enum(['user', 'api_key']),
+});
+export type MessageRescanRequestedV1 = z.infer<typeof messageRescanRequestedV1>;
+
 export const EventTypes = {
   MessageReceived: 'mail.message.received.v1',
   MessageScanned: 'mail.message.scanned.v1',
@@ -327,4 +431,6 @@ export const EventTypes = {
   DomainRoutingChanged: 'domain.routing.changed.v1',
   MessageParsed: 'mail.message.parsed.v1',
   MessageParseFailed: 'mail.message.parse_failed.v1',
+  MessageStateChanged: 'mail.message.state_changed.v1',
+  MessageRescanRequested: 'mail.message.rescan_requested.v1',
 } as const;

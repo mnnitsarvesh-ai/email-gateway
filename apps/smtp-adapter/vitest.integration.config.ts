@@ -12,6 +12,8 @@ export default defineConfig({
   plugins: [swc.vite({ module: { type: 'es6' } })],
   test: {
     include: ['integration/**/*.test.ts'],
+    // Pauses a live event-relay and the outbox-polling workers while these suites run.
+    globalSetup: ['integration/support/live-workers.ts'],
     fileParallelism: false,
     testTimeout: 60_000,
     hookTimeout: 60_000,

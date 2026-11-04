@@ -31,7 +31,7 @@ sequenceDiagram
   PL->>DB: poll outbox approvals (consumer delivery-worker.planner), processOnce
   PL->>DB: load message + approved recipients (organization from the row, never the payload)
   Note over PL: re-check direction (R1): inbound recipient domain still owned by the<br/>same organization? suspended → hold (gateway_hold), other owner → failed
-  PL->>DB: one transaction: email_deliveries (pending, direction inbound,<br/>destination_key tenant:<domainId>), delivery_reinjections per<br/>(listener, direction, destination) chunked ≤ 100, planner audit rows,<br/>message → delivery_queued
+  PL->>DB: one transaction: email_deliveries (pending, direction inbound,<br/>destination_key tenant:<domainId>), delivery_reinjections per<br/>(listener, direction, destination) chunked ≤ 100, planner audit rows,<br/>message → delivery_pending (step 3.3: approved → delivery_pending, E20)
   RJ->>DB: claim due rows FOR UPDATE SKIP LOCKED, lease
   RJ->>S3: GetObject org/<orgId>/… (prefix checked), read header block only
   Note over RJ: hop check (R10): Received count, gateway passes in both directions;<br/>over the limit → failed loop_detected, nothing sent

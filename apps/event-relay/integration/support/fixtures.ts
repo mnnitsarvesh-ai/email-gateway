@@ -7,7 +7,12 @@ import {
   MetricsService,
   uuidv7,
 } from '@email-gateway/common';
-import { type MessageOutbox, PrismaClient } from '@email-gateway/database';
+import {
+  type MessageOutbox,
+  type MessageStatus,
+  PrismaClient,
+  type RecipientStatus,
+} from '@email-gateway/database';
 import { EXAMPLE_EVENT_PAYLOADS } from '@email-gateway/event-contracts';
 import { createLogger, type Logger } from '@email-gateway/logger';
 import { type Channel, type ChannelModel, connect, type ConsumeMessage } from 'amqplib';
@@ -149,6 +154,78 @@ export class Fixtures {
     await this.prisma.messageIdempotency.create({ data: { consumer, eventId } });
   }
 
+  /**
+   * A message inserted directly in `state` (a fixture, step 3.3 L8.6) with contiguous history
+   * rows (versions 0..version), received `ageSeconds` ago and unchanged for `idleSeconds`.
+   */
+  async message(
+    organizationId: bigint,
+    options: {
+      state: MessageStatus;
+      idleSeconds: number;
+      /** Seconds since `received_at` (default `idleSeconds + 60`). */
+      ageSeconds?: number;
+      recipients?: readonly RecipientStatus[];
+    },
+  ): Promise<{ id: bigint; receivedAt: Date; organizationId: bigint; version: number }> {
+    const now = Date.now();
+    const receivedAt = new Date(now - (options.ageSeconds ?? options.idleSeconds + 60) * 1000);
+    const statusChangedAt = new Date(now - options.idleSeconds * 1000);
+    const identity = await this.prisma.messageIdentity.create({
+      data: { organizationId, ingestKey: `it-er-${randomBytes(12).toString('hex')}`, receivedAt },
+      select: { id: true },
+    });
+    const id = identity.id;
+    const states: MessageStatus[] = ['received', 'persisted'];
+    if (options.state !== 'persisted') states.push(options.state);
+    const version = states.length - 1;
+    const recipients = options.recipients ?? ['pending'];
+    await this.prisma.$transaction(async (tx) => {
+      await tx.emailMessage.create({
+        data: {
+          id,
+          receivedAt,
+          organizationId,
+          direction: 'outbound',
+          status: options.state,
+          version,
+          statusReason: 'it_fixture',
+          statusChangedAt,
+          envelopeFrom: 'sender@it.test',
+          sizeBytes: 100,
+          recipientCount: recipients.length,
+          emlObjectKey: `org/${organizationId.toString()}/eml/it/${id.toString()}.eml`,
+          emlSha256: '0'.repeat(64),
+        },
+      });
+      await tx.emailMessageStatusHistory.createMany({
+        data: states.map((to, v) => ({
+          receivedAt,
+          messageId: id,
+          organizationId,
+          version: v,
+          fromStatus: v === 0 ? null : states[v - 1]!,
+          toStatus: to,
+          reasonCode: 'it_fixture',
+          actorService: 'it-fixture',
+          changedAt: v === version ? statusChangedAt : receivedAt,
+        })),
+      });
+      await tx.emailRecipient.createMany({
+        data: recipients.map((status, rcptSeq) => ({
+          receivedAt,
+          messageId: id,
+          organizationId,
+          rcptSeq,
+          address: `r${rcptSeq}@ext.test`,
+          direction: 'outbound' as const,
+          status,
+        })),
+      });
+    });
+    return { id, receivedAt, organizationId, version };
+  }
+
   cursor(name: string): string {
     this.cursors.add(name);
     return name;
@@ -171,7 +248,13 @@ export class Fixtures {
             where: { eventId: { in: eventIds.slice(i, i + 1000) } },
           });
         }
-        await this.prisma.messageOutbox.deleteMany({ where: { organizationId: { in: ids } } });
+        const where = { organizationId: { in: ids } };
+        await this.prisma.messageOutbox.deleteMany({ where });
+        await this.prisma.emailMessageStatusHistory.deleteMany({ where });
+        await this.prisma.emailEvent.deleteMany({ where });
+        await this.prisma.emailRecipient.deleteMany({ where });
+        await this.prisma.emailMessage.deleteMany({ where });
+        await this.prisma.messageIdentity.deleteMany({ where });
         await this.prisma.organization.deleteMany({ where: { id: { in: ids } } });
       }
       if (this.cursors.size > 0) {

@@ -470,6 +470,7 @@ export class DeliveryReconciler {
                 sourceService: SOURCE_SERVICE,
                 timeoutMs: this.recorderTimeoutMs,
                 logger: this.logger,
+                lifecycleMetrics: this.metrics.lifecycle,
               },
             );
             this.metrics.signal('reconciler', result.result, {
@@ -514,7 +515,12 @@ export class DeliveryReconciler {
         failureReason: 'status_signal_missing',
         detail: 'no delivery status signal can resolve this recipient',
       },
-      { sourceService: SOURCE_SERVICE, timeoutMs: this.recorderTimeoutMs, logger: this.logger },
+      {
+        sourceService: SOURCE_SERVICE,
+        timeoutMs: this.recorderTimeoutMs,
+        logger: this.logger,
+        lifecycleMetrics: this.metrics.lifecycle,
+      },
     );
     this.metrics.signal('reconciler', result.result, { direction, status: result.status });
     return result.result;
@@ -548,7 +554,12 @@ export class DeliveryReconciler {
           failureReason: 'status_signal_missing',
           detail: 'no delivery status signal within the stale window',
         },
-        { sourceService: SOURCE_SERVICE, timeoutMs: this.recorderTimeoutMs, logger: this.logger },
+        {
+          sourceService: SOURCE_SERVICE,
+          timeoutMs: this.recorderTimeoutMs,
+          logger: this.logger,
+          lifecycleMetrics: this.metrics.lifecycle,
+        },
       );
       this.metrics.signal('reconciler', result.result, {
         direction: delivery.direction,

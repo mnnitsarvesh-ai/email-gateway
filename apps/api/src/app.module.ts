@@ -22,6 +22,7 @@ import { DeliveriesModule } from './modules/deliveries/deliveries.module';
 import { DomainDestinationsModule } from './modules/domain-destinations/domain-destinations.module';
 import { DomainsModule } from './modules/domains/domains.module';
 import { LoginAuditModule } from './modules/login-audit/login-audit.module';
+import { MessagesModule } from './modules/messages/messages.module';
 import { OrganizationsModule } from './modules/organizations/organizations.module';
 import { RolesModule } from './modules/roles/roles.module';
 import { SmtpConnectorsModule } from './modules/smtp-connectors/smtp-connectors.module';
@@ -69,6 +70,8 @@ export class AppModule {
         // Step 2.3: destination servers and per-recipient delivery status.
         DomainDestinationsModule,
         DeliveriesModule,
+        // Step 3.3 L10/L12: message lifecycle reads, rescan and quarantine release.
+        MessagesModule,
         // Step 3.2 Q9: dead-letter view and audited replay (platform).
         DeadLettersModule,
       ],

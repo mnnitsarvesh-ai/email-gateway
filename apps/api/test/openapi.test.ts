@@ -274,7 +274,9 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
       expect(schemes, key).toEqual([ACCESS_TOKEN_SCHEME, API_KEY_SCHEME].sort());
     }
     const deliveryOps = operations(doc).filter(
-      (op) => op.key.includes(' /api/v1/deliveries') || op.key.includes(' /api/v1/messages'),
+      (op) =>
+        op.key.includes(' /api/v1/deliveries') ||
+        (op.key.includes(' /api/v1/messages') && op.key.includes('/deliveries')),
     );
     expect(deliveryOps.map((op) => op.key).sort()).toEqual(
       Object.keys(expected)
@@ -316,6 +318,64 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     expect(replay.description).toContain('source_queue_not_replayable');
     // The internal Prometheus endpoint is not part of the contract.
     expect(doc.paths['/metrics']).toBeUndefined();
+  });
+
+  it('documents the step 3.3 lifecycle endpoints (L10, L12) with their errors and headers', () => {
+    const expected = [
+      'GET /api/v1/messages/{messageId}/lifecycle',
+      'GET /api/v1/messages/{messageId}/lifecycle/history',
+      'POST /api/v1/messages/{messageId}/rescan',
+      'POST /api/v1/messages/{messageId}/release',
+    ];
+    const byKey = new Map(operations(doc).map((op) => [op.key, op]));
+    for (const key of expected) {
+      const op = byKey.get(key);
+      expect(op?.tags, key).toEqual(['messages']);
+      const schemes = op!.security.flatMap((s) => Object.keys(s)).sort();
+      expect(schemes, key).toEqual([ACCESS_TOKEN_SCHEME, API_KEY_SCHEME].sort());
+    }
+    const messageOps = operations(doc).filter(
+      (op) => op.key.includes(' /api/v1/messages') && !op.key.includes('/deliveries'),
+    );
+    expect(messageOps.map((op) => op.key).sort()).toEqual([...expected].sort());
+
+    type Op = {
+      parameters?: Array<{ name: string; in: string; required?: boolean }>;
+      responses: Record<string, { headers?: Record<string, unknown> }>;
+      requestBody?: unknown;
+    };
+    for (const action of ['rescan', 'release']) {
+      const op = (doc.paths[`/api/v1/messages/{messageId}/${action}`] as Record<string, Op>).post!;
+      expect(Object.keys(op.responses).sort(), action).toEqual(
+        ['202', '400', '401', '403', '404', '409', '422'].sort(),
+      );
+      expect(op.parameters?.find((p) => p.name === 'Idempotency-Key')).toMatchObject({
+        in: 'header',
+        required: true,
+      });
+      expect(op.responses['202']!.headers).toHaveProperty('Idempotency-Replayed');
+      expect(op.requestBody).toBeDefined();
+      const text = JSON.stringify(op.responses);
+      for (const code of [
+        'idempotency_key_required',
+        'idempotency_key_invalid',
+        'idempotency_key_reused',
+        'message_not_found',
+        'message_version_conflict',
+        'message_state_conflict',
+      ]) {
+        expect(text, `${action} ${code}`).toContain(code);
+      }
+    }
+    const release = JSON.stringify(
+      (doc.paths['/api/v1/messages/{messageId}/release'] as Record<string, Op>).post!.responses,
+    );
+    expect(release).toContain('quarantine_workflow_required');
+    expect(release).toContain('no_releasable_recipients');
+    // The deliveries view carries the lifecycle reason since step 3.3.
+    expect(JSON.stringify(doc.paths['/api/v1/messages/{messageId}/deliveries'])).toContain(
+      'statusReason',
+    );
   });
 
   it('matches the committed snapshot docs/api/openapi.json', async () => {

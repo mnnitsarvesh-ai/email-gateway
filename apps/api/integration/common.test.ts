@@ -11,6 +11,7 @@ import { EmailDeliveryError, SmtpEmailSender } from '../src/email/smtp-email-sen
 import { KV_KEY_PREFIX, RedisKeyValueStore } from '../src/kv/redis-key-value-store';
 import { OrganizationFeaturesService } from '../src/tenancy/organization-features.service';
 import { OrganizationLimitsService } from '../src/tenancy/organization-limits.service';
+import { cleanupProbeMessages } from './support/probe-cleanup';
 
 function required(key: string): string {
   const value = process.env[key];
@@ -212,11 +213,15 @@ describe('SmtpEmailSender against the Compose Postfix (never NOTIFY_SMTP_HOST)',
   let postfixUp = false;
   let policyUp = false;
   let sender: SmtpEmailSender;
+  // Step 3.3 L16: a unique marker per run, so afterAll finds exactly this run's probe mail.
+  const runMarker = randomUUID();
+  const startedAt = new Date();
+  const sentMessageIds: string[] = [];
   const email = {
     kind: 'email_verification' as const,
     to: `probe@${relayDomain}`,
-    subject: 'Integration probe',
-    text: 'SmtpEmailSender integration probe. No token.',
+    subject: `Integration probe ${runMarker}`,
+    text: `SmtpEmailSender integration probe ${runMarker}. No token.`,
   };
 
   beforeAll(async () => {
@@ -230,12 +235,34 @@ describe('SmtpEmailSender against the Compose Postfix (never NOTIFY_SMTP_HOST)',
       NOTIFY_SMTP_SECURE: 'none',
       NOTIFY_SMTP_FROM: 'no-reply@gateway.local',
     });
+    // Record the Message-ID nodemailer generates for each probe (the gateway stores it as
+    // email_messages.internet_message_id), calling through to the real transport.
+    const transporter = (
+      sender as unknown as {
+        transporter: { sendMail: (mail: unknown) => Promise<{ messageId?: string }> };
+      }
+    ).transporter;
+    const sendMail = transporter.sendMail.bind(transporter);
+    vi.spyOn(transporter, 'sendMail').mockImplementation(async (mail: unknown) => {
+      const info = await sendMail(mail);
+      if (typeof info.messageId === 'string') sentMessageIds.push(info.messageId);
+      return info;
+    });
   });
 
-  afterAll(() => {
+  afterAll(async () => {
     sender?.close();
     vi.restoreAllMocks();
-  });
+    // Remove what the probe left in the mail plane: the deferred postfix-outbound queue file(s),
+    // the S3 objects and the rows of this run's message(s). Nothing to do when nothing was sent.
+    if (sentMessageIds.length > 0) {
+      await cleanupProbeMessages(prisma, {
+        relayDomain,
+        since: new Date(startedAt.getTime() - 1000),
+        messageIds: sentMessageIds,
+      });
+    }
+  }, 90_000);
 
   it('delivers to the local MX when the mail-plane policy service is running', async (ctx) => {
     if (!postfixUp) ctx.skip(`Postfix is not reachable on ${HOST}:${smtpPort}`);
@@ -243,6 +270,7 @@ describe('SmtpEmailSender against the Compose Postfix (never NOTIFY_SMTP_HOST)',
       ctx.skip('smtp-adapter (Postfix policy service) is not running; Postfix tempfails all RCPTs');
     }
     await expect(sender.send(email)).resolves.toBeUndefined();
+    expect(sentMessageIds).toHaveLength(1);
   });
 
   it('reports the SMTP tempfail code when the policy service is down (Postfix fails closed)', async (ctx) => {

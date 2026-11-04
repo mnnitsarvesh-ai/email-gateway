@@ -1,4 +1,4 @@
-import { DELIVERY_STATUSES } from '@email-gateway/event-contracts';
+import { DELIVERY_STATUSES, MESSAGE_STATES } from '@email-gateway/event-contracts';
 import { z } from 'zod';
 import { DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT } from '../../../http/pagination';
 
@@ -13,18 +13,8 @@ export const MessageIdParamSchema = z.uuid();
 
 export const DeliveryStatusSchema = z.enum(DELIVERY_STATUSES);
 export const DirectionSchema = z.enum(['inbound', 'outbound', 'internal']);
-export const MessageStatusSchema = z.enum([
-  'received',
-  'scanning',
-  'scanned',
-  'policy_evaluated',
-  'quarantined',
-  'delivery_queued',
-  'delivered',
-  'partially_delivered',
-  'discarded',
-  'failed',
-]);
+/** Message lifecycle states (step 3.3 L2, ADR-0025), shared with the event contracts. */
+export const MessageStatusSchema = z.enum(MESSAGE_STATES);
 export const SignalSourceSchema = z.enum([
   'planner',
   'reinjection',
@@ -94,6 +84,13 @@ export const MessageDeliveriesSchema = z.object({
     id: z.uuid(),
     direction: DirectionSchema,
     status: MessageStatusSchema,
+    statusReason: z
+      .string()
+      .nullable()
+      .describe(
+        'Reason code of the last lifecycle transition, e.g. delivery_partial (some recipients ' +
+          'failed) or delivery_failed (all failed); see GET /messages/{messageId}/lifecycle',
+      ),
     receivedAt: IsoDate,
   }),
   deliveries: z.array(DeliverySchema),

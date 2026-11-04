@@ -411,6 +411,18 @@ async function runRetentionPurges(
   }
 
   try {
+    // The api's Idempotency-Key store (step 3.3 L11): records past expires_at + grace.
+    const cutoff = new Date(now.getTime() - cfg.apiIdempotencyGraceDays * 24 * 60 * 60 * 1000);
+    await purge(
+      'api_idempotency_keys',
+      `DELETE FROM ${q('api_idempotency_keys')} WHERE ${q('expires_at')} < ? LIMIT ${cfg.batchSize}`,
+      [formatBound(cutoff)],
+    );
+  } catch (err) {
+    fail('api_idempotency_keys', err);
+  }
+
+  try {
     await purgeRegistry(options, cfg, result, sleep);
   } catch (err) {
     fail('message_identities', err);

@@ -1,6 +1,7 @@
 import { buildGatewayTrace, GATEWAY_TRACE_HEADER } from '@email-gateway/common';
 import { dkimVerify } from 'mailauth/lib/dkim/verify';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { purgeDormantQueues } from './support/broker';
 import { waitFor } from './support/compose';
 import { clearSinkDomain, waitForSinkMessage } from './support/mail-sink';
 import { buildMessage } from './support/messages';
@@ -128,6 +129,7 @@ afterAll(async () => {
   }
   await removeToolsFiles(toolFiles);
   await fx.cleanup();
+  await purgeDormantQueues();
 }, 180_000);
 
 describe.skipIf(gate.skip)(

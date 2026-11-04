@@ -1,8 +1,14 @@
-# Messaging topology (RabbitMQ, topology v1)
+# Messaging topology (RabbitMQ, topology v2)
 
 The reference for the RabbitMQ broker objects of the gateway: exchanges, queues, bindings, routing keys, headers, policies, dead-letter paths, retry hops, the dormant-queue rule, users and permissions, and provisioning. Decisions: [ADR-0024](adr/0024-rabbitmq-topology-retry-dead-letter.md) (topology, retry, dead-letter, replay, least privilege; supersedes ADR-0005) and [ADR-0023](adr/0023-outbox-relay-and-reconciliation.md) (outbox relay and reconciliation). Design: [step 3.2](../plan/steps/07-rabbitmq.md) (§ and Q references below point there).
 
 ## Status
+
+**Topology v2 (step 3.3, [design L7](../plan/steps/08-message-lifecycle.md#l7-events-packagesevent-contracts-registry-topology-v2), [ADR-0025](adr/0025-message-lifecycle-state-machine.md)).** `TOPOLOGY_VERSION = 2` adds two registered event types and five bindings to topology v1; the six exchanges, fourteen queues and their policies are unchanged:
+
+- `mail.message.state_changed.v1` on `email.events` (every applied lifecycle transition): no binding of its own, it reaches only the `email.analytics` firehose (`org.#`).
+- `mail.message.rescan_requested.v1` on `email.security` (the api's administrative rescan): bound with `org.*.mail.message.rescan_requested.v1` to `scan.auth`, `scan.spam`, `scan.url`, `scan.attachment` and `scan.dlp` (dormant until 4.x; each stage consumes both `parsed.v1` and `rescan_requested.v1`, and must check the event's `lifecycleRound` against the writer row).
+- The vhost description is `email-gateway topology v2`. `init.mjs` imports additively (existing objects unchanged), so `pnpm rabbitmq:init` (or the Compose `rabbitmq-init`) upgrades a v1 vhost in place. No permission changes: the relay already publishes `^org\.` keys to every exchange.
 
 | Part                                                                                                                                | Status                                                                                                                                                                            |
 | ----------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -16,7 +22,7 @@ The reference for the RabbitMQ broker objects of the gateway: exchanges, queues,
 ## Source of truth and provisioning
 
 - **`packages/event-contracts/src/registry.ts`**: `EVENT_REGISTRY` (every concrete event type `<name>.vN` → exchange, zod schema, outbox `aggregate_type`, version), `RESERVED_EVENT_TYPES`, `eventDefinition(type)`, `schemaVersionOf(type)`.
-- **`packages/event-contracts/src/topology.ts`**: `TOPOLOGY` (`TOPOLOGY_VERSION = 1`, `DEFAULT_VHOST = 'email-gateway'`), `EXCHANGE_NAMES`, `QUEUE_NAMES`, per-queue role, home exchange, bindings, consumer, retry policy and policy definition; helpers `queueDefinition`, `eventRoutingKey`, `retryRoutingKey`, `delayRoutingKey`, `deadLetterRoutingKey`, `parseRoutingKey`, `eventTypesBoundTo`, `routeMessage`/`topicMatches` (AMQP topic semantics), `retryPolicyViolations`, `validateTopology` (the §3 invariants, run by the tests and by the export CLI).
+- **`packages/event-contracts/src/topology.ts`**: `TOPOLOGY` (`TOPOLOGY_VERSION = 2`, `DEFAULT_VHOST = 'email-gateway'`), `EXCHANGE_NAMES`, `QUEUE_NAMES`, per-queue role, home exchange, bindings, consumer, retry policy and policy definition; helpers `queueDefinition`, `eventRoutingKey`, `retryRoutingKey`, `delayRoutingKey`, `deadLetterRoutingKey`, `parseRoutingKey`, `eventTypesBoundTo`, `routeMessage`/`topicMatches` (AMQP topic semantics), `retryPolicyViolations`, `validateTopology` (the §3 invariants, run by the tests and by the export CLI).
 - **`packages/event-contracts/src/definitions.ts`**: `toRabbitDefinitions(topology, { vhost })` → the body of `POST /api/definitions/{vhost}` plus `topology_version`. During the step 3.2 transition the package root still exports the ADR-0005 names (`EXCHANGES`, `QUEUES`, `QueueDefinition`, …) from `legacy-topology.ts`; topology v1's queue type is exported from the root as `TopologyQueueDefinition` until WP4 deletes the legacy file.
 - **`infrastructure/rabbitmq/definitions.json`**: generated, committed. `pnpm --filter @email-gateway/event-contracts topology:export` rewrites it (build, export, Prettier); a unit test fails when the committed file differs from the generated one. Never edit it by hand.
 - **`infrastructure/rabbitmq/init.mjs`**: the only provisioning code (plain Node 22, no dependencies, the management HTTP API as the administrator). It waits for the API (≤ 120 s); creates/updates the vhost (description `email-gateway topology v<N>`, `default_queue_type: quorum`) and gives the administrator full permissions on it; imports the definitions (without `topology_version`, every object's `vhost` set to the target); with `--users` creates/updates the four role users (no tags) and sets exactly their permissions; with `--cleanup-legacy` deletes the ADR-0005 objects on vhost `/` (below) only when empty; then **verifies**: exactly the 6 exchanges (topic, durable, not internal) and 14 queues (quorum, durable), each queue's effective policy is `eg.<queue>`, every binding present and no other binding, every policy equal to the file, the role users without tags and with exactly their permissions. Idempotent; exits non-zero on any failure; logs object names and counts only. `--vhost <name>` provisions another vhost (integration suites use `eg-it-<hex>`), `--mgmt-url <url>` another broker, `--definitions <path>` another file, `--delete-vhost <name>` tears a test vhost down (refuses `email-gateway` and `/`).
@@ -28,14 +34,14 @@ The reference for the RabbitMQ broker objects of the gateway: exchanges, queues,
 
 Six exchanges, all `topic`, durable, not auto-delete, not internal, no arguments. The default exchange (`""`) and `amq.*` are never used.
 
-| Exchange          | Carries (events published here, see the registry)                                        | Bound to `email.events` with `org.#` |
-| ----------------- | ---------------------------------------------------------------------------------------- | ------------------------------------ |
-| `email.ingestion` | `mail.message.received.v1`, `mail.message.parsed.v1`, `mail.message.parse_failed.v1`     | yes                                  |
-| `email.security`  | `mail.message.scanned.v1`; reserved `mail.attachment.sandbox_requested.v1`               | yes                                  |
-| `email.policy`    | `mail.policy.decided.v1`                                                                 | yes                                  |
-| `email.delivery`  | `mail.delivery.approved.v1`, `mail.delivery.status_changed.v1`                           | yes                                  |
-| `email.archive`   | nothing yet (archive-stage outputs, 8.1)                                                 | yes                                  |
-| `email.events`    | `domain.status.changed.v1`, `domain.routing.changed.v1`; the firehose; every dead letter | –                                    |
+| Exchange          | Carries (events published here, see the registry)                                                                              | Bound to `email.events` with `org.#` |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------ |
+| `email.ingestion` | `mail.message.received.v1`, `mail.message.parsed.v1`, `mail.message.parse_failed.v1`                                           | yes                                  |
+| `email.security`  | `mail.message.scanned.v1`, `mail.message.rescan_requested.v1` (v2); reserved `mail.attachment.sandbox_requested.v1`            | yes                                  |
+| `email.policy`    | `mail.policy.decided.v1`                                                                                                       | yes                                  |
+| `email.delivery`  | `mail.delivery.approved.v1`, `mail.delivery.status_changed.v1`                                                                 | yes                                  |
+| `email.archive`   | nothing yet (archive-stage outputs, 8.1)                                                                                       | yes                                  |
+| `email.events`    | `domain.status.changed.v1`, `domain.routing.changed.v1`, `mail.message.state_changed.v1` (v2); the firehose; every dead letter | –                                    |
 
 `mail.attachment.sandbox_requested.v1` is **reserved**: routed (the `scan.sandbox` binding exists) but without a schema until step 4.6; the relay refuses to publish a reserved type.
 
@@ -43,38 +49,40 @@ Six exchanges, all `topic`, durable, not auto-delete, not internal, no arguments
 
 Fourteen quorum queues (durable, `x-queue-type: quorum` is the **only** queue argument; everything mutable is a policy). Role decides the policy (below).
 
-| Queue                    | Role        | Home exchange     | Event bindings (exchange: key)                                                                             | Consumer                                                                               | Retry policy                                             |
-| ------------------------ | ----------- | ----------------- | ---------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| `email.received`         | work        | `email.ingestion` | `email.ingestion`: `org.*.mail.message.received.v1`                                                        | email-worker MIME ingestion, ledger `email-worker.mime-parser` (step 3.2 WP4)          | hold, 8 attempts, 1 s–60 s, 24 h                         |
-| `scan.auth`              | dormant     | `email.security`  | `email.ingestion`: `org.*.mail.message.parsed.v1`                                                          | **step 4.1** (email-worker): SPF/DKIM/DMARC results via Rspamd                         | hold, 5, 1 s–60 s, 24 h                                  |
-| `scan.spam`              | dormant     | `email.security`  | `email.ingestion`: `org.*.mail.message.parsed.v1`                                                          | **step 4.1** (email-worker): Rspamd verdict                                            | hold, 5, 1 s–60 s, 24 h                                  |
-| `scan.url`               | dormant     | `email.security`  | `email.ingestion`: `org.*.mail.message.parsed.v1`                                                          | **step 4.3** (email-worker): URL protection                                            | hold, 5, 1 s–60 s, 24 h                                  |
-| `scan.attachment`        | dormant     | `email.security`  | `email.ingestion`: `org.*.mail.message.parsed.v1`                                                          | **step 4.2** (email-worker): ClamAV + YARA                                             | hold, 5, 1 s–60 s, 24 h                                  |
-| `scan.dlp`               | dormant     | `email.security`  | `email.ingestion`: `org.*.mail.message.parsed.v1`                                                          | **step 4.5** (email-worker): DLP                                                       | hold, 5, 1 s–60 s, 24 h                                  |
-| `scan.sandbox`           | dormant     | `email.security`  | `email.security`: `org.*.mail.attachment.sandbox_requested.v1` (reserved)                                  | **step 4.6**: sandbox orchestration                                                    | hold, 5, 1 s–60 s, 24 h                                  |
-| `email.policy.evaluate`  | dormant     | `email.policy`    | `email.security`: `org.*.mail.message.scanned.v1`; `email.ingestion`: `org.*.mail.message.parse_failed.v1` | **steps 5.1/5.2** (policy-engine); parse failures go to the policy fail-safe (3.1 M13) | hold, 5, 1 s–60 s, 24 h                                  |
-| `email.delivery.pending` | work        | `email.delivery`  | `email.delivery`: `org.*.mail.delivery.approved.v1`                                                        | delivery-worker planner, ledger `delivery-worker.planner` (step 3.2 WP4)               | delay-queue `email.delivery.retry`, 10, 5 s–15 min, 48 h |
-| `email.delivery.retry`   | delay       | `email.delivery`  | none; internal binding `email.delivery`: `delay.email.delivery.pending.#`                                  | none by design: expired messages return to `email.delivery.pending`                    | –                                                        |
-| `email.quarantine`       | dormant     | `email.policy`    | `email.policy`: `org.*.mail.policy.decided.v1`                                                             | **step 5.3**: quarantine (acts on `action = quarantine`)                               | hold, 5, 1 s–60 s, 24 h                                  |
-| `email.archive`          | dormant     | `email.archive`   | `email.policy`: `org.*.mail.policy.decided.v1`                                                             | **step 8.1** (archive-worker; acts on `archive = true`)                                | hold, 5, 1 s–60 s, 24 h                                  |
-| `email.analytics`        | dormant     | `email.events`    | `email.events`: `org.#` (the firehose: every event of every exchange)                                      | ClickHouse ingestion (ADR-0009), **not scheduled yet**                                 | hold, 5, 1 s–60 s, 24 h                                  |
-| `email.dead-letter`      | dead-letter | `email.events`    | none; internal binding `email.events`: `dead-letter.#`                                                     | none: operators replay through the api (Q9, step 3.2 WP4)                              | –                                                        |
+| Queue                    | Role        | Home exchange     | Event bindings (exchange: key)                                                                                     | Consumer                                                                               | Retry policy                                             |
+| ------------------------ | ----------- | ----------------- | ------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| `email.received`         | work        | `email.ingestion` | `email.ingestion`: `org.*.mail.message.received.v1`                                                                | email-worker MIME ingestion, ledger `email-worker.mime-parser` (step 3.2 WP4)          | hold, 8 attempts, 1 s–60 s, 24 h                         |
+| `scan.auth`              | dormant     | `email.security`  | `email.ingestion`: `org.*.mail.message.parsed.v1`; `email.security`: `org.*.mail.message.rescan_requested.v1` (v2) | **step 4.1** (email-worker): SPF/DKIM/DMARC results via Rspamd                         | hold, 5, 1 s–60 s, 24 h                                  |
+| `scan.spam`              | dormant     | `email.security`  | `email.ingestion`: `org.*.mail.message.parsed.v1`; `email.security`: `org.*.mail.message.rescan_requested.v1` (v2) | **step 4.1** (email-worker): Rspamd verdict                                            | hold, 5, 1 s–60 s, 24 h                                  |
+| `scan.url`               | dormant     | `email.security`  | `email.ingestion`: `org.*.mail.message.parsed.v1`; `email.security`: `org.*.mail.message.rescan_requested.v1` (v2) | **step 4.3** (email-worker): URL protection                                            | hold, 5, 1 s–60 s, 24 h                                  |
+| `scan.attachment`        | dormant     | `email.security`  | `email.ingestion`: `org.*.mail.message.parsed.v1`; `email.security`: `org.*.mail.message.rescan_requested.v1` (v2) | **step 4.2** (email-worker): ClamAV + YARA                                             | hold, 5, 1 s–60 s, 24 h                                  |
+| `scan.dlp`               | dormant     | `email.security`  | `email.ingestion`: `org.*.mail.message.parsed.v1`; `email.security`: `org.*.mail.message.rescan_requested.v1` (v2) | **step 4.5** (email-worker): DLP                                                       | hold, 5, 1 s–60 s, 24 h                                  |
+| `scan.sandbox`           | dormant     | `email.security`  | `email.security`: `org.*.mail.attachment.sandbox_requested.v1` (reserved)                                          | **step 4.6**: sandbox orchestration                                                    | hold, 5, 1 s–60 s, 24 h                                  |
+| `email.policy.evaluate`  | dormant     | `email.policy`    | `email.security`: `org.*.mail.message.scanned.v1`; `email.ingestion`: `org.*.mail.message.parse_failed.v1`         | **steps 5.1/5.2** (policy-engine); parse failures go to the policy fail-safe (3.1 M13) | hold, 5, 1 s–60 s, 24 h                                  |
+| `email.delivery.pending` | work        | `email.delivery`  | `email.delivery`: `org.*.mail.delivery.approved.v1`                                                                | delivery-worker planner, ledger `delivery-worker.planner` (step 3.2 WP4)               | delay-queue `email.delivery.retry`, 10, 5 s–15 min, 48 h |
+| `email.delivery.retry`   | delay       | `email.delivery`  | none; internal binding `email.delivery`: `delay.email.delivery.pending.#`                                          | none by design: expired messages return to `email.delivery.pending`                    | –                                                        |
+| `email.quarantine`       | dormant     | `email.policy`    | `email.policy`: `org.*.mail.policy.decided.v1`                                                                     | **step 5.3**: quarantine (acts on `action = quarantine`)                               | hold, 5, 1 s–60 s, 24 h                                  |
+| `email.archive`          | dormant     | `email.archive`   | `email.policy`: `org.*.mail.policy.decided.v1`                                                                     | **step 8.1** (archive-worker; acts on `archive = true`)                                | hold, 5, 1 s–60 s, 24 h                                  |
+| `email.analytics`        | dormant     | `email.events`    | `email.events`: `org.#` (the firehose: every event of every exchange)                                              | ClickHouse ingestion (ADR-0009), **not scheduled yet**                                 | hold, 5, 1 s–60 s, 24 h                                  |
+| `email.dead-letter`      | dead-letter | `email.events`    | none; internal binding `email.events`: `dead-letter.#`                                                             | none: operators replay through the api (Q9, step 3.2 WP4)                              | –                                                        |
 
-Plus, on every work and dormant queue, exactly one **retry binding** `retry.<queue>.#` on its home exchange. 32 bindings in total: 27 queue bindings and the five exchange-to-exchange bindings `email.{ingestion,security,policy,delivery,archive}` → `email.events` (`org.#`).
+Plus, on every work and dormant queue, exactly one **retry binding** `retry.<queue>.#` on its home exchange. 37 bindings in total (v1: 32): 32 queue bindings and the five exchange-to-exchange bindings `email.{ingestion,security,policy,delivery,archive}` → `email.events` (`org.#`).
 
 Where each event lands (`routeMessage`, asserted by `topology.test.ts`):
 
-| Event type                        | Queues                                                                                 |
-| --------------------------------- | -------------------------------------------------------------------------------------- |
-| `mail.message.received.v1`        | `email.received`, `email.analytics`                                                    |
-| `mail.message.parsed.v1`          | `scan.auth`, `scan.spam`, `scan.url`, `scan.attachment`, `scan.dlp`, `email.analytics` |
-| `mail.message.parse_failed.v1`    | `email.policy.evaluate`, `email.analytics`                                             |
-| `mail.message.scanned.v1`         | `email.policy.evaluate`, `email.analytics`                                             |
-| `mail.policy.decided.v1`          | `email.quarantine`, `email.archive`, `email.analytics`                                 |
-| `mail.delivery.approved.v1`       | `email.delivery.pending`, `email.analytics`                                            |
-| `mail.delivery.status_changed.v1` | `email.analytics` (webhooks/notifications 6.2 add a queue later)                       |
-| `domain.status.changed.v1`        | `email.analytics` (the smtp-adapter cache invalidation stays an outbox tail, Q13)      |
-| `domain.routing.changed.v1`       | `email.analytics` (same)                                                               |
+| Event type                         | Queues                                                                                      |
+| ---------------------------------- | ------------------------------------------------------------------------------------------- |
+| `mail.message.received.v1`         | `email.received`, `email.analytics`                                                         |
+| `mail.message.parsed.v1`           | `scan.auth`, `scan.spam`, `scan.url`, `scan.attachment`, `scan.dlp`, `email.analytics`      |
+| `mail.message.parse_failed.v1`     | `email.policy.evaluate`, `email.analytics`                                                  |
+| `mail.message.scanned.v1`          | `email.policy.evaluate`, `email.analytics`                                                  |
+| `mail.policy.decided.v1`           | `email.quarantine`, `email.archive`, `email.analytics`                                      |
+| `mail.delivery.approved.v1`        | `email.delivery.pending`, `email.analytics`                                                 |
+| `mail.delivery.status_changed.v1`  | `email.analytics` (webhooks/notifications 6.2 add a queue later)                            |
+| `domain.status.changed.v1`         | `email.analytics` (the smtp-adapter cache invalidation stays an outbox tail, Q13)           |
+| `domain.routing.changed.v1`        | `email.analytics` (same)                                                                    |
+| `mail.message.state_changed.v1`    | `email.analytics` (v2; analytics and webhooks 6.2 consume it later)                         |
+| `mail.message.rescan_requested.v1` | `scan.auth`, `scan.spam`, `scan.url`, `scan.attachment`, `scan.dlp`, `email.analytics` (v2) |
 
 ```mermaid
 flowchart LR
@@ -87,15 +95,16 @@ flowchart LR
   R[event-relay\nconfirmed publish\nstep 3.2 WP3]
   SA & EW & DW & API --> OB[(message_outbox)] --> R
   R -->|org.id.mail.message.*| XI{{email.ingestion}}
-  R -->|org.id.mail.message.scanned.v1| XS{{email.security}}
+  R -->|org.id.mail.message.scanned.v1, rescan_requested.v1| XS{{email.security}}
   R -->|org.id.mail.policy.decided.v1| XP{{email.policy}}
   R -->|org.id.mail.delivery.*| XD{{email.delivery}}
-  R -->|org.id.domain.*| XE{{email.events}}
+  R -->|org.id.domain.*, mail.message.state_changed.v1| XE{{email.events}}
   XA{{email.archive}}
   XI -->|org.*.received.v1| Q1[email.received\nwork: email-worker]
   XI -->|org.*.parsed.v1| QS[scan.auth / spam / url / attachment / dlp\ndormant: 4.1-4.5]
   XI -->|org.*.parse_failed.v1| QP[email.policy.evaluate\ndormant: 5.1/5.2]
   XS -->|org.*.scanned.v1| QP
+  XS -->|org.*.rescan_requested.v1 v2| QS
   XS -->|org.*.sandbox_requested.v1| QSB[scan.sandbox\ndormant: 4.6]
   XP -->|org.*.policy.decided.v1| QQ[email.quarantine\ndormant: 5.3]
   XP -->|org.*.policy.decided.v1| QA[email.archive\ndormant: 8.1]

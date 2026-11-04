@@ -1,56 +1,148 @@
 # 11. Message state machine
 
-The states are exactly the values of `email_messages.status` from the step 1.1 design (§3.4), in enum order: `received`, `scanning`, `scanned`, `policy_evaluated`, `quarantined`, `delivery_queued`, `delivered`, `partially_delivered`, `discarded`, `failed`. The enum is IMPLEMENTED in the schema (append-only: values are only ever added).
-
-**Every transition is PLANNED for step 3.3** (message lifecycle: state machine, atomic transitions, history, concurrency tests). The transitions below are the intended lifecycle derived from the data-ownership table and ADR-0006; step 3.3 owns the final transition table and may refine it. Each transition will be one atomic update guarded by optimistic concurrency (`email_messages.version`), written together with an `email_message_status_history` row and, where another stage must react, a `message_outbox` row.
+The fifteen lifecycle states of `email_messages.status` (step 3.3, [design L2–L4](../../plan/steps/08-message-lifecycle.md#l2-states-and-the-mapping-of-the-old-values), [ADR-0025](../adr/0025-message-lifecycle-state-machine.md)), in enum and rank order: `received`, `persisted`, `scanning`, `scanned`, `scan_failed`, `policy_evaluated`, `approved`, `quarantined`, `held_for_review`, `rejected`, `delivery_pending`, `delivery_retry`, `delivered`, `archived`, `expired`. The enum, the lifecycle columns and the history columns are IMPLEMENTED (migration `20261104130000_message_lifecycle`); the transition table is data in `@email-gateway/message-lifecycle` (`TRANSITIONS`, step 3.3 WP2), and every transition goes through its transition service (one door). Edges E1–E26 are the rows of that table.
 
 ```mermaid
 stateDiagram-v2
-  classDef impl fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#1b1b1b
-  classDef terminal fill:#e8f5e9,stroke:#2e7d32,stroke-width:4px,color:#1b1b1b
+  classDef s33 fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#1b1b1b
+  classDef planned fill:#fff8e1,stroke:#b26a00,stroke-width:2px,stroke-dasharray:6 4,color:#1b1b1b
+  classDef final33 fill:#e8f5e9,stroke:#2e7d32,stroke-width:4px,color:#1b1b1b
+  classDef finalPlanned fill:#fff8e1,stroke:#b26a00,stroke-width:4px,stroke-dasharray:6 4,color:#1b1b1b
 
-  [*] --> received: P 3.3 ingestion commit, smtp-adapter
-  received --> scanning: P 3.3 email-worker starts the scan
-  scanning --> scanned: P 3.3 every stage reported or timed out
-  scanning --> failed: P 3.3 unrecoverable, e.g. EML missing in S3
-  scanned --> policy_evaluated: P 3.3 policy-engine decided
-  policy_evaluated --> delivery_queued: P 3.3 deliver or tag for at least one recipient
-  policy_evaluated --> quarantined: P 3.3 every recipient quarantined
-  policy_evaluated --> discarded: P 3.3 discard, always audited
-  quarantined --> delivery_queued: P 5.3 release after re-validation
-  quarantined --> discarded: P 5.3 deleted or expired
-  delivery_queued --> delivered: P 3.3 every recipient delivered
-  delivery_queued --> partially_delivered: P 3.3 some recipients delivered
-  delivery_queued --> failed: P 3.3 no recipient deliverable
-  partially_delivered --> delivered: P 3.3 deferred recipients delivered later
-  delivered --> [*]
-  partially_delivered --> [*]
-  discarded --> [*]
-  failed --> [*]
+  [*] --> received: E1 · 3.3 smtp-adapter commit
+  received --> persisted: E2 · 3.3 smtp-adapter commit
+  persisted --> scanning: E3 · P 4.1 scanner
+  persisted --> approved: E4 · 3.3 dev pass-through, local/ci
+  persisted --> policy_evaluated: E5 · P 5.2 parse failed, fail-safe
+  scanning --> scanned: E6 · P 4.x scanner
+  scanning --> scan_failed: E7 · P 4.x scan error, timeout, EML unavailable
+  scanned --> policy_evaluated: E8 · P 5.2 policy decided
+  scan_failed --> policy_evaluated: E9 · P 5.2 scan failed, fail-safe
+  policy_evaluated --> approved: E10 · P 5.2 deliver or tag
+  policy_evaluated --> quarantined: E11 · P 5.2 quarantine
+  policy_evaluated --> held_for_review: E12 · P 5.2 hold
+  policy_evaluated --> rejected: E13 · P 5.2 discard or reject
+  quarantined --> approved: E14 · 3.3 api release, new round, also P 5.3
+  held_for_review --> approved: E15 · 3.3 api release, new round, also P 5.3
+  held_for_review --> quarantined: E16 · P 5.3
+  quarantined --> rejected: E17 · P 5.3 deleted
+  held_for_review --> rejected: E18 · P 5.3 rejected
+  scanning --> scanning: E19 · 3.3 api rescan, new round
+  scanned --> scanning: E19 · 3.3 api rescan
+  scan_failed --> scanning: E19 · 3.3 api rescan
+  policy_evaluated --> scanning: E19 · 3.3 api rescan
+  quarantined --> scanning: E19 · 3.3 api rescan
+  held_for_review --> scanning: E19 · 3.3 api rescan
+  expired --> scanning: E19 · 3.3 api rescan
+  approved --> delivery_pending: E20 · 3.3 planner
+  delivery_pending --> delivery_retry: E21 · 3.3 recorder, lifecycle check
+  delivery_retry --> delivery_pending: E22 · 3.3 recorder, lifecycle check
+  delivery_pending --> delivered: E23 · 3.3 complete or partial
+  delivery_retry --> delivered: E23 · 3.3 complete or partial
+  delivery_pending --> rejected: E24 · 3.3 every recipient failed
+  delivery_retry --> rejected: E24 · 3.3 every recipient failed
+  delivered --> archived: E25 · P 8.1 archive
+  rejected --> archived: E25 · P 8.1 archive
+  persisted --> expired: E26 · 3.3 sweeper
+  scanning --> expired: E26 · 3.3 sweeper
+  scanned --> expired: E26 · 3.3 sweeper
+  scan_failed --> expired: E26 · 3.3 sweeper
+  policy_evaluated --> expired: E26 · 3.3 sweeper
+  approved --> expired: E26 · 3.3 sweeper
+  quarantined --> expired: E26 · 3.3 sweeper
+  held_for_review --> expired: E26 · 3.3 sweeper
+  delivery_pending --> expired: E26 · 3.3 sweeper
+  delivery_retry --> expired: E26 · 3.3 sweeper
+  archived --> [*]
 
-  class received, scanning, scanned, policy_evaluated, quarantined, delivery_queued impl
-  class delivered, partially_delivered, discarded, failed terminal
+  class received, persisted, scanning, approved, delivery_pending, delivery_retry s33
+  class scanned, scan_failed, policy_evaluated, quarantined, held_for_review planned
+  class delivered, rejected, expired final33
+  class archived finalPlanned
 ```
 
-**Legend.** States (green) are IMPLEMENTED enum values; a thick border marks a terminal state. Every transition label starts with `P x.y`: the transition is PLANNED for that step. No code performs any transition today.
+**Legend.** Every state is an IMPLEMENTED enum value. Green states (solid border) are reached by a producer of step 3.3; amber states (dashed border) are reached only by producers of later steps (scanning 4.x, policy 5.2, quarantine 5.3, archive 8.1); `scanning` is green because the administrative rescan (E19) produces it in step 3.3. A thick border marks a final state (`delivered`, `rejected`, `archived`, `expired`). Every edge label starts with its id; `3.3` marks an edge whose producer is built in step 3.3 (WP3 for the producers, WP4 for the api, WP2 for the event-relay sweeper and lifecycle check), `P x.y` an edge whose producer is PLANNED for step x.y. An edge produced in 3.3 and later also by another step says so (E14, E15: also the 5.3 quarantine workflow). `received` is never visible after the SMTP commit: E1 and E2 are written together in the commit transaction (the message is born `persisted`, version 1, with both history rows).
 
-## Rules the transitions must keep (from the existing design)
+## Transition table (data, `TRANSITIONS`)
 
-| Rule                                                                                                                                                                                                                                  | Source                         |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
-| No transition after `received` ever produces an NDR to the sender. Post-queue outcomes are deliver, tag, quarantine or discard                                                                                                        | ADR-0006                       |
-| Per-recipient outcomes live in `email_recipients.status` and `final_action`. A message with some recipients quarantined and some delivered moves to `delivery_queued`, and its quarantined recipients have `quarantine_messages` rows | Design §3.4, §3.8              |
-| Each transition is a compare-and-set on `(id, received_at, version)`, so a redelivered event cannot move a message backwards                                                                                                          | Design §3.4 (`version` column) |
-| Every transition appends `email_message_status_history (version, from_status, to_status, reason_code, event_id)`                                                                                                                      | Design §3.4                    |
-| Messages stuck in a non-terminal state are found by `status IN (...) AND status_changed_at < now - 15 min` (query Q7, index `(status, status_changed_at)`) and re-driven by reconciliation (PLANNED 3.2)                              | Design §D8 Q7                  |
-| `delivery_queued`, `delivered` and `partially_delivered` have no writer assigned in the data-ownership table (§3.11). Step 3.3 must assign it (most likely `delivery-worker`)                                                         | Design §3.11 (gap)             |
+| Edge | From                                                                                                  | To                 | Roles                | Reasons                                         | New round | Producer                      |
+| ---- | ----------------------------------------------------------------------------------------------------- | ------------------ | -------------------- | ----------------------------------------------- | --------- | ----------------------------- |
+| E1   | (creation)                                                                                            | `received`         | ingestion            | `smtp_accepted`                                 |           | **3.3** smtp-adapter          |
+| E2   | `received`                                                                                            | `persisted`        | ingestion            | `committed`                                     |           | **3.3** smtp-adapter          |
+| E3   | `persisted`                                                                                           | `scanning`         | scanner              | `scan_started`                                  |           | 4.1                           |
+| E4   | `persisted`                                                                                           | `approved`         | dev_passthrough      | `dev_passthrough`                               |           | **3.3** delivery-worker (dev) |
+| E5   | `persisted`                                                                                           | `policy_evaluated` | policy               | `parse_failed_fail_safe`                        |           | 5.2                           |
+| E6   | `scanning`                                                                                            | `scanned`          | scanner              | `scan_complete`                                 |           | 4.x                           |
+| E7   | `scanning`                                                                                            | `scan_failed`      | scanner              | `scan_error`, `scan_timeout`, `eml_unavailable` |           | 4.x                           |
+| E8   | `scanned`                                                                                             | `policy_evaluated` | policy               | `policy_decided`                                |           | 5.2                           |
+| E9   | `scan_failed`                                                                                         | `policy_evaluated` | policy               | `scan_failed_fail_safe`                         |           | 5.2                           |
+| E10  | `policy_evaluated`                                                                                    | `approved`         | policy               | `policy_deliver`, `policy_tag`                  |           | 5.2                           |
+| E11  | `policy_evaluated`                                                                                    | `quarantined`      | policy               | `policy_quarantine`                             |           | 5.2                           |
+| E12  | `policy_evaluated`                                                                                    | `held_for_review`  | policy               | `policy_hold`                                   |           | 5.2                           |
+| E13  | `policy_evaluated`                                                                                    | `rejected`         | policy               | `policy_discard`, `policy_reject`               |           | 5.2                           |
+| E14  | `quarantined`                                                                                         | `approved`         | operator, quarantine | `quarantine_release`                            | yes       | **3.3** api; 5.3              |
+| E15  | `held_for_review`                                                                                     | `approved`         | operator, quarantine | `review_release`                                | yes       | **3.3** api; 5.3              |
+| E16  | `held_for_review`                                                                                     | `quarantined`      | quarantine           | `review_quarantined`                            |           | 5.3                           |
+| E17  | `quarantined`                                                                                         | `rejected`         | quarantine           | `quarantine_deleted`                            |           | 5.3                           |
+| E18  | `held_for_review`                                                                                     | `rejected`         | quarantine           | `review_rejected`                               |           | 5.3                           |
+| E19  | `scanning`, `scanned`, `scan_failed`, `policy_evaluated`, `quarantined`, `held_for_review`, `expired` | `scanning`         | operator             | `admin_rescan`                                  | yes       | **3.3** api                   |
+| E20  | `approved`                                                                                            | `delivery_pending` | delivery             | `delivery_planned`                              |           | **3.3** delivery-worker       |
+| E21  | `delivery_pending`                                                                                    | `delivery_retry`   | delivery, recovery   | `delivery_deferred`                             |           | **3.3** recorder; event-relay |
+| E22  | `delivery_retry`                                                                                      | `delivery_pending` | delivery, recovery   | `delivery_requeued`                             |           | **3.3** recorder; event-relay |
+| E23  | `delivery_pending`, `delivery_retry`                                                                  | `delivered`        | delivery, recovery   | `delivery_complete`, `delivery_partial`         |           | **3.3** recorder; event-relay |
+| E24  | `delivery_pending`, `delivery_retry`                                                                  | `rejected`         | delivery, recovery   | `delivery_failed`                               |           | **3.3** recorder; event-relay |
+| E25  | `delivered`, `rejected`                                                                               | `archived`         | archive              | `archived`                                      |           | 8.1                           |
+| E26  | every `EXPIRABLE_STATES` member                                                                       | `expired`          | sweeper              | `deadline_exceeded`                             |           | **3.3** event-relay           |
+
+`EXPIRABLE_STATES` = `persisted`, `scanning`, `scanned`, `scan_failed`, `policy_evaluated`, `approved`, `quarantined`, `held_for_review`, `delivery_pending`, `delivery_retry`. No edge leaves `archived`; `expired` is left only by E19; `delivered` and `rejected` only by E25. The reason `lifecycle_backfill` exists only in migrated history rows and is never accepted by the service.
+
+## Ordering rule (design L4)
+
+`decideTransition(current, request)` decides every request under the message row lock, in this order (the transition-key duplicate check runs first, in the database):
+
+1. **Round.** `expectedRound` older than the message's `lifecycle_round` → `stale/older_round`; newer → `invalid/future_round`.
+2. **Version.** `expectedVersion` given and different → `stale/version_mismatch` (the api's `expectedVersion`, the sweeper's read version).
+3. **Expected source.** Current state not in `expectedFrom` → `invalid/unexpected_from`, unless the message is already in the target state by a non-round edge → `duplicate/same_state`.
+4. **Same state** without a new-round edge → `duplicate/same_state`.
+5. **No edge** from the current state to the target: current state final → `stale/final_state`; target rank ≤ current rank → `stale/overtaken` (a late or duplicate event); otherwise → `invalid/edge_not_allowed` (a skipped stage: a bug).
+6. **Edge found:** wrong role → `invalid/actor_not_allowed`; wrong reason → `invalid/reason_not_allowed`.
+7. **Apply:** `version + 1`, `lifecycle_round + 1` on a new-round edge (E14, E15, E19).
+
+Occurrence times (`occurred_at`) are recorded but never compared (different clocks). Delivery states (E21–E24) are not ordered by events at all: they are re-derived from the recipient statuses under the message lock ([diagram 22](22-delivery-lifecycle.md)), so an older signal cannot overwrite a newer state.
+
+## Mapping of the step 1.1 values (migration `message_lifecycle`)
+
+| Old value                                                | New state          | `status_reason`      | Version / history                                                                              |
+| -------------------------------------------------------- | ------------------ | -------------------- | ---------------------------------------------------------------------------------------------- |
+| `received`                                               | `persisted`        | `lifecycle_backfill` | `version + 1`; history `NULL → received` (version 0) and `received → persisted`, both backfill |
+| `scanning`, `scanned`, `policy_evaluated`, `quarantined` | same name          | unchanged            | none                                                                                           |
+| `delivery_queued`                                        | `delivery_pending` | `delivery_planned`   | in-place rename                                                                                |
+| `delivered`                                              | `delivered`        | `delivery_complete`  | none                                                                                           |
+| `partially_delivered`                                    | `delivered`        | `delivery_partial`   | in-place rename                                                                                |
+| `failed`                                                 | `rejected`         | `delivery_failed`    | in-place rename                                                                                |
+| `discarded`                                              | `rejected`         | `discarded`          | in-place rename                                                                                |
+
+History rows are renamed with the same mapping, keep their versions and get `actor_role = actor_service = 'legacy'`; every message without a version-0 row got one `NULL → received` row. Legacy rows may contain pairs the table does not allow (`received → delivery_pending`): they are history, not decisions.
+
+## Rules every transition keeps
+
+| Rule                                                                                                                                                                                      | Source                  |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
+| One door: only `@email-gateway/message-lifecycle` writes `status`, `status_changed_at`, `version`, `lifecycle_round`, `status_reason` and history rows                                    | Design §2.0, L5.9       |
+| Atomic with the cause: the transition, its history row, `email_events` row and `mail.message.state_changed.v1` outbox row commit in the producer's transaction                            | Design §2.0, L5.1       |
+| Lock, then compare-and-set: `SELECT … FOR UPDATE` on the message row, `UPDATE … WHERE version = ?` as the backstop                                                                        | Design L5.1, L5.4       |
+| Idempotent by key: the same `transitionKey` leaves one history row (unique `(message_id, transition_key, received_at)`)                                                                   | Design L5.3             |
+| No transition after `received` produces an NDR to the sender; post-queue outcomes are deliver, tag, quarantine or discard (`rejected`)                                                    | ADR-0006                |
+| Partial and failed deliveries are reasons, not states: `delivered/delivery_partial`, `rejected/delivery_failed`; per-recipient outcomes stay in `email_recipients` and `email_deliveries` | ADR-0025, design L2, L9 |
+| A message stuck past its state's deadline is expired by the event-relay sweeper (E26); a lost delivery derivation is repaired by the lifecycle check (E21–E24, role `recovery`)           | Design L13, L14         |
 
 ## Status
 
-| Element                                                      | Status      | Evidence or delivering step                                |
-| ------------------------------------------------------------ | ----------- | ---------------------------------------------------------- |
-| `email_messages.status` enum, `status_changed_at`, `version` | IMPLEMENTED | Step 1.1 schema (`packages/database/prisma/schema.prisma`) |
-| `email_message_status_history` (partitioned, append-only)    | IMPLEMENTED | Step 1.1 schema; `schema.test.ts` checks partitioning      |
-| Index `(status, status_changed_at)` for reconciliation       | IMPLEMENTED | Step 1.1 schema                                            |
-| Every transition                                             | PLANNED 3.3 | Release transitions with 5.3                               |
-| Reconciliation of stuck messages                             | PLANNED 3.2 |                                                            |
+| Element                                                                                               | Status                     | Evidence or delivering step                                                             |
+| ----------------------------------------------------------------------------------------------------- | -------------------------- | --------------------------------------------------------------------------------------- |
+| The fifteen-value enum, `lifecycle_round`, `status_reason`, history actor and key columns, unique key | IMPLEMENTED (3.3 WP1)      | Migration `20261104130000_message_lifecycle`; `tests/integration/schema.test.ts`        |
+| `MESSAGE_STATES`, `ACTOR_ROLES`, `mail.message.state_changed.v1`, `mail.message.rescan_requested.v1`  | IMPLEMENTED (3.3 WP1)      | `packages/event-contracts`, `events.test.ts`, `registry.test.ts`                        |
+| Transition table, `decideTransition`, transition service, expiry sweeper, lifecycle check             | IMPLEMENTED (3.3)          | `packages/message-lifecycle`, `apps/event-relay/src/lifecycle`, `lifecycle-event-relay` |
+| Producers of E1, E2, E4, E20–E24                                                                      | IMPLEMENTED (3.3)          | smtp-adapter, delivery-worker, `@email-gateway/mail-routing`; stack `routing-*`         |
+| Producers of E14, E15, E19 (api)                                                                      | IMPLEMENTED (3.3)          | `apps/api/src/modules/messages`; stack `lifecycle-release`, `lifecycle-rescan`          |
+| Producers of E3, E5–E13, E16–E18, E25                                                                 | PLANNED 4.x, 5.2, 5.3, 8.1 |                                                                                         |

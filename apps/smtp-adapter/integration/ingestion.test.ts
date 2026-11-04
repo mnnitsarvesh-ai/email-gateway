@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { TestingModule } from '@nestjs/testing';
 import { buildGatewayTrace } from '@email-gateway/common';
-import { messageReceivedV1 } from '@email-gateway/event-contracts';
+import { EventTypes, messageReceivedV1 } from '@email-gateway/event-contracts';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { LmtpInboundListener, LmtpOutboundListener } from '../src/ingestion/ingestion.module';
 import { IngestionRepository } from '../src/ingestion/ingestion.repository';
@@ -102,7 +102,11 @@ describe('LMTP ingestion: inbound', () => {
       organizationId: orgA,
       domainId: domainA,
       direction: 'inbound',
-      status: 'received',
+      // Step 3.3 L8.1: born persisted, version 1, round 0.
+      status: 'persisted',
+      statusReason: 'committed',
+      version: 1,
+      lifecycleRound: 0,
       statusChangedAt: identity.receivedAt,
       internetMessageId: '<Endtoend@external.test>',
       envelopeFrom: 'sender@external.test',
@@ -162,6 +166,40 @@ describe('LMTP ingestion: inbound', () => {
       publishedAt: null,
     });
     expect(outbox[0]!.eventId).toMatch(/^[0-9a-f-]{36}$/);
+    // No state_changed row for the creation: mail.message.received.v1 notifies `persisted`.
+    expect(outbox.filter((o) => o.eventType === EventTypes.MessageStateChanged)).toEqual([]);
+
+    // Exactly the two creation history rows (E1, E2), caused by the received event.
+    const history = await fx.prisma.emailMessageStatusHistory.findMany({
+      where: { messageId: identity.id, receivedAt: identity.receivedAt },
+      orderBy: { version: 'asc' },
+    });
+    expect(
+      history.map((h) => [h.version, h.fromStatus, h.toStatus, h.reasonCode, h.lifecycleRound]),
+    ).toEqual([
+      [0, null, 'received', 'smtp_accepted', 0],
+      [1, 'received', 'persisted', 'committed', 0],
+    ]);
+    for (const row of history) {
+      expect(row).toMatchObject({
+        organizationId: orgA,
+        actorRole: 'ingestion',
+        actorService: 'smtp-adapter',
+        actorType: 'system',
+        actorId: null,
+        eventId: outbox[0]!.eventId,
+        correlationId: `lmtp:${ident}`,
+        stateEventId: null,
+        occurredAt: identity.receivedAt,
+        changedAt: identity.receivedAt,
+      });
+    }
+    expect(history[0]!.transitionKey).toBe(
+      sha256(Buffer.from(`ingest:${identity.id.toString()}:received`)),
+    );
+    expect(history[1]!.transitionKey).toBe(
+      sha256(Buffer.from(`ingest:${identity.id.toString()}:persisted`)),
+    );
     expect(messageReceivedV1.parse(outbox[0]!.payload)).toEqual({
       messageId: identity.id.toString(),
       receivedAt: identity.receivedAt.toISOString(),
@@ -178,11 +216,15 @@ describe('LMTP ingestion: inbound', () => {
     // routing stack suites, CI's apps profile) adds `mail.delivery.*` rows for these messages
     // through its development pass-through (step 2.3 R5; docs/plan/steps/05-routing.md §12).
     const ingestionOutbox = { organizationId: orgA, eventType: 'mail.message.received.v1' };
+    // Ingestion's own history rows: the live dev pass-through may move the earlier tests'
+    // messages `persisted → approved` meanwhile (step 3.3 verification round 2).
+    const ingestionHistory = { organizationId: orgA, actorRole: 'ingestion' as const };
     const before = await Promise.all([
       fx.messageCount(orgA),
       fx.prisma.messageOutbox.count({ where: ingestionOutbox }),
       // EML objects only: a running email-worker adds `org/{id}/part/…` objects (step 3.1 M11).
       fx.emlObjectKeys(orgA),
+      fx.prisma.emailMessageStatusHistory.count({ where: ingestionHistory }),
     ]);
     const result = await deliver({
       port: inboundPort,
@@ -197,6 +239,9 @@ describe('LMTP ingestion: inbound', () => {
     expect(await fx.messageCount(orgA)).toBe(before[0]);
     expect(await fx.prisma.messageOutbox.count({ where: ingestionOutbox })).toBe(before[1]);
     expect(await fx.emlObjectKeys(orgA)).toEqual(before[2]);
+    expect(await fx.prisma.emailMessageStatusHistory.count({ where: ingestionHistory })).toBe(
+      before[3],
+    );
   });
 
   it('splits a message over two organizations: two messages, two prefixes, per-recipient replies', async () => {

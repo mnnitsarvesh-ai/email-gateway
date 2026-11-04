@@ -1,4 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import {
+  DELIVERED_PATH,
+  expectConsistentHistory,
+  expectStateChangedRows,
+  pathOf,
+  waitForLifecycle,
+} from './support/lifecycle';
+import { purgeDormantQueues } from './support/broker';
 import { waitFor } from './support/compose';
 import { waitForAllDeliveries, waitForMessage } from './support/deliveries';
 import { clearSinkDomain, sinkFiles, sinkMessage } from './support/mail-sink';
@@ -44,6 +52,7 @@ afterAll(async () => {
     if (domain) await clearSinkDomain(domain);
   }
   await fx.cleanup();
+  await purgeDormantQueues();
 }, 180_000);
 
 describe.skipIf(gate.skip)(
@@ -122,6 +131,13 @@ describe.skipIf(gate.skip)(
           })) > 0,
       );
       expect(involving(await listQueue('postfix-outbound'), [out.name, extDomain()])).toEqual([]);
+      // Step 3.3 (L9, E24): every recipient failed → rejected/delivery_failed.
+      await waitForLifecycle(fx.prisma, message, 'rejected', 'delivery_failed');
+      expect(await pathOf(fx.prisma, message)).toEqual(
+        DELIVERED_PATH('rejected', 'delivery_failed'),
+      );
+      await expectConsistentHistory(fx.prisma, message);
+      await expectStateChangedRows(fx.prisma, org, message);
     });
 
     it('inbound 5xx: bounced, and NO DSN to the external sender (no backscatter)', async () => {
@@ -154,6 +170,11 @@ describe.skipIf(gate.skip)(
       expect(
         involving(await listQueue('postfix-outbound'), [tenant.name, extSenderDomain()]),
       ).toEqual([]);
+      await waitForLifecycle(fx.prisma, message, 'rejected', 'delivery_failed');
+      expect(await pathOf(fx.prisma, message)).toEqual(
+        DELIVERED_PATH('rejected', 'delivery_failed'),
+      );
+      await expectConsistentHistory(fx.prisma, message);
     });
   },
 );

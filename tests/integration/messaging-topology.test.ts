@@ -10,8 +10,8 @@ import { ManagementApi, type RawBinding, type RawExchange, type RawPolicy } from
 import { stack } from './support/env';
 
 /**
- * The provisioned vhost `email-gateway` matches topology v1 exactly (step 3.2 Q1, Q4, §3):
- * read-only checks through the management API.
+ * The provisioned vhost `email-gateway` matches the topology exactly (step 3.2 Q1, Q4, §3; v2:
+ * step 3.3 L7): read-only checks through the management API.
  */
 const api = new ManagementApi();
 const vhost = stack.rabbitmqVhost();
@@ -110,5 +110,25 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
       .sort();
     expect(actual).toEqual(expected);
     expect(bindings.filter((b) => b.destination_type === 'exchange')).toHaveLength(5);
+  });
+
+  it('is topology v2: the vhost description and the rescan bindings of step 3.3', async () => {
+    expect(TOPOLOGY_VERSION).toBe(2);
+    const info = await api.get<{ description?: string }>(`/vhosts/${encodeURIComponent(vhost)}`);
+    expect(info.description).toBe('email-gateway topology v2');
+    const rescan = bindings
+      .filter(
+        (b) =>
+          b.source === 'email.security' &&
+          b.routing_key === 'org.*.mail.message.rescan_requested.v1',
+      )
+      .map((b) => `${b.destination_type}:${b.destination}`)
+      .sort();
+    expect(rescan).toEqual(
+      ['scan.attachment', 'scan.auth', 'scan.dlp', 'scan.spam', 'scan.url'].map(
+        (q) => `queue:${q}`,
+      ),
+    );
+    expect(bindings.filter((b) => b.source !== '')).toHaveLength(37);
   });
 });

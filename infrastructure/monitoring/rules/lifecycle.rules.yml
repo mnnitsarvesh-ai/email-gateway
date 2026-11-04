@@ -1,0 +1,61 @@
+# Message lifecycle alerts (step 3.3 L14, docs/plan/steps/08-message-lifecycle.md). Series: the
+# lifecycle metrics of the transition service (lifecycle_transitions_total, every writer of the
+# state) and of the event-relay lifecycle jobs (expiry sweeper L13, lifecycle check L14). Every
+# alert links its section of docs/runbooks/message-lifecycle.md. Validate with
+# `promtool check rules` and `promtool test rules tests/lifecycle.rules.test.yml`.
+groups:
+  - name: message-lifecycle
+    rules:
+      - alert: LifecycleRecoveries
+        # A recovery means a derived delivery state was lost (a signal recorded without its
+        # derivation, a bug, or legacy backfill rows): the lifecycle check repaired it.
+        expr: sum(increase(lifecycle_recovered_total[1h])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: The lifecycle check recovered lost delivery-state derivations
+          description: >-
+            {{ $value | humanize }} message delivery states were re-derived by the event-relay
+            lifecycle check in the last hour. Find the messages (warn log "lost delivery-state
+            derivation recovered") and the path that skipped the derivation.
+          runbook_url: docs/runbooks/message-lifecycle.md#lifecyclerecoveries
+      - alert: LifecycleStuckMessages
+        expr: max by (state) (lifecycle_stuck_messages) > 100
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: Messages stuck in a lifecycle state
+          description: >-
+            {{ $value | humanize }} messages have been in state {{ $labels.state }} longer than
+            LIFECYCLE_CHECK_AFTER_SECONDS for 30 minutes. The stage that leaves this state is
+            down, not deployed, or failing; the sweeper expires them at the state's deadline.
+          runbook_url: docs/runbooks/message-lifecycle.md#lifecyclestuckmessages
+      - alert: LifecycleExpiryNoShardOwner
+        # Every replica with the sweeper enabled reports lifecycle_expiry_shards
+        # (LIFECYCLE_EXPIRY_SHARDS); the held shard locks of all replicas must cover it.
+        expr: >-
+          (sum(lifecycle_expiry_shards_held) or vector(0))
+          < max(lifecycle_expiry_shards)
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Expiry sweeper shards without an owner
+          description: >-
+            Fewer expiry shard locks are held than LIFECYCLE_EXPIRY_SHARDS. Overdue messages of
+            unowned shards are not expired. Shards must be <= replicas x
+            LIFECYCLE_EXPIRY_MAX_HELD_SHARDS.
+          runbook_url: docs/runbooks/message-lifecycle.md#lifecycleexpirynoshardowner
+      - alert: LifecycleInvalidTransitions
+        expr: sum(rate(lifecycle_transitions_total{result="invalid"}[15m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Invalid lifecycle transitions requested
+          description: >-
+            Producers keep requesting transitions the state machine refuses (a skipped stage, a
+            wrong actor or reason, a forged or future-round event). Each is recorded as an
+            email_events lifecycle.ignored row and logged at warn with its ids and codes.
+          runbook_url: docs/runbooks/message-lifecycle.md#lifecycleinvalidtransitions

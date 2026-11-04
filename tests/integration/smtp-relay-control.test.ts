@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { purgeDormantQueues } from './support/broker';
 import { compose, composeExec } from './support/compose';
 import { SmtpFixtures } from './support/smtp-fixtures';
 import { assertStackReady, smtpStackGate } from './support/smtp-stack';
@@ -37,6 +38,7 @@ afterAll(async () => {
   if (gate.skip) return;
   await removeToolsFiles(toolFiles);
   await fx.cleanup();
+  await purgeDormantQueues();
 }, 120_000);
 
 describe.skipIf(gate.skip)('SMTP stack: no open relay (suite 3)', { timeout: 120_000 }, () => {

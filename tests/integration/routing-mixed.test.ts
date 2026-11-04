@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { purgeDormantQueues } from './support/broker';
 import { waitFor } from './support/compose';
 import {
   deliveriesOf,
@@ -64,6 +65,7 @@ afterAll(async () => {
   }
   await clearSinkDomain(extDomain());
   await fx.cleanup();
+  await purgeDormantQueues();
 }, 180_000);
 
 describe.skipIf(gate.skip)(

@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { purgeDormantQueues } from './support/broker';
 import { composeOk, waitFor } from './support/compose';
 import {
   deliveriesOf,
@@ -70,6 +71,7 @@ afterAll(async () => {
   }
   for (const d of [...extDomains(), redisExt()]) await clearSinkDomain(d);
   await fx.cleanup();
+  await purgeDormantQueues();
 }, 240_000);
 
 describe.skipIf(gate.skip)('routing stack: outbound rate limits (§9 item 8)', () => {

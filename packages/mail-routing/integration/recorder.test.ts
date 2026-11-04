@@ -1,10 +1,14 @@
-import { randomUUID } from 'node:crypto';
-import { deliveryStatusChangedV1, EventTypes } from '@email-gateway/event-contracts';
+import { createHash, randomUUID } from 'node:crypto';
+import {
+  deliveryStatusChangedV1,
+  EventTypes,
+  messageStateChangedV1,
+} from '@email-gateway/event-contracts';
+import type { LifecycleMetrics, MessageState } from '@email-gateway/message-lifecycle';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   bindReinjectionQueueId,
   logSignalKey,
-  markMessageDeliveryQueued,
   planSignalKey,
   reconcileSignalKey,
   recordDeliverySignal,
@@ -12,7 +16,12 @@ import {
   reinjectionToken,
   type DeliverySignal,
 } from '../src';
-import { Fixtures, type DeliveryFixture, type MessageFixture } from './support/fixtures';
+import {
+  Fixtures,
+  type DeliveryFixture,
+  type FixtureState,
+  type MessageFixture,
+} from './support/fixtures';
 
 const fx = new Fixtures();
 const prisma = fx.prisma;
@@ -39,10 +48,39 @@ const key = () =>
 
 async function setup(
   addresses: string[],
+  state: FixtureState = 'delivery_pending',
 ): Promise<{ message: MessageFixture; deliveries: DeliveryFixture[] }> {
-  const message = await fx.message(organizationId, addresses);
+  const message = await fx.message(organizationId, addresses, 'outbound', state);
   const deliveries = await fx.deliveries(message);
   return { message, deliveries };
+}
+
+const sha256 = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex');
+
+async function lifecycle(message: MessageFixture) {
+  return prisma.emailMessage.findUniqueOrThrow({
+    where: { id_receivedAt: { id: message.messageId, receivedAt: message.receivedAt } },
+    select: { status: true, statusReason: true, version: true, lifecycleRound: true },
+  });
+}
+
+async function history(message: MessageFixture) {
+  return prisma.emailMessageStatusHistory.findMany({
+    where: { messageId: message.messageId, receivedAt: message.receivedAt },
+    orderBy: { version: 'asc' },
+  });
+}
+
+/** Records every lifecycle metric call (the RecorderContext's optional lifecycleMetrics). */
+function recordingMetrics() {
+  const calls: string[] = [];
+  const metrics: LifecycleMetrics = {
+    transition: (from, to, result) => calls.push(`transition:${from}>${to}:${result}`),
+    ignored: (reason) => calls.push(`ignored:${reason}`),
+    versionConflict: () => calls.push('conflict'),
+    derivedSkipped: (state) => calls.push(`skipped:${state}`),
+  };
+  return { calls, metrics };
 }
 
 const byId = (d: DeliveryFixture) => ({ deliveryId: d.id, receivedAt: d.receivedAt });
@@ -105,9 +143,6 @@ describe('recordDeliverySignal', () => {
     const reinjection = await fx.reinjection(message);
     const [d] = await fx.deliveries(message, { reinjectionId: reinjection.id });
     const token = reinjectionToken(reinjection.publicId);
-    await prisma.$transaction((tx) =>
-      markMessageDeliveryQueued(tx, { id: message.messageId, receivedAt: message.receivedAt }),
-    );
 
     const queued = await recordDeliverySignal(
       prisma,
@@ -162,6 +197,7 @@ describe('recordDeliverySignal', () => {
     expect(await recordDeliverySignal(prisma, deferredSignal, ctx)).toMatchObject({
       result: 'applied',
       status: 'deferred',
+      messageState: 'delivery_retry',
     });
     let row = await delivery(d!);
     expect(row).toMatchObject({
@@ -177,6 +213,14 @@ describe('recordDeliverySignal', () => {
     });
     expect(recipient.status).toBe('deferred');
 
+    const deliveredKey = logSignalKey({
+      sourceId: 'it',
+      queueId: '4ZQUEUE1',
+      address: 'alice@ext.test',
+      status: 'sent',
+      logTimestamp: at(3000),
+      dsn: '2.0.0',
+    });
     const delivered = await recordDeliverySignal(
       prisma,
       {
@@ -184,14 +228,7 @@ describe('recordDeliverySignal', () => {
         status: 'delivered',
         occurredAt: at(3000),
         source: 'postfix_log',
-        signalKey: logSignalKey({
-          sourceId: 'it',
-          queueId: '4ZQUEUE1',
-          address: 'alice@ext.test',
-          status: 'sent',
-          logTimestamp: at(3000),
-          dsn: '2.0.0',
-        }),
+        signalKey: deliveredKey,
         attempt: {
           remoteHost: 'mx.ext.test',
           remoteIp: '203.0.113.25',
@@ -210,7 +247,7 @@ describe('recordDeliverySignal', () => {
       result: 'applied',
       status: 'delivered',
       previousStatus: 'deferred',
-      messageStatus: 'delivered',
+      messageState: 'delivered',
     });
     row = await delivery(d!);
     expect(row).toMatchObject({ status: 'delivered', attemptCount: 2, finalSmtpCode: 250 });
@@ -227,22 +264,34 @@ describe('recordDeliverySignal', () => {
     ]);
     expect(attempts[1]!.tlsProtocol).toBe('TLSv1.3');
 
-    const msg = await prisma.emailMessage.findUniqueOrThrow({
-      where: { id_receivedAt: { id: message.messageId, receivedAt: message.receivedAt } },
+    // The derived message state (step 3.3 L9): delivery_retry on the deferral, then delivered.
+    expect(await lifecycle(message)).toMatchObject({
+      status: 'delivered',
+      statusReason: 'delivery_complete',
+      version: 5,
     });
-    expect(msg).toMatchObject({ status: 'delivered', version: 2 });
-    const history = await prisma.emailMessageStatusHistory.findMany({
-      where: { messageId: message.messageId, receivedAt: message.receivedAt },
-      orderBy: { version: 'asc' },
-    });
-    expect(history.map((h) => [h.version, h.fromStatus, h.toStatus])).toEqual([
-      [1, 'received', 'delivery_queued'],
-      [2, 'delivery_queued', 'delivered'],
+    const rows = await history(message);
+    expect(rows.slice(3).map((h) => [h.version, h.fromStatus, h.toStatus, h.reasonCode])).toEqual([
+      [3, 'approved', 'delivery_pending', 'delivery_planned'],
+      [4, 'delivery_pending', 'delivery_retry', 'delivery_deferred'],
+      [5, 'delivery_retry', 'delivered', 'delivery_complete'],
     ]);
+    expect(rows[5]).toMatchObject({
+      actorRole: 'delivery',
+      actorService: 'mail-routing-it',
+      actorType: 'system',
+      eventId: null,
+      correlationId: `delivery:${d!.id.toString()}`,
+      transitionKey: sha256(`signal:${d!.id.toString()}:${deliveredKey}:delivered`),
+    });
 
     // Every outbox row parses, names ids only and correlates to the delivery.
     const outbox = await prisma.messageOutbox.findMany({
-      where: { aggregateId: message.messageId.toString(), organizationId },
+      where: {
+        aggregateId: message.messageId.toString(),
+        organizationId,
+        eventType: EventTypes.DeliveryStatusChanged,
+      },
       orderBy: { id: 'asc' },
     });
     expect(outbox.map((o) => o.eventType)).toEqual(Array(3).fill(EventTypes.DeliveryStatusChanged));
@@ -274,7 +323,9 @@ describe('recordDeliverySignal', () => {
     expect(events.map((e) => e.eventType)).toEqual([
       'delivery.queued',
       'delivery.deferred',
+      'lifecycle.delivery_retry',
       'delivery.delivered',
+      'lifecycle.delivered',
     ]);
     for (const event of events) expect(JSON.stringify(event.details)).not.toContain('@');
   });
@@ -346,15 +397,15 @@ describe('recordDeliverySignal', () => {
       ['bounced', 'delivered', false],
     ]);
     expect((await delivery(d)).status).toBe('bounced');
-    // The single delivery is terminal: the message failed.
-    const msg = await prisma.emailMessage.findUniqueOrThrow({
-      where: { id_receivedAt: { id: message.messageId, receivedAt: message.receivedAt } },
+    // The single delivery is terminal: the message failed (rejected/delivery_failed, step 3.3).
+    expect(await lifecycle(message)).toMatchObject({
+      status: 'rejected',
+      statusReason: 'delivery_failed',
     });
-    expect(msg.status).toBe('failed');
   });
 
   it('records the DSN queue id on a same-state signal and recovers from unknown', async () => {
-    const { deliveries } = await setup(['dsn@ext.test', 'lost@ext.test']);
+    const { message, deliveries } = await setup(['dsn@ext.test', 'lost@ext.test']);
     const [bounced, lost] = deliveries as [DeliveryFixture, DeliveryFixture];
     const signal = (
       d: DeliveryFixture,
@@ -400,7 +451,11 @@ describe('recordDeliverySignal', () => {
     expect(late).toMatchObject({
       result: 'applied',
       status: 'delivered',
-      messageStatus: 'partially_delivered',
+      messageState: 'delivered',
+    });
+    expect(await lifecycle(message)).toMatchObject({
+      status: 'delivered',
+      statusReason: 'delivery_partial',
     });
   });
 
@@ -469,12 +524,9 @@ describe('recordDeliverySignal', () => {
     expect(attempts.map((a) => a.attemptNo)).toEqual([1, 2, 3, 4, 5, 6]);
   });
 
-  it('completes the message aggregate exactly once under concurrent terminal signals', async () => {
+  it('moves the message to its final state exactly once under concurrent terminal signals', async () => {
     const addresses = Array.from({ length: 5 }, (_, i) => `r${i}@ext.test`);
     const { message, deliveries } = await setup(addresses);
-    await prisma.$transaction((tx) =>
-      markMessageDeliveryQueued(tx, { id: message.messageId, receivedAt: message.receivedAt }),
-    );
     const results = await Promise.all(
       deliveries.map((d, i) =>
         recordDeliverySignal(
@@ -492,39 +544,27 @@ describe('recordDeliverySignal', () => {
       ),
     );
     expect(results.map((r) => r.result)).toEqual(Array(5).fill('applied'));
-    expect(
-      results.filter((r) => r.messageStatus !== undefined).map((r) => r.messageStatus),
-    ).toEqual(['partially_delivered']);
-    const history = await prisma.emailMessageStatusHistory.findMany({
-      where: { messageId: message.messageId, receivedAt: message.receivedAt },
-      orderBy: { version: 'asc' },
+    expect(results.filter((r) => r.messageState !== undefined).map((r) => r.messageState)).toEqual([
+      'delivered',
+    ]);
+    expect((await history(message)).map((h) => [h.version, h.toStatus])).toEqual([
+      [0, 'received'],
+      [1, 'persisted'],
+      [2, 'approved'],
+      [3, 'delivery_pending'],
+      [4, 'delivered'],
+    ]);
+    expect(await lifecycle(message)).toMatchObject({
+      status: 'delivered',
+      statusReason: 'delivery_partial',
+      version: 4,
     });
-    expect(history.map((h) => h.toStatus)).toEqual(['delivery_queued', 'partially_delivered']);
   });
 
   it('runs inside the caller’s transaction and rolls back with it', async () => {
     const { message, deliveries } = await setup(['tx@ext.test', 'tx2@ext.test']);
     const approvalEventId = randomUUID();
     await prisma.$transaction(async (tx) => {
-      expect(
-        await markMessageDeliveryQueued(
-          tx,
-          { id: message.messageId, receivedAt: message.receivedAt },
-          { eventId: approvalEventId },
-        ),
-      ).toEqual({
-        changed: true,
-        status: 'delivery_queued',
-      });
-      expect(
-        await markMessageDeliveryQueued(tx, {
-          id: message.messageId,
-          receivedAt: message.receivedAt,
-        }),
-      ).toEqual({
-        changed: false,
-        status: 'delivery_queued',
-      });
       for (const d of deliveries) {
         const result = await recordDeliverySignal(
           tx,
@@ -546,11 +586,9 @@ describe('recordDeliverySignal', () => {
       ['pending', null],
       ['suppressed', 'suppressed'],
     ]);
-    const history = await prisma.emailMessageStatusHistory.findFirstOrThrow({
-      where: { messageId: message.messageId, receivedAt: message.receivedAt },
-    });
-    expect(history.eventId).toBe(approvalEventId);
-    expect(await counts(message)).toMatchObject({ audit: 2, events: 2, outbox: 1 });
+    // One recipient still pending: the message stays delivery_pending (no transition).
+    expect(await lifecycle(message)).toMatchObject({ status: 'delivery_pending', version: 3 });
+    expect(await counts(message)).toMatchObject({ audit: 2, events: 2, outbox: 1, history: 4 });
 
     // A failing caller transaction leaves nothing behind.
     const other = await setup(['rollback@ext.test']);
@@ -570,13 +608,246 @@ describe('recordDeliverySignal', () => {
         throw new Error('caller failed');
       }),
     ).rejects.toThrow('caller failed');
+    // Not even the derived rejected/delivery_failed of the failing caller's signal survives.
     expect(await counts(other.message)).toMatchObject({
       audit: 0,
       events: 0,
       outbox: 0,
-      history: 0,
+      history: 4,
     });
     expect((await delivery(other.deliveries[0]!)).status).toBe('pending');
+    expect(await lifecycle(other.message)).toMatchObject({
+      status: 'delivery_pending',
+      version: 3,
+    });
+  });
+});
+
+describe('derived message state (step 3.3 L9)', () => {
+  const sig = (
+    d: DeliveryFixture,
+    status: DeliverySignal['status'],
+    offsetMs: number,
+    extra: Partial<DeliverySignal> = {},
+  ): DeliverySignal => ({
+    match: byId(d),
+    status,
+    occurredAt: at(offsetMs),
+    source: 'postfix_log',
+    signalKey: key(),
+    ...(status === 'delivered' ? { enhancedStatus: '2.0.0' } : {}),
+    ...(status === 'bounced' ? { enhancedStatus: '5.1.1', smtpCode: 550 } : {}),
+    ...extra,
+  });
+
+  async function stateEvents(message: MessageFixture) {
+    const rows = await prisma.messageOutbox.findMany({
+      where: {
+        organizationId,
+        aggregateId: message.messageId.toString(),
+        eventType: EventTypes.MessageStateChanged,
+      },
+      orderBy: { id: 'asc' },
+    });
+    return rows.map((row) => ({ row, payload: messageStateChangedV1.parse(row.payload) }));
+  }
+
+  it('delivery_retry on a deferral, delivery_pending on the requeue, then delivered/delivery_complete', async () => {
+    const { message, deliveries } = await setup(['one@ext.test', 'two@ext.test']);
+    const [a, b] = deliveries as [DeliveryFixture, DeliveryFixture];
+    const { calls, metrics } = recordingMetrics();
+    const mctx = { ...ctx, lifecycleMetrics: metrics, eventId: randomUUID() };
+    const send = async (signal: DeliverySignal): Promise<MessageState | undefined> =>
+      (await recordDeliverySignal(prisma, signal, mctx)).messageState;
+
+    expect(await send(sig(a, 'queued', 0))).toBeUndefined();
+    expect(await send(sig(a, 'deferred', 1000, { errorClass: 'remote_4xx' }))).toBe(
+      'delivery_retry',
+    );
+    expect(await lifecycle(message)).toMatchObject({
+      status: 'delivery_retry',
+      statusReason: 'delivery_deferred',
+      version: 4,
+    });
+    // Postfix moves the deferred file back to the active queue: no recipient deferred any more.
+    expect(await send(sig(a, 'queued', 2000))).toBe('delivery_pending');
+    expect(await lifecycle(message)).toMatchObject({
+      status: 'delivery_pending',
+      statusReason: 'delivery_requeued',
+      version: 5,
+    });
+    expect(await send(sig(a, 'delivered', 3000))).toBeUndefined(); // b still pending
+    expect(await send(sig(b, 'delivered', 3000))).toBe('delivered');
+    expect(await lifecycle(message)).toMatchObject({
+      status: 'delivered',
+      statusReason: 'delivery_complete',
+      version: 6,
+      lifecycleRound: 0,
+    });
+
+    const rows = await history(message);
+    expect(rows.map((h) => h.version)).toEqual([0, 1, 2, 3, 4, 5, 6]);
+    expect(rows.slice(4).map((h) => [h.fromStatus, h.toStatus, h.reasonCode])).toEqual([
+      ['delivery_pending', 'delivery_retry', 'delivery_deferred'],
+      ['delivery_retry', 'delivery_pending', 'delivery_requeued'],
+      ['delivery_pending', 'delivered', 'delivery_complete'],
+    ]);
+    for (const row of rows.slice(4)) {
+      expect(row).toMatchObject({
+        actorRole: 'delivery',
+        actorService: 'mail-routing-it',
+        eventId: mctx.eventId,
+        lifecycleRound: 0,
+      });
+      expect(row.stateEventId).toMatch(/^[0-9a-f-]{36}$/);
+    }
+    expect(rows[6]!.correlationId).toBe(`delivery:${b.id.toString()}`);
+
+    // One state_changed outbox row per applied transition, ids and codes only.
+    const events = await stateEvents(message);
+    expect(
+      events.map((e) => [e.payload.previousState, e.payload.state, e.payload.version]),
+    ).toEqual([
+      ['delivery_pending', 'delivery_retry', 4],
+      ['delivery_retry', 'delivery_pending', 5],
+      ['delivery_pending', 'delivered', 6],
+    ]);
+    expect(events.map((e) => e.row.eventId)).toEqual(rows.slice(4).map((h) => h.stateEventId));
+    for (const { row } of events) expect(JSON.stringify(row.payload)).not.toContain('@');
+    expect(calls.filter((c) => c.endsWith(':applied'))).toEqual([
+      'transition:delivery_pending>delivery_retry:applied',
+      'transition:delivery_retry>delivery_pending:applied',
+      'transition:delivery_pending>delivered:applied',
+    ]);
+  });
+
+  it('delivered/delivery_partial when one recipient bounced and the other was delivered', async () => {
+    const { message, deliveries } = await setup(['ok@ext.test', 'gone@ext.test']);
+    const [a, b] = deliveries as [DeliveryFixture, DeliveryFixture];
+    await recordDeliverySignal(prisma, sig(b, 'bounced', 0), ctx);
+    expect(await lifecycle(message)).toMatchObject({ status: 'delivery_pending', version: 3 });
+    expect((await recordDeliverySignal(prisma, sig(a, 'delivered', 10), ctx)).messageState).toBe(
+      'delivered',
+    );
+    expect(await lifecycle(message)).toMatchObject({
+      status: 'delivered',
+      statusReason: 'delivery_partial',
+      version: 4,
+    });
+  });
+
+  it('rejected/delivery_failed when no recipient was delivered', async () => {
+    const { message, deliveries } = await setup(['x@ext.test', 'y@ext.test']);
+    const [a, b] = deliveries as [DeliveryFixture, DeliveryFixture];
+    await recordDeliverySignal(prisma, sig(a, 'bounced', 0), ctx);
+    const last = await recordDeliverySignal(prisma, sig(b, 'expired', 10), ctx);
+    expect(last).toMatchObject({ result: 'applied', status: 'expired', messageState: 'rejected' });
+    expect(await lifecycle(message)).toMatchObject({
+      status: 'rejected',
+      statusReason: 'delivery_failed',
+      version: 4,
+    });
+    // Final: a late signal of another recipient changes nothing at message level.
+    expect(
+      (await recordDeliverySignal(prisma, sig(a, 'bounced', 20, { dsnQueueId: '4ZLATE1' }), ctx))
+        .result,
+    ).toBe('duplicate');
+    expect((await history(message)).length).toBe(5);
+  });
+
+  it('a signal of an older delivery_seq updates its delivery but never moves the message', async () => {
+    const { message, deliveries: seq0 } = await setup(['rel@ext.test', 'rel2@ext.test']);
+    const seq1 = await fx.deliveries(message, { deliverySeq: 1 });
+    const before = await counts(message);
+    const result = await recordDeliverySignal(prisma, sig(seq0[0]!, 'bounced', 0), ctx);
+    expect(result).toMatchObject({ result: 'applied', status: 'bounced' });
+    expect(result.messageState).toBeUndefined();
+    await recordDeliverySignal(prisma, sig(seq0[1]!, 'bounced', 0), ctx);
+    // Every recipient is now bounced (the recipient mirror follows the delivery), yet the
+    // message stays where the newest delivery_seq has it.
+    expect(await lifecycle(message)).toMatchObject({ status: 'delivery_pending', version: 3 });
+    expect((await counts(message)).history).toBe(before.history);
+    expect(await stateEvents(message)).toEqual([]);
+
+    // The newest delivery_seq derives from the current recipients.
+    const newest = await recordDeliverySignal(prisma, sig(seq1[0]!, 'delivered', 10), ctx);
+    expect(newest.messageState).toBe('delivered');
+    expect(await lifecycle(message)).toMatchObject({
+      status: 'delivered',
+      statusReason: 'delivery_partial',
+    });
+  });
+
+  it('a message outside the delivery phase (expired) is not moved; the recipient is still recorded', async () => {
+    const { message, deliveries } = await setup(['late@ext.test'], 'expired');
+    const d = deliveries[0]!;
+    const { calls, metrics } = recordingMetrics();
+    const result = await recordDeliverySignal(prisma, sig(d, 'delivered', 0), {
+      ...ctx,
+      lifecycleMetrics: metrics,
+    });
+    expect(result).toMatchObject({ result: 'applied', status: 'delivered' });
+    expect(result.messageState).toBeUndefined();
+    expect((await delivery(d)).status).toBe('delivered');
+    const recipient = await prisma.emailRecipient.findUniqueOrThrow({
+      where: { id_receivedAt: { id: d.recipientId, receivedAt: d.receivedAt } },
+    });
+    expect(recipient.status).toBe('delivered');
+    expect(await lifecycle(message)).toMatchObject({
+      status: 'expired',
+      statusReason: 'deadline_exceeded',
+      version: 4,
+    });
+    expect((await history(message)).length).toBe(5);
+    // No ignored row: a late per-recipient signal after expiry is normal (counted only).
+    expect(
+      await prisma.emailEvent.count({
+        where: {
+          messageId: message.messageId,
+          receivedAt: message.receivedAt,
+          eventType: { startsWith: 'lifecycle.' },
+        },
+      }),
+    ).toBe(0);
+    expect(calls).toEqual(['skipped:expired']);
+  });
+
+  it('resolves queue ids case-sensitively (4jKFxV5fmHz12JnW is not 4jKFxV5fMHz12Jnw, L15)', async () => {
+    const lower = await setup(['same@ext.test']);
+    const upper = await setup(['same@ext.test']);
+    // The two ids of L15, with a per-run suffix (rows of other runs never interfere).
+    const suffix = randomUUID().replaceAll('-', '').slice(0, 6);
+    const ids = [`4jKFxV5fmHz12JnW${suffix}`, `4jKFxV5fMHz12Jnw${suffix}`] as const;
+    for (const [i, fixture] of [lower, upper].entries()) {
+      const bound = await recordDeliverySignal(
+        prisma,
+        { ...sig(fixture.deliveries[0]!, 'queued', 0, { source: 'reinjection' }), queueId: ids[i] },
+        ctx,
+      );
+      expect(bound.result).toBe('applied');
+      expect((await delivery(fixture.deliveries[0]!)).outboundQueueId).toBe(ids[i]);
+    }
+    const byQueue = (queueId: string, status: DeliverySignal['status']) =>
+      recordDeliverySignal(
+        prisma,
+        {
+          match: { queueId, address: 'same@ext.test' },
+          status,
+          occurredAt: at(1000),
+          source: 'postfix_log',
+          signalKey: key(),
+          ...(status === 'delivered' ? { enhancedStatus: '2.0.0' } : { enhancedStatus: '5.1.1' }),
+        },
+        ctx,
+      );
+    const second = await byQueue(ids[1], 'bounced');
+    expect(second).toMatchObject({ result: 'applied', deliveryId: upper.deliveries[0]!.id });
+    expect((await delivery(lower.deliveries[0]!)).status).toBe('queued');
+    const first = await byQueue(ids[0], 'delivered');
+    expect(first).toMatchObject({ result: 'applied', deliveryId: lower.deliveries[0]!.id });
+    expect(await lifecycle(lower.message)).toMatchObject({ status: 'delivered' });
+    expect(await lifecycle(upper.message)).toMatchObject({ status: 'rejected' });
+    expect((await byQueue(ids[0].toUpperCase(), 'bounced')).result).toBe('unmatched');
   });
 });
 

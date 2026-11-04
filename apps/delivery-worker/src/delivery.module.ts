@@ -157,6 +157,7 @@ export class DeliveryModule {
             prisma,
             RECORDER_TX_TIMEOUT_MS,
             logger,
+            metrics,
           ),
         inject: [PrismaService, AdvisoryLocks, DeliveryMetrics],
       },

@@ -10,6 +10,7 @@ const messageSelect = {
   receivedAt: true,
   direction: true,
   status: true,
+  statusReason: true,
 } satisfies Prisma.EmailMessageSelect;
 
 export type DeliveryMessageRow = Prisma.EmailMessageGetPayload<{ select: typeof messageSelect }> & {

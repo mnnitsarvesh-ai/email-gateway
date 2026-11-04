@@ -1,11 +1,15 @@
 import { randomUUID } from 'node:crypto';
-import { Prisma, type MessageStatus, type PrismaClient } from '@email-gateway/database';
+import { Prisma, type PrismaClient } from '@email-gateway/database';
 import { deliveryStatusChangedV1, EventTypes } from '@email-gateway/event-contracts';
+import {
+  applyDerivedDeliveryState,
+  isRetryableLifecycleError,
+  type LifecycleMetrics,
+  type MessageState,
+} from '@email-gateway/message-lifecycle';
 import { parseReinjectionToken } from '../reinjection-key';
 import type { DeliverySignal } from './signals';
 import {
-  aggregateMessageStatus,
-  isTerminalDeliveryStatus,
   mapRecipientStatus,
   nextDeliveryState,
   type DeliveryStatus,
@@ -19,8 +23,10 @@ import {
  *
  * Lock order, identical in every writer of delivery state so concurrent signals never deadlock:
  * `delivery_reinjections` row (queue-id binding only) → `email_messages` row → `email_deliveries`
- * row(s). Locking the message first serializes the signals of one message, so the aggregate
- * (R9.1 step 6) always sees the latest committed status of every sibling delivery.
+ * row(s). Locking the message first serializes the signals of one message, so the derived
+ * message state (step 3.3 L9) always sees the latest committed status of every recipient. The
+ * message lifecycle columns are written only through @email-gateway/message-lifecycle
+ * (`applyDerivedDeliveryState`, one-door rule, ADR-0025).
  */
 
 type Db = PrismaClient | Prisma.TransactionClient;
@@ -34,10 +40,12 @@ export interface RecorderContext {
   sourceService: string;
   /** Interactive transaction timeout (and maxWait) when the recorder opens its own transaction. */
   timeoutMs: number;
-  /** Envelope event id that caused the signal (`email_events.event_id`, status history). */
+  /** Envelope event id (UUID) that caused the signal (`email_events.event_id`, status history). */
   eventId?: string | null;
   /** Receives conflicts (ids and statuses only, never addresses). */
   logger?: RecorderLogger;
+  /** The deployable's lifecycle series (`lifecycle_transitions_total`, …); none when absent. */
+  lifecycleMetrics?: LifecycleMetrics;
 }
 
 export type RecordResult = TransitionResult | 'unmatched';
@@ -51,16 +59,8 @@ export interface RecordDeliverySignalResult {
   /** Status after the signal (unchanged unless applied). */
   status?: DeliveryStatus;
   previousStatus?: DeliveryStatus | null;
-  /** Set when the signal completed the message aggregate. */
-  messageStatus?: MessageStatus;
-}
-
-/** The message row changed between read and write (optimistic `version` check). */
-export class MessageVersionConflictError extends Error {
-  override readonly name = 'MessageVersionConflictError';
-  constructor(readonly messageId: bigint) {
-    super(`email_messages ${messageId.toString()} changed concurrently`);
-  }
+  /** Set when the signal moved the message to a new derived lifecycle state (step 3.3 L9). */
+  messageState?: MessageState;
 }
 
 const MAX_TX_ATTEMPTS = 3;
@@ -77,7 +77,9 @@ const isPrismaClient = (client: Db): client is PrismaClient =>
   typeof (client as Partial<PrismaClient>).$transaction === 'function';
 
 function isRetryable(error: unknown): boolean {
-  if (error instanceof MessageVersionConflictError) return true;
+  // The lifecycle's compare-and-set conflict, deadlocks, lock waits, P2034 and a concurrent
+  // duplicate transition key (the re-run answers `duplicate`).
+  if (isRetryableLifecycleError(error)) return true;
   if (error instanceof Prisma.PrismaClientKnownRequestError) {
     if (error.code === 'P2034') return true;
     // Raw query failures carry the MySQL code: 1213 deadlock, 1205 lock wait timeout.
@@ -88,7 +90,7 @@ function isRetryable(error: unknown): boolean {
 
 /**
  * Runs `fn` in the caller's transaction, or in an own writer transaction retried up to 3 times
- * on an optimistic-version conflict, a deadlock or a write conflict.
+ * on a lifecycle version conflict, a deadlock or a write conflict.
  */
 async function inTransaction<T>(
   client: Db,
@@ -109,8 +111,6 @@ interface MessageRow {
   id: bigint;
   received_at: Date;
   organization_id: bigint;
-  status: MessageStatus;
-  version: number;
   direction: 'inbound' | 'outbound' | 'internal';
 }
 
@@ -135,10 +135,9 @@ async function lockMessage(
   receivedAt: Date,
 ): Promise<MessageRow | null> {
   const rows = await tx.$queryRaw<MessageRow[]>`
-    SELECT id, received_at, organization_id, status, version, direction
+    SELECT id, received_at, organization_id, direction
     FROM email_messages WHERE id = ${id} AND received_at = ${receivedAt} FOR UPDATE`;
-  const row = rows[0];
-  return row ? { ...row, version: Number(row.version) } : null;
+  return rows[0] ?? null;
 }
 
 async function lockDelivery(
@@ -272,39 +271,6 @@ const smallint = (value: number | null | undefined): number | undefined =>
     ? Math.min(value, MAX_SMALLINT)
     : undefined;
 
-/**
- * Sets the message status with an optimistic `version` check and appends the status history
- * row (version = the new version). Throws MessageVersionConflictError when the row changed.
- */
-async function setMessageStatus(
-  tx: Prisma.TransactionClient,
-  message: MessageRow,
-  status: MessageStatus,
-  reasonCode: string,
-  eventId: string | null,
-  changedAt: Date,
-): Promise<void> {
-  const { count } = await tx.emailMessage.updateMany({
-    where: { id: message.id, receivedAt: message.received_at, version: message.version },
-    data: { status, version: { increment: 1 }, statusChangedAt: changedAt },
-  });
-  if (count !== 1) throw new MessageVersionConflictError(message.id);
-  await tx.emailMessageStatusHistory.create({
-    data: {
-      receivedAt: message.received_at,
-      messageId: message.id,
-      organizationId: message.organization_id,
-      version: message.version + 1,
-      fromStatus: message.status,
-      toStatus: status,
-      reasonCode,
-      eventId,
-      changedAt,
-    },
-    select: { id: true },
-  });
-}
-
 function validateSignal(signal: DeliverySignal): void {
   if (!HEX64.test(signal.signalKey)) throw new Error('signalKey must be a hex SHA-256');
   if (!(signal.occurredAt instanceof Date) || Number.isNaN(signal.occurredAt.getTime())) {
@@ -325,14 +291,19 @@ function validateSignal(signal: DeliverySignal): void {
  *    (`attempt_no` = the new attempt count), `email_recipients.status`, an `email_events` row
  *    (`delivery.<status>`, ids only) and the `mail.delivery.status_changed.v1` outbox row (not
  *    for the planner's initial `pending`);
- * 6. when every delivery of the signal's `delivery_seq` is terminal: the message aggregate
- *    (`delivered` / `partially_delivered` / `failed`, `version + 1`, status history).
+ * 6. when the delivery has the highest `delivery_seq` of the message: the derived message
+ *    state (step 3.3 L9, `applyDerivedDeliveryState`): from `delivery_pending` /
+ *    `delivery_retry`, the state the recipients imply (`delivery_retry` while one is deferred,
+ *    `delivery_pending`, `delivered` with `delivery_complete` / `delivery_partial`, `rejected`
+ *    with `delivery_failed`) through the transition service, transition key
+ *    `signal:<deliveryId>:<signalKey>:<state>`. A signal of an older `delivery_seq` (a delivery
+ *    before a release) or a message outside the delivery phase (expired, quarantined, …)
+ *    leaves the message state alone; the per-recipient state is recorded either way.
  *
  * Not-applied signals keep their audit row (`stale`, `conflict`, same-state `duplicate`); a
  * same-state signal still fills a missing `dsn_queue_id` / `outbound_queue_id` (annotation, no
- * transition). Inside a caller's transaction a version conflict throws
- * MessageVersionConflictError for the caller to retry; in an own transaction it is retried up
- * to 3 times.
+ * transition). Inside a caller's transaction a lifecycle version conflict or deadlock
+ * propagates for the caller to retry; in an own transaction it is retried up to 3 times.
  */
 export async function recordDeliverySignal(
   client: Db,
@@ -570,25 +541,39 @@ export async function recordDeliverySignal(
       });
     }
 
-    // R9.1 step 6: the message aggregate over this delivery_seq.
-    let messageStatus: MessageStatus | undefined;
-    if (isTerminalDeliveryStatus(next.status)) {
-      const siblings = await tx.$queryRaw<{ status: DeliveryStatus }[]>`
-        SELECT status FROM email_deliveries
-        WHERE message_id = ${delivery.message_id} AND received_at = ${delivery.received_at}
-          AND delivery_seq = ${delivery.delivery_seq}
-        FOR SHARE`;
-      const aggregate = aggregateMessageStatus(siblings.map((row) => row.status));
-      if (aggregate !== null && aggregate !== message.status) {
-        await setMessageStatus(
-          tx,
-          message,
-          aggregate,
-          'delivery_complete',
-          ctx.eventId ?? null,
-          new Date(),
-        );
-        messageStatus = aggregate;
+    // Step 6 (step 3.3 L9): the derived message state, only for the newest delivery_seq.
+    let messageState: MessageState | undefined;
+    const newest = await tx.$queryRaw<{ seq: number | bigint | null }[]>`
+      SELECT MAX(delivery_seq) AS seq FROM email_deliveries
+      WHERE message_id = ${delivery.message_id} AND received_at = ${delivery.received_at}`;
+    const newestSeq = newest[0]?.seq;
+    if (
+      newestSeq === null ||
+      newestSeq === undefined ||
+      delivery.delivery_seq >= Number(newestSeq)
+    ) {
+      const derived = await applyDerivedDeliveryState(
+        tx,
+        {
+          id: delivery.message_id,
+          receivedAt: delivery.received_at,
+          organizationId: delivery.organization_id,
+        },
+        {
+          actor: { role: 'delivery', service: ctx.sourceService, type: 'system' },
+          transitionKey: (state) =>
+            `signal:${delivery.id.toString()}:${signal.signalKey}:${state.state}`,
+          causationEventId: ctx.eventId ?? null,
+          correlationId: `delivery:${delivery.id.toString()}`,
+          occurredAt: signal.occurredAt,
+        },
+        {
+          ...(ctx.lifecycleMetrics ? { metrics: ctx.lifecycleMetrics } : {}),
+          ...(ctx.logger ? { logger: ctx.logger } : {}),
+        },
+      );
+      if (derived.result === 'transition' && derived.outcome.result === 'applied') {
+        messageState = derived.outcome.to;
       }
     }
 
@@ -597,7 +582,7 @@ export async function recordDeliverySignal(
       result: 'applied',
       status: next.status,
       previousStatus,
-      ...(messageStatus ? { messageStatus } : {}),
+      ...(messageState ? { messageState } : {}),
     };
   });
 }
@@ -683,32 +668,4 @@ export async function bindReinjectionQueueId(
     }
     return { result: previous === null ? 'bound' : 'rebound', ...bound };
   });
-}
-
-/** Message statuses from which planning moves a message to `delivery_queued`. */
-const QUEUEABLE: readonly MessageStatus[] = ['received', 'policy_evaluated'];
-
-/**
- * The planner's message transition (R7 step 4): `received` / `policy_evaluated` →
- * `delivery_queued` with `version + 1` and a status history row; any other status is left
- * alone (`changed: false`). Locks the message row first (the recorder's lock order). Run it in
- * the planner's transaction before recording the planner signals.
- */
-export async function markMessageDeliveryQueued(
-  tx: Prisma.TransactionClient,
-  message: { id: bigint; receivedAt: Date },
-  options: { eventId?: string | null; changedAt?: Date } = {},
-): Promise<{ changed: boolean; status: MessageStatus | null }> {
-  const row = await lockMessage(tx, message.id, message.receivedAt);
-  if (!row) return { changed: false, status: null };
-  if (!QUEUEABLE.includes(row.status)) return { changed: false, status: row.status };
-  await setMessageStatus(
-    tx,
-    row,
-    'delivery_queued',
-    'delivery_planned',
-    options.eventId ?? null,
-    options.changedAt ?? new Date(),
-  );
-  return { changed: true, status: 'delivery_queued' };
 }

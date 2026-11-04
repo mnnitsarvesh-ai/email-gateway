@@ -15,6 +15,10 @@ export interface RelayComponents {
   relay?: Startable;
   /** Present when `RECONCILE_ENABLED`. */
   reconciler?: Startable;
+  /** Present when `LIFECYCLE_EXPIRY_ENABLED` (step 3.3 L13). */
+  expiry?: Startable;
+  /** Present when `LIFECYCLE_CHECK_ENABLED` (step 3.3 L14). */
+  lifecycleCheck?: Startable;
   /** The dedicated lock connection (`AdvisoryLocks`). */
   locks: Closable;
   /** `ConfirmPublisher`, then `AmqpConnection`. */
@@ -22,16 +26,20 @@ export interface RelayComponents {
   connection: Closable;
 }
 
-type Step = 'relay' | 'reconciler' | 'locks' | 'publisher' | 'connection';
+type Role = 'relay' | 'reconciler' | 'expiry' | 'lifecycleCheck';
+type Step = Role | 'locks' | 'publisher' | 'connection';
+
+const ROLES: readonly Role[] = ['relay', 'reconciler', 'expiry', 'lifecycleCheck'];
 
 /**
  * Starts the enabled roles after the application bootstrapped and stops them in the order of
- * step 3.2 §WP3: relay loops (an in-flight batch finishes and is marked), reconciler, lock
- * connection, AMQP (publisher, then connection); the database closes last (Nest's
+ * step 3.2 §WP3: relay loops (an in-flight batch finishes and is marked), reconciler, the step 3.3
+ * lifecycle jobs (expiry sweeper, lifecycle check), lock connection, AMQP (publisher, then
+ * connection); the database closes last (Nest's
  * `PrismaService` hook). Each step runs once; a failing step is logged and the next one runs.
  */
 export class RelayLifecycle {
-  private readonly started = new Set<'relay' | 'reconciler'>();
+  private readonly started = new Set<Role>();
   private stopped = false;
 
   constructor(
@@ -44,13 +52,11 @@ export class RelayLifecycle {
   }
 
   start(): void {
-    if (this.components.relay) {
-      this.components.relay.start();
-      this.started.add('relay');
-    }
-    if (this.components.reconciler) {
-      this.components.reconciler.start();
-      this.started.add('reconciler');
+    for (const role of ROLES) {
+      const component = this.components[role];
+      if (!component) continue;
+      component.start();
+      this.started.add(role);
     }
     this.logger.info({ roles: this.startedRoles }, 'event-relay roles started');
   }
@@ -70,11 +76,10 @@ export class RelayLifecycle {
         );
       }
     };
-    await step('relay', this.started.delete('relay') ? () => c.relay!.stop() : undefined);
-    await step(
-      'reconciler',
-      this.started.delete('reconciler') ? () => c.reconciler!.stop() : undefined,
-    );
+    for (const role of ROLES) {
+      const component = c[role];
+      await step(role, this.started.delete(role) && component ? () => component.stop() : undefined);
+    }
     await step('locks', () => c.locks.close());
     await step('publisher', () => c.publisher.close());
     await step('connection', () => c.connection.close());

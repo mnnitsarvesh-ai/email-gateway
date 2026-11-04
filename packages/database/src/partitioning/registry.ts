@@ -97,6 +97,7 @@ export const PARTITION_REGISTRY: readonly PartitionSpec[] = Object.freeze([
 
 export interface RetentionPurgeConfig {
   idempotencyDays: number;
+  apiIdempotencyGraceDays: number;
   batchSize: number;
   maxBatches: number;
   sleepMs: number;
@@ -109,6 +110,12 @@ export const RETENTION_PURGES: Readonly<RetentionPurgeConfig> = Object.freeze({
    * this many days ago are deleted.
    */
   idempotencyDays: 30,
+  /**
+   * `api_idempotency_keys` rows (the api's Idempotency-Key store, step 3.3 L11) expired more
+   * than this many days ago are deleted. The api already ignores expired rows; the grace keeps a
+   * just-expired record available for support while it is replaced.
+   */
+  apiIdempotencyGraceDays: 1,
   batchSize: 5000,
   /** Safety cap per purge per run (batchSize × maxBatches rows at most). */
   maxBatches: 200,

@@ -1,5 +1,7 @@
+import { randomUUID } from 'node:crypto';
 import type { TestingModule } from '@nestjs/testing';
-import { buildGatewayTrace } from '@email-gateway/common';
+import { buildGatewayTrace, MetricsService } from '@email-gateway/common';
+import { EventTypes, messageStateChangedV1 } from '@email-gateway/event-contracts';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { LmtpBounceListener } from '../src/bounces/bounces.module';
 import { reinjectionToken } from '@email-gateway/mail-routing';
@@ -315,11 +317,44 @@ describe('bounce notices → per-recipient delivery status (step 2.3)', () => {
         where: { organizationId: org, address: 'gone@ext-r.test' },
       }),
     ).toBe(1);
-    // The message aggregate: its only delivery is terminal and not delivered.
+    // The derived message state (step 3.3 L9): its only recipient bounced → rejected.
     const message = await fx.prisma.emailMessage.findFirstOrThrow({
       where: { id: fixture.messageId, organizationId: org },
     });
-    expect(message.status).toBe('failed');
+    expect(message).toMatchObject({
+      status: 'rejected',
+      statusReason: 'delivery_failed',
+      version: 4,
+    });
+    const history = await fx.prisma.emailMessageStatusHistory.findFirstOrThrow({
+      where: { messageId: fixture.messageId, receivedAt: fixture.receivedAt, version: 4 },
+    });
+    expect(history).toMatchObject({
+      fromStatus: 'delivery_pending',
+      toStatus: 'rejected',
+      reasonCode: 'delivery_failed',
+      actorRole: 'delivery',
+      actorService: 'smtp-adapter',
+      correlationId: `delivery:${delivery.id.toString()}`,
+    });
+    const stateChanged = await fx.prisma.messageOutbox.findFirstOrThrow({
+      where: {
+        organizationId: org,
+        aggregateId: fixture.messageId.toString(),
+        eventType: EventTypes.MessageStateChanged,
+      },
+    });
+    expect(messageStateChangedV1.parse(stateChanged.payload)).toMatchObject({
+      previousState: 'delivery_pending',
+      state: 'rejected',
+      reasonCode: 'delivery_failed',
+      actorRole: 'delivery',
+      actorService: 'smtp-adapter',
+    });
+    // Counted on the adapter's registry (the recorder context's lifecycleMetrics).
+    expect(await stack.get(MetricsService).metrics()).toMatch(
+      /lifecycle_transitions_total\{from="delivery_pending",to="rejected",result="applied",service="smtp-adapter"\} [1-9]/,
+    );
   });
 
   it('a redelivered notice gives no second transition, event or outbox row', async () => {
@@ -346,7 +381,8 @@ describe('bounce notices → per-recipient delivery status (step 2.3)', () => {
       }),
     });
     const before = await counts();
-    expect(before).toEqual({ audit: 1, events: 1, outbox: 1, bounces: 1 });
+    // delivery.bounced + lifecycle.rejected; status_changed + state_changed (step 3.3).
+    expect(before).toEqual({ audit: 1, events: 2, outbox: 2, bounces: 1 });
     const again = await send(notice);
     expect(again.data.map((r) => r.code)).toEqual([250]);
     expect(await counts()).toEqual(before);
@@ -469,6 +505,72 @@ describe('bounce notices → per-recipient delivery status (step 2.3)', () => {
     expect(await fx.prisma.bounceEvent.count({ where: { organizationId: org } })).toBe(
       bouncesBefore,
     );
+  });
+
+  it('queue ids that differ only in letter case never match each other (L15)', async () => {
+    // Postfix long queue ids are case-sensitive: 4jKFxV5fmHz12JnW and 4jKFxV5fMHz12Jnw are two
+    // queue files. The queue-id columns are utf8mb4_bin since step 3.3.
+    const suffix = randomUUID().replaceAll('-', '').slice(0, 6);
+    const lower = `4jKFxV5fmHz12JnW${suffix}`;
+    const upper = `4jKFxV5fMHz12Jnw${suffix}`;
+    const first = await fx.reinjectedMessage({
+      organizationId: org,
+      direction: 'outbound',
+      envelopeFrom: `ivy@${tenantDomain}`,
+      recipients: ['case@ext-r.test'],
+      queueId: lower,
+    });
+    const second = await fx.reinjectedMessage({
+      organizationId: org,
+      direction: 'outbound',
+      envelopeFrom: `ivy@${tenantDomain}`,
+      recipients: ['case@ext-r.test'],
+      queueId: upper,
+    });
+    await send(singleHardBounce(upper, `ivy@${tenantDomain}`, 'case@ext-r.test', [trace(org)]));
+    expect((await deliveryOf(second.deliveryIds[0]!)).status).toBe('bounced');
+    expect((await deliveryOf(first.deliveryIds[0]!)).status).toBe('queued');
+    expect(await auditOf(first.deliveryIds[0]!)).toEqual([]);
+    const bounce = await fx.prisma.bounceEvent.findFirstOrThrow({
+      where: { organizationId: org, recipientAddress: 'case@ext-r.test' },
+    });
+    expect(bounce.messageId).toBe(second.messageId);
+    const states = await fx.prisma.emailMessage.findMany({
+      where: { id: { in: [first.messageId, second.messageId] }, organizationId: org },
+      select: { id: true, status: true },
+    });
+    expect(Object.fromEntries(states.map((m) => [m.id.toString(), m.status]))).toEqual({
+      [first.messageId.toString()]: 'delivery_pending',
+      [second.messageId.toString()]: 'rejected',
+    });
+
+    // A delay warning for the other file goes to the first delivery only.
+    await send(
+      postfixPostmasterCopy({
+        kind: 'delay',
+        queueId: lower,
+        date: new Date(Date.now() + 1000).toUTCString(),
+        sender: `ivy@${tenantDomain}`,
+        originalHeaders: [trace(org)],
+        recipients: [
+          {
+            address: 'case@ext-r.test',
+            action: 'delayed',
+            status: '4.2.1',
+            diagnostic: 'smtp; 450 4.2.1 Mailbox busy',
+          },
+        ],
+      }),
+    );
+    expect((await deliveryOf(first.deliveryIds[0]!)).status).toBe('deferred');
+    expect((await deliveryOf(second.deliveryIds[0]!)).status).toBe('bounced');
+    expect(
+      (
+        await fx.prisma.emailMessage.findFirstOrThrow({
+          where: { id: first.messageId, organizationId: org },
+        })
+      ).status,
+    ).toBe('delivery_retry');
   });
 
   it('an unmatched notice keeps the 2.2 behaviour (no message reference, no delivery signal)', async () => {

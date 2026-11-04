@@ -1,14 +1,32 @@
 import { MetricsService, NonRetryableError } from '@email-gateway/common';
 import type { DeliveryApprovedV1, EventEnvelope } from '@email-gateway/event-contracts';
 import { createLogger } from '@email-gateway/logger';
-import { describe, expect, it, vi } from 'vitest';
+import {
+  lockLifecycle,
+  transitionMessage,
+  type LifecycleSnapshot,
+} from '@email-gateway/message-lifecycle';
+import type * as Lifecycle from '@email-gateway/message-lifecycle';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DeliveryMetrics } from '../metrics/delivery-metrics';
 import { DeliveryPlanner } from './delivery-planner';
 
-const planner = () =>
+vi.mock('@email-gateway/message-lifecycle', async (original) => ({
+  ...(await original<typeof Lifecycle>()),
+  lockLifecycle: vi.fn(),
+  transitionMessage: vi.fn(),
+}));
+const lock = vi.mocked(lockLifecycle);
+const transition = vi.mocked(transitionMessage);
+beforeEach(() => {
+  lock.mockReset();
+  transition.mockReset();
+});
+
+const planner = (metrics = new DeliveryMetrics(new MetricsService({ service: 't' }))) =>
   new DeliveryPlanner({
     logger: createLogger({ service: 't', level: 'silent' }),
-    metrics: new DeliveryMetrics(new MetricsService({ service: 't' })),
+    metrics,
     config: {
       DELIVERY_BATCH_MAX_RECIPIENTS: 100,
       DELIVERY_REINJECT_RETRY_BASE_SECONDS: 30,
@@ -150,5 +168,116 @@ describe('DeliveryPlanner (R7) trust checks', () => {
         },
       }),
     );
+  });
+});
+
+describe('DeliveryPlanner lifecycle rule (step 3.3 L8.4)', () => {
+  const snapshot = (state: LifecycleSnapshot['state'], round = 0): LifecycleSnapshot => ({
+    state,
+    version: 3,
+    round,
+    statusChangedAt: new Date('2026-11-03T11:30:00.000Z'),
+    statusReason: null,
+    direction: 'outbound',
+    emlObjectKey: 'org/7/eml/x.eml',
+  });
+  /** Reaches the lifecycle check; every recipient already has a delivery (a duplicate). */
+  const planningTx = (event = approval()) => ({
+    ...tx(
+      { id: 100n, direction: 'outbound' },
+      [{ id: 500n, rcptSeq: 0, address: 'a@ext.test', direction: 'outbound' }],
+      issued(event.payload),
+    ),
+    emailDelivery: { findMany: vi.fn(() => Promise.resolve([{ recipientId: 500n }])) },
+  });
+
+  it('moves an approved message of the approval round to delivery_pending, then plans', async () => {
+    lock.mockResolvedValue(snapshot('approved'));
+    transition.mockResolvedValue({
+      result: 'applied',
+      from: 'approved',
+      to: 'delivery_pending',
+      version: 4,
+      round: 0,
+      historyId: 1n,
+      stateEventId: '0190f0f0-0000-7000-8000-0000000000bb',
+      snapshot: snapshot('delivery_pending'),
+    });
+    const t = planningTx();
+    const event = approval();
+    expect(await planner().plan(event, t as never)).toMatchObject({ status: 'duplicate' });
+    expect(lock).toHaveBeenCalledWith(t, {
+      id: 100n,
+      receivedAt: new Date('2026-11-03T11:00:00.000Z'),
+      organizationId: 7n,
+    });
+    expect(transition.mock.calls[0]![1]).toMatchObject({
+      to: 'delivery_pending',
+      reason: 'delivery_planned',
+      actor: { role: 'delivery', service: 'delivery-worker', type: 'system' },
+      transitionKey: `evt:${event.eventId}:delivery_pending`,
+      causationEventId: event.eventId,
+      correlationId: event.correlationId,
+      expectedRound: 0,
+      expectedFrom: ['approved'],
+    });
+    expect(t.emailDelivery.findMany).toHaveBeenCalled();
+  });
+
+  it('plans a later chunk while delivery_pending or delivery_retry of the same round, without a transition', async () => {
+    for (const state of ['delivery_pending', 'delivery_retry'] as const) {
+      lock.mockResolvedValueOnce(snapshot(state, 2));
+      const event = approval({ lifecycleRound: 2 });
+      const t = planningTx(event);
+      expect(await planner().plan(event, t as never)).toMatchObject({ status: 'duplicate' });
+      expect(t.emailDelivery.findMany).toHaveBeenCalled();
+    }
+    expect(transition).not.toHaveBeenCalled();
+  });
+
+  it('rejects approvals of another round or of a message that is not approved (lifecycle_state)', async () => {
+    const service = new MetricsService({ service: 't' });
+    const metrics = new DeliveryMetrics(service);
+    const cases: [LifecycleSnapshot | null, number | undefined][] = [
+      [snapshot('approved', 1), 0], // an older round's approval after a release
+      [snapshot('approved', 1), undefined], // absent = round 0
+      [snapshot('approved', 0), 1], // a future round (forged or a bug)
+      [snapshot('delivery_pending', 1), 0],
+      [snapshot('persisted'), 0],
+      [snapshot('quarantined'), 0],
+      [snapshot('delivered'), 0],
+      [snapshot('expired'), 0],
+      [null, 0], // locked row gone or another organization
+    ];
+    for (const [snap, round] of cases) {
+      lock.mockResolvedValueOnce(snap);
+      const event = approval(round === undefined ? {} : { lifecycleRound: round });
+      const t = planningTx(event);
+      expect(await planner(metrics).plan(event, t as never)).toMatchObject({
+        status: 'rejected',
+        reason: 'lifecycle_state',
+        deliveries: 0,
+      });
+      expect(t.emailDelivery.findMany).not.toHaveBeenCalled();
+    }
+    expect(transition).not.toHaveBeenCalled();
+    expect(await service.metrics()).toContain(
+      `delivery_approvals_rejected_total{reason="lifecycle_state",service="t"} ${cases.length}`,
+    );
+  });
+
+  it('does not plan when the transition is refused under the lock', async () => {
+    lock.mockResolvedValue(snapshot('approved'));
+    transition.mockResolvedValue({
+      result: 'duplicate',
+      why: 'transition_key',
+      snapshot: snapshot('approved'),
+    });
+    const t = planningTx();
+    expect(await planner().plan(approval(), t as never)).toMatchObject({
+      status: 'rejected',
+      reason: 'lifecycle_state',
+    });
+    expect(t.emailDelivery.findMany).not.toHaveBeenCalled();
   });
 });

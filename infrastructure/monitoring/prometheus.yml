@@ -2,8 +2,8 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
-# Alert rules (step 3.2 Q15). Alertmanager routing is step 10.3; until then the alerts are visible
-# on the Prometheus /alerts page.
+# Alert rules (step 3.2 Q15: messaging.rules.yml; step 3.3 L14: lifecycle.rules.yml). Alertmanager
+# routing is step 10.3; until then the alerts are visible on the Prometheus /alerts page.
 rule_files:
   - rules/*.rules.yml
 

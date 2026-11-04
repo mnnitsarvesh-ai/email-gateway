@@ -223,6 +223,20 @@ describe('route security (e2e, dependencies stubbed)', () => {
     }
   });
 
+  it('the step 3.3 lifecycle routes require exactly their permission (L10, L12)', () => {
+    const expected: Record<string, string> = {
+      'get /api/v1/messages/:messageId/lifecycle': 'message:read',
+      'get /api/v1/messages/:messageId/lifecycle/history': 'message:read',
+      'post /api/v1/messages/:messageId/rescan': 'message:rescan',
+      'post /api/v1/messages/:messageId/release': 'quarantine:release',
+    };
+    for (const [key, permission] of Object.entries(expected)) {
+      const route = routes.find((r) => `${r.method} ${r.path}` === key);
+      expect(route?.isPublic, key).toBe(false);
+      expect(route?.requirement, key).toEqual({ mode: 'all', permissions: [permission] });
+    }
+  });
+
   it('the step 3.2 dead-letter routes require their platform permissions (Q9)', () => {
     const expected: Record<string, string> = {
       'get /api/v1/platform/dead-letters': 'platform:operations',

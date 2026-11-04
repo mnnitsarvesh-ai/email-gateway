@@ -1,5 +1,6 @@
 import { createConnection, type Socket } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { purgeDormantQueues } from './support/broker';
 import { stack } from './support/env';
 import { buildMessage } from './support/messages';
 import { SmtpClient } from './support/smtp-client';
@@ -45,7 +46,9 @@ beforeAll(async () => {
 }, 60_000);
 
 afterAll(async () => {
-  if (!gate.skip) await fx.cleanup();
+  if (gate.skip) return;
+  await fx.cleanup();
+  await purgeDormantQueues();
 }, 120_000);
 
 /** EHLO on a raw session from the host to an SMTP host port. */

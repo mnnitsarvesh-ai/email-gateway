@@ -233,6 +233,7 @@ export class StatusSignalApplier {
       sourceService: SOURCE_SERVICE,
       timeoutMs: this.options.recorderTimeoutMs,
       logger: this.logger,
+      lifecycleMetrics: this.options.metrics.lifecycle,
     });
     if (result.result !== 'unmatched') {
       this.options.metrics.signal(signal.source, result.result, {

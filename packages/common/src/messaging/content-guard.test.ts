@@ -28,8 +28,8 @@ function refusal(value: unknown): { code: ContentGuardCode; path: string } {
 describe('assertMetadataOnly: valid envelopes pass', () => {
   const types = Object.keys(EVENT_REGISTRY) as RegisteredEventType[];
 
-  it('covers all nine registered event types', () => {
-    expect(types).toHaveLength(9);
+  it('covers all eleven registered event types (two added by step 3.3)', () => {
+    expect(types).toHaveLength(11);
   });
 
   it.each(types)('%s example passes the registry schema and the guard', (type) => {

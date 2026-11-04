@@ -38,13 +38,13 @@ const mutableQueue = (topology: { queues: QueueDefinition[] }, name: QueueName) 
   return queue;
 };
 
-describe('TOPOLOGY v1', () => {
+describe('TOPOLOGY v2', () => {
   it('satisfies every invariant of design §3', () => {
     expect(validateTopology(TOPOLOGY)).toEqual([]);
   });
 
   it('declares exactly the six exchanges and fourteen queues of the brief', () => {
-    expect(TOPOLOGY_VERSION).toBe(1);
+    expect(TOPOLOGY_VERSION).toBe(2);
     expect(DEFAULT_VHOST).toBe('email-gateway');
     expect([...TOPOLOGY.exchanges]).toEqual([
       'email.ingestion',
@@ -85,26 +85,31 @@ describe('TOPOLOGY v1', () => {
       'scan.auth': [
         'email.security',
         'email.ingestion org.*.mail.message.parsed.v1',
+        'email.security org.*.mail.message.rescan_requested.v1',
         'email.security retry.scan.auth.#',
       ],
       'scan.spam': [
         'email.security',
         'email.ingestion org.*.mail.message.parsed.v1',
+        'email.security org.*.mail.message.rescan_requested.v1',
         'email.security retry.scan.spam.#',
       ],
       'scan.url': [
         'email.security',
         'email.ingestion org.*.mail.message.parsed.v1',
+        'email.security org.*.mail.message.rescan_requested.v1',
         'email.security retry.scan.url.#',
       ],
       'scan.attachment': [
         'email.security',
         'email.ingestion org.*.mail.message.parsed.v1',
+        'email.security org.*.mail.message.rescan_requested.v1',
         'email.security retry.scan.attachment.#',
       ],
       'scan.dlp': [
         'email.security',
         'email.ingestion org.*.mail.message.parsed.v1',
+        'email.security org.*.mail.message.rescan_requested.v1',
         'email.security retry.scan.dlp.#',
       ],
       'scan.sandbox': [
@@ -400,7 +405,7 @@ describe('routing keys (Q2)', () => {
     });
   });
 
-  it('returns null for keys topology v1 never produces', () => {
+  it('returns null for keys the topology never produces', () => {
     for (const key of [
       '',
       'org',
@@ -464,6 +469,18 @@ describe('routing (topic semantics)', () => {
     expect(route('mail.delivery.status_changed.v1')).toEqual(['email.analytics']);
     expect(route('domain.status.changed.v1')).toEqual(['email.analytics']);
     expect(route('domain.routing.changed.v1')).toEqual(['email.analytics']);
+    // Topology v2 (step 3.3 L7).
+    expect(route('mail.message.state_changed.v1')).toEqual(['email.analytics']);
+    expect(route('mail.message.rescan_requested.v1')).toEqual(
+      [
+        'email.analytics',
+        'scan.attachment',
+        'scan.auth',
+        'scan.dlp',
+        'scan.spam',
+        'scan.url',
+      ].sort(),
+    );
   });
 
   it('keeps internal hops out of the firehose and out of other queues', () => {
@@ -514,6 +531,12 @@ describe('routing (topic semantics)', () => {
       'mail.message.scanned.v1',
     ]);
     expect(eventTypesBoundTo('scan.sandbox')).toEqual(['mail.attachment.sandbox_requested.v1']);
+    for (const queue of ['scan.auth', 'scan.spam', 'scan.url', 'scan.attachment', 'scan.dlp']) {
+      expect(eventTypesBoundTo(queue), queue).toEqual([
+        'mail.message.parsed.v1',
+        'mail.message.rescan_requested.v1',
+      ]);
+    }
     expect(eventTypesBoundTo('email.analytics')).toEqual(
       [...Object.keys(EVENT_REGISTRY), ...Object.keys(RESERVED_EVENT_TYPES)].sort(),
     );
@@ -630,7 +653,7 @@ describe('toRabbitDefinitions (Q5)', () => {
   const definitions = toRabbitDefinitions(TOPOLOGY, { vhost: DEFAULT_VHOST });
 
   it('declares topic exchanges and quorum queues with no other argument', () => {
-    expect(definitions.topology_version).toBe(1);
+    expect(definitions.topology_version).toBe(2);
     expect(definitions.exchanges).toHaveLength(6);
     for (const exchange of definitions.exchanges) {
       expect(exchange).toEqual({

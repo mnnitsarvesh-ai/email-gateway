@@ -168,7 +168,7 @@ const EVENT_TYPES = [
   'delivery.queued',
   'delivery.completed',
 ];
-const STUCK_STATUSES = ['scanning', 'policy_evaluated', 'delivery_queued'];
+const STUCK_STATUSES = ['scanning', 'policy_evaluated', 'delivery_pending'];
 const CONTENT_TYPES = ['application/pdf', 'image/png', 'application/zip', 'text/calendar'];
 
 /** Diurnal weight by UTC hour (peaks in Indian business hours, 03:30–12:30 UTC). */
@@ -408,7 +408,7 @@ export async function loadSyntheticData(client: SqlClient, opts: LoadOptions): P
       const age = nowMs - m.receivedMs;
       let status = allQuarantined ? 'quarantined' : 'delivered';
       if (!allQuarantined && age < 2 * DAY_MS && rand() < 0.002) status = pick(STUCK_STATUSES);
-      else if (!allQuarantined && rand() < 0.003) status = 'failed';
+      else if (!allQuarantined && rand() < 0.003) status = 'rejected';
       const action = allQuarantined ? 'quarantine' : m.verdict === 'clean' ? 'deliver' : 'tag';
       const changedMs = m.receivedMs + 2000 + Math.floor(rand() * 8000);
       const risk =
@@ -460,7 +460,7 @@ export async function loadSyntheticData(client: SqlClient, opts: LoadOptions): P
           seq,
           addr,
           null,
-          q ? 'quarantined' : status === 'failed' ? 'failed' : 'delivered',
+          q ? 'quarantined' : status === 'rejected' ? 'failed' : 'delivered',
           q ? 'quarantine' : action,
           m.received,
           sqlTime(changedMs),

@@ -200,7 +200,7 @@ export async function buildQueries(
           label: 'stuck messages',
           sql: `SELECT id, received_at, organization_id, status, status_changed_at
   FROM email_messages
- WHERE status IN ('scanning', 'policy_evaluated', 'delivery_queued')
+ WHERE status IN ('scanning', 'policy_evaluated', 'delivery_pending')
    AND status_changed_at < ?
  ORDER BY status_changed_at
  LIMIT 500`,

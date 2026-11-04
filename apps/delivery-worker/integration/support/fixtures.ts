@@ -5,6 +5,7 @@ import { s3ConfigSchema, type S3Config } from '@email-gateway/config';
 import {
   type DomainStatus,
   type MessageDirection,
+  type MessageStatus,
   type OrganizationStatus,
   PrismaClient,
 } from '@email-gateway/database';
@@ -48,7 +49,47 @@ export interface MessageFixture {
   recipients: { id: bigint; rcptSeq: number; address: string }[];
 }
 
+/**
+ * Lifecycle paths a fixture message is set up with (step 3.3 L8.6: fixtures insert the rows of
+ * any state directly, with matching history rows). Each step is `[state, reason, actor role]`;
+ * the message ends in the last state with `version` = the number of transitions.
+ */
+const LIFECYCLE_PATHS = {
+  persisted: [
+    ['received', 'smtp_accepted', 'ingestion'],
+    ['persisted', 'committed', 'ingestion'],
+  ],
+  approved: [
+    ['received', 'smtp_accepted', 'ingestion'],
+    ['persisted', 'committed', 'ingestion'],
+    ['approved', 'policy_deliver', 'policy'],
+  ],
+  delivery_pending: [
+    ['received', 'smtp_accepted', 'ingestion'],
+    ['persisted', 'committed', 'ingestion'],
+    ['approved', 'policy_deliver', 'policy'],
+    ['delivery_pending', 'delivery_planned', 'delivery'],
+  ],
+  quarantined: [
+    ['received', 'smtp_accepted', 'ingestion'],
+    ['persisted', 'committed', 'ingestion'],
+    ['scanning', 'scan_started', 'scanner'],
+    ['scanned', 'scan_complete', 'scanner'],
+    ['policy_evaluated', 'policy_decided', 'policy'],
+    ['quarantined', 'policy_quarantine', 'policy'],
+  ],
+} as const satisfies Record<string, readonly (readonly [MessageStatus, string, string])[]>;
+
+export type FixtureState = keyof typeof LIFECYCLE_PATHS;
+
 export interface MessageOptions {
+  /**
+   * Lifecycle state (default `approved`, round 0: what a delivery approval finds; the dev
+   * pass-through tests use `persisted`, as the SMTP commit leaves it).
+   */
+  state?: FixtureState;
+  /** `lifecycle_round` of the message (default 0; > 0 as after a release or rescan). */
+  lifecycleRound?: number;
   direction?: MessageDirection;
   envelopeFrom?: string;
   recipients: { address: string; direction?: MessageDirection | null }[];
@@ -175,8 +216,14 @@ export class Fixtures {
     });
   }
 
-  /** A message as ingestion writes it (status received, recipients pending) and its EML in S3. */
+  /**
+   * A message with pending recipients, in lifecycle `options.state` (default `approved`) with its
+   * history rows, and its EML in S3.
+   */
   async message(organizationId: bigint, options: MessageOptions): Promise<MessageFixture> {
+    const path = LIFECYCLE_PATHS[options.state ?? 'approved'];
+    const last = path[path.length - 1]!;
+    const lifecycleRound = options.lifecycleRound ?? 0;
     const receivedAt = new Date();
     const identity = await this.prisma.messageIdentity.create({
       data: { organizationId, ingestKey: `it-${randomUUID()}`, receivedAt },
@@ -201,7 +248,10 @@ export class Fixtures {
         receivedAt,
         organizationId,
         direction,
-        status: 'received',
+        status: last[0],
+        version: path.length - 1,
+        lifecycleRound,
+        statusReason: last[1],
         statusChangedAt: receivedAt,
         envelopeFrom: options.envelopeFrom ?? 'sender@example.org',
         sizeBytes: Buffer.byteLength(eml),
@@ -211,6 +261,22 @@ export class Fixtures {
         clientIp: options.clientIp === undefined ? '203.0.113.7' : options.clientIp,
         clientHelo: options.clientHelo === undefined ? 'mail.example.org' : options.clientHelo,
       },
+    });
+    await this.prisma.emailMessageStatusHistory.createMany({
+      data: path.map(([toStatus, reasonCode, actorRole], version) => ({
+        receivedAt,
+        messageId,
+        organizationId,
+        version,
+        fromStatus: version === 0 ? null : path[version - 1]![0],
+        toStatus,
+        reasonCode,
+        lifecycleRound: version === path.length - 1 ? lifecycleRound : 0,
+        actorRole,
+        actorService: 'delivery-worker-it',
+        changedAt: receivedAt,
+        occurredAt: receivedAt,
+      })),
     });
     await this.prisma.emailRecipient.createMany({
       data: options.recipients.map((r, rcptSeq) => ({
@@ -312,6 +378,20 @@ export class Fixtures {
       where: { messageId: message.messageId, receivedAt: message.receivedAt },
       orderBy: { id: 'asc' },
     });
+  }
+
+  /** The message's lifecycle columns and its history (oldest first). */
+  async lifecycle(message: MessageFixture) {
+    const where = { messageId: message.messageId, receivedAt: message.receivedAt };
+    const row = await this.prisma.emailMessage.findUniqueOrThrow({
+      where: { id_receivedAt: { id: message.messageId, receivedAt: message.receivedAt } },
+      select: { status: true, statusReason: true, version: true, lifecycleRound: true },
+    });
+    const history = await this.prisma.emailMessageStatusHistory.findMany({
+      where,
+      orderBy: { version: 'asc' },
+    });
+    return { ...row, history };
   }
 
   async counts(message: MessageFixture) {

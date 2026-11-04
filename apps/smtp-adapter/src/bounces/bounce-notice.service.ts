@@ -7,6 +7,7 @@ import {
 } from '@email-gateway/common';
 import { resolveDomainOwner } from '@email-gateway/database';
 import { createLogger, type Logger } from '@email-gateway/logger';
+import type { LifecycleMetrics } from '@email-gateway/message-lifecycle';
 import {
   classifyDeliveryError,
   type DeliveryStatus,
@@ -25,6 +26,7 @@ import {
   LMTP_UNKNOWN_RECIPIENT,
   type SmtpReply,
 } from '../shared/replies';
+import { lifecycleMetrics } from '../shared/lifecycle-metrics';
 import { ReputationRecorder } from '../shared/reputation';
 import { bounceDedupeKey, classifyBounce } from './bounce-classifier';
 import { BOUNCES_OPTIONS, type BouncesModuleOptions } from './bounces.options';
@@ -76,6 +78,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 export class BounceNoticeService {
   private readonly logger: Logger;
   private readonly notices: Counter<'outcome'>;
+  private readonly lifecycleMetrics: LifecycleMetrics;
   private readonly recipientAddress: string;
   private readonly doubleBounceSender: string;
 
@@ -95,6 +98,7 @@ export class BounceNoticeService {
         'every notice matched to a reinjection (in addition to its final outcome)',
       ['outcome'],
     );
+    this.lifecycleMetrics = lifecycleMetrics(metrics);
     this.recipientAddress = `${BOUNCE_NOTICE_LOCAL_PART}@${options.config.POSTFIX_BOUNCE_DOMAIN}`;
     this.doubleBounceSender =
       `${DOUBLE_BOUNCE_LOCAL_PART}@${options.config.POSTFIX_OUTBOUND_MYHOSTNAME}`.toLowerCase();
@@ -348,7 +352,10 @@ export class BounceNoticeService {
    * recorder, matched by the reinjection's token and the address, so the organization and the
    * delivery always come from the reinjection row. Signal key = `dsn|queue|address|action|
    * status|arrival` (the inputs of the 2.2 bounce dedupe key): a redelivered notice is a
-   * `duplicate`. Returns the number of applied transitions; database errors propagate.
+   * `duplicate`. The recorder also derives the message lifecycle state (step 3.3 L9, e.g. the
+   * last recipient bouncing moves the message to `rejected/delivery_failed`), counted on the
+   * shared `lifecycle_*` series. Returns the number of applied transitions; database errors
+   * propagate.
    */
   private async recordSignals(
     notice: DsnNotice,
@@ -388,6 +395,7 @@ export class BounceNoticeService {
             sourceService: BOUNCE_SIGNAL_SOURCE_SERVICE,
             timeoutMs: BOUNCE_DB_TIMEOUT_MS,
             logger: this.logger,
+            lifecycleMetrics: this.lifecycleMetrics,
           },
         ),
         BOUNCE_DB_TIMEOUT_MS * 2,
@@ -406,6 +414,7 @@ export class BounceNoticeService {
           status: recipient.status,
           signal: status,
           result: result.result,
+          messageState: result.messageState ?? null,
         },
         'bounce notice delivery signal',
       );

@@ -18,7 +18,8 @@ const message: DeliveryMessageRow = {
   publicId: '0195f3c1-7a2b-7c3d-8e4f-000000000100',
   receivedAt,
   direction: 'outbound',
-  status: 'partially_delivered',
+  status: 'delivered',
+  statusReason: 'delivery_partial',
 };
 
 const recipient = (id: bigint, rcptSeq: number, address: string): RecipientRow => ({
@@ -113,7 +114,8 @@ describe('DeliveriesService', () => {
     expect(view.message).toEqual({
       id: message.publicId,
       direction: 'outbound',
-      status: 'partially_delivered',
+      status: 'delivered',
+      statusReason: 'delivery_partial',
       receivedAt: receivedAt.toISOString(),
     });
     expect(

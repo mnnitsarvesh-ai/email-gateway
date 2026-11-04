@@ -92,7 +92,8 @@ describe('GET /messages/{messageId}/deliveries', () => {
     expect(res.body.message).toEqual({
       id: mixed.publicId,
       direction: 'outbound',
-      status: 'delivery_queued',
+      status: 'delivery_pending',
+      statusReason: null,
       receivedAt: base.toISOString(),
     });
     expect(res.body.deliveries).toHaveLength(2);

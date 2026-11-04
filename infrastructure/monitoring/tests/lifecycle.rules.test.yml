@@ -1,0 +1,91 @@
+# promtool unit tests of rules/lifecycle.rules.yml (step 3.3 L14):
+#   docker run --rm -v "$PWD/infrastructure/monitoring:/m:ro" --entrypoint promtool \
+#     prom/prometheus:v3.6.0 test rules /m/tests/lifecycle.rules.test.yml
+rule_files:
+  - ../rules/lifecycle.rules.yml
+evaluation_interval: 1m
+tests:
+  - name: recoveries, stuck messages, expiry shard ownership, invalid transitions
+    interval: 1m
+    input_series:
+      # Two replicas, four expiry shards; replica b stops holding its shards after 5 minutes.
+      - series: 'lifecycle_expiry_shards{job="event-relay",instance="a"}'
+        values: '4x40'
+      - series: 'lifecycle_expiry_shards{job="event-relay",instance="b"}'
+        values: '4x40'
+      - series: 'lifecycle_expiry_shards_held{job="event-relay",instance="a"}'
+        values: '2x40'
+      - series: 'lifecycle_expiry_shards_held{job="event-relay",instance="b"}'
+        values: '2x5 0x35'
+      # One recovery at minute 10.
+      - series: 'lifecycle_recovered_total{job="event-relay",instance="a",from="delivery_pending",to="delivered"}'
+        values: '0x10 1x30'
+      - series: 'lifecycle_stuck_messages{job="event-relay",instance="a",state="scanning"}'
+        values: '150x40'
+      - series: 'lifecycle_stuck_messages{job="event-relay",instance="a",state="approved"}'
+        values: '3x40'
+      # Invalid requests from minute 5 on.
+      - series: 'lifecycle_transitions_total{job="delivery-worker",instance="d",from="persisted",to="delivery_pending",result="invalid"}'
+        values: '0x5 1+1x35'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: LifecycleExpiryNoShardOwner
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: LifecycleExpiryNoShardOwner
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Expiry sweeper shards without an owner
+              description: >-
+                Fewer expiry shard locks are held than LIFECYCLE_EXPIRY_SHARDS. Overdue messages
+                of unowned shards are not expired. Shards must be <= replicas x
+                LIFECYCLE_EXPIRY_MAX_HELD_SHARDS.
+              runbook_url: docs/runbooks/message-lifecycle.md#lifecycleexpirynoshardowner
+      - eval_time: 5m
+        alertname: LifecycleRecoveries
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: LifecycleRecoveries
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: The lifecycle check recovered lost delivery-state derivations
+              description: >-
+                1 message delivery states were re-derived by the event-relay lifecycle check in
+                the last hour. Find the messages (warn log "lost delivery-state derivation
+                recovered") and the path that skipped the derivation.
+              runbook_url: docs/runbooks/message-lifecycle.md#lifecyclerecoveries
+      - eval_time: 20m
+        alertname: LifecycleStuckMessages
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: LifecycleStuckMessages
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              state: scanning
+            exp_annotations:
+              summary: Messages stuck in a lifecycle state
+              description: >-
+                150 messages have been in state scanning longer than
+                LIFECYCLE_CHECK_AFTER_SECONDS for 30 minutes. The stage that leaves this state is
+                down, not deployed, or failing; the sweeper expires them at the state's deadline.
+              runbook_url: docs/runbooks/message-lifecycle.md#lifecyclestuckmessages
+      - eval_time: 10m
+        alertname: LifecycleInvalidTransitions
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: LifecycleInvalidTransitions
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Invalid lifecycle transitions requested
+              description: >-
+                Producers keep requesting transitions the state machine refuses (a skipped stage,
+                a wrong actor or reason, a forged or future-round event). Each is recorded as an
+                email_events lifecycle.ignored row and logged at warn with its ids and codes.
+              runbook_url: docs/runbooks/message-lifecycle.md#lifecycleinvalidtransitions

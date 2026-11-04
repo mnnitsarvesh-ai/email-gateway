@@ -83,8 +83,10 @@ Prisma has no relation between partitioned tables, so it is two queries: `emailS
 
 ## Q4: Status history and events for a message
 
+The lifecycle history (step 3.3): one row per applied transition, oldest first, version 0 = `NULL → received`; the actor columns (`actor_role`, `actor_service`, `actor_type`, `actor_id`), `lifecycle_round`, `correlation_id` and `occurred_at` are read the same way (rows from before step 3.3 have actor `legacy`).
+
 ```sql
-SELECT version, from_status, to_status, reason_code, changed_at
+SELECT version, from_status, to_status, reason_code, lifecycle_round, actor_role, changed_at
   FROM email_message_status_history WHERE message_id = ? AND received_at = ? ORDER BY version;
 SELECT event_type, occurred_at, source_service, details
   FROM email_events WHERE message_id = ? AND received_at = ? ORDER BY occurred_at, id;
@@ -137,10 +139,12 @@ Prisma: `quarantineMessage.findMany({ where: { organizationId, recipientAddress,
 
 ## Q7: Stuck-message reconciliation
 
+The step 3.3 expiry sweeper and lifecycle check (event-relay) run this shape per state, with a `received_at` lower bound for pruning and `MOD(id, shards)` for sharding (design [L13, L14](../plan/steps/08-message-lifecycle.md#l13-expiry-sweeper-event-relay)).
+
 ```sql
 SELECT id, received_at, organization_id, status, status_changed_at
   FROM email_messages
- WHERE status IN ('scanning', 'policy_evaluated', 'delivery_queued')
+ WHERE status IN ('scanning', 'policy_evaluated', 'delivery_pending')
    AND status_changed_at < NOW(3) - INTERVAL 15 MINUTE
  ORDER BY status_changed_at
  LIMIT 500;

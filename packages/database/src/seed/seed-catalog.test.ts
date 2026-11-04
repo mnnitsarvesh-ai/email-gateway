@@ -71,7 +71,7 @@ describe('seed catalog', () => {
   const sorted = (list: readonly string[]) => [...list].sort();
   const role = (key: string) => SYSTEM_ROLES.find((r) => r.key === key)!.permissions;
 
-  it('contains the 36 permissions of D7, D8, steps 2.1 D14, 2.2, 2.3 and 3.2, without duplicates', () => {
+  it('contains the 37 permissions of D7, D8, steps 2.1 D14, 2.2, 2.3, 3.2 and 3.3, without duplicates', () => {
     expect(new Set(keys).size).toBe(keys.length);
     expect(sorted(keys)).toEqual(
       sorted([
@@ -91,6 +91,7 @@ describe('seed catalog', () => {
         'policy:publish',
         'message:read',
         'message:read_content',
+        'message:rescan',
         'quarantine:read',
         'quarantine:release',
         'quarantine:delete',
@@ -113,8 +114,11 @@ describe('seed catalog', () => {
         'platform:dead_letter_replay',
       ]),
     );
-    expect(keys).toHaveLength(36);
-    // Appended in catalog order (permission ids follow it on a fresh database).
+    expect(keys).toHaveLength(37);
+    // Step 3.3 placed message:rescan next to the other message permissions (design §3.3); the
+    // seed upserts by key, so on an existing database it simply gets the next id.
+    expect(keys.indexOf('message:rescan')).toBe(keys.indexOf('message:read_content') + 1);
+    // Otherwise appended in catalog order (permission ids follow it on a fresh database).
     expect(keys.slice(-5)).toEqual([
       'connector:read',
       'connector:manage',
@@ -227,6 +231,7 @@ describe('seed catalog', () => {
         'policy:manage',
         'message:read',
         'message:read_content',
+        'message:rescan',
         'delivery:read',
         'quarantine:read',
         'quarantine:release',
@@ -283,6 +288,14 @@ describe('seed catalog', () => {
     expect(holders('delivery:read')).toEqual([...SYSTEM_ROLE_KEYS]);
     expect(TENANT_PERMISSIONS).toContain('domain:routing_manage');
     expect(TENANT_PERMISSIONS).toContain('delivery:read');
+    // Step 3.3 (L10.2): the administrative rescan is a tenant write permission.
+    expect(holders('message:rescan')).toEqual([
+      'super_admin',
+      'organization_admin',
+      'security_analyst',
+    ]);
+    expect(TENANT_PERMISSIONS).toContain('message:rescan');
+    expect(TENANT_READ_PERMISSIONS).not.toContain('message:rescan');
   });
 
   it('maps every retired step-1.1 role key to an existing, non-retired role', () => {

@@ -114,7 +114,7 @@ All ports bind to `127.0.0.1`. You can change any host port in `.env` (`*_HOST_P
 | delivery-worker      | 3040                                                                                                  | `/health/ready`                                                                                                                                          |
 | notification-worker  | 3050                                                                                                  | `/health/ready`                                                                                                                                          |
 | archive-worker       | 3060                                                                                                  | `/health/ready`                                                                                                                                          |
-| event-relay          | 3070 (HTTP, `/metrics`; `EVENT_RELAY_HOST_PORT`)                                                      | `/health/ready` (`mysql` writer, `rabbitmq`); outbox relay and reconciler (step 3.2)                                                                     |
+| event-relay          | 3070 (HTTP, `/metrics`; `EVENT_RELAY_HOST_PORT`)                                                      | `/health/ready` (`mysql` writer, `rabbitmq`); outbox relay and reconciler (3.2), lifecycle expiry sweeper and lifecycle check (3.3)                      |
 | postfix (inbound MX) | 2525 → 25 (`SMTP_HOST_PORT`)                                                                          | Container health check                                                                                                                                   |
 | postfix-outbound     | 2587 → 587 submission, 2527 → 25 connector relay (`SUBMISSION_HOST_PORT`, `OUTBOUND_RELAY_HOST_PORT`) | Container health check; reinjection 10026/10027 are never published                                                                                      |
 | rspamd-outbound      | none (milter of postfix-outbound 10027 only)                                                          | Container health check                                                                                                                                   |
@@ -142,7 +142,7 @@ pnpm --filter @email-gateway/smtp-adapter dev       # with SMTP_ADAPTER_HOST=hos
 pnpm test:integration
 ```
 
-The step 2.3 routing suites (`routing-*.test.ts`) also need the delivery-worker with `DELIVERY_DEV_PASSTHROUGH_ENABLED=true`, and the step 3.1 suite `mime-ingestion.test.ts` needs an email-worker with the MIME stage on `EMAIL_WORKER_HOST_PORT` (`pnpm --filter @email-gateway/email-worker dev` or the rebuilt container; its gate checks `/health/ready` and the `mime_*` series on `/metrics`). With the email-worker running, every message of the other suites is parsed too; their fixtures clean up the parse rows and part objects. The step 3.2 stack suites `messaging-*.test.ts` (broker restart, MySQL writer pause, email-worker SIGKILL, duplicate events, a 500-message backlog, dead-letter replay through the api) need the whole apps profile **as containers** built from this tree (they restart, pause and kill them) and `DELIVERY_DEV_PASSTHROUGH_ENABLED=true`. The broker node-failure test runs only on the test-only `rabbitmq-cluster` profile: `pnpm --filter @email-gateway/integration-tests test:cluster` after the procedure in the [RabbitMQ runbook](docs/runbooks/rabbitmq-messaging.md#node-failure-test).
+The step 2.3 routing suites (`routing-*.test.ts`) also need the delivery-worker with `DELIVERY_DEV_PASSTHROUGH_ENABLED=true`, and the step 3.1 suite `mime-ingestion.test.ts` needs an email-worker with the MIME stage on `EMAIL_WORKER_HOST_PORT` (`pnpm --filter @email-gateway/email-worker dev` or the rebuilt container; its gate checks `/health/ready` and the `mime_*` series on `/metrics`). With the email-worker running, every message of the other suites is parsed too; their fixtures clean up the parse rows and part objects. The step 3.2 stack suites `messaging-*.test.ts` (broker restart, MySQL writer pause, email-worker SIGKILL, duplicate events, a 500-message backlog, dead-letter replay through the api) need the whole apps profile **as containers** built from this tree (they restart, pause and kill them) and `DELIVERY_DEV_PASSTHROUGH_ENABLED=true`. The step 3.3 suites `lifecycle-*.test.ts` need the same (release and rescan through the live api, a SIGKILL of the delivery-worker); `lifecycle-event-relay.test.ts` stops the `event-relay` container for its duration, runs a test-only event-relay on the host (`LIFECYCLE_TEST_RELAY_PORT`, default 3071) with short sweep intervals, and starts the container again. Suites that send mail purge the dormant queues (`scan.*`, `email.policy.evaluate`, `email.quarantine`, `email.archive`, `email.analytics`) in `afterAll`. The broker node-failure test runs only on the test-only `rabbitmq-cluster` profile: `pnpm --filter @email-gateway/integration-tests test:cluster` after the procedure in the [RabbitMQ runbook](docs/runbooks/rabbitmq-messaging.md#node-failure-test).
 
 ```bash
 pnpm --filter @email-gateway/integration-tests run test:integration   # the stack suites only
@@ -152,6 +152,25 @@ pnpm --filter @email-gateway/mime-parser test                        # parser, l
 ```
 
 With the apps profile instead (`SMTP_ADAPTER_HOST=smtp-adapter`, as in CI) the adapter and the api run as containers and the suites publish DKIM keys inside the api container. `SMTP_STACK_TESTS=skip` skips the SMTP suites explicitly (with a visible notice); `SMTP_LOAD_SESSIONS` / `SMTP_LOAD_MESSAGES` scale the load test down on a small machine.
+
+## Message lifecycle (step 3.3)
+
+Every message has one lifecycle state in `email_messages.status` (fifteen states: `received`, `persisted`, `scanning`, `scanned`, `scan_failed`, `policy_evaluated`, `approved`, `quarantined`, `held_for_review`, `rejected`, `delivery_pending`, `delivery_retry`, `delivered`, `archived`, `expired`), plus `status_reason`, `version` (+1 per applied transition) and `lifecycle_round` (+1 on a rescan or release). Every write goes through `@email-gateway/message-lifecycle` ([packages/message-lifecycle](packages/message-lifecycle/README.md)): the transition table (edges E1–E26), a row lock plus a version compare-and-set, an idempotency key per transition, and in the same transaction one `email_message_status_history` row (actor role/service/type/id, reason, causing event, correlation id, occurrence time), one `email_events` row `lifecycle.<state>` and one `mail.message.state_changed.v1` outbox row. Late, duplicate or out-of-order requests never move a message backwards; they are recorded as `lifecycle.ignored`. Design: [step 3.3](docs/plan/steps/08-message-lifecycle.md), [ADR-0025](docs/architecture/adr/0025-message-lifecycle-state-machine.md), diagrams [11](docs/architecture/diagrams/11-message-state-machine.md) and [22](docs/architecture/diagrams/22-delivery-lifecycle.md), runbook [message lifecycle](docs/runbooks/message-lifecycle.md).
+
+Who moves a message today: smtp-adapter (`received` → `persisted` in the SMTP commit), the dev pass-through of the delivery-worker (`persisted → approved`, local/CI only, until the 5.2 policy engine), the delivery planner (`approved → delivery_pending`), the shared delivery recorder (`delivery_retry` / `delivered` / `rejected`, derived from the per-recipient states), the api (operator rescan and release) and event-relay (expiry, lost-derivation recovery). The scan and policy states are valid in the machine but have no producer before Phases 4 and 5. A partial delivery is `delivered` with reason `delivery_partial`; every recipient failed is `rejected` with `delivery_failed`.
+
+event-relay roles (each a flag, single owner through MySQL `GET_LOCK`): `RELAY_ENABLED` (outbox relay), `RECONCILE_ENABLED` (re-drive of unconsumed events), `LIFECYCLE_EXPIRY_ENABLED` (expires a message stuck past its state's deadline, `LIFECYCLE_DEADLINE_<STATE>_HOURS`), `LIFECYCLE_CHECK_ENABLED` (re-derives a lost delivery transition, gauges of stuck messages). Keys: `.env.example` section "Message lifecycle (step 3.3)".
+
+Routes (OpenAPI at `/docs`, [docs/api/README.md](docs/api/README.md)):
+
+| Route                                         | Permission           | Does                                                                                                                                                                                                             |
+| --------------------------------------------- | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /api/v1/messages/{id}/lifecycle`         | `message:read`       | State, reason, version, round, parse outcome, recipient counts, allowed actions (replica)                                                                                                                        |
+| `GET /api/v1/messages/{id}/lifecycle/history` | `message:read`       | Applied transitions oldest first, cursor pagination                                                                                                                                                              |
+| `POST /api/v1/messages/{id}/rescan`           | `message:rescan`     | `Idempotency-Key` required; E19 → `scanning`, `rescan_requested.v1` to the scan queues. State transition and request contract only: no scan runs before step 4.1 (the message stays `scanning` until it expires) |
+| `POST /api/v1/messages/{id}/release`          | `quarantine:release` | `Idempotency-Key` required; `quarantined`/`held_for_review` → `approved`, released `quarantined` recipients → `pending`, delivered via 2.3                                                                       |
+
+Reading a message's state locally: the api route above, or on the writer `SELECT status, status_reason, version, lifecycle_round, status_changed_at FROM email_messages WHERE id = ?` and `SELECT version, from_status, to_status, reason_code, actor_role, actor_service, changed_at FROM email_message_status_history WHERE message_id = ? ORDER BY version` (add `received_at` for partition pruning). The stack suites `tests/integration/lifecycle-*.test.ts` exercise release, rescan, expiry, recovery, re-drive and a delivery-worker crash.
 
 ## Common commands
 
@@ -169,7 +188,7 @@ With the apps profile instead (`SMTP_ADAPTER_HOST=smtp-adapter`, as in CI) the a
 | `pnpm --filter @email-gateway/api auth:bootstrap`             | Invite the first platform super admin (after `build`; prints the link to stdout)              |
 | `pnpm --filter @email-gateway/api dkim:sync`                  | Publish DKIM signing keys to redis-dkim once (after `build`; e.g. after a restart)            |
 | `pnpm db:perf`                                                | Database performance test (throwaway schema)                                                  |
-| `pnpm rabbitmq:init`                                          | Apply the RabbitMQ topology v1 and role users from the host (idempotent)                      |
+| `pnpm rabbitmq:init`                                          | Apply the RabbitMQ topology v2 and role users from the host (idempotent)                      |
 | `pnpm --filter @email-gateway/integration-tests test:cluster` | Broker node-failure test on the 3-node `rabbitmq-cluster` profile (not in `test:integration`) |
 | `pnpm infra:up` / `pnpm stack:up` / `pnpm stack:down`         | Compose shortcuts                                                                             |
 
@@ -185,17 +204,18 @@ apps/
   delivery-worker/      Reinjection into outbound Postfix
   notification-worker/  Digests and alerts
   archive-worker/       Optional per-tenant archiving
-  event-relay/          Outbox relay (confirmed publish to RabbitMQ) and reconciliation (3.2)
+  event-relay/          Outbox relay (confirmed publish to RabbitMQ) and reconciliation (3.2); lifecycle expiry and check (3.3)
 packages/
   common/               NestJS cross-cutting: bootstrap, health, correlation, errors, infra clients, AMQP client library
   config/               zod-validated configuration, <KEY>_FILE secrets
   database/             Prisma schema, migrations, client, idempotency helper
-  event-contracts/      Event envelope, schemas and registry, RabbitMQ topology v1 and definitions
+  event-contracts/      Event envelope, schemas and registry, RabbitMQ topology v2 and definitions
   security-contracts/   Security engine interface and verdict schema
   shared-types/         Domain primitives shared with the portal
   logger/               pino JSON logger, request context, OpenTelemetry bootstrap
   mime-parser/          Streaming MIME parser with limits, defects, filename sanitization, sniffing, zip inspection
   mail-routing/         Direction resolution, destination safety, route planning, delivery status recorder
+  message-lifecycle/    Message state machine: transition table, ordering rule, transition service (3.3)
 infrastructure/         docker, kubernetes, terraform, postfix, rspamd, clamav, rabbitmq, mysql, minio, monitoring
 docs/                   architecture (+ ADRs), database, api, security, deployment, runbooks
 tests/integration/      Tests against the running stack
@@ -225,6 +245,7 @@ scripts/                Developer tooling
 - [SMTP concurrency results (smtp-source, zero loss)](docs/performance/smtp-concurrency.md)
 - [Outbox relay and reconciliation (ADR-0023)](docs/architecture/adr/0023-outbox-relay-and-reconciliation.md), [RabbitMQ topology, retry, dead letters (ADR-0024)](docs/architecture/adr/0024-rabbitmq-topology-retry-dead-letter.md), the [step 3.2 design and verification record](docs/plan/steps/07-rabbitmq.md), the [messaging topology](docs/architecture/messaging-topology.md), the [event-relay README](apps/event-relay/README.md), the [RabbitMQ messaging runbook](docs/runbooks/rabbitmq-messaging.md) and [diagram 21](docs/architecture/diagrams/21-event-relay-sequence.md)
 - [MIME parsing and post-queue ingestion (ADR-0022)](docs/architecture/adr/0022-mime-parsing-and-post-queue-ingestion.md), the [step 3.1 design and verification record](docs/plan/steps/06-mime-ingestion.md), the [email-worker](apps/email-worker/README.md) and [mime-parser](packages/mime-parser/README.md) READMEs, the [MIME ingestion runbook](docs/runbooks/mime-ingestion.md) and [diagram 20](docs/architecture/diagrams/20-mime-ingestion-sequence.md)
+- [Message lifecycle (ADR-0025)](docs/architecture/adr/0025-message-lifecycle-state-machine.md), the [step 3.3 design and verification record](docs/plan/steps/08-message-lifecycle.md), the [message-lifecycle README](packages/message-lifecycle/README.md), the [message lifecycle runbook](docs/runbooks/message-lifecycle.md) and diagrams [11](docs/architecture/diagrams/11-message-state-machine.md) and [22](docs/architecture/diagrams/22-delivery-lifecycle.md)
 
 ## Engineering rules (short version)
 

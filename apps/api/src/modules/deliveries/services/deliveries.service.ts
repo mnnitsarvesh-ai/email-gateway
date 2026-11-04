@@ -76,6 +76,7 @@ export class DeliveriesService {
         id: message.publicId,
         direction: message.direction,
         status: message.status,
+        statusReason: message.statusReason,
         receivedAt: message.receivedAt.toISOString(),
       },
       deliveries: views,

@@ -4,6 +4,7 @@ import { PrismaService } from '@email-gateway/common';
 import { Prisma } from '@email-gateway/database';
 import { EventTypes, messageReceivedV1 } from '@email-gateway/event-contracts';
 import type { RoutedDirection } from '@email-gateway/mail-routing';
+import { initialLifecycle, writeInitialHistory } from '@email-gateway/message-lifecycle';
 import type { IngestDirection } from './ingestion-keys';
 
 export const MESSAGE_AGGREGATE_TYPE = 'message';
@@ -80,6 +81,12 @@ export class IngestionRepository {
    * One writer transaction: registry row, message, recipients, one `received` event and the
    * `mail.message.received.v1` outbox row, all with the same `received_at`. Throws P2002 when the
    * ingest key is already committed (a concurrent duplicate).
+   *
+   * Lifecycle (step 3.3 L8.1, edges E1 and E2): the message is born `persisted` (version 1,
+   * round 0, reason `committed`) with its two history rows (`received`, `persisted`; actor
+   * `ingestion`/`smtp-adapter`, causation = the received event id, correlation
+   * `lmtp:<queueId>`) through @email-gateway/message-lifecycle; one `createMany`, no lock, no
+   * read, no `state_changed` outbox row (`mail.message.received.v1` notifies `persisted`).
    */
   async commit(
     data: IngestCommit,
@@ -100,6 +107,15 @@ export class IngestionRepository {
           select: { id: true },
         });
         const messageId = identity.id;
+        const lifecycle = initialLifecycle({
+          messageId,
+          receivedAt: data.receivedAt,
+          organizationId: data.organizationId,
+          causationEventId: eventId,
+          correlationId: `lmtp:${data.queueId}`,
+          service: SOURCE_SERVICE,
+          at: data.receivedAt,
+        });
         const payload = messageReceivedV1.parse({
           messageId: messageId.toString(),
           receivedAt: data.receivedAt.toISOString(),
@@ -116,8 +132,7 @@ export class IngestionRepository {
             organizationId: data.organizationId,
             domainId: data.domainId,
             direction: data.messageDirection,
-            status: 'received',
-            statusChangedAt: data.receivedAt,
+            ...lifecycle.messageFields,
             internetMessageId: data.internetMessageId,
             envelopeFrom: data.envelopeFrom,
             headerFrom: data.headerFrom,
@@ -132,6 +147,7 @@ export class IngestionRepository {
           },
           select: { id: true },
         });
+        await writeInitialHistory(tx, lifecycle);
         await tx.emailRecipient.createMany({
           data: data.recipients.map((address, rcptSeq) => ({
             receivedAt: data.receivedAt,

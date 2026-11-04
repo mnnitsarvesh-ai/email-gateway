@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { purgeDormantQueues } from './support/broker';
 import { composeExec, composeOk, waitFor } from './support/compose';
 import { rawLmtp } from './support/lmtp-raw';
 import { buildMessage } from './support/messages';
@@ -78,6 +79,7 @@ afterAll(async () => {
   await waitForPostfix();
   await waitForQueueDrained('postfix', [domain.name]).catch(() => undefined);
   await fx.cleanup();
+  await purgeDormantQueues();
 }, 300_000);
 
 describe.skipIf(gate.skip)(

@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import { parseEvent } from './envelope';
 import { eventEnvelopeSchema } from './envelope';
 import {
+  ACTOR_ROLES,
+  actorRoleSchema,
   DELIVERY_STATUSES,
   deliveryApprovedV1,
   deliveryStatusChangedV1,
@@ -10,11 +12,15 @@ import {
   domainStatusChangedV1,
   EventTypes,
   MESSAGE_PARSE_STATUSES,
+  MESSAGE_STATES,
   MIME_LIMIT_NAMES,
   messageParsedV1,
   messageParseFailedV1,
   messageReceivedV1,
+  messageRescanRequestedV1,
   messageScannedV1,
+  messageStateChangedV1,
+  messageStateSchema,
   PARSE_FAILURE_REASONS,
   policyDecidedV1,
 } from './events';
@@ -201,6 +207,8 @@ describe('event types', () => {
       DomainRoutingChanged: 'domain.routing.changed.v1',
       MessageParsed: 'mail.message.parsed.v1',
       MessageParseFailed: 'mail.message.parse_failed.v1',
+      MessageStateChanged: 'mail.message.state_changed.v1',
+      MessageRescanRequested: 'mail.message.rescan_requested.v1',
     });
   });
 });
@@ -232,6 +240,15 @@ describe('mail.delivery.approved.v1', () => {
       rcptSeq: i,
     }));
     expect(parse(approval({ recipients: many })).payload.recipients).toHaveLength(1000);
+  });
+
+  it('accepts an optional lifecycle round (absent = round 0) within 0..65535', () => {
+    expect(parse(approval()).payload.lifecycleRound).toBeUndefined();
+    expect(parse(approval({ lifecycleRound: 0 })).payload.lifecycleRound).toBe(0);
+    expect(parse(approval({ lifecycleRound: 65_535 })).payload.lifecycleRound).toBe(65_535);
+    for (const lifecycleRound of [-1, 65_536, 1.5, '1', null]) {
+      expect(() => parse(approval({ lifecycleRound })), String(lifecycleRound)).toThrow();
+    }
   });
 
   it('rejects malformed approvals', () => {
@@ -595,6 +612,156 @@ describe('domain.routing.changed.v1', () => {
       { changedAt: '2026-11-03' },
     ]) {
       expect(() => parse(routing(overrides)), JSON.stringify(overrides).slice(0, 80)).toThrow();
+    }
+  });
+});
+
+describe('lifecycle states and actor roles (step 3.3 L2, L3)', () => {
+  it('lists the fifteen states in rank/enum order and the ten actor roles', () => {
+    expect(MESSAGE_STATES).toEqual([
+      'received',
+      'persisted',
+      'scanning',
+      'scanned',
+      'scan_failed',
+      'policy_evaluated',
+      'approved',
+      'quarantined',
+      'held_for_review',
+      'rejected',
+      'delivery_pending',
+      'delivery_retry',
+      'delivered',
+      'archived',
+      'expired',
+    ]);
+    expect(ACTOR_ROLES).toEqual([
+      'ingestion',
+      'scanner',
+      'policy',
+      'dev_passthrough',
+      'delivery',
+      'operator',
+      'quarantine',
+      'archive',
+      'sweeper',
+      'recovery',
+    ]);
+    for (const state of MESSAGE_STATES) expect(messageStateSchema.parse(state)).toBe(state);
+    // The step 1.1 values retired by ADR-0025.
+    for (const old of ['delivery_queued', 'partially_delivered', 'discarded', 'failed']) {
+      expect(messageStateSchema.safeParse(old).success, old).toBe(false);
+    }
+    expect(actorRoleSchema.safeParse('legacy').success).toBe(false);
+  });
+});
+
+describe('mail.message.state_changed.v1', () => {
+  const changed = (overrides: Record<string, unknown> = {}) => ({
+    messageId: '9007199254740993',
+    receivedAt,
+    direction: 'inbound',
+    previousState: 'approved',
+    state: 'delivery_pending',
+    version: 3,
+    lifecycleRound: 0,
+    reasonCode: 'delivery_planned',
+    actorRole: 'delivery',
+    actorType: 'system',
+    actorService: 'delivery-worker',
+    causationEventId: '01890a5d-ac96-774b-bcce-b302099a8057',
+    changedAt: '2026-11-01T10:16:01.000Z',
+    ...overrides,
+  });
+  const parse = (payload: unknown) =>
+    parseEvent(
+      envelope(payload, { eventType: EventTypes.MessageStateChanged }),
+      messageStateChangedV1,
+    );
+
+  it('accepts every state, role and actor type, a null previous state and causation', () => {
+    for (const state of MESSAGE_STATES) {
+      expect(parse(changed({ state, previousState: state })).payload.state).toBe(state);
+    }
+    for (const actorRole of ACTOR_ROLES) {
+      expect(parse(changed({ actorRole })).payload.actorRole).toBe(actorRole);
+    }
+    for (const actorType of ['system', 'user', 'api_key']) {
+      expect(parse(changed({ actorType })).payload.actorType).toBe(actorType);
+    }
+    const first = parse(changed({ previousState: null, causationEventId: null })).payload;
+    expect(first.previousState).toBeNull();
+    expect(first.causationEventId).toBeNull();
+    expect(parse(changed({ lifecycleRound: 65_535 })).payload.lifecycleRound).toBe(65_535);
+    expect(parse(changed({ reasonCode: 'a'.repeat(64) })).payload.reasonCode).toHaveLength(64);
+    expect(parse(changed({ actorService: 'x'.repeat(64) })).payload.actorService).toHaveLength(64);
+  });
+
+  it('rejects unknown states, roles, codes and malformed fields', () => {
+    for (const overrides of [
+      { state: 'delivery_queued' },
+      { state: 'partially_delivered' },
+      { previousState: 'failed' },
+      { direction: 'both' },
+      { messageId: '0' },
+      { version: -1 },
+      { version: 1.5 },
+      { lifecycleRound: -1 },
+      { lifecycleRound: 65_536 },
+      { reasonCode: '' },
+      { reasonCode: 'Delivery-Planned' },
+      { reasonCode: 'a'.repeat(65) },
+      { actorRole: 'legacy' },
+      { actorType: 'service' },
+      { actorService: '' },
+      { actorService: 'x'.repeat(65) },
+      { causationEventId: 'not-a-uuid' },
+      { changedAt: '2026-11-01' },
+      { state: undefined },
+    ]) {
+      expect(() => parse(changed(overrides)), JSON.stringify(overrides).slice(0, 80)).toThrow();
+    }
+  });
+});
+
+describe('mail.message.rescan_requested.v1', () => {
+  const rescan = (overrides: Record<string, unknown> = {}) => ({
+    messageId: '9007199254740993',
+    receivedAt,
+    direction: 'outbound',
+    emlS3Key: `org/${organizationId}/eml/2026/11/01/abc.eml`,
+    lifecycleRound: 1,
+    scanKind: 'rescan',
+    requestedAt: '2026-11-02T08:00:00.000Z',
+    requestedBy: 'api_key',
+    ...overrides,
+  });
+  const parse = (payload: unknown) =>
+    parseEvent(
+      envelope(payload, { eventType: EventTypes.MessageRescanRequested }),
+      messageRescanRequestedV1,
+    );
+
+  it('accepts a rescan by a user or an API key with a round of at least 1', () => {
+    expect(parse(rescan()).payload).toMatchObject({ scanKind: 'rescan', lifecycleRound: 1 });
+    expect(parse(rescan({ requestedBy: 'user' })).payload.requestedBy).toBe('user');
+    expect(parse(rescan({ lifecycleRound: 65_535 })).payload.lifecycleRound).toBe(65_535);
+  });
+
+  it('rejects round 0, other scan kinds, foreign keys and system requesters', () => {
+    for (const overrides of [
+      { lifecycleRound: 0 },
+      { lifecycleRound: 65_536 },
+      { scanKind: 'initial' },
+      { scanKind: 'retro' },
+      { emlS3Key: 'eml/x.eml' },
+      { emlS3Key: 'org/0/eml/x.eml' },
+      { requestedBy: 'system' },
+      { requestedAt: 'now' },
+      { direction: 'both' },
+      { messageId: 'abc' },
+    ]) {
+      expect(() => parse(rescan(overrides)), JSON.stringify(overrides).slice(0, 80)).toThrow();
     }
   });
 });

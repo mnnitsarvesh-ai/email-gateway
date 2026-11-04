@@ -928,6 +928,7 @@ export class Reinjector {
             timeoutMs: this.deps.txTimeoutMs,
             eventId: row.approvalEventId,
             logger: this.logger,
+            lifecycleMetrics: this.deps.metrics.lifecycle,
           });
           out.push({ result: recorded.result, status: recorded.status });
         }

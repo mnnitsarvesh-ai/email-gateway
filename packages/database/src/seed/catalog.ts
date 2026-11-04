@@ -34,6 +34,9 @@ export const PERMISSIONS = Object.freeze([
     key: 'message:read_content',
     description: 'View message content (body and attachments) from object storage',
   },
+  // Step 3.3 (L10.2): administrative rescan (E19). A tenant permission, so organization_admin
+  // and super_admin hold it; security_analyst gets it explicitly. Not read-only.
+  { key: 'message:rescan', description: "Request a rescan of a message's security pipeline" },
   { key: 'quarantine:read', description: 'View quarantined messages' },
   { key: 'quarantine:release', description: 'Release quarantined messages' },
   { key: 'quarantine:delete', description: 'Delete quarantined messages' },
@@ -218,6 +221,7 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'policy:manage',
       'message:read',
       'message:read_content',
+      'message:rescan',
       'delivery:read',
       'quarantine:read',
       'quarantine:release',

@@ -7,6 +7,8 @@ import {
   type MessageReceivedV1,
 } from '@email-gateway/event-contracts';
 import type { Logger } from '@email-gateway/logger';
+import { transitionMessage } from '@email-gateway/message-lifecycle';
+import type { DeliveryMetrics } from '../metrics/delivery-metrics';
 import { SOURCE_SERVICE } from '../planning/delivery-planner';
 import type { ApprovalFeed } from './approval-feed';
 
@@ -34,9 +36,15 @@ export interface PassThroughResult {
  * mail). Step 5.x replaces it with the policy engine's approvals.
  *
  * In the consumer's idempotency transaction (`processOnceHandler`, budget `txTimeoutMs`) it
- * writes the approval outbox row(s) and one `email_events` row `delivery.approved` per approval
- * (`details.source = dev_passthrough`). The message and its EML key come from the writer row of
- * the envelope's organization, never from the event payload alone.
+ * first moves the message `persisted → approved` (step 3.3 L8.3, edge E4, role
+ * `dev_passthrough`, key `evt:<receivedEventId>:approved`, expected round 0) through
+ * @email-gateway/message-lifecycle, then writes the approval outbox row(s)
+ * (`lifecycleRound: 0`) and one `email_events` row `delivery.approved` per approval
+ * (`details.source = dev_passthrough`). A message that is not `persisted` (another stage or an
+ * operator moved it, an older round), or that does not exist for the envelope's organization,
+ * is not approved (`delivery_approvals_skipped_total{reason="lifecycle_<result>"}`). The
+ * message and its EML key come from the writer row of the envelope's organization, never from
+ * the event payload alone.
  */
 export class DevPassThroughApprover {
   private readonly logger: Logger;
@@ -46,6 +54,7 @@ export class DevPassThroughApprover {
     private readonly prisma: PrismaClient,
     private readonly txTimeoutMs: number,
     logger: Logger,
+    private readonly metrics: DeliveryMetrics,
     private readonly now: () => Date = () => new Date(),
   ) {
     this.logger = logger.child({ component: 'dev-passthrough' });
@@ -77,14 +86,42 @@ export class DevPassThroughApprover {
     const messageId = BigInt(event.payload.messageId);
     const receivedAt = new Date(event.payload.receivedAt);
     const ids = { eventId: event.eventId, messageId: event.payload.messageId };
-    const message = await tx.emailMessage.findFirst({
-      where: { id: messageId, receivedAt, organizationId },
-      select: { emlObjectKey: true },
-    });
-    if (!message) {
-      this.logger.warn(ids, 'received message not found for the organization; not approved');
+    // E4 first, in the same transaction as the approvals: they exist iff the message is approved.
+    const lifecycle = await transitionMessage(
+      tx,
+      {
+        message: { id: messageId, receivedAt, organizationId },
+        to: 'approved',
+        reason: 'dev_passthrough',
+        actor: { role: 'dev_passthrough', service: SOURCE_SERVICE, type: 'system' },
+        transitionKey: `evt:${event.eventId}:approved`,
+        causationEventId: event.eventId,
+        correlationId: event.correlationId,
+        expectedRound: 0,
+        expectedFrom: ['persisted'],
+      },
+      { metrics: this.metrics.lifecycle, logger: this.logger },
+    );
+    if (lifecycle.result === 'duplicate') {
+      // Already approved by an earlier run of this event (cannot happen inside one ledger
+      // transaction; kept for safety): its approvals were committed with it.
+      this.logger.info(
+        { ...ids, result: lifecycle.result, why: lifecycle.why, state: lifecycle.snapshot.state },
+        'message already approved; nothing more to approve',
+      );
       return { approvals: [], recipients: 0 };
     }
+    if (lifecycle.result !== 'applied') {
+      const why = lifecycle.result === 'not_found' ? null : lifecycle.why;
+      const state = lifecycle.result === 'not_found' ? null : lifecycle.snapshot.state;
+      this.metrics.approvalsSkipped.inc({ reason: `lifecycle_${lifecycle.result}` });
+      this.logger.info(
+        { ...ids, result: lifecycle.result, why, state },
+        'message is not persisted for the organization (lifecycle); not approved',
+      );
+      return { approvals: [], recipients: 0 };
+    }
+    const emlObjectKey = lifecycle.snapshot.emlObjectKey;
     const recipients = await tx.emailRecipient.findMany({
       where: { messageId, receivedAt, organizationId, status: 'pending' },
       orderBy: { rcptSeq: 'asc' },
@@ -99,8 +136,9 @@ export class DevPassThroughApprover {
         messageId: messageId.toString(),
         receivedAt: receivedAt.toISOString(),
         deliverySeq: 0,
+        lifecycleRound: 0,
         source: 'dev_passthrough',
-        emlS3Key: message.emlObjectKey,
+        emlS3Key: emlObjectKey,
         recipients: chunk.map((r) => ({ recipientId: r.id.toString(), rcptSeq: r.rcptSeq })),
         approvedAt: now.toISOString(),
       });
@@ -129,6 +167,7 @@ export class DevPassThroughApprover {
             source: 'dev_passthrough',
             approvalEventId: approvalId,
             deliverySeq: 0,
+            lifecycleRound: 0,
             recipientCount: chunk.length,
           },
         },

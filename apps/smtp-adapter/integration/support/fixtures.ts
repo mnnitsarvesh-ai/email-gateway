@@ -20,6 +20,14 @@ import { requireEnv, s3Config } from './stack';
  * Outbox event types the running email-worker writes for every ingested message (step 3.1,
  * docs/plan/steps/06-mime-ingestion.md M14). Suites that assert what INGESTION wrote exclude them.
  */
+/** History of a fixture message in `delivery_pending`: `[state, reason, actor role]` per version. */
+const LIFECYCLE_PATH = [
+  ['received', 'smtp_accepted', 'ingestion'],
+  ['persisted', 'committed', 'ingestion'],
+  ['approved', 'dev_passthrough', 'dev_passthrough'],
+  ['delivery_pending', 'delivery_planned', 'delivery'],
+] as const;
+
 export const EMAIL_WORKER_EVENT_TYPES = [
   EventTypes.MessageParsed,
   EventTypes.MessageParseFailed,
@@ -133,7 +141,9 @@ export class Fixtures {
    * A reinjected message as the delivery-worker leaves it (step 2.3 R7/R8): registry row,
    * message, recipients, one reinjection (`queued`, with `queueId` when given) and one delivery
    * per recipient bound to it (`queued`, `outbound_queue_id` = `queueId`). Rows are inserted
-   * directly; the adapter only reads them and records signals.
+   * directly; the adapter only reads them and records signals. The message is in
+   * `delivery_pending` (version 3) with the matching history rows (`received`, `persisted`,
+   * `approved`, `delivery_pending`), as the planner leaves it (step 3.3 L8.6).
    */
   async reinjectedMessage(options: {
     organizationId: bigint;
@@ -165,7 +175,9 @@ export class Fixtures {
         receivedAt,
         organizationId: options.organizationId,
         direction: options.direction,
-        status: 'delivery_queued',
+        status: 'delivery_pending',
+        statusReason: 'delivery_planned',
+        version: LIFECYCLE_PATH.length - 1,
         statusChangedAt: receivedAt,
         envelopeFrom: options.envelopeFrom,
         sizeBytes: 100,
@@ -173,6 +185,21 @@ export class Fixtures {
         emlObjectKey: `org/${options.organizationId}/eml/test/${randomUUID()}.eml`,
         emlSha256: sha('x'),
       },
+    });
+    await this.prisma.emailMessageStatusHistory.createMany({
+      data: LIFECYCLE_PATH.map(([toStatus, reasonCode, actorRole], version) => ({
+        receivedAt,
+        messageId,
+        organizationId: options.organizationId,
+        version,
+        fromStatus: version === 0 ? null : LIFECYCLE_PATH[version - 1]![0],
+        toStatus,
+        reasonCode,
+        actorRole,
+        actorService: 'smtp-adapter-it',
+        changedAt: receivedAt,
+        occurredAt: receivedAt,
+      })),
     });
     const recipientRows = [];
     for (const [rcptSeq, address] of options.recipients.entries()) {

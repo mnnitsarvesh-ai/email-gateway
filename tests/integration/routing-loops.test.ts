@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { purgeDormantQueues } from './support/broker';
 import { apiRunning, apiSession, type ApiSession } from './support/api-client';
 import { composeOk, waitFor } from './support/compose';
 import { deliveriesOf, waitForDeliveries, waitForMessage } from './support/deliveries';
@@ -63,6 +64,7 @@ afterAll(async () => {
     }
   }
   await fx.cleanup();
+  await purgeDormantQueues();
 }, 240_000);
 
 describe.skipIf(gate.skip)('routing stack: loops (§9 item 4)', { timeout: 300_000 }, () => {

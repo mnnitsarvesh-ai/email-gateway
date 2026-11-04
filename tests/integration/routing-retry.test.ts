@@ -1,4 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import {
+  DELIVERED_PATH,
+  expectConsistentHistory,
+  pathOf,
+  waitForLifecycle,
+} from './support/lifecycle';
+import { purgeDormantQueues } from './support/broker';
 import { composeOk } from './support/compose';
 import {
   statusEventsOf,
@@ -64,6 +71,7 @@ afterAll(async () => {
   for (const service of [...stopped]) await startSink(service);
   for (const domain of [m365, google].filter(Boolean)) await clearSinkDomain(domain.name, 'all');
   await fx.cleanup();
+  await purgeDormantQueues();
 }, 240_000);
 
 describe.skipIf(gate.skip)('routing stack: outage, retry and failover (§9 item 5)', () => {
@@ -100,6 +108,8 @@ describe.skipIf(gate.skip)('routing stack: outage, retry and failover (§9 item 
         // Postfix holds it in its deferred queue (it owns the retry, ADR-0006).
         const queued = involving(await listQueue('postfix-outbound'), [m365.name]);
         expect(queued.map((m) => m.queue_name)).toContain('deferred');
+        // Step 3.3 (L9, E21): a deferred recipient → delivery_retry/delivery_deferred.
+        await waitForLifecycle(fx.prisma, message, 'delivery_retry', 'delivery_deferred', 30_000);
       } finally {
         await startSink('sink-m365');
       }
@@ -126,6 +136,15 @@ describe.skipIf(gate.skip)('routing stack: outage, retry and failover (§9 item 
         audit.filter((e) => e.toStatus === 'deferred' && e.source === 'postfix_log').length,
       ).toBeGreaterThanOrEqual(1);
       expect(involving(await listQueue('postfix-outbound'), [m365.name])).toEqual([]);
+      // … and the retry's success → delivered/delivery_complete, from delivery_retry (E23).
+      const key = { id: messageId, receivedAt: delivered!.receivedAt };
+      await waitForLifecycle(fx.prisma, key, 'delivered', 'delivery_complete');
+      const path = await pathOf(fx.prisma, key);
+      expect(path.slice(0, 4)).toEqual(DELIVERED_PATH('delivery_retry', '').slice(0, 4));
+      expect(path).toContainEqual(['delivery_pending', 'delivery_retry', 'delivery_deferred']);
+      // From delivery_retry (E23), or from delivery_pending if a requeue signal came first (E22).
+      expect(path.at(-1)?.slice(1)).toEqual(['delivered', 'delivery_complete']);
+      await expectConsistentHistory(fx.prisma, key);
     },
   );
 

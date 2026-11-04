@@ -1,4 +1,3 @@
-import { PutObjectCommand } from '@aws-sdk/client-s3';
 import { encodeEvent, HEADERS, uuidv7 } from '@email-gateway/common';
 import {
   deadLetterRoutingKey,
@@ -10,6 +9,13 @@ import type { MessageProperties } from 'amqplib';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { waitFor } from './support/compose';
 import { waitForAllDeliveries } from './support/deliveries';
+import {
+  DELIVERED_PATH,
+  expectConsistentHistory,
+  insertFixtureMessage,
+  pathOf,
+  waitForLifecycle,
+} from './support/lifecycle';
 import { sinkFiles } from './support/mail-sink';
 import { MessagingScenario } from './support/messaging-scenario';
 import {
@@ -66,61 +72,25 @@ afterAll(async () => {
   await scenario.teardown();
 }, 300_000);
 
-/** A stored inbound message with one pending recipient, as ingestion leaves it. */
+/**
+ * A stored inbound message with one pending recipient whose delivery was approved (step 3.3:
+ * the planner plans approvals of `approved` messages only, L8.4), as the dev pass-through leaves
+ * it: state `approved`, version 2, round 0, with its history.
+ */
 async function pendingMessage() {
-  const org = scenario.org;
-  const receivedAt = new Date();
-  const eml = [
-    'From: replay-sender@example.org',
-    `To: ${scenario.recipient}`,
-    'Subject: Messaging replay',
-    `Message-ID: <${uuidv7()}@integration.test>`,
-    `Date: ${receivedAt.toUTCString().replace('GMT', '+0000')}`,
-    'MIME-Version: 1.0',
-    'Content-Type: text/plain; charset=utf-8',
-    '',
-    'Replayed approval.',
-    '',
-  ].join('\r\n');
-  const identity = await fx.prisma.messageIdentity.create({
-    data: { organizationId: org, ingestKey: `it-${uuidv7()}`, receivedAt },
-    select: { id: true },
+  const message = await insertFixtureMessage(fx, {
+    organizationId: scenario.org,
+    state: 'approved',
+    recipients: [scenario.recipient],
+    subject: 'Messaging replay',
   });
-  const emlObjectKey = `org/${org.toString()}/eml/it/${uuidv7()}.eml`;
-  await fx.s3.send(
-    new PutObjectCommand({ Bucket: fx.bucket, Key: emlObjectKey, Body: Buffer.from(eml) }),
-  );
-  await fx.prisma.emailMessage.create({
-    data: {
-      id: identity.id,
-      receivedAt,
-      organizationId: org,
-      direction: 'inbound',
-      status: 'received',
-      statusChangedAt: receivedAt,
-      envelopeFrom: 'replay-sender@example.org',
-      sizeBytes: Buffer.byteLength(eml),
-      recipientCount: 1,
-      emlObjectKey,
-      emlSha256: '0'.repeat(64),
-      clientIp: '203.0.113.7',
-      clientHelo: 'mail.example.org',
-    },
-  });
-  await fx.prisma.emailRecipient.create({
-    data: {
-      receivedAt,
-      messageId: identity.id,
-      organizationId: org,
-      rcptSeq: 0,
-      address: scenario.recipient,
-      direction: 'inbound',
-    },
-  });
-  const recipient = await fx.prisma.emailRecipient.findFirstOrThrow({
-    where: { organizationId: org, messageId: identity.id },
-  });
-  return { messageId: identity.id, receivedAt, emlObjectKey, recipientId: recipient.id };
+  return {
+    messageId: message.id,
+    receivedAt: message.receivedAt,
+    emlObjectKey: message.emlObjectKey,
+    recipientId: message.recipients[0]!.id,
+    key: message,
+  };
 }
 
 /** The approval, written to the outbox and marked published (as the relay leaves it). */
@@ -324,6 +294,13 @@ describe.skipIf(gate.skip)(
         }),
       ).toBe(1);
       expect(await sinkFiles(scenario.recipient)).toHaveLength(1);
+      // Step 3.3: the replayed approval moved the message once (E20, then E23), and the
+      // duplicate replay added no history row.
+      await waitForLifecycle(fx.prisma, message.key, 'delivered', 'delivery_complete');
+      expect(await pathOf(fx.prisma, message.key)).toEqual(
+        DELIVERED_PATH('delivered', 'delivery_complete'),
+      );
+      await expectConsistentHistory(fx.prisma, message.key);
       expect(await scenario.broker.depth(QUEUES.deadLetter)).toBe(before);
       expect(await scenario.broker.depth(QUEUES.pending)).toBe(0);
       record('messaging-replay', {
