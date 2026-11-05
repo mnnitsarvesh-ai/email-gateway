@@ -15,44 +15,49 @@ All paths below are under `/api/v1`.
 
 The `permissions` table is seeded from `PERMISSIONS` in `packages/database/src/seed/catalog.ts` (the source of truth; `GET /permissions` lists it). Keys starting with `platform:` are **platform permissions** (`PLATFORM_PERMISSIONS`); all others are **tenant permissions** (`TENANT_PERMISSIONS`). `TENANT_READ_PERMISSIONS` is the read-only subset used by several default roles.
 
-| Key                           | Meaning                                                                    |
-| ----------------------------- | -------------------------------------------------------------------------- |
-| `organization:read`           | View organization profile, settings and limits                             |
-| `organization:manage`         | Change organization profile and settings                                   |
-| `user:read`                   | View users and their roles                                                 |
-| `user:manage`                 | Invite, disable and assign roles to users                                  |
-| `role:read`                   | View roles and the permission catalog                                      |
-| `role:manage`                 | Create and edit custom roles                                               |
-| `apikey:read`                 | View API keys (never secrets)                                              |
-| `apikey:manage`               | Create and revoke API keys                                                 |
-| `session:manage`              | View and revoke other users' sessions                                      |
-| `domain:read`                 | View domains, DNS records and mail servers                                 |
-| `domain:manage`               | Add, verify and configure domains                                          |
-| `domain:dkim_rotate`          | Rotate DKIM signing keys of domains (step 2.1)                             |
-| `policy:read`                 | View email policies and exceptions                                         |
-| `policy:manage`               | Create and edit draft policies and exceptions                              |
-| `policy:publish`              | Publish and roll back policy versions                                      |
-| `message:read`                | View message metadata, verdicts and delivery status                        |
-| `message:read_content`        | View message content (body and attachments) from object storage            |
-| `quarantine:read`             | View quarantined messages                                                  |
-| `quarantine:release`          | Release quarantined messages                                               |
-| `quarantine:delete`           | Delete quarantined messages                                                |
-| `quarantine:request_release`  | Request the release of a quarantined message                               |
-| `report:read`                 | View dashboards and reports                                                |
-| `audit:read`                  | View the audit log                                                         |
-| `archive:read`                | Search and view archived messages                                          |
-| `archive:export`              | Export archived messages                                                   |
-| `archive:legal_hold`          | Create and release legal holds                                             |
-| `webhook:manage`              | Create and edit webhook subscriptions                                      |
-| `settings:manage`             | Change notification, quarantine and archive settings                       |
-| `platform:organizations`      | Platform: create, suspend and manage customer organizations                |
-| `platform:operations`         | Platform: view operational health, queues and maintenance status           |
-| `platform:tenant_override`    | Platform: start an audited override into a customer organization           |
-| `connector:read`              | View SMTP connectors (never secrets) (step 2.2)                            |
-| `connector:manage`            | Create, rotate and disable SMTP connectors (step 2.2)                      |
-| `domain:routing_manage`       | Change where a domain's mail is delivered (destination servers) (step 2.3) |
-| `delivery:read`               | View per-recipient delivery status and the delivery audit trail (step 2.3) |
-| `platform:dead_letter_replay` | Platform: replay dead-lettered pipeline messages (step 3.2)                |
+| Key                            | Meaning                                                                    |
+| ------------------------------ | -------------------------------------------------------------------------- |
+| `organization:read`            | View organization profile, settings and limits                             |
+| `organization:manage`          | Change organization profile and settings                                   |
+| `user:read`                    | View users and their roles                                                 |
+| `user:manage`                  | Invite, disable and assign roles to users                                  |
+| `role:read`                    | View roles and the permission catalog                                      |
+| `role:manage`                  | Create and edit custom roles                                               |
+| `apikey:read`                  | View API keys (never secrets)                                              |
+| `apikey:manage`                | Create and revoke API keys                                                 |
+| `session:manage`               | View and revoke other users' sessions                                      |
+| `domain:read`                  | View domains, DNS records and mail servers                                 |
+| `domain:manage`                | Add, verify and configure domains                                          |
+| `domain:dkim_rotate`           | Rotate DKIM signing keys of domains (step 2.1)                             |
+| `policy:read`                  | View email policies and exceptions                                         |
+| `policy:manage`                | Create and edit draft policies and exceptions                              |
+| `policy:publish`               | Publish and roll back policy versions                                      |
+| `message:read`                 | View message metadata, verdicts and delivery status                        |
+| `message:read_content`         | View message content (body and attachments) from object storage            |
+| `message:rescan`               | Request a rescan of a message's security pipeline (step 3.3)               |
+| `quarantine:read`              | View quarantined messages                                                  |
+| `quarantine:release`           | Release quarantined messages                                               |
+| `quarantine:delete`            | Delete quarantined messages                                                |
+| `quarantine:request_release`   | Request the release of a quarantined message                               |
+| `report:read`                  | View dashboards and reports                                                |
+| `audit:read`                   | View the audit log                                                         |
+| `archive:read`                 | Search and view archived messages                                          |
+| `archive:export`               | Export archived messages                                                   |
+| `archive:legal_hold`           | Create and release legal holds                                             |
+| `webhook:manage`               | Create and edit webhook subscriptions                                      |
+| `settings:manage`              | Change notification, quarantine and archive settings                       |
+| `platform:organizations`       | Platform: create, suspend and manage customer organizations                |
+| `platform:operations`          | Platform: view operational health, queues and maintenance status           |
+| `platform:tenant_override`     | Platform: start an audited override into a customer organization           |
+| `connector:read`               | View SMTP connectors (never secrets) (step 2.2)                            |
+| `connector:manage`             | Create, rotate and disable SMTP connectors (step 2.2)                      |
+| `domain:routing_manage`        | Change where a domain's mail is delivered (destination servers) (step 2.3) |
+| `delivery:read`                | View per-recipient delivery status and the delivery audit trail (step 2.3) |
+| `platform:dead_letter_replay`  | Platform: replay dead-lettered pipeline messages (step 3.2)                |
+| `scan:settings_manage`         | Change the organization's security scan thresholds (step 4.1)              |
+| `platform:scan_training`       | Train the shared spam classifiers (Bayes, fuzzy) from a message (step 4.1) |
+| `platform:threat_intel_manage` | Manage the platform's known-threat file hashes (step 4.2)                  |
+| `platform:scan_rescan`         | Start and cancel bulk attachment rescans (step 4.2)                        |
 
 `GET /permissions` lists `platform:*` keys only to users of the platform organization who are not under an override; customer users and API keys see the tenant permissions only.
 
@@ -74,44 +79,49 @@ System roles are shared by all organizations (`roles.organization_id IS NULL`, `
 
 Generated from the seed catalog (`SYSTEM_ROLES`); if the catalog changes, regenerate this table.
 
-| Permission                    | SA  | PA  | OA  | DA  | SAn | QR  | CA  | RO  |
-| ----------------------------- | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: |
-| `organization:read`           |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |
-| `organization:manage`         |  ✓  |     |  ✓  |     |     |     |     |     |
-| `user:read`                   |  ✓  |  ✓  |  ✓  |  ✓  |     |     |  ✓  |  ✓  |
-| `user:manage`                 |  ✓  |     |  ✓  |     |     |     |     |     |
-| `role:read`                   |  ✓  |  ✓  |  ✓  |     |     |     |  ✓  |  ✓  |
-| `role:manage`                 |  ✓  |     |  ✓  |     |     |     |     |     |
-| `apikey:read`                 |  ✓  |  ✓  |  ✓  |     |     |     |  ✓  |  ✓  |
-| `apikey:manage`               |  ✓  |     |  ✓  |     |     |     |     |     |
-| `session:manage`              |  ✓  |     |  ✓  |     |     |     |     |     |
-| `domain:read`                 |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |  ✓  |  ✓  |
-| `domain:manage`               |  ✓  |     |  ✓  |  ✓  |     |     |     |     |
-| `domain:dkim_rotate`          |  ✓  |     |  ✓  |  ✓  |     |     |     |     |
-| `policy:read`                 |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |  ✓  |  ✓  |
-| `policy:manage`               |  ✓  |     |  ✓  |     |  ✓  |     |     |     |
-| `policy:publish`              |  ✓  |     |  ✓  |     |     |     |     |     |
-| `message:read`                |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |
-| `message:read_content`        |  ✓  |     |  ✓  |     |  ✓  |     |     |     |
-| `quarantine:read`             |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |
-| `quarantine:release`          |  ✓  |     |  ✓  |     |  ✓  |  ✓  |     |     |
-| `quarantine:delete`           |  ✓  |     |  ✓  |     |  ✓  |  ✓  |     |     |
-| `quarantine:request_release`  |  ✓  |     |  ✓  |     |     |  ✓  |     |     |
-| `report:read`                 |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |
-| `audit:read`                  |  ✓  |  ✓  |  ✓  |     |  ✓  |     |  ✓  |     |
-| `archive:read`                |  ✓  |  ✓  |  ✓  |     |  ✓  |     |  ✓  |  ✓  |
-| `archive:export`              |  ✓  |     |  ✓  |     |     |     |  ✓  |     |
-| `archive:legal_hold`          |  ✓  |     |  ✓  |     |     |     |     |     |
-| `webhook:manage`              |  ✓  |     |  ✓  |     |     |     |     |     |
-| `settings:manage`             |  ✓  |     |  ✓  |     |     |     |     |     |
-| `platform:organizations`      |  ✓  |  ✓  |     |     |     |     |     |     |
-| `platform:operations`         |  ✓  |  ✓  |     |     |     |     |     |     |
-| `platform:tenant_override`    |  ✓  |  ✓  |     |     |     |     |     |     |
-| `connector:read`              |  ✓  |  ✓  |  ✓  |  ✓  |     |     |  ✓  |  ✓  |
-| `connector:manage`            |  ✓  |     |  ✓  |  ✓  |     |     |     |     |
-| `domain:routing_manage`       |  ✓  |     |  ✓  |  ✓  |     |     |     |     |
-| `delivery:read`               |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |
-| `platform:dead_letter_replay` |  ✓  |  ✓  |     |     |     |     |     |     |
+| Permission                     | SA  | PA  | OA  | DA  | SAn | QR  | CA  | RO  |
+| ------------------------------ | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: |
+| `organization:read`            |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |
+| `organization:manage`          |  ✓  |     |  ✓  |     |     |     |     |     |
+| `user:read`                    |  ✓  |  ✓  |  ✓  |  ✓  |     |     |  ✓  |  ✓  |
+| `user:manage`                  |  ✓  |     |  ✓  |     |     |     |     |     |
+| `role:read`                    |  ✓  |  ✓  |  ✓  |     |     |     |  ✓  |  ✓  |
+| `role:manage`                  |  ✓  |     |  ✓  |     |     |     |     |     |
+| `apikey:read`                  |  ✓  |  ✓  |  ✓  |     |     |     |  ✓  |  ✓  |
+| `apikey:manage`                |  ✓  |     |  ✓  |     |     |     |     |     |
+| `session:manage`               |  ✓  |     |  ✓  |     |     |     |     |     |
+| `domain:read`                  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |  ✓  |  ✓  |
+| `domain:manage`                |  ✓  |     |  ✓  |  ✓  |     |     |     |     |
+| `domain:dkim_rotate`           |  ✓  |     |  ✓  |  ✓  |     |     |     |     |
+| `policy:read`                  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |  ✓  |  ✓  |
+| `policy:manage`                |  ✓  |     |  ✓  |     |  ✓  |     |     |     |
+| `policy:publish`               |  ✓  |     |  ✓  |     |     |     |     |     |
+| `message:read`                 |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |
+| `message:read_content`         |  ✓  |     |  ✓  |     |  ✓  |     |     |     |
+| `message:rescan`               |  ✓  |     |  ✓  |     |  ✓  |     |     |     |
+| `quarantine:read`              |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |
+| `quarantine:release`           |  ✓  |     |  ✓  |     |  ✓  |  ✓  |     |     |
+| `quarantine:delete`            |  ✓  |     |  ✓  |     |  ✓  |  ✓  |     |     |
+| `quarantine:request_release`   |  ✓  |     |  ✓  |     |     |  ✓  |     |     |
+| `report:read`                  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |
+| `audit:read`                   |  ✓  |  ✓  |  ✓  |     |  ✓  |     |  ✓  |     |
+| `archive:read`                 |  ✓  |  ✓  |  ✓  |     |  ✓  |     |  ✓  |  ✓  |
+| `archive:export`               |  ✓  |     |  ✓  |     |     |     |  ✓  |     |
+| `archive:legal_hold`           |  ✓  |     |  ✓  |     |     |     |     |     |
+| `webhook:manage`               |  ✓  |     |  ✓  |     |     |     |     |     |
+| `settings:manage`              |  ✓  |     |  ✓  |     |     |     |     |     |
+| `platform:organizations`       |  ✓  |  ✓  |     |     |     |     |     |     |
+| `platform:operations`          |  ✓  |  ✓  |     |     |     |     |     |     |
+| `platform:tenant_override`     |  ✓  |  ✓  |     |     |     |     |     |     |
+| `connector:read`               |  ✓  |  ✓  |  ✓  |  ✓  |     |     |  ✓  |  ✓  |
+| `connector:manage`             |  ✓  |     |  ✓  |  ✓  |     |     |     |     |
+| `domain:routing_manage`        |  ✓  |     |  ✓  |  ✓  |     |     |     |     |
+| `delivery:read`                |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |
+| `platform:dead_letter_replay`  |  ✓  |  ✓  |     |     |     |     |     |     |
+| `scan:settings_manage`         |  ✓  |     |  ✓  |     |  ✓  |     |     |     |
+| `platform:scan_training`       |  ✓  |  ✓  |     |     |     |     |     |     |
+| `platform:threat_intel_manage` |  ✓  |  ✓  |     |     |     |     |     |     |
+| `platform:scan_rescan`         |  ✓  |  ✓  |     |     |     |     |     |     |
 
 **Platform roles** are the roles that hold any `platform:*` permission: `super_admin` and `platform_admin` (`PLATFORM_ROLE_KEYS`). They can be assigned only to users of the platform organization (`kind = platform`); assigning one in a customer organization is `400`. Customer organizations never see platform roles in `GET /roles` or `GET /roles/{key}` (`404`). Domain Admin is organization-wide; per-domain scoping of roles is out of scope for now.
 
@@ -170,6 +180,25 @@ One platform permission for replaying dead-lettered pipeline messages (design [d
 - Replay is separate from `platform:operations` (which only reads operational state): it re-runs pipeline stages on events of **every** tenant (platform-wide by nature; an organization filter narrows it), so a custom platform role can watch queues without being able to re-drive mail.
 - Users only: API keys and override tokens never replay (`@UserOnly()`); an MFA-authenticated session is required; every replay (also a dry run, an empty match or a broker failure half-way) writes one `audit_logs` row with the operator's reason.
 - Like every `platform:*` key it is stripped under a platform override and never assignable to a customer role (`400`).
+
+## Scan permissions (steps 3.3, 4.1, 4.2)
+
+Catalog 36 → 41 (seed data only, `pnpm db:seed`): `message:rescan` (step 3.3, [design](../plan/steps/08-message-lifecycle.md)), `scan:settings_manage` and `platform:scan_training` (step 4.1, [design](../plan/steps/09-rspamd.md) S8, S13, S16), `platform:threat_intel_manage` and `platform:scan_rescan` (step 4.2, [design](../plan/steps/10-attachment-scanning.md) A13, A16, A17).
+
+| Permission                     | Routes                                                                                                                                                                             | System roles                                      |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| `message:read`                 | `GET /messages/{messageId}/scans` (existing key)                                                                                                                                   | every system role                                 |
+| `message:rescan`               | `POST /messages/{messageId}/rescan`                                                                                                                                                | super admin, organization admin, security analyst |
+| `policy:read`                  | `GET /scan-settings` (existing key)                                                                                                                                                | as above                                          |
+| `scan:settings_manage`         | `PUT /scan-settings/{engine}`, `DELETE /scan-settings/{engine}` (`rspamd`, `attachment`)                                                                                           | super admin, organization admin, security analyst |
+| `platform:scan_training`       | `POST /platform/organizations/{organizationId}/messages/{messageId}/scan-training` (`@UserOnly()`, `@RequireMfa()`, 60/min)                                                        | super admin, platform admin                       |
+| `platform:threat_intel_manage` | `GET`/`POST /platform/threat-hashes`, `DELETE /platform/threat-hashes/{sha256}` (`@UserOnly()`, `@RequireMfa()`, 60/min)                                                           | super admin, platform admin                       |
+| `platform:scan_rescan`         | `POST`/`GET /platform/attachment-rescans`, `GET /platform/attachment-rescans/{jobId}`, `POST /platform/attachment-rescans/{jobId}/cancel` (`@UserOnly()`, `@RequireMfa()`, 10/min) | super admin, platform admin                       |
+
+- Tenant scan settings are **bounded** by the platform settings: Rspamd thresholds only inside the platform bounds, attachment settings raise-only (verdicts) and tighten-only (limits, denied types); the worker re-validates every stored row at use.
+- The three `platform:` scan keys act on **shared** state: the Bayes/fuzzy stores (training one tenant's message changes every tenant's scores), the known-threat hash catalog (a hash changes every tenant's verdicts at once) and bulk rescans (they select messages of every organization unless one is named). They are therefore platform permissions, users only (no API keys or override tokens), MFA-authenticated, rate limited and audited (`scan_training.learn_*`, `threat_hash.added` / `threat_hash.removed` with the before-image, `attachment_rescan.requested` / `.cancelled`).
+- The bulk-rescan api only writes the job row; the email-worker's rescan runner executes it as lifecycle role `scanner` (edge E19, reason `signature_rescan`), never as the requesting user.
+- What tenants see of attachment results (`GET /messages/{messageId}/scans`) excludes the content-cache outcome and the attachment engine's durations: the cache is shared across organizations, so these would reveal another organization's mail (step 4.2 A16).
 
 ## Custom roles
 

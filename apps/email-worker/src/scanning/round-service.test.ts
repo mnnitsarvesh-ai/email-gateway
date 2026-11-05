@@ -25,6 +25,7 @@ const config = loadWorkerConfig({
   RABBITMQ_SCANNER_URL: 'amqp://a:b@localhost:5672/v',
   SCAN_RSPAMD_URL: 'http://127.0.0.1:11333',
   REDIS_URL: 'redis://localhost:6379',
+  ATTACHMENT_CACHE_HMAC_KEY: 'test-content-cache-mac-key-0123456789',
   S3_REGION: 'ap-south-1',
   S3_BUCKET_MAIL: 'test-mail',
   S3_BUCKET_ARCHIVE: 'test-archive',
@@ -402,5 +403,39 @@ describe('ScanRoundService (S5)', () => {
     const err = new EmlUnavailableError();
     expect(classifyScanFailure(err)).toBe('retryable');
     expect(err.name).toBe('EmlUnavailableError');
+  });
+
+  it('carries engine child rows into the final row and records a skipped outcome (step 4.2 A12)', async () => {
+    const childRows = {
+      attachments: [
+        {
+          attachmentId: 9n,
+          contentVersion: '0123456789abcdef',
+          result: { partIndex: 1 } as never,
+        },
+      ],
+      sandbox: [],
+    };
+    const base = definite('clean', ['clean.no_findings']) as Extract<
+      EngineScanOutcome,
+      { kind: 'definite' }
+    >;
+    const withRows: EngineScanOutcome = { ...base, childRows };
+    const { store, service } = setup([withRows]);
+    expect(await service.handle(parsed())).toBe('handled');
+    const final = store.rowsOf(store.scans[0]!.scanId).find((r) => r.isFinal)!;
+    expect(final.final!.childRows).toEqual(childRows);
+
+    const skipped: EngineScanOutcome = {
+      kind: 'definite',
+      result: { ...base.result, outcome: 'skipped', reasonCodes: ['attachment.none'], signals: [] },
+      childRows: {},
+    };
+    const second = setup([skipped]);
+    expect(await second.service.handle(parsed())).toBe('handled');
+    const row = second.store.rowsOf(second.store.scans[0]!.scanId).find((r) => r.isFinal)!;
+    expect(row).toMatchObject({ outcome: 'skipped', reasonCodes: ['attachment.none'] });
+    // A skipped required engine satisfies completion and never decides the verdict.
+    expect(second.store.scans[0]).toMatchObject({ status: 'completed', verdict: 'unknown' });
   });
 });

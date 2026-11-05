@@ -133,7 +133,7 @@ describe('ConfirmPublisher.publishBatch', () => {
         },
       },
       { envelope: { ...envelope(), eventType: 'mail.unknown.thing.v1' } },
-      { envelope: { ...envelope(), eventType: 'mail.attachment.sandbox_requested.v1' } },
+      { envelope: { ...envelope(), eventType: 'mail.attachment.sandbox_completed.v1' } },
     ]);
     expect(results).toEqual([
       { outcome: 'refused', code: 'forbidden_field' },

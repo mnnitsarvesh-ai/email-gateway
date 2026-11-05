@@ -1,0 +1,203 @@
+# The attachment engine (step 4.2 A1, A20; docs/plan/steps/10-attachment-scanning.md,
+# docs/deployment/attachment-scanning.md): the scan role of the same image with only the
+# attachment consumer (scan.attachment) as role user eg-scanner. It reads part objects from S3,
+# streams them to clamd (Service `clamav`, clamav.yaml) and inspects them in resource-limited
+# child processes (prlimit, empty environment, private 0700 directory under the size-limited
+# emptyDir /tmp, Node's permission model); it also runs the signature watcher and the rescan job
+# runner (one leader each through MySQL advisory locks). Queue-lag autoscaling (KEDA RabbitMQ
+# scaler, 200 ready messages per replica) is configured per environment; the base HPA scales on
+# CPU. Sizing: SCAN_ATTACHMENT_CONCURRENCY x ATTACHMENT_PER_MESSAGE_PARALLELISM attachments in
+# flight, at most ATTACHMENT_MEMORY_BUDGET_BYTES of attachment bytes plus the inspector children
+# (ATTACHMENT_INSPECTOR_POOL_SIZE x ATTACHMENT_INSPECT_MAX_RSS_MB), within the 2 GiB limit.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: email-worker-attachment
+  labels:
+    {
+      app.kubernetes.io/name: email-worker-attachment,
+      app.kubernetes.io/component: scan-attachment,
+      app.kubernetes.io/part-of: email-gateway,
+    }
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels: { app.kubernetes.io/name: email-worker-attachment }
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  template:
+    metadata:
+      labels:
+        {
+          app.kubernetes.io/name: email-worker-attachment,
+          app.kubernetes.io/component: scan-attachment,
+          app.kubernetes.io/part-of: email-gateway,
+        }
+    spec:
+      serviceAccountName: email-worker-attachment
+      automountServiceAccountToken: false
+      # In-flight scans finish (up to SCAN_ATTACHMENT_TIMEOUT_MS is not awaited: held retries
+      # are requeued and the inspector children are killed on shutdown).
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app.kubernetes.io/name: email-worker-attachment }
+      containers:
+        - name: email-worker
+          image: email-gateway/email-worker:latest
+          ports:
+            - { name: http, containerPort: 3020 }
+          envFrom:
+            - configMapRef: { name: email-gateway-config }
+          env:
+            - { name: HTTP_PORT, value: '3020' }
+            - { name: MIME_INGESTION_ENABLED, value: 'false' }
+            - { name: SCAN_ENABLED, value: 'true' }
+            - { name: SCAN_CONSUMERS, value: attachment }
+            # clamd (A7): the clamav Service; per-worker connections bounded so that
+            # CLAMAV_MAX_CONNECTIONS x replicas <= clamd MaxThreads x clamd replicas.
+            - { name: CLAMAV_HOST, value: clamav }
+            - { name: CLAMAV_PORT, value: '3310' }
+            - { name: CLAMAV_TIMEOUT_MS, value: '60000' }
+            - { name: CLAMAV_MAX_CONNECTIONS, value: '4' }
+            - { name: CLAMAV_CHUNK_BYTES, value: '65536' }
+            # The engine's budgets (A12) and per-message bounds (A3, A14); defaults.
+            - { name: SCAN_ATTACHMENT_CONCURRENCY, value: '4' }
+            - { name: SCAN_ATTACHMENT_TIMEOUT_MS, value: '180000' }
+            - { name: SCAN_ATTACHMENT_MAX_ATTEMPTS, value: '6' }
+            - { name: SCAN_RETRY_BASE_MS, value: '2000' }
+            - { name: SCAN_RETRY_MAX_MS, value: '60000' }
+            - { name: SCAN_S3_TIMEOUT_MS, value: '30000' }
+            - { name: SCAN_DB_TIMEOUT_MS, value: '120000' }
+            - { name: SCAN_ROUND_DEADLINE_SECONDS, value: '1800' }
+            - { name: ATTACHMENT_MAX_PER_MESSAGE, value: '100' }
+            - { name: ATTACHMENT_PER_MESSAGE_PARALLELISM, value: '2' }
+            - { name: ATTACHMENT_MEMORY_BUDGET_BYTES, value: '134217728' }
+            # Inspector pool (A4): prlimit required (refused in production otherwise).
+            - { name: ATTACHMENT_INSPECTOR_POOL_SIZE, value: '2' }
+            - { name: ATTACHMENT_INSPECTOR_MAX_JOBS, value: '500' }
+            - { name: ATTACHMENT_INSPECTOR_HEAP_MB, value: '192' }
+            - { name: ATTACHMENT_INSPECTOR_RLIMITS, value: required }
+            - { name: ATTACHMENT_INSPECTOR_TMPDIR, value: /tmp }
+            - { name: ATTACHMENT_INSPECT_TIMEOUT_MS, value: '30000' }
+            - { name: ATTACHMENT_INSPECT_CPU_SECONDS, value: '10' }
+            - { name: ATTACHMENT_INSPECT_MAX_RSS_MB, value: '384' }
+            - { name: ATTACHMENT_YARA_TIMEOUT_MS, value: '10000' }
+            # Empty = the bundled rules; production points it at the mounted rule feed.
+            - { name: ATTACHMENT_YARA_RULES_DIR, value: '' }
+            # Content cache (A10), sandbox submissions (A11), signatures and rescans (A13).
+            - { name: ATTACHMENT_CACHE_ENABLED, value: 'true' }
+            - { name: ATTACHMENT_CACHE_CLEAN_TTL_SECONDS, value: '21600' }
+            - { name: ATTACHMENT_CACHE_MALICIOUS_TTL_SECONDS, value: '604800' }
+            - { name: ATTACHMENT_CACHE_OTHER_TTL_SECONDS, value: '3600' }
+            - { name: ATTACHMENT_CACHE_TIMEOUT_MS, value: '200' }
+            - { name: ATTACHMENT_SANDBOX_SUBMIT, value: 'true' }
+            - { name: ATTACHMENT_SANDBOX_MAX_PER_MESSAGE, value: '5' }
+            - { name: ATTACHMENT_SIGNATURE_POLL_MS, value: '300000' }
+            - { name: ATTACHMENT_SIGNATURE_RESCAN, value: record }
+            - { name: ATTACHMENT_RESCAN_INTERVAL_MS, value: '10000' }
+            - { name: ATTACHMENT_RESCAN_BATCH_SIZE, value: '50' }
+            - { name: SCAN_BREAKER_FAILURE_THRESHOLD, value: '5' }
+            - { name: SCAN_BREAKER_FAILURE_RATIO, value: '0.5' }
+            - { name: SCAN_BREAKER_WINDOW, value: '20' }
+            - { name: SCAN_BREAKER_OPEN_MS, value: '15000' }
+            - { name: SCAN_BREAKER_HALF_OPEN_PROBES, value: '1' }
+            - { name: SCAN_SETTINGS_CACHE_TTL_MS, value: '30000' }
+            - { name: SCAN_ENGINE_VERSION_TTL_MS, value: '300000' }
+            # Secrets are mounted as files by External Secrets and read via the <KEY>_FILE convention.
+            - { name: DATABASE_URL_FILE, value: /var/run/secrets/gateway/database-url }
+            - {
+                name: RABBITMQ_SCANNER_URL_FILE,
+                value: /var/run/secrets/gateway/rabbitmq-scanner-url,
+              }
+            - { name: REDIS_URL_FILE, value: /var/run/secrets/gateway/redis-url }
+            # The content cache MAC key (A10): its own Secret, mounted by this Deployment only
+            # (not in email-gateway-secrets, which every Deployment mounts).
+            - {
+                name: ATTACHMENT_CACHE_HMAC_KEY_FILE,
+                value: /var/run/secrets/attachment-cache/hmac-key,
+              }
+          volumeMounts:
+            - { name: secrets, mountPath: /var/run/secrets/gateway, readOnly: true }
+            - { name: cache-mac, mountPath: /var/run/secrets/attachment-cache, readOnly: true }
+            # The inspector children's private directories (nothing is written: buffers only).
+            - { name: tmp, mountPath: /tmp }
+          readinessProbe:
+            # Includes `clamav` (PING) and `attachment-inspector` (pool ready).
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /health/live, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          startupProbe:
+            httpGet: { path: /health/live, port: http }
+            periodSeconds: 5
+            failureThreshold: 24
+          resources:
+            requests: { cpu: '1', memory: 1Gi }
+            limits: { cpu: '2', memory: 2Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+      volumes:
+        - name: secrets
+          secret: { secretName: email-gateway-secrets }
+        - name: cache-mac
+          secret: { secretName: email-gateway-attachment-cache-key }
+        - name: tmp
+          emptyDir: { sizeLimit: 64Mi }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: email-worker-attachment
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: email-worker-attachment
+  labels: { app.kubernetes.io/name: email-worker-attachment }
+spec:
+  selector: { app.kubernetes.io/name: email-worker-attachment }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+---
+# CPU-based base HPA. Production adds the queue signal with KEDA (docs/deployment/
+# attachment-scanning.md): a ScaledObject on rabbitmq_queue_messages_ready of scan.attachment,
+# target 200 ready messages per replica, replacing this HPA.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: email-worker-attachment
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: email-worker-attachment }
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 65 }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: email-worker-attachment
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: email-worker-attachment }

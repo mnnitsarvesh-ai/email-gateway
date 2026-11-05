@@ -44,9 +44,9 @@ import {
 import { ScanSettingsService } from '../services/scan-settings.service';
 
 /**
- * Security scan settings of the caller's organization (step 4.1 S8, S16): the Rspamd
- * thresholds and severities within the platform bounds. Translation only; the logic is in
- * ScanSettingsService.
+ * Security scan settings of the caller's organization (step 4.1 S8, S16; step 4.2 A8): the
+ * Rspamd thresholds and severities and the attachment type rules within the platform bounds.
+ * Translation only; the logic is in ScanSettingsService.
  */
 @ApiTags('scan-settings')
 @ApiBearerAuth(ACCESS_TOKEN_SCHEME)
@@ -81,7 +81,11 @@ export class ScanSettingsController {
       'Replaces the override with `settings` (rspamd: `spamScore` and `suspiciousScore` within ' +
       'the platform score bounds with suspiciousScore below spamScore; `phishingVerdict`, ' +
       '`dmarcRejectVerdict` and `authFailureVerdict` may only be raised above the platform ' +
-      'value). Compare-and-set on `expectedVersion` (0 when there is no override yet). ' +
+      'value; attachment: `deniedTypes` added to the platform deny list, `allowedTypes` for ' +
+      'allow-list mode (never a platform-denied type), `deniedTypeVerdict`, ' +
+      '`typeMismatchVerdict` and `encryptedArchiveVerdict` raise-only (`suspicious` → ' +
+      '`malicious`), `maxAttachmentBytes` tighten-only; archive, CPU and memory limits are ' +
+      'platform-only). Compare-and-set on `expectedVersion` (0 when there is no override yet). ' +
       'Audited as `scan_settings.updated` with the settings before and after. A required ' +
       `engine cannot be disabled. ${SETTINGS_APPLY_NOTE}`,
   })

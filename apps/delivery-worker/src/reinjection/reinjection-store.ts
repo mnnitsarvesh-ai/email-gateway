@@ -75,6 +75,32 @@ export interface ReinjectionContext {
 const ACTIVE_STATUSES = ['pending', 'deferred', 'in_progress'] as const;
 const MAX_ERROR = 512;
 
+/** Default interactive-transaction budget of `claim` (the worker passes DELIVERY_DB_TX_TIMEOUT_MS). */
+export const DEFAULT_STORE_TX_TIMEOUT_MS = 120_000;
+
+/** The read whose echo check failed (bounded metric label of `delivery_inconsistent_reads_total`). */
+export type InconsistentRead = 'message' | 'deliveries' | 'recipients' | 'approval';
+
+/**
+ * A writer read returned rows that do not belong to the request (step 4.2 §6.2 item 3): the
+ * identifying columns of the result differ from what was asked for. Seen after a writer stall
+ * with the Prisma 6.19 library engine (a pooled connection's unread reply is read by the next
+ * request, §12 WP4). Transient: the reinjector reschedules the row with the attempt refunded.
+ * The message names the check only, never row content.
+ */
+export class InconsistentReadError extends Error {
+  override readonly name = 'InconsistentReadError';
+
+  constructor(
+    readonly read: InconsistentRead,
+    readonly check: string,
+  ) {
+    super(`inconsistent ${read} read: ${check}`);
+  }
+}
+
+const sameTime = (a: Date, b: Date): boolean => a.getTime() === b.getTime();
+
 const where = (row: { id: bigint; receivedAt: Date }) => ({
   id_receivedAt: { id: row.id, receivedAt: row.receivedAt },
 });
@@ -85,7 +111,18 @@ const where = (row: { id: bigint; receivedAt: Date }) => ({
  * already resolved (or another claim took over after a lease expiry) is never overwritten.
  */
 export class ReinjectionStore {
-  constructor(private readonly prisma: PrismaClient) {}
+  private readonly txTimeoutMs: number;
+
+  /**
+   * `txTimeoutMs`: budget (timeout and maxWait) of the claim transaction, longer than the
+   * writer's own timeouts so the client never expires it while a statement is in flight (§6.2).
+   */
+  constructor(
+    private readonly prisma: PrismaClient,
+    options: { txTimeoutMs?: number } = {},
+  ) {
+    this.txTimeoutMs = options.txTimeoutMs ?? DEFAULT_STORE_TX_TIMEOUT_MS;
+  }
 
   /**
    * Claims up to `limit` due rows: `SELECT … FOR UPDATE SKIP LOCKED` (replicas never claim the
@@ -99,42 +136,45 @@ export class ReinjectionStore {
   ): Promise<ClaimedReinjection[]> {
     if (limit <= 0) return [];
     const organizations = scope?.organizationIds ?? [];
-    return this.prisma.$transaction(async (tx) => {
-      const rows =
-        organizations.length > 0
-          ? await tx.$queryRaw<{ id: bigint; received_at: Date }[]>`
+    return this.prisma.$transaction(
+      async (tx) => {
+        const rows =
+          organizations.length > 0
+            ? await tx.$queryRaw<{ id: bigint; received_at: Date }[]>`
               SELECT id, received_at FROM delivery_reinjections
               WHERE status = 'pending' AND next_attempt_at <= ${now}
                 AND organization_id IN (${Prisma.join(organizations)})
               ORDER BY next_attempt_at
               LIMIT ${limit}
               FOR UPDATE SKIP LOCKED`
-          : await tx.$queryRaw<{ id: bigint; received_at: Date }[]>`
+            : await tx.$queryRaw<{ id: bigint; received_at: Date }[]>`
               SELECT id, received_at FROM delivery_reinjections
               WHERE status = 'pending' AND next_attempt_at <= ${now}
               ORDER BY next_attempt_at
               LIMIT ${limit}
               FOR UPDATE SKIP LOCKED`;
-      if (rows.length === 0) return [];
-      const leaseExpiresAt = new Date(now.getTime() + leaseSeconds * 1000);
-      for (const row of rows) {
-        await tx.deliveryReinjection.update({
-          where: where({ id: BigInt(row.id), receivedAt: row.received_at }),
-          data: {
-            status: 'in_progress',
-            leaseExpiresAt,
-            attempts: { increment: 1 },
-            startedAt: now,
-          },
-          select: { id: true },
+        if (rows.length === 0) return [];
+        const leaseExpiresAt = new Date(now.getTime() + leaseSeconds * 1000);
+        for (const row of rows) {
+          await tx.deliveryReinjection.update({
+            where: where({ id: BigInt(row.id), receivedAt: row.received_at }),
+            data: {
+              status: 'in_progress',
+              leaseExpiresAt,
+              attempts: { increment: 1 },
+              startedAt: now,
+            },
+            select: { id: true },
+          });
+        }
+        return tx.deliveryReinjection.findMany({
+          where: { OR: rows.map((row) => ({ id: BigInt(row.id), receivedAt: row.received_at })) },
+          select: CLAIM_SELECT,
+          orderBy: { nextAttemptAt: 'asc' },
         });
-      }
-      return tx.deliveryReinjection.findMany({
-        where: { OR: rows.map((row) => ({ id: BigInt(row.id), receivedAt: row.received_at })) },
-        select: CLAIM_SELECT,
-        orderBy: { nextAttemptAt: 'asc' },
-      });
-    });
+      },
+      { timeout: this.txTimeoutMs, maxWait: this.txTimeoutMs },
+    );
   }
 
   /** Extends the lease of a row still held by this claim. False when the claim was lost. */
@@ -151,13 +191,46 @@ export class ReinjectionStore {
     return count === 1;
   }
 
-  /** The message's envelope data and the deliveries that still need this hop. */
+  /**
+   * The message's envelope data and the deliveries that still need this hop; null when the
+   * message row is not found. Every result is checked against the request (message id,
+   * organization and `received_at` echo; each delivery's `reinjection_id`, message, organization
+   * and status; each recipient requested, of the message, and every delivery's recipient
+   * returned); a mismatch throws `InconsistentReadError` (§6.2 item 3).
+   */
   async context(row: ClaimedReinjection): Promise<ReinjectionContext | null> {
     const message = await this.prisma.emailMessage.findFirst({
       where: { id: row.messageId, receivedAt: row.receivedAt, organizationId: row.organizationId },
-      select: { envelopeFrom: true, clientIp: true, clientHelo: true },
+      select: {
+        id: true,
+        receivedAt: true,
+        organizationId: true,
+        envelopeFrom: true,
+        clientIp: true,
+        clientHelo: true,
+      },
     });
     if (!message) return null;
+    if (
+      message.id !== row.messageId ||
+      message.organizationId !== row.organizationId ||
+      !sameTime(message.receivedAt, row.receivedAt)
+    ) {
+      throw new InconsistentReadError('message', 'identity echo');
+    }
+    return {
+      envelopeFrom: message.envelopeFrom,
+      clientIp: message.clientIp,
+      clientHelo: message.clientHelo,
+      deliveries: await this.activeDeliveries(row),
+    };
+  }
+
+  /**
+   * The deliveries of the row that still need the hop, with their recipients (the same checks
+   * as `context`). Also used without the message row (the final `context_missing` attempt).
+   */
+  async activeDeliveries(row: ClaimedReinjection): Promise<ActiveDelivery[]> {
     const deliveries = await this.prisma.emailDelivery.findMany({
       where: {
         reinjectionId: row.id,
@@ -166,33 +239,63 @@ export class ReinjectionStore {
         organizationId: row.organizationId,
         status: { in: [...ACTIVE_STATUSES] },
       },
-      select: { id: true, receivedAt: true, recipientId: true },
+      select: {
+        id: true,
+        receivedAt: true,
+        recipientId: true,
+        reinjectionId: true,
+        messageId: true,
+        organizationId: true,
+        status: true,
+      },
       orderBy: { recipientId: 'asc' },
     });
-    const recipients =
-      deliveries.length === 0
-        ? []
-        : await this.prisma.emailRecipient.findMany({
-            where: {
-              id: { in: deliveries.map((d) => d.recipientId) },
-              receivedAt: row.receivedAt,
-              messageId: row.messageId,
-            },
-            select: { id: true, rcptSeq: true, address: true },
-          });
+    for (const d of deliveries) {
+      if (
+        d.reinjectionId !== row.id ||
+        d.messageId !== row.messageId ||
+        d.organizationId !== row.organizationId ||
+        !sameTime(d.receivedAt, row.receivedAt) ||
+        !(ACTIVE_STATUSES as readonly string[]).includes(d.status)
+      ) {
+        throw new InconsistentReadError('deliveries', 'delivery echo');
+      }
+    }
+    if (deliveries.length === 0) return [];
+    const requested = new Set(deliveries.map((d) => d.recipientId));
+    const recipients = await this.prisma.emailRecipient.findMany({
+      where: { id: { in: [...requested] }, receivedAt: row.receivedAt, messageId: row.messageId },
+      select: { id: true, rcptSeq: true, address: true, messageId: true, receivedAt: true },
+    });
+    for (const r of recipients) {
+      if (
+        !requested.has(r.id) ||
+        r.messageId !== row.messageId ||
+        !sameTime(r.receivedAt, row.receivedAt)
+      ) {
+        throw new InconsistentReadError('recipients', 'recipient echo');
+      }
+    }
     const byId = new Map(recipients.map((r) => [r.id, r]));
-    return {
-      envelopeFrom: message.envelopeFrom,
-      clientIp: message.clientIp,
-      clientHelo: message.clientHelo,
-      deliveries: deliveries.flatMap((d) => {
-        const recipient = byId.get(d.recipientId);
-        return recipient ? [{ ...d, rcptSeq: recipient.rcptSeq, address: recipient.address }] : [];
-      }),
-    };
+    return deliveries.map((d) => {
+      const recipient = byId.get(d.recipientId);
+      // A delivery always has its recipient row (same message, same partition).
+      if (!recipient) throw new InconsistentReadError('recipients', 'recipient missing');
+      return {
+        id: d.id,
+        receivedAt: d.receivedAt,
+        recipientId: d.recipientId,
+        rcptSeq: recipient.rcptSeq,
+        address: recipient.address,
+      };
+    });
   }
 
-  /** When the approval that planned this row was accepted (the oldest row of the approval). */
+  /**
+   * When the approval that planned this row was accepted: the oldest row of the approval. The
+   * claimed row itself matches the query, so a result is always expected; it must echo the
+   * approval event and the message and be no newer than the row (§6.2 item 3).
+   */
   async approvalTime(row: ClaimedReinjection): Promise<Date> {
     const oldest = await this.prisma.deliveryReinjection.findFirst({
       where: {
@@ -201,9 +304,49 @@ export class ReinjectionStore {
         approvalEventId: row.approvalEventId,
       },
       orderBy: { createdAt: 'asc' },
-      select: { createdAt: true },
+      select: { createdAt: true, approvalEventId: true, messageId: true, receivedAt: true },
     });
-    return oldest?.createdAt ?? row.createdAt;
+    if (
+      !oldest ||
+      oldest.approvalEventId !== row.approvalEventId ||
+      oldest.messageId !== row.messageId ||
+      !sameTime(oldest.receivedAt, row.receivedAt) ||
+      oldest.createdAt.getTime() > row.createdAt.getTime()
+    ) {
+      throw new InconsistentReadError('approval', 'approval echo');
+    }
+    return oldest.createdAt;
+  }
+
+  /**
+   * Final `context_missing` attempt, in the caller's transaction after the recorder: deliveries
+   * of the row that are still active although the recorder could not resolve them (their
+   * message row is gone, so the recorder reports them `unmatched`) are failed directly with
+   * `failureReason`, so no delivery is left pending without a recovery path. Returns the count.
+   */
+  async failOrphanedDeliveries(
+    tx: Prisma.TransactionClient,
+    row: ClaimedReinjection,
+    deliveryIds: readonly bigint[],
+    failureReason: string,
+    now: Date,
+  ): Promise<number> {
+    if (deliveryIds.length === 0) return 0;
+    const { count } = await tx.emailDelivery.updateMany({
+      where: {
+        id: { in: [...deliveryIds] },
+        receivedAt: row.receivedAt,
+        reinjectionId: row.id,
+        status: { in: [...ACTIVE_STATUSES] },
+      },
+      data: {
+        status: 'failed',
+        failureReason,
+        lastErrorClass: 'other',
+        statusChangedAt: now,
+      },
+    });
+    return count;
   }
 
   /** Back to `pending` at `nextAttemptAt` (worker retry, hold, rate limit, shutdown release). */

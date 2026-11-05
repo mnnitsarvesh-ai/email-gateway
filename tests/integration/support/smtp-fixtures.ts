@@ -478,6 +478,8 @@ export class SmtpFixtures {
         await this.prisma.apiIdempotencyKey.deleteMany({ where });
         // Step 4.1: tenant scan thresholds (foreign key to organizations, Restrict).
         await this.prisma.scanEngineSetting.deleteMany({ where });
+        // Step 4.2: attachment rescan jobs scoped to a fixture organization (Restrict).
+        await this.prisma.attachmentRescanJob.deleteMany({ where });
         await this.prisma.bounceEvent.deleteMany({ where });
         await this.prisma.deliverySuppression.deleteMany({ where });
         await this.prisma.organizationLimit.deleteMany({ where });
@@ -543,10 +545,15 @@ export class SmtpFixtures {
   /**
    * Step 4.1 rows (docs/plan/steps/09-rspamd.md §3): with the email-worker scan role running,
    * every parsed message of a run is also scanned (scan round, engine results incl. failed
-   * attempts, authentication results, `scanned.v1` outbox row and `scan.*` events).
+   * attempts, authentication results, `scanned.v1` outbox row and `scan.*` events; step 4.2:
+   * attachment results and sandbox submissions).
    */
   private async deleteScanRows(ids: readonly bigint[]): Promise<void> {
     const where = { organizationId: { in: [...ids] } };
+    // Step 4.2 (docs/plan/steps/10-attachment-scanning.md §3): per-attachment results and
+    // sandbox submissions of the attachment engine (child rows of the final, no foreign keys).
+    await this.prisma.attachmentScanResult.deleteMany({ where });
+    await this.prisma.sandboxSubmission.deleteMany({ where });
     await this.prisma.emailAuthResult.deleteMany({ where });
     await this.prisma.scanEngineResult.deleteMany({ where });
     await this.prisma.emailScan.deleteMany({ where });

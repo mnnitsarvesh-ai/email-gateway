@@ -70,6 +70,21 @@ describe('PrismaReadService', () => {
     expect(service.client).toBe(reader.client);
   });
 
+  it('builds the replica URL through databaseClientUrl (socket timeout of the options)', () => {
+    const reader = fakeReader();
+    reader.queryRawUnsafe.mockResolvedValue([row()]);
+    const factory = vi.fn((_url: string) => reader.client);
+    const service = new PrismaReadService(
+      writer,
+      { url: URL, maxLagSeconds: 10, lagCheckIntervalMs: 5_000, socketTimeoutSeconds: 7 },
+      factory,
+    );
+    services.push(service);
+    const built = new globalThis.URL(factory.mock.calls[0]![0]);
+    expect(built.searchParams.get('socket_timeout')).toBe('7');
+    expect(built.host).toBe('replica:3306');
+  });
+
   it.each([
     ['bigint', 3n, 3],
     ['string', '4', 4],

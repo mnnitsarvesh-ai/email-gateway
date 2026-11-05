@@ -22,7 +22,11 @@ export class DatabaseModule {
     const providers: Provider[] = [{ provide: DATABASE_OPTIONS, useValue: options }, PrismaService];
     const exports: Provider[] = [PrismaService];
     if (options.read) {
-      providers.push({ provide: DATABASE_READ_OPTIONS, useValue: options.read }, PrismaReadService);
+      const read = {
+        ...options.read,
+        socketTimeoutSeconds: options.read.socketTimeoutSeconds ?? options.socketTimeoutSeconds,
+      };
+      providers.push({ provide: DATABASE_READ_OPTIONS, useValue: read }, PrismaReadService);
       exports.push(PrismaReadService);
     }
     return { module: DatabaseModule, providers, exports };

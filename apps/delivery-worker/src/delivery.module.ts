@@ -18,6 +18,7 @@ import {
   PrismaService,
   RedisService,
   S3Service,
+  withTransactionDefaults,
 } from '@email-gateway/common';
 import {
   EventTypes,
@@ -31,7 +32,12 @@ import {
   DEV_PASSTHROUGH_CONSUMER,
   DevPassThroughApprover,
 } from './approvals/dev-passthrough.approver';
-import { WORKER_CONFIG, WORKER_LOGGER, type WorkerConfig } from './config';
+import {
+  DEFAULT_DELIVERY_DB_TX_TIMEOUT_MS,
+  WORKER_CONFIG,
+  WORKER_LOGGER,
+  type WorkerConfig,
+} from './config';
 import { DeliveryMetrics } from './metrics/delivery-metrics';
 import { DeliveryPlanner } from './planning/delivery-planner';
 import { OutboundRateLimiter } from './rate-limit/outbound-rate-limiter';
@@ -43,10 +49,15 @@ import { PostfixLogTailer } from './status/postfix-log-tailer';
 import { StatusSignalApplier } from './status/status-signal-applier';
 import { WorkerLifecycle } from './worker-lifecycle';
 
-/** Writer transaction budget of one approval (planning up to 1000 recipients). */
-export const PLANNING_TX_TIMEOUT_MS = 60_000;
-/** Writer transaction budget of one signal or result commit (as the 2.2 INGEST_DB_TIMEOUT_MS). */
-export const RECORDER_TX_TIMEOUT_MS = 15_000;
+/**
+ * Default writer-transaction budgets (= `DELIVERY_DB_TX_TIMEOUT_MS` default, step 4.2 §6.2): one
+ * approval (planning up to 1000 recipients) and one signal or result commit. The module uses the
+ * configured `DELIVERY_DB_TX_TIMEOUT_MS` for both; tests use these defaults. Before step 4.2 they
+ * were 60 s and 15 s, and the claim ran with Prisma's 5 s default: a writer stall or lock wait
+ * longer than that expired transactions with a statement in flight (§12 WP4).
+ */
+export const PLANNING_TX_TIMEOUT_MS = DEFAULT_DELIVERY_DB_TX_TIMEOUT_MS;
+export const RECORDER_TX_TIMEOUT_MS = DEFAULT_DELIVERY_DB_TX_TIMEOUT_MS;
 /** Advisory lock namespace of this worker's outbox poller (dev pass-through): `dw:outbox:<consumer>` (R6). */
 export const OUTBOX_LOCK_PREFIX = 'dw';
 
@@ -85,6 +96,11 @@ export class WorkerRuntime implements OnApplicationBootstrap, OnModuleDestroy {
 @Module({})
 export class DeliveryModule {
   static forRoot(config: Readonly<WorkerConfig>, logger: Logger): DynamicModule {
+    // Every data-plane interactive transaction of this worker gets the same budget (§6.2 F2):
+    // explicit options below, and `writer(prisma)` for every `$transaction(fn)` without options.
+    const txBudgetMs = config.DELIVERY_DB_TX_TIMEOUT_MS;
+    const writer = (prisma: PrismaService) =>
+      withTransactionDefaults(prisma, { timeoutMs: txBudgetMs });
     const providers = [
       { provide: WORKER_CONFIG, useValue: config },
       { provide: WORKER_LOGGER, useValue: logger },
@@ -101,7 +117,7 @@ export class DeliveryModule {
             logger,
             metrics,
             config,
-            recorderTimeoutMs: RECORDER_TX_TIMEOUT_MS,
+            recorderTimeoutMs: txBudgetMs,
           }),
         inject: [DeliveryMetrics],
       },
@@ -125,7 +141,7 @@ export class DeliveryModule {
             }),
             planner,
             prisma,
-            PLANNING_TX_TIMEOUT_MS,
+            txBudgetMs,
           ),
         inject: [
           PrismaService,
@@ -156,7 +172,7 @@ export class DeliveryModule {
               concurrency: 1,
             }),
             prisma,
-            RECORDER_TX_TIMEOUT_MS,
+            txBudgetMs,
             logger,
             metrics,
           ),
@@ -170,17 +186,18 @@ export class DeliveryModule {
           s3: S3Service,
           metrics: DeliveryMetrics,
         ) => {
-          const store = new ReinjectionStore(prisma);
+          const txPrisma = writer(prisma);
+          const store = new ReinjectionStore(txPrisma, { txTimeoutMs: txBudgetMs });
           const reinjector = new Reinjector({
-            prisma,
+            prisma: txPrisma,
             store,
             s3: s3.client,
             bucket: s3.mailBucket,
-            limiter: new OutboundRateLimiter(prisma, redis.client, config),
+            limiter: new OutboundRateLimiter(txPrisma, redis.client, config),
             metrics,
             logger,
             config,
-            txTimeoutMs: RECORDER_TX_TIMEOUT_MS,
+            txTimeoutMs: txBudgetMs,
           });
           return new ReinjectionScheduler(store, reinjector, config, logger);
         },
@@ -203,7 +220,7 @@ export class DeliveryModule {
               logger,
               sourceId: config.DELIVERY_STATUS_LOG_SOURCE_ID,
               unmatchedRetryMs: config.DELIVERY_STATUS_UNMATCHED_RETRY_SECONDS * 1000,
-              recorderTimeoutMs: RECORDER_TX_TIMEOUT_MS,
+              recorderTimeoutMs: txBudgetMs,
             }),
           }),
         inject: [PrismaService, AdvisoryLocks, DeliveryMetrics],
@@ -211,7 +228,7 @@ export class DeliveryModule {
       {
         provide: DeliveryReconciler,
         useFactory: (prisma: PrismaService, metrics: DeliveryMetrics) =>
-          new DeliveryReconciler(prisma, metrics, config, logger, RECORDER_TX_TIMEOUT_MS),
+          new DeliveryReconciler(writer(prisma), metrics, config, logger, txBudgetMs),
         inject: [PrismaService, DeliveryMetrics],
       },
       {

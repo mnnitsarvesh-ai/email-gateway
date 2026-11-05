@@ -56,7 +56,9 @@ const hasNewRoundEdge = (
  * 4. target = current state without a re-entry edge → `duplicate/same_state`;
  * 5. no edge: from a final state → `stale/final_state`; target ranked at or below the current
  *    state → `stale/overtaken`; otherwise `invalid/edge_not_allowed`;
- * 6. role or reason not on the edge → `invalid/actor_not_allowed` / `reason_not_allowed`;
+ * 6. role or reason not on the edge → `invalid/actor_not_allowed` / `reason_not_allowed`; a
+ *    reason the edge pairs with other roles only (`reasonRoles`, step 4.2 A13: E19 `scanner` only
+ *    with `signature_rescan`, `operator` only with `admin_rescan`) → `invalid/reason_not_allowed`;
  * 7. `apply` (round + 1 on a re-entry edge).
  *
  * Occurrence times are never compared (different clocks, ADR-0025).
@@ -107,6 +109,10 @@ export function decideTransition(
     return { result: 'invalid', why: 'actor_not_allowed' };
   if (!edge.reasons.includes(request.reason))
     return { result: 'invalid', why: 'reason_not_allowed' };
+  const pairedRoles = edge.reasonRoles?.[request.reason];
+  if (edge.reasonRoles !== undefined && !pairedRoles?.includes(request.actor.role)) {
+    return { result: 'invalid', why: 'reason_not_allowed' };
+  }
   // 7.
   return { result: 'apply', edge, nextRound: current.round + (edge.newRound ? 1 : 0) };
 }

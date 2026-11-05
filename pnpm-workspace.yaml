@@ -2,6 +2,8 @@ packages:
   - apps/*
   - packages/*
   - tests
+  # Generated attachment test files (step 4.2 §9), built like a package.
+  - tests/fixtures/attachment-corpus
 
 # Refuse packages published less than 7 days ago (supply-chain hygiene).
 minimumReleaseAge: 10080

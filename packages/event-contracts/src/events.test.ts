@@ -4,7 +4,9 @@ import { parseEvent } from './envelope';
 import { eventEnvelopeSchema } from './envelope';
 import {
   ACTOR_ROLES,
+  ATTACHMENT_FILE_TYPE_VALUES,
   actorRoleSchema,
+  attachmentSandboxRequestedV1,
   DELIVERY_STATUSES,
   deliveryApprovedV1,
   ENGINE_OUTCOME_VALUES,
@@ -23,7 +25,9 @@ import {
   messageStateChangedV1,
   messageStateSchema,
   PARSE_FAILURE_REASONS,
+  organizationIdOfKey,
   policyDecidedV1,
+  SANDBOX_ATTACHMENT_VERDICT_VALUES,
   SCAN_VERDICT_VALUES,
 } from './events';
 
@@ -224,6 +228,7 @@ describe('event types', () => {
       MessageParseFailed: 'mail.message.parse_failed.v1',
       MessageStateChanged: 'mail.message.state_changed.v1',
       MessageRescanRequested: 'mail.message.rescan_requested.v1',
+      AttachmentSandboxRequested: 'mail.attachment.sandbox_requested.v1',
     });
   });
 });
@@ -760,10 +765,12 @@ describe('mail.message.rescan_requested.v1', () => {
   it('accepts a rescan by a user or an API key with a round of at least 1', () => {
     expect(parse(rescan()).payload).toMatchObject({ scanKind: 'rescan', lifecycleRound: 1 });
     expect(parse(rescan({ requestedBy: 'user' })).payload.requestedBy).toBe('user');
+    // Step 4.2 A13: signature-update rescan jobs of the email-worker have no human principal.
+    expect(parse(rescan({ requestedBy: 'system' })).payload.requestedBy).toBe('system');
     expect(parse(rescan({ lifecycleRound: 65_535 })).payload.lifecycleRound).toBe(65_535);
   });
 
-  it('rejects round 0, other scan kinds, foreign keys and system requesters', () => {
+  it('rejects round 0, other scan kinds, foreign keys and unknown requesters', () => {
     for (const overrides of [
       { lifecycleRound: 0 },
       { lifecycleRound: 65_536 },
@@ -771,7 +778,7 @@ describe('mail.message.rescan_requested.v1', () => {
       { scanKind: 'retro' },
       { emlS3Key: 'eml/x.eml' },
       { emlS3Key: 'org/0/eml/x.eml' },
-      { requestedBy: 'system' },
+      { requestedBy: 'service' },
       { requestedAt: 'now' },
       { direction: 'both' },
       { messageId: 'abc' },
@@ -910,5 +917,98 @@ describe('mail.message.scanned.v1 (step 4.1 S6)', () => {
         ],
       }),
     ).toBe(false);
+  });
+});
+
+describe('mail.attachment.sandbox_requested.v1 (step 4.2 A2)', () => {
+  const partKey = `org/${organizationId}/part/2026/11/01/7/3.att`;
+  const payload = (overrides: Record<string, unknown> = {}) => ({
+    submissionId: '301',
+    messageId: '7',
+    receivedAt,
+    direction: 'inbound',
+    scanId: '11',
+    lifecycleRound: 1,
+    attachment: {
+      partIndex: 3,
+      sha256: 'c'.repeat(64),
+      sizeBytes: 48_213,
+      detectedType: 'zip',
+      objectKey: partKey,
+    },
+    attachmentVerdict: 'suspicious',
+    reasonCodes: ['archive.encrypted', 'type.mismatch'],
+    requestedAt: '2026-11-01T10:15:31.200Z',
+    ...overrides,
+  });
+  const ok = (value: unknown) => attachmentSandboxRequestedV1.safeParse(value).success;
+  const withAttachment = (patch: Record<string, unknown>) =>
+    payload({ attachment: { ...payload().attachment, ...patch } });
+
+  it('accepts a suspicious or unknown attachment in an envelope', () => {
+    const event = parseEvent(
+      envelope(payload(), { eventType: EventTypes.AttachmentSandboxRequested }),
+      attachmentSandboxRequestedV1,
+    );
+    expect(event.payload).toEqual(payload());
+    expect([...SANDBOX_ATTACHMENT_VERDICT_VALUES]).toEqual(['suspicious', 'unknown']);
+    for (const verdict of SANDBOX_ATTACHMENT_VERDICT_VALUES) {
+      expect(ok(payload({ attachmentVerdict: verdict }))).toBe(true);
+    }
+    expect(ok(payload({ lifecycleRound: 0 }))).toBe(true);
+    expect(ok(withAttachment({ partIndex: 0, sizeBytes: 0 }))).toBe(true);
+  });
+
+  it('never submits a clean or malicious attachment', () => {
+    for (const verdict of ['clean', 'malicious', 'spam', 'error']) {
+      expect(ok(payload({ attachmentVerdict: verdict })), verdict).toBe(false);
+    }
+  });
+
+  it('carries no filename and no content (strict objects)', () => {
+    expect(ok(payload({ filename: 'invoice.pdf' }))).toBe(false);
+    expect(ok(withAttachment({ filename: 'invoice.pdf' }))).toBe(false);
+    expect(ok(withAttachment({ originalFilename: 'x' }))).toBe(false);
+    expect(ok(withAttachment({ content: 'TVqQAAMAAAAEAAAA' }))).toBe(false);
+    expect(ok(withAttachment({ declaredContentType: 'application/pdf' }))).toBe(false);
+    expect(ok(payload({ subject: 'Invoice' }))).toBe(false);
+  });
+
+  it('requires an organization-prefixed part key without traversal', () => {
+    expect(ok(withAttachment({ objectKey: 'org/42/eml/2026/11/01/7.eml' }))).toBe(false);
+    expect(ok(withAttachment({ objectKey: 'part/2026/11/01/7/3.att' }))).toBe(false);
+    expect(ok(withAttachment({ objectKey: 'org/042/part/x/3.att' }))).toBe(false);
+    expect(ok(withAttachment({ objectKey: 'org/42/part/../../43/part/3.att' }))).toBe(false);
+    expect(ok(withAttachment({ objectKey: 'org/42/part/a b/3.att' }))).toBe(false);
+    expect(ok(withAttachment({ objectKey: `org/42/part/${'a'.repeat(510)}` }))).toBe(false);
+    expect(organizationIdOfKey(partKey)).toBe('42');
+    expect(organizationIdOfKey('part/x')).toBeNull();
+  });
+
+  it('validates the detected type against the A5 vocabulary and bounds the codes', () => {
+    expect(ATTACHMENT_FILE_TYPE_VALUES).toContain('unknown');
+    expect(new Set(ATTACHMENT_FILE_TYPE_VALUES).size).toBe(ATTACHMENT_FILE_TYPE_VALUES.length);
+    for (const type of ATTACHMENT_FILE_TYPE_VALUES) {
+      expect(ok(withAttachment({ detectedType: type })), type).toBe(true);
+    }
+    expect(ok(withAttachment({ detectedType: 'exe' }))).toBe(false);
+    expect(ok(withAttachment({ sha256: 'C'.repeat(64) }))).toBe(false);
+    expect(ok(withAttachment({ partIndex: 65_536 }))).toBe(false);
+    expect(ok(withAttachment({ sizeBytes: -1 }))).toBe(false);
+    expect(ok(payload({ reasonCodes: [] }))).toBe(false);
+    expect(ok(payload({ reasonCodes: ['type.mismatch', 'type.mismatch'] }))).toBe(false);
+    expect(ok(payload({ reasonCodes: ['TYPE'] }))).toBe(false);
+    const codes = Array.from({ length: 17 }, (_, i) => `limit.code_${i}`);
+    expect(ok(payload({ reasonCodes: codes.slice(0, 16) }))).toBe(true);
+    expect(ok(payload({ reasonCodes: codes }))).toBe(false);
+  });
+
+  it('rejects malformed ids, rounds and times', () => {
+    expect(ok(payload({ submissionId: '0' }))).toBe(false);
+    expect(ok(payload({ scanId: 11 }))).toBe(false);
+    expect(ok(payload({ messageId: '01' }))).toBe(false);
+    expect(ok(payload({ lifecycleRound: 65_536 }))).toBe(false);
+    expect(ok(payload({ requestedAt: 'yesterday' }))).toBe(false);
+    expect(ok(payload({ direction: 'sideways' }))).toBe(false);
   });
 });

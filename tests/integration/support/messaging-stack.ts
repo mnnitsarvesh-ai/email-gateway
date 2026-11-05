@@ -24,6 +24,10 @@ import type { SmtpStackGate } from './smtp-stack';
 export const MIME_LEDGER = 'email-worker.mime-parser';
 /** Ledger of the Rspamd engine consumer on `scan.spam` (step 4.1 S2). */
 export const SCAN_LEDGER = 'email-worker.scan.rspamd';
+/** Step 4.2: the attachment engine's ledger consumer (scan.attachment). */
+export const ATTACHMENT_SCAN_LEDGER = 'email-worker.scan.attachment';
+/** Step 4.2 A1: every round requires Rspamd and the attachment engine (`SCAN_ENGINES`). */
+export const REQUIRED_ENGINE_COUNT = 2;
 export const PLANNER_LEDGER = 'delivery-worker.planner';
 export const QUEUES = {
   received: 'email.received',
@@ -202,6 +206,8 @@ export interface PipelineCounts {
   scanFinals: number;
   /** `message_idempotency` rows of `email-worker.scan.rspamd` for the parsed events. */
   scanLedger: number;
+  /** Step 4.2: `message_idempotency` rows of `email-worker.scan.attachment` (parsed events). */
+  attachmentLedger: number;
   /** `mail.message.scanned.v1` outbox rows (one per completed round). */
   scannedEvents: number;
   approvals: number;
@@ -276,6 +282,11 @@ export async function pipelineCounts(
       SCAN_LEDGER,
       parsed.map((p) => p.eventId),
     ),
+    attachmentLedger: await ledgerCount(
+      prisma,
+      ATTACHMENT_SCAN_LEDGER,
+      parsed.map((p) => p.eventId),
+    ),
     scannedEvents: await prisma.messageOutbox.count({
       where: { ...where, eventType: EventTypes.MessageScanned },
     }),
@@ -337,8 +348,9 @@ export async function waitForPipeline(
 
 /**
  * The exactly-once assertions of every chaos suite for `n` single-recipient messages: one parse
- * row, one MIME ledger row and one parse event per message; one scan round, one final Rspamd
- * result, one scan ledger row and one `scanned.v1` per message (step 4.1); one approval, one
+ * row, one MIME ledger row and one parse event per message; one scan round, one final result per
+ * required engine (Rspamd, step 4.1, and the attachment engine, step 4.2), one ledger row per
+ * engine consumer and one `scanned.v1` per message; one approval, one
  * planner ledger row, one delivery and one reinjection group per message; nothing unpublished.
  */
 export function exactlyOnceProblems(c: PipelineCounts, n: number): string[] {
@@ -351,8 +363,9 @@ export function exactlyOnceProblems(c: PipelineCounts, n: number): string[] {
     ['mimeLedger', n],
     ['parseEvents', n],
     ['scans', n],
-    ['scanFinals', n],
+    ['scanFinals', n * REQUIRED_ENGINE_COUNT],
     ['scanLedger', n],
+    ['attachmentLedger', n],
     ['scannedEvents', n],
     ['approvals', n],
     ['plannerLedger', n],

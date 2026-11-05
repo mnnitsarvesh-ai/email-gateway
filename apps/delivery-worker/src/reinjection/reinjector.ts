@@ -23,11 +23,12 @@ import { SOURCE_SERVICE } from '../planning/delivery-planner';
 import { maxChunk, type OutboundRateLimiter } from '../rate-limit/outbound-rate-limiter';
 import { nextWindowStart, retryDelayMs } from '../shared/backoff';
 import { ContentMissingError, type EmlStream, ForeignObjectKeyError, openEml } from './eml-source';
-import type {
-  ActiveDelivery,
-  ClaimedReinjection,
-  ReinjectionContext,
-  ReinjectionStore,
+import {
+  type ActiveDelivery,
+  type ClaimedReinjection,
+  InconsistentReadError,
+  type ReinjectionContext,
+  type ReinjectionStore,
 } from './reinjection-store';
 import { isAmbiguousSmtpError, SmtpClient, SmtpClientError, type SmtpReply } from './smtp-client';
 
@@ -41,6 +42,7 @@ export interface ReinjectorConfig {
   DELIVERY_REINJECT_RETRY_BASE_SECONDS: number;
   DELIVERY_REINJECT_RETRY_MAX_SECONDS: number;
   DELIVERY_REINJECT_MAX_AGE_SECONDS: number;
+  DELIVERY_REINJECT_MAX_ATTEMPTS: number;
   ROUTING_MAX_RECEIVED_HEADERS: number;
   ROUTING_MAX_GATEWAY_PASSES: number;
   GATEWAY_TRACE_SECRET: string;
@@ -81,6 +83,8 @@ type SessionResult =
     };
 
 const QUEUED_AS = /\bqueued as ([A-Za-z0-9]{1,32})\b/;
+/** `checkedRead` result of a read that failed its echo check (the row was rescheduled). */
+const INCONSISTENT = Symbol('inconsistent-read');
 const NON_ASCII = /[^\x20-\x7e]/;
 const MAX_DETAIL = 1024;
 
@@ -147,12 +151,9 @@ export class Reinjector {
 
   private async run(row: ClaimedReinjection, signal?: AbortSignal): Promise<ReinjectionOutcome> {
     const ids = this.ids(row);
-    const context = await this.deps.store.context(row);
-    if (!context) {
-      this.logger.error(ids, 'message of the reinjection not found; reinjection failed');
-      await this.deps.store.markFailed(row, 'other', 'message not found');
-      return 'failed';
-    }
+    const context = await this.checkedRead(row, () => this.deps.store.context(row));
+    if (context === INCONSISTENT) return 'retry';
+    if (!context) return this.contextMissing(row);
     let active = context.deliveries;
     if (active.length === 0) {
       this.logger.info(ids, 'no recipient of the reinjection still needs the hop');
@@ -161,7 +162,8 @@ export class Reinjector {
     }
 
     // R8 step 4: max age since the approval.
-    const approvalAt = await this.deps.store.approvalTime(row);
+    const approvalAt = await this.checkedRead(row, () => this.deps.store.approvalTime(row));
+    if (approvalAt === INCONSISTENT) return 'retry';
     if (
       this.now().getTime() - approvalAt.getTime() >=
       this.deps.config.DELIVERY_REINJECT_MAX_AGE_SECONDS * 1000
@@ -283,6 +285,105 @@ export class Reinjector {
     } finally {
       eml.destroy();
     }
+  }
+
+  // --- Read checks (step 4.2 §6.2 item 3) -------------------------------------------------------
+
+  /**
+   * Runs a store read; an `InconsistentReadError` (the result did not echo the request) is
+   * transient: the row goes back to `pending` with backoff and its attempt refunded (a wrong
+   * read is not the row's fault), counted in `delivery_inconsistent_reads_total`.
+   */
+  private async checkedRead<T>(
+    row: ClaimedReinjection,
+    read: () => Promise<T>,
+  ): Promise<T | typeof INCONSISTENT> {
+    try {
+      return await read();
+    } catch (err) {
+      if (!(err instanceof InconsistentReadError)) throw err;
+      this.deps.metrics.inconsistentReads.inc({ read: err.read });
+      this.logger.warn(
+        { ...this.ids(row), read: err.read, check: err.check },
+        'inconsistent writer read; reinjection rescheduled (attempt refunded)',
+      );
+      await this.deps.store.reschedule(row, {
+        nextAttemptAt: this.backoff(row),
+        errorClass: 'inconsistent_read',
+        error: err.message,
+        refundAttempt: true,
+      });
+      return INCONSISTENT;
+    }
+  }
+
+  /**
+   * The message row of the reinjection was not found (§6.2 item 3). Retryable: a read right
+   * after a writer stall can miss an existing row, so the row is rescheduled with backoff
+   * (error class `context_missing`) until `DELIVERY_REINJECT_MAX_ATTEMPTS`. The final attempt
+   * fails the row and terminal-fails its active deliveries in the same transaction (`failed`,
+   * reason `message_missing`, through the shared recorder; deliveries the recorder cannot
+   * resolve because the message is gone are failed directly), so none stays pending.
+   */
+  private async contextMissing(row: ClaimedReinjection): Promise<ReinjectionOutcome> {
+    const ids = this.ids(row);
+    if (row.attempts < this.deps.config.DELIVERY_REINJECT_MAX_ATTEMPTS) {
+      this.deps.metrics.contextMissing.inc({ result: 'retry' });
+      this.logger.warn(ids, 'message of the reinjection not found; reinjection rescheduled');
+      await this.deps.store.reschedule(row, {
+        nextAttemptAt: this.backoff(row),
+        errorClass: 'context_missing',
+        error: 'message not found',
+      });
+      return 'retry';
+    }
+    const active = await this.checkedRead(row, () => this.deps.store.activeDeliveries(row));
+    if (active === INCONSISTENT) return 'retry';
+    this.deps.metrics.contextMissing.inc({ result: 'failed' });
+    this.logger.error(
+      { ...ids, deliveries: active.length },
+      'message of the reinjection not found after the last attempt; reinjection and its ' +
+        'deliveries failed (message_missing)',
+    );
+    if (active.length === 0) {
+      await this.deps.store.markFailed(row, 'context_missing', 'message not found');
+      return 'failed';
+    }
+    const now = this.now();
+    await this.commitTerminal(row, active, {
+      status: 'failed',
+      outcome: 'message_missing',
+      failureReason: 'message_missing',
+      errorClass: 'other',
+      detail: 'the message of the reinjection was not found',
+      rowErrorClass: 'context_missing',
+      rowError: 'message not found',
+      after: async (tx) => {
+        await this.deps.store.failOrphanedDeliveries(
+          tx,
+          row,
+          active.map((d) => d.id),
+          'message_missing',
+          now,
+        );
+      },
+    });
+    return 'failed';
+  }
+
+  /** The row's next attempt time with the worker backoff. */
+  private backoff(row: ClaimedReinjection): Date {
+    return new Date(
+      this.now().getTime() +
+        retryDelayMs(
+          row.attempts,
+          {
+            baseSeconds: this.deps.config.DELIVERY_REINJECT_RETRY_BASE_SECONDS,
+            maxSeconds: this.deps.config.DELIVERY_REINJECT_RETRY_MAX_SECONDS,
+          },
+          this.random,
+        ),
+    );
   }
 
   // --- R1 hold re-check ------------------------------------------------------------------------
@@ -790,17 +891,7 @@ export class Reinjector {
     active: readonly ActiveDelivery[],
     options: { errorClass: DeliveryErrorClass; error: string; outcome: string; reply?: SmtpReply },
   ): Promise<void> {
-    const nextAttemptAt = new Date(
-      this.now().getTime() +
-        retryDelayMs(
-          row.attempts,
-          {
-            baseSeconds: this.deps.config.DELIVERY_REINJECT_RETRY_BASE_SECONDS,
-            maxSeconds: this.deps.config.DELIVERY_REINJECT_RETRY_MAX_SECONDS,
-          },
-          this.random,
-        ),
-    );
+    const nextAttemptAt = this.backoff(row);
     await this.commitSignals(
       row,
       active.map((delivery) => ({
@@ -843,6 +934,8 @@ export class Reinjector {
       rowErrorClass: string | null;
       rowError: string;
       finishRow?: boolean;
+      /** Runs in the same transaction after the recorder. */
+      after?: (tx: Prisma.TransactionClient) => Promise<void>;
     },
   ): Promise<void> {
     await this.commitSignals(
@@ -869,6 +962,7 @@ export class Reinjector {
           await this.deps.store.markFailed(row, options.rowErrorClass, options.rowError, tx);
         }
       },
+      options.after,
     );
   }
 

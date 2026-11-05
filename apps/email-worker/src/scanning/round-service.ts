@@ -401,6 +401,7 @@ export class ScanRoundService {
       durationMs: result.durationMs,
       settingsVersion: result.settingsVersion,
       auth: result.auth ?? null,
+      ...(outcome.childRows ? { childRows: outcome.childRows } : {}),
     };
   }
 }

@@ -12,6 +12,9 @@ import {
 } from '@email-gateway/config';
 import { parseAllowedDestinationPorts } from '@email-gateway/mail-routing';
 import {
+  ATTACHMENT_PLATFORM_ENV_KEYS,
+  type AttachmentPlatformSettings,
+  attachmentPlatformSettingsFromEnv,
   RSPAMD_PLATFORM_DEFAULTS,
   RSPAMD_PLATFORM_ENV_KEYS,
   type RspamdPlatformSettings,
@@ -444,6 +447,53 @@ type ScanConfigKeys = {
   [K in keyof typeof scanConfigShape]: z.output<(typeof scanConfigShape)[K]>;
 };
 
+/** Largest `ATTACHMENT_RESCAN_MAX_MESSAGES` (step 4.2 A13). */
+export const ATTACHMENT_RESCAN_MAX_MESSAGES_LIMIT = 50_000;
+
+/**
+ * Attachment scanning (step 4.2 A8, A13): the platform attachment settings (the same
+ * `ATTACHMENT_*` keys the email-worker reads; the settings API validates tenant overrides against
+ * them and shows the archive limits) and the per-job cap of the rescan job route. Kept as raw
+ * strings here and parsed by `attachmentPlatformSettingsFromEnv` (unset or empty → default), so
+ * the api and the worker interpret them identically.
+ */
+const attachmentConfigShape = {
+  ...(Object.fromEntries(
+    Object.values(ATTACHMENT_PLATFORM_ENV_KEYS).map((key) => [key, z.string().optional()]),
+  ) as Record<
+    (typeof ATTACHMENT_PLATFORM_ENV_KEYS)[keyof AttachmentPlatformSettings],
+    z.ZodOptional<z.ZodString>
+  >),
+  ATTACHMENT_RESCAN_MAX_MESSAGES: int(1, ATTACHMENT_RESCAN_MAX_MESSAGES_LIMIT).default(5000),
+};
+
+type AttachmentConfigKeys = Partial<
+  Record<(typeof ATTACHMENT_PLATFORM_ENV_KEYS)[keyof AttachmentPlatformSettings], string>
+>;
+
+/** The validated attachment platform settings of the api config (A8). */
+export function attachmentPlatformSettingsOf(
+  cfg: AttachmentConfigKeys,
+): AttachmentPlatformSettings {
+  return attachmentPlatformSettingsFromEnv(cfg);
+}
+
+function validateAttachmentConfig(cfg: AttachmentConfigKeys, ctx: z.RefinementCtx): void {
+  try {
+    attachmentPlatformSettingsFromEnv(cfg);
+  } catch (err) {
+    if (!(err instanceof z.ZodError)) throw err;
+    for (const issue of err.issues) {
+      const setting = issue.path[0] as keyof AttachmentPlatformSettings | undefined;
+      ctx.addIssue({
+        code: 'custom',
+        path: [setting ? ATTACHMENT_PLATFORM_ENV_KEYS[setting] : 'ATTACHMENT_MAX_BYTES'],
+        message: issue.message,
+      });
+    }
+  }
+}
+
 /** The validated Rspamd platform settings of the api config (S8). */
 export function rspamdPlatformSettingsOf(
   cfg: Pick<ScanConfigKeys, (typeof RSPAMD_PLATFORM_ENV_KEYS)[keyof RspamdPlatformSettings]>,
@@ -496,6 +546,7 @@ export const apiConfigSchema = baseConfigSchema
   .extend(routingConfigShape)
   .extend(deadLetterConfigShape)
   .extend(scanConfigShape)
+  .extend(attachmentConfigShape)
   .extend({
     /** Comma-separated allow-list of admin portal origins. */
     CORS_ORIGINS: z
@@ -512,6 +563,7 @@ export const apiConfigSchema = baseConfigSchema
     validateNotifySmtpConfig(cfg, ctx);
     validateDomainConfig(cfg, ctx);
     validateScanConfig(cfg, ctx);
+    validateAttachmentConfig(cfg, ctx);
     if (cfg.AUTH_SESSION_MAX_AGE_SECONDS < cfg.AUTH_REFRESH_TOKEN_TTL_SECONDS) {
       ctx.addIssue({
         code: 'custom',

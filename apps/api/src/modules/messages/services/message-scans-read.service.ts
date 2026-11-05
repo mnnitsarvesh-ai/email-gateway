@@ -7,10 +7,11 @@ import { MessageLifecycleReadRepository } from '../repositories/message-lifecycl
 import { MessageScansReadRepository } from '../repositories/message-scans-read.repository';
 
 /**
- * `GET /messages/{messageId}/scans` (step 4.1 S16): the scan rounds of a message of the caller's
- * organization, newest round first, from the read replica (a few seconds behind the writer: a
- * round that just completed may still show as running). Another organization's message is
- * `404 message_not_found`.
+ * `GET /messages/{messageId}/scans` (step 4.1 S16; step 4.2 A16: per-attachment results on the
+ * `attachment` engine entry): the scan rounds of a message of the caller's organization, newest
+ * round first, from the read replica (a few seconds behind the writer: a round that just
+ * completed may still show as running). Every query filters by the scope's organization;
+ * another organization's message is `404 message_not_found`.
  */
 @Injectable()
 export class MessageScansReadService {
@@ -33,14 +34,22 @@ export class MessageScansReadService {
     });
     const page = rows.slice(0, query.limit);
     const scanIds = page.map((row) => row.id);
-    const [engineRows, authRows] = await Promise.all([
+    const [engineRows, authRows, results, submissions] = await Promise.all([
       this.rounds.engineResults(scope, message, scanIds),
       this.rounds.authResults(scope, message, scanIds),
+      this.rounds.attachmentResults(scope, message, scanIds),
+      this.rounds.sandboxSubmissions(scope, message, scanIds),
     ]);
+    const parts = await this.rounds.attachmentParts(
+      scope,
+      message,
+      results.map((row) => row.partIndex),
+    );
+    const attachments = { results, parts, submissions };
     const last = page.at(-1);
     return {
       messageId: message.publicId,
-      data: page.map((scan) => roundOf(scan, engineRows, authRows)),
+      data: page.map((scan) => roundOf(scan, engineRows, authRows, attachments)),
       nextCursor: rows.length > query.limit && last ? encodeScanCursor(last.lifecycleRound) : null,
     };
   }

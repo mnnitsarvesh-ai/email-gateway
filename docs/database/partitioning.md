@@ -1,6 +1,6 @@
 # Partitioning
 
-Twenty high-volume tables are range-partitioned by time ([ADR-0014](../architecture/adr/0014-mysql-data-model-partitioning-read-write-split.md) §3, design [D3](../plan/steps/01-database.md#d3-partitioning-adr-0014-3); step 2.3 added `delivery_reinjections` and `delivery_status_events`, [§3](../plan/steps/05-routing.md#3-data-model-one-forward-migration-mail_routing-wp1); step 3.1 added the parse stage table `email_message_parses`, [§3](../plan/steps/06-mime-ingestion.md#3-data-model-one-forward-migration-mime_ingestion-wp1); step 4.1 added the authentication results table `email_auth_results`, [§3](../plan/steps/09-rspamd.md#3-data-model-one-forward-migration-scan_pipeline-wp1)). Dropping a partition removes a month (or a day) of rows as a metadata operation, without the undo, purge lag and binlog volume of a batched `DELETE`.
+Twenty-two high-volume tables are range-partitioned by time ([ADR-0014](../architecture/adr/0014-mysql-data-model-partitioning-read-write-split.md) §3, design [D3](../plan/steps/01-database.md#d3-partitioning-adr-0014-3); step 2.3 added `delivery_reinjections` and `delivery_status_events`, [§3](../plan/steps/05-routing.md#3-data-model-one-forward-migration-mail_routing-wp1); step 3.1 added the parse stage table `email_message_parses`, [§3](../plan/steps/06-mime-ingestion.md#3-data-model-one-forward-migration-mime_ingestion-wp1); step 4.1 added the authentication results table `email_auth_results`, [§3](../plan/steps/09-rspamd.md#3-data-model-one-forward-migration-scan_pipeline-wp1); step 4.2 added the per-attachment results `attachment_scan_results` and the sandbox submissions `sandbox_submissions`, [§3](../plan/steps/10-attachment-scanning.md#3-data-model-one-forward-migration-attachment_scanning-wp1)). Dropping a partition removes a month (or a day) of rows as a metadata operation, without the undo, purge lag and binlog volume of a batched `DELETE`.
 
 ## MySQL constraints we design for
 
@@ -40,6 +40,8 @@ The registry is `packages/database/src/partitioning/registry.ts`. "Retention N m
 | `delivery_status_events`       | `received_at`       | month       | 3 months   | detail      |                                         |
 | `email_message_parses`         | `received_at`       | month       | 6 months   | core        |                                         |
 | `email_auth_results`           | `received_at`       | month       | 6 months   | core        |                                         |
+| `attachment_scan_results`      | `received_at`       | month       | 6 months   | core        |                                         |
+| `sandbox_submissions`          | `received_at`       | month       | 6 months   | core        |                                         |
 | `email_archives`               | `received_at`       | month       | never      | compliance  | `drop: false` (legal hold, step 8.1)    |
 | `bounce_events`                | `occurred_at`       | month       | 6 months   | core        |                                         |
 | `audit_logs`                   | `created_at`        | month       | never      | compliance  | `drop: false` (export is an ops action) |

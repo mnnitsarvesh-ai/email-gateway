@@ -251,10 +251,10 @@ export class ManagementApi {
  * queues are never in this list (a purge there would lose real events).
  */
 export const DORMANT_QUEUES = [
-  // `scan.spam` is a work queue since topology v3 (step 4.1 S2, consumed by the scan role).
+  // `scan.spam` is a work queue since topology v3 (step 4.1 S2, consumed by the scan role),
+  // `scan.attachment` since v4 (step 4.2 A2, the attachment engine).
   'scan.auth',
   'scan.url',
-  'scan.attachment',
   'scan.dlp',
   'scan.sandbox',
   'email.policy.evaluate',

@@ -1,0 +1,201 @@
+# promtool unit tests of rules/attachment-scanning.rules.yml (step 4.2 A19):
+#   docker run --rm -v "$PWD/infrastructure/monitoring:/m:ro" --entrypoint promtool \
+#     prom/prometheus:v3.6.0 test rules /m/tests/attachment-scanning.rules.test.yml
+rule_files:
+  - ../rules/attachment-scanning.rules.yml
+evaluation_interval: 1m
+tests:
+  - name: breaker, signatures, failures, kills, backlog, latency, cache, signature change, sandbox
+    interval: 1m
+    input_series:
+      # Replica a's attachment breaker opens at minute 5; the rspamd breaker stays closed.
+      - series: 'scan_engine_circuit_state{job="email-worker",instance="a",engine="attachment"}'
+        values: '0x5 2x40'
+      - series: 'scan_engine_circuit_state{job="email-worker",instance="a",engine="rspamd"}'
+        values: '0x45'
+      # Database 2 days 1 hour old from minute 10 (before: 1 hour).
+      - series: 'scan_attachment_clamav_db_age_seconds{job="email-worker",instance="a"}'
+        values: '3600x10 180000x35'
+      # 10 clean finals per minute; 1 error final per minute from minute 10 (9 %).
+      - series: 'scan_engine_results_total{job="email-worker",instance="a",engine="attachment",outcome="clean",final="true"}'
+        values: '0+10x45'
+      - series: 'scan_engine_results_total{job="email-worker",instance="a",engine="attachment",outcome="error",final="true"}'
+        values: '0x10 1+1x35'
+      # Retried attempts never count; neither do rspamd failures.
+      - series: 'scan_engine_results_total{job="email-worker",instance="a",engine="attachment",outcome="error",final="false"}'
+        values: '0+50x45'
+      - series: 'scan_engine_results_total{job="email-worker",instance="a",engine="rspamd",outcome="error",final="true"}'
+        values: '0+50x45'
+      # 12 inspector kills per minute (0.2/s) from minute 10.
+      - series: 'scan_attachment_inspector_kills_total{job="email-worker",instance="a",reason="cpu"}'
+        values: '0x10 12+12x35'
+      # scan.attachment backlog from minute 10; scan.spam backlog never alerts here.
+      - series: 'rabbitmq_detailed_queue_messages_ready{job="rabbitmq-detailed",vhost="email-gateway",queue="scan.attachment"}'
+        values: '0x10 2000x35'
+      - series: 'rabbitmq_detailed_queue_messages_ready{job="rabbitmq-detailed",vhost="email-gateway",queue="scan.spam"}'
+        values: '5000x45'
+      # Total stage durations: 90 % above 30 s.
+      - series: 'scan_attachment_stage_duration_seconds_bucket{job="email-worker",instance="a",stage="total",le="30"}'
+        values: '0+1x45'
+      - series: 'scan_attachment_stage_duration_seconds_bucket{job="email-worker",instance="a",stage="total",le="60"}'
+        values: '0+10x45'
+      - series: 'scan_attachment_stage_duration_seconds_bucket{job="email-worker",instance="a",stage="total",le="+Inf"}'
+        values: '0+10x45'
+      # Other stages never count toward the latency alert.
+      - series: 'scan_attachment_stage_duration_seconds_bucket{job="email-worker",instance="a",stage="clamav",le="+Inf"}'
+        values: '0+100x45'
+      # 120 cache errors per minute (2/s) from minute 10.
+      - series: 'scan_attachment_cache_total{job="email-worker",instance="a",result="error"}'
+        values: '0x10 120+120x35'
+      - series: 'scan_attachment_cache_total{job="email-worker",instance="a",result="hit"}'
+        values: '0+1000x45'
+      # One database change at minute 10.
+      - series: 'scan_attachment_signature_changes_total{job="email-worker",instance="a",component="clamav_db"}'
+        values: '0x10 1x35'
+      # scan.sandbox above 5000 from minute 10.
+      - series: 'rabbitmq_detailed_queue_messages_ready{job="rabbitmq-detailed",vhost="email-gateway",queue="scan.sandbox"}'
+        values: '10x10 6000x35'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: ClamavUnavailable
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: ClamavUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: Attachment engine circuit open (clamd unavailable)
+              description: >-
+                The attachment engine's circuit breaker has been open for 2 minutes on at least
+                one email-worker: clamd is down, overloaded or reloading, or the inspector keeps
+                failing. Attachment scans are retried with backoff and end scan_failed after
+                SCAN_ATTACHMENT_MAX_ATTEMPTS or the round deadline (never clean).
+              runbook_url: docs/runbooks/attachment-scanning.md#clamavunavailable
+      - eval_time: 30m
+        alertname: ClamavSignaturesStale
+        exp_alerts: []
+      - eval_time: 42m
+        alertname: ClamavSignaturesStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: ClamAV signature database older than 48 hours
+              description: >-
+                The ClamAV daily database reported by clamd VERSION has been older than 48 hours
+                for 30 minutes: freshclam is not updating (network, mirror rate limit, disk). New
+                malware is not detected by signatures until it updates.
+              runbook_url: docs/runbooks/attachment-scanning.md#clamavsignaturesstale
+      - eval_time: 9m
+        alertname: AttachmentScanFailuresHigh
+        exp_alerts: []
+      # The 10-minute ratio crosses 5 % at minute 16; pending for 5 minutes.
+      - eval_time: 25m
+        alertname: AttachmentScanFailuresHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Attachment engine final failures above 5 %
+              description: >-
+                More than 5 % of the final attachment results of the last 10 minutes are timeout
+                or error (clamd, inspector, part objects). Their rounds end scan_failed; rescan
+                them after the cause is fixed.
+              runbook_url: docs/runbooks/attachment-scanning.md#attachmentscanfailureshigh
+      - eval_time: 15m
+        alertname: AttachmentInspectorKills
+        exp_alerts: []
+      # The 10-minute rate crosses 0.1/s at minute 16; pending for 10 minutes.
+      - eval_time: 30m
+        alertname: AttachmentInspectorKills
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Attachment inspector children killed frequently
+              description: >-
+                Inspector children have been killed more than 0.1 times per second for 10
+                minutes (CPU, memory, wall clock or crash). Check the reason label: CPU/memory
+                kills are hostile or oversized files (limit.cpu_time / limit.memory), wall-clock
+                kills mean an overloaded host, crashes a binding or limit bug.
+              runbook_url: docs/runbooks/attachment-scanning.md#attachmentinspectorkills
+      - eval_time: 15m
+        alertname: AttachmentScanQueueBacklog
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: AttachmentScanQueueBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Attachment scan queue backlog
+              description: >-
+                scan.attachment has had more than 1000 ready messages, or the p95 age of
+                attachment scan triggers at handling start has been above 180 s, for 10 minutes.
+                Scale email-worker-attachment (and clamd) or check clamd latency.
+              runbook_url: docs/runbooks/attachment-scanning.md#attachmentscanqueuebacklog
+      - eval_time: 10m
+        alertname: AttachmentScanLatencyHigh
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: AttachmentScanLatencyHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Attachment scan p95 latency above 30 s
+              description: >-
+                The p95 time to scan one attachment (S3 read, clamd, inspector) has been above
+                30 s for 15 minutes. Check the stage histogram (clamav vs inspect vs s3_read),
+                clamd threads and the inspector pool.
+              runbook_url: docs/runbooks/attachment-scanning.md#attachmentscanlatencyhigh
+      - eval_time: 15m
+        alertname: AttachmentCacheErrors
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: AttachmentCacheErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Attachment content cache errors
+              description: >-
+                More than one content cache operation per second has failed for 10 minutes
+                (Redis down or slower than ATTACHMENT_CACHE_TIMEOUT_MS). Scans continue without
+                the cache (every attachment is scanned in full), so clamd load rises.
+              runbook_url: docs/runbooks/attachment-scanning.md#attachmentcacheerrors
+      - eval_time: 9m
+        alertname: AttachmentSignatureChanged
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: AttachmentSignatureChanged
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              component: clamav_db
+            exp_annotations:
+              summary: Attachment signature version changed
+              description: >-
+                The clamav_db version changed in the last 30 minutes (a ClamAV database update
+                or a new YARA bundle). Old cache entries are unreachable; a rescan job was
+                recorded (ATTACHMENT_SIGNATURE_RESCAN=record) or started (rescan).
+              runbook_url: docs/runbooks/attachment-scanning.md#attachmentsignaturechanged
+      - eval_time: 45m
+        alertname: AttachmentSignatureChanged
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: SandboxSubmissionsAccumulating
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: SandboxSubmissionsAccumulating
+        exp_alerts:
+          - exp_labels:
+              severity: info
+            exp_annotations:
+              summary: Sandbox submissions accumulating
+              description: >-
+                scan.sandbox holds more than 5000 sandbox_requested.v1 events for 15 minutes.
+                Until step 4.6 the queue is a bounded dormant buffer (drop-head): this is
+                expected volume information, not a failure.
+              runbook_url: docs/runbooks/attachment-scanning.md#sandboxsubmissionsaccumulating

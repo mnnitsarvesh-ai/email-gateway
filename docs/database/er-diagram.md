@@ -34,7 +34,10 @@ flowchart LR
   subgraph security[Security]
     email_scans[(email_scans P)]
     email_auth_results[(email_auth_results P)]
+    attachment_scan_results[(attachment_scan_results P)]
+    sandbox_submissions[(sandbox_submissions P)]
     scan_engine_settings
+    attachment_rescan_jobs
   end
   subgraph policy[Policy]
     email_policies
@@ -67,7 +70,10 @@ flowchart LR
   email_messages -.-> email_message_parses
   email_messages -.-> email_scans
   email_scans -.-> email_auth_results
+  email_scans -.-> attachment_scan_results
+  email_scans -.-> sandbox_submissions
   organizations --> scan_engine_settings
+  organizations --> attachment_rescan_jobs
   email_messages -.-> email_deliveries
   delivery_reinjections -.-> email_deliveries
   email_deliveries -.-> delivery_status_events
@@ -414,6 +420,12 @@ erDiagram
   email_scans ||..o{ email_auth_results : "scan_id + received_at, one per engine"
   organizations ||--o{ scan_engine_settings : "RESTRICT, one per engine"
   users |o--o{ scan_engine_settings : "updated_by, SET NULL"
+  email_scans ||..o{ attachment_scan_results : "scan_id + received_at, one per attachment"
+  email_attachments ||..o{ attachment_scan_results : "attachment_id, one per round"
+  email_scans ||..o{ sandbox_submissions : "scan_id + received_at, one per submitted attachment"
+  organizations |o--o{ attachment_rescan_jobs : "RESTRICT, NULL = every organization"
+  users |o--o{ attachment_rescan_jobs : "requested_by, SET NULL"
+  users |o--o{ malware_signatures : "added_by, SET NULL"
   organizations |o--o{ threat_indicators : "NULL = platform feed"
   organizations |o--o{ yara_rules : "NULL = platform rule"
   users |o--o{ yara_rules : "updated_by"
@@ -479,6 +491,43 @@ erDiagram
   malware_signatures {
     bigint id PK
     char sha256 UK
+    enum severity
+    varchar source "analyst, feed:<name>, sandbox"
+    bigint added_by_user_id FK "nullable"
+    datetime expires_at "nullable"
+  }
+  attachment_scan_results {
+    bigint id PK
+    datetime received_at PK "PARTITIONED month"
+    bigint scan_id "UK with attachment_id, received_at"
+    bigint attachment_id
+    char sha256
+    varchar detected_type
+    enum verdict
+    json reason_codes
+    json archive "index paths, no entry names"
+  }
+  sandbox_submissions {
+    bigint id PK
+    datetime received_at PK "PARTITIONED month"
+    bigint scan_id "UK with attachment_id, received_at"
+    bigint attachment_id
+    varchar object_key "S3 part key"
+    enum status "pending until step 4.6"
+  }
+  attachment_rescan_jobs {
+    bigint id PK
+    char public_id UK
+    varchar dedupe_key UK "nullable"
+    bigint organization_id FK "nullable"
+    enum trigger
+    enum status
+  }
+  scan_signature_versions {
+    bigint id PK
+    varchar engine "UK with component, version"
+    varchar component
+    varchar version
   }
   yara_rules {
     bigint id PK
@@ -486,9 +535,11 @@ erDiagram
   }
 ```
 
-The four reputation catalogs and `malware_signatures` are platform-wide and stand alone.
+The four reputation catalogs and `malware_signatures` are platform-wide; `malware_signatures` references only the analyst who added a hash (step 4.2 A17), and `scan_signature_versions` stands alone.
 
 Step 4.1 ([§3](../plan/steps/09-rspamd.md#3-data-model-one-forward-migration-scan_pipeline-wp1)): a scan round is `(message_id, received_at, lifecycle_round)`, one `email_scans` row; each engine writes its failed attempts as non-final `scan_engine_results` rows and exactly one final row (the unique key on the generated `final_engine`); the Rspamd engine also writes one `email_auth_results` row per round. All three are partitioned and copy the message's `received_at`, so a message's scan graph lives in one partition. `scan_engine_settings` (not partitioned) holds a tenant's override of an engine's platform thresholds, validated by `@email-gateway/security-contracts`.
+
+Step 4.2 ([§3](../plan/steps/10-attachment-scanning.md#3-data-model-one-forward-migration-attachment_scanning-wp1)): the attachment engine writes, in the finalize transaction of its final `scan_engine_results` row, one `attachment_scan_results` row per attachment (logical reference to `email_attachments.id`) and one `sandbox_submissions` row per attachment submitted to the sandbox; both are partitioned and copy the message's `received_at`. Archive entries are findings inside their attachment's row (index paths), not rows. `attachment_rescan_jobs` and `scan_signature_versions` are not partitioned.
 
 ## Policy
 

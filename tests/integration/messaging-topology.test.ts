@@ -18,7 +18,7 @@ import { stack } from './support/env';
 
 /**
  * The provisioned vhost `email-gateway` matches the topology exactly (step 3.2 Q1, Q4, §3; v2:
- * step 3.3 L7; v3: step 4.1 S2): checks through the management API. The prune case adds one
+ * step 3.3 L7; v3: step 4.1 S2; v4: step 4.2 A2): checks through the management API. The prune case adds one
  * stray binding to the dormant `scan.auth` and lets `init.mjs` remove it again.
  */
 const api = new ManagementApi();
@@ -120,10 +120,10 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
     expect(bindings.filter((b) => b.destination_type === 'exchange')).toHaveLength(5);
   });
 
-  it('is topology v3: the vhost description and the rescan bindings (step 4.1 S2)', async () => {
-    expect(TOPOLOGY_VERSION).toBe(3);
+  it('is topology v4: the vhost description and the rescan bindings (steps 4.1 S2, 4.2 A2)', async () => {
+    expect(TOPOLOGY_VERSION).toBe(4);
     const info = await api.get<{ description?: string }>(`/vhosts/${encodeURIComponent(vhost)}`);
-    expect(info.description).toBe('email-gateway topology v3');
+    expect(info.description).toBe('email-gateway topology v4');
     const rescan = bindings
       .filter(
         (b) =>
@@ -171,6 +171,63 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
     expect(users.length, 'consumers on scan.spam').toBeGreaterThanOrEqual(1);
     const scanner = process.env.RABBITMQ_SCANNER_USER || 'eg-scanner';
     expect(new Set(users)).toEqual(new Set([scanner]));
+  });
+
+  it('scan.attachment is a work queue (work policy, v4) for the scanner role user eg-scanner', async () => {
+    expect(queueDefinition('scan.attachment')).toMatchObject({
+      role: 'work',
+      consumer: {
+        kind: 'ledger',
+        ledgerName: 'email-worker.scan.attachment',
+        service: 'email-worker',
+      },
+    });
+    const attachment = bindings
+      .filter((b) => b.source !== '' && b.destination === 'scan.attachment')
+      .map((b) => `${b.source} [${b.routing_key}]`)
+      .sort();
+    expect(attachment).toEqual(
+      [
+        'email.ingestion [org.*.mail.message.parsed.v1]',
+        'email.security [org.*.mail.message.rescan_requested.v1]',
+        'email.security [retry.scan.attachment.#]',
+      ].sort(),
+    );
+    const policy = policies.find((p) => p.name === 'eg.scan.attachment');
+    expect(policy?.definition).toEqual(policyFor('work', 'scan.attachment'));
+    expect(policy?.definition).toMatchObject({
+      'dead-letter-routing-key': 'dead-letter.scan.attachment',
+      overflow: 'reject-publish',
+    });
+    // The running stack consumes it (the email-worker attachment engine, step 4.2 WP3), only as
+    // the scanner role user.
+    const details = await api.get<{
+      consumer_details?: { channel_details?: { user?: string } }[];
+    }>(`/queues/${encodeURIComponent(vhost)}/scan.attachment`);
+    const users = (details.consumer_details ?? []).map((c) => c.channel_details?.user);
+    expect(users.length, 'consumers on scan.attachment').toBeGreaterThanOrEqual(1);
+    const scanner = process.env.RABBITMQ_SCANNER_USER || 'eg-scanner';
+    expect(new Set(users)).toEqual(new Set([scanner]));
+  });
+
+  it('scan.sandbox stays dormant, bound to the now registered sandbox_requested.v1 (v4)', () => {
+    expect(queueDefinition('scan.sandbox')).toMatchObject({
+      role: 'dormant',
+      consumer: { kind: 'planned', plannedStep: '4.6' },
+    });
+    const sandbox = bindings
+      .filter((b) => b.source !== '' && b.destination === 'scan.sandbox')
+      .map((b) => `${b.source} [${b.routing_key}]`)
+      .sort();
+    expect(sandbox).toEqual(
+      [
+        'email.security [org.*.mail.attachment.sandbox_requested.v1]',
+        'email.security [retry.scan.sandbox.#]',
+      ].sort(),
+    );
+    expect(policies.find((p) => p.name === 'eg.scan.sandbox')?.definition).toEqual(
+      policyFor('dormant', 'scan.sandbox'),
+    );
   });
 
   it('init.mjs prunes a binding on a topology queue that the definitions do not have', async () => {

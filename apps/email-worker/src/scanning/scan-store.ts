@@ -2,7 +2,7 @@ import type { HandleOutcome } from '@email-gateway/common';
 import type { MessageState } from '@email-gateway/message-lifecycle';
 import type { AuthResults, EngineOutcome } from '@email-gateway/security-contracts';
 import type { RoundAggregate } from './aggregate';
-import type { MessageDirectionValue } from './engine';
+import type { EngineChildRows, MessageDirectionValue } from './engine';
 import type { EngineSettingsSource } from './settings-resolver';
 import type { SkipReason } from './scan-metrics';
 
@@ -97,6 +97,12 @@ export interface FinalRowInput {
   settingsVersion: string | null;
   /** The `email_auth_results` row of an engine that reports authentication (Rspamd). */
   auth: AuthResults | null;
+  /**
+   * Engine-specific child rows (step 4.2 A12: `attachment_scan_results`, `sandbox_submissions`
+   * with their outbox rows), written after the final row in the same transaction, only when the
+   * final row was inserted.
+   */
+  childRows?: EngineChildRows;
 }
 
 export interface CompletionContext {

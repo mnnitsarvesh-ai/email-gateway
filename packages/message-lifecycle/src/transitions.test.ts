@@ -35,7 +35,7 @@ E15 held_for_review approved operator,quarantine review_release yes 3.3
 E16 held_for_review quarantined quarantine review_quarantined - 5.3
 E17 quarantined rejected quarantine quarantine_deleted - 5.3
 E18 held_for_review rejected quarantine review_rejected - 5.3
-E19 scanning,scanned,scan_failed,policy_evaluated,quarantined,held_for_review,expired scanning operator admin_rescan yes 3.3
+E19 scanning,scanned,scan_failed,policy_evaluated,quarantined,held_for_review,expired scanning operator,scanner admin_rescan,signature_rescan yes 3.3
 E20 approved delivery_pending delivery delivery_planned - 3.3
 E21 delivery_pending delivery_retry delivery,recovery delivery_deferred - 3.3
 E22 delivery_retry delivery_pending delivery,recovery delivery_requeued - 3.3
@@ -58,6 +58,10 @@ describe('TRANSITIONS', () => {
           to,
           roles: roles!.split(','),
           reasons: reasons!.split(','),
+          // Step 4.2 A13: E19 pairs each rescan reason with one role.
+          ...(id === 'E19'
+            ? { reasonRoles: { admin_rescan: ['operator'], signature_rescan: ['scanner'] } }
+            : {}),
           ...(round === 'yes' ? { newRound: true } : {}),
           producedBy,
         };
@@ -120,12 +124,32 @@ describe('TRANSITIONS', () => {
     expect(findEdge('scan_failed', 'approved')).toBeUndefined();
   });
 
-  it('opens new rounds only for operator/quarantine actors', () => {
+  it('opens new rounds only for operator/quarantine actors, and the scanner for signature rescans', () => {
     const roundEdges = TRANSITIONS.filter((e) => e.newRound);
     expect(roundEdges.map((e) => e.id)).toEqual(['E14', 'E15', 'E19']);
     for (const edge of roundEdges) {
-      for (const role of edge.roles) expect(['operator', 'quarantine']).toContain(role);
+      for (const role of edge.roles) {
+        if (edge.id === 'E19' && role === 'scanner') continue;
+        expect(['operator', 'quarantine']).toContain(role);
+      }
     }
+    // Step 4.2 A13: the scanner's only re-entry is E19 with signature_rescan.
+    const e19 = TRANSITIONS.find((e) => e.id === 'E19')!;
+    expect(e19.reasonRoles).toEqual({
+      admin_rescan: ['operator'],
+      signature_rescan: ['scanner'],
+    });
+  });
+
+  it('lists every reason of an edge in its reasonRoles, with roles of the edge only', () => {
+    const paired = TRANSITIONS.filter((e) => e.reasonRoles !== undefined);
+    expect(paired.map((e) => e.id)).toEqual(['E19']);
+    for (const edge of paired) {
+      expect(Object.keys(edge.reasonRoles!).sort()).toEqual([...edge.reasons].sort());
+      const used = new Set(Object.values(edge.reasonRoles!).flat());
+      expect([...used].sort()).toEqual([...edge.roles].sort());
+    }
+    expect(LIFECYCLE_REASON_CODES).toContain('signature_rescan');
   });
 
   it('reaches every state from creation and every non-final state reaches a final state', () => {

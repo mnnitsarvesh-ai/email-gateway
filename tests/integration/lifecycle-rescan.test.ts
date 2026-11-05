@@ -11,7 +11,14 @@ import {
   waitForLifecycle,
 } from './support/lifecycle';
 import { MessagingScenario } from './support/messaging-scenario';
-import { RSPAMD_LEDGER, scanRoundsOf, waitForRoundComplete } from './support/scan-stack';
+import {
+  ATTACHMENT_LEDGER,
+  engineResultsOf,
+  REQUIRED_ENGINES,
+  RSPAMD_LEDGER,
+  scanRoundsOf,
+  waitForRoundComplete,
+} from './support/scan-stack';
 import { messagingStackGate, record } from './support/messaging-stack';
 import { organizationRef } from './support/routing';
 import { SmtpFixtures } from './support/smtp-fixtures';
@@ -19,17 +26,19 @@ import { assertStackReady } from './support/smtp-stack';
 
 /**
  * Administrative rescan through the LIVE api, relay, broker and scan stage (docs/plan/steps/
- * 08-message-lifecycle.md L10.2, §9 "Stack"; topology v3 and the scan stage of step 4.1,
- * docs/plan/steps/09-rspamd.md S2, S14). A stored message in `scan_failed` (fixture, L8.6) is
- * rescanned with `POST /api/v1/messages/{id}/rescan`: E19 moves it to `scanning` with round + 1
- * and writes `mail.message.rescan_requested.v1`, which the relay publishes to `email.security`.
- * Topology v3 binds it to FOUR scan queues: the three dormant ones (`scan.url`,
- * `scan.attachment`, `scan.dlp`) each hold exactly one copy (peeked through the management API,
- * then purged); `scan.spam` is consumed by the email-worker scan role, which scans round 1 and
- * completes it (`scanned`), after which the dev pass-through approves round 1 and the message is
- * delivered. `scan.auth` lost its event bindings in v3 and receives nothing.
+ * 08-message-lifecycle.md L10.2, §9 "Stack"; the scan stage of step 4.1, docs/plan/steps/
+ * 09-rspamd.md S2, S14, and topology v4 of step 4.2, 10-attachment-scanning.md A1/A2). A stored
+ * message in `scan_failed` (fixture, L8.6, with its parse row and no attachments) is rescanned
+ * with `POST /api/v1/messages/{id}/rescan`: E19 moves it to `scanning` with round + 1 and writes
+ * `mail.message.rescan_requested.v1`, which the relay publishes to `email.security`. The topology
+ * binds it to FOUR scan queues: the two dormant ones (`scan.url`, `scan.dlp`) each hold exactly
+ * one copy (peeked through the management API, then purged); `scan.spam` and (since v4)
+ * `scan.attachment` are consumed by the email-worker scan role, which scans round 1 with both
+ * required engines (Rspamd; the attachment engine `skipped`, `attachment.none`) and completes it
+ * (`scanned`), after which the dev pass-through approves round 1 and the message is delivered.
+ * `scan.auth` lost its event bindings in v3 and receives nothing.
  */
-const DORMANT_SCAN_QUEUES = ['scan.url', 'scan.attachment', 'scan.dlp'];
+const DORMANT_SCAN_QUEUES = ['scan.url', 'scan.dlp'];
 const gate = await messagingStackGate();
 const fx = new SmtpFixtures();
 const scenario = new MessagingScenario('lifecycle-rescan', fx);
@@ -153,7 +162,8 @@ describe.skipIf(gate.skip)('lifecycle stack: administrative rescan', { timeout: 
       `org.${scenario.org.toString()}.mail.message.rescan_requested.v1`,
     );
 
-    // scan.spam: the scan role consumed the copy (one ledger row for the rescan event), opened
+    // scan.spam and scan.attachment: the scan role consumed both copies (one ledger row per
+    // engine consumer for the rescan event), opened
     // round 1 (`rescan`) and completed it; the pass-through approved round 1 and it was
     // delivered (E19 → E6 → E27 → E20 → E23).
     const round = await waitForRoundComplete(fx.prisma, message, 1);
@@ -161,15 +171,26 @@ describe.skipIf(gate.skip)('lifecycle stack: administrative rescan', { timeout: 
       scanKind: 'rescan',
       status: 'completed',
       triggerEventId: rescanEventId,
-      requiredEngines: ['rspamd'],
+      requiredEngines: [...REQUIRED_ENGINES],
     });
     expect(await scanRoundsOf(fx.prisma, message)).toHaveLength(1);
-    expect(
-      await fx.prisma.messageIdempotency.count({
-        where: { consumer: RSPAMD_LEDGER, eventId: rescanEventId },
-      }),
-    ).toBe(1);
-    expect((await mgmt.queue(vhost, 'scan.spam')).messages).toBe(0);
+    for (const consumer of [RSPAMD_LEDGER, ATTACHMENT_LEDGER]) {
+      expect(
+        await fx.prisma.messageIdempotency.count({
+          where: { consumer, eventId: rescanEventId },
+        }),
+        consumer,
+      ).toBe(1);
+    }
+    const finals = (await engineResultsOf(fx.prisma, message)).filter((r) => r.isFinal);
+    expect(finals.map((r) => r.engine).sort()).toEqual(['attachment', 'rspamd']);
+    expect(finals.find((r) => r.engine === 'attachment')).toMatchObject({
+      outcome: 'skipped',
+      reasonCodes: ['attachment.none'],
+    });
+    for (const queue of ['scan.spam', 'scan.attachment']) {
+      expect((await mgmt.queue(vhost, queue)).messages, queue).toBe(0);
+    }
     await waitForLifecycle(fx.prisma, message, 'delivered', 'delivery_complete');
     expect(await pathOf(fx.prisma, message)).toEqual([
       [null, 'received', 'smtp_accepted'],

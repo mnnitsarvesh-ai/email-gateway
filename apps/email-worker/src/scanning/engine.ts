@@ -1,5 +1,9 @@
 import type { Readable } from 'node:stream';
-import type { EngineName, NormalizedEngineResult } from '@email-gateway/security-contracts';
+import type {
+  AttachmentResult,
+  EngineName,
+  NormalizedEngineResult,
+} from '@email-gateway/security-contracts';
 
 /**
  * The adapter contract of a scan engine (step 4.1 S4, docs/plan/steps/09-rspamd.md). The
@@ -62,19 +66,75 @@ export interface EngineFailure {
   engineFault?: boolean;
 }
 
+/**
+ * A definite result that says the engine did not apply (ADR-0026 `skipped`, e.g. the attachment
+ * engine's rule A0 "no attachments"): recorded as a final row with outcome `skipped`, ignored by
+ * the round verdict (step 4.2 A1).
+ */
+export type SkippedEngineResult = Omit<NormalizedEngineResult, 'outcome'> & { outcome: 'skipped' };
+
+/** One `attachment_scan_results` row of a definite attachment-engine final (step 4.2 A18). */
+export interface AttachmentResultInput {
+  /** `email_attachments.id`. */
+  attachmentId: bigint;
+  result: AttachmentResult;
+  /** Content version of the cache key (A9); null when the content was not scanned. */
+  contentVersion: string | null;
+}
+
+/** One `sandbox_submissions` row and its `sandbox_requested.v1` outbox row (step 4.2 A11). */
+export interface SandboxSubmissionInput {
+  attachmentId: bigint;
+  partIndex: number;
+  sha256: string;
+  sizeBytes: number;
+  detectedType: string;
+  /** `email_attachments.object_key` (org-prefixed, checked against the row). */
+  objectKey: string;
+  attachmentVerdict: 'suspicious' | 'unknown';
+  /** At most 16 reason codes. */
+  reasonCodes: string[];
+}
+
+/** Engine-specific child rows written in the finalize transaction of the final row (A12). */
+export interface EngineChildRows {
+  attachments?: AttachmentResultInput[];
+  sandbox?: SandboxSubmissionInput[];
+}
+
 /** A definite result (S9); `evidence` adds engine flags to `scan_engine_results.evidence`. */
 export interface EngineDefinite {
   kind: 'definite';
-  result: NormalizedEngineResult;
+  result: NormalizedEngineResult | SkippedEngineResult;
   /** Extra bounded flags, e.g. `{ rcptTruncated: true }` (never content). */
   evidence?: { rcptTruncated?: boolean };
+  /**
+   * Child rows (step 4.2 A12): inserted after the final row in the same transaction, only when
+   * the final row was inserted (a duplicate finalizer writes nothing).
+   */
+  childRows?: EngineChildRows;
 }
 
 export type EngineScanOutcome = EngineDefinite | EngineFailure;
 
+/** A readiness check an adapter contributes (step 4.2 A12: `clamav`, `attachment-inspector`). */
+export interface EngineHealthCheck {
+  readonly name: string;
+  /** Resolves (optionally with bounded details) when ready; rejects otherwise. */
+  check(): Promise<void | Record<string, unknown>>;
+}
+
 export interface ScanEngineAdapter {
   readonly name: EngineName;
   scan(ctx: EngineScanContext, signal: AbortSignal): Promise<EngineScanOutcome>;
+  /**
+   * Resources the adapter owns beyond one call (the attachment engine's inspector pool):
+   * started before the engine's consumer, stopped after it (optional).
+   */
+  start?(): Promise<void>;
+  stop?(): Promise<void>;
+  /** Readiness checks of the adapter's dependencies (optional). */
+  healthChecks?(): EngineHealthCheck[];
 }
 
 /** The stored EML does not exist (`NoSuchKey`): a content outcome, not an outage. */
@@ -100,7 +160,11 @@ export class EngineAttemptFailedError extends Error {
   }
 }
 
-/** Reason code of a failed attempt or a failure final (S7 R0, S10). */
+/**
+ * Reason code of a failed attempt or a failure final (S7 R0, S10; step 4.2 A6 adds the attachment
+ * engine's own failures `inspector_timeout`, `inspector_crash`, `part_unavailable`,
+ * `part_integrity`, `part_key_mismatch`, `parse_row_missing`).
+ */
 export function failureReasonCode(failure: Pick<EngineFailure, 'outcome' | 'errorCode'>): string {
   switch (failure.errorCode) {
     case 'circuit_open':
@@ -110,6 +174,12 @@ export function failureReasonCode(failure: Pick<EngineFailure, 'outcome' | 'erro
     case 'eml_key_mismatch':
     case 'deadline_exceeded':
     case 'max_attempts_exceeded':
+    case 'inspector_timeout':
+    case 'inspector_crash':
+    case 'part_unavailable':
+    case 'part_integrity':
+    case 'part_key_mismatch':
+    case 'parse_row_missing':
       return `engine.${failure.errorCode}`;
     default:
       return failure.outcome === 'timeout' ? 'engine.timeout' : 'engine.error';
@@ -124,7 +194,13 @@ export type FailureMetricReason =
   | 'circuit_open'
   | 'soft_reject'
   | 'eml_unavailable'
-  | 'deadline_exceeded';
+  | 'deadline_exceeded'
+  | 'inspector_timeout'
+  | 'inspector_crash'
+  | 'part_unavailable'
+  | 'part_integrity'
+  | 'part_key_mismatch'
+  | 'parse_row_missing';
 
 export function failureMetricReason(
   failure: Pick<EngineFailure, 'outcome' | 'errorCode'>,
@@ -135,6 +211,12 @@ export function failureMetricReason(
     case 'soft_reject':
     case 'eml_unavailable':
     case 'deadline_exceeded':
+    case 'inspector_timeout':
+    case 'inspector_crash':
+    case 'part_unavailable':
+    case 'part_integrity':
+    case 'part_key_mismatch':
+    case 'parse_row_missing':
       return failure.errorCode;
     default:
       return failure.outcome;

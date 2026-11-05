@@ -263,7 +263,9 @@ export class Fixtures {
       prisma?: PrismaClient;
     } = {},
   ): TestIngestion {
-    const config = workerConfig(options.overrides);
+    // The MIME stage alone: its own limits must not trip the attachment engine's cross-checks
+    // (step 4.2 A8: ATTACHMENT_MAX_BYTES ≤ MIME_MAX_ATTACHMENT_BYTES).
+    const config = workerConfig({ SCAN_ENGINES: 'rspamd', ...options.overrides });
     const registry = new MetricsService({ service: `email-worker-it-${randomUUID().slice(0, 6)}` });
     const metrics = new MimeMetrics(registry);
     const service = createMimeIngestionService({

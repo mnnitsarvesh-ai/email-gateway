@@ -5,6 +5,7 @@ export * from './bootstrap';
 export * from './cache/redis.module';
 export * from './correlation/correlation-id.middleware';
 export * from './database/database.module';
+export { socketTimeoutOf } from './database/prisma.service';
 export * from './database/prisma-read.service';
 export * from './errors/all-exceptions.filter';
 export * from './health/health-indicator';

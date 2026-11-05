@@ -17,10 +17,14 @@ import {
   type ReplayResponse,
   ReplayResponseSchema,
 } from '../dto/dead-letters.schemas';
+import { REPLAYABLE_QUEUES } from '../domain/dead-letter-replay';
 import { DeadLetterReplayService } from '../services/dead-letter-replay.service';
 
 /** Platform permission of the replay (seed catalog, step 3.2 Q9). */
 export const PLATFORM_DEAD_LETTER_REPLAY = 'platform:dead_letter_replay';
+/** The replayable work queues of the topology (step 4.2: also `scan.attachment`). */
+const REPLAYABLE_LIST = REPLAYABLE_QUEUES.map((queue) => `\`${queue}\``).join(', ');
+
 /** Platform permission of the read-only queue view. */
 export const PLATFORM_OPERATIONS = 'platform:operations';
 
@@ -58,9 +62,8 @@ export class DeadLettersController {
   @ApiOperation({
     summary: 'Replay dead letters into a work queue',
     description:
-      'Fetches up to `limit` dead letters of `sourceQueue` (a work queue: `email.received`, ' +
-      '`email.delivery.pending`, `scan.spam`; other queues are 400 ' +
-      '`source_queue_not_replayable`) matching ' +
+      `Fetches up to \`limit\` dead letters of \`sourceQueue\` (a work queue: ${REPLAYABLE_LIST}; ` +
+      'other queues are 400 `source_queue_not_replayable`) matching ' +
       'the optional filters, republishes each unchanged envelope to the source queue with ' +
       'fresh retry headers and a replay id, confirmed before the dead letter is removed. ' +
       'Non-matching and invalid messages stay in the queue. A replayed event that was already ' +

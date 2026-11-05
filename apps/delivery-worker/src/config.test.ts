@@ -66,6 +66,40 @@ describe('delivery-worker config', () => {
     });
   });
 
+  it('applies the step 4.2 §6.2 database defaults: no socket timeout, a 120 s transaction budget', () => {
+    expect(loadWorkerConfig(base)).toMatchObject({
+      DATABASE_SOCKET_TIMEOUT_SECONDS: 0,
+      DELIVERY_DB_TX_TIMEOUT_MS: 120_000,
+      DELIVERY_REINJECT_MAX_ATTEMPTS: 10,
+    });
+  });
+
+  it('requires the transaction budget to outlast a configured socket timeout', () => {
+    expect(
+      loadWorkerConfig({
+        ...base,
+        DATABASE_SOCKET_TIMEOUT_SECONDS: '30',
+        DELIVERY_DB_TX_TIMEOUT_MS: '90000',
+      }),
+    ).toMatchObject({ DATABASE_SOCKET_TIMEOUT_SECONDS: 30, DELIVERY_DB_TX_TIMEOUT_MS: 90_000 });
+    expect(
+      issues({
+        DATABASE_SOCKET_TIMEOUT_SECONDS: '120',
+        DELIVERY_DB_TX_TIMEOUT_MS: '120000',
+      }).join(),
+    ).toContain('DELIVERY_DB_TX_TIMEOUT_MS');
+  });
+
+  it.each([
+    ['DELIVERY_DB_TX_TIMEOUT_MS', '59999'],
+    ['DELIVERY_DB_TX_TIMEOUT_MS', '900001'],
+    ['DATABASE_SOCKET_TIMEOUT_SECONDS', '-1'],
+    ['DATABASE_SOCKET_TIMEOUT_SECONDS', '3601'],
+    ['DELIVERY_REINJECT_MAX_ATTEMPTS', '0'],
+  ])('refuses %s=%s', (key, value) => {
+    expect(issues({ [key]: value }).join()).toContain(key);
+  });
+
   it('accepts the dev pass-through in local and ci', () => {
     for (const APP_ENV of ['local', 'ci']) {
       const config = loadWorkerConfig({

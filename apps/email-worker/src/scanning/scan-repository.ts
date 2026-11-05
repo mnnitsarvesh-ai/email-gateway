@@ -6,7 +6,11 @@ import {
   withTransactionDefaults,
 } from '@email-gateway/common';
 import { type Prisma, processOnce, type PrismaClient } from '@email-gateway/database';
-import { EventTypes, messageScannedV1 } from '@email-gateway/event-contracts';
+import {
+  attachmentSandboxRequestedV1,
+  EventTypes,
+  messageScannedV1,
+} from '@email-gateway/event-contracts';
 import {
   type LifecycleMetrics,
   type LifecycleSnapshot,
@@ -15,6 +19,7 @@ import {
   transitionMessage,
 } from '@email-gateway/message-lifecycle';
 import { aggregateRound, type FinalEngineResult } from './aggregate';
+import type { AttachmentResultInput, SandboxSubmissionInput } from './engine';
 import type { EngineSettingsRow } from './registry';
 import {
   type AttemptInput,
@@ -48,6 +53,13 @@ export const SCANNER_ACTOR: TransitionActor = {
 const MAX_ENVELOPE_RECIPIENTS = 1_000;
 
 const json = (value: unknown): Prisma.InputJsonValue => value as Prisma.InputJsonValue;
+
+/** What the child rows of a final need beyond the round (sandbox events, step 4.2 A11). */
+interface ChildRowContext {
+  direction: 'inbound' | 'outbound' | 'internal' | null;
+  correlationId: string;
+  now: Date;
+}
 
 interface ScanRow {
   id: bigint;
@@ -274,7 +286,11 @@ export class ScanRepository implements ScanStore {
       if (input.final && scan) {
         const existing = await this.engineRows(tx, scan, input.final.engine);
         if (!existing.finalExists) {
-          await this.insertFinal(tx, scan, input.final);
+          await this.insertFinal(tx, scan, input.final, {
+            direction: snapshot?.direction ?? null,
+            correlationId: input.completion.correlationId,
+            now: input.completion.now,
+          });
           inserted = true;
         }
       }
@@ -456,6 +472,7 @@ export class ScanRepository implements ScanStore {
     tx: Prisma.TransactionClient,
     scan: ScanRound,
     final: FinalRowInput,
+    context: ChildRowContext | null = null,
   ): Promise<void> {
     const completedAt = new Date();
     await tx.scanEngineResult.create({
@@ -503,6 +520,123 @@ export class ScanRepository implements ScanStore {
         ],
         // Unique per (scan, engine): an earlier final of this engine wrote it already.
         skipDuplicates: true,
+      });
+    }
+    const children = final.childRows;
+    if (children?.attachments && children.attachments.length > 0) {
+      await this.insertAttachmentResults(tx, scan, children.attachments);
+    }
+    if (children?.sandbox && children.sandbox.length > 0) {
+      if (!context) throw new NonRetryableError('sandbox_context_missing');
+      await this.insertSandboxSubmissions(tx, scan, children.sandbox, context);
+    }
+  }
+
+  /**
+   * `attachment_scan_results` of a definite attachment final (step 4.2 A18), in the final row's
+   * transaction. Unique per `(scan_id, attachment_id, received_at)`; only reached when the final
+   * row was inserted, so a redelivery writes nothing.
+   */
+  private async insertAttachmentResults(
+    tx: Prisma.TransactionClient,
+    scan: ScanRound,
+    rows: readonly AttachmentResultInput[],
+  ): Promise<void> {
+    await tx.attachmentScanResult.createMany({
+      data: rows.map(({ attachmentId, result, contentVersion }) => ({
+        receivedAt: scan.receivedAt,
+        messageId: scan.messageId,
+        organizationId: scan.organizationId,
+        scanId: scan.scanId,
+        attachmentId,
+        partIndex: result.partIndex,
+        sha256: result.sha256,
+        sizeBytes: result.sizeBytes,
+        detectedType: result.detectedType,
+        typeFamily: result.typeFamily,
+        typeMismatch: result.typeMismatch,
+        verdict: result.verdict,
+        reasonCodes: json(result.reasonCodes),
+        clamavSignature: result.clamav?.signature ?? null,
+        clamavEngineVersion: result.clamav?.engineVersion ?? null,
+        clamavDbVersion: result.clamav?.dbVersion ?? null,
+        yaraBundleId: result.yara?.bundleId ?? null,
+        ...(result.yara ? { yaraMatches: json(result.yara.matches) } : {}),
+        ...(result.archive ? { archive: json(result.archive) } : {}),
+        knownHashSeverity: result.knownHash?.severity ?? null,
+        cacheResult: result.cache,
+        contentVersion,
+        durationMs: Math.max(0, Math.round(result.durationMs)),
+      })),
+      skipDuplicates: true,
+    });
+  }
+
+  /**
+   * Sandbox submissions (step 4.2 A11): one `sandbox_submissions` row (`pending`) and one
+   * `mail.attachment.sandbox_requested.v1` outbox row per submission, through the same outbox
+   * write as `scanned.v1`. The payload is validated by the event contract; a violation never
+   * commits half a finalization (the delivery is dead-lettered).
+   */
+  private async insertSandboxSubmissions(
+    tx: Prisma.TransactionClient,
+    scan: ScanRound,
+    rows: readonly SandboxSubmissionInput[],
+    context: ChildRowContext,
+  ): Promise<void> {
+    const prefix = `org/${scan.organizationId.toString()}/part/`;
+    for (const row of rows) {
+      if (!row.objectKey.startsWith(prefix)) throw new NonRetryableError('sandbox_key_invalid');
+      const eventId = uuidv7(context.now.getTime());
+      const created = await tx.sandboxSubmission.create({
+        data: {
+          receivedAt: scan.receivedAt,
+          messageId: scan.messageId,
+          organizationId: scan.organizationId,
+          scanId: scan.scanId,
+          attachmentId: row.attachmentId,
+          partIndex: row.partIndex,
+          sha256: row.sha256,
+          sizeBytes: row.sizeBytes,
+          detectedType: row.detectedType,
+          objectKey: row.objectKey,
+          attachmentVerdict: row.attachmentVerdict,
+          reasonCodes: json(row.reasonCodes),
+          status: 'pending',
+          requestedEventId: eventId,
+        },
+        select: { id: true },
+      });
+      const parsed = attachmentSandboxRequestedV1.safeParse({
+        submissionId: created.id.toString(),
+        messageId: scan.messageId.toString(),
+        receivedAt: scan.receivedAt.toISOString(),
+        direction: context.direction,
+        scanId: scan.scanId.toString(),
+        lifecycleRound: scan.round,
+        attachment: {
+          partIndex: row.partIndex,
+          sha256: row.sha256,
+          sizeBytes: row.sizeBytes,
+          detectedType: row.detectedType,
+          objectKey: row.objectKey,
+        },
+        attachmentVerdict: row.attachmentVerdict,
+        reasonCodes: row.reasonCodes,
+        requestedAt: context.now.toISOString(),
+      });
+      if (!parsed.success) throw new NonRetryableError('sandbox_payload_invalid');
+      await tx.messageOutbox.create({
+        data: {
+          eventId,
+          organizationId: scan.organizationId,
+          eventType: EventTypes.AttachmentSandboxRequested,
+          aggregateType: 'attachment',
+          aggregateId: created.id.toString(),
+          correlationId: context.correlationId,
+          payload: parsed.data,
+        },
+        select: { id: true },
       });
     }
   }

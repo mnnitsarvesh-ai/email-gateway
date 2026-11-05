@@ -21,7 +21,7 @@ import type { ApprovalFeed } from './approval-feed';
 export const DEV_PASSTHROUGH_CONSUMER = 'delivery-worker.dev-passthrough-scanned';
 
 export const DEV_PASSTHROUGH_WARNING =
-  'DEV PASS-THROUGH ENABLED: mail is delivered after scanning but without policy (not production behaviour)';
+  'DEV PASS-THROUGH ENABLED: mail is delivered after scanning without policy; malicious verdicts are held in scanned (not production behaviour)';
 
 /** `mail.delivery.approved.v1` carries at most 1000 recipients. */
 const MAX_APPROVAL_RECIPIENTS = 1000;
@@ -36,7 +36,7 @@ export interface PassThroughResult {
  * `outcome = scanned` into `mail.delivery.approved.v1` (`source = dev_passthrough`) for every
  * recipient of the message whose `email_recipients.status` is `pending`, so the stack can be
  * tested end to end before policy (5.2) exists. **This is not production behaviour: it delivers
- * every scanned message, whatever its verdict, without policy.** Config validation refuses it
+ * every scanned message without policy, except a `malicious` verdict.** Config validation refuses it
  * unless `APP_ENV` is `local` or `ci`; it starts from the outbox position at its first start
  * (never replays old mail). Step 5.2 replaces it with the policy engine's approvals.
  *
@@ -45,12 +45,18 @@ export interface PassThroughResult {
  * `evt:<scannedEventId>:approved`, expected round = the event's `lifecycleRound`) through
  * @email-gateway/message-lifecycle, then writes the approval outbox row(s) with that
  * `lifecycleRound` and one `email_events` row `delivery.approved` per approval
- * (`details.source = dev_passthrough`). The verdict is logged, never acted upon.
+ * (`details.source = dev_passthrough`). `clean`, `spam`, `suspicious` and `unknown` verdicts are
+ * approved as in step 4.1 (logged).
  *
  * Never approved:
  * - `outcome = scan_failed` (a required engine timed out or failed): ledger row only,
  *   `delivery_approvals_skipped_total{reason="scan_failed"}`; the message waits for policy's
  *   fail-safe (5.2) or its deadline;
+ * - `outcome = scanned` with `verdict = malicious` (step 4.2 A15): ledger row only,
+ *   `delivery_approvals_skipped_total{reason="malicious_verdict"}`, an info log with the ids and
+ *   the verdict. The message stays `scanned` until policy (5.2) or the `scanned` lifecycle
+ *   deadline (`LIFECYCLE_DEADLINE_SCANNED_HOURS`, then `expired`). Quarantine is a policy action
+ *   (5.3); the pass-through does not invent one, but it never delivers malware either;
  * - a message that is not `scanned` in that round (another stage or an operator moved it, a
  *   rescan superseded the round) or that does not exist for the envelope's organization
  *   (`delivery_approvals_skipped_total{reason="lifecycle_<result>"}`);
@@ -112,6 +118,16 @@ export class DevPassThroughApprover {
       this.logger.info(
         { ...ids, outcome: payload.outcome, verdict: payload.verdict },
         'scan failed; the dev pass-through does not approve it (waits for policy or its deadline)',
+      );
+      return { approvals: [], recipients: 0 };
+    }
+    if (payload.verdict === 'malicious') {
+      // Step 4.2 A15: the pass-through never delivers a malicious verdict; the message is held.
+      this.metrics.approvalsSkipped.inc({ reason: 'malicious_verdict' });
+      this.logger.info(
+        { ...ids, outcome: payload.outcome, verdict: payload.verdict },
+        'malicious verdict; the dev pass-through does not approve it (held in scanned until ' +
+          'policy or its deadline)',
       );
       return { approvals: [], recipients: 0 };
     }

@@ -355,7 +355,7 @@ describe('DevPassThroughApprover (R5, step 4.1 S15, development only)', () => {
     expect(events[0]!.data.details).toMatchObject({ lifecycleRound: 2, deliverySeq: 2 });
   });
 
-  it('approves every verdict of a complete scan (the pass-through stands in for policy)', async () => {
+  it('approves every non-malicious verdict of a complete scan (the pass-through stands in for policy)', async () => {
     const approver = new DevPassThroughApprover(
       feed(),
       noWriter,
@@ -364,7 +364,7 @@ describe('DevPassThroughApprover (R5, step 4.1 S15, development only)', () => {
       newMetrics(),
       () => NOW,
     );
-    for (const verdict of ['clean', 'suspicious', 'malicious', 'unknown'] as const) {
+    for (const verdict of ['clean', 'spam', 'suspicious', 'unknown'] as const) {
       const t = fakeTx({ recipients: 1 });
       const result = await approver.approve(
         {
@@ -378,6 +378,73 @@ describe('DevPassThroughApprover (R5, step 4.1 S15, development only)', () => {
       );
       expect(result.approvals).toHaveLength(1);
     }
+  });
+
+  it('holds a malicious verdict (step 4.2 A15): no transition, no approval, counted, logged with ids', async () => {
+    const service = metricsService();
+    const info = vi.fn();
+    const logger = { child: () => ({ warn: vi.fn(), info }) } as unknown as Logger;
+    const approver = new DevPassThroughApprover(
+      feed(),
+      noWriter,
+      RECORDER_TX_TIMEOUT_MS,
+      logger,
+      newMetrics(service),
+      () => NOW,
+    );
+    const t = fakeTx({ recipients: 2 });
+    const malicious = {
+      ...event,
+      payload: scannedPayload({
+        verdict: 'malicious',
+        engines: [
+          { engine: 'rspamd', required: true, outcome: 'clean', attempts: 1 },
+          { engine: 'attachment', required: true, outcome: 'malicious', attempts: 1 },
+        ],
+      }),
+    };
+    expect(await approver.approve(malicious, t.tx as never)).toEqual({
+      approvals: [],
+      recipients: 0,
+    });
+    expect(transition).not.toHaveBeenCalled();
+    expect(t.outbox).toHaveLength(0);
+    expect(t.events).toHaveLength(0);
+    expect(t.tx.emailRecipient.findMany).not.toHaveBeenCalled();
+    expect(await service.metrics()).toContain(
+      'delivery_approvals_skipped_total{reason="malicious_verdict",service="t"} 1',
+    );
+    expect(info).toHaveBeenCalledWith(
+      {
+        eventId: malicious.eventId,
+        messageId: malicious.payload.messageId,
+        scanId: malicious.payload.scanId,
+        round: malicious.payload.lifecycleRound,
+        outcome: 'scanned',
+        verdict: 'malicious',
+      },
+      expect.stringContaining('malicious verdict'),
+    );
+  });
+
+  it('commits the ledger row of a held malicious verdict (handled once, never approved)', async () => {
+    const { tx, outbox } = fakeTx({});
+    const writer = fakeWriter(tx);
+    const f = feed();
+    new DevPassThroughApprover(
+      f,
+      writer.prisma,
+      RECORDER_TX_TIMEOUT_MS,
+      createLogger({ service: 't', level: 'silent' }),
+      newMetrics(),
+      () => NOW,
+    ).start();
+    const malicious = { ...event, payload: scannedPayload({ verdict: 'malicious' }) };
+    expect(await f.handler!(malicious)).toBe('handled');
+    expect(writer.ledger).toEqual([
+      { consumer: DEV_PASSTHROUGH_CONSUMER, eventId: malicious.eventId },
+    ]);
+    expect(outbox).toHaveLength(0);
   });
 
   it('never approves a failed scan: no transition, no approval, counted as scan_failed', async () => {
@@ -439,6 +506,7 @@ describe('DevPassThroughApprover (R5, step 4.1 S15, development only)', () => {
 
   it('uses its own consumer name and warns that mail is delivered after scanning', () => {
     expect(DEV_PASSTHROUGH_CONSUMER).toBe('delivery-worker.dev-passthrough-scanned');
-    expect(DEV_PASSTHROUGH_WARNING).toContain('after scanning but without policy');
+    expect(DEV_PASSTHROUGH_WARNING).toContain('delivered after scanning without policy');
+    expect(DEV_PASSTHROUGH_WARNING).toContain('malicious verdicts are held in scanned');
   });
 });

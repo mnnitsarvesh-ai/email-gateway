@@ -65,6 +65,9 @@ x-node-env: &node-env
   SERVICE_VERSION: ${SERVICE_VERSION:-0.1.0-local}
   HTTP_HOST: 0.0.0.0
   DATABASE_URL: mysql://${MYSQL_APP_USER:?}:${MYSQL_APP_PASSWORD:?}@mysql:3306/${MYSQL_DATABASE:?}
+  # socket_timeout of every service's writer/replica client (step 4.2 §6.2 F2); 0 = none, see
+  # packages/database/src/client-url.ts for why that is the default.
+  DATABASE_SOCKET_TIMEOUT_SECONDS: ${DATABASE_SOCKET_TIMEOUT_SECONDS:-0}
   REDIS_URL: redis://:${REDIS_PASSWORD:?}@redis:6379/0
   S3_REGION: ${S3_REGION:-ap-south-1}
   S3_ENDPOINT: http://minio:9000
@@ -359,8 +362,15 @@ services:
       retries: 10
 
   clamav:
+    # clamd + freshclam (step 4.2 A7): the email-worker's attachment engine streams attachments
+    # over TCP INSTREAM (CLAMAV_HOST/CLAMAV_PORT). Config: infrastructure/clamav/clamd.conf
+    # (restart, no rebuild, after a change). The cgroup limit confines a runaway clamd instead of
+    # letting the VM's OOM killer pick mysqld. Measured (docs/plan/steps/10-attachment-scanning.md
+    # §12, WP2): ~0.95 GiB idle, ~1.06 GiB during RELOAD, 1.36 GiB at start while freshclam tests a
+    # new daily database next to clamd's first load, so the design's 1536m was raised to 2048m.
     image: clamav/clamav-debian:1.4
     restart: unless-stopped
+    mem_limit: 2048m
     volumes:
       - clamav-db:/var/lib/clamav
       - ./infrastructure/clamav/clamd.conf:/etc/clamav/clamd.conf:ro
@@ -805,6 +815,21 @@ services:
       RSPAMD_CONTROLLER_URL: http://rspamd:11334
       RSPAMD_CONTROLLER_ENABLE_PASSWORD: ${RSPAMD_CONTROLLER_ENABLE_PASSWORD:?append the security scanning keys from .env.example}
       SCAN_FUZZY_WEIGHT: ${SCAN_FUZZY_WEIGHT:-10}
+      # Attachment scanning (step 4.2 A8, A13): the platform settings the attachment settings
+      # API validates tenant overrides against (the email-worker reads the same keys) and the
+      # per-job cap of the rescan job route.
+      ATTACHMENT_MAX_BYTES: ${ATTACHMENT_MAX_BYTES:-26214400}
+      ATTACHMENT_ARCHIVE_MAX_DEPTH: ${ATTACHMENT_ARCHIVE_MAX_DEPTH:-3}
+      ATTACHMENT_ARCHIVE_MAX_ENTRIES: ${ATTACHMENT_ARCHIVE_MAX_ENTRIES:-1000}
+      ATTACHMENT_MAX_ENTRY_BYTES: ${ATTACHMENT_MAX_ENTRY_BYTES:-26214400}
+      ATTACHMENT_MAX_DECOMPRESSED_BYTES: ${ATTACHMENT_MAX_DECOMPRESSED_BYTES:-104857600}
+      ATTACHMENT_MAX_COMPRESSION_RATIO: ${ATTACHMENT_MAX_COMPRESSION_RATIO:-100}
+      ATTACHMENT_MAX_ENTRY_FINDINGS: ${ATTACHMENT_MAX_ENTRY_FINDINGS:-20}
+      ATTACHMENT_DENIED_TYPES: ${ATTACHMENT_DENIED_TYPES:-pe_executable,msi,elf,macho,lnk,script_js,script_vbs,script_ps1,script_batch,hta,jar,apk,iso,vhd,chm}
+      ATTACHMENT_DENIED_TYPE_VERDICT: ${ATTACHMENT_DENIED_TYPE_VERDICT:-suspicious}
+      ATTACHMENT_TYPE_MISMATCH_VERDICT: ${ATTACHMENT_TYPE_MISMATCH_VERDICT:-suspicious}
+      ATTACHMENT_ENCRYPTED_VERDICT: ${ATTACHMENT_ENCRYPTED_VERDICT:-suspicious}
+      ATTACHMENT_RESCAN_MAX_MESSAGES: ${ATTACHMENT_RESCAN_MAX_MESSAGES:-5000}
     ports: ['127.0.0.1:${API_HOST_PORT:-3000}:3000']
     healthcheck:
       <<: *node-healthcheck
@@ -907,6 +932,7 @@ services:
     depends_on:
       <<: *app-deps
       rspamd: { condition: service_healthy }
+      clamav: { condition: service_healthy }
     environment:
       <<: [*node-env, *scan-platform-env]
       HTTP_PORT: 3020
@@ -917,7 +943,9 @@ services:
       # the engine version).
       RABBITMQ_SCANNER_URL: amqp://${RABBITMQ_SCANNER_USER:-eg-scanner}:${RABBITMQ_SCANNER_PASSWORD:?append the security scanning keys from .env.example}@rabbitmq:5672/${RABBITMQ_VHOST:-email-gateway}
       SCAN_ENABLED: ${SCAN_ENABLED:-true}
-      SCAN_ENGINES: ${SCAN_ENGINES:-rspamd}
+      SCAN_ENGINES: ${SCAN_ENGINES:-rspamd,attachment}
+      # Engine consumers of this replica (subset of SCAN_ENGINES; empty = every enabled engine).
+      SCAN_CONSUMERS: ${SCAN_CONSUMERS:-}
       SCAN_RSPAMD_URL: http://rspamd:11333
       RSPAMD_CONTROLLER_URL: http://rspamd:11334
       RSPAMD_CONTROLLER_PASSWORD: ${RSPAMD_CONTROLLER_PASSWORD:?append the security scanning keys from .env.example}
@@ -928,7 +956,7 @@ services:
       SCAN_RETRY_BASE_MS: ${SCAN_RETRY_BASE_MS:-2000}
       SCAN_RETRY_MAX_MS: ${SCAN_RETRY_MAX_MS:-60000}
       SCAN_S3_TIMEOUT_MS: ${SCAN_S3_TIMEOUT_MS:-30000}
-      SCAN_DB_TIMEOUT_MS: ${SCAN_DB_TIMEOUT_MS:-15000}
+      SCAN_DB_TIMEOUT_MS: ${SCAN_DB_TIMEOUT_MS:-120000}
       SCAN_ROUND_DEADLINE_SECONDS: ${SCAN_ROUND_DEADLINE_SECONDS:-1800}
       SCAN_SWEEP_INTERVAL_MS: ${SCAN_SWEEP_INTERVAL_MS:-30000}
       SCAN_SWEEP_LOOKBACK_HOURS: ${SCAN_SWEEP_LOOKBACK_HOURS:-48}
@@ -940,15 +968,65 @@ services:
       SCAN_BREAKER_HALF_OPEN_PROBES: ${SCAN_BREAKER_HALF_OPEN_PROBES:-1}
       SCAN_SETTINGS_CACHE_TTL_MS: ${SCAN_SETTINGS_CACHE_TTL_MS:-30000}
       SCAN_ENGINE_VERSION_TTL_MS: ${SCAN_ENGINE_VERSION_TTL_MS:-300000}
+      # Attachment engine (step 4.2, docs/plan/steps/10-attachment-scanning.md §5): clamd INSTREAM
+      # over TCP, YARA-X in resource-limited inspector children (prlimit required in the
+      # container), the content cache in the shared Redis (REDIS_URL of x-node-env, host redis).
       CLAMAV_HOST: clamav
       CLAMAV_PORT: 3310
+      CLAMAV_TIMEOUT_MS: ${CLAMAV_TIMEOUT_MS:-60000}
+      CLAMAV_MAX_CONNECTIONS: ${CLAMAV_MAX_CONNECTIONS:-4}
+      CLAMAV_CHUNK_BYTES: ${CLAMAV_CHUNK_BYTES:-65536}
+      SCAN_ATTACHMENT_CONCURRENCY: ${SCAN_ATTACHMENT_CONCURRENCY:-4}
+      SCAN_ATTACHMENT_TIMEOUT_MS: ${SCAN_ATTACHMENT_TIMEOUT_MS:-180000}
+      SCAN_ATTACHMENT_MAX_ATTEMPTS: ${SCAN_ATTACHMENT_MAX_ATTEMPTS:-6}
+      ATTACHMENT_MAX_BYTES: ${ATTACHMENT_MAX_BYTES:-26214400}
+      ATTACHMENT_MAX_PER_MESSAGE: ${ATTACHMENT_MAX_PER_MESSAGE:-100}
+      ATTACHMENT_PER_MESSAGE_PARALLELISM: ${ATTACHMENT_PER_MESSAGE_PARALLELISM:-2}
+      ATTACHMENT_MEMORY_BUDGET_BYTES: ${ATTACHMENT_MEMORY_BUDGET_BYTES:-134217728}
+      ATTACHMENT_ARCHIVE_MAX_DEPTH: ${ATTACHMENT_ARCHIVE_MAX_DEPTH:-3}
+      ATTACHMENT_ARCHIVE_MAX_ENTRIES: ${ATTACHMENT_ARCHIVE_MAX_ENTRIES:-1000}
+      ATTACHMENT_MAX_ENTRY_BYTES: ${ATTACHMENT_MAX_ENTRY_BYTES:-26214400}
+      ATTACHMENT_MAX_DECOMPRESSED_BYTES: ${ATTACHMENT_MAX_DECOMPRESSED_BYTES:-104857600}
+      ATTACHMENT_MAX_COMPRESSION_RATIO: ${ATTACHMENT_MAX_COMPRESSION_RATIO:-100}
+      ATTACHMENT_MAX_ENTRY_FINDINGS: ${ATTACHMENT_MAX_ENTRY_FINDINGS:-20}
+      ATTACHMENT_DENIED_TYPES: ${ATTACHMENT_DENIED_TYPES:-pe_executable,msi,elf,macho,lnk,script_js,script_vbs,script_ps1,script_batch,hta,jar,apk,iso,vhd,chm}
+      ATTACHMENT_DENIED_TYPE_VERDICT: ${ATTACHMENT_DENIED_TYPE_VERDICT:-suspicious}
+      ATTACHMENT_TYPE_MISMATCH_VERDICT: ${ATTACHMENT_TYPE_MISMATCH_VERDICT:-suspicious}
+      ATTACHMENT_ENCRYPTED_VERDICT: ${ATTACHMENT_ENCRYPTED_VERDICT:-suspicious}
+      ATTACHMENT_INSPECTOR_POOL_SIZE: ${ATTACHMENT_INSPECTOR_POOL_SIZE:-2}
+      ATTACHMENT_INSPECTOR_MAX_JOBS: ${ATTACHMENT_INSPECTOR_MAX_JOBS:-500}
+      ATTACHMENT_INSPECTOR_HEAP_MB: ${ATTACHMENT_INSPECTOR_HEAP_MB:-192}
+      # Fixed for the container: the host .env sets best_effort (macOS has no prlimit).
+      ATTACHMENT_INSPECTOR_RLIMITS: required
+      # Container paths, not host paths from .env: os.tmpdir() and the bundled yara/ directory.
+      ATTACHMENT_INSPECTOR_TMPDIR: ''
+      ATTACHMENT_INSPECT_TIMEOUT_MS: ${ATTACHMENT_INSPECT_TIMEOUT_MS:-30000}
+      ATTACHMENT_INSPECT_CPU_SECONDS: ${ATTACHMENT_INSPECT_CPU_SECONDS:-10}
+      ATTACHMENT_INSPECT_MAX_RSS_MB: ${ATTACHMENT_INSPECT_MAX_RSS_MB:-384}
+      ATTACHMENT_YARA_TIMEOUT_MS: ${ATTACHMENT_YARA_TIMEOUT_MS:-10000}
+      ATTACHMENT_YARA_RULES_DIR: ''
+      ATTACHMENT_CACHE_ENABLED: ${ATTACHMENT_CACHE_ENABLED:-true}
+      ATTACHMENT_CACHE_CLEAN_TTL_SECONDS: ${ATTACHMENT_CACHE_CLEAN_TTL_SECONDS:-21600}
+      ATTACHMENT_CACHE_MALICIOUS_TTL_SECONDS: ${ATTACHMENT_CACHE_MALICIOUS_TTL_SECONDS:-604800}
+      ATTACHMENT_CACHE_OTHER_TTL_SECONDS: ${ATTACHMENT_CACHE_OTHER_TTL_SECONDS:-3600}
+      ATTACHMENT_CACHE_TIMEOUT_MS: ${ATTACHMENT_CACHE_TIMEOUT_MS:-200}
+      # Secret MAC key of the cache values (only the email-worker holds it).
+      ATTACHMENT_CACHE_HMAC_KEY: ${ATTACHMENT_CACHE_HMAC_KEY:?append the attachment scanning keys from .env.example}
+      ATTACHMENT_SANDBOX_SUBMIT: ${ATTACHMENT_SANDBOX_SUBMIT:-true}
+      ATTACHMENT_SANDBOX_MAX_PER_MESSAGE: ${ATTACHMENT_SANDBOX_MAX_PER_MESSAGE:-5}
+      ATTACHMENT_SIGNATURE_POLL_MS: ${ATTACHMENT_SIGNATURE_POLL_MS:-300000}
+      ATTACHMENT_SIGNATURE_RESCAN: ${ATTACHMENT_SIGNATURE_RESCAN:-record}
+      ATTACHMENT_RESCAN_INTERVAL_MS: ${ATTACHMENT_RESCAN_INTERVAL_MS:-10000}
+      ATTACHMENT_RESCAN_BATCH_SIZE: ${ATTACHMENT_RESCAN_BATCH_SIZE:-50}
+      ATTACHMENT_RESCAN_MAX_MESSAGES: ${ATTACHMENT_RESCAN_MAX_MESSAGES:-5000}
+      ATTACHMENT_RESCAN_WINDOW_HOURS: ${ATTACHMENT_RESCAN_WINDOW_HOURS:-24}
       # MIME ingestion (step 3.1, docs/plan/steps/06-mime-ingestion.md §5).
       MIME_INGESTION_ENABLED: ${MIME_INGESTION_ENABLED:-true}
       MIME_CONCURRENCY: ${MIME_CONCURRENCY:-4}
       MIME_RETRY_BASE_MS: ${MIME_RETRY_BASE_MS:-1000}
       MIME_RETRY_MAX_MS: ${MIME_RETRY_MAX_MS:-60000}
       MIME_MAX_ATTEMPTS: ${MIME_MAX_ATTEMPTS:-5}
-      MIME_DB_TIMEOUT_MS: ${MIME_DB_TIMEOUT_MS:-15000}
+      MIME_DB_TIMEOUT_MS: ${MIME_DB_TIMEOUT_MS:-120000}
       MIME_S3_TIMEOUT_MS: ${MIME_S3_TIMEOUT_MS:-30000}
       MIME_S3_PART_SIZE_BYTES: ${MIME_S3_PART_SIZE_BYTES:-5242880}
       MIME_S3_QUEUE_SIZE: ${MIME_S3_QUEUE_SIZE:-2}
@@ -1037,6 +1115,10 @@ services:
       DELIVERY_REINJECT_RETRY_BASE_SECONDS: ${DELIVERY_REINJECT_RETRY_BASE_SECONDS:-30}
       DELIVERY_REINJECT_RETRY_MAX_SECONDS: ${DELIVERY_REINJECT_RETRY_MAX_SECONDS:-900}
       DELIVERY_REINJECT_MAX_AGE_SECONDS: ${DELIVERY_REINJECT_MAX_AGE_SECONDS:-432000}
+      # Step 4.2 §6.2: retry budget of a missing message context, and the budget of every
+      # interactive transaction (longer than innodb_lock_wait_timeout and the stalls ridden out).
+      DELIVERY_REINJECT_MAX_ATTEMPTS: ${DELIVERY_REINJECT_MAX_ATTEMPTS:-10}
+      DELIVERY_DB_TX_TIMEOUT_MS: ${DELIVERY_DB_TX_TIMEOUT_MS:-120000}
       DELIVERY_POLL_INTERVAL_MS: ${DELIVERY_POLL_INTERVAL_MS:-1000}
       DELIVERY_OUTBOX_POLL_INTERVAL_MS: ${DELIVERY_OUTBOX_POLL_INTERVAL_MS:-1000}
       DELIVERY_OUTBOX_SAFETY_LAG_MS: ${DELIVERY_OUTBOX_SAFETY_LAG_MS:-120000}
@@ -1110,7 +1192,7 @@ services:
       RECONCILE_MAX_REDRIVES: ${RECONCILE_MAX_REDRIVES:-3}
       RECONCILE_LOOKBACK_HOURS: ${RECONCILE_LOOKBACK_HOURS:-72}
       RECONCILE_BATCH_SIZE: ${RECONCILE_BATCH_SIZE:-1000}
-      RECONCILE_QUEUES: ${RECONCILE_QUEUES:-email.received,email.delivery.pending,scan.spam}
+      RECONCILE_QUEUES: ${RECONCILE_QUEUES:-email.received,email.delivery.pending,scan.spam,scan.attachment}
       RECONCILE_START_POSITION: ${RECONCILE_START_POSITION:-oldest}
       # Message lifecycle jobs (step 3.3 L13, L14; docs/plan/steps/08-message-lifecycle.md §5).
       LIFECYCLE_EXPIRY_ENABLED: ${LIFECYCLE_EXPIRY_ENABLED:-true}

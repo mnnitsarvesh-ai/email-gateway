@@ -249,7 +249,7 @@ describe('ScanSettingsService (step 4.1 S8, S16)', () => {
     });
     const view = await service.reset(user, scope, 'rspamd', 4, client);
     expect(view).toMatchObject({ version: 5, override: null, overrideApplied: false });
-    expect(view.effective.spamScore).toBe(6);
+    expect(view.engine === 'rspamd' && view.effective.spamScore).toBe(6);
     expect(row()?.settings).toEqual({});
     expect(audits).toEqual([
       expect.objectContaining({
@@ -282,7 +282,7 @@ describe('ScanSettingsService (step 4.1 S8, S16)', () => {
       updatedAt: new Date('2026-11-05T09:00:00Z'),
     });
     const list = await service.list(scope);
-    expect(list.data).toHaveLength(1);
+    expect(list.data.map((view) => view.engine)).toEqual(['rspamd', 'attachment']);
     expect(list.data[0]).toMatchObject({
       engine: 'rspamd',
       version: 2,
@@ -290,5 +290,47 @@ describe('ScanSettingsService (step 4.1 S8, S16)', () => {
       effective: { phishingVerdict: 'malicious', spamScore: 6 },
       updatedAt: '2026-11-05T09:00:00.000Z',
     });
+    expect(list.data[1]).toMatchObject({ engine: 'attachment', version: 0, override: null });
+  });
+
+  it('replaces the attachment override within the platform bounds, audited (step 4.2 A8)', async () => {
+    const { service, audits, row } = fakeStore();
+    const view = await service.replace(
+      user,
+      scope,
+      'attachment',
+      { expectedVersion: 0, settings: { deniedTypes: ['zip'], deniedTypeVerdict: 'malicious' } },
+      client,
+    );
+    expect(view).toMatchObject({
+      engine: 'attachment',
+      version: 1,
+      overrideApplied: true,
+      effective: { deniedTypeVerdict: 'malicious' },
+    });
+    expect(row()?.settings).toEqual({ deniedTypes: ['zip'], deniedTypeVerdict: 'malicious' });
+    expect(audits).toEqual([
+      expect.objectContaining({
+        action: 'scan_settings.updated',
+        resourceId: 'attachment',
+        metadata: expect.objectContaining({ engine: 'attachment', fromVersion: 0, toVersion: 1 }),
+      }),
+    ]);
+  });
+
+  it('refuses an attachment override that allows a platform-denied type (422)', async () => {
+    const { service, row } = fakeStore();
+    expect(
+      await codeOf(
+        service.replace(
+          user,
+          scope,
+          'attachment',
+          { expectedVersion: 0, settings: { allowedTypes: ['pe_executable'] } },
+          client,
+        ),
+      ),
+    ).toMatchObject({ status: 422, code: 'scan_settings_invalid' });
+    expect(row()).toBeNull();
   });
 });

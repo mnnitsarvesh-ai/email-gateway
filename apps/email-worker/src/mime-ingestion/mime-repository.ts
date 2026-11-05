@@ -114,7 +114,7 @@ export class MimeRepository implements MimeStore {
     } else if (existing.status !== 'parsing') {
       return { kind: 'final' };
     }
-    return this.prisma.$transaction(async (tx) => {
+    return this.txPrisma.$transaction(async (tx) => {
       const where = {
         messageId: message.id,
         receivedAt: message.receivedAt,

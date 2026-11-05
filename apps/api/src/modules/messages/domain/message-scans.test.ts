@@ -2,11 +2,14 @@ import { BadRequestException } from '@nestjs/common';
 import { Prisma } from '@email-gateway/database';
 import { describe, expect, it } from 'vitest';
 import type {
+  AttachmentResultRow,
   AuthResultRow,
   EngineResultRow,
   ScanRoundRow,
 } from '../repositories/message-scans-read.repository';
 import {
+  attachmentOf,
+  attachmentsOf,
   decodeScanCursor,
   encodeScanCursor,
   engineOf,
@@ -120,6 +123,31 @@ describe('message scans mapping (step 4.1 S16)', () => {
     ]);
   });
 
+  it('withholds the attachment engine timing and rounds its times to the second (cross-tenant cache)', () => {
+    const ms = (s: number, milli: number) => new Date(at(s).getTime() + milli);
+    const rows = [
+      row({ engine: 'attachment', durationMs: 7, completedAt: ms(2, 345) }),
+      row({
+        engine: 'attachment',
+        attempt: 2,
+        isFinal: true,
+        outcome: 'clean',
+        errorCode: null,
+        durationMs: 4,
+        completedAt: ms(5, 999),
+      }),
+    ];
+    const view = engineOf('attachment', rows);
+    expect(view).toMatchObject({ durationMs: null, completedAt: at(5).toISOString() });
+    expect(view.attempts).toEqual([
+      expect.objectContaining({ attempt: 1, durationMs: null, at: at(2).toISOString() }),
+      expect.objectContaining({ attempt: 2, durationMs: null, at: at(5).toISOString() }),
+    ]);
+    // Other engines keep their exact values.
+    const rspamd = engineOf('rspamd', [row({ completedAt: ms(2, 345), durationMs: 7 })]);
+    expect(rspamd.attempts[0]).toMatchObject({ durationMs: 7, at: ms(2, 345).toISOString() });
+  });
+
   it('builds a round from its own rows only, engines in catalog order, auth of the first engine', () => {
     const auth: AuthResultRow = {
       scanId: 2n,
@@ -175,5 +203,89 @@ describe('message scans mapping (step 4.1 S16)', () => {
     for (const bad of ['bogus', Buffer.from('r65536').toString('base64url'), 'cjAx', '']) {
       expect(() => decodeScanCursor(bad)).toThrow(BadRequestException);
     }
+  });
+});
+
+describe('attachment results (step 4.2 A16)', () => {
+  const base: AttachmentResultRow = {
+    scanId: 7n,
+    attachmentId: 900n,
+    partIndex: 2,
+    sha256: 'b'.repeat(64),
+    sizeBytes: 1024,
+    detectedType: 'zip',
+    typeFamily: 'archive',
+    typeMismatch: false,
+    verdict: 'suspicious',
+    reasonCodes: ['archive.encrypted', 'not.a.code', 7],
+    clamavSignature: null,
+    clamavEngineVersion: '1.4.6',
+    clamavDbVersion: 28173,
+    yaraBundleId: 'yara-1-462fab6e5cc4',
+    yaraMatches: [{ rule: 'EG_Test_Marker_Medium', severity: 'medium', scope: '0' }],
+    archive: {
+      format: 'zip',
+      supported: true,
+      entries: 1,
+      depthReached: 1,
+      decompressedBytes: 10,
+      maxRatio: 1.5,
+      encrypted: true,
+      findings: [{ path: '0', type: 'pdf', reasonCodes: ['archive.encrypted'] }],
+    },
+    knownHashSeverity: 'medium',
+  };
+
+  it('maps a row with its part metadata and sandbox submission; unknown codes are dropped', () => {
+    const view = attachmentOf(
+      base,
+      { partIndex: 2, filename: 'a.zip', declaredContentType: 'application/zip' },
+      { id: 55n, scanId: 7n, attachmentId: 900n, status: 'pending' },
+    );
+    expect(view).toMatchObject({
+      partIndex: 2,
+      filename: 'a.zip',
+      reasonCodes: ['archive.encrypted'],
+      clamav: { signature: null, engineVersion: '1.4.6', dbVersion: 28173 },
+      yara: { bundleId: 'yara-1-462fab6e5cc4', matches: [{ rule: 'EG_Test_Marker_Medium' }] },
+      archive: { format: 'zip', encrypted: true },
+      knownHash: { severity: 'medium', family: null },
+      sandbox: { submissionId: '55', status: 'pending' },
+    });
+    // The cross-tenant content cache outcome and the per-file timing are never shown.
+    expect(view).not.toHaveProperty('cache');
+    expect(view).not.toHaveProperty('durationMs');
+  });
+
+  it('shows malformed stored JSON as null, never raw', () => {
+    const view = attachmentOf(
+      {
+        ...base,
+        yaraMatches: [{ rule: 'bad rule name', severity: 'x' }],
+        archive: { format: 'zip', entryNames: ['secret.txt'] },
+        clamavDbVersion: null,
+      },
+      undefined,
+      undefined,
+    );
+    expect(view).toMatchObject({
+      yara: null,
+      archive: null,
+      clamav: null,
+      filename: null,
+      sandbox: null,
+    });
+    expect(JSON.stringify(view)).not.toContain('secret.txt');
+  });
+
+  it('attaches the rows of the round only, by part index, to the attachment engine entry', () => {
+    const rows = [
+      { ...base, partIndex: 3, attachmentId: 901n },
+      { ...base, partIndex: 1, attachmentId: 902n },
+      { ...base, scanId: 8n },
+    ];
+    expect(
+      attachmentsOf(7n, { results: rows, parts: [], submissions: [] }).map((a) => a.partIndex),
+    ).toEqual([1, 3]);
   });
 });

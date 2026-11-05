@@ -39,13 +39,13 @@ const mutableQueue = (topology: { queues: QueueDefinition[] }, name: QueueName) 
   return queue;
 };
 
-describe('TOPOLOGY v3', () => {
+describe('TOPOLOGY v4', () => {
   it('satisfies every invariant of design §3', () => {
     expect(validateTopology(TOPOLOGY)).toEqual([]);
   });
 
   it('declares exactly the six exchanges and fourteen queues of the brief', () => {
-    expect(TOPOLOGY_VERSION).toBe(3);
+    expect(TOPOLOGY_VERSION).toBe(4);
     expect(DEFAULT_VHOST).toBe('email-gateway');
     expect([...TOPOLOGY.exchanges]).toEqual([
       'email.ingestion',
@@ -61,13 +61,19 @@ describe('TOPOLOGY v3', () => {
     expect(new Set(QUEUE_NAMES).size).toBe(14);
   });
 
-  it('assigns roles: three work queues, one delay, one dead-letter, nine dormant (v3)', () => {
+  it('assigns roles: four work queues, one delay, one dead-letter, eight dormant (v4)', () => {
     const byRole = (role: string) =>
       TOPOLOGY.queues.filter((q) => q.role === role).map((q) => q.name);
-    expect(byRole('work')).toEqual(['email.received', 'scan.spam', 'email.delivery.pending']);
+    expect(byRole('work')).toEqual([
+      'email.received',
+      'scan.spam',
+      'scan.attachment',
+      'email.delivery.pending',
+    ]);
     expect(byRole('delay')).toEqual(['email.delivery.retry']);
     expect(byRole('dead-letter')).toEqual(['email.dead-letter']);
-    expect(byRole('dormant')).toHaveLength(9);
+    expect(byRole('dormant')).toHaveLength(8);
+    expect(byRole('dormant')).toContain('scan.sandbox');
     expect(byRole('dormant')).toContain('scan.auth');
   });
 
@@ -171,6 +177,23 @@ describe('TOPOLOGY v3', () => {
     expect(queueDefinition('scan.spam').description).toBe(
       'Rspamd: spam, phishing, reputation and SPF/DKIM/DMARC/ARC (step 4.1)',
     );
+    // v4 (step 4.2 A2): the attachment engine of the email-worker scan role.
+    expect(queueDefinition('scan.attachment').consumer).toEqual({
+      kind: 'ledger',
+      ledgerName: 'email-worker.scan.attachment',
+      service: 'email-worker',
+    });
+    expect(queueDefinition('scan.attachment').description).toBe(
+      'Attachments: file type, known hashes, ClamAV, YARA, archive limits (step 4.2)',
+    );
+    expect(queueDefinition('scan.attachment').policy).toEqual(policyFor('work', 'scan.attachment'));
+    expect(queueDefinition('scan.attachment').policy).toMatchObject({
+      'delivery-limit': 20,
+      'dead-letter-exchange': 'email.events',
+      'dead-letter-routing-key': 'dead-letter.scan.attachment',
+      overflow: 'reject-publish',
+      'max-length': 1_000_000,
+    });
     expect(queueDefinition('scan.auth').consumer).toEqual({
       kind: 'none',
       reason: SCAN_AUTH_RESERVED_REASON,
@@ -185,7 +208,6 @@ describe('TOPOLOGY v3', () => {
     );
     expect(planned).toEqual({
       'scan.url': '4.3',
-      'scan.attachment': '4.2',
       'scan.dlp': '4.5',
       'scan.sandbox': '4.6',
       'email.policy.evaluate': '5.1/5.2',
@@ -284,6 +306,8 @@ describe('retry policies (Q8)', () => {
       maxDelayMs: 60_000,
       maxRetryAgeMs: 86_400_000,
     });
+    // v4 (step 4.2 A2, A12): as scan.spam; SCAN_ATTACHMENT_MAX_ATTEMPTS (6) < 10 finalizes first.
+    expect(queueDefinition('scan.attachment').retry).toEqual(queueDefinition('scan.spam').retry);
     for (const queue of TOPOLOGY.queues.filter((q) => q.role === 'dormant')) {
       expect(queue.retry, queue.name).toEqual({
         strategy: 'hold',
@@ -693,7 +717,7 @@ describe('toRabbitDefinitions (Q5)', () => {
   const definitions = toRabbitDefinitions(TOPOLOGY, { vhost: DEFAULT_VHOST });
 
   it('declares topic exchanges and quorum queues with no other argument', () => {
-    expect(definitions.topology_version).toBe(3);
+    expect(definitions.topology_version).toBe(4);
     expect(definitions.exchanges).toHaveLength(6);
     for (const exchange of definitions.exchanges) {
       expect(exchange).toEqual({

@@ -68,3 +68,20 @@ data:
   SCAN_RSPAMD_PHISHING_VERDICT: suspicious
   SCAN_RSPAMD_DMARC_REJECT_VERDICT: suspicious
   SCAN_RSPAMD_AUTH_FAILURE_VERDICT: reason_only
+  # Attachment scanning (step 4.2 §5, A8): the platform attachment settings read by both the api
+  # (tenant override bounds) and the email-worker scan replicas; the required engines of a round
+  # (SCAN_ENGINES) must be identical on every scan replica (A1).
+  SCAN_ENGINES: rspamd,attachment
+  ATTACHMENT_MAX_BYTES: '26214400'
+  ATTACHMENT_ARCHIVE_MAX_DEPTH: '3'
+  ATTACHMENT_ARCHIVE_MAX_ENTRIES: '1000'
+  ATTACHMENT_MAX_ENTRY_BYTES: '26214400'
+  ATTACHMENT_MAX_DECOMPRESSED_BYTES: '104857600'
+  ATTACHMENT_MAX_COMPRESSION_RATIO: '100'
+  ATTACHMENT_MAX_ENTRY_FINDINGS: '20'
+  ATTACHMENT_DENIED_TYPES: pe_executable,msi,elf,macho,lnk,script_js,script_vbs,script_ps1,script_batch,hta,jar,apk,iso,vhd,chm
+  ATTACHMENT_DENIED_TYPE_VERDICT: suspicious
+  ATTACHMENT_TYPE_MISMATCH_VERDICT: suspicious
+  ATTACHMENT_ENCRYPTED_VERDICT: suspicious
+  ATTACHMENT_RESCAN_MAX_MESSAGES: '5000'
+  ATTACHMENT_RESCAN_WINDOW_HOURS: '24'

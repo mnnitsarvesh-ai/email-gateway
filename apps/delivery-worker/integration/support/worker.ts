@@ -2,7 +2,6 @@ import { RedisService, withTransactionDefaults } from '@email-gateway/common';
 import { processOnce } from '@email-gateway/database';
 import type { DeliveryApprovedV1, EventEnvelope } from '@email-gateway/event-contracts';
 import type { WorkerConfig } from '../../src/config';
-import { PLANNING_TX_TIMEOUT_MS, RECORDER_TX_TIMEOUT_MS } from '../../src/delivery.module';
 import type { DeliveryMetrics } from '../../src/metrics/delivery-metrics';
 import { DeliveryPlanner, type PlanResult } from '../../src/planning/delivery-planner';
 import { OutboundRateLimiter } from '../../src/rate-limit/outbound-rate-limiter';
@@ -40,16 +39,18 @@ export function buildWorker(
   config: Readonly<WorkerConfig>,
   options: { redisUrl?: string; logSourcePrefix?: string; now?: () => Date } = {},
 ): TestWorker {
-  const prisma = fx.prisma;
+  // As DeliveryModule: one transaction budget for every data-plane transaction (§6.2 F2).
+  const txBudgetMs = config.DELIVERY_DB_TX_TIMEOUT_MS;
+  const prisma = withTransactionDefaults(fx.prisma, { timeoutMs: txBudgetMs });
   const metrics = newMetrics();
   const redis = options.redisUrl ? new RedisService({ url: options.redisUrl }) : fx.redis;
   const planner = new DeliveryPlanner({
     logger: silentLogger,
     metrics,
     config,
-    recorderTimeoutMs: RECORDER_TX_TIMEOUT_MS,
+    recorderTimeoutMs: txBudgetMs,
   });
-  const store = new ReinjectionStore(prisma);
+  const store = new ReinjectionStore(prisma, { txTimeoutMs: txBudgetMs });
   const reinjector = new Reinjector({
     prisma,
     store,
@@ -59,7 +60,7 @@ export function buildWorker(
     metrics,
     logger: silentLogger,
     config,
-    txTimeoutMs: RECORDER_TX_TIMEOUT_MS,
+    txTimeoutMs: txBudgetMs,
     ...(options.now ? { now: options.now } : {}),
   });
   const scope = { organizationIds: fx.organizationIds };
@@ -76,14 +77,14 @@ export function buildWorker(
     metrics,
     config,
     silentLogger,
-    RECORDER_TX_TIMEOUT_MS,
+    txBudgetMs,
     undefined,
     {
       organizationIds: fx.organizationIds,
       logSourcePrefix: options.logSourcePrefix ?? `postfix-log:it-${fx.suffix}`,
     },
   );
-  const txPrisma = withTransactionDefaults(prisma, { timeoutMs: PLANNING_TX_TIMEOUT_MS });
+  const txPrisma = prisma;
   const consumer = fx.consumer('planner');
   return {
     config,

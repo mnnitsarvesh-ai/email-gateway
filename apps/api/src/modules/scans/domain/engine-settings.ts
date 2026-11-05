@@ -1,6 +1,10 @@
 import {
+  type AttachmentPlatformSettings,
+  attachmentSettingsBounds,
+  attachmentTenantSettingsSchema,
   type EngineCatalogEntry,
   ENGINE_CATALOG,
+  resolveAttachmentSettings,
   resolveRspamdSettings,
   type RspamdPlatformSettings,
   rspamdSettingsBounds,
@@ -10,8 +14,9 @@ import {
 import type { EngineSettingsView } from '../dto/scan-settings.schemas';
 
 /**
- * Tenant settings per registered engine (step 4.1 S8, S16), pure. Step 4.1 registers Rspamd
- * only; an engine of the catalog without a settings definition has no settings routes (404).
+ * Tenant settings per registered engine (step 4.1 S8, S16; step 4.2 A8), pure: `rspamd` and
+ * `attachment`. An engine of the catalog without a settings definition has no settings routes
+ * (404).
  */
 
 export interface StoredOverride {
@@ -31,6 +36,16 @@ export interface EngineSettingsDefinition {
   view(stored: StoredOverride | null): EngineSettingsView;
 }
 
+/** The platform settings of every engine that has tenant settings. */
+export interface PlatformEngineSettings {
+  rspamd: RspamdPlatformSettings;
+  attachment: AttachmentPlatformSettings;
+}
+
+/** The parsed override without undefined keys (what is stored). */
+const definedKeys = (parsed: Record<string, unknown>): Record<string, unknown> =>
+  Object.fromEntries(Object.entries(parsed).filter(([, v]) => v !== undefined));
+
 const isEmptyObject = (value: unknown): boolean =>
   value !== null &&
   typeof value === 'object' &&
@@ -48,11 +63,7 @@ function rspamdDefinition(
   const check = (override: unknown): OverrideCheck => {
     const resolution = resolveRspamdSettings(platform, override);
     if (!resolution.ok) return { ok: false, violations: resolution.violations };
-    const parsed = rspamdTenantSettingsSchema.parse(override);
-    return {
-      ok: true,
-      settings: Object.fromEntries(Object.entries(parsed).filter(([, v]) => v !== undefined)),
-    };
+    return { ok: true, settings: definedKeys(rspamdTenantSettingsSchema.parse(override)) };
   };
   const bounds = rspamdSettingsBounds(platform);
   const platformEffective = resolveRspamdSettings(platform, null);
@@ -66,7 +77,7 @@ function rspamdDefinition(
       // An override that no longer fits the platform settings is ignored, as the worker does.
       const effective = resolution.ok ? resolution.settings : platformEffective.settings;
       return {
-        engine: catalog.name,
+        engine: 'rspamd',
         required: catalog.requiredByDefault,
         tenantMayDisable: catalog.tenantMayDisable,
         platform: { ...platform },
@@ -77,7 +88,7 @@ function rspamdDefinition(
           dmarcRejectVerdict: [...bounds.dmarcRejectVerdict],
           authFailureVerdict: [...bounds.authFailureVerdict],
         },
-        override: override as EngineSettingsView['override'],
+        override: override as Extract<EngineSettingsView, { engine: 'rspamd' }>['override'],
         effective: { ...effective },
         overrideApplied: override !== null && resolution.ok,
         violations: resolution.ok ? [] : resolution.violations,
@@ -88,13 +99,66 @@ function rspamdDefinition(
   };
 }
 
-/** The settings definitions of every catalog engine that has tenant settings. */
+function attachmentDefinition(
+  catalog: EngineCatalogEntry,
+  platform: AttachmentPlatformSettings,
+): EngineSettingsDefinition {
+  const check = (override: unknown): OverrideCheck => {
+    const resolution = resolveAttachmentSettings(platform, override);
+    if (!resolution.ok) return { ok: false, violations: resolution.violations };
+    return { ok: true, settings: definedKeys(attachmentTenantSettingsSchema.parse(override)) };
+  };
+  const bounds = attachmentSettingsBounds(platform);
+  const platformEffective = resolveAttachmentSettings(platform, null);
+  if (!platformEffective.ok) throw new Error('The platform attachment settings do not resolve');
+  return {
+    catalog,
+    check,
+    view(stored) {
+      const override = holdsOverride(stored) ? stored.settings : null;
+      const resolution = resolveAttachmentSettings(platform, override);
+      // An override that no longer fits the platform settings is ignored, as the worker does.
+      const effective = resolution.ok ? resolution.settings : platformEffective.settings;
+      return {
+        engine: 'attachment',
+        required: catalog.requiredByDefault,
+        tenantMayDisable: catalog.tenantMayDisable,
+        platform: { ...platform, deniedTypes: [...platform.deniedTypes] },
+        bounds: {
+          maxAttachmentBytes: { ...bounds.maxAttachmentBytes },
+          deniedTypes: [...bounds.deniedTypes],
+          platformDeniedTypes: [...bounds.platformDeniedTypes],
+          allowedTypes: [...bounds.allowedTypes],
+          maxAllowedTypes: bounds.maxAllowedTypes,
+          deniedTypeVerdict: [...bounds.deniedTypeVerdict],
+          typeMismatchVerdict: [...bounds.typeMismatchVerdict],
+          encryptedArchiveVerdict: [...bounds.encryptedArchiveVerdict],
+        },
+        override: override as Extract<EngineSettingsView, { engine: 'attachment' }>['override'],
+        effective: {
+          ...effective,
+          deniedTypes: [...effective.deniedTypes],
+          allowedTypes: effective.allowedTypes === null ? null : [...effective.allowedTypes],
+        },
+        overrideApplied: override !== null && resolution.ok,
+        violations: resolution.ok ? [] : resolution.violations,
+        version: stored?.version ?? 0,
+        updatedAt: stored ? stored.updatedAt.toISOString() : null,
+      };
+    },
+  };
+}
+
+/** The settings definitions of every catalog engine that has tenant settings (catalog order). */
 export function engineSettingsDefinitions(
-  platform: RspamdPlatformSettings,
+  platform: PlatformEngineSettings,
 ): ReadonlyMap<string, EngineSettingsDefinition> {
   const out = new Map<string, EngineSettingsDefinition>();
   for (const entry of ENGINE_CATALOG) {
-    if (entry.name === 'rspamd') out.set(entry.name, rspamdDefinition(entry, platform));
+    if (entry.name === 'rspamd') out.set(entry.name, rspamdDefinition(entry, platform.rspamd));
+    if (entry.name === 'attachment') {
+      out.set(entry.name, attachmentDefinition(entry, platform.attachment));
+    }
   }
   return out;
 }

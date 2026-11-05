@@ -41,8 +41,11 @@ function setup(rows: ScanRoundRow[], found = true) {
   const lifecycle = { findMessage: vi.fn(() => Promise.resolve(found ? message : null)) };
   const scans = {
     rounds: vi.fn(() => Promise.resolve(rows)),
-    engineResults: vi.fn(() => Promise.resolve([])),
+    engineResults: vi.fn(() => Promise.resolve([] as unknown[])),
     authResults: vi.fn(() => Promise.resolve([])),
+    attachmentResults: vi.fn(() => Promise.resolve([] as unknown[])),
+    attachmentParts: vi.fn((..._args: unknown[]) => Promise.resolve([] as unknown[])),
+    sandboxSubmissions: vi.fn(() => Promise.resolve([] as unknown[])),
   };
   const service = new MessageScansReadService(
     lifecycle as unknown as MessageLifecycleReadRepository,
@@ -80,5 +83,74 @@ describe('MessageScansReadService (step 4.1 S16)', () => {
     expect((error as HttpException).getStatus()).toBe(404);
     expect(lifecycle.findMessage).toHaveBeenCalledWith(scope, message.publicId);
     expect(scans.rounds).not.toHaveBeenCalled();
+  });
+
+  it('adds the per-attachment results to the attachment engine entry (step 4.2 A16)', async () => {
+    const { service, scans } = setup([round(30n, 2)]);
+    const completedAt = new Date('2026-11-05T08:00:05Z');
+    scans.engineResults.mockResolvedValue([
+      {
+        scanId: 30n,
+        engine: 'attachment',
+        engineVersion: 'clamav/1.4.6/28173;yara-x/0.10.0/462fab6e5cc4',
+        outcome: 'malicious',
+        score: null,
+        requiredScore: null,
+        action: null,
+        reasonCodes: ['malware.clamav'],
+        errorCode: null,
+        settingsVersion: 'attachment-map/1;p=abc;t=none',
+        durationMs: 40,
+        evidence: { signals: [] },
+        attempt: 1,
+        isFinal: true,
+        completedAt,
+      },
+    ]);
+    scans.attachmentResults.mockResolvedValue([
+      {
+        scanId: 30n,
+        attachmentId: 900n,
+        partIndex: 1,
+        sha256: 'a'.repeat(64),
+        sizeBytes: 68,
+        detectedType: 'text',
+        typeFamily: 'text',
+        typeMismatch: false,
+        verdict: 'malicious',
+        reasonCodes: ['malware.clamav'],
+        clamavSignature: 'Eicar-Test-Signature',
+        clamavEngineVersion: '1.4.6',
+        clamavDbVersion: 28173,
+        yaraBundleId: null,
+        yaraMatches: null,
+        archive: null,
+        knownHashSeverity: null,
+        cacheResult: 'miss',
+        durationMs: 12,
+      },
+    ]);
+    scans.attachmentParts.mockResolvedValue([
+      { partIndex: 1, filename: 'eicar.txt', declaredContentType: 'text/plain' },
+    ]);
+    const page = await service.list(scope, message.publicId, { limit: 10 });
+    expect(scans.attachmentParts).toHaveBeenCalledWith(scope, message, [1]);
+    expect(scans.attachmentResults).toHaveBeenCalledWith(scope, message, [30n]);
+    expect(scans.sandboxSubmissions).toHaveBeenCalledWith(scope, message, [30n]);
+    expect(page.data[0]!.engines[0]).toMatchObject({
+      engine: 'attachment',
+      outcome: 'malicious',
+      attachments: [
+        {
+          partIndex: 1,
+          filename: 'eicar.txt',
+          declaredContentType: 'text/plain',
+          verdict: 'malicious',
+          reasonCodes: ['malware.clamav'],
+          clamav: { signature: 'Eicar-Test-Signature', engineVersion: '1.4.6', dbVersion: 28173 },
+          sandbox: null,
+        },
+      ],
+    });
   });
 });

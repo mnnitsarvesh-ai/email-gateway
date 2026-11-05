@@ -1,4 +1,9 @@
-import { AUTH_OUTCOMES, DMARC_POLICIES, SCAN_VERDICTS } from '@email-gateway/security-contracts';
+import {
+  attachmentResultSchema,
+  AUTH_OUTCOMES,
+  DMARC_POLICIES,
+  SCAN_VERDICTS,
+} from '@email-gateway/security-contracts';
 import { z } from 'zod';
 
 /**
@@ -7,7 +12,9 @@ import { z } from 'zod';
  * (`scan_engine_results`: the final row as the result, every row as an attempt), the
  * authentication results (`email_auth_results`) and the engine's symbols (`evidence.signals`).
  * Scores, codes, symbol names, bounded symbol options and authentication outcomes only: never
- * message content.
+ * message content. Step 4.2 A16: the `attachment` engine entry also lists its per-attachment
+ * results (`attachment_scan_results`; hashes, sizes, type ids, signature and rule names, counts
+ * and codes, never file content or archive entry names).
  */
 
 /** Rounds per page (S16: at most 20). */
@@ -43,10 +50,62 @@ export const ScanAttemptSchema = z.object({
     .string()
     .nullable()
     .describe('Failure code of a timeout/error attempt (e.g. eml_unavailable)'),
-  durationMs: z.number().int().min(0),
-  at: IsoDate.describe('When the attempt completed'),
+  durationMs: z
+    .number()
+    .int()
+    .min(0)
+    .nullable()
+    .describe('Attempt duration; null for the `attachment` engine (it would reveal cache hits)'),
+  at: IsoDate.describe(
+    'When the attempt completed (whole seconds for the `attachment` engine, see durationMs)',
+  ),
 });
 export type ScanAttempt = z.output<typeof ScanAttemptSchema>;
+
+/** Status of a sandbox submission (step 4.2 A11; the sandbox itself arrives in step 4.6). */
+export const SandboxSubmissionStatusSchema = z.enum([
+  'pending',
+  'submitted',
+  'completed',
+  'failed',
+  'expired',
+]);
+
+/**
+ * The per-attachment fields shown to a tenant: the normalized result without `cache` and
+ * `durationMs`. The content cache is shared by every organization and keyed by the file hash
+ * only (A10), so its hit/miss outcome, and the per-file timing that reveals it, would tell a
+ * tenant whether some other organization received a byte-identical file within the cache TTL.
+ * Both stay in `attachment_scan_results` and in the operator metrics.
+ */
+const {
+  cache: _cacheResult,
+  durationMs: _attachmentDuration,
+  ...tenantAttachmentShape
+} = attachmentResultSchema.shape;
+
+/**
+ * One attachment's result in a round (step 4.2 A16): the normalized `attachmentResultSchema` of
+ * `@email-gateway/security-contracts` (without the cross-tenant cache outcome and timing, see
+ * above) plus the display metadata of the part and its sandbox submission. `filename` is the
+ * sanitized display name of `email_attachments` (step 3.1 M9).
+ */
+export const AttachmentScanViewSchema = z.object({
+  ...tenantAttachmentShape,
+  filename: z
+    .string()
+    .nullable()
+    .describe('Sanitized display filename of the part (attacker-controlled text, escaped)'),
+  declaredContentType: z.string().nullable().describe('Content type the message declared'),
+  sandbox: z
+    .object({
+      submissionId: z.string().describe('sandbox_submissions id (decimal)'),
+      status: SandboxSubmissionStatusSchema,
+    })
+    .nullable()
+    .describe('Sandbox submission of a suspicious/unknown attachment; null when not submitted'),
+});
+export type AttachmentScanView = z.output<typeof AttachmentScanViewSchema>;
 
 export const ScanEngineResultSchema = z.object({
   engine: z.string(),
@@ -61,9 +120,26 @@ export const ScanEngineResultSchema = z.object({
   reasonCodes: z.array(z.string()),
   symbols: z.array(ScanSymbolSchema).describe('Rspamd symbols, by |score| descending'),
   attempts: z.array(ScanAttemptSchema).describe('Every attempt of the engine in the round'),
-  durationMs: z.number().int().min(0).nullable(),
+  attachments: z
+    .array(AttachmentScanViewSchema)
+    .optional()
+    .describe(
+      'Engine `attachment` only (step 4.2 A16): one result per scanned attachment of the ' +
+        'round, by part index; empty before the final result and for `skipped`',
+    ),
+  durationMs: z
+    .number()
+    .int()
+    .min(0)
+    .nullable()
+    .describe(
+      'Engine duration of the final result; always null for the `attachment` engine, whose ' +
+        'timing would reveal whether a file was in the cross-tenant content cache',
+    ),
   settingsVersion: z.string().nullable(),
-  completedAt: IsoDate.nullable(),
+  completedAt: IsoDate.nullable().describe(
+    'Final result time (whole seconds for the `attachment` engine)',
+  ),
 });
 export type ScanEngineResultView = z.output<typeof ScanEngineResultSchema>;
 

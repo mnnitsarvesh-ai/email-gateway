@@ -342,6 +342,55 @@ enum DmarcPolicy {
   reject
 }
 
+/// Verdict of one attachment in a scan round (step 4.2 A6, `ATTACHMENT_VERDICTS` of
+/// @email-gateway/security-contracts). `clean` only by rule C1.
+enum AttachmentScanVerdict {
+  clean
+  suspicious
+  malicious
+  unknown
+}
+
+/// Whether the content result of an attachment came from the content cache (step 4.2 A10).
+enum AttachmentCacheResult {
+  hit
+  miss
+  bypass
+}
+
+/// Verdicts of an attachment that is submitted to the sandbox (step 4.2 A11).
+enum SandboxAttachmentVerdict {
+  suspicious
+  unknown
+}
+
+/// Status of a sandbox submission (step 4.2 A11). Step 4.2 writes `pending` only; the sandbox
+/// orchestrator (step 4.6) moves it to `submitted`, then `completed`, `failed` or `expired`.
+enum SandboxSubmissionStatus {
+  pending
+  submitted
+  completed
+  failed
+  expired
+}
+
+/// What created a bulk attachment rescan job (step 4.2 A13).
+enum AttachmentRescanTrigger {
+  signature_update
+  admin
+}
+
+/// Status of a bulk attachment rescan job (step 4.2 A13). `skipped`: a signature change recorded
+/// with `ATTACHMENT_SIGNATURE_RESCAN=record` (an audit trail, no rescans).
+enum AttachmentRescanStatus {
+  pending
+  running
+  completed
+  cancelled
+  failed
+  skipped
+}
+
 enum IndicatorType {
   ip
   domain
@@ -665,6 +714,7 @@ model Organization {
   archiveLegalHolds        ArchiveLegalHold[]
   webhookSubscriptions     WebhookSubscription[]
   scanEngineSettings       ScanEngineSetting[]
+  attachmentRescanJobs     AttachmentRescanJob[]
 
   @@index([status])
   @@index([status, purgeAfter])
@@ -782,27 +832,29 @@ model User {
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
 
-  userRoles                 UserRole[]               @relation("UserRoleUser")
-  grantedUserRoles          UserRole[]               @relation("UserRoleGrantedBy")
-  sessions                  UserSession[]
-  tokens                    UserToken[]              @relation("UserTokenUser")
-  createdTokens             UserToken[]              @relation("UserTokenCreatedBy")
-  mfaRecoveryCodes          UserMfaRecoveryCode[]
-  createdApiKeys            ApiKey[]
-  updatedYaraRules          YaraRule[]
-  createdEmailPolicies      EmailPolicy[]
-  publishedPolicyVersions   PolicyVersion[]
-  createdPolicyExceptions   PolicyException[]
-  createdSuppressions       DeliverySuppression[]
-  quarantineMessages        QuarantineMessage[]
-  quarantineActions         QuarantineAction[]
-  createdLegalHolds         ArchiveLegalHold[]       @relation("LegalHoldCreatedBy")
-  releasedLegalHolds        ArchiveLegalHold[]       @relation("LegalHoldReleasedBy")
-  createdWebhooks           WebhookSubscription[]
-  updatedSystemSettings     SystemSetting[]
-  createdSmtpConnectors     SmtpConnector[]
-  createdRecipients         DomainRecipientAddress[]
-  updatedScanEngineSettings ScanEngineSetting[]
+  userRoles                  UserRole[]               @relation("UserRoleUser")
+  grantedUserRoles           UserRole[]               @relation("UserRoleGrantedBy")
+  sessions                   UserSession[]
+  tokens                     UserToken[]              @relation("UserTokenUser")
+  createdTokens              UserToken[]              @relation("UserTokenCreatedBy")
+  mfaRecoveryCodes           UserMfaRecoveryCode[]
+  createdApiKeys             ApiKey[]
+  updatedYaraRules           YaraRule[]
+  createdEmailPolicies       EmailPolicy[]
+  publishedPolicyVersions    PolicyVersion[]
+  createdPolicyExceptions    PolicyException[]
+  createdSuppressions        DeliverySuppression[]
+  quarantineMessages         QuarantineMessage[]
+  quarantineActions          QuarantineAction[]
+  createdLegalHolds          ArchiveLegalHold[]       @relation("LegalHoldCreatedBy")
+  releasedLegalHolds         ArchiveLegalHold[]       @relation("LegalHoldReleasedBy")
+  createdWebhooks            WebhookSubscription[]
+  updatedSystemSettings      SystemSetting[]
+  createdSmtpConnectors      SmtpConnector[]
+  createdRecipients          DomainRecipientAddress[]
+  updatedScanEngineSettings  ScanEngineSetting[]
+  addedMalwareSignatures     MalwareSignature[]
+  requestedAttachmentRescans AttachmentRescanJob[]
 
   @@unique([organizationId, email])
   @@index([organizationId, status])
@@ -1439,7 +1491,8 @@ model EmailAttachment {
   organizationId      BigInt                 @map("organization_id") @db.UnsignedBigInt
   /// Index of the leaf in the parse structure (email_message_parses.structure, step 3.1 M9).
   partIndex           Int                    @map("part_index") @db.UnsignedSmallInt
-  /// Set for files extracted from archives (step 4.2); step 3.1 leaves it NULL.
+  /// Unused, always NULL (step 4.2 A18: archive entries are not rows; they are findings of their
+  /// attachment's attachment_scan_results row).
   parentPartIndex     Int?                   @map("parent_part_index") @db.UnsignedSmallInt
   /// Step 3.1 M9: MIME part path of the leaf (for example `1.2.1`); NULL for rows before 3.1.
   partPath            String?                @map("part_path") @db.VarChar(128)
@@ -1471,6 +1524,7 @@ model EmailAttachment {
   /// maxRatio, encryptedEntries, nestedArchives }`. Numbers and the type only, never entry
   /// names. NULL when the part is not an archive.
   archiveInfo         Json?                  @map("archive_info")
+  /// Not written (step 4.2 A18: per-round results are in attachment_scan_results).
   verdict             AttachmentVerdict?
   createdAt           DateTime               @default(now()) @map("created_at") @db.DateTime(3)
   updatedAt           DateTime               @updatedAt @map("updated_at") @db.DateTime(3)
@@ -1662,7 +1716,8 @@ model ScanEngineResult {
   scanId          BigInt        @map("scan_id") @db.UnsignedBigInt
   messageId       BigInt        @map("message_id") @db.UnsignedBigInt
   organizationId  BigInt        @map("organization_id") @db.UnsignedBigInt
-  /// rspamd, clamav, yara, url, bec, dlp, sandbox, reputation.
+  /// ENGINE_NAMES of @email-gateway/security-contracts: rspamd, attachment, url, bec, dlp,
+  /// sandbox (step 4.2 A1: ClamAV and YARA are components of the `attachment` engine).
   engine          String        @db.VarChar(32)
   engineVersion   String?       @map("engine_version") @db.VarChar(64)
   outcome         EngineOutcome
@@ -1741,6 +1796,155 @@ model ScanEngineSetting {
 
   @@unique([organizationId, engine])
   @@map("scan_engine_settings")
+}
+
+/// PARTITIONED by RANGE COLUMNS(received_at), monthly (6 months, core; step 4.2 §3, A18). One row
+/// per attachment per scan round with a definite final result of the `attachment` engine,
+/// written only in that final row's finalize transaction (unique per (scan, attachment)). Hashes,
+/// sizes, type ids, signature and rule names, counts and codes only: never file content, never a
+/// filename, never an archive entry name (entries are index paths). No foreign keys.
+model AttachmentScanResult {
+  id                  BigInt                @default(autoincrement()) @db.UnsignedBigInt
+  receivedAt          DateTime              @map("received_at") @db.DateTime(3)
+  messageId           BigInt                @map("message_id") @db.UnsignedBigInt
+  organizationId      BigInt                @map("organization_id") @db.UnsignedBigInt
+  /// email_scans.id of the round.
+  scanId              BigInt                @map("scan_id") @db.UnsignedBigInt
+  /// email_attachments.id of the scanned attachment.
+  attachmentId        BigInt                @map("attachment_id") @db.UnsignedBigInt
+  partIndex           Int                   @map("part_index") @db.UnsignedSmallInt
+  /// Hex SHA-256 of the decoded attachment bytes.
+  sha256              String                @db.Char(64)
+  sizeBytes           Int                   @map("size_bytes") @db.UnsignedInt
+  /// FILE_TYPES id of the detected type (A5).
+  detectedType        String                @map("detected_type") @db.VarChar(32)
+  /// FILE_TYPES family of the detected type (A5).
+  typeFamily          String                @map("type_family") @db.VarChar(16)
+  typeMismatch        Boolean               @map("type_mismatch")
+  verdict             AttachmentScanVerdict
+  /// JSON array (≤ 32) of ATTACHMENT_REASON_CODES.
+  reasonCodes         Json                  @map("reason_codes")
+  /// ClamAV signature name when ClamAV reported FOUND; NULL when clean or not scanned.
+  clamavSignature     String?               @map("clamav_signature") @db.VarChar(128)
+  clamavEngineVersion String?               @map("clamav_engine_version") @db.VarChar(32)
+  clamavDbVersion     Int?                  @map("clamav_db_version") @db.UnsignedInt
+  yaraBundleId        String?               @map("yara_bundle_id") @db.VarChar(48)
+  /// JSON array (≤ 32) of `{ rule, severity, scope }`; rule names only, never matched strings.
+  yaraMatches         Json?                 @map("yara_matches")
+  /// `{ format, supported, entries, depthReached, decompressedBytes, maxRatio, encrypted,
+  /// findings[≤ 20] { path, type, reasonCodes } }` (A16); index paths, never entry names.
+  archive             Json?
+  /// Most severe malware_signatures hit of the attachment or an archive entry.
+  knownHashSeverity   Severity?             @map("known_hash_severity")
+  cacheResult         AttachmentCacheResult @map("cache_result")
+  /// Content version of the cache key (A9); NULL when the content was not scanned.
+  contentVersion      String?               @map("content_version") @db.Char(16)
+  durationMs          Int                   @map("duration_ms") @db.UnsignedInt
+  createdAt           DateTime              @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@id([id, receivedAt])
+  @@unique([scanId, attachmentId, receivedAt])
+  @@index([organizationId, sha256])
+  @@index([messageId, receivedAt])
+  @@map("attachment_scan_results")
+}
+
+/// PARTITIONED by RANGE COLUMNS(received_at), monthly (6 months, core; step 4.2 §3, A11). One row
+/// per attachment of a round submitted to the sandbox, written in the attachment engine's
+/// finalize transaction together with the `mail.attachment.sandbox_requested.v1` outbox row. The
+/// part is referenced by its S3 key only. `external_ref`, `sandbox_verdict` and `completed_at`
+/// are reserved for the sandbox orchestrator (step 4.6). No foreign keys.
+model SandboxSubmission {
+  id                BigInt                   @default(autoincrement()) @db.UnsignedBigInt
+  receivedAt        DateTime                 @map("received_at") @db.DateTime(3)
+  messageId         BigInt                   @map("message_id") @db.UnsignedBigInt
+  organizationId    BigInt                   @map("organization_id") @db.UnsignedBigInt
+  scanId            BigInt                   @map("scan_id") @db.UnsignedBigInt
+  attachmentId      BigInt                   @map("attachment_id") @db.UnsignedBigInt
+  partIndex         Int                      @map("part_index") @db.UnsignedSmallInt
+  sha256            String                   @db.Char(64)
+  sizeBytes         Int                      @map("size_bytes") @db.UnsignedInt
+  detectedType      String                   @map("detected_type") @db.VarChar(32)
+  /// `org/{organizationId}/part/…` (email_attachments.object_key of the attachment).
+  objectKey         String                   @map("object_key") @db.VarChar(512)
+  attachmentVerdict SandboxAttachmentVerdict @map("attachment_verdict")
+  /// JSON array (≤ 16) of ATTACHMENT_REASON_CODES.
+  reasonCodes       Json                     @map("reason_codes")
+  status            SandboxSubmissionStatus  @default(pending)
+  /// Envelope event id of the sandbox_requested.v1 outbox row.
+  requestedEventId  String                   @map("requested_event_id") @db.Char(36)
+  /// Reserved for step 4.6: the sandbox's own reference.
+  externalRef       String?                  @map("external_ref") @db.VarChar(128)
+  /// Reserved for step 4.6: the sandbox verdict.
+  sandboxVerdict    String?                  @map("sandbox_verdict") @db.VarChar(16)
+  /// Reserved for step 4.6.
+  completedAt       DateTime?                @map("completed_at") @db.DateTime(3)
+  createdAt         DateTime                 @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt         DateTime                 @updatedAt @map("updated_at") @db.DateTime(3)
+
+  @@id([id, receivedAt])
+  @@unique([scanId, attachmentId, receivedAt])
+  @@index([status, createdAt])
+  @@index([sha256])
+  @@map("sandbox_submissions")
+}
+
+/// Bulk attachment rescan jobs (step 4.2 A13): written by the api (`admin`) or the signature
+/// watcher (`signature_update`), executed by the email-worker's rescan runner through lifecycle
+/// edge E19 (role scanner, reason signature_rescan). `organization_id` NULL = every organization.
+/// `dedupe_key` (`sig:<component>:<version>`) makes the fleet create one job per signature change.
+model AttachmentRescanJob {
+  id                BigInt                  @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId          String                  @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  trigger           AttachmentRescanTrigger
+  status            AttachmentRescanStatus  @default(pending)
+  dedupeKey         String?                 @unique @map("dedupe_key") @db.VarChar(128)
+  organizationId    BigInt?                 @map("organization_id") @db.UnsignedBigInt
+  windowStart       DateTime                @map("window_start") @db.DateTime(3)
+  windowEnd         DateTime                @map("window_end") @db.DateTime(3)
+  /// JSON array of message states the job selects (A13).
+  states            Json
+  /// Signature component of a `signature_update` job (`clamav_db`, `clamav_engine`, `yara_bundle`).
+  component         String?                 @db.VarChar(32)
+  fromVersion       String?                 @map("from_version") @db.VarChar(128)
+  toVersion         String?                 @map("to_version") @db.VarChar(128)
+  maxMessages       Int                     @map("max_messages") @db.UnsignedInt
+  /// Keyset cursor `(received_at, message id)` of the last processed candidate.
+  cursorReceivedAt  DateTime?               @map("cursor_received_at") @db.DateTime(3)
+  cursorMessageId   BigInt?                 @map("cursor_message_id") @db.UnsignedBigInt
+  selectedCount     Int                     @default(0) @map("selected_count") @db.UnsignedInt
+  requestedCount    Int                     @default(0) @map("requested_count") @db.UnsignedInt
+  skippedCount      Int                     @default(0) @map("skipped_count") @db.UnsignedInt
+  requestedByUserId BigInt?                 @map("requested_by_user_id") @db.UnsignedBigInt
+  reason            String?                 @db.VarChar(512)
+  /// Error code or bounded message of a failed job; never content.
+  lastError         String?                 @map("last_error") @db.VarChar(512)
+  startedAt         DateTime?               @map("started_at") @db.DateTime(3)
+  completedAt       DateTime?               @map("completed_at") @db.DateTime(3)
+  createdAt         DateTime                @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt         DateTime                @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  requestedBy  User?         @relation(fields: [requestedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt])
+  @@map("attachment_rescan_jobs")
+}
+
+/// Versions of a scan engine's signature components seen by the signature watcher (step 4.2
+/// A13): engine `attachment`, component `clamav_db`, `clamav_engine` or `yara_bundle`. Platform
+/// catalog (no tenant data).
+model ScanSignatureVersion {
+  id          BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  engine      String   @db.VarChar(32)
+  component   String   @db.VarChar(32)
+  version     String   @db.VarChar(128)
+  firstSeenAt DateTime @map("first_seen_at") @db.DateTime(3)
+  lastSeenAt  DateTime @map("last_seen_at") @db.DateTime(3)
+
+  @@unique([engine, component, version])
+  @@index([engine, component, firstSeenAt])
+  @@map("scan_signature_versions")
 }
 
 /// `organization_id` NULL = platform-wide intelligence.
@@ -1829,19 +2033,32 @@ model UrlReputation {
   @@map("url_reputation")
 }
 
-/// Platform catalog.
+/// Platform catalog of known-threat file hashes (step 4.2 A17), platform-wide by design (never
+/// tenant-scoped). Written by the api's threat-hash routes (`source = 'analyst'`); `feed:<name>`
+/// (future feeds) and `sandbox` (step 4.6) are the other sources. Read by the attachment engine
+/// on every scan (never cached). Delete is a hard delete (the audit log keeps the before-image).
 model MalwareSignature {
-  id          BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
-  sha256      String   @unique @db.Char(64)
-  md5         String?  @db.Char(32)
-  family      String?  @db.VarChar(128)
-  severity    Severity
-  source      String   @db.VarChar(64)
-  firstSeenAt DateTime @map("first_seen_at") @db.DateTime(3)
-  lastSeenAt  DateTime @map("last_seen_at") @db.DateTime(3)
-  createdAt   DateTime @default(now()) @map("created_at") @db.DateTime(3)
-  updatedAt   DateTime @updatedAt @map("updated_at") @db.DateTime(3)
+  id            BigInt    @id @default(autoincrement()) @db.UnsignedBigInt
+  sha256        String    @unique @db.Char(64)
+  md5           String?   @db.Char(32)
+  family        String?   @db.VarChar(128)
+  severity      Severity
+  /// `analyst`, `feed:<name>` or `sandbox`.
+  source        String    @db.VarChar(64)
+  firstSeenAt   DateTime  @map("first_seen_at") @db.DateTime(3)
+  lastSeenAt    DateTime  @map("last_seen_at") @db.DateTime(3)
+  createdAt     DateTime  @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt     DateTime  @updatedAt @map("updated_at") @db.DateTime(3)
+  /// The analyst who added the hash (NULL for feeds and the sandbox, or after the user is deleted).
+  addedByUserId BigInt?   @map("added_by_user_id") @db.UnsignedBigInt
+  /// Why the hash was added (analyst input; no file content).
+  reason        String?   @db.VarChar(512)
+  /// The lookup ignores the row after this instant; NULL = no expiry.
+  expiresAt     DateTime? @map("expires_at") @db.DateTime(3)
 
+  addedBy User? @relation(fields: [addedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([source, createdAt])
   @@map("malware_signatures")
 }
 

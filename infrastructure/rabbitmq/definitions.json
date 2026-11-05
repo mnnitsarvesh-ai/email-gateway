@@ -1,5 +1,5 @@
 {
-  "topology_version": 3,
+  "topology_version": 4,
   "exchanges": [
     {
       "name": "email.ingestion",
@@ -528,9 +528,12 @@
       "apply-to": "queues",
       "priority": 10,
       "definition": {
-        "delivery-limit": -1,
-        "max-length": 10000,
-        "overflow": "drop-head"
+        "delivery-limit": 20,
+        "dead-letter-exchange": "email.events",
+        "dead-letter-routing-key": "dead-letter.scan.attachment",
+        "dead-letter-strategy": "at-least-once",
+        "overflow": "reject-publish",
+        "max-length": 1000000
       }
     },
     {

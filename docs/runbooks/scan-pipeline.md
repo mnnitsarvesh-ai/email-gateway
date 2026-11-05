@@ -2,6 +2,8 @@
 
 Step 4.1 ([design](../plan/steps/09-rspamd.md), [ADR-0026](../architecture/adr/0026-security-scan-pipeline.md), [ADR-0027](../architecture/adr/0027-rspamd-milter-policy.md), Rspamd deployment: [rspamd.md](../deployment/rspamd.md)). The scan stage is the **scan role** of the email-worker (`SCAN_ENABLED`; production Deployment `email-worker-scan`). Every alert of `infrastructure/monitoring/rules/scanning.rules.yml` links a section of this page.
 
+**Attachment engine (step 4.2):** ClamAV, YARA, the inspector, the content cache, signature updates and rescan jobs have their own runbook, [attachment-scanning.md](attachment-scanning.md) (alerts of `attachment-scanning.rules.yml`). The generic alerts below apply to it with `engine="attachment"`; since step 4.2 both `rspamd` and `attachment` are required in every round.
+
 **Rules that hold in every procedure below:**
 
 - **Never clean by accident.** A timeout, error, open breaker, missing EML, unparseable reply or deadline is never `clean`. A round whose required engine failed ends `scan_failed` and waits for policy (the 5.2 fail-safe). Do not "fix" a failed round by editing rows: rescan it.

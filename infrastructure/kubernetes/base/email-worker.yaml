@@ -44,7 +44,7 @@ spec:
             - { name: MIME_RETRY_BASE_MS, value: '1000' }
             - { name: MIME_RETRY_MAX_MS, value: '60000' }
             - { name: MIME_MAX_ATTEMPTS, value: '5' }
-            - { name: MIME_DB_TIMEOUT_MS, value: '15000' }
+            - { name: MIME_DB_TIMEOUT_MS, value: '120000' }
             - { name: MIME_S3_TIMEOUT_MS, value: '30000' }
             - { name: MIME_S3_PART_SIZE_BYTES, value: '5242880' }
             - { name: MIME_S3_QUEUE_SIZE, value: '2' }
@@ -197,10 +197,12 @@ spec:
             - configMapRef: { name: email-gateway-config }
           env:
             - { name: HTTP_PORT, value: '3020' }
-            # The scan role only (S1).
+            # The scan role only (S1), Rspamd consumers only (step 4.2 A1): the attachment
+            # engine runs in email-worker-attachment. SCAN_ENGINES (both engines required in
+            # every round) comes from the ConfigMap, identical on every scan replica.
             - { name: MIME_INGESTION_ENABLED, value: 'false' }
             - { name: SCAN_ENABLED, value: 'true' }
-            - { name: SCAN_ENGINES, value: rspamd }
+            - { name: SCAN_CONSUMERS, value: rspamd }
             # Security scanning (step 4.1 §5, S5, S8, S10); defaults. SCAN_RSPAMD_URL,
             # RSPAMD_CONTROLLER_URL and the SCAN_RSPAMD_* platform thresholds come from the
             # ConfigMap (shared with the api).
@@ -211,7 +213,7 @@ spec:
             - { name: SCAN_RETRY_BASE_MS, value: '2000' }
             - { name: SCAN_RETRY_MAX_MS, value: '60000' }
             - { name: SCAN_S3_TIMEOUT_MS, value: '30000' }
-            - { name: SCAN_DB_TIMEOUT_MS, value: '15000' }
+            - { name: SCAN_DB_TIMEOUT_MS, value: '120000' }
             - { name: SCAN_ROUND_DEADLINE_SECONDS, value: '1800' }
             - { name: SCAN_SWEEP_INTERVAL_MS, value: '30000' }
             - { name: SCAN_SWEEP_LOOKBACK_HOURS, value: '48' }

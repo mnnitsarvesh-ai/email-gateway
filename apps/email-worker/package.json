@@ -7,13 +7,16 @@
     "dev": "nest start --watch --exec \"node --env-file-if-exists=../../.env\"",
     "start": "node dist/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "eslint src integration",
-    "test": "vitest run --dir src",
-    "test:integration": "vitest run --config vitest.integration.config.ts"
+    "lint": "eslint src integration bench",
+    "test": "node yara/bundle.mjs --check && vitest run --dir src",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "yara:bundle": "node yara/bundle.mjs --check",
+    "bench:attachments": "tsx bench/attachment-bench.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.890.0",
     "@aws-sdk/lib-storage": "^3.1152.0",
+    "@email-gateway/clamav": "workspace:*",
     "@email-gateway/common": "workspace:*",
     "@email-gateway/config": "workspace:*",
     "@email-gateway/database": "workspace:*",
@@ -24,19 +27,26 @@
     "@email-gateway/rspamd": "workspace:*",
     "@email-gateway/security-contracts": "workspace:*",
     "@email-gateway/shared-types": "workspace:*",
+    "@litko/yara-x": "0.10.0",
     "@nestjs/common": "^11.1.6",
     "@nestjs/core": "^11.1.6",
     "@nestjs/platform-express": "^11.1.6",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
+    "tar-stream": "3.2.2",
+    "yauzl": "3.4.0",
     "zod": "^4.1.5"
   },
   "devDependencies": {
+    "@email-gateway/attachment-corpus": "workspace:*",
     "@nestjs/cli": "^11.0.10",
     "@nestjs/testing": "^11.1.6",
     "@swc/core": "^1.13.5",
     "@types/express": "^5.0.3",
+    "@types/tar-stream": "3.1.5",
+    "@types/yauzl": "3.4.0",
     "@types/yazl": "3.3.1",
+    "tsx": "4.23.15",
     "unplugin-swc": "^1.5.7",
     "yazl": "3.3.1"
   }

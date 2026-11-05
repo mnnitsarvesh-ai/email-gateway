@@ -12,6 +12,7 @@ const config = loadWorkerConfig({
   RABBITMQ_SCANNER_URL: 'amqp://a:b@localhost:5672/v',
   SCAN_RSPAMD_URL: 'http://127.0.0.1:11333',
   REDIS_URL: 'redis://localhost:6379',
+  ATTACHMENT_CACHE_HMAC_KEY: 'test-content-cache-mac-key-0123456789',
   S3_REGION: 'ap-south-1',
   S3_BUCKET_MAIL: 'test-mail',
   S3_BUCKET_ARCHIVE: 'test-archive',

@@ -6,11 +6,11 @@ import {
   type OnModuleInit,
   Optional,
 } from '@nestjs/common';
-import { PrismaClient } from '@email-gateway/database';
+import { databaseClientUrl, PrismaClient } from '@email-gateway/database';
 import type { HealthDetails } from '@email-gateway/shared-types';
 import type { HealthIndicator } from '../health/health-indicator';
 import { DATABASE_READ_OPTIONS, type DatabaseReadOptions } from './database.options';
-import { PrismaService } from './prisma.service';
+import { PrismaService, socketTimeoutOf } from './prisma.service';
 
 /**
  * Optional provider of a `(url) => PrismaClient` factory for the replica client. Tests use it to
@@ -84,7 +84,11 @@ export class PrismaReadService implements OnModuleInit, OnModuleDestroy, HealthI
     createReaderClient: ReaderClientFactory = defaultReaderClientFactory,
   ) {
     // PrismaClient connects lazily on first query, so a down replica cannot fail construction.
-    this.reader = options.url ? createReaderClient(options.url) : undefined;
+    this.reader = options.url
+      ? createReaderClient(
+          databaseClientUrl(options.url, { socketTimeoutSeconds: socketTimeoutOf(options) }),
+        )
+      : undefined;
     this.current = this.reader
       ? this.fallback('not probed yet', null)
       : { mode: 'writer-only', lagSeconds: null, maxLagSeconds: options.maxLagSeconds };

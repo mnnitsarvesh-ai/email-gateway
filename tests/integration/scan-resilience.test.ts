@@ -16,9 +16,10 @@ import { buildMessage } from './support/messages';
 import { record } from './support/messaging-stack';
 import { MAIL_SINK_HOST, organizationRef, sleep } from './support/routing';
 import {
-  engineResultsOf,
+  engineResultsOf as allEngineResultsOf,
   ensureRspamdRunning,
   messagePublicId,
+  REQUIRED_ENGINES,
   scannedEventsOf,
   scanRoundsOf,
   scanStackGate,
@@ -49,6 +50,11 @@ import { reply } from './support/smtp-tools';
  *    result, round 0's rows stay exactly as they were, and round 1 is approved and delivered.
  *
  * `afterAll` always starts Rspamd again and waits for its health check.
+ *
+ * Step 4.2: every round also requires the `attachment` engine (A1); these messages have no
+ * attachments, so its final is `skipped` (`attachment.none`, rule A0) at the first attempt and
+ * the assertions on attempts below are about the Rspamd rows. The ClamAV outage is
+ * attachment-resilience.test.ts.
  */
 const gate = await scanStackGate();
 const fx = new SmtpFixtures();
@@ -57,6 +63,24 @@ let domain: FixtureDomain;
 let session: ApiSession | undefined;
 let failedMessage: { id: bigint; receivedAt: Date; publicId: string } | undefined;
 const maxAttempts = Number(process.env.SCAN_RSPAMD_MAX_ATTEMPTS ?? 6);
+
+/** The Rspamd rows of a message (attempts and finals). */
+async function engineResultsOf(
+  prisma: typeof fx.prisma,
+  message: { id: bigint; receivedAt: Date },
+) {
+  return (await allEngineResultsOf(prisma, message)).filter((r) => r.engine === 'rspamd');
+}
+
+/** The attachment engine's single final of every round: `skipped`, `attachment.none`. */
+async function expectAttachmentSkipped(message: { id: bigint; receivedAt: Date }, rounds: number) {
+  const rows = (await allEngineResultsOf(fx.prisma, message)).filter(
+    (r) => r.engine === 'attachment',
+  );
+  expect(rows.map((r) => [r.isFinal, r.attempt, r.outcome, r.reasonCodes])).toEqual(
+    Array.from({ length: rounds }, () => [true, 1, 'skipped', ['attachment.none']]),
+  );
+}
 
 beforeAll(async () => {
   assertStackReady(gate);
@@ -126,7 +150,15 @@ describe.skipIf(gate.skip)('scan stack: Rspamd outage', { timeout: 600_000 }, ()
       // Milter unreachable → default action accept (no tempfail).
       expect(reply(sent, 'DATA-END').code, sent.transcript).toBe(250);
       const message = await waitForMessage(fx.prisma, org, { mtaQueueId: sent.queueId! });
-      const failed = await waitForEngineRows(fx.prisma, message, 1);
+      await waitForEngineRows(fx.prisma, message, 1);
+      const failed = await waitFor(
+        'a failed Rspamd attempt',
+        async () => {
+          const rows = await engineResultsOf(fx.prisma, message);
+          return rows.length > 0 ? rows : undefined;
+        },
+        { timeoutMs: 120_000, intervalMs: 250 },
+      );
       expect(failed.every((r) => !r.isFinal)).toBe(true);
       expect(failed.every((r) => r.outcome === 'error' || r.outcome === 'timeout')).toBe(true);
       expect((await lifecycleOf(fx.prisma, message)).status).toBe('scanning');
@@ -152,11 +184,17 @@ describe.skipIf(gate.skip)('scan stack: Rspamd outage', { timeout: 600_000 }, ()
       expect(attempts.length + 1).toBeLessThanOrEqual(maxAttempts);
       expect(['error', 'timeout']).not.toContain(finals[0]!.outcome);
       expect(round.scanVerdict).toBe(finals[0]!.outcome);
+      expect(round.requiredEngines).toEqual([...REQUIRED_ENGINES]);
+      await expectAttachmentSkipped(message, 1);
       const [scanned] = await scannedEventsOf(fx.prisma, org, message);
-      expect(messageScannedV1.parse(scanned!.payload)).toMatchObject({
-        outcome: 'scanned',
-        engines: [{ engine: 'rspamd', attempts: attempts.length + 1 }],
-      });
+      const recovered = messageScannedV1.parse(scanned!.payload);
+      expect(recovered.outcome).toBe('scanned');
+      expect(recovered.engines).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ engine: 'rspamd', attempts: attempts.length + 1 }),
+          expect.objectContaining({ engine: 'attachment', outcome: 'skipped', attempts: 1 }),
+        ]),
+      );
 
       await waitForLifecycle(fx.prisma, message, 'delivered', 'delivery_complete');
       expect((await pathOf(fx.prisma, message)).slice(2, 5)).toEqual([
@@ -200,13 +238,18 @@ describe.skipIf(gate.skip)('scan stack: Rspamd outage', { timeout: 600_000 }, ()
       // Never clean: every row, final or not, is a failure.
       expect(rows.every((r) => r.outcome === 'error' || r.outcome === 'timeout')).toBe(true);
       expect(rows.every((r) => r.errorCode !== null)).toBe(true);
+      await expectAttachmentSkipped(message, 1);
       await waitForLifecycle(fx.prisma, message, 'scan_failed', 'scan_error');
       const [scanned] = await scannedEventsOf(fx.prisma, org, message);
-      expect(messageScannedV1.parse(scanned!.payload)).toMatchObject({
-        outcome: 'scan_failed',
-        verdict: 'error',
-        engines: [{ engine: 'rspamd', required: true, outcome: 'error', attempts: maxAttempts }],
-      });
+      const failedPayload = messageScannedV1.parse(scanned!.payload);
+      expect(failedPayload).toMatchObject({ outcome: 'scan_failed', verdict: 'error' });
+      expect(failedPayload.engines).toEqual(
+        expect.arrayContaining([
+          { engine: 'rspamd', required: true, outcome: 'error', attempts: maxAttempts },
+          { engine: 'attachment', required: true, outcome: 'skipped', attempts: 1 },
+        ]),
+      );
+      expect(failedPayload.engines).toHaveLength(2);
 
       // The pass-through skips it: no approval, no delivery, the state stays scan_failed.
       await waitFor(
@@ -270,9 +313,10 @@ describe.skipIf(gate.skip)('scan stack: Rspamd outage', { timeout: 600_000 }, ()
       scanKind: 'rescan',
       status: 'completed',
       triggerEventId: rescanEventId,
-      requiredEngines: ['rspamd'],
+      requiredEngines: [...REQUIRED_ENGINES],
     });
     expect(['error', 'timeout']).not.toContain(round1.scanVerdict);
+    await expectAttachmentSkipped(message, 2);
     const all = await engineResultsOf(fx.prisma, message);
     const round1Rows = all.filter((r) => r.scanId === round1.id);
     expect(round1Rows.filter((r) => r.isFinal)).toHaveLength(1);

@@ -5,5 +5,5 @@
     "rootDir": ".",
     "types": ["node"]
   },
-  "include": ["src", "integration"]
+  "include": ["src", "integration", "bench"]
 }

@@ -71,7 +71,7 @@ describe('seed catalog', () => {
   const sorted = (list: readonly string[]) => [...list].sort();
   const role = (key: string) => SYSTEM_ROLES.find((r) => r.key === key)!.permissions;
 
-  it('contains the 39 permissions of D7, D8, steps 2.1 D14, 2.2, 2.3, 3.2, 3.3 and 4.1, without duplicates', () => {
+  it('contains the 41 permissions of D7, D8, steps 2.1 D14, 2.2, 2.3, 3.2, 3.3, 4.1 and 4.2, without duplicates', () => {
     expect(new Set(keys).size).toBe(keys.length);
     expect(sorted(keys)).toEqual(
       sorted([
@@ -114,14 +114,16 @@ describe('seed catalog', () => {
         'platform:dead_letter_replay',
         'scan:settings_manage',
         'platform:scan_training',
+        'platform:threat_intel_manage',
+        'platform:scan_rescan',
       ]),
     );
-    expect(keys).toHaveLength(39);
+    expect(keys).toHaveLength(41);
     // Step 3.3 placed message:rescan next to the other message permissions (design §3.3); the
     // seed upserts by key, so on an existing database it simply gets the next id.
     expect(keys.indexOf('message:rescan')).toBe(keys.indexOf('message:read_content') + 1);
     // Otherwise appended in catalog order (permission ids follow it on a fresh database).
-    expect(keys.slice(-7)).toEqual([
+    expect(keys.slice(-9)).toEqual([
       'connector:read',
       'connector:manage',
       'domain:routing_manage',
@@ -129,6 +131,8 @@ describe('seed catalog', () => {
       'platform:dead_letter_replay',
       'scan:settings_manage',
       'platform:scan_training',
+      'platform:threat_intel_manage',
+      'platform:scan_rescan',
     ]);
     for (const key of keys) expect(key).toMatch(/^[a-z]+:[a-z_]+$/);
     for (const p of PERMISSIONS) expect(p.description.length, p.key).toBeGreaterThan(0);
@@ -139,8 +143,10 @@ describe('seed catalog', () => {
       'platform:dead_letter_replay',
       'platform:operations',
       'platform:organizations',
+      'platform:scan_rescan',
       'platform:scan_training',
       'platform:tenant_override',
+      'platform:threat_intel_manage',
     ]);
     expect(TENANT_PERMISSIONS.some((p) => p.startsWith('platform:'))).toBe(false);
     expect(sorted([...TENANT_PERMISSIONS, ...PLATFORM_PERMISSIONS])).toEqual(sorted(keys));
@@ -211,6 +217,8 @@ describe('seed catalog', () => {
         'platform:tenant_override',
         'platform:dead_letter_replay',
         'platform:scan_training',
+        'platform:threat_intel_manage',
+        'platform:scan_rescan',
         ...read,
         'audit:read',
       ],
@@ -314,6 +322,18 @@ describe('seed catalog', () => {
     // Step 4.1 (S13): training the shared classifiers is platform-only.
     expect(holders('platform:scan_training')).toEqual(['super_admin', 'platform_admin']);
     expect(PLATFORM_PERMISSIONS).toContain('platform:scan_training');
+    // Step 4.2 (A13, A16, A17): the hash catalog and bulk rescans are platform-only.
+    for (const key of ['platform:threat_intel_manage', 'platform:scan_rescan'] as const) {
+      expect(holders(key), key).toEqual(['super_admin', 'platform_admin']);
+      expect(PLATFORM_PERMISSIONS).toContain(key);
+      expect(TENANT_PERMISSIONS).not.toContain(key);
+    }
+    expect(PERMISSIONS.find((p) => p.key === 'platform:threat_intel_manage')?.description).toBe(
+      "Manage the platform's known-threat file hashes",
+    );
+    expect(PERMISSIONS.find((p) => p.key === 'platform:scan_rescan')?.description).toBe(
+      'Start and cancel bulk attachment rescans',
+    );
   });
 
   it('maps every retired step-1.1 role key to an existing, non-retired role', () => {

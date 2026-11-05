@@ -1,8 +1,17 @@
-# Messaging topology (RabbitMQ, topology v3)
+# Messaging topology (RabbitMQ, topology v4)
 
 The reference for the RabbitMQ broker objects of the gateway: exchanges, queues, bindings, routing keys, headers, policies, dead-letter paths, retry hops, the dormant-queue rule, users and permissions, and provisioning. Decisions: [ADR-0024](adr/0024-rabbitmq-topology-retry-dead-letter.md) (topology, retry, dead-letter, replay, least privilege; supersedes ADR-0005) and [ADR-0023](adr/0023-outbox-relay-and-reconciliation.md) (outbox relay and reconciliation). Design: [step 3.2](../plan/steps/07-rabbitmq.md) (§ and Q references below point there).
 
 ## Status
+
+**Topology v4 (step 4.2, [design A2](../plan/steps/10-attachment-scanning.md#a2-topology-v4-and-the-sandbox-contract), [ADR-0028](adr/0028-attachment-scanning-engine.md)).** `TOPOLOGY_VERSION = 4`; the six exchanges and the fourteen queues are unchanged, and so are the 35 bindings:
+
+- `scan.attachment` becomes a **work** queue: the attachment engine of the email-worker scan role (ledger consumer `email-worker.scan.attachment`, broker user `eg-scanner`, the same user as `scan.spam`: same image and bounded context, ADR-0028), the work policy (delivery limit 20, dead-letter `dead-letter.scan.attachment`, `reject-publish`, max length 1 000 000) and retry `hold`, 10 attempts, 2 s–60 s, 24 h (the engine's own budget `SCAN_ATTACHMENT_MAX_ATTEMPTS`, 6, finalizes first). Bindings unchanged (`parsed.v1`, `rescan_requested.v1`, `retry.scan.attachment.#`). Description "Attachments: file type, known hashes, ClamAV, YARA, archive limits (step 4.2)".
+- **`mail.attachment.sandbox_requested.v1` is registered** (it was reserved since step 3.2): exchange `email.security`, outbox `aggregate_type = 'attachment'` (`aggregate_id` = `sandbox_submissions.id`), producer the email-worker's attachment engine, written in the finalize transaction of its final result together with the `sandbox_submissions` row; strict payload (ids, `receivedAt`, `direction`, `scanId`, `lifecycleRound`, `attachment { partIndex, sha256, sizeBytes, detectedType, objectKey }` with an `org/<id>/part/…` key, `attachmentVerdict` `suspicious` | `unknown`, ≤ 16 reason codes, `requestedAt`; no filename, no content). `RESERVED_EVENT_TYPES` is now empty (kept for future reservations). `scan.sandbox` stays **dormant** (planned 4.6), binding unchanged: it buffers the requests (drop-head, 10 000) until step 4.6.
+- **How step 4.6 consumes it** (contract, [A11](../plan/steps/10-attachment-scanning.md#a11-sandbox-submissions-contract-for-step-46)): `scan.sandbox` becomes a work queue (topology v5) of the sandbox orchestrator (ledger consumer `sandbox-orchestrator.submissions`), which de-duplicates by `sha256`, reads the part through a read-only grant on `org/*/part/` keys after checking the key's organization against the envelope's `organizationId`, moves `sandbox_submissions.status` `pending → submitted → completed | failed | expired`, and emits `mail.attachment.sandbox_completed.v1` (defined in 4.6). The scan round never waits for it.
+- Provisioning: **`eg-scanner`** reads `^scan\.(spam|attachment)$` and publishes `^retry\.scan\.(spam|attachment)\.` on `email.security` and `^dead-letter\.scan\.(spam|attachment)(\.|$)` on `email.events`; **`eg-ops`** may replay `scan.attachment` dead letters (topic `^retry\.scan\.(spam|attachment)\.` on `email.security`). The scanner never publishes `sandbox_requested.v1` itself (outbox → relay, whose user already publishes `^org\.` keys to `email.security`). `init.mjs --users` sets and verifies the new grants exactly; the vhost description is `email-gateway topology v4`.
+- The reconciler may track `scan.attachment` (`RECONCILE_QUEUES=email.received,email.delivery.pending,scan.spam,scan.attachment`, env only). Dead-letter replay covers `scan.attachment` automatically (`REPLAYABLE_QUEUES` is derived from the work queues; the api's replay route description lists it).
+- Upgrading a broker: `pnpm rabbitmq:init` (or the Compose `rabbitmq-init`). The import replaces the `eg.scan.attachment` policy (dormant drop-head 10 000 → work reject-publish 1 000 000 with its dead-letter target); messages a v3 `scan.attachment` buffered stay in the queue and are consumed by the attachment engine once it runs (rounds whose message has moved on are stale, no effect). Test suites must no longer purge `scan.attachment` (it left `DORMANT_QUEUES` in `tests/integration/support/broker.ts`).
 
 **Topology v3 (step 4.1, [design S2](../plan/steps/09-rspamd.md#s2-what-starts-a-scan-and-through-which-queues-topology-v3), [ADR-0026](adr/0026-security-scan-pipeline.md)).** `TOPOLOGY_VERSION = 3`; the six exchanges and the fourteen queues are unchanged:
 
@@ -46,52 +55,53 @@ Six exchanges, all `topic`, durable, not auto-delete, not internal, no arguments
 | Exchange          | Carries (events published here, see the registry)                                                                              | Bound to `email.events` with `org.#` |
 | ----------------- | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------ |
 | `email.ingestion` | `mail.message.received.v1`, `mail.message.parsed.v1`, `mail.message.parse_failed.v1`                                           | yes                                  |
-| `email.security`  | `mail.message.scanned.v1`, `mail.message.rescan_requested.v1` (v2); reserved `mail.attachment.sandbox_requested.v1`            | yes                                  |
+| `email.security`  | `mail.message.scanned.v1`, `mail.message.rescan_requested.v1` (v2), `mail.attachment.sandbox_requested.v1` (v4)                | yes                                  |
 | `email.policy`    | `mail.policy.decided.v1`                                                                                                       | yes                                  |
 | `email.delivery`  | `mail.delivery.approved.v1`, `mail.delivery.status_changed.v1`                                                                 | yes                                  |
 | `email.archive`   | nothing yet (archive-stage outputs, 8.1)                                                                                       | yes                                  |
 | `email.events`    | `domain.status.changed.v1`, `domain.routing.changed.v1`, `mail.message.state_changed.v1` (v2); the firehose; every dead letter | –                                    |
 
-`mail.attachment.sandbox_requested.v1` is **reserved**: routed (the `scan.sandbox` binding exists) but without a schema until step 4.6; the relay refuses to publish a reserved type.
+`mail.attachment.sandbox_requested.v1` was **reserved** (routed, no schema) from step 3.2 to 4.1; step 4.2 registered its schema (v4). No type is reserved now; the relay refuses to publish an unregistered or reserved type.
 
 ## Queues
 
 Fourteen quorum queues (durable, `x-queue-type: quorum` is the **only** queue argument; everything mutable is a policy). Role decides the policy (below).
 
-| Queue                    | Role        | Home exchange     | Event bindings (exchange: key)                                                                                     | Consumer                                                                               | Retry policy                                             |
-| ------------------------ | ----------- | ----------------- | ------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| `email.received`         | work        | `email.ingestion` | `email.ingestion`: `org.*.mail.message.received.v1`                                                                | email-worker MIME ingestion, ledger `email-worker.mime-parser` (step 3.2 WP4)          | hold, 8 attempts, 1 s–60 s, 24 h                         |
-| `scan.auth`              | dormant     | `email.security`  | none (v3): reserved, only its retry binding                                                                        | none: authentication results come from the Rspamd engine on `scan.spam` (step 4.1)     | hold, 5, 1 s–60 s, 24 h                                  |
-| `scan.spam`              | work        | `email.security`  | `email.ingestion`: `org.*.mail.message.parsed.v1`; `email.security`: `org.*.mail.message.rescan_requested.v1` (v2) | email-worker scan role, Rspamd engine, ledger `email-worker.scan.rspamd` (step 4.1)    | hold, 10 attempts, 2 s–60 s, 24 h                        |
-| `scan.url`               | dormant     | `email.security`  | `email.ingestion`: `org.*.mail.message.parsed.v1`; `email.security`: `org.*.mail.message.rescan_requested.v1` (v2) | **step 4.3** (email-worker): URL protection                                            | hold, 5, 1 s–60 s, 24 h                                  |
-| `scan.attachment`        | dormant     | `email.security`  | `email.ingestion`: `org.*.mail.message.parsed.v1`; `email.security`: `org.*.mail.message.rescan_requested.v1` (v2) | **step 4.2** (email-worker): ClamAV + YARA                                             | hold, 5, 1 s–60 s, 24 h                                  |
-| `scan.dlp`               | dormant     | `email.security`  | `email.ingestion`: `org.*.mail.message.parsed.v1`; `email.security`: `org.*.mail.message.rescan_requested.v1` (v2) | **step 4.5** (email-worker): DLP                                                       | hold, 5, 1 s–60 s, 24 h                                  |
-| `scan.sandbox`           | dormant     | `email.security`  | `email.security`: `org.*.mail.attachment.sandbox_requested.v1` (reserved)                                          | **step 4.6**: sandbox orchestration                                                    | hold, 5, 1 s–60 s, 24 h                                  |
-| `email.policy.evaluate`  | dormant     | `email.policy`    | `email.security`: `org.*.mail.message.scanned.v1`; `email.ingestion`: `org.*.mail.message.parse_failed.v1`         | **steps 5.1/5.2** (policy-engine); parse failures go to the policy fail-safe (3.1 M13) | hold, 5, 1 s–60 s, 24 h                                  |
-| `email.delivery.pending` | work        | `email.delivery`  | `email.delivery`: `org.*.mail.delivery.approved.v1`                                                                | delivery-worker planner, ledger `delivery-worker.planner` (step 3.2 WP4)               | delay-queue `email.delivery.retry`, 10, 5 s–15 min, 48 h |
-| `email.delivery.retry`   | delay       | `email.delivery`  | none; internal binding `email.delivery`: `delay.email.delivery.pending.#`                                          | none by design: expired messages return to `email.delivery.pending`                    | –                                                        |
-| `email.quarantine`       | dormant     | `email.policy`    | `email.policy`: `org.*.mail.policy.decided.v1`                                                                     | **step 5.3**: quarantine (acts on `action = quarantine`)                               | hold, 5, 1 s–60 s, 24 h                                  |
-| `email.archive`          | dormant     | `email.archive`   | `email.policy`: `org.*.mail.policy.decided.v1`                                                                     | **step 8.1** (archive-worker; acts on `archive = true`)                                | hold, 5, 1 s–60 s, 24 h                                  |
-| `email.analytics`        | dormant     | `email.events`    | `email.events`: `org.#` (the firehose: every event of every exchange)                                              | ClickHouse ingestion (ADR-0009), **not scheduled yet**                                 | hold, 5, 1 s–60 s, 24 h                                  |
-| `email.dead-letter`      | dead-letter | `email.events`    | none; internal binding `email.events`: `dead-letter.#`                                                             | none: operators replay through the api (Q9, step 3.2 WP4)                              | –                                                        |
+| Queue                    | Role        | Home exchange     | Event bindings (exchange: key)                                                                                     | Consumer                                                                                    | Retry policy                                             |
+| ------------------------ | ----------- | ----------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| `email.received`         | work        | `email.ingestion` | `email.ingestion`: `org.*.mail.message.received.v1`                                                                | email-worker MIME ingestion, ledger `email-worker.mime-parser` (step 3.2 WP4)               | hold, 8 attempts, 1 s–60 s, 24 h                         |
+| `scan.auth`              | dormant     | `email.security`  | none (v3): reserved, only its retry binding                                                                        | none: authentication results come from the Rspamd engine on `scan.spam` (step 4.1)          | hold, 5, 1 s–60 s, 24 h                                  |
+| `scan.spam`              | work        | `email.security`  | `email.ingestion`: `org.*.mail.message.parsed.v1`; `email.security`: `org.*.mail.message.rescan_requested.v1` (v2) | email-worker scan role, Rspamd engine, ledger `email-worker.scan.rspamd` (step 4.1)         | hold, 10 attempts, 2 s–60 s, 24 h                        |
+| `scan.url`               | dormant     | `email.security`  | `email.ingestion`: `org.*.mail.message.parsed.v1`; `email.security`: `org.*.mail.message.rescan_requested.v1` (v2) | **step 4.3** (email-worker): URL protection                                                 | hold, 5, 1 s–60 s, 24 h                                  |
+| `scan.attachment`        | work (v4)   | `email.security`  | `email.ingestion`: `org.*.mail.message.parsed.v1`; `email.security`: `org.*.mail.message.rescan_requested.v1` (v2) | email-worker scan role, attachment engine, ledger `email-worker.scan.attachment` (step 4.2) | hold, 10 attempts, 2 s–60 s, 24 h                        |
+| `scan.dlp`               | dormant     | `email.security`  | `email.ingestion`: `org.*.mail.message.parsed.v1`; `email.security`: `org.*.mail.message.rescan_requested.v1` (v2) | **step 4.5** (email-worker): DLP                                                            | hold, 5, 1 s–60 s, 24 h                                  |
+| `scan.sandbox`           | dormant     | `email.security`  | `email.security`: `org.*.mail.attachment.sandbox_requested.v1` (registered v4)                                     | **step 4.6**: sandbox orchestration                                                         | hold, 5, 1 s–60 s, 24 h                                  |
+| `email.policy.evaluate`  | dormant     | `email.policy`    | `email.security`: `org.*.mail.message.scanned.v1`; `email.ingestion`: `org.*.mail.message.parse_failed.v1`         | **steps 5.1/5.2** (policy-engine); parse failures go to the policy fail-safe (3.1 M13)      | hold, 5, 1 s–60 s, 24 h                                  |
+| `email.delivery.pending` | work        | `email.delivery`  | `email.delivery`: `org.*.mail.delivery.approved.v1`                                                                | delivery-worker planner, ledger `delivery-worker.planner` (step 3.2 WP4)                    | delay-queue `email.delivery.retry`, 10, 5 s–15 min, 48 h |
+| `email.delivery.retry`   | delay       | `email.delivery`  | none; internal binding `email.delivery`: `delay.email.delivery.pending.#`                                          | none by design: expired messages return to `email.delivery.pending`                         | –                                                        |
+| `email.quarantine`       | dormant     | `email.policy`    | `email.policy`: `org.*.mail.policy.decided.v1`                                                                     | **step 5.3**: quarantine (acts on `action = quarantine`)                                    | hold, 5, 1 s–60 s, 24 h                                  |
+| `email.archive`          | dormant     | `email.archive`   | `email.policy`: `org.*.mail.policy.decided.v1`                                                                     | **step 8.1** (archive-worker; acts on `archive = true`)                                     | hold, 5, 1 s–60 s, 24 h                                  |
+| `email.analytics`        | dormant     | `email.events`    | `email.events`: `org.#` (the firehose: every event of every exchange)                                              | ClickHouse ingestion (ADR-0009), **not scheduled yet**                                      | hold, 5, 1 s–60 s, 24 h                                  |
+| `email.dead-letter`      | dead-letter | `email.events`    | none; internal binding `email.events`: `dead-letter.#`                                                             | none: operators replay through the api (Q9, step 3.2 WP4)                                   | –                                                        |
 
 Plus, on every work and dormant queue, exactly one **retry binding** `retry.<queue>.#` on its home exchange. 35 bindings in total (v1: 32, v2: 37): 30 queue bindings and the five exchange-to-exchange bindings `email.{ingestion,security,policy,delivery,archive}` → `email.events` (`org.#`).
 
 Where each event lands (`routeMessage`, asserted by `topology.test.ts`):
 
-| Event type                         | Queues                                                                                              |
-| ---------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `mail.message.received.v1`         | `email.received`, `email.analytics`                                                                 |
-| `mail.message.parsed.v1`           | `scan.spam`, `scan.url`, `scan.attachment`, `scan.dlp`, `email.analytics` (v3: not `scan.auth`)     |
-| `mail.message.parse_failed.v1`     | `email.policy.evaluate`, `email.analytics`                                                          |
-| `mail.message.scanned.v1`          | `email.policy.evaluate`, `email.analytics`                                                          |
-| `mail.policy.decided.v1`           | `email.quarantine`, `email.archive`, `email.analytics`                                              |
-| `mail.delivery.approved.v1`        | `email.delivery.pending`, `email.analytics`                                                         |
-| `mail.delivery.status_changed.v1`  | `email.analytics` (webhooks/notifications 6.2 add a queue later)                                    |
-| `domain.status.changed.v1`         | `email.analytics` (the smtp-adapter cache invalidation stays an outbox tail, Q13)                   |
-| `domain.routing.changed.v1`        | `email.analytics` (same)                                                                            |
-| `mail.message.state_changed.v1`    | `email.analytics` (v2; analytics and webhooks 6.2 consume it later)                                 |
-| `mail.message.rescan_requested.v1` | `scan.spam`, `scan.url`, `scan.attachment`, `scan.dlp`, `email.analytics` (v2; v3: not `scan.auth`) |
+| Event type                             | Queues                                                                                              |
+| -------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `mail.message.received.v1`             | `email.received`, `email.analytics`                                                                 |
+| `mail.message.parsed.v1`               | `scan.spam`, `scan.url`, `scan.attachment`, `scan.dlp`, `email.analytics` (v3: not `scan.auth`)     |
+| `mail.message.parse_failed.v1`         | `email.policy.evaluate`, `email.analytics`                                                          |
+| `mail.message.scanned.v1`              | `email.policy.evaluate`, `email.analytics`                                                          |
+| `mail.policy.decided.v1`               | `email.quarantine`, `email.archive`, `email.analytics`                                              |
+| `mail.delivery.approved.v1`            | `email.delivery.pending`, `email.analytics`                                                         |
+| `mail.delivery.status_changed.v1`      | `email.analytics` (webhooks/notifications 6.2 add a queue later)                                    |
+| `domain.status.changed.v1`             | `email.analytics` (the smtp-adapter cache invalidation stays an outbox tail, Q13)                   |
+| `domain.routing.changed.v1`            | `email.analytics` (same)                                                                            |
+| `mail.message.state_changed.v1`        | `email.analytics` (v2; analytics and webhooks 6.2 consume it later)                                 |
+| `mail.message.rescan_requested.v1`     | `scan.spam`, `scan.url`, `scan.attachment`, `scan.dlp`, `email.analytics` (v2; v3: not `scan.auth`) |
+| `mail.attachment.sandbox_requested.v1` | `scan.sandbox`, `email.analytics` (v4: registered)                                                  |
 
 ```mermaid
 flowchart LR
@@ -104,20 +114,23 @@ flowchart LR
   R[event-relay\nconfirmed publish\nstep 3.2 WP3]
   SA & EW & DW & API --> OB[(message_outbox)] --> R
   R -->|org.id.mail.message.*| XI{{email.ingestion}}
-  R -->|org.id.mail.message.scanned.v1, rescan_requested.v1| XS{{email.security}}
+  R -->|org.id.mail.message.scanned.v1, rescan_requested.v1, attachment.sandbox_requested.v1| XS{{email.security}}
   R -->|org.id.mail.policy.decided.v1| XP{{email.policy}}
   R -->|org.id.mail.delivery.*| XD{{email.delivery}}
   R -->|org.id.domain.*, mail.message.state_changed.v1| XE{{email.events}}
   XA{{email.archive}}
   XI -->|org.*.received.v1| Q1[email.received\nwork: email-worker]
   XI -->|org.*.parsed.v1| QSP[scan.spam\nwork: email-worker scan role]
-  XI -->|org.*.parsed.v1| QS[scan.url / attachment / dlp\ndormant: 4.2-4.5]
+  XI -->|org.*.parsed.v1| QAT[scan.attachment\nwork: email-worker scan role v4]
+  XI -->|org.*.parsed.v1| QS[scan.url / dlp\ndormant: 4.3, 4.5]
   QAU[scan.auth\nreserved, unbound]
   XI -->|org.*.parse_failed.v1| QP[email.policy.evaluate\ndormant: 5.1/5.2]
   XS -->|org.*.scanned.v1| QP
   XS -->|org.*.rescan_requested.v1 v2| QS
   XS -->|org.*.rescan_requested.v1 v2| QSP
   XS -->|retry.scan.spam.#| QSP
+  XS -->|org.*.rescan_requested.v1 v2| QAT
+  XS -->|retry.scan.attachment.#| QAT
   XS -->|org.*.sandbox_requested.v1| QSB[scan.sandbox\ndormant: 4.6]
   XP -->|org.*.policy.decided.v1| QQ[email.quarantine\ndormant: 5.3]
   XP -->|org.*.policy.decided.v1| QA[email.archive\ndormant: 8.1]
@@ -263,32 +276,32 @@ Consequences for the library and its users:
 
 Vhost **`email-gateway`** (`RABBITMQ_VHOST`). Role users have **no tags** (no management UI/API access); passwords and URLs come only from `.env` / secrets.
 
-| User (`.env` key)                                      | Used by                                                   | configure | write                                                               | read                         |
-| ------------------------------------------------------ | --------------------------------------------------------- | --------- | ------------------------------------------------------------------- | ---------------------------- |
-| `RABBITMQ_USER` (administrator, broker default user)   | `init.mjs`, tests, operators                              | `.*`      | `.*`                                                                | `.*`                         |
-| `RABBITMQ_RELAY_USER` = `eg-relay`                     | event-relay (`RABBITMQ_RELAY_URL`)                        | `^$`      | `^email\.(ingestion\|security\|policy\|delivery\|archive\|events)$` | `^$`                         |
-| `RABBITMQ_EMAIL_WORKER_USER` = `eg-email-worker`       | email-worker (`RABBITMQ_EMAIL_WORKER_URL`)                | `^$`      | `^email\.(ingestion\|events)$`                                      | `^email\.received$`          |
-| `RABBITMQ_SCANNER_USER` = `eg-scanner`                 | email-worker scan role (`RABBITMQ_SCANNER_URL`, step 4.1) | `^$`      | `^email\.(security\|events)$`                                       | `^scan\.spam$`               |
-| `RABBITMQ_DELIVERY_WORKER_USER` = `eg-delivery-worker` | delivery-worker (`RABBITMQ_DELIVERY_WORKER_URL`)          | `^$`      | `^email\.(delivery\|events)$`                                       | `^email\.delivery\.pending$` |
-| `RABBITMQ_OPS_USER` = `eg-ops`                         | api replay and stats (`RABBITMQ_OPS_URL`)                 | `^$`      | `^email\.(ingestion\|delivery\|security)$` (v3: + `security`)       | `^email\.dead-letter$`       |
+| User (`.env` key)                                      | Used by                                                   | configure | write                                                               | read                              |
+| ------------------------------------------------------ | --------------------------------------------------------- | --------- | ------------------------------------------------------------------- | --------------------------------- |
+| `RABBITMQ_USER` (administrator, broker default user)   | `init.mjs`, tests, operators                              | `.*`      | `.*`                                                                | `.*`                              |
+| `RABBITMQ_RELAY_USER` = `eg-relay`                     | event-relay (`RABBITMQ_RELAY_URL`)                        | `^$`      | `^email\.(ingestion\|security\|policy\|delivery\|archive\|events)$` | `^$`                              |
+| `RABBITMQ_EMAIL_WORKER_USER` = `eg-email-worker`       | email-worker (`RABBITMQ_EMAIL_WORKER_URL`)                | `^$`      | `^email\.(ingestion\|events)$`                                      | `^email\.received$`               |
+| `RABBITMQ_SCANNER_USER` = `eg-scanner`                 | email-worker scan role (`RABBITMQ_SCANNER_URL`, step 4.1) | `^$`      | `^email\.(security\|events)$`                                       | `^scan\.(spam\|attachment)$` (v4) |
+| `RABBITMQ_DELIVERY_WORKER_USER` = `eg-delivery-worker` | delivery-worker (`RABBITMQ_DELIVERY_WORKER_URL`)          | `^$`      | `^email\.(delivery\|events)$`                                       | `^email\.delivery\.pending$`      |
+| `RABBITMQ_OPS_USER` = `eg-ops`                         | api replay and stats (`RABBITMQ_OPS_URL`)                 | `^$`      | `^email\.(ingestion\|delivery\|security)$` (v3: + `security`)       | `^email\.dead-letter$`            |
 
 - Each service reads only its own URL key (a comma-separated list of `amqp(s)://` URLs for cluster nodes, `amqpUrlListSchema` in `@email-gateway/config`; `*_FILE` in Kubernetes). `RABBITMQ_URL` is the administrator URL on `/` for tests and tools only; Compose no longer passes it to services. `RABBITMQ_PREFETCH` is no longer read.
 - policy-engine, archive-worker and notification-worker get no broker user in step 3.2 (they consume nothing); their steps add one.
-- The email-worker cannot publish approvals (no write on `email.delivery`); consumers still check every event against the writer row. The scan role connects as `eg-scanner` (its own connection, step 4.1 S1): it reads only `scan.spam` and publishes only its retry and dead-letter hops; `mail.message.scanned.v1` goes through the outbox and the relay. Production runs the MIME role (`eg-email-worker`) and the scan role (`eg-scanner`) as separate Deployments of the same image.
+- The email-worker cannot publish approvals (no write on `email.delivery`); consumers still check every event against the writer row. The scan role connects as `eg-scanner` (its own connection, step 4.1 S1): it reads only `scan.spam` and (v4) `scan.attachment` and publishes only their retry and dead-letter hops; `mail.message.scanned.v1` and `mail.attachment.sandbox_requested.v1` go through the outbox and the relay. Production runs the MIME role (`eg-email-worker`) and the scan role (`eg-scanner`) as separate Deployments of the same image.
 - **Topic permissions** (routing keys each user may publish, per exchange; `init.mjs --users` sets and verifies them exactly; read `^$`, no user binds):
 
-| User                 | Exchange          | write (routing keys)                            |
-| -------------------- | ----------------- | ----------------------------------------------- |
-| `eg-relay`           | each of the six   | `^org\.[1-9][0-9]{0,19}\.` (event keys only)    |
-| `eg-email-worker`    | `email.ingestion` | `^retry\.email\.received\.`                     |
-| `eg-email-worker`    | `email.events`    | `^dead-letter\.email\.received(\.\|$)`          |
-| `eg-scanner`         | `email.security`  | `^retry\.scan\.spam\.` (v3)                     |
-| `eg-scanner`         | `email.events`    | `^dead-letter\.scan\.spam(\.\|$)` (v3)          |
-| `eg-delivery-worker` | `email.delivery`  | `^(retry\|delay)\.email\.delivery\.pending\.`   |
-| `eg-delivery-worker` | `email.events`    | `^dead-letter\.email\.delivery\.pending(\.\|$)` |
-| `eg-ops`             | `email.ingestion` | `^retry\.email\.received\.`                     |
-| `eg-ops`             | `email.delivery`  | `^retry\.email\.delivery\.pending\.`            |
-| `eg-ops`             | `email.security`  | `^retry\.scan\.spam\.` (v3)                     |
+| User                 | Exchange          | write (routing keys)                                         |
+| -------------------- | ----------------- | ------------------------------------------------------------ |
+| `eg-relay`           | each of the six   | `^org\.[1-9][0-9]{0,19}\.` (event keys only)                 |
+| `eg-email-worker`    | `email.ingestion` | `^retry\.email\.received\.`                                  |
+| `eg-email-worker`    | `email.events`    | `^dead-letter\.email\.received(\.\|$)`                       |
+| `eg-scanner`         | `email.security`  | `^retry\.scan\.(spam\|attachment)\.` (v3; v4 + `attachment`) |
+| `eg-scanner`         | `email.events`    | `^dead-letter\.scan\.(spam\|attachment)(\.\|$)` (v3; v4)     |
+| `eg-delivery-worker` | `email.delivery`  | `^(retry\|delay)\.email\.delivery\.pending\.`                |
+| `eg-delivery-worker` | `email.events`    | `^dead-letter\.email\.delivery\.pending(\.\|$)`              |
+| `eg-ops`             | `email.ingestion` | `^retry\.email\.received\.`                                  |
+| `eg-ops`             | `email.delivery`  | `^retry\.email\.delivery\.pending\.`                         |
+| `eg-ops`             | `email.security`  | `^retry\.scan\.(spam\|attachment)\.` (v3; v4 + `attachment`) |
 
 - Only the relay can publish an event key (`org.<id>.<type>`). A retry key still reaches its work queue, so the broker alone cannot stop a leaked `eg-delivery-worker` or `eg-ops` credential from sending an approval-shaped retry message: the delivery planner plans only approvals with a matching `message_outbox` row (same event id, type, organization and payload) and dead-letters others as `approval_not_issued` / `approval_mismatch` (ADR-0024 amendment).
 

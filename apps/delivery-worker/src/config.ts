@@ -7,6 +7,10 @@ import {
   redisConfigSchema,
   s3ConfigSchema,
 } from '@email-gateway/config';
+import {
+  MAX_DATABASE_SOCKET_TIMEOUT_SECONDS,
+  transactionOutlastsSocket,
+} from '@email-gateway/database';
 import { z } from 'zod';
 
 const port = z.coerce.number().int().min(1).max(65535);
@@ -21,6 +25,17 @@ const hostName = z
   .string()
   .transform((value) => value.trim().toLowerCase().replace(/\.$/, ''))
   .refine((v) => HOST_NAME.test(v) && v.length <= 253, 'must be a host name');
+
+/**
+ * Default writer-transaction budget of every data-plane interactive transaction of this worker
+ * (`DELIVERY_DB_TX_TIMEOUT_MS`, step 4.2 §6.2, §12 WP4). Longer than MySQL's default
+ * `innodb_lock_wait_timeout` (50 s) and than the writer stalls the worker rides through, so the
+ * client never expires a transaction while one of its statements is in flight (with the Prisma
+ * 6.19 library engine that leaves the reply unread on a pooled connection: wrong reads).
+ */
+export const DEFAULT_DELIVERY_DB_TX_TIMEOUT_MS = 120_000;
+/** Lower bound of `DELIVERY_DB_TX_TIMEOUT_MS` (above `innodb_lock_wait_timeout` 50 s). */
+export const MIN_DELIVERY_DB_TX_TIMEOUT_MS = 60_000;
 
 /**
  * Delivery-worker configuration (step 2.3 §5; `.env.example` section "Mail routing and delivery
@@ -42,6 +57,24 @@ export const deliveryConfigShape = {
   DELIVERY_REINJECT_RETRY_BASE_SECONDS: positiveInt.default(30),
   DELIVERY_REINJECT_RETRY_MAX_SECONDS: positiveInt.default(900),
   DELIVERY_REINJECT_MAX_AGE_SECONDS: positiveInt.default(432_000),
+  /**
+   * Attempts after which a reinjection whose message context stays unreadable (`context_missing`)
+   * fails with its active deliveries (`message_missing`, step 4.2 §6.2 item 3).
+   */
+  DELIVERY_REINJECT_MAX_ATTEMPTS: positiveInt.max(1000).default(10),
+
+  // Writer client (step 4.2 §6.2 F2).
+  /** `socket_timeout` of the writer client; 0 = none (default; see `client-url.ts`). */
+  DATABASE_SOCKET_TIMEOUT_SECONDS: nonNegativeInt
+    .max(MAX_DATABASE_SOCKET_TIMEOUT_SECONDS)
+    .default(0),
+  /** Budget of every data-plane interactive transaction (planner, recorder, claims, results). */
+  DELIVERY_DB_TX_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .min(MIN_DELIVERY_DB_TX_TIMEOUT_MS)
+    .max(900_000)
+    .default(DEFAULT_DELIVERY_DB_TX_TIMEOUT_MS),
 
   // Approvals from RabbitMQ (step 3.2 Q13): prefetch of the `email.delivery.pending` consumer
   // (= approvals planned at the same time by one replica).
@@ -113,9 +146,22 @@ export function validateWorkerConfig(
     DELIVERY_REINJECT_RETRY_MAX_SECONDS: number;
     DELIVERY_REINJECT_INBOUND_PORT: number;
     DELIVERY_REINJECT_OUTBOUND_PORT: number;
+    DATABASE_SOCKET_TIMEOUT_SECONDS: number;
+    DELIVERY_DB_TX_TIMEOUT_MS: number;
   },
   ctx: z.RefinementCtx,
 ): void {
+  if (
+    !transactionOutlastsSocket(cfg.DELIVERY_DB_TX_TIMEOUT_MS, cfg.DATABASE_SOCKET_TIMEOUT_SECONDS)
+  ) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['DELIVERY_DB_TX_TIMEOUT_MS'],
+      message:
+        'must be longer than DATABASE_SOCKET_TIMEOUT_SECONDS: a transaction must never expire ' +
+        'while one of its statements is in flight (step 4.2 §6.2)',
+    });
+  }
   if (cfg.DELIVERY_DEV_PASSTHROUGH_ENABLED && cfg.APP_ENV !== 'local' && cfg.APP_ENV !== 'ci') {
     ctx.addIssue({
       code: 'custom',

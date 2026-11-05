@@ -21,6 +21,7 @@
     "mysql2": "^3.15.0"
   },
   "devDependencies": {
+    "@email-gateway/attachment-corpus": "workspace:*",
     "@types/amqplib": "^0.10.7"
   }
 }

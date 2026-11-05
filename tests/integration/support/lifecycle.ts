@@ -322,6 +322,11 @@ const sha256hex = (text: string | Buffer) => createHash('sha256').update(text).d
  * commit writes them, then one `persisted → <state>` row v2 for any later state, actor
  * `fixture`). `statusChangedAt` lets a suite backdate the state (expiry). The message is not
  * ingested through SMTP, so the dev pass-through never approves it on its own.
+ *
+ * Any state after `persisted` also gets the final parse row of the step 3.1 MIME role (`parsed`,
+ * one text part, no attachments), as a real message in that state has one: since step 4.2 a
+ * rescan of the fixture runs the attachment engine, which needs the parse row (rule A0
+ * `attachment.none`; without the row the engine fails with `parse_row_missing`, A3).
  */
 export async function insertFixtureMessage(
   fx: SmtpFixtures,
@@ -410,6 +415,25 @@ export async function insertFixtureMessage(
       select: { id: true },
     });
     recipients.push({ id: row.id, address, rcptSeq });
+  }
+  if (options.state !== 'received' && options.state !== 'persisted') {
+    await fx.prisma.emailMessageParse.create({
+      data: {
+        receivedAt,
+        messageId: identity.id,
+        organizationId: org,
+        status: 'parsed',
+        attempts: 1,
+        parserVersion: 'integration-fixture',
+        partCount: 1,
+        attachmentCount: 0,
+        maxDepth: 0,
+        bytesRead: BigInt(Buffer.byteLength(eml)),
+        startedAt: receivedAt,
+        completedAt: receivedAt,
+        durationMs: 0,
+      },
+    });
   }
   await fx.prisma.emailMessageStatusHistory.createMany({
     data: steps.map((step, index) => ({

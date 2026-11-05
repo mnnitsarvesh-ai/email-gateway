@@ -24,7 +24,9 @@ import {
   engineResultsOf,
   gatewayAuthservId,
   headerFieldsOf,
+  ATTACHMENT_LEDGER,
   messagePublicId,
+  REQUIRED_ENGINES,
   RSPAMD_LEDGER,
   scannedEventsOf,
   scanRoundsOf,
@@ -55,8 +57,13 @@ import { reply } from './support/smtp-tools';
  *   (same event id, published as the relay does) are ledger duplicates, and a re-emission with a
  *   new event id is skipped by the lifecycle check; no second round, result, transition,
  *   `scanned.v1`, approval or delivery, and no dead letter.
- * - Topology v3: `scan.spam` consumed by the scanner role user, `scan.auth` without event
- *   bindings.
+ * - Topology v4: `scan.spam` and `scan.attachment` consumed by the scanner role user, `scan.auth`
+ *   without event bindings.
+ *
+ * Since step 4.2 every round also requires the `attachment` engine (A1): the messages of this
+ * suite have no attachments, so its final is `skipped` with `attachment.none` (rule A0), which
+ * never decides the verdict (Rspamd does). Attachments through the stack are
+ * attachment-smtp.test.ts.
  */
 const gate = await scanStackGate();
 const fx = new SmtpFixtures();
@@ -131,7 +138,7 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
       scanKind: 'initial',
       status: 'completed',
       scanVerdict: 'clean',
-      requiredEngines: ['rspamd'],
+      requiredEngines: [...REQUIRED_ENGINES],
       triggerEventId: parsed.eventId,
       attempt: 1,
     });
@@ -139,8 +146,8 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
     expect(round.reasonCodes).toContain('clean.below_threshold');
 
     const results = await engineResultsOf(fx.prisma, message);
-    expect(results).toHaveLength(1);
-    const [final] = results;
+    expect(results).toHaveLength(2);
+    const final = results.find((r) => r.engine === 'rspamd');
     expect(final).toMatchObject({
       scanId: round.id,
       engine: 'rspamd',
@@ -159,6 +166,21 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
       expect.arrayContaining(['R_SPF_ALLOW', 'R_DKIM_ALLOW', 'DMARC_POLICY_ALLOW']),
     );
     expect(signals).not.toContain('GTUBE');
+    // Step 4.2 rule A0: no attachments → the attachment engine's final is `skipped`.
+    const attachmentFinal = results.find((r) => r.engine === 'attachment');
+    expect(attachmentFinal).toMatchObject({
+      scanId: round.id,
+      isFinal: true,
+      attempt: 1,
+      outcome: 'skipped',
+      errorCode: null,
+      reasonCodes: ['attachment.none'],
+    });
+    expect(
+      await fx.prisma.attachmentScanResult.count({
+        where: { messageId: message.id, receivedAt: message.receivedAt },
+      }),
+    ).toBe(0);
 
     const [auth, ...moreAuth] = await authResultsOf(fx.prisma, message);
     expect(moreAuth).toEqual([]);
@@ -187,15 +209,20 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
       scanKind: 'initial',
       outcome: 'scanned',
       verdict: 'clean',
-      engines: [{ engine: 'rspamd', required: true, outcome: 'clean', attempts: 1 }],
       emlS3Key: message.emlObjectKey,
     });
+    expect([...payload.engines].sort((a, b) => a.engine.localeCompare(b.engine))).toEqual([
+      { engine: 'attachment', required: true, outcome: 'skipped', attempts: 1 },
+      { engine: 'rspamd', required: true, outcome: 'clean', attempts: 1 },
+    ]);
     expect(JSON.stringify(scanned[0]!.payload)).not.toContain('clean.scan.test');
-    expect(
-      await fx.prisma.messageIdempotency.count({
-        where: { consumer: RSPAMD_LEDGER, eventId: parsed.eventId },
-      }),
-    ).toBe(1);
+    for (const consumer of [RSPAMD_LEDGER, ATTACHMENT_LEDGER]) {
+      expect(
+        await fx.prisma.messageIdempotency.count({
+          where: { consumer, eventId: parsed.eventId },
+        }),
+      ).toBe(1);
+    }
 
     // Approved by the pass-through only after the scan (E27), then delivered.
     const [delivery] = await waitForAllDeliveries(fx.prisma, org, message.id, ['delivered'], 1);
@@ -249,7 +276,10 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
       round: 0,
       verdict: 'clean',
       auth: { spf: 'pass', dkim: 'pass', dmarc: 'pass' },
-      engines: [{ engine: 'rspamd', final: true, outcome: 'clean' }],
+      engines: [
+        { engine: 'rspamd', final: true, outcome: 'clean' },
+        { engine: 'attachment', final: true, outcome: 'skipped', reasonCodes: ['attachment.none'] },
+      ],
     });
     expect(page.data[0]!.engines[0]!.symbols.map((s) => s.name)).toContain('R_SPF_ALLOW');
     cleanMessage = { id: message.id, receivedAt: message.receivedAt, rcpt };
@@ -291,7 +321,9 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
     const round = await waitForRoundComplete(fx.prisma, message, 0);
     expect(round).toMatchObject({ status: 'completed', scanKind: 'initial' });
     expect(['suspicious', 'spam']).toContain(round.scanVerdict);
-    const [final] = (await engineResultsOf(fx.prisma, message)).filter((r) => r.isFinal);
+    const final = (await engineResultsOf(fx.prisma, message)).find(
+      (r) => r.isFinal && r.engine === 'rspamd',
+    );
     expect(final!.reasonCodes).toEqual(
       expect.arrayContaining(['auth.spf_fail', 'auth.dmarc_reject']),
     );
@@ -366,10 +398,17 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
     expect(before.rounds).toHaveLength(1);
     expect(before.scanned).toHaveLength(1);
 
-    const skipped = (reason: string) =>
-      metricValue('email-worker', 'scan_events_skipped_total', { engine: 'rspamd', reason });
-    const duplicatesBefore = await skipped('duplicate');
-    const lifecycleSkipsBefore = await skipped('lifecycle_delivered');
+    // Both engine consumers (scan.spam and scan.attachment, step 4.2) get every copy.
+    const skippedOf = (reason: string) =>
+      Promise.all(
+        REQUIRED_ENGINES.map((engine) =>
+          metricValue('email-worker', 'scan_events_skipped_total', { engine, reason }),
+        ),
+      );
+    const duplicatesBefore = await skippedOf('duplicate');
+    const lifecycleSkipsBefore = await skippedOf('lifecycle_delivered');
+    const grew = (now: number[], before: number[], by: number) =>
+      now.every((v, i) => v >= before[i]! + by);
     const broker = await LiveBroker.connect();
     try {
       const deadLetters = await broker.depth(QUEUES.deadLetter);
@@ -382,26 +421,32 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
       await broker.publish([reEmitted]);
 
       await waitFor(
-        'two ledger duplicates and one lifecycle skip in the scan consumer',
+        'two ledger duplicates and one lifecycle skip in each scan consumer',
         async () =>
-          (await skipped('duplicate')) >= duplicatesBefore + 2 &&
-          (await skipped('lifecycle_delivered')) >= lifecycleSkipsBefore + 1,
+          grew(await skippedOf('duplicate'), duplicatesBefore, 2) &&
+          grew(await skippedOf('lifecycle_delivered'), lifecycleSkipsBefore, 1),
         { timeoutMs: 60_000, intervalMs: 500 },
       );
       await sleep(3_000);
       expect(await snapshot()).toEqual(before);
       expect(await broker.depth('scan.spam')).toBe(0);
+      expect(await broker.depth('scan.attachment')).toBe(0);
       expect(await broker.depth(QUEUES.deadLetter)).toBe(deadLetters);
-      // One ledger row per event id: the original and the re-emission (handled, no effect).
-      expect(
-        await fx.prisma.messageIdempotency.count({
-          where: { consumer: RSPAMD_LEDGER, eventId: { in: [exact.eventId, reEmitted.eventId] } },
-        }),
-      ).toBe(2);
+      // One ledger row per consumer and event id: the original and the re-emission (handled,
+      // no effect).
+      for (const consumer of [RSPAMD_LEDGER, ATTACHMENT_LEDGER]) {
+        expect(
+          await fx.prisma.messageIdempotency.count({
+            where: { consumer, eventId: { in: [exact.eventId, reEmitted.eventId] } },
+          }),
+        ).toBe(2);
+      }
+      const duplicatesAfter = await skippedOf('duplicate');
+      const lifecycleAfter = await skippedOf('lifecycle_delivered');
       record('scan-pipeline', {
         duplicate_copies: 3,
-        ledger_duplicates: (await skipped('duplicate')) - duplicatesBefore,
-        lifecycle_skips: (await skipped('lifecycle_delivered')) - lifecycleSkipsBefore,
+        ledger_duplicates: duplicatesAfter.map((v, i) => v - duplicatesBefore[i]!).join(','),
+        lifecycle_skips: lifecycleAfter.map((v, i) => v - lifecycleSkipsBefore[i]!).join(','),
         second_effects: 0,
       });
     } finally {
@@ -409,16 +454,19 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
     }
   });
 
-  it('runs topology v3: scan.spam consumed by the scanner user, scan.auth without event bindings', async () => {
-    const details = await mgmt.get<{
-      consumers?: number;
-      consumer_details?: { channel_details?: { user?: string } }[];
-    }>(`/queues/${encodeURIComponent(vhost)}/scan.spam`);
-    expect(details.consumers).toBeGreaterThanOrEqual(1);
+  it('runs topology v4: scan.spam and scan.attachment consumed by the scanner user, scan.auth without event bindings', async () => {
     const scanner = process.env.RABBITMQ_SCANNER_USER || 'eg-scanner';
-    expect(new Set((details.consumer_details ?? []).map((c) => c.channel_details?.user))).toEqual(
-      new Set([scanner]),
-    );
+    for (const queue of ['scan.spam', 'scan.attachment']) {
+      const details = await mgmt.get<{
+        consumers?: number;
+        consumer_details?: { channel_details?: { user?: string } }[];
+      }>(`/queues/${encodeURIComponent(vhost)}/${queue}`);
+      expect(details.consumers, queue).toBeGreaterThanOrEqual(1);
+      expect(
+        new Set((details.consumer_details ?? []).map((c) => c.channel_details?.user)),
+        queue,
+      ).toEqual(new Set([scanner]));
+    }
     const auth = (await mgmt.bindings(vhost)).filter(
       (b) => b.source !== '' && b.destination === 'scan.auth',
     );

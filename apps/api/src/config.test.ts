@@ -1,8 +1,9 @@
 import { randomBytes } from 'node:crypto';
 import { ConfigValidationError } from '@email-gateway/config';
+import { ATTACHMENT_PLATFORM_DEFAULTS } from '@email-gateway/security-contracts';
 import { describe, expect, it } from 'vitest';
 import { TEST_DOMAIN_ENV } from '../test/support/test-env';
-import { loadApiConfig, rspamdPlatformSettingsOf } from './config';
+import { attachmentPlatformSettingsOf, loadApiConfig, rspamdPlatformSettingsOf } from './config';
 
 const hex64 = () => randomBytes(32).toString('hex');
 
@@ -652,5 +653,46 @@ describe('loadApiConfig: security scanning (step 4.1 S8, S13)', () => {
     const message = rejection({ ...valid, ...env });
     expect(message).toContain(key);
     expect(message).not.toContain('u:p');
+  });
+});
+
+describe('loadApiConfig: attachment scanning (step 4.2 A8, A13)', () => {
+  it('defaults the attachment platform settings and the rescan cap', () => {
+    const cfg = loadApiConfig(valid);
+    expect(attachmentPlatformSettingsOf(cfg)).toEqual({
+      ...ATTACHMENT_PLATFORM_DEFAULTS,
+      deniedTypes: [...ATTACHMENT_PLATFORM_DEFAULTS.deniedTypes],
+    });
+    expect(cfg.ATTACHMENT_RESCAN_MAX_MESSAGES).toBe(5000);
+  });
+
+  it('reads the ATTACHMENT_* keys as the email-worker does', () => {
+    const cfg = loadApiConfig({
+      ...valid,
+      ATTACHMENT_MAX_BYTES: '10485760',
+      ATTACHMENT_DENIED_TYPES: 'pe_executable,zip',
+      ATTACHMENT_DENIED_TYPE_VERDICT: 'malicious',
+      ATTACHMENT_RESCAN_MAX_MESSAGES: '20000',
+    });
+    expect(attachmentPlatformSettingsOf(cfg)).toMatchObject({
+      maxAttachmentBytes: 10_485_760,
+      deniedTypes: ['pe_executable', 'zip'],
+      deniedTypeVerdict: 'malicious',
+    });
+    expect(cfg.ATTACHMENT_RESCAN_MAX_MESSAGES).toBe(20_000);
+  });
+
+  it.each([
+    [{ ATTACHMENT_MAX_BYTES: '40000000' }, 'ATTACHMENT_MAX_BYTES'],
+    [{ ATTACHMENT_DENIED_TYPES: 'no_such_type' }, 'ATTACHMENT_DENIED_TYPES'],
+    [{ ATTACHMENT_DENIED_TYPES: 'unknown' }, 'ATTACHMENT_DENIED_TYPES'],
+    [{ ATTACHMENT_ENCRYPTED_VERDICT: 'clean' }, 'ATTACHMENT_ENCRYPTED_VERDICT'],
+    [
+      { ATTACHMENT_MAX_ENTRY_BYTES: '2000', ATTACHMENT_MAX_DECOMPRESSED_BYTES: '1000' },
+      'ATTACHMENT_MAX_ENTRY_BYTES',
+    ],
+    [{ ATTACHMENT_RESCAN_MAX_MESSAGES: '50001' }, 'ATTACHMENT_RESCAN_MAX_MESSAGES'],
+  ])('refuses %j, naming the key', (env, key) => {
+    expect(rejection({ ...valid, ...env })).toContain(key);
   });
 });

@@ -63,7 +63,13 @@ export const mimeConfigShape = {
   MIME_MAX_ATTEMPTS: positiveInt.max(1000).default(5),
 
   // Budgets of one attempt.
-  MIME_DB_TIMEOUT_MS: int.min(100).default(15_000),
+  /**
+   * Writer transaction budget (timeout and maxWait). Above innodb_lock_wait_timeout (50 s) and
+   * the writer stalls the worker rides through: on Prisma 6.19.3 an expired interactive
+   * transaction returns its connection to the pool with the reply unread, and later queries on
+   * it read other queries' results (step 4.2 §6, §13).
+   */
+  MIME_DB_TIMEOUT_MS: int.min(100).default(120_000),
   /** Longest single wait on S3 (a request, a body chunk, a part upload); below the parse budget. */
   MIME_S3_TIMEOUT_MS: int.min(100).default(30_000),
   MIME_S3_PART_SIZE_BYTES: int.min(MIN_S3_PART_SIZE_BYTES).default(MIN_S3_PART_SIZE_BYTES),

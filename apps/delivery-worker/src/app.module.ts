@@ -43,7 +43,10 @@ export class AppModule {
       module: AppModule,
       imports: [
         CorrelationModule,
-        DatabaseModule.forRoot({ url: config.DATABASE_URL }),
+        DatabaseModule.forRoot({
+          url: config.DATABASE_URL,
+          socketTimeoutSeconds: config.DATABASE_SOCKET_TIMEOUT_SECONDS,
+        }),
         AmqpModule.forRoot({
           urls: config.RABBITMQ_DELIVERY_WORKER_URL,
           connectionName: SERVICE_NAME,

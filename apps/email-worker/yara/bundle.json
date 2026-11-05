@@ -1,0 +1,11 @@
+{
+  "name": "eg-platform",
+  "version": 1,
+  "rules": [
+    "eg-html-smuggling.yar",
+    "eg-lnk-command.yar",
+    "eg-ooxml-template-injection.yar",
+    "eg-powershell-encoded.yar",
+    "eg-test-markers.yar"
+  ]
+}

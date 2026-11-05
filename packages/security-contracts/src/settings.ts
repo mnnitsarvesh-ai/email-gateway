@@ -288,7 +288,8 @@ function canonicalJson(value: unknown): string {
 }
 
 /**
- * `scan_engine_results.settings_version` (S8):
+ * `scan_engine_results.settings_version` (S8), for any engine's platform settings object (Rspamd,
+ * attachment):
  * `<mapping version>;p=<first 12 hex of SHA-256 of the canonical platform settings>;t=<row
  * version | none>`. `rowVersion` is the `scan_engine_settings.version` of the override that was
  * applied, or null when the platform settings were applied unchanged (no row, or a row that
@@ -296,7 +297,7 @@ function canonicalJson(value: unknown): string {
  */
 export function settingsVersion(
   mappingVersion: string,
-  platform: RspamdPlatformSettings,
+  platform: object,
   rowVersion: number | null,
 ): string {
   const hash = createHash('sha256').update(canonicalJson(platform), 'utf8').digest('hex');

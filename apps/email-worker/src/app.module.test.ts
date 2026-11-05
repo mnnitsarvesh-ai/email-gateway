@@ -21,8 +21,11 @@ import {
 } from './mime-ingestion/mime-ingestion.module';
 import { MIME_CONSUMER } from './mime-ingestion/mime-ingestion.service';
 import { classifyScanFailure } from './scanning/engine-consumer';
+import { ATTACHMENT_CONSUMER } from './scanning/engines/attachment/registration';
 import { RSPAMD_CONSUMER } from './scanning/engines/rspamd/registration';
 import {
+  ATTACHMENT_JOBS,
+  type AttachmentJobs,
   type EngineRuntime,
   SCAN_ENGINES,
   SCAN_LOCKS,
@@ -36,10 +39,13 @@ const env = {
   RABBITMQ_SCANNER_URL: 'amqp://scan:test@localhost:5672/email-gateway',
   SCAN_RSPAMD_URL: 'http://127.0.0.1:11333',
   REDIS_URL: 'redis://localhost:6379',
+  ATTACHMENT_CACHE_HMAC_KEY: 'test-content-cache-mac-key-0123456789',
   S3_REGION: 'ap-south-1',
   S3_BUCKET_MAIL: 'test-mail',
   S3_BUCKET_ARCHIVE: 'test-archive',
   LOG_LEVEL: 'fatal',
+  // The step 4.1 wiring tests run the Rspamd engine alone; the attachment wiring has its own.
+  SCAN_ENGINES: 'rspamd',
 };
 
 const stub = (healthName: string, extra: Record<string, unknown> = {}) => ({
@@ -337,5 +343,80 @@ describe('AppModule wiring', () => {
     expect(scanner.calls.unregistered).toBe(1);
     expect(scanner.calls.closed).toBe(1);
     expect(locks.calls.closed).toBe(1);
+  });
+
+  it('wires the attachment consumer, its readiness checks and background jobs (step 4.2 A1, A12)', async () => {
+    const { RABBITMQ_EMAIL_WORKER_URL: _omitted, ...scanOnlyEnv } = env;
+    const config = loadWorkerConfig({
+      ...scanOnlyEnv,
+      MIME_INGESTION_ENABLED: 'false',
+      SCAN_ENGINES: 'rspamd,attachment',
+      SCAN_CONSUMERS: 'attachment',
+      ATTACHMENT_INSPECTOR_RLIMITS: 'best_effort',
+      ATTACHMENT_INSPECTOR_POOL_SIZE: '1',
+      // A closed port: clamd readiness fails, nothing else depends on it here.
+      CLAMAV_PORT: '1',
+    });
+    const scanner = idleAmqp();
+    const locks = idleLocks();
+    const moduleRef = await Test.createTestingModule({ imports: [AppModule.forRoot(config)] })
+      .overrideProvider(PrismaService)
+      .useValue(stub('mysql'))
+      .overrideProvider(SCANNER_AMQP_CONNECTION)
+      .useValue(scanner.connection)
+      .overrideProvider(SCAN_LOCKS)
+      .useValue(locks.locks)
+      .overrideProvider(RedisService)
+      .useValue(stub('redis', { client: {} }))
+      .overrideProvider(S3Service)
+      .useValue(stub('s3', { client: {}, mailBucket: 'test-mail' }))
+      .compile();
+    await moduleRef.init();
+    try {
+      const engines = moduleRef.get<EngineRuntime[]>(SCAN_ENGINES, { strict: false });
+      expect(engines.map((e) => e.registration.catalog.name)).toEqual(['attachment']);
+      const feed = engines[0]!.consumer;
+      expect(feed.queue).toBe('scan.attachment');
+      expect(feed.consumerName).toBe(ATTACHMENT_CONSUMER);
+      expect(feed.retryPolicy.maxAttempts).toBe(10);
+      expect((feed as unknown as { options: { prefetch: number } }).options.prefetch).toBe(4);
+      expect(scanner.calls.topology).toContainEqual({
+        exchanges: ['email.security', 'email.events'],
+        queues: ['scan.attachment'],
+      });
+      const jobs = moduleRef.get<AttachmentJobs | null>(ATTACHMENT_JOBS, { strict: false });
+      expect(jobs?.watcher.running).toBe(true);
+      expect(jobs?.runner.running).toBe(true);
+      const report = await moduleRef.get(HealthService).readiness();
+      expect(report.checks.map((c) => c.name)).toEqual([
+        'mysql',
+        'rabbitmq-scanner',
+        'clamav',
+        'attachment-inspector',
+        'redis',
+        's3',
+      ]);
+      const inspector = report.checks.find((c) => c.name === 'attachment-inspector')!;
+      expect(inspector.status).toBe('ok');
+      expect(report.checks.find((c) => c.name === 'clamav')!.status).not.toBe('ok');
+      const metrics = await moduleRef.get(MetricsService).metrics();
+      for (const name of [
+        'scan_attachment_files_total',
+        'scan_attachment_inspector_pool',
+        'scan_attachment_memory_budget_bytes',
+        'scan_attachment_inspector_kills_total',
+        'clamav_requests_total',
+        'scan_attachment_signature_info',
+      ]) {
+        expect(metrics).toContain(`# TYPE ${name} `);
+      }
+      expect(metrics).toContain(
+        'scan_engine_circuit_state{engine="attachment",service="email-worker"} 0',
+      );
+    } finally {
+      await moduleRef.close();
+    }
+    const jobs = moduleRef.get<AttachmentJobs | null>(ATTACHMENT_JOBS, { strict: false });
+    expect(jobs?.watcher.running).toBe(false);
   });
 });

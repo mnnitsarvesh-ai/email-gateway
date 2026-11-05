@@ -8,7 +8,13 @@ import { routingStackGate } from './routing-stack';
 import type { SmtpStackGate } from './smtp-stack';
 import { swaks, type SwaksResult } from './smtp-tools';
 
-export { PASSTHROUGH_CONSUMER, RSPAMD_LEDGER, scanStageProblems } from './scan-stage';
+export {
+  ATTACHMENT_LEDGER,
+  PASSTHROUGH_CONSUMER,
+  REQUIRED_ENGINES,
+  RSPAMD_LEDGER,
+  scanStageProblems,
+} from './scan-stage';
 
 async function ready(service: 'event-relay' | 'api'): Promise<boolean> {
   try {
@@ -115,34 +121,57 @@ export async function waitForEngineRows(
   );
 }
 
-// --- Rspamd container control -------------------------------------------------------------------
+export function attachmentResultsOf(prisma: PrismaClient, message: MessageKey) {
+  return prisma.attachmentScanResult.findMany({
+    where: { messageId: message.id, receivedAt: message.receivedAt },
+    orderBy: [{ scanId: 'asc' }, { partIndex: 'asc' }],
+  });
+}
 
-/** `docker compose stop rspamd` (the inbound Rspamd: milter and /checkv2). */
-export async function stopRspamd(): Promise<void> {
-  await composeOk(['stop', '--timeout', '10', 'rspamd'], { timeoutMs: 60_000 });
+export function sandboxSubmissionsOf(prisma: PrismaClient, message: MessageKey) {
+  return prisma.sandboxSubmission.findMany({
+    where: { messageId: message.id, receivedAt: message.receivedAt },
+    orderBy: [{ scanId: 'asc' }, { partIndex: 'asc' }],
+  });
+}
+
+// --- Engine container control (Rspamd, ClamAV) --------------------------------------------------
+
+/** The engine containers the resilience suites stop and start (Compose services). */
+export type EngineService = 'rspamd' | 'clamav';
+
+/** `docker compose stop <service>` (only that container). */
+export async function stopEngineService(service: EngineService): Promise<void> {
+  await composeOk(['stop', '--timeout', '10', service], { timeoutMs: 60_000 });
 }
 
 /**
- * Starts the stopped Rspamd container (`docker start`, not `docker compose start`, so nothing
- * else is started) and waits until its health check passes. Returns the seconds it took.
+ * Starts a stopped engine container (`docker start`, not `docker compose start`, so nothing else
+ * is started) and waits until its health check passes. Returns the seconds it took.
  */
-export async function startRspamd(): Promise<number> {
+export async function startEngineService(
+  service: EngineService,
+  timeoutMs = 180_000,
+): Promise<number> {
   const started = Date.now();
-  const id = (await composeOk(['ps', '--all', '--quiet', 'rspamd'], { timeoutMs: 20_000 })).stdout
+  const id = (await composeOk(['ps', '--all', '--quiet', service], { timeoutMs: 20_000 })).stdout
     .trim()
     .split('\n')[0];
-  if (!id || !/^[0-9a-f]{12,64}$/.test(id)) throw new Error('rspamd container not found');
+  if (!id || !/^[0-9a-f]{12,64}$/.test(id)) throw new Error(`${service} container not found`);
   const result = await run('docker', ['start', id], { timeoutMs: 60_000 });
-  if (result.exitCode !== 0) throw new Error(`docker start rspamd: ${result.stderr.trim()}`);
-  await waitForRspamdHealthy(180_000);
+  if (result.exitCode !== 0) throw new Error(`docker start ${service}: ${result.stderr.trim()}`);
+  await waitForEngineHealthy(service, timeoutMs);
   return (Date.now() - started) / 1000;
 }
 
-export async function waitForRspamdHealthy(timeoutMs = 180_000): Promise<void> {
+export async function waitForEngineHealthy(
+  service: EngineService,
+  timeoutMs = 180_000,
+): Promise<void> {
   await waitFor(
-    'rspamd healthy',
+    `${service} healthy`,
     async () => {
-      const id = (await compose(['ps', '--quiet', 'rspamd'], { timeoutMs: 20_000 })).stdout.trim();
+      const id = (await compose(['ps', '--quiet', service], { timeoutMs: 20_000 })).stdout.trim();
       if (!/^[0-9a-f]{12,64}$/.test(id)) return false;
       const state = await run('docker', ['inspect', '--format', '{{.State.Health.Status}}', id], {
         timeoutMs: 20_000,
@@ -151,6 +180,35 @@ export async function waitForRspamdHealthy(timeoutMs = 180_000): Promise<void> {
     },
     { timeoutMs, intervalMs: 1_000 },
   );
+}
+
+/** Starts the engine container when it is not running, then waits for its health check. */
+export async function ensureEngineRunning(
+  service: EngineService,
+  timeoutMs = 180_000,
+): Promise<void> {
+  const running = await compose(['ps', '--status', 'running', '--quiet', service], {
+    timeoutMs: 20_000,
+  });
+  if (!running.stdout.trim()) {
+    await startEngineService(service, timeoutMs);
+    return;
+  }
+  await waitForEngineHealthy(service, timeoutMs);
+}
+
+/** `docker compose stop rspamd` (the inbound Rspamd: milter and /checkv2). */
+export function stopRspamd(): Promise<void> {
+  return stopEngineService('rspamd');
+}
+
+/** Starts the stopped Rspamd container and waits for its health check (seconds it took). */
+export function startRspamd(): Promise<number> {
+  return startEngineService('rspamd');
+}
+
+export function waitForRspamdHealthy(timeoutMs = 180_000): Promise<void> {
+  return waitForEngineHealthy('rspamd', timeoutMs);
 }
 
 /** Postfix's `myhostname`: the authserv-id of the Authentication-Results Rspamd adds (S11). */
@@ -218,15 +276,8 @@ export function sendToMx(options: {
 }
 
 /** Starts Rspamd when its container is not running, then waits for its health check. */
-export async function ensureRspamdRunning(): Promise<void> {
-  const running = await compose(['ps', '--status', 'running', '--quiet', 'rspamd'], {
-    timeoutMs: 20_000,
-  });
-  if (!running.stdout.trim()) {
-    await startRspamd();
-    return;
-  }
-  await waitForRspamdHealthy();
+export function ensureRspamdRunning(): Promise<void> {
+  return ensureEngineRunning('rspamd');
 }
 
 /** The public id of a message (`message_identities.public_id`, what the api addresses). */

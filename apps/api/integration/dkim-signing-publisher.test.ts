@@ -86,8 +86,9 @@ describe('DkimSigningPublisher against redis-dkim', () => {
     const otherTenant = await domain({}, suspendedOrg);
     await insertDkimKey(ctx, suspendedOrg, otherTenant);
 
-    const counts = await publisher.reconcile();
-    expect(counts.published).toBeGreaterThanOrEqual(1);
+    // Assert the resulting redis-dkim state, not the change count: the running api
+    // container reconciles on its own timer and may already have published the key.
+    await publisher.reconcile();
     expect(await selectorOf(signable)).toBe(key.selector);
     expect(await keyOf(signable, key.selector)).toBe(key.pem);
     for (const d of [inboundOnly, pending, otherTenant]) expect(await selectorOf(d)).toBeNull();

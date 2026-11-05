@@ -1,0 +1,25 @@
+{
+  "name": "@email-gateway/attachment-corpus",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Attachment test files generated at test time (step 4.2 §9): EICAR from fragments, archives, bombs, malformed and disguised files. No committed binaries.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src",
+    "test": "vitest run --dir src"
+  },
+  "dependencies": {
+    "tar-stream": "3.2.2",
+    "yazl": "3.3.1"
+  },
+  "devDependencies": {
+    "@types/tar-stream": "3.1.5",
+    "@types/yazl": "3.3.1"
+  }
+}

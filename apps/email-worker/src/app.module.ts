@@ -16,7 +16,13 @@ import {
 import { createLogger } from '@email-gateway/logger';
 import { MIME_QUEUE, type WorkerConfig } from './config';
 import { MimeIngestionModule } from './mime-ingestion/mime-ingestion.module';
-import { ScannerBrokerHealth, ScanningModule } from './scanning/scanning.module';
+import { runsAttachmentConsumer } from './scanning/config';
+import {
+  ClamavHealth,
+  InspectorHealth,
+  ScannerBrokerHealth,
+  ScanningModule,
+} from './scanning/scanning.module';
 
 export const SERVICE_NAME = 'email-worker';
 
@@ -53,6 +59,8 @@ export class AppModule {
     const indicators: Type<HealthIndicator>[] = [PrismaService];
     if (mime) indicators.push(AmqpConnection);
     if (scanning) indicators.push(ScannerBrokerHealth);
+    // Step 4.2 A12: clamd PING and the inspector pool on replicas running the attachment engine.
+    if (scanning && runsAttachmentConsumer(config)) indicators.push(ClamavHealth, InspectorHealth);
     indicators.push(RedisService, S3Service);
     return {
       module: AppModule,

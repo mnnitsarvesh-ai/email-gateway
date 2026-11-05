@@ -2,7 +2,11 @@ import { ApiParam } from '@nestjs/swagger';
 import { ApiCodedError } from '../../http/coded-exception';
 import {
   CONTENT_UNAVAILABLE,
+  HASH_EXISTS,
   ORGANIZATION_NOT_FOUND,
+  RESCAN_JOB_NOT_CANCELLABLE,
+  RESCAN_JOB_NOT_FOUND,
+  THREAT_HASH_NOT_FOUND,
   RSPAMD_UNAVAILABLE,
   SCAN_ENGINE_NOT_FOUND,
   SCAN_SETTINGS_INVALID,
@@ -11,14 +15,22 @@ import {
 } from './scans.errors';
 import { MESSAGE_NOT_FOUND } from '../messages/messages.errors';
 
-/** Permissions of the scan routes (seed catalog; the last two are new in step 4.1). */
+/** Permissions of the scan routes (seed catalog; `scan:settings_manage` and `platform:scan_training` are new in step 4.1, the last two in step 4.2). */
 export const POLICY_READ = 'policy:read';
 export const SCAN_SETTINGS_MANAGE = 'scan:settings_manage';
 export const PLATFORM_SCAN_TRAINING = 'platform:scan_training';
+/** Known-threat hash catalog (step 4.2 A16, A17). */
+export const PLATFORM_THREAT_INTEL_MANAGE = 'platform:threat_intel_manage';
+/** Bulk attachment rescan jobs (step 4.2 A13). */
+export const PLATFORM_SCAN_RESCAN = 'platform:scan_rescan';
 
 /** `{engine}` path parameter. */
 export const ApiEngineParam = (): MethodDecorator =>
-  ApiParam({ name: 'engine', description: 'Scan engine name (step 4.1: `rspamd`)' });
+  ApiParam({
+    name: 'engine',
+    description:
+      'Scan engine name with tenant settings: `rspamd` (step 4.1), `attachment` (step 4.2)',
+  });
 
 export const ApiScanEngineNotFound = (): MethodDecorator =>
   ApiCodedError(404, 'The engine is not registered', [SCAN_ENGINE_NOT_FOUND]);
@@ -35,7 +47,9 @@ export const ApiScanSettingsInvalid = (): MethodDecorator =>
   ApiCodedError(
     422,
     'The override breaks the platform settings: scores outside the bounds, suspiciousScore not ' +
-      'below spamScore, a severity lowered below the platform value, or an unknown key',
+      'below spamScore, a severity or verdict lowered below the platform value, ' +
+      'maxAttachmentBytes outside [1 MiB, ATTACHMENT_MAX_BYTES], a platform-denied type on ' +
+      'allowedTypes, an unknown file type or an unknown key',
     [SCAN_SETTINGS_INVALID],
     {
       violations: {
@@ -80,3 +94,23 @@ export const ApiRspamdUnavailable = (): MethodDecorator =>
   ApiCodedError(503, 'The Rspamd controller is not configured, unreachable, timed out or failed', [
     RSPAMD_UNAVAILABLE,
   ]);
+
+export const ApiHashExists = (): MethodDecorator =>
+  ApiCodedError(409, 'The SHA-256 is already in the catalog', [HASH_EXISTS]);
+
+export const ApiThreatHashNotFound = (): MethodDecorator =>
+  ApiCodedError(404, 'The SHA-256 is not in the catalog', [THREAT_HASH_NOT_FOUND]);
+
+export const ApiRescanJobNotFound = (): MethodDecorator =>
+  ApiCodedError(404, 'No rescan job with that id', [RESCAN_JOB_NOT_FOUND]);
+
+export const ApiRescanOrganizationNotFound = (): MethodDecorator =>
+  ApiCodedError(404, '`organizationId` names no organization', [ORGANIZATION_NOT_FOUND]);
+
+export const ApiRescanJobNotCancellable = (): MethodDecorator =>
+  ApiCodedError(
+    409,
+    'The job is not pending or running; `status` is its status now',
+    [RESCAN_JOB_NOT_CANCELLABLE],
+    { status: { type: 'string' } },
+  );

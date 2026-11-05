@@ -2,6 +2,8 @@
 export * from '@prisma/client';
 export * from './idempotency';
 export * from './ids';
+// Shared writer/replica client URL construction (step 4.2 §6.2 F2).
+export * from './client-url';
 // Partition maintenance (D3): registry, pure planner and executor.
 export * from './partitioning';
 // Migration-history preflight (retired phase-0 migration).

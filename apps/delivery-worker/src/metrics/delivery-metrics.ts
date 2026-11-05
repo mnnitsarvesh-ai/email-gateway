@@ -48,6 +48,8 @@ export class DeliveryMetrics {
   readonly rateLimited: Counter<'scope'>;
   readonly reconcilerActions: Counter<'action'>;
   readonly outboxInvalid: Counter<'consumer'>;
+  readonly inconsistentReads: Counter<'read'>;
+  readonly contextMissing: Counter<'result'>;
 
   constructor(metrics: MetricsService) {
     this.approvals = metrics.counter(
@@ -57,7 +59,7 @@ export class DeliveryMetrics {
     );
     this.approvalsSkipped = metrics.counter(
       'delivery_approvals_skipped_total',
-      'Scanned messages the dev pass-through did not approve: scan_failed (a required engine failed) or the lifecycle refused the approval (lifecycle_<result>)',
+      'Scanned messages the dev pass-through did not approve: scan_failed (a required engine failed), malicious_verdict (held in scanned, step 4.2 A15) or the lifecycle refused the approval (lifecycle_<result>)',
       ['reason'],
     );
     this.approvalsRejected = metrics.counter(
@@ -134,6 +136,16 @@ export class DeliveryMetrics {
       'delivery_outbox_invalid_events_total',
       'Outbox rows that failed envelope or payload validation and were skipped',
       ['consumer'],
+    );
+    this.inconsistentReads = metrics.counter(
+      'delivery_inconsistent_reads_total',
+      'Writer reads of the reinjector whose identifying columns did not echo the request (message, deliveries, recipients, approval); the row is rescheduled with the attempt refunded (step 4.2 §6.2)',
+      ['read'],
+    );
+    this.contextMissing = metrics.counter(
+      'delivery_reinjection_context_missing_total',
+      'Reinjections whose message row was not found: retry (rescheduled with backoff) or failed (final attempt, deliveries failed with message_missing)',
+      ['result'],
     );
   }
 

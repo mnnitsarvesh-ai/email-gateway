@@ -15,30 +15,38 @@ published from the outbox by the `event-relay` (to `email.ingestion`, bound to t
 ([09-rspamd.md](../../docs/plan/steps/09-rspamd.md),
 [ADR-0026](../../docs/architecture/adr/0026-security-scan-pipeline.md)) it also runs the
 **security scan stage** (the scan role, below): one queue per engine, scan rounds, the engine
-registry, standardized verdicts, with Rspamd as the first engine.
+registry, standardized verdicts, with Rspamd as the first engine. Since step 4.2
+([10-attachment-scanning.md](../../docs/plan/steps/10-attachment-scanning.md),
+[ADR-0028](../../docs/architecture/adr/0028-attachment-scanning-engine.md)) the second required
+engine is the **attachment engine** (queue `scan.attachment`): known-threat hashes, ClamAV over
+clamd INSTREAM, YARA-X, true file types and archive limits in resource-limited inspector child
+processes, a Redis content cache, sandbox submissions and signature-update rescans (below).
 
 Data plane: the MySQL **writer** only (ADR-0014, no `PrismaReadService`), S3 (`S3_BUCKET_MAIL`)
 and RabbitMQ with one least-privilege user per role: the MIME role uses `RABBITMQ_EMAIL_WORKER_URL`
 (read `email.received`, write `email.ingestion` and `email.events` for retry and dead-letter
 copies; it cannot configure anything or reach `email.delivery`), the scan role
 `RABBITMQ_SCANNER_URL` (user `eg-scanner`: read `scan.spam`, write `email.security` and
-`email.events`). Redis stays connected and in readiness as in phase 0, but neither stage uses it
-(Rspamd keeps its own state in Redis DB `RSPAMD_REDIS_DB`). Health is `GET /health/live` and
+`email.events`). Redis holds the attachment engine's content cache (`eg:scan:att:v2:*`, values authenticated with
+the worker-only `ATTACHMENT_CACHE_HMAC_KEY`, A10;
+Rspamd keeps its own state in Redis DB `RSPAMD_REDIS_DB`). Health is `GET /health/live` and
 `GET /health/ready` (checks `mysql`, `rabbitmq` with the MIME role, `rabbitmq-scanner` with the
-scan role, `redis`, `s3`; a broker check = connected, not blocked by a resource alarm, the
+scan role, `clamav` and `attachment-inspector` where the attachment consumer runs, `redis`,
+`s3`; a broker check = connected, not blocked by a resource alarm, the
 exchanges and queues of the role verified passively). Metrics are on `GET /metrics`. The default
 port is 3020.
 
 ## Roles (step 4.1 S1)
 
-| Role | Flag                                    | Broker user (URL)                               | Consumes                           | Readiness          |
-| ---- | --------------------------------------- | ----------------------------------------------- | ---------------------------------- | ------------------ |
-| MIME | `MIME_INGESTION_ENABLED` (default true) | `eg-email-worker` (`RABBITMQ_EMAIL_WORKER_URL`) | `email.received`                   | `rabbitmq`         |
-| Scan | `SCAN_ENABLED` (default true)           | `eg-scanner` (`RABBITMQ_SCANNER_URL`)           | `scan.spam` (one queue per engine) | `rabbitmq-scanner` |
+| Role | Flag                                    | Broker user (URL)                               | Consumes                                                                | Readiness                                            |
+| ---- | --------------------------------------- | ----------------------------------------------- | ----------------------------------------------------------------------- | ---------------------------------------------------- |
+| MIME | `MIME_INGESTION_ENABLED` (default true) | `eg-email-worker` (`RABBITMQ_EMAIL_WORKER_URL`) | `email.received`                                                        | `rabbitmq`                                           |
+| Scan | `SCAN_ENABLED` (default true)           | `eg-scanner` (`RABBITMQ_SCANNER_URL`)           | `scan.spam`, `scan.attachment` (one queue per engine, `SCAN_CONSUMERS`) | `rabbitmq-scanner`, `clamav`, `attachment-inspector` |
 
 Locally (Compose, host) one process runs both roles. Production runs two Deployments of the same
 image (`infrastructure/kubernetes/base/email-worker.yaml`): `email-worker` (`SCAN_ENABLED=false`)
-and `email-worker-scan` (`MIME_INGESTION_ENABLED=false`), scaled independently. The global
+and `email-worker-scan` (`MIME_INGESTION_ENABLED=false`, `SCAN_CONSUMERS=rspamd`), plus
+`email-worker-attachment` (`SCAN_CONSUMERS=attachment`, step 4.2), scaled independently. The global
 `AmqpModule` is imported only with the MIME role; `ScanningModule` builds its own connection and
 confirm publisher. At least one role must be enabled.
 
@@ -193,6 +201,58 @@ alone never does (`isTrustedArcChain` in `verdict-mapper.ts`). The deadline swee
 `running` rounds by `deadline_at` within `SCAN_SWEEP_LOOKBACK_HOURS`, never by `received_at`.
 
 Operations: [docs/runbooks/scan-pipeline.md](../../docs/runbooks/scan-pipeline.md).
+
+## Attachment engine (step 4.2)
+
+Design [10-attachment-scanning.md](../../docs/plan/steps/10-attachment-scanning.md) (decision ids
+A*n*), [ADR-0028](../../docs/architecture/adr/0028-attachment-scanning-engine.md), runbook
+[attachment-scanning.md](../../docs/runbooks/attachment-scanning.md), deployment
+[attachment-scanning.md](../../docs/deployment/attachment-scanning.md). Code:
+`src/scanning/engines/attachment/`.
+
+| Module                                                                             | Role                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `registration.ts`                                                                  | `attachmentRegistration` (consumer `email-worker.scan.attachment`, budget `SCAN_ATTACHMENT_*`, `settingsFor` = `resolveAttachmentSettings`, an invalid tenant row falls back to the platform), `createAttachmentEngine`                                                                                                                                                                                                                                           |
+| `attachment.engine.ts`                                                             | The adapter (A3): parse and attachment rows on the writer (row count checked against the parse row's `attachment_count`; a mismatch is the retryable `inconsistent_read`), A0/E1 (every parse limit but `body_size` is incomplete), known hashes (chunks of 500), per-attachment parallelism, byte budget, cache, S3 full read (size bound, SHA-256), clamd ∥ inspector, inner hashes, mapping, child rows, sandbox selection, readiness checks, signature source |
+| `verdict-mapper.ts`                                                                | `attachment-map/1` (A6), pure: rules M1–C1, A0, E1, tenant rules (deny incl. extension type and entries, allow list, raise-only), reason-code ordering ≤ 32, signals, sandbox selection                                                                                                                                                                                                                                                                           |
+| `inspector/pool.ts`                                                                | `InspectorPool` (A4): children with an empty environment, IPC (`advanced`), heap cap, `prlimit --cpu --core=0` (Linux, `required`), Node's permission model (compiled children), private 0700 cwd, recycling, bounded wait queue, CPU/RSS sampling every 100 ms, kill classification `cpu`/`memory`/`wall`/`crash`, bundle-id handshake                                                                                                                           |
+| `inspector/child.ts`, `inspect.ts`, `file-type.ts`, `yara-scanner.ts`, `bundle.ts` | The child (no `child_process`, no fs writes: unit-tested module graph): true type (A5), archive walk (zip/gzip/tar, limits while inflating, encryption markers, malformed, traversal, overlap, index paths), YARA-X, bundle id (A9, equals `yara/bundle.mjs`)                                                                                                                                                                                                     |
+| `content-cache.ts`, `clamav-versions.ts`                                           | Content cache `eg:scan:att:v2:<sha256>:<contentVersion>` (A10: `<HMAC-SHA256>.<json>` under `ATTACHMENT_CACHE_HMAC_KEY`, wrong MAC or shape → `rejected` and rescanned, strict `contentResultSchema` in `content-schema.ts`; TTL by content verdict, ≤ 128 KiB, Redis errors bypass), the ClamAV version provider                                                                                                                                                 |
+| `attachment-store.ts`, `part-reader.ts`, `byte-budget.ts`                          | Writer reads with echo checks (`InconsistentAttachmentReadError`: identity, part order, requested hashes), bounded S3 part reads, the weighted byte semaphore                                                                                                                                                                                                                                                                                                     |
+| `signature-watcher.ts`, `rescan-runner.ts`                                         | A13: version detector (`scan_signature_versions` and its job in one transaction, jobs per `ATTACHMENT_SIGNATURE_RESCAN`) and the job executor (E19 `scanner`/`signature_rescan` + `rescan_requested.v1`)                                                                                                                                                                                                                                                          |
+| `attachment-metrics.ts`                                                            | The A19 series (bounded labels)                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+
+Generic changes of the 4.1 orchestrator (A12): `EngineDeps` carries the writer, S3, Redis, the
+scan metrics and the registry; `EngineDefinite.childRows { attachments, sandbox }` travel in
+`FinalRowInput` and `ScanRepository.insertFinal` writes `attachment_scan_results`,
+`sandbox_submissions` and the `sandbox_requested.v1` outbox rows in the final row's transaction
+only when the final row was inserted; a definite result may be `skipped` (rule A0); the failure
+codes `inspector_timeout`, `inspector_crash`, `part_unavailable`, `part_integrity`,
+`part_key_mismatch`, `parse_row_missing`, `inconsistent_read` (retryable, not the engine's fault); the round deadline validation is the maximum over the
+enabled engines; `ScanningModule` builds consumers only for `SCAN_CONSUMERS` and starts/stops the
+adapter (inspector pool), the watcher and the runner.
+
+**Configuration** (`.env.example` section "Attachment scanning (step 4.2)"; every key validated by
+`scanning/config.ts`): `SCAN_ENGINES` (default `rspamd,attachment`), `SCAN_CONSUMERS` (subset;
+empty = all), `CLAMAV_HOST`/`_PORT`/`_TIMEOUT_MS`/`_MAX_CONNECTIONS`/`_CHUNK_BYTES`,
+`SCAN_ATTACHMENT_CONCURRENCY`/`_TIMEOUT_MS`/`_MAX_ATTEMPTS` (< 10, the queue limit),
+`ATTACHMENT_MAX_BYTES` (≤ `MIME_MAX_ATTACHMENT_BYTES`), the archive limits, `ATTACHMENT_DENIED_TYPES`
+and the three rule verdicts (validated with `attachmentPlatformSettingsSchema`),
+`ATTACHMENT_MAX_PER_MESSAGE`, `ATTACHMENT_PER_MESSAGE_PARALLELISM`,
+`ATTACHMENT_MEMORY_BUDGET_BYTES` (≥ `ATTACHMENT_MAX_BYTES`), `ATTACHMENT_INSPECTOR_*` and
+`ATTACHMENT_INSPECT_*` (CPU ≤ wall timeout, YARA ≤ wall timeout, RSS > heap; `best_effort`
+rlimits and `EG_INSPECTOR_SELFTEST` refused with `NODE_ENV=production`),
+`ATTACHMENT_YARA_RULES_DIR`, `ATTACHMENT_CACHE_*`, `ATTACHMENT_SANDBOX_*`,
+`ATTACHMENT_SIGNATURE_*`, `ATTACHMENT_RESCAN_*`, `REDIS_URL`.
+
+**Scaling:** see the deployment doc (`CLAMAV_MAX_CONNECTIONS × replicas ≤ clamd MaxThreads × clamd
+replicas`, `concurrency × parallelism ≥ pool size`, memory budget + pool × RSS within the pod
+limit).
+
+**Benchmark:** `pnpm --filter @email-gateway/email-worker bench:attachments -- --duration=10`
+(`bench/attachment-bench.ts`; real pool + ClamdClient, cache off/on; results in
+[docs/performance/attachment-scanning.md](../../docs/performance/attachment-scanning.md)). The
+compiled child (`dist/`) is used when built (`pnpm --filter @email-gateway/email-worker build`).
 
 ## Message lifecycle (step 3.3 L8.2)
 
@@ -439,3 +499,37 @@ pnpm --filter @email-gateway/email-worker test:integration   # real MySQL writer
     transition), a rescan (new round, old rows unchanged, a late round-0 trigger skipped), Bayes
     learning with per-run tokens (`BAYES_SPAM`, higher score), fuzzy add/delete (`fuzzy.spam` and
     back).
+  - Since step 4.2 these pipelines run with `SCAN_ENGINES=rspamd` (rounds require Rspamd only);
+    the attachment engine has its own suites.
+- **Attachment unit tests** (`src/scanning/engines/attachment/**/*.test.ts`): file-type
+  detection (every magic type, PE `e_lfanew`, OOXML/macro/ODF/jar/apk sub-typing, MSI, ISO,
+  scripts by extension), the archive walker over the generated corpus (zip/gzip/tar/tgz, depth,
+  entry count, entry size, decompressed total, ratio bombs stopped early, every encryption
+  marker, malformed/truncated/CRC/bad tar checksum, traversal, overlap, unsupported formats,
+  OOXML parts scanned by YARA, ≤ 20 findings, no entry names), the verdict mapper (every rule
+  M1–C1, A0, E1, ordering, tenant deny/allow/raise-only), the cache (key, content version, TTLs,
+  too large, Redis errors/timeouts bypass), the byte budget, the inspector pool with a fake child
+  (environment, prlimit arguments, 0700 cwd, bundle mismatch, wait queue, recycling, CPU/memory/
+  wall/crash/SIGXCPU/heap classification, abort, stale directories), the samplers, the bundle id
+  equal to `yara/bundle.mjs --check`, the child's module graph (no `child_process`, no fs
+  writes), the engine adapter with fakes (every failure mapping, cache hit/miss/version change,
+  sandbox selection, metrics), the registration, the watcher with an in-memory writer, the
+  rescan payload contract, and the AppModule wiring of the attachment consumer (real children).
+- **Attachment integration suites** (`integration/attachment-*.test.ts`, real clamd, MySQL
+  writer, MinIO, Redis; `it-scan-<run>-*` organizations):
+  - `attachment-scan`: EICAR plain/zip/nested/past the depth limit/gzip/tar → malicious; clean
+    archives; 7z/rar → unknown; zip bomb; encrypted, malformed and truncated archives; a
+    truncated PDF; large attachments near and above the limits and not stored; a disguised
+    executable and tenant deny/allow/raise; known-bad hashes added and removed, an inner hash;
+    YARA test rules; cache hit without a clamd call and a miss after a simulated database
+    update; no attachments (`skipped`); an incomplete parse; schema-valid rows without names;
+    sandbox rows and their outbox events; duplicates (one set of rows, one submission, one
+    event); missing and corrupt part objects;
+  - `attachment-resilience`: clamd unreachable (closed port: attempts, breaker open,
+    `scan_failed`, never clean), recovery, and the inspector's CPU, memory, wall-clock and crash
+    kills with real children (`selftest`); the `prlimit` variant runs on Linux only (skipped on
+    the macOS host). The Linux production path (`prlimit` + the `/proc` sampler) is covered in
+    the container by the stack suite `tests/integration/attachment-inspector-container.test.ts`;
+  - `attachment-rescan`: an admin job and a watcher-detected signature change executed by the
+    runner (batches, window, states, malicious and attachment-less messages skipped, counts,
+    cursor, `max_messages`, cancellation), the requested rescans completing new rounds.

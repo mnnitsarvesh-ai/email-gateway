@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// RabbitMQ provisioning for topology v3 (step 3.2 Q5, Q10, ADR-0024; v2: step 3.3 L7; v3: step
-// 4.1 S2, ADR-0026). The only code that declares broker objects: services verify passively and
-// their users cannot configure.
+// RabbitMQ provisioning for topology v4 (step 3.2 Q5, Q10, ADR-0024; v2: step 3.3 L7; v3: step
+// 4.1 S2, ADR-0026; v4: step 4.2 A2, ADR-0028). The only code that declares broker objects:
+// services verify passively and their users cannot configure.
 //
 //   node init.mjs [--vhost <name>] [--mgmt-url <url>] [--definitions <path>]
 //                 [--users] [--cleanup-legacy] [--legacy-vhost <name>]
@@ -48,8 +48,12 @@ const topic = (exchange, write) => ({ exchange, write, read: '^$' });
  * the routing keys of its role: the relay the event keys, a consumer the retry/delay/dead-letter
  * hops of its own queue, ops (dead-letter replay) the retry hops of the replayable work queues).
  * Topology v3 (step 4.1 S2) adds the scanner (email-worker scan role, queue scan.spam) and gives
- * ops the retry hops of scan.spam. The relay needs nothing new: the reconciler re-drives an event
- * through its outbox row, so the relay republishes it with its own `org.` event key.
+ * ops the retry hops of scan.spam. Topology v4 (step 4.2 A2) extends the scanner to the
+ * attachment engine's work queue scan.attachment (same user: same image and bounded context,
+ * ADR-0028) and gives ops the retry hops of scan.attachment. The scanner never publishes
+ * mail.attachment.sandbox_requested.v1 itself (outbox → relay). The relay needs nothing new: the
+ * reconciler re-drives an event through its outbox row, so the relay republishes it with its own
+ * `org.` event key.
  */
 const ROLE_USERS = [
   {
@@ -75,15 +79,16 @@ const ROLE_USERS = [
   },
   {
     // Step 4.1 S1/S2: the email-worker scan role has its own broker user (least privilege).
+    // Step 4.2 A2 (v4): the same user consumes scan.attachment (the attachment engine).
     role: 'scanner',
     userKey: 'RABBITMQ_SCANNER_USER',
     passwordKey: 'RABBITMQ_SCANNER_PASSWORD',
     configure: '^$',
     write: '^email\\.(security|events)$',
-    read: '^scan\\.spam$',
+    read: '^scan\\.(spam|attachment)$',
     topics: [
-      topic('email.security', '^retry\\.scan\\.spam\\.'),
-      topic('email.events', '^dead-letter\\.scan\\.spam(\\.|$)'),
+      topic('email.security', '^retry\\.scan\\.(spam|attachment)\\.'),
+      topic('email.events', '^dead-letter\\.scan\\.(spam|attachment)(\\.|$)'),
     ],
   },
   {
@@ -104,13 +109,13 @@ const ROLE_USERS = [
     passwordKey: 'RABBITMQ_OPS_PASSWORD',
     configure: '^$',
     // Replay republishes only to the home exchanges of the replayable work queues (Q9); v3 adds
-    // scan.spam (home exchange email.security).
+    // scan.spam, v4 scan.attachment (home exchange email.security).
     write: '^email\\.(ingestion|delivery|security)$',
     read: '^email\\.dead-letter$',
     topics: [
       topic('email.ingestion', '^retry\\.email\\.received\\.'),
       topic('email.delivery', '^retry\\.email\\.delivery\\.pending\\.'),
-      topic('email.security', '^retry\\.scan\\.spam\\.'),
+      topic('email.security', '^retry\\.scan\\.(spam|attachment)\\.'),
     ],
   },
 ];

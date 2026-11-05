@@ -145,9 +145,12 @@ async function deleteScanFixtures(organizationIds: bigint[]): Promise<void> {
 function eml(tag: string): string {
   const words = Array.from({ length: 160 }, (_, i) => `t${run}${tag}w${(i * 7) % 23}`);
   return [
-    'From: Trainer <trainer@spam-sender.scan.test>',
+    // Every Bayes token is per run (body words, From, Subject): the statfiles are shared and
+    // persist, and a fixed header vocabulary learned as spam on every run makes Rspamd skip the
+    // learn (204, already >= 95 % spam) after enough runs (step 4.2 §13).
+    `From: Trainer ${run} <trainer-${run}@spam-sender.scan.test>`,
     'To: bob@customer.scan.test',
-    `Subject: training ${run} ${tag}`,
+    `Subject: ${run}${tag} ${tag}${run}`,
     'Date: Thu, 05 Nov 2026 10:00:00 +0000',
     `Message-ID: <${run}.${tag}@spam-sender.scan.test>`,
     'MIME-Version: 1.0',

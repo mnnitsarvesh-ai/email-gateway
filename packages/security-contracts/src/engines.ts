@@ -6,21 +6,20 @@ import { z } from 'zod';
  * adapter registry (`scanning/registry.ts`) pairs every entry with an adapter.
  */
 
-/** Pipeline stages of the security engines (ADR-0026). */
-export const SECURITY_STAGES = [
-  'antispam',
-  'antivirus',
-  'yara',
-  'url',
-  'bec',
-  'dlp',
-  'sandbox',
-] as const;
+/**
+ * Pipeline stages of the security engines (ADR-0026, amended by ADR-0028: ClamAV and YARA are
+ * components of the one `attachment` stage, step 4.2 A1).
+ */
+export const SECURITY_STAGES = ['antispam', 'attachment', 'url', 'bec', 'dlp', 'sandbox'] as const;
 export type SecurityStage = (typeof SECURITY_STAGES)[number];
 export const securityStageSchema = z.enum(SECURITY_STAGES);
 
-/** Every engine name the platform knows (4.1 registers only `rspamd`; 4.2–4.6 add the rest). */
-export const ENGINE_NAMES = ['rspamd', 'clamav', 'yara', 'url', 'bec', 'dlp', 'sandbox'] as const;
+/**
+ * Every engine name the platform knows (4.1 registers `rspamd`, 4.2 `attachment`; 4.3–4.6 add the
+ * rest). `clamav` and `yara` were never registered or stored: they are components of the
+ * `attachment` engine (step 4.2 A1, ADR-0028).
+ */
+export const ENGINE_NAMES = ['rspamd', 'attachment', 'url', 'bec', 'dlp', 'sandbox'] as const;
 export type EngineName = (typeof ENGINE_NAMES)[number];
 export const engineNameSchema = z.enum(ENGINE_NAMES);
 
@@ -34,12 +33,12 @@ export interface EngineCatalogEntry {
   readonly queue: string;
   /** Required for every round when enabled on the platform (`SCAN_ENGINES`). */
   readonly requiredByDefault: boolean;
-  /** Whether a tenant may switch the engine off; required engines never are in 4.1. */
+  /** Whether a tenant may switch the engine off; required engines never are (4.1, 4.2). */
   readonly tenantMayDisable: boolean;
   readonly description: string;
 }
 
-/** The registered engines (step 4.1: Rspamd only). */
+/** The registered engines (step 4.1: Rspamd; step 4.2: the attachment engine, A1). */
 export const ENGINE_CATALOG: readonly EngineCatalogEntry[] = Object.freeze([
   Object.freeze({
     name: 'rspamd',
@@ -49,6 +48,15 @@ export const ENGINE_CATALOG: readonly EngineCatalogEntry[] = Object.freeze([
     tenantMayDisable: false,
     description:
       'Rspamd: spam, phishing, reputation, Bayes, fuzzy hashes and SPF/DKIM/DMARC/ARC (step 4.1)',
+  } as const),
+  Object.freeze({
+    name: 'attachment',
+    stage: 'attachment',
+    queue: 'scan.attachment',
+    requiredByDefault: true,
+    tenantMayDisable: false,
+    description:
+      'Attachments: file type, known-threat hashes, ClamAV, YARA, archive limits (step 4.2)',
   } as const),
 ]);
 
@@ -62,7 +70,7 @@ export function engineCatalogEntry(name: string): EngineCatalogEntry | undefined
 
 /**
  * Parses the platform's enabled engines (`SCAN_ENGINES`, a comma-separated list, default
- * `rspamd`). Throws on an empty list, a duplicate or a name that is not in the catalog, so a
+ * `rspamd,attachment` from step 4.2). Throws on an empty list, a duplicate or a name that is not in the catalog, so a
  * misconfigured worker refuses to start instead of scanning with fewer engines.
  */
 export function parseEnabledEngines(value: string): EngineName[] {

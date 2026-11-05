@@ -33,6 +33,10 @@ RUN if [ -d /out/node_modules/@email-gateway/database ] || [ "${APP}" = "databas
     fi
 
 FROM ${NODE_IMAGE} AS runtime
+# The email-worker's attachment inspector runs its children under `prlimit` (util-linux, an
+# Essential package of Debian, present in node:22-bookworm-slim: util-linux 2.38.1; step 4.2 A4,
+# ATTACHMENT_INSPECTOR_RLIMITS=required). The @litko/yara-x native binary comes from the
+# lockfile's linux-<arch>-gnu optional package during `pnpm deploy` (glibc image).
 RUN apt-get update \
  && apt-get install -y --no-install-recommends openssl ca-certificates tini \
  && rm -rf /var/lib/apt/lists/*

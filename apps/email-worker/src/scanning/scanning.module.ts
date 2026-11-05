@@ -19,6 +19,7 @@ import {
   PrismaConsumerProgress,
   PrismaService,
   type QueueConsumer,
+  RedisService,
   S3Service,
 } from '@email-gateway/common';
 import type { PrismaClient } from '@email-gateway/database';
@@ -28,9 +29,15 @@ import type { HealthDetails } from '@email-gateway/shared-types';
 import type { WorkerConfig } from '../config';
 import { errorFields } from '../mime-ingestion/error-fields';
 import { CircuitBreaker } from './circuit-breaker';
+import { attachmentScalingWarnings, consumerEngines, runsAttachmentConsumer } from './config';
+import type { EngineHealthCheck, ScanEngineAdapter } from './engine';
+import { AttachmentEngine } from './engines/attachment/attachment.engine';
+import { AttachmentMetrics } from './engines/attachment/attachment-metrics';
+import { RescanJobRunner } from './engines/attachment/rescan-runner';
+import { SignatureWatcher } from './engines/attachment/signature-watcher';
 import { DeadlineSweeper, type LeaderLock } from './deadline-sweeper';
 import { createEngineConsumer, s3EmlOpener } from './engine-consumer';
-import { enabledRegistrations, type ScanEngineRegistration } from './registry';
+import { type EngineDeps, enabledRegistrations, type ScanEngineRegistration } from './registry';
 import {
   type EmlOpener,
   ScanRoundService,
@@ -49,6 +56,13 @@ export const SCANNER_MESSAGING_METRICS = Symbol('SCANNER_MESSAGING_METRICS');
 /** The advisory-lock connection of the deadline sweeper's leader lock. */
 export const SCAN_LOCKS = Symbol('SCAN_LOCKS');
 export const SCAN_ENGINES = Symbol('SCAN_ENGINES');
+/** The attachment engine's background jobs (A13), or null on replicas without its consumer. */
+export const ATTACHMENT_JOBS = Symbol('ATTACHMENT_JOBS');
+
+export interface AttachmentJobs {
+  watcher: SignatureWatcher;
+  runner: RescanJobRunner;
+}
 
 /** `amqp_connection_up{connection}` of the scan role. */
 export const SCANNER_CONNECTION_NAME = 'email-worker-scanner';
@@ -59,8 +73,17 @@ export const SCANNER_EXCHANGES = ['email.security', 'email.events'];
 export interface EngineRuntime {
   registration: ScanEngineRegistration;
   service: ScanRoundService;
+  adapter: ScanEngineAdapter;
   consumer: QueueConsumer<ScanTriggerPayload>;
   breaker: CircuitBreaker;
+}
+
+/** The registrations whose consumers this replica runs (SCAN_CONSUMERS ⊆ SCAN_ENGINES, A1). */
+export function consumerRegistrations(config: Readonly<WorkerConfig>): ScanEngineRegistration[] {
+  const consumers = consumerEngines(config);
+  return enabledRegistrations(config.SCAN_ENGINES).filter((r) =>
+    consumers.includes(r.catalog.name),
+  );
 }
 
 /** A circuit breaker per engine with the S10 settings, reporting into the S17 series. */
@@ -99,16 +122,22 @@ export function createRoundService(options: {
   openEml: EmlOpener;
   metrics: ScanMetrics;
   logger: Logger;
+  /** What the registration builds its adapter from (step 4.2 A12). */
+  deps: Omit<EngineDeps, 'config' | 'logger' | 'metrics'>;
+  /** A prebuilt adapter (tests); default `registration.create(deps)`. */
+  adapter?: ScanEngineAdapter;
   breaker?: CircuitBreaker;
   consumer?: string;
-}): { service: ScanRoundService; breaker: CircuitBreaker } {
+}): { service: ScanRoundService; breaker: CircuitBreaker; adapter: ScanEngineAdapter } {
   const { config, registration, metrics, logger } = options;
   const engine = registration.catalog.name;
   metrics.registerEngine(engine);
   const breaker = options.breaker ?? createEngineBreaker(config, engine, metrics, logger);
+  const adapter =
+    options.adapter ?? registration.create({ config, logger, metrics, ...options.deps });
   const service = new ScanRoundService({
     registration,
-    adapter: registration.create({ config, logger }),
+    adapter,
     store: options.store,
     settings: options.settings,
     openEml: options.openEml,
@@ -120,7 +149,80 @@ export function createRoundService(options: {
     deadlineSeconds: config.SCAN_ROUND_DEADLINE_SECONDS,
     ...(options.consumer ? { consumer: options.consumer } : {}),
   });
-  return { service, breaker };
+  return { service, breaker, adapter };
+}
+
+/** The adapter's readiness check `name`, or a check that fails (no such engine running). */
+function engineHealthCheck(engines: EngineRuntime[], name: string): EngineHealthCheck | null {
+  for (const engine of engines) {
+    const check = engine.adapter.healthChecks?.().find((c) => c.name === name);
+    if (check) return check;
+  }
+  return null;
+}
+
+/** Readiness `clamav` (clamd PING) on replicas running the attachment consumer (A12). */
+@Injectable()
+export class ClamavHealth implements HealthIndicator {
+  readonly healthName = 'clamav';
+  constructor(@Inject(SCAN_ENGINES) private readonly engines: EngineRuntime[]) {}
+
+  async checkHealth(): Promise<void | HealthDetails> {
+    const check = engineHealthCheck(this.engines, this.healthName);
+    if (!check) throw new Error('the attachment engine does not run in this worker');
+    return (await check.check()) as void | HealthDetails;
+  }
+}
+
+/** Readiness `attachment-inspector` (pool ready, rlimit mode, bundle id; A4, A12). */
+@Injectable()
+export class InspectorHealth implements HealthIndicator {
+  readonly healthName = 'attachment-inspector';
+  constructor(@Inject(SCAN_ENGINES) private readonly engines: EngineRuntime[]) {}
+
+  async checkHealth(): Promise<void | HealthDetails> {
+    const check = engineHealthCheck(this.engines, this.healthName);
+    if (!check) throw new Error('the attachment engine does not run in this worker');
+    return (await check.check()) as void | HealthDetails;
+  }
+}
+
+/** The signature watcher and the rescan runner of the attachment engine (A13). */
+export function createAttachmentJobs(options: {
+  config: Readonly<WorkerConfig>;
+  prisma: PrismaClient;
+  engine: AttachmentEngine;
+  locks: LeaderLock;
+  registry: MetricsService;
+  metrics: ScanMetrics;
+  logger: Logger;
+}): AttachmentJobs {
+  const { config } = options;
+  const attachmentMetrics = AttachmentMetrics.for(options.registry);
+  return {
+    watcher: new SignatureWatcher({
+      prisma: options.prisma,
+      locks: options.locks,
+      source: options.engine.signatureSource(),
+      metrics: attachmentMetrics,
+      logger: options.logger,
+      intervalMs: config.ATTACHMENT_SIGNATURE_POLL_MS,
+      mode: config.ATTACHMENT_SIGNATURE_RESCAN,
+      windowHours: config.ATTACHMENT_RESCAN_WINDOW_HOURS,
+      maxMessages: config.ATTACHMENT_RESCAN_MAX_MESSAGES,
+      txTimeoutMs: config.SCAN_DB_TIMEOUT_MS,
+    }),
+    runner: new RescanJobRunner({
+      prisma: options.prisma,
+      locks: options.locks,
+      metrics: attachmentMetrics,
+      lifecycleMetrics: options.metrics.lifecycle,
+      logger: options.logger,
+      intervalMs: config.ATTACHMENT_RESCAN_INTERVAL_MS,
+      batchSize: config.ATTACHMENT_RESCAN_BATCH_SIZE,
+      txTimeoutMs: config.SCAN_DB_TIMEOUT_MS,
+    }),
+  };
 }
 
 /** The scan role's writer store, settings resolver and EML reads (shared by every engine). */
@@ -173,6 +275,7 @@ export class ScanningRuntime implements OnModuleInit, OnApplicationBootstrap, On
     @Inject(SCANNER_PUBLISHER) private readonly publisher: ConfirmPublisher,
     @Inject(SCAN_LOCKS) private readonly locks: LeaderLock & { close(): Promise<void> },
     @Inject(SCAN_LOGGER) private readonly logger: Logger,
+    @Inject(ATTACHMENT_JOBS) private readonly jobs: AttachmentJobs | null,
   ) {}
 
   get running(): boolean {
@@ -187,12 +290,18 @@ export class ScanningRuntime implements OnModuleInit, OnApplicationBootstrap, On
     this.connection.start();
   }
 
-  onApplicationBootstrap(): void {
+  async onApplicationBootstrap(): Promise<void> {
+    // Adapter resources first (the inspector pool refuses to start without prlimit in
+    // `required` mode or with another YARA bundle id): the worker fails its start instead of
+    // consuming deliveries it cannot scan.
+    for (const engine of this.engines) await engine.adapter.start?.();
     for (const engine of this.engines) {
       const { service } = engine;
       engine.consumer.start((event) => service.handle(event));
     }
     this.sweeper.start();
+    this.jobs?.watcher.start();
+    this.jobs?.runner.start();
     this.started = true;
     this.logger.info(
       {
@@ -214,6 +323,22 @@ export class ScanningRuntime implements OnModuleInit, OnApplicationBootstrap, On
         }
       }
       await this.sweeper.stop().catch(() => this.logger.warn('scan deadline sweeper stop failed'));
+      if (this.jobs) {
+        await this.jobs.watcher
+          .stop()
+          .catch(() => this.logger.warn('attachment signature watcher stop failed'));
+        await this.jobs.runner
+          .stop()
+          .catch(() => this.logger.warn('attachment rescan runner stop failed'));
+      }
+    }
+    // Kills the inspector children (graceful shutdown) after the consumers stopped.
+    for (const engine of this.engines) {
+      await engine.adapter
+        .stop?.()
+        .catch(() =>
+          this.logger.warn({ engine: engine.registration.catalog.name }, 'scan engine stop failed'),
+        );
     }
     await this.publisher.close().catch(() => this.logger.warn('scanner publisher close failed'));
     await this.connection.close().catch(() => this.logger.warn('scanner connection close failed'));
@@ -282,6 +407,8 @@ export class ScanningModule {
           useFactory: (
             prisma: PrismaService,
             s3: S3Service,
+            redis: RedisService,
+            registry: MetricsService,
             metrics: ScanMetrics,
             connection: AmqpConnection,
             publisher: ConfirmPublisher,
@@ -295,13 +422,19 @@ export class ScanningModule {
               logger: scanLogger,
             });
             const progress = new PrismaConsumerProgress(prisma);
-            return enabledRegistrations(config.SCAN_ENGINES).map((registration) => {
-              const { service, breaker } = createRoundService({
+            for (const warning of runsAttachmentConsumer(config)
+              ? attachmentScalingWarnings(config)
+              : []) {
+              scanLogger.warn({ warning }, 'attachment scaling configuration warning');
+            }
+            return consumerRegistrations(config).map((registration) => {
+              const { service, breaker, adapter } = createRoundService({
                 config,
                 registration,
                 ...infra,
                 metrics,
                 logger: scanLogger,
+                deps: { prisma, s3, redis, registry },
               });
               const consumer = createEngineConsumer({
                 config,
@@ -312,12 +445,14 @@ export class ScanningModule {
                 metrics: messaging,
                 progress,
               });
-              return { registration, service, consumer, breaker };
+              return { registration, service, adapter, consumer, breaker };
             });
           },
           inject: [
             PrismaService,
             S3Service,
+            RedisService,
+            MetricsService,
             ScanMetrics,
             SCANNER_AMQP_CONNECTION,
             SCANNER_PUBLISHER,
@@ -338,10 +473,35 @@ export class ScanningModule {
             }),
           inject: [PrismaService, ScanMetrics, SCAN_LOCKS],
         },
+        {
+          provide: ATTACHMENT_JOBS,
+          useFactory: (
+            engines: EngineRuntime[],
+            prisma: PrismaService,
+            locks: LeaderLock,
+            registry: MetricsService,
+            metrics: ScanMetrics,
+          ): AttachmentJobs | null => {
+            const attachment = engines.find((e) => e.adapter instanceof AttachmentEngine);
+            if (!attachment) return null;
+            return createAttachmentJobs({
+              config,
+              prisma,
+              engine: attachment.adapter as AttachmentEngine,
+              locks,
+              registry,
+              metrics,
+              logger: scanLogger,
+            });
+          },
+          inject: [SCAN_ENGINES, PrismaService, SCAN_LOCKS, MetricsService, ScanMetrics],
+        },
         ScannerBrokerHealth,
+        ClamavHealth,
+        InspectorHealth,
         ScanningRuntime,
       ],
-      exports: [ScanMetrics, ScanningRuntime, ScannerBrokerHealth],
+      exports: [ScanMetrics, ScanningRuntime, ScannerBrokerHealth, ClamavHealth, InspectorHealth],
     };
   }
 }

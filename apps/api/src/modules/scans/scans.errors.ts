@@ -61,3 +61,36 @@ export const scanTrainingNotApplicable = (): CodedHttpException =>
     SCAN_TRAINING_NOT_APPLICABLE,
     'Rspamd found no content it can hash in this message',
   );
+
+/** Step 4.2 A16/A17 known-threat hashes and A13 rescan jobs. */
+export const HASH_EXISTS = 'hash_exists';
+export const THREAT_HASH_NOT_FOUND = 'threat_hash_not_found';
+export const RESCAN_JOB_NOT_FOUND = 'rescan_job_not_found';
+export const RESCAN_JOB_NOT_CANCELLABLE = 'rescan_job_not_cancellable';
+
+/** The SHA-256 is already in the known-threat catalog (`malware_signatures`). */
+export const hashExists = (): CodedHttpException =>
+  new CodedHttpException(
+    HttpStatus.CONFLICT,
+    HASH_EXISTS,
+    'The SHA-256 is already in the known-threat hash catalog',
+  );
+
+export const threatHashNotFound = (): CodedHttpException =>
+  new CodedHttpException(
+    HttpStatus.NOT_FOUND,
+    THREAT_HASH_NOT_FOUND,
+    'The SHA-256 is not in the known-threat hash catalog',
+  );
+
+export const rescanJobNotFound = (): CodedHttpException =>
+  new CodedHttpException(HttpStatus.NOT_FOUND, RESCAN_JOB_NOT_FOUND, 'Rescan job not found');
+
+/** Only `pending` and `running` jobs can be cancelled; `status` is the job's status now. */
+export const rescanJobNotCancellable = (status: string): CodedHttpException =>
+  new CodedHttpException(
+    HttpStatus.CONFLICT,
+    RESCAN_JOB_NOT_CANCELLABLE,
+    'Only pending or running rescan jobs can be cancelled',
+    { status },
+  );

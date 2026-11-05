@@ -479,7 +479,14 @@ export class ScanPipeline {
     broker: ScanBroker,
     options: ScanPipelineOptions = {},
   ): Promise<ScanPipeline> {
-    const config = workerConfig({ SCAN_SETTINGS_CACHE_TTL_MS: '0', ...options.overrides });
+    // The step 4.1 suites exercise the Rspamd engine and the generic orchestrator: rounds of
+    // this pipeline require `rspamd` only (step 4.2: the attachment engine has its own suites,
+    // attachment-*.test.ts; the stack suites run both).
+    const config = workerConfig({
+      SCAN_ENGINES: 'rspamd',
+      SCAN_SETTINGS_CACHE_TTL_MS: '0',
+      ...options.overrides,
+    });
     const registry = new MetricsService({ service: `email-worker-it-${randomUUID().slice(0, 6)}` });
     const metrics = new ScanMetrics(registry);
     const messaging = createMessagingMetrics(registry);
@@ -506,6 +513,7 @@ export class ScanPipeline {
       logger: silentLogger,
       breaker,
       consumer: consumerName,
+      deps: { prisma: fx.prisma, s3: fx.s3, redis: null, registry },
     });
     const connection = new AmqpConnection({
       urls: [broker.vhost.adminUrl],

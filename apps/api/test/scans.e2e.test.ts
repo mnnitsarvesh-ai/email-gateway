@@ -1,5 +1,7 @@
 /**
- * Step 4.1 scan routes (S13, S16) over HTTP with MySQL, Redis, S3 and Rspamd stubbed:
+ * Step 4.1 scan routes (S13, S16) and the step 4.2 additions (A8 attachment settings, A13 rescan
+ * jobs, A16 per-attachment results and known-threat hashes) over HTTP with MySQL, Redis, S3 and
+ * Rspamd stubbed:
  * authorization (401, 403 per permission, API keys refused and MFA required on the platform
  * training route), validation before any database access (400, 404 unknown engine, 422 invalid
  * settings with violations), the version compare-and-set (409), the scan read mapping and its
@@ -38,8 +40,10 @@ import {
   MessageLifecycleReadRepository,
 } from '../src/modules/messages/repositories/message-lifecycle-read.repository';
 import { MessageScansReadRepository } from '../src/modules/messages/repositories/message-scans-read.repository';
+import { AttachmentRescansRepository } from '../src/modules/scans/repositories/attachment-rescans.repository';
 import { ScanSettingsRepository } from '../src/modules/scans/repositories/scan-settings.repository';
 import { ScanTrainingRepository } from '../src/modules/scans/repositories/scan-training.repository';
+import { ThreatHashesRepository } from '../src/modules/scans/repositories/threat-hashes.repository';
 import { InMemoryKeyValueStore } from './support/in-memory-key-value-store';
 import { RecordingEmailSender } from './support/recording-email-sender';
 import { TEST_DOMAIN_ENV } from './support/test-env';
@@ -64,6 +68,9 @@ const READ = 'message:read';
 const POLICY_READ = 'policy:read';
 const MANAGE = 'scan:settings_manage';
 const TRAIN = 'platform:scan_training';
+const THREAT_INTEL = 'platform:threat_intel_manage';
+const RESCAN = 'platform:scan_rescan';
+const SHA = 'c'.repeat(64);
 const ids = { user: randomUUID(), org: randomUUID(), session: randomUUID() };
 
 let snapshot: PrincipalSnapshot;
@@ -138,6 +145,81 @@ const engineRow = (attempt: number, isFinal: boolean) => ({
   completedAt: new Date(`2026-11-05T08:00:0${attempt + 1}.000Z`),
 });
 
+const attachmentEngineRow = {
+  ...engineRow(1, true),
+  engine: 'attachment',
+  engineVersion: 'clamav/1.4.6/28173;yara-x/0.10.0/462fab6e5cc4',
+  outcome: 'suspicious' as const,
+  score: null,
+  requiredScore: null,
+  action: null,
+  reasonCodes: ['type.executable_disguised'],
+  settingsVersion: 'attachment-map/1;p=abc;t=none',
+  evidence: { signals: [] },
+};
+const attachmentResultRow = {
+  scanId: 900n,
+  attachmentId: 4000n,
+  partIndex: 1,
+  sha256: 'd'.repeat(64),
+  sizeBytes: 2048,
+  detectedType: 'pe_executable',
+  typeFamily: 'executable',
+  typeMismatch: true,
+  verdict: 'suspicious' as const,
+  reasonCodes: ['type.executable_disguised', 'type.denied'],
+  clamavSignature: null,
+  clamavEngineVersion: '1.4.6',
+  clamavDbVersion: 28173,
+  yaraBundleId: 'yara-1-462fab6e5cc4',
+  yaraMatches: [],
+  archive: null,
+  knownHashSeverity: null,
+  cacheResult: 'miss' as const,
+  durationMs: 15,
+};
+const hashRow = (sha256 = SHA) => ({
+  id: 12n,
+  sha256,
+  md5: null,
+  severity: 'critical' as const,
+  family: 'Win.Test',
+  source: 'analyst',
+  reason: 'campaign',
+  expiresAt: null,
+  firstSeenAt: new Date('2026-11-05T09:00:00.000Z'),
+  lastSeenAt: new Date('2026-11-05T09:00:00.000Z'),
+  createdAt: new Date('2026-11-05T09:00:00.000Z'),
+  updatedAt: new Date('2026-11-05T09:00:00.000Z'),
+  addedBy: { publicId: ids.user },
+});
+const JOB_ID = randomUUID();
+const jobRow = (status: 'pending' | 'completed' = 'pending') => ({
+  id: 3n,
+  publicId: JOB_ID,
+  trigger: 'admin' as const,
+  status,
+  organizationId: null,
+  windowStart: new Date('2026-11-04T09:00:00.000Z'),
+  windowEnd: new Date('2026-11-05T09:00:00.000Z'),
+  states: ['scanned'],
+  component: null,
+  fromVersion: null,
+  toVersion: null,
+  maxMessages: 5000,
+  selectedCount: 0,
+  requestedCount: 0,
+  skippedCount: 0,
+  reason: 'x',
+  lastError: null,
+  startedAt: null,
+  completedAt: null,
+  createdAt: new Date('2026-11-05T09:00:00.000Z'),
+  updatedAt: new Date('2026-11-05T09:00:00.000Z'),
+  organization: null,
+  requestedBy: { publicId: ids.user },
+});
+
 describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
   let app: INestApplication;
   const kv = new InMemoryKeyValueStore();
@@ -148,6 +230,29 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
     find: vi.fn(() => Promise.resolve(null as unknown)),
     create: vi.fn(() => Promise.resolve({})),
     replaceIfVersion: vi.fn(() => Promise.resolve(true)),
+  };
+  const hashes = {
+    list: vi.fn(() => Promise.resolve([hashRow()])),
+    findForUpdate: vi.fn((_tx: unknown, sha256: string) =>
+      Promise.resolve(sha256 === SHA ? hashRow() : null),
+    ),
+    create: vi.fn((_tx: unknown, input: { sha256: string }) =>
+      Promise.resolve(hashRow(input.sha256)),
+    ),
+    remove: vi.fn(() => Promise.resolve()),
+  };
+  const rescans = {
+    findOrganization: vi.fn((publicId: string) =>
+      Promise.resolve(publicId === ids.org ? { id: 1n, publicId } : null),
+    ),
+    countCandidates: vi.fn(() => Promise.resolve(7)),
+    create: vi.fn(() => Promise.resolve(jobRow())),
+    list: vi.fn(() => Promise.resolve([jobRow()])),
+    find: vi.fn((publicId: string) => Promise.resolve(publicId === JOB_ID ? jobRow() : null)),
+    findOnWriter: vi.fn((_tx: unknown, publicId: string) =>
+      Promise.resolve(publicId === JOB_ID ? jobRow() : null),
+    ),
+    cancel: vi.fn(() => Promise.resolve(true)),
   };
   const training = {
     findOrganization: vi.fn((publicId: string) =>
@@ -218,7 +323,13 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
       .overrideProvider(MessageScansReadRepository)
       .useValue({
         rounds: () => Promise.resolve([scanRow]),
-        engineResults: () => Promise.resolve([engineRow(2, true), engineRow(1, false)]),
+        engineResults: () =>
+          Promise.resolve([engineRow(2, true), engineRow(1, false), attachmentEngineRow]),
+        attachmentResults: () => Promise.resolve([attachmentResultRow]),
+        attachmentParts: () =>
+          Promise.resolve([{ partIndex: 1, filename: 'invoice.pdf', declaredContentType: null }]),
+        sandboxSubmissions: () =>
+          Promise.resolve([{ id: 31n, scanId: 900n, attachmentId: 4000n, status: 'pending' }]),
         authResults: () =>
           Promise.resolve([
             {
@@ -239,6 +350,10 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
       .useValue(settingsRows)
       .overrideProvider(ScanTrainingRepository)
       .useValue(training)
+      .overrideProvider(ThreatHashesRepository)
+      .useValue(hashes)
+      .overrideProvider(AttachmentRescansRepository)
+      .useValue(rescans)
       .compile();
     app = moduleRef.createNestApplication({ logger: false });
     configureHttpApp(app, createLogger({ service: 'api-test', level: 'silent' }));
@@ -334,6 +449,49 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
                 settingsVersion: 'rspamd-map/1;p=abc;t=none',
                 completedAt: '2026-11-05T08:00:03.000Z',
               },
+              {
+                engine: 'attachment',
+                final: true,
+                engineVersion: 'clamav/1.4.6/28173;yara-x/0.10.0/462fab6e5cc4',
+                outcome: 'suspicious',
+                score: null,
+                requiredScore: null,
+                action: null,
+                reasonCodes: ['type.executable_disguised'],
+                symbols: [],
+                attempts: [
+                  {
+                    attempt: 1,
+                    outcome: 'suspicious',
+                    errorCode: null,
+                    // Withheld for the attachment engine (cross-tenant cache, A10).
+                    durationMs: null,
+                    at: '2026-11-05T08:00:02.000Z',
+                  },
+                ],
+                durationMs: null,
+                settingsVersion: 'attachment-map/1;p=abc;t=none',
+                completedAt: '2026-11-05T08:00:02.000Z',
+                attachments: [
+                  {
+                    partIndex: 1,
+                    filename: 'invoice.pdf',
+                    declaredContentType: null,
+                    sha256: 'd'.repeat(64),
+                    sizeBytes: 2048,
+                    detectedType: 'pe_executable',
+                    typeFamily: 'executable',
+                    typeMismatch: true,
+                    verdict: 'suspicious',
+                    reasonCodes: ['type.executable_disguised', 'type.denied'],
+                    clamav: { signature: null, engineVersion: '1.4.6', dbVersion: 28173 },
+                    yara: { bundleId: 'yara-1-462fab6e5cc4', matches: [] },
+                    archive: null,
+                    knownHash: null,
+                    sandbox: { submissionId: '31', status: 'pending' },
+                  },
+                ],
+              },
             ],
           },
         ],
@@ -376,6 +534,17 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
           version: 0,
           platform: expect.objectContaining({ spamScore: 6, suspiciousScore: 4 }),
           effective: expect.objectContaining({ spamScore: 6, phishingVerdict: 'suspicious' }),
+        }),
+        expect.objectContaining({
+          engine: 'attachment',
+          required: true,
+          tenantMayDisable: false,
+          override: null,
+          platform: expect.objectContaining({ maxAttachmentBytes: 26_214_400, archiveMaxDepth: 3 }),
+          effective: expect.objectContaining({
+            allowedTypes: null,
+            deniedTypeVerdict: 'suspicious',
+          }),
         }),
       ]);
       expect(res.body.note).toContain('SCAN_SETTINGS_CACHE_TTL_MS');
@@ -549,6 +718,242 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
         await http().post(trainUrl(randomUUID())).set(auth).send(learn).expect(404);
       }
       await http().post(trainUrl(randomUUID())).set(auth).send(learn).expect(429);
+    });
+  });
+
+  describe('attachment settings (step 4.2 A8)', () => {
+    it('PUT validates an attachment override against the platform bounds (422 with violations)', async () => {
+      const res = await http()
+        .put('/api/v1/scan-settings/attachment')
+        .set(await bearer())
+        .send({
+          expectedVersion: 0,
+          settings: { allowedTypes: ['pe_executable'], maxAttachmentBytes: 99_000_000, zip: 1 },
+        })
+        .expect(422);
+      expect(res.body.code).toBe('scan_settings_invalid');
+      expect(res.body.violations.map((v: { path: string }) => v.path).sort()).toEqual(['zip']);
+      expect(settingsRows.find).not.toHaveBeenCalled();
+    });
+
+    it('PUT stores a valid attachment override (audited)', async () => {
+      const res = await http()
+        .put('/api/v1/scan-settings/attachment')
+        .set(await bearer())
+        .send({ expectedVersion: 0, settings: { deniedTypes: ['zip'] } })
+        .expect(200);
+      expect(res.body).toMatchObject({ engine: 'attachment' });
+      expect(settingsRows.create).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({ engine: 'attachment', settings: { deniedTypes: ['zip'] } }),
+      );
+      expect(audit.record.mock.calls[0]![0]).toMatchObject({
+        action: 'scan_settings.updated',
+        resourceId: 'attachment',
+      });
+    });
+  });
+
+  describe('platform known-threat hashes (step 4.2 A16, A17)', () => {
+    const url = '/api/v1/platform/threat-hashes';
+    const body = { sha256: 'e'.repeat(64), severity: 'high', reason: 'campaign' };
+    beforeEach(() => principalWith([THREAT_INTEL], 'platform'));
+
+    it('refuses API keys, sessions without MFA, users without the permission and tenants', async () => {
+      apiKeyPermissions = new Set([THREAT_INTEL]);
+      await http().get(url).set(apiKey).expect(403);
+      await http()
+        .post(url)
+        .set(await bearer(['pwd']))
+        .send(body)
+        .expect(403);
+      principalWith([TRAIN, RESCAN], 'platform');
+      await http()
+        .delete(`${url}/${SHA}?reason=x`)
+        .set(await bearer())
+        .expect(403);
+      principalWith([READ, POLICY_READ, MANAGE]);
+      await http()
+        .get(url)
+        .set(await bearer())
+        .expect(403);
+      expect(hashes.list).not.toHaveBeenCalled();
+      expect(hashes.create).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [{ ...body, sha256: 'E'.repeat(64) }, 'sha256'],
+      [{ ...body, sha256: 'e'.repeat(63) }, 'sha256'],
+      [{ ...body, md5: 'x' }, 'md5'],
+      [{ ...body, severity: 'severe' }, 'severity'],
+      [{ ...body, family: 'f'.repeat(129) }, 'family'],
+      [{ ...body, reason: '' }, 'reason'],
+      [{ ...body, reason: 'r'.repeat(513) }, 'reason'],
+      [{ ...body, expiresAt: '2020-01-01T00:00:00.000Z' }, 'expiresAt'],
+      [{ ...body, source: 'feed:x' }, 'source'],
+    ])('400 for body %j', async (input, text) => {
+      const res = await http()
+        .post(url)
+        .set(await bearer())
+        .send(input)
+        .expect(400);
+      expect(JSON.stringify(res.body.message)).toContain(text);
+      expect(hashes.create).not.toHaveBeenCalled();
+    });
+
+    it('adds (201, audited), refuses a listed hash (409), lists and deletes (204, 404)', async () => {
+      const created = await http()
+        .post(url)
+        .set(await bearer())
+        .send(body)
+        .expect(201);
+      expect(created.body).toMatchObject({ sha256: 'e'.repeat(64), source: 'analyst' });
+      expect(audit.record.mock.calls[0]![0]).toMatchObject({ action: 'threat_hash.added' });
+      const exists = await http()
+        .post(url)
+        .set(await bearer())
+        .send({ ...body, sha256: SHA })
+        .expect(409);
+      expect(exists.body.code).toBe('hash_exists');
+      const list = await http()
+        .get(`${url}?limit=5`)
+        .set(await bearer())
+        .expect(200);
+      expect(list.body.data[0]).toMatchObject({ sha256: SHA, addedByUserId: ids.user });
+      await http()
+        .delete(`${url}/${SHA}?reason=false%20positive`)
+        .set(await bearer())
+        .expect(204);
+      expect(audit.record.mock.calls.at(-1)![0]).toMatchObject({
+        action: 'threat_hash.removed',
+        metadata: { reason: 'false positive', before: expect.objectContaining({ sha256: SHA }) },
+      });
+      const missing = await http()
+        .delete(`${url}/${'f'.repeat(64)}?reason=x`)
+        .set(await bearer())
+        .expect(404);
+      expect(missing.body.code).toBe('threat_hash_not_found');
+      await http()
+        .delete(`${url}/${SHA}`)
+        .set(await bearer())
+        .expect(400);
+    });
+
+    it('allows 60 calls per caller per minute (429 after)', async () => {
+      const auth = await bearer();
+      for (let i = 0; i < 60; i += 1) await http().get(url).set(auth).expect(200);
+      await http().get(url).set(auth).expect(429);
+    });
+  });
+
+  describe('platform attachment rescan jobs (step 4.2 A13)', () => {
+    const url = '/api/v1/platform/attachment-rescans';
+    const body = { windowHours: 24, reason: 'new signatures' };
+    beforeEach(() => principalWith([RESCAN], 'platform'));
+
+    it('refuses API keys, sessions without MFA and users without the permission', async () => {
+      apiKeyPermissions = new Set([RESCAN]);
+      await http().post(url).set(apiKey).send(body).expect(403);
+      await http()
+        .post(url)
+        .set(await bearer(['pwd']))
+        .send(body)
+        .expect(403);
+      principalWith([THREAT_INTEL], 'platform');
+      await http()
+        .get(url)
+        .set(await bearer())
+        .expect(403);
+      expect(rescans.create).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [{ ...body, windowHours: 0 }, 'windowHours'],
+      [{ ...body, windowHours: 169 }, 'windowHours'],
+      [{ ...body, states: ['delivered'] }, 'states'],
+      [{ ...body, states: [] }, 'states'],
+      [{ ...body, organizationId: 'x' }, 'organizationId'],
+      [{ ...body, maxMessages: 0 }, 'maxMessages'],
+      [{ ...body, maxMessages: 5001 }, 'maxMessages'],
+      [{ windowHours: 1 }, 'reason'],
+    ])('400 for body %j', async (input, text) => {
+      const res = await http()
+        .post(url)
+        .set(await bearer())
+        .send(input)
+        .expect(400);
+      expect(JSON.stringify(res.body.message)).toContain(text);
+      expect(rescans.create).not.toHaveBeenCalled();
+    });
+
+    it('a dry run answers 200 with the estimate; a request 202 with the job (audited)', async () => {
+      const dry = await http()
+        .post(url)
+        .set(await bearer())
+        .send({ ...body, dryRun: true })
+        .expect(200);
+      expect(dry.body).toMatchObject({ dryRun: true, estimatedMessages: 7, maxMessages: 5000 });
+      expect(rescans.create).not.toHaveBeenCalled();
+      const created = await http()
+        .post(url)
+        .set(await bearer())
+        .send({ ...body, organizationId: ids.org, states: ['scanned'] })
+        .expect(202);
+      expect(created.body).toEqual({ jobId: JOB_ID, status: 'pending', estimatedMessages: 7 });
+      expect(audit.record.mock.calls.at(-1)![0]).toMatchObject({
+        action: 'attachment_rescan.requested',
+        organizationId: 1n,
+      });
+      const unknown = await http()
+        .post(url)
+        .set(await bearer())
+        .send({ ...body, organizationId: randomUUID() })
+        .expect(404);
+      expect(unknown.body.code).toBe('organization_not_found');
+    });
+
+    it('lists, reads and cancels jobs (404 unknown, 409 not cancellable)', async () => {
+      const list = await http()
+        .get(url)
+        .set(await bearer())
+        .expect(200);
+      expect(list.body.data[0]).toMatchObject({ jobId: JOB_ID, status: 'pending' });
+      await http()
+        .get(`${url}/${JOB_ID}`)
+        .set(await bearer())
+        .expect(200);
+      const missing = await http()
+        .get(`${url}/${randomUUID()}`)
+        .set(await bearer())
+        .expect(404);
+      expect(missing.body.code).toBe('rescan_job_not_found');
+      await http()
+        .post(`${url}/${JOB_ID}/cancel`)
+        .set(await bearer())
+        .expect(200);
+      expect(audit.record.mock.calls.at(-1)![0]).toMatchObject({
+        action: 'attachment_rescan.cancelled',
+      });
+      rescans.cancel.mockResolvedValueOnce(false);
+      rescans.findOnWriter
+        .mockResolvedValueOnce(jobRow('completed'))
+        .mockResolvedValueOnce(jobRow('completed'));
+      const conflict = await http()
+        .post(`${url}/${JOB_ID}/cancel`)
+        .set(await bearer())
+        .send({ reason: 'late' })
+        .expect(409);
+      expect(conflict.body).toMatchObject({
+        code: 'rescan_job_not_cancellable',
+        status: 'completed',
+      });
+    });
+
+    it('allows 10 calls per caller per minute (429 after)', async () => {
+      const auth = await bearer();
+      for (let i = 0; i < 10; i += 1) await http().get(url).set(auth).expect(200);
+      await http().get(url).set(auth).expect(429);
     });
   });
 });

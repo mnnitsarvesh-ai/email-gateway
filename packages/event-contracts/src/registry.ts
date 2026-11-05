@@ -1,5 +1,6 @@
 import type { z } from 'zod';
 import {
+  attachmentSandboxRequestedV1,
   deliveryApprovedV1,
   deliveryStatusChangedV1,
   domainRoutingChangedV1,
@@ -22,8 +23,11 @@ import type { ExchangeName } from './topology';
  * the registered version of each type they declare.
  */
 
-/** Outbox `aggregate_type` values of registered events. */
-export type AggregateType = 'message' | 'domain';
+/**
+ * Outbox `aggregate_type` values of registered events. `attachment` (step 4.2 A2): the aggregate
+ * is a sandbox submission (`aggregate_id` = `sandbox_submissions.id`).
+ */
+export type AggregateType = 'message' | 'domain' | 'attachment';
 
 export interface EventDefinition<S extends z.ZodType = z.ZodType> {
   type: string;
@@ -129,20 +133,24 @@ export const EVENT_REGISTRY = {
     domainRoutingChangedV1,
     'domain',
   ),
+  // Step 4.2 A2: reserved since step 3.2, registered with its schema; producer email-worker.
+  [EventTypes.AttachmentSandboxRequested]: define(
+    EventTypes.AttachmentSandboxRequested,
+    'email.security',
+    attachmentSandboxRequestedV1,
+    'attachment',
+  ),
 } as const satisfies Record<string, EventDefinition>;
 
 export type RegisteredEventType = keyof typeof EVENT_REGISTRY;
 
-/** Reserved types: routed (bindings exist) but without a schema; the relay refuses them. */
-export const RESERVED_EVENT_TYPES = {
-  'mail.attachment.sandbox_requested.v1': {
-    type: 'mail.attachment.sandbox_requested.v1',
-    version: 1,
-    exchange: 'email.security',
-    aggregateType: 'message',
-    definedBy: 'step 4.6',
-  },
-} as const satisfies Record<string, ReservedEventDefinition>;
+/**
+ * Reserved types: routed (bindings exist) but without a schema; the relay refuses them. Empty
+ * since step 4.2 registered `mail.attachment.sandbox_requested.v1` (A2); kept for future
+ * reservations.
+ */
+export const RESERVED_EVENT_TYPES: Readonly<Record<string, ReservedEventDefinition>> =
+  Object.freeze({});
 
 export type ReservedEventType = keyof typeof RESERVED_EVENT_TYPES;
 

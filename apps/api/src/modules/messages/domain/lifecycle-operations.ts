@@ -36,7 +36,8 @@ export const AUDIT_ACTIONS: Readonly<Record<LifecycleOperation, string>> = {
  * registered engine's queue and records a new round.
  */
 export const RESCAN_NOTE =
-  'the new round is scanned by every registered scan engine (step 4.1: rspamd); read its ' +
+  'the new round is scanned by every registered scan engine (step 4.2: rspamd, attachment); ' +
+  'read its ' +
   'results with GET /api/v1/messages/{messageId}/scans once the message leaves scanning';
 
 /** `mail.delivery.approved.v1` carries at most 1000 recipients (step 2.3 R5). */

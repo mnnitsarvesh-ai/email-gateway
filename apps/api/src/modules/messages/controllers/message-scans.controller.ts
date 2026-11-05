@@ -19,8 +19,9 @@ import {
 import { MessageScansReadService } from '../services/message-scans-read.service';
 
 /**
- * Security scan results of a message of the caller's organization (step 4.1 S16), from the read
- * replica. Translation only; the logic is in MessageScansReadService.
+ * Security scan results of a message of the caller's organization (step 4.1 S16; step 4.2 A16
+ * per-attachment results), from the read replica. Translation only; the logic is in
+ * MessageScansReadService.
  */
 @ApiTags('messages')
 @ApiBearerAuth(ACCESS_TOKEN_SCHEME)
@@ -41,9 +42,16 @@ export class MessageScansController {
       '`error`; null while running), reason codes, required engines, the deadline, the ' +
       'SPF/DKIM/DMARC/ARC results and per engine its final result (outcome, score, threshold, ' +
       'action, reason codes, symbols with bounded options, engine and settings versions) and ' +
-      'every attempt (failed attempts are retried and listed with their error code). From ' +
-      'the read replica: a round that just completed may still show as running. Symbol ' +
-      'options can contain addresses or URLs of the message.',
+      'every attempt (failed attempts are retried and listed with their error code). The ' +
+      '`attachment` engine entry lists its per-attachment results (step 4.2): part index, ' +
+      'sanitized filename, declared and detected type, size, SHA-256, verdict, reason codes, ' +
+      'the ClamAV signature and versions, YARA rule matches, archive inspection counts and ' +
+      'findings (by entry index path, never names), a known-hash hit and the sandbox ' +
+      'submission. The content cache is shared across organizations, so its hit/miss ' +
+      'outcome is never shown, and the `attachment` engine reports no durations and ' +
+      'second-granular times. From the read replica: a round that just completed ' +
+      'may still show as running. Symbol options can contain addresses or URLs of the ' +
+      'message; filenames are attacker-controlled text.',
   })
   @ApiMessageId()
   @ApiQueryFrom(MessageScansQuerySchema)

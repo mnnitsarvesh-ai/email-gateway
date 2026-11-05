@@ -1,7 +1,15 @@
 import { BadRequestException } from '@nestjs/common';
-import { ENGINE_CATALOG } from '@email-gateway/security-contracts';
+import {
+  attachmentArchiveResultSchema,
+  attachmentYaraResultSchema,
+  ENGINE_CATALOG,
+  fileTypeFamilySchema,
+  fileTypeIdSchema,
+  isAttachmentReasonCode,
+} from '@email-gateway/security-contracts';
 import { z } from 'zod';
 import type {
+  AttachmentScanView,
   ScanAttempt,
   ScanAuthView,
   ScanEngineResultView,
@@ -9,8 +17,11 @@ import type {
   ScanSymbol,
 } from '../dto/message-scans.schemas';
 import type {
+  AttachmentPartRow,
+  AttachmentResultRow,
   AuthResultRow,
   EngineResultRow,
+  SandboxSubmissionRow,
   ScanRoundRow,
 } from '../repositories/message-scans-read.repository';
 
@@ -76,20 +87,32 @@ export function authOf(row: AuthResultRow): ScanAuthView {
   };
 }
 
-function attemptOf(row: EngineResultRow): ScanAttempt {
+/** Whole seconds (the `attachment` engine's timestamps, see `engineOf`). */
+const toSecond = (value: Date): string =>
+  new Date(Math.floor(value.getTime() / 1000) * 1000).toISOString();
+
+function attemptOf(row: EngineResultRow, coarse: boolean): ScanAttempt {
   return {
     attempt: row.attempt,
     outcome: row.outcome,
     errorCode: row.errorCode,
-    durationMs: row.durationMs,
-    at: row.completedAt.toISOString(),
+    durationMs: coarse ? null : row.durationMs,
+    at: coarse ? toSecond(row.completedAt) : row.completedAt.toISOString(),
   };
 }
 
-/** One engine of a round: the final row as the result (if any), every row as an attempt. */
+/**
+ * One engine of a round: the final row as the result (if any), every row as an attempt. For the
+ * `attachment` engine the durations are withheld and the times rounded down to the second: its
+ * content cache is shared across organizations (A10), and a fast result would tell a tenant
+ * that another organization received the same file. Operators keep the exact values in
+ * `scan_engine_results` and the metrics.
+ */
 export function engineOf(engine: string, rows: readonly EngineResultRow[]): ScanEngineResultView {
   const sorted = [...rows].sort((a, b) => a.attempt - b.attempt);
   const final = sorted.find((row) => row.isFinal) ?? null;
+  const coarse = engine === ATTACHMENT_ENGINE;
+  const completedAt = (value: Date): string => (coarse ? toSecond(value) : value.toISOString());
   return {
     engine,
     final: final !== null,
@@ -100,11 +123,99 @@ export function engineOf(engine: string, rows: readonly EngineResultRow[]): Scan
     action: final?.action ?? null,
     reasonCodes: final ? stringArray(final.reasonCodes) : [],
     symbols: final ? symbolsOf(final.evidence) : [],
-    attempts: sorted.map(attemptOf),
-    durationMs: final?.durationMs ?? null,
+    attempts: sorted.map((row) => attemptOf(row, coarse)),
+    durationMs: coarse ? null : (final?.durationMs ?? null),
     settingsVersion: final?.settingsVersion ?? null,
-    completedAt: final ? final.completedAt.toISOString() : null,
+    completedAt: final ? completedAt(final.completedAt) : null,
   };
+}
+
+/** The attachment engine's name (step 4.2 A1). */
+export const ATTACHMENT_ENGINE = 'attachment';
+
+/** The per-attachment rows of a page with the display metadata they are joined with. */
+export interface AttachmentInputs {
+  results: readonly AttachmentResultRow[];
+  parts: readonly AttachmentPartRow[];
+  submissions: readonly SandboxSubmissionRow[];
+}
+
+export const NO_ATTACHMENTS: AttachmentInputs = Object.freeze({
+  results: [],
+  parts: [],
+  submissions: [],
+});
+
+/**
+ * One `attachment_scan_results` row as the A16 view. Stored JSON (reason codes, YARA matches,
+ * archive) is validated against the security-contracts schemas; a malformed value is shown as
+ * empty/null, never passed through raw. `knownHash.family` is not stored per result (A18
+ * stores the severity only), so it is null.
+ */
+export function attachmentOf(
+  row: AttachmentResultRow,
+  part: AttachmentPartRow | undefined,
+  submission: SandboxSubmissionRow | undefined,
+): AttachmentScanView {
+  const detected = fileTypeIdSchema.safeParse(row.detectedType);
+  const family = fileTypeFamilySchema.safeParse(row.typeFamily);
+  const yara =
+    row.yaraBundleId === null
+      ? null
+      : attachmentYaraResultSchema.safeParse({
+          bundleId: row.yaraBundleId,
+          matches: Array.isArray(row.yaraMatches) ? row.yaraMatches : [],
+        });
+  const archive =
+    row.archive === null ? null : attachmentArchiveResultSchema.safeParse(row.archive);
+  return {
+    partIndex: row.partIndex,
+    filename: part?.filename ?? null,
+    declaredContentType: part?.declaredContentType ?? null,
+    sha256: row.sha256,
+    sizeBytes: row.sizeBytes,
+    detectedType: detected.success ? detected.data : 'unknown',
+    typeFamily: family.success ? family.data : 'other',
+    typeMismatch: row.typeMismatch,
+    verdict: row.verdict,
+    reasonCodes: Array.isArray(row.reasonCodes)
+      ? row.reasonCodes
+          .filter((c): c is string => typeof c === 'string')
+          .filter(isAttachmentReasonCode)
+      : [],
+    clamav:
+      row.clamavEngineVersion === null || row.clamavDbVersion === null
+        ? null
+        : {
+            signature: row.clamavSignature,
+            engineVersion: row.clamavEngineVersion,
+            dbVersion: row.clamavDbVersion,
+          },
+    yara: yara?.success ? yara.data : null,
+    archive: archive?.success ? archive.data : null,
+    knownHash:
+      row.knownHashSeverity === null ? null : { severity: row.knownHashSeverity, family: null },
+    // No `cache` / `durationMs`: they reveal the cross-tenant cache (AttachmentScanViewSchema).
+    sandbox: submission
+      ? { submissionId: submission.id.toString(), status: submission.status }
+      : null,
+  };
+}
+
+/** The attachments of one round (by part index). */
+export function attachmentsOf(scanId: bigint, inputs: AttachmentInputs): AttachmentScanView[] {
+  const parts = new Map(inputs.parts.map((p) => [p.partIndex, p]));
+  const submissions = new Map(
+    inputs.submissions
+      .filter((s) => s.scanId === scanId)
+      .map((s) => [s.attachmentId.toString(), s]),
+  );
+  return inputs.results
+    .filter((row) => row.scanId === scanId)
+    .sort((a, b) => a.partIndex - b.partIndex)
+    .map((row) =>
+      attachmentOf(row, parts.get(row.partIndex), submissions.get(row.attachmentId.toString())),
+    );
 }
 
 const catalogRank = (engine: string): number => {
@@ -114,11 +225,15 @@ const catalogRank = (engine: string): number => {
 const byCatalog = (a: string, b: string): number =>
   catalogRank(a) - catalogRank(b) || (a < b ? -1 : a > b ? 1 : 0);
 
-/** A round with its engines (catalog order) and the first engine's authentication results. */
+/**
+ * A round with its engines (catalog order), the first engine's authentication results and, on
+ * the `attachment` engine entry, its per-attachment results (step 4.2 A16).
+ */
 export function roundOf(
   scan: ScanRoundRow,
   engineRows: readonly EngineResultRow[],
   authRows: readonly AuthResultRow[],
+  attachments: AttachmentInputs = NO_ATTACHMENTS,
 ): ScanRoundView {
   const byEngine = new Map<string, EngineResultRow[]>();
   for (const row of engineRows) {
@@ -141,9 +256,12 @@ export function roundOf(
     completedAt: iso(scan.completedAt),
     deadlineAt: iso(scan.deadlineAt),
     auth: auth ? authOf(auth) : null,
-    engines: [...byEngine.keys()]
-      .sort(byCatalog)
-      .map((engine) => engineOf(engine, byEngine.get(engine)!)),
+    engines: [...byEngine.keys()].sort(byCatalog).map((engine) => {
+      const view = engineOf(engine, byEngine.get(engine)!);
+      return engine === ATTACHMENT_ENGINE
+        ? { ...view, attachments: attachmentsOf(scan.id, attachments) }
+        : view;
+    }),
   };
 }
 

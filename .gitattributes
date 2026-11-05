@@ -1,2 +1,4 @@
 # MIME fixture corpus: byte-exact (CRLF, 8-bit, NUL); never normalise line endings.
 packages/mime-parser/test/fixtures/** -text
+# YARA rule bundle: the bundle id hashes the exact bytes (step 4.2 A9); never normalise.
+apps/email-worker/yara/rules/** -text

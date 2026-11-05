@@ -157,9 +157,10 @@ describe('QueueConsumer construction', () => {
   it('accepts only event types bound to the queue', () => {
     expect(() => build({ eventTypes: ['mail.message.parsed.v1'] })).toThrow(/not bound/);
     expect(() => build({ eventTypes: [] })).toThrow();
+    // Step 4.2 registered the schema of the type scan.sandbox is bound to (it was reserved).
     expect(() =>
       build({ queue: 'scan.sandbox', eventTypes: ['mail.attachment.sandbox_requested.v1'] }),
-    ).toThrow(/no registered schema/);
+    ).not.toThrow();
     expect(() =>
       build({ queue: 'email.analytics', eventTypes: [RECEIVED, APPROVED] }),
     ).not.toThrow();

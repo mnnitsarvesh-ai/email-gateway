@@ -7,14 +7,18 @@ import {
 } from './registry';
 
 /**
- * RabbitMQ topology v3 as data (step 3.2 §3, ADR-0024; v2: step 3.3 L7, ADR-0025; v3: step 4.1
- * S2, ADR-0026): exactly six topic exchanges and fourteen quorum queues in the vhost
- * `email-gateway`. v2 added the bindings of `mail.message.rescan_requested.v1` (`email.security`)
- * to the five scan queues, and `mail.message.state_changed.v1` (`email.events`) reaches only the
- * `email.analytics` firehose. v3 makes `scan.spam` a work queue (the Rspamd engine of the
- * email-worker scan role, ledger consumer `email-worker.scan.rspamd`) and unbinds `scan.auth`
- * (reserved: authentication results come from the Rspamd engine on `scan.spam`); the exchanges
- * and the other queues are unchanged. `infrastructure/rabbitmq/definitions.json` is
+ * RabbitMQ topology v4 as data (step 3.2 §3, ADR-0024; v2: step 3.3 L7, ADR-0025; v3: step 4.1
+ * S2, ADR-0026; v4: step 4.2 A2, ADR-0028): exactly six topic exchanges and fourteen quorum
+ * queues in the vhost `email-gateway`. v2 added the bindings of `mail.message.rescan_requested.v1`
+ * (`email.security`) to the five scan queues, and `mail.message.state_changed.v1`
+ * (`email.events`) reaches only the `email.analytics` firehose. v3 makes `scan.spam` a work queue
+ * (the Rspamd engine of the email-worker scan role, ledger consumer `email-worker.scan.rspamd`)
+ * and unbinds `scan.auth` (reserved: authentication results come from the Rspamd engine on
+ * `scan.spam`). v4 makes `scan.attachment` a work queue (the attachment engine of the
+ * email-worker scan role, ledger consumer `email-worker.scan.attachment`; bindings unchanged) and
+ * registers `mail.attachment.sandbox_requested.v1`, the event the dormant `scan.sandbox` (step
+ * 4.6) was already bound to; the exchanges and the other queues are unchanged.
+ * `infrastructure/rabbitmq/definitions.json` is
  * generated from `TOPOLOGY` (`pnpm --filter @email-gateway/event-contracts topology:export`) and
  * imported by `infrastructure/rabbitmq/init.mjs`; services never declare, they verify passively.
  *
@@ -22,7 +26,7 @@ import {
  * target, overflow, length limits) is a per-queue policy `eg.<queue>` (Q4), so it changes without
  * re-declaring a queue.
  */
-export const TOPOLOGY_VERSION = 3;
+export const TOPOLOGY_VERSION = 4;
 export const DEFAULT_VHOST = 'email-gateway';
 
 /** The six exchanges of the topology (ADR-0024): all topic, durable, not internal. */
@@ -330,14 +334,27 @@ export const TOPOLOGY: Topology = {
       'email-worker',
       'URL protection',
     ),
-    dormant(
-      'scan.attachment',
-      'email.security',
-      [parsed(), rescan()],
-      '4.2',
-      'email-worker',
-      'ClamAV and YARA attachment scanning',
-    ),
+    {
+      // v4 (step 4.2 A2): the attachment engine of the email-worker scan role.
+      name: 'scan.attachment',
+      role: 'work',
+      homeExchange: 'email.security',
+      bindings: [parsed(), rescan(), retryBinding('email.security', 'scan.attachment')],
+      consumer: {
+        kind: 'ledger',
+        ledgerName: 'email-worker.scan.attachment',
+        service: 'email-worker',
+      },
+      retry: {
+        strategy: 'hold',
+        maxAttempts: 10,
+        baseDelayMs: 2 * SECOND,
+        maxDelayMs: MINUTE,
+        maxRetryAgeMs: 24 * HOUR,
+      },
+      policy: policyFor('work', 'scan.attachment'),
+      description: 'Attachments: file type, known hashes, ClamAV, YARA, archive limits (step 4.2)',
+    },
     dormant(
       'scan.dlp',
       'email.security',
@@ -352,7 +369,7 @@ export const TOPOLOGY: Topology = {
       [eventBinding('email.security', 'mail.attachment.sandbox_requested.v1')],
       '4.6',
       'sandbox orchestration',
-      'Sandbox orchestration (reserved event type)',
+      'Sandbox orchestration of mail.attachment.sandbox_requested.v1 submissions',
     ),
     dormant(
       'email.policy.evaluate',
@@ -620,7 +637,7 @@ const SAMPLE_ORGANIZATION_ID = '42';
 /** The exchange an event type is published to: registered or reserved. */
 function exchangeOfEventType(type: string): ExchangeName | undefined {
   if (isRegisteredEventType(type)) return EVENT_REGISTRY[type].exchange;
-  if (isReservedEventType(type)) return RESERVED_EVENT_TYPES[type].exchange;
+  if (isReservedEventType(type)) return RESERVED_EVENT_TYPES[type]?.exchange;
   return undefined;
 }
 

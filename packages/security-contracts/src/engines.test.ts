@@ -11,8 +11,8 @@ import {
 } from './index';
 
 describe('engine catalog (S4)', () => {
-  it('registers only rspamd in step 4.1, required and not disableable, on scan.spam', () => {
-    expect(ENGINE_CATALOG).toHaveLength(1);
+  it('registers rspamd (4.1) and attachment (4.2), both required and not disableable', () => {
+    expect(ENGINE_CATALOG).toHaveLength(2);
     expect(ENGINE_CATALOG[0]).toMatchObject({
       name: 'rspamd',
       stage: 'antispam',
@@ -20,17 +20,28 @@ describe('engine catalog (S4)', () => {
       requiredByDefault: true,
       tenantMayDisable: false,
     });
-    expect(ENGINE_CATALOG[0]!.description.length).toBeGreaterThan(0);
+    expect(ENGINE_CATALOG[1]).toEqual({
+      name: 'attachment',
+      stage: 'attachment',
+      queue: 'scan.attachment',
+      requiredByDefault: true,
+      tenantMayDisable: false,
+      description:
+        'Attachments: file type, known-threat hashes, ClamAV, YARA, archive limits (step 4.2)',
+    });
+    for (const entry of ENGINE_CATALOG) {
+      expect(entry.description.length).toBeGreaterThan(0);
+      expect(Object.isFrozen(entry)).toBe(true);
+    }
     expect(Object.isFrozen(ENGINE_CATALOG)).toBe(true);
-    expect(Object.isFrozen(ENGINE_CATALOG[0])).toBe(true);
   });
 
   it('knows every planned engine name and stage, and every name fits the row/event pattern', () => {
-    expect([...ENGINE_NAMES]).toEqual(['rspamd', 'clamav', 'yara', 'url', 'bec', 'dlp', 'sandbox']);
+    // Step 4.2 A1: ClamAV and YARA are components of the attachment engine, not engines.
+    expect([...ENGINE_NAMES]).toEqual(['rspamd', 'attachment', 'url', 'bec', 'dlp', 'sandbox']);
     expect([...SECURITY_STAGES]).toEqual([
       'antispam',
-      'antivirus',
-      'yara',
+      'attachment',
       'url',
       'bec',
       'dlp',
@@ -47,22 +58,35 @@ describe('engine catalog (S4)', () => {
 
   it('looks up entries and names', () => {
     expect(engineCatalogEntry('rspamd')?.queue).toBe('scan.spam');
+    expect(engineCatalogEntry('attachment')?.queue).toBe('scan.attachment');
+    expect(engineCatalogEntry('url')).toBeUndefined();
     expect(engineCatalogEntry('clamav')).toBeUndefined();
-    expect(isEngineName('clamav')).toBe(true);
+    expect(isEngineName('url')).toBe(true);
+    expect(isEngineName('clamav')).toBe(false);
+    expect(isEngineName('yara')).toBe(false);
     expect(isEngineName('spamassassin')).toBe(false);
   });
 
   it('parses SCAN_ENGINES and refuses empty, duplicate and unregistered engines', () => {
     expect(parseEnabledEngines('rspamd')).toEqual(['rspamd']);
     expect(parseEnabledEngines(' rspamd , ')).toEqual(['rspamd']);
+    expect(parseEnabledEngines('rspamd,attachment')).toEqual(['rspamd', 'attachment']);
+    expect(parseEnabledEngines('attachment')).toEqual(['attachment']);
     expect(() => parseEnabledEngines('')).toThrow(/No scan engine/);
     expect(() => parseEnabledEngines('rspamd,rspamd')).toThrow(/twice/);
     expect(() => parseEnabledEngines('rspamd,clamav')).toThrow(/not in the catalog: clamav/);
+    expect(() => parseEnabledEngines('rspamd,url')).toThrow(/not in the catalog: url/);
   });
 
   it('snapshots the required engines; a tenant cannot drop an engine it may not disable', () => {
     expect(requiredEngines(['rspamd'])).toEqual(['rspamd']);
     expect(requiredEngines(['rspamd'], ['rspamd'])).toEqual(['rspamd']);
     expect(requiredEngines([])).toEqual([]);
+    // Catalog order, whatever the order of SCAN_ENGINES; attachment cannot be disabled either.
+    expect(requiredEngines(['attachment', 'rspamd'])).toEqual(['rspamd', 'attachment']);
+    expect(requiredEngines(['rspamd', 'attachment'], ['attachment', 'rspamd'])).toEqual([
+      'rspamd',
+      'attachment',
+    ]);
   });
 });

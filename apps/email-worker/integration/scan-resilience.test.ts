@@ -242,7 +242,7 @@ describe('missing EML', () => {
 
 describe('round deadline sweeper', () => {
   it('finalizes a round whose engine never reports: timeout rows, scan_failed', async () => {
-    const config = workerConfig({});
+    const config = workerConfig({ SCAN_ENGINES: 'rspamd' });
     const registry = new MetricsService({ service: 'email-worker-it-sweeper' });
     const metrics = new ScanMetrics(registry);
     const { sweeper: sweep, store, locks } = sweeper(fx, metrics, config);
@@ -321,7 +321,7 @@ describe('round deadline sweeper', () => {
   it('finalizes initial and rescan rounds of a message received before the lookback window', async () => {
     // The sweep is bounded by the round's deadline, not by the message's received_at: a rescan
     // of mail received 72 h ago (lookback 48 h) whose engine never reports must still end.
-    const config = workerConfig({});
+    const config = workerConfig({ SCAN_ENGINES: 'rspamd' });
     const registry = new MetricsService({ service: 'email-worker-it-sweeper-old' });
     const metrics = new ScanMetrics(registry);
     const { sweeper: sweep, store, locks } = sweeper(fx, metrics, config);

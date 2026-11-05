@@ -29,6 +29,7 @@ export const LIFECYCLE_REASON_CODES = [
   'quarantine_deleted',
   'review_rejected',
   'admin_rescan',
+  'signature_rescan',
   'delivery_planned',
   'delivery_deferred',
   'delivery_requeued',
@@ -56,6 +57,12 @@ export interface TransitionEdge {
   to: MessageState;
   roles: readonly ActorRole[];
   reasons: readonly LifecycleReasonCode[];
+  /**
+   * Optional role/reason pairing (step 4.2 A13): when present, each listed reason may be used
+   * only by the roles given for it (every reason of the edge is listed). Absent = any listed
+   * role with any listed reason.
+   */
+  reasonRoles?: Readonly<Partial<Record<LifecycleReasonCode, readonly ActorRole[]>>>;
   /** Re-entry edge: lifecycle_round + 1 (rescan, release). Allowed even when from = to. */
   newRound?: true;
   /** Step that builds the producer; '3.3' = this step. */
@@ -63,8 +70,8 @@ export interface TransitionEdge {
 }
 
 /**
- * The transition table (step 3.3 L3, edges E1–E26; step 4.1 S15 adds E27 and retires E4), as
- * data. Every allowed change of `email_messages.status` is one of these edges; everything else is
+ * The transition table (step 3.3 L3, edges E1–E26; step 4.1 S15 adds E27 and retires E4; step
+ * 4.2 A13 gives E19 the scanner role with the reason signature_rescan), as data. Every allowed change of `email_messages.status` is one of these edges; everything else is
  * stale or invalid (L4). Retired ids are never reused.
  * At most one edge exists per `(from, to)` pair (`transitions.test.ts`).
  */
@@ -221,8 +228,11 @@ export const TRANSITIONS: readonly TransitionEdge[] = [
       'expired',
     ],
     to: 'scanning',
-    roles: ['operator'],
-    reasons: ['admin_rescan'],
+    // Step 4.2 A13 (ADR-0028 amends ADR-0025): the email-worker's rescan job runner re-scans
+    // after signature updates as `scanner`; an operator rescan stays `admin_rescan`.
+    roles: ['operator', 'scanner'],
+    reasons: ['admin_rescan', 'signature_rescan'],
+    reasonRoles: { admin_rescan: ['operator'], signature_rescan: ['scanner'] },
     newRound: true,
     producedBy: '3.3',
   },

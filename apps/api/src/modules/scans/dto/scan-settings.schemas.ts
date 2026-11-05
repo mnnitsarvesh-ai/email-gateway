@@ -1,14 +1,17 @@
 import {
+  ATTACHMENT_RULE_VERDICTS,
   AUTH_FAILURE_VERDICTS,
   DMARC_REJECT_VERDICTS,
+  FILE_TYPE_IDS,
   PHISHING_VERDICTS,
 } from '@email-gateway/security-contracts';
 import { z } from 'zod';
 
 /**
- * Request and response shapes of the scan settings routes (step 4.1 S8, S16):
+ * Request and response shapes of the scan settings routes (step 4.1 S8, S16; step 4.2 A8):
  * `GET /scan-settings`, `PUT /scan-settings/{engine}`, `DELETE /scan-settings/{engine}`.
- * Step 4.1 registers one engine (`rspamd`); its settings are the Rspamd thresholds.
+ * Engines with tenant settings: `rspamd` (thresholds and severities) and `attachment` (type
+ * rules, raise-only verdicts, a tighter size limit); one view shape per engine.
  */
 
 const Version = z
@@ -26,8 +29,9 @@ export const ScanSettingsPutSchema = z.strictObject({
     .record(z.string(), z.unknown())
     .describe(
       'The override, all keys optional (rspamd: spamScore, suspiciousScore, phishingVerdict, ' +
-        'dmarcRejectVerdict, authFailureVerdict); replaces the previous override. Unknown keys ' +
-        'are refused (422)',
+        'dmarcRejectVerdict, authFailureVerdict; attachment: deniedTypes, allowedTypes, ' +
+        'deniedTypeVerdict, typeMismatchVerdict, encryptedArchiveVerdict, ' +
+        'maxAttachmentBytes); replaces the previous override. Unknown keys are refused (422)',
     ),
 });
 export type ScanSettingsPut = z.output<typeof ScanSettingsPutSchema>;
@@ -77,14 +81,9 @@ export const SettingsViolationSchema = z.object({
   message: z.string(),
 });
 
-export const EngineSettingsViewSchema = z.object({
-  engine: z.string().describe('Engine name (ENGINE_CATALOG; step 4.1: rspamd)'),
+const viewCommon = {
   required: z.boolean().describe('Required for every scan round'),
   tenantMayDisable: z.boolean(),
-  platform: RspamdPlatformSettingsDoc.describe('Platform settings (SCAN_RSPAMD_*)'),
-  bounds: RspamdBoundsDoc.describe('What an override may choose'),
-  override: RspamdOverrideDoc.nullable().describe('The organization override; null for none'),
-  effective: RspamdEffectiveSettingsDoc.describe('What the scan stage applies'),
   overrideApplied: z
     .boolean()
     .describe('False when there is no override or it no longer fits the platform settings'),
@@ -93,7 +92,85 @@ export const EngineSettingsViewSchema = z.object({
     .describe('Why a stored override is ignored (platform settings tightened since it was saved)'),
   version: Version,
   updatedAt: z.iso.datetime().nullable(),
+};
+
+export const RspamdSettingsViewSchema = z.object({
+  engine: z.literal('rspamd').describe('Engine name (ENGINE_CATALOG)'),
+  platform: RspamdPlatformSettingsDoc.describe('Platform settings (SCAN_RSPAMD_*)'),
+  bounds: RspamdBoundsDoc.describe('What an override may choose'),
+  override: RspamdOverrideDoc.nullable().describe('The organization override; null for none'),
+  effective: RspamdEffectiveSettingsDoc.describe('What the scan stage applies'),
+  ...viewCommon,
 });
+
+const FileTypeId = z.enum(FILE_TYPE_IDS);
+const RuleVerdict = z.enum(ATTACHMENT_RULE_VERDICTS);
+const ByteCount = z.number().int().min(0);
+
+/** Attachment platform settings (`ATTACHMENT_*`, step 4.2 A8); archive limits are platform-only. */
+export const AttachmentPlatformSettingsDoc = z.object({
+  maxAttachmentBytes: ByteCount.describe('Largest attachment that is content-scanned'),
+  archiveMaxDepth: z.number().int().describe('Archive nesting depth inspected'),
+  archiveMaxEntries: z.number().int().describe('Archive entries inspected, over all levels'),
+  maxEntryBytes: ByteCount.describe('Largest archive entry inspected'),
+  maxDecompressedBytes: ByteCount.describe('Decompressed bytes per attachment, over all levels'),
+  maxCompressionRatio: z.number().int().describe('Largest compression ratio'),
+  maxEntryFindings: z.number().int().describe('Archive entry findings kept per attachment'),
+  deniedTypes: z.array(FileTypeId).describe('Platform deny list (never removable)'),
+  deniedTypeVerdict: RuleVerdict,
+  typeMismatchVerdict: RuleVerdict,
+  encryptedArchiveVerdict: RuleVerdict,
+});
+
+export const AttachmentOverrideDoc = z.object({
+  deniedTypes: z.array(FileTypeId).optional().describe('Added to the platform deny list'),
+  allowedTypes: z
+    .array(FileTypeId)
+    .optional()
+    .describe('Allow-list mode: only these types (never a platform-denied type)'),
+  deniedTypeVerdict: RuleVerdict.optional().describe('Raise-only'),
+  typeMismatchVerdict: RuleVerdict.optional().describe('Raise-only'),
+  encryptedArchiveVerdict: RuleVerdict.optional().describe('Raise-only'),
+  maxAttachmentBytes: ByteCount.optional().describe('Tighten-only'),
+});
+
+export const AttachmentEffectiveSettingsDoc = z.object({
+  maxAttachmentBytes: ByteCount,
+  deniedTypes: z.array(FileTypeId).describe('Platform plus organization deny list'),
+  allowedTypes: z
+    .array(FileTypeId)
+    .nullable()
+    .describe('Allow list; null = every type that is not denied'),
+  deniedTypeVerdict: RuleVerdict,
+  typeMismatchVerdict: RuleVerdict,
+  encryptedArchiveVerdict: RuleVerdict,
+});
+
+export const AttachmentBoundsDoc = z.object({
+  maxAttachmentBytes: z.object({ min: ByteCount, max: ByteCount }),
+  deniedTypes: z.array(FileTypeId).describe('Types an override may add to the deny list'),
+  platformDeniedTypes: z.array(FileTypeId).describe('Always denied, never allowed'),
+  allowedTypes: z.array(FileTypeId).describe('Types an allow list may contain'),
+  maxAllowedTypes: z.number().int().describe('Most entries of deniedTypes / allowedTypes'),
+  deniedTypeVerdict: z.array(RuleVerdict).describe('Allowed values (raise-only)'),
+  typeMismatchVerdict: z.array(RuleVerdict).describe('Allowed values (raise-only)'),
+  encryptedArchiveVerdict: z.array(RuleVerdict).describe('Allowed values (raise-only)'),
+});
+
+export const AttachmentSettingsViewSchema = z.object({
+  engine: z.literal('attachment').describe('Engine name (ENGINE_CATALOG)'),
+  platform: AttachmentPlatformSettingsDoc.describe('Platform settings (ATTACHMENT_*)'),
+  bounds: AttachmentBoundsDoc.describe('What an override may choose'),
+  override: AttachmentOverrideDoc.nullable().describe('The organization override; null for none'),
+  effective: AttachmentEffectiveSettingsDoc.describe('What the attachment engine applies'),
+  ...viewCommon,
+});
+
+/** The settings of one engine, by `engine`. */
+export const EngineSettingsViewSchema = z.discriminatedUnion('engine', [
+  RspamdSettingsViewSchema,
+  AttachmentSettingsViewSchema,
+]);
 export type EngineSettingsView = z.output<typeof EngineSettingsViewSchema>;
 
 /** How quickly the scan stage applies a change (S8 settings cache). */
@@ -108,7 +185,9 @@ export const ScanSettingsListSchema = z.object({
 });
 export type ScanSettingsList = z.output<typeof ScanSettingsListSchema>;
 
-export const ScanSettingsResponseSchema = EngineSettingsViewSchema.extend({
-  note: z.string().describe(SETTINGS_APPLY_NOTE),
-});
+const Note = z.string().describe(SETTINGS_APPLY_NOTE);
+export const ScanSettingsResponseSchema = z.discriminatedUnion('engine', [
+  RspamdSettingsViewSchema.extend({ note: Note }),
+  AttachmentSettingsViewSchema.extend({ note: Note }),
+]);
 export type ScanSettingsResponse = z.output<typeof ScanSettingsResponseSchema>;

@@ -96,6 +96,18 @@ export const PERMISSIONS = Object.freeze([
     key: 'platform:scan_training',
     description: 'Train the shared spam classifiers (Bayes, fuzzy) from a message',
   },
+  // Step 4.2 (docs/plan/steps/10-attachment-scanning.md A16, A17): the known-threat hash catalog
+  // (malware_signatures) is platform-wide; a hash added by one party changes every tenant's
+  // verdicts, so managing it is a platform permission.
+  {
+    key: 'platform:threat_intel_manage',
+    description: "Manage the platform's known-threat file hashes",
+  },
+  // Step 4.2 (A13): bulk attachment rescans select messages of every organization.
+  {
+    key: 'platform:scan_rescan',
+    description: 'Start and cancel bulk attachment rescans',
+  },
 ] as const satisfies readonly PermissionDef[]);
 
 /** Every permission key of the catalog. */
@@ -193,6 +205,8 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'platform:tenant_override',
       'platform:dead_letter_replay',
       'platform:scan_training',
+      'platform:threat_intel_manage',
+      'platform:scan_rescan',
       ...TENANT_READ_PERMISSIONS,
       'audit:read',
     ],

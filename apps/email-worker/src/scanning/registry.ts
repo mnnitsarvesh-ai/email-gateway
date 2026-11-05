@@ -1,8 +1,12 @@
+import type { MetricsService, RedisService, S3Service } from '@email-gateway/common';
+import type { PrismaClient } from '@email-gateway/database';
 import type { Logger } from '@email-gateway/logger';
 import { type EngineCatalogEntry, engineCatalogEntry } from '@email-gateway/security-contracts';
 import type { WorkerConfig } from '../config';
 import type { ScanEngineAdapter } from './engine';
+import { attachmentRegistration } from './engines/attachment/registration';
 import { rspamdRegistration } from './engines/rspamd/registration';
+import type { ScanMetrics } from './scan-metrics';
 
 /** A tenant override row of `scan_engine_settings` (S8). */
 export interface EngineSettingsRow {
@@ -28,9 +32,22 @@ export interface EngineBudget {
   maxAttempts: number;
 }
 
+/**
+ * What a registration may use to build its adapter (step 4.2 A12). `rspamdRegistration` uses the
+ * config and the logger only.
+ */
 export interface EngineDeps {
   config: Readonly<WorkerConfig>;
   logger: Logger;
+  /** The writer client (§2.0: the scan stage reads and writes the writer only). */
+  prisma: PrismaClient;
+  /** S3 mail bucket (part objects). */
+  s3: Pick<S3Service, 'client' | 'mailBucket'>;
+  /** The shared app Redis, or null when the worker has none configured for the engine. */
+  redis: Pick<RedisService, 'client'> | null;
+  metrics: ScanMetrics;
+  /** The worker's Prometheus registry (engine-specific series). */
+  registry: MetricsService;
 }
 
 /**
@@ -51,9 +68,10 @@ export interface ScanEngineRegistration {
   ): EngineSettingsResolution;
 }
 
-/** Every engine with an adapter in this worker (step 4.1: Rspamd). */
+/** Every engine with an adapter in this worker (step 4.1: Rspamd; step 4.2: attachment). */
 export const ENGINE_REGISTRY: readonly ScanEngineRegistration[] = Object.freeze([
   rspamdRegistration,
+  attachmentRegistration,
 ]);
 
 /** The registrations of the platform-enabled engines (`SCAN_ENGINES`), in catalog order. */

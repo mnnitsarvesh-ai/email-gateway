@@ -514,10 +514,130 @@ export const messageRescanRequestedV1 = z.object({
   lifecycleRound: z.number().int().min(1).max(65_535),
   scanKind: z.literal('rescan'),
   requestedAt: z.iso.datetime(),
-  /** Principal kind of the operator; the principal id stays in the audit row. */
-  requestedBy: z.enum(['user', 'api_key']),
+  /**
+   * Principal kind of the requester; the principal id stays in the audit row. `system` (step 4.2
+   * A13): a rescan job of the signature-update detector in the email-worker (no human principal;
+   * the lifecycle history records actor role `scanner`, reason `signature_rescan`).
+   */
+  requestedBy: z.enum(['user', 'api_key', 'system']),
 });
 export type MessageRescanRequestedV1 = z.infer<typeof messageRescanRequestedV1>;
+
+/**
+ * The true-file-type ids of the attachment engine (step 4.2 A5). Mirrors `FILE_TYPE_IDS` of
+ * `@email-gateway/security-contracts` (event-contracts has no dependency on it; the email-worker,
+ * which depends on both, asserts that the lists are equal, as for `SCAN_VERDICT_VALUES`).
+ */
+export const ATTACHMENT_FILE_TYPE_VALUES = [
+  'pdf',
+  'ooxml_word',
+  'ooxml_excel',
+  'ooxml_powerpoint',
+  'ooxml_macro',
+  'odf',
+  'ole_office',
+  'rtf',
+  'chm',
+  'zip',
+  'gzip',
+  'tar',
+  '7z',
+  'rar',
+  'cab',
+  'bzip2',
+  'xz',
+  'jar',
+  'apk',
+  'pe_executable',
+  'msi',
+  'elf',
+  'macho',
+  'lnk',
+  'script_js',
+  'script_vbs',
+  'script_ps1',
+  'script_batch',
+  'script_shell',
+  'hta',
+  'iso',
+  'vhd',
+  'html',
+  'svg',
+  'xml',
+  'png',
+  'jpeg',
+  'gif',
+  'bmp',
+  'webp',
+  'tiff',
+  'text',
+  'ics',
+  'eml',
+  'unknown',
+] as const;
+
+/** Attachment verdicts that are submitted to the sandbox (step 4.2 A11). */
+export const SANDBOX_ATTACHMENT_VERDICT_VALUES = ['suspicious', 'unknown'] as const;
+
+/** An attachment part key: `org/{organizationId}/part/…` (step 3.1 M11). */
+const partS3Key = z
+  .string()
+  .max(512)
+  .regex(
+    /^org\/[1-9][0-9]{0,19}\/part\/[A-Za-z0-9._/-]+$/,
+    'Part keys are organization-prefixed (org/{organizationId}/part/…)',
+  )
+  .refine((key) => !key.split('/').includes('..'), { message: 'No .. segment in a part key' });
+
+/**
+ * A request to detonate one attachment in the sandbox (step 4.2 A2, A11; consumed from step 4.6).
+ * Written by the email-worker's attachment engine through `message_outbox`
+ * (`aggregate_type = 'attachment'`, `aggregate_id` = `sandbox_submissions.id`) in the finalize
+ * transaction of the engine's final result, together with the `sandbox_submissions` row, for
+ * every attachment whose verdict is `suspicious` or `unknown` and whose part object is stored
+ * (at most `ATTACHMENT_SANDBOX_MAX_PER_MESSAGE` per message). Published to `email.security`
+ * (`org.<id>.mail.attachment.sandbox_requested.v1`) and bound to the dormant `scan.sandbox`. The
+ * round never waits for the sandbox.
+ *
+ * Content rules (§2.0 invariant 2): ids, the part's S3 key, its hash, size, detected type, the
+ * verdict and reason codes only. No filename, no content: the object is strict. Consumers must
+ * check that the key's organization equals the envelope's `organizationId` before reading it.
+ */
+export const attachmentSandboxRequestedV1 = z
+  .strictObject({
+    /** `sandbox_submissions.id`. */
+    submissionId: decimalIdSchema,
+    messageId: decimalIdSchema,
+    receivedAt: z.iso.datetime(),
+    direction,
+    /** `email_scans.id` of the round. */
+    scanId: decimalIdSchema,
+    lifecycleRound: z.number().int().min(0).max(65_535),
+    attachment: z.strictObject({
+      partIndex: z.number().int().min(0).max(65_535),
+      sha256: z.string().regex(/^[0-9a-f]{64}$/, 'Expected a lower-case hex SHA-256'),
+      sizeBytes: z.number().int().nonnegative(),
+      detectedType: z.enum(ATTACHMENT_FILE_TYPE_VALUES),
+      objectKey: partS3Key,
+    }),
+    attachmentVerdict: z.enum(SANDBOX_ATTACHMENT_VERDICT_VALUES),
+    reasonCodes: z.array(scanReasonCode).min(1).max(16),
+    requestedAt: z.iso.datetime(),
+  })
+  .superRefine((payload, ctx) => {
+    if (new Set(payload.reasonCodes).size !== payload.reasonCodes.length) {
+      ctx.addIssue({ code: 'custom', path: ['reasonCodes'], message: 'Duplicate reason code' });
+    }
+  });
+export type AttachmentSandboxRequestedV1 = z.infer<typeof attachmentSandboxRequestedV1>;
+
+/**
+ * The organization of an `org/<id>/…` key, or null. Consumers of
+ * `mail.attachment.sandbox_requested.v1` compare it with the envelope's `organizationId`.
+ */
+export function organizationIdOfKey(key: string): string | null {
+  return /^org\/([1-9][0-9]{0,19})\//.exec(key)?.[1] ?? null;
+}
 
 export const EventTypes = {
   MessageReceived: 'mail.message.received.v1',
@@ -531,4 +651,5 @@ export const EventTypes = {
   MessageParseFailed: 'mail.message.parse_failed.v1',
   MessageStateChanged: 'mail.message.state_changed.v1',
   MessageRescanRequested: 'mail.message.rescan_requested.v1',
+  AttachmentSandboxRequested: 'mail.attachment.sandbox_requested.v1',
 } as const;

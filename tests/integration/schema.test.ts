@@ -48,6 +48,9 @@ const PARTITIONED: Record<string, string> = {
   email_message_parses: 'received_at',
   // Step 4.1 §3: authentication results of a scan round.
   email_auth_results: 'received_at',
+  // Step 4.2 §3: per-attachment results and sandbox submissions of a scan round.
+  attachment_scan_results: 'received_at',
+  sandbox_submissions: 'received_at',
 };
 
 /** Tables with no `organization_id`: platform catalogs, the root, a join table, the ledger and
@@ -67,6 +70,8 @@ const NOT_TENANT_OWNED = [
   'maintenance_watermarks',
   'mail_destination_presets',
   'stream_cursors',
+  // Step 4.2 §3.5: signature component versions (platform catalog).
+  'scan_signature_versions',
 ];
 
 /** Tenant-owned tables whose `organization_id` is nullable (platform-level rows), per D1. */
@@ -76,6 +81,8 @@ const NULLABLE_ORGANIZATION = [
   'yara_rules',
   'audit_logs',
   'login_audit_logs',
+  // Step 4.2 §3.4: NULL = a rescan job over every organization.
+  'attachment_rescan_jobs',
 ];
 
 const TENANT_OWNED = [
@@ -114,6 +121,10 @@ const TENANT_OWNED = [
   // Step 4.1 §3.
   'email_auth_results',
   'scan_engine_settings',
+  // Step 4.2 §3.
+  'attachment_scan_results',
+  'sandbox_submissions',
+  'attachment_rescan_jobs',
   'threat_indicators',
   'yara_rules',
   'email_policies',
@@ -146,17 +157,17 @@ const TENANT_OWNED = [
 const ALL_TABLES = [...NOT_TENANT_OWNED, ...TENANT_OWNED];
 
 describe('MySQL schema', () => {
-  it('has exactly the 75 data-model tables plus _prisma_migrations', async () => {
+  it('has exactly the 79 data-model tables plus _prisma_migrations', async () => {
     const rows = await prisma.$queryRaw<{ name: string }[]>`
       SELECT TABLE_NAME AS name FROM information_schema.TABLES
       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'`;
-    expect(ALL_TABLES).toHaveLength(75);
-    expect(new Set(ALL_TABLES).size).toBe(75);
+    expect(ALL_TABLES).toHaveLength(79);
+    expect(new Set(ALL_TABLES).size).toBe(79);
     expect(rows.map((r) => r.name).sort()).toEqual([...ALL_TABLES, '_prisma_migrations'].sort());
   });
 
-  it('partitions the 20 high-volume tables by RANGE COLUMNS with a pmax partition', async () => {
-    expect(Object.keys(PARTITIONED)).toHaveLength(20);
+  it('partitions the 22 high-volume tables by RANGE COLUMNS with a pmax partition', async () => {
+    expect(Object.keys(PARTITIONED)).toHaveLength(22);
     const rows = await prisma.$queryRaw<
       { tableName: string; method: string; expression: string; partitionName: string }[]
     >`
@@ -1860,5 +1871,163 @@ describe('scan pipeline schema (step 4.1, docs/plan/steps/09-rspamd.md §3)', ()
     expect(
       (await uniqueSets('scan_engine_settings')).map((u) => u.replace(/^[^(]+/, '')),
     ).toContain('(organization_id,engine)');
+  });
+});
+
+describe('attachment scanning schema (step 4.2, docs/plan/steps/10-attachment-scanning.md §3)', () => {
+  const uniqueSets = async (table: string) =>
+    [...(await indexes(table)).values()]
+      .filter((i) => i.unique)
+      .map((i) => i.columns.join(','))
+      .sort();
+  const indexSets = async (table: string) =>
+    [...(await indexes(table)).values()].map((i) => i.columns.join(','));
+  const foreignKeys = async (table: string) =>
+    prisma.$queryRaw<{ columnName: string; referenced: string; onDelete: string }[]>`
+      SELECT k.COLUMN_NAME AS columnName, k.REFERENCED_TABLE_NAME AS referenced,
+             r.DELETE_RULE AS onDelete
+      FROM information_schema.KEY_COLUMN_USAGE k
+      JOIN information_schema.REFERENTIAL_CONSTRAINTS r
+        ON r.CONSTRAINT_SCHEMA = k.TABLE_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+      WHERE k.TABLE_SCHEMA = DATABASE() AND k.TABLE_NAME = ${table}
+        AND k.REFERENCED_TABLE_NAME IS NOT NULL
+      ORDER BY k.COLUMN_NAME`;
+
+  it('evolves malware_signatures into the known-threat hash catalog (A17)', async () => {
+    const cols = await columns(['malware_signatures']);
+    expect(cols.get('malware_signatures.added_by_user_id')).toMatchObject({
+      columnType: 'bigint unsigned',
+      nullable: 'YES',
+    });
+    expect(cols.get('malware_signatures.reason')).toMatchObject({
+      columnType: 'varchar(512)',
+      nullable: 'YES',
+    });
+    expect(cols.get('malware_signatures.expires_at')).toMatchObject({
+      columnType: 'datetime(3)',
+      nullable: 'YES',
+    });
+    expect(await uniqueSets('malware_signatures')).toContain('sha256');
+    expect(await indexSets('malware_signatures')).toContain('source,created_at');
+    expect(await foreignKeys('malware_signatures')).toEqual([
+      { columnName: 'added_by_user_id', referenced: 'users', onDelete: 'SET NULL' },
+    ]);
+  });
+
+  it('has attachment_scan_results: one row per (scan, attachment), no content columns (A18)', async () => {
+    const cols = await columns(['attachment_scan_results']);
+    expect(cols.get('attachment_scan_results.verdict')?.columnType).toBe(
+      "enum('clean','suspicious','malicious','unknown')",
+    );
+    expect(cols.get('attachment_scan_results.cache_result')?.columnType).toBe(
+      "enum('hit','miss','bypass')",
+    );
+    expect(cols.get('attachment_scan_results.known_hash_severity')).toMatchObject({
+      columnType: "enum('low','medium','high','critical')",
+      nullable: 'YES',
+    });
+    expect(cols.get('attachment_scan_results.sha256')?.columnType).toBe('char(64)');
+    expect(cols.get('attachment_scan_results.detected_type')?.columnType).toBe('varchar(32)');
+    expect(cols.get('attachment_scan_results.type_family')?.columnType).toBe('varchar(16)');
+    expect(cols.get('attachment_scan_results.content_version')?.columnType).toBe('char(16)');
+    expect(cols.get('attachment_scan_results.reason_codes')).toMatchObject({
+      columnType: 'json',
+      nullable: 'NO',
+    });
+    const names = [...cols.keys()].map((k) => k.split('.')[1]!);
+    for (const forbidden of ['filename', 'original_filename', 'content', 'object_key', 'body']) {
+      expect(names, forbidden).not.toContain(forbidden);
+    }
+    expect(await uniqueSets('attachment_scan_results')).toEqual(
+      ['id,received_at', 'scan_id,attachment_id,received_at'].sort(),
+    );
+    expect(await indexSets('attachment_scan_results')).toEqual(
+      expect.arrayContaining(['organization_id,sha256', 'message_id,received_at']),
+    );
+  });
+
+  it('has sandbox_submissions: pending by default, unique per (scan, attachment), 4.6 columns reserved (A11)', async () => {
+    const cols = await columns(['sandbox_submissions']);
+    expect(cols.get('sandbox_submissions.status')).toMatchObject({
+      columnType: "enum('pending','submitted','completed','failed','expired')",
+      nullable: 'NO',
+      columnDefault: 'pending',
+    });
+    expect(cols.get('sandbox_submissions.attachment_verdict')?.columnType).toBe(
+      "enum('suspicious','unknown')",
+    );
+    expect(cols.get('sandbox_submissions.object_key')?.columnType).toBe('varchar(512)');
+    expect(cols.get('sandbox_submissions.requested_event_id')?.columnType).toBe('char(36)');
+    for (const reserved of ['external_ref', 'sandbox_verdict', 'completed_at']) {
+      expect(cols.get(`sandbox_submissions.${reserved}`)?.nullable, reserved).toBe('YES');
+    }
+    expect(await uniqueSets('sandbox_submissions')).toEqual(
+      ['id,received_at', 'scan_id,attachment_id,received_at'].sort(),
+    );
+    expect(await indexSets('sandbox_submissions')).toEqual(
+      expect.arrayContaining(['status,created_at', 'sha256']),
+    );
+  });
+
+  it('has attachment_rescan_jobs (A13) with a unique dedupe key and its foreign keys', async () => {
+    const cols = await columns(['attachment_rescan_jobs']);
+    expect(cols.get('attachment_rescan_jobs.trigger')?.columnType).toBe(
+      "enum('signature_update','admin')",
+    );
+    expect(cols.get('attachment_rescan_jobs.status')).toMatchObject({
+      columnType: "enum('pending','running','completed','cancelled','failed','skipped')",
+      columnDefault: 'pending',
+    });
+    expect(cols.get('attachment_rescan_jobs.organization_id')?.nullable).toBe('YES');
+    expect(cols.get('attachment_rescan_jobs.dedupe_key')?.nullable).toBe('YES');
+    for (const counter of ['selected_count', 'requested_count', 'skipped_count']) {
+      expect(cols.get(`attachment_rescan_jobs.${counter}`), counter).toMatchObject({
+        columnType: 'int unsigned',
+        columnDefault: '0',
+      });
+    }
+    expect(await uniqueSets('attachment_rescan_jobs')).toEqual(
+      expect.arrayContaining(['public_id', 'dedupe_key']),
+    );
+    expect(await indexSets('attachment_rescan_jobs')).toContain('status,created_at');
+    expect(await foreignKeys('attachment_rescan_jobs')).toEqual([
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+      { columnName: 'requested_by_user_id', referenced: 'users', onDelete: 'SET NULL' },
+    ]);
+  });
+
+  it('has scan_signature_versions unique per (engine, component, version) (A13)', async () => {
+    expect(await uniqueSets('scan_signature_versions')).toContain('engine,component,version');
+    expect(await indexSets('scan_signature_versions')).toContain('engine,component,first_seen_at');
+  });
+
+  it('rejects a second attachment_scan_results row for the same (scan, attachment, received_at)', async () => {
+    const receivedAt = new Date();
+    const scanId = BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000));
+    const row = {
+      receivedAt,
+      messageId: 1n,
+      organizationId: 1n,
+      scanId,
+      attachmentId: 1n,
+      partIndex: 0,
+      sha256: 'a'.repeat(64),
+      sizeBytes: 1,
+      detectedType: 'pdf',
+      typeFamily: 'document',
+      typeMismatch: false,
+      verdict: 'clean' as const,
+      reasonCodes: ['clean.no_findings'],
+      cacheResult: 'miss' as const,
+      durationMs: 1,
+    };
+    try {
+      await prisma.attachmentScanResult.create({ data: row });
+      await expect(prisma.attachmentScanResult.create({ data: row })).rejects.toMatchObject({
+        code: 'P2002',
+      });
+    } finally {
+      await prisma.attachmentScanResult.deleteMany({ where: { scanId } });
+    }
   });
 });

@@ -1,0 +1,21 @@
+{
+  "name": "@email-gateway/clamav",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src integration",
+    "test": "vitest run --dir src",
+    "test:integration": "vitest run --config vitest.integration.config.ts"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@email-gateway/attachment-corpus": "workspace:*"
+  }
+}

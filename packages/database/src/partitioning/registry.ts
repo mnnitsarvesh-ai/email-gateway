@@ -52,8 +52,9 @@ const monthly = (
 });
 
 /**
- * The 20 partitioned tables: the 16 of D3, the two delivery tables of step 2.3 (§3), the parse
- * stage table of step 3.1 (§3) and the authentication results table of step 4.1 (§3).
+ * The 22 partitioned tables: the 16 of D3, the two delivery tables of step 2.3 (§3), the parse
+ * stage table of step 3.1 (§3), the authentication results table of step 4.1 (§3) and the
+ * per-attachment results and sandbox submissions of step 4.2 (§3).
  */
 export const PARTITION_REGISTRY: readonly PartitionSpec[] = Object.freeze([
   monthly('email_messages', 'received_at', 6, 'core'),
@@ -77,6 +78,10 @@ export const PARTITION_REGISTRY: readonly PartitionSpec[] = Object.freeze([
   // Step 4.1 (docs/plan/steps/09-rspamd.md §3): SPF/DKIM/DMARC/ARC results of a scan round live
   // as long as the scan rounds (email_scans) they belong to.
   monthly('email_auth_results', 'received_at', 6, 'core'),
+  // Step 4.2 (docs/plan/steps/10-attachment-scanning.md §3, A11, A18): per-attachment results of
+  // a scan round and the sandbox submissions it made live as long as the scan rounds.
+  monthly('attachment_scan_results', 'received_at', 6, 'core'),
+  monthly('sandbox_submissions', 'received_at', 6, 'core'),
   // Legal hold and per-tenant archive retention are row-level (step 8.1).
   monthly('email_archives', 'received_at', null, 'compliance'),
   monthly('bounce_events', 'occurred_at', 6, 'core'),

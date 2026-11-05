@@ -14,6 +14,7 @@ const base = {
   RABBITMQ_SCANNER_URL: 'amqp://sc:scan-pw@localhost:5672/email-gateway',
   SCAN_RSPAMD_URL: 'http://127.0.0.1:11333',
   REDIS_URL: 'redis://localhost:6379',
+  ATTACHMENT_CACHE_HMAC_KEY: 'test-content-cache-mac-key-0123456789',
   S3_REGION: 'ap-south-1',
   S3_BUCKET_MAIL: 'test-mail',
   S3_BUCKET_ARCHIVE: 'test-archive',
@@ -33,7 +34,7 @@ describe('email-worker MIME config (design §5, M5)', () => {
     expect(config.MIME_RETRY_BASE_MS).toBe(1000);
     expect(config.MIME_RETRY_MAX_MS).toBe(60_000);
     expect(config.MIME_MAX_ATTEMPTS).toBe(5);
-    expect(config.MIME_DB_TIMEOUT_MS).toBe(15_000);
+    expect(config.MIME_DB_TIMEOUT_MS).toBe(120_000);
     expect(config.MIME_S3_TIMEOUT_MS).toBe(30_000);
     expect(config.MIME_S3_PART_SIZE_BYTES).toBe(5_242_880);
     expect(config.MIME_S3_QUEUE_SIZE).toBe(2);

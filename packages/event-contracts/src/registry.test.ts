@@ -40,6 +40,8 @@ describe('EVENT_REGISTRY', () => {
       'mail.delivery.status_changed.v1': ['email.delivery', 'message'],
       'domain.status.changed.v1': ['email.events', 'domain'],
       'domain.routing.changed.v1': ['email.events', 'domain'],
+      // Step 4.2 A2: the sandbox submission is its own aggregate.
+      'mail.attachment.sandbox_requested.v1': ['email.security', 'attachment'],
     });
     for (const definition of Object.values(EVENT_REGISTRY)) {
       expect(EXCHANGE_NAMES).toContain(definition.exchange);
@@ -72,21 +74,20 @@ describe('EVENT_REGISTRY', () => {
 });
 
 describe('reserved event types', () => {
-  it('reserves mail.attachment.sandbox_requested.v1 on email.security without a schema', () => {
-    expect(RESERVED_EVENT_TYPES).toEqual({
-      'mail.attachment.sandbox_requested.v1': {
-        type: 'mail.attachment.sandbox_requested.v1',
-        version: 1,
-        exchange: 'email.security',
-        aggregateType: 'message',
-        definedBy: 'step 4.6',
-      },
+  it('is empty since step 4.2 registered mail.attachment.sandbox_requested.v1 (A2)', () => {
+    expect(RESERVED_EVENT_TYPES).toEqual({});
+    expect(Object.isFrozen(RESERVED_EVENT_TYPES)).toBe(true);
+    const type = 'mail.attachment.sandbox_requested.v1';
+    expect(isReservedEventType(type)).toBe(false);
+    expect(isRegisteredEventType(type)).toBe(true);
+    expect(eventDefinition(type)).toMatchObject({
+      type,
+      version: 1,
+      exchange: 'email.security',
+      aggregateType: 'attachment',
     });
-    for (const definition of Object.values(RESERVED_EVENT_TYPES)) {
-      expect('schema' in definition).toBe(false);
-      expect(isReservedEventType(definition.type)).toBe(true);
-      expect(isRegisteredEventType(definition.type)).toBe(false);
-      expect(eventDefinition(definition.type)).toBeUndefined();
+    for (const name of ['toString', '__proto__', 'constructor']) {
+      expect(isReservedEventType(name)).toBe(false);
     }
   });
 });
