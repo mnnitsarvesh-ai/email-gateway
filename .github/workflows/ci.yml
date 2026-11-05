@@ -129,20 +129,26 @@ jobs:
   stack:
     name: Docker Compose stack + integration tests
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Step 4.1 adds the scan stage to every message and the scan-* stack suites (an Rspamd outage
+    # past the attempt budget alone takes about a minute), plus the rspamd package suite.
+    timeout-minutes: 90
     needs: [quality]
     # Test profile of step 2.3 (docs/plan/steps/05-routing.md §5), for THIS job only. Compose
     # and the test runner take these over the generated .env (shell environment wins over .env
     # in Compose interpolation; process.loadEnvFile never overrides a set variable).
     # - DELIVERY_DEV_PASSTHROUGH_ENABLED: DEVELOPMENT/CI ONLY, the delivery-worker approves every
-    #   received message without scanning or policy (steps 3.x/5.x do not exist yet), so the
-    #   routing stack suites can deliver end to end. The worker refuses it unless APP_ENV is
+    #   SCANNED message (step 4.1 E27; never scan_failed) without policy (step 5.2 does not exist
+    #   yet), so the routing, lifecycle and scan stack suites can deliver end to end. The worker refuses it unless APP_ENV is
     #   local or ci; never set it anywhere else.
     # - Postfix retry and connect timeout shortened by configuration only (nothing in code
     #   depends on them): 10s/60s/10s backoff, 5s connect timeout.
     # - The test CA of the smtp-test sinks (volume test-pki) for verified TLS to the provider
     #   sinks; trusted by nothing else.
     # - The worker's own hop retries quickly (local .env values).
+    # - Step 4.1 (docs/plan/steps/09-rspamd.md §5, S12): the inbound rspamd resolves only the
+    #   dns-sink test zones (scan.test), uses the test RBL/DBL zones instead of public blocklists
+    #   and classifies with Bayes after 10 learns per class (test only), like the local .env; the
+    #   ARC corpus fixtures need the test sealer arc-trusted.scan.test on the trusted list.
     env:
       DELIVERY_DEV_PASSTHROUGH_ENABLED: 'true'
       POSTFIX_MINIMAL_BACKOFF_TIME: 10s
@@ -156,6 +162,10 @@ jobs:
       DELIVERY_POLL_INTERVAL_MS: '500'
       DELIVERY_OUTBOX_POLL_INTERVAL_MS: '500'
       DELIVERY_RECONCILE_INTERVAL_MS: '5000'
+      RSPAMD_DNS_SERVERS: 172.31.250.53
+      RSPAMD_RBL_PROFILE: test
+      RSPAMD_BAYES_MIN_LEARNS: '10'
+      RSPAMD_ARC_TRUSTED_SEALERS: arc-trusted.scan.test
     steps:
       - uses: actions/checkout@v5
         with:
@@ -187,14 +197,23 @@ jobs:
           docker compose exec -T postfix-outbound postconf -h minimal_backoff_time | grep -qx 10s
           docker compose exec -T postfix-outbound postconf -h smtp_tls_CApath | grep -qx /etc/postfix/test-ca/ca
           test -r "${POSTFIX_OUTBOUND_LOG_DIR:-./.local/postfix-outbound-log}/maillog"
+      # Step 4.1: the scan stage the stack gates require (tests/integration/support/scan-stage.ts):
+      # Rspamd's rendered configuration, the email-worker scan role and topology v3 with the
+      # eg-scanner user (rabbitmq-init exits non-zero without the scanner keys).
+      - name: Check the scan stage (Rspamd, email-worker scan role, topology v3)
+        run: |
+          docker compose exec -T rspamd rspamadm configtest
+          curl -fsS "http://127.0.0.1:${EMAIL_WORKER_HOST_PORT:-3020}/metrics" | grep -q '^# TYPE scan_engine_results_total '
+          docker compose ps --all --format '{{.Service}} {{.ExitCode}}' rabbitmq-init | grep -qx 'rabbitmq-init 0'
       # The api integration tests need the catalog (plans, permissions, platform organization).
       - name: Seed catalog
         run: pnpm db:seed
       # DKIM keys of the SMTP suites are published by running the api's one-shot publisher
       # (`node dist/modules/domains/cli/dkim-sync.js`) inside the running api container
       # (tests/integration/support/smtp-fixtures.ts); the periodic publisher keeps running too.
-      # pnpm test:integration = the stack suites (tests/), then the api, smtp-adapter,
-      # mail-routing (recorder against MySQL) and delivery-worker integration suites.
+      # pnpm test:integration = the stack suites (tests/, incl. the step 4.1 scan-* suites), then
+      # the api, smtp-adapter, message-lifecycle, mail-routing, rspamd (corpus, Bayes, fuzzy
+      # against the real Rspamd), delivery-worker, email-worker and event-relay suites.
       - name: Integration tests
         run: pnpm test:integration
       - name: Service logs
@@ -203,7 +222,7 @@ jobs:
       - name: Mail plane logs and queues
         if: failure()
         run: |
-          docker compose --profile apps logs --no-color --tail 1000 postfix postfix-outbound smtp-adapter delivery-worker rspamd-outbound redis-dkim
+          docker compose --profile apps logs --no-color --tail 1000 postfix postfix-outbound smtp-adapter delivery-worker email-worker rspamd rspamd-outbound redis-dkim
           docker compose --profile smtp-test logs --no-color --tail 300 mail-sink dns-sink sink-m365 sink-google sink-google-alt relay-sink reinject-forwarder
           docker compose exec -T postfix postqueue -j || true
           docker compose exec -T postfix-outbound postqueue -j || true

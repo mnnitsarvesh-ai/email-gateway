@@ -1,0 +1,14 @@
+From: Newsletter <news@quarantine.scan.test>
+To: bob@customer.scan.test
+Subject: Monthly product update
+Date: Sun, 01 Nov 2026 14:30:00 +0000
+Message-ID: <news-20261101-1430@clean.scan.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Hello,
+
+This month we shipped three improvements to the reporting module and fixed several bugs in the
+export feature. Read the full release notes in your account.
+
+The product team

@@ -21,8 +21,8 @@ import {
 } from '@email-gateway/common';
 import {
   EventTypes,
-  messageReceivedV1,
-  type MessageReceivedV1,
+  messageScannedV1,
+  type MessageScannedV1,
 } from '@email-gateway/event-contracts';
 import type { Logger } from '@email-gateway/logger';
 import { createApprovalFeed } from './approvals/approval-feed';
@@ -139,14 +139,15 @@ export class DeliveryModule {
         provide: DevPassThroughApprover,
         useFactory: (prisma: PrismaService, locks: AdvisoryLocks, metrics: DeliveryMetrics) =>
           new DevPassThroughApprover(
-            new OutboxPoller<MessageReceivedV1>({
+            // Step 4.1 S15: approve after the scan (mail.message.scanned.v1), never before it.
+            new OutboxPoller<MessageScannedV1>({
               prisma,
               locks,
               logger,
               metrics: metrics.outboxPoller(),
               consumer: DEV_PASSTHROUGH_CONSUMER,
-              eventType: EventTypes.MessageReceived,
-              schema: messageReceivedV1,
+              eventType: EventTypes.MessageScanned,
+              schema: messageScannedV1,
               initialPosition: 'latest',
               pollIntervalMs: config.DELIVERY_OUTBOX_POLL_INTERVAL_MS,
               safetyLagMs: config.DELIVERY_OUTBOX_SAFETY_LAG_MS,

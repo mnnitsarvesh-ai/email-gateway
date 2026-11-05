@@ -1,0 +1,13 @@
+From: "billing@bank.scan.test" <invoices@anomaly-sender.scan.test>
+To: bob@customer.scan.test
+Subject: Invoice 2026-0457 overdue
+Date: Sun, 01 Nov 2026 16:00:00 +0000
+Message-ID: <invoice-20261101-1600@anomaly-sender.scan.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Hello,
+
+Invoice 2026-0457 is now overdue. Please arrange the payment this week.
+
+Billing department

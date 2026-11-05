@@ -7,6 +7,7 @@ import {
   actorRoleSchema,
   DELIVERY_STATUSES,
   deliveryApprovedV1,
+  ENGINE_OUTCOME_VALUES,
   deliveryStatusChangedV1,
   domainRoutingChangedV1,
   domainStatusChangedV1,
@@ -23,6 +24,7 @@ import {
   messageStateSchema,
   PARSE_FAILURE_REASONS,
   policyDecidedV1,
+  SCAN_VERDICT_VALUES,
 } from './events';
 
 const organizationId = '42';
@@ -36,6 +38,24 @@ function envelope(payload: unknown, overrides: Record<string, unknown> = {}) {
     correlationId: 'corr-12345678',
     organizationId,
     payload,
+    ...overrides,
+  };
+}
+
+function scannedPayload(overrides: Record<string, unknown> = {}) {
+  return {
+    messageId: '7',
+    receivedAt,
+    direction: 'inbound',
+    emlS3Key: `org/${organizationId}/eml/2026/11/01/7.eml`,
+    lifecycleRound: 0,
+    scanId: '11',
+    scanKind: 'initial',
+    outcome: 'scanned',
+    verdict: 'clean',
+    engines: [{ engine: 'rspamd', required: true, outcome: 'clean', attempts: 1 }],
+    reasonCodes: ['clean.below_threshold'],
+    completedAt: '2026-11-01T10:15:31.000Z',
     ...overrides,
   };
 }
@@ -63,13 +83,11 @@ describe('parseEvent', () => {
 
   it('accepts a valid message.scanned event', () => {
     const event = parseEvent(
-      envelope(
-        { messageId: '7', receivedAt, scanIds: ['11', '12'], timedOutStages: [] },
-        { eventType: EventTypes.MessageScanned },
-      ),
+      envelope(scannedPayload(), { eventType: EventTypes.MessageScanned }),
       messageScannedV1,
     );
-    expect(event.payload.scanIds).toEqual(['11', '12']);
+    expect(event.payload.scanId).toBe('11');
+    expect(event.payload.engines[0]?.engine).toBe('rspamd');
   });
 
   it('accepts a valid policy.decided event', () => {
@@ -104,10 +122,7 @@ describe('parseEvent', () => {
     ).toThrow();
     expect(() =>
       parseEvent(
-        envelope(
-          { messageId: '7', receivedAt, scanIds: ['011'], timedOutStages: [] },
-          { eventType: EventTypes.MessageScanned },
-        ),
+        envelope(scannedPayload({ scanId: '011' }), { eventType: EventTypes.MessageScanned }),
         messageScannedV1,
       ),
     ).toThrow();
@@ -763,5 +778,137 @@ describe('mail.message.rescan_requested.v1', () => {
     ]) {
       expect(() => parse(rescan(overrides)), JSON.stringify(overrides).slice(0, 80)).toThrow();
     }
+  });
+});
+
+describe('mail.message.scanned.v1 (step 4.1 S6)', () => {
+  const ok = (overrides: Record<string, unknown>) =>
+    messageScannedV1.safeParse(scannedPayload(overrides)).success;
+  const failedEngine = (outcome: string, required = true) => [
+    { engine: 'rspamd', required, outcome, attempts: 6 },
+  ];
+
+  it('has the seven verdicts and the engine outcomes (verdicts + skipped)', () => {
+    expect([...SCAN_VERDICT_VALUES]).toEqual([
+      'clean',
+      'spam',
+      'suspicious',
+      'malicious',
+      'unknown',
+      'timeout',
+      'error',
+    ]);
+    expect([...ENGINE_OUTCOME_VALUES]).toEqual([...SCAN_VERDICT_VALUES, 'skipped']);
+  });
+
+  it('accepts every definite verdict for a scanned round, initial and rescan', () => {
+    for (const verdict of ['clean', 'spam', 'suspicious', 'malicious', 'unknown']) {
+      expect(
+        ok({
+          verdict,
+          engines: [{ engine: 'rspamd', required: true, outcome: verdict, attempts: 2 }],
+        }),
+        verdict,
+      ).toBe(true);
+    }
+    expect(ok({ scanKind: 'rescan', lifecycleRound: 3 })).toBe(true);
+    expect(ok({ reasonCodes: [] })).toBe(true);
+  });
+
+  it('scanned: no required engine failed and the verdict is not a failure', () => {
+    expect(ok({ engines: failedEngine('timeout') })).toBe(false);
+    expect(ok({ engines: failedEngine('error') })).toBe(false);
+    expect(ok({ verdict: 'timeout' })).toBe(false);
+    expect(ok({ verdict: 'error' })).toBe(false);
+    // A non-required engine's failure never fails the round.
+    expect(
+      ok({
+        engines: [
+          { engine: 'rspamd', required: true, outcome: 'clean', attempts: 1 },
+          { engine: 'url', required: false, outcome: 'timeout', attempts: 3 },
+        ],
+      }),
+    ).toBe(true);
+  });
+
+  it('scan_failed: at least one required engine ended timeout or error', () => {
+    expect(
+      ok({ outcome: 'scan_failed', verdict: 'timeout', engines: failedEngine('timeout') }),
+    ).toBe(true);
+    expect(ok({ outcome: 'scan_failed', verdict: 'error', engines: failedEngine('error') })).toBe(
+      true,
+    );
+    // A malicious finding of another engine stays the verdict of a failed round.
+    expect(
+      ok({
+        outcome: 'scan_failed',
+        verdict: 'malicious',
+        engines: [
+          { engine: 'rspamd', required: true, outcome: 'error', attempts: 6 },
+          { engine: 'url', required: false, outcome: 'malicious', attempts: 1 },
+        ],
+      }),
+    ).toBe(true);
+    expect(ok({ outcome: 'scan_failed', verdict: 'clean' })).toBe(false);
+    expect(
+      ok({ outcome: 'scan_failed', verdict: 'timeout', engines: failedEngine('timeout', false) }),
+    ).toBe(false);
+  });
+
+  it('bounds engines, attempts, rounds and reason codes', () => {
+    expect(ok({ engines: [] })).toBe(false);
+    expect(
+      ok({
+        engines: Array.from({ length: 17 }, (_, i) => ({
+          engine: `e${i}`,
+          required: false,
+          outcome: 'skipped',
+          attempts: 1,
+        })),
+      }),
+    ).toBe(false);
+    expect(
+      ok({
+        engines: [
+          { engine: 'rspamd', required: true, outcome: 'clean', attempts: 1 },
+          { engine: 'rspamd', required: false, outcome: 'clean', attempts: 1 },
+        ],
+      }),
+    ).toBe(false);
+    expect(
+      ok({ engines: [{ engine: 'Rspamd', required: true, outcome: 'clean', attempts: 1 }] }),
+    ).toBe(false);
+    expect(
+      ok({ engines: [{ engine: 'rspamd', required: true, outcome: 'clean', attempts: 0 }] }),
+    ).toBe(false);
+    expect(
+      ok({ engines: [{ engine: 'rspamd', required: true, outcome: 'ok', attempts: 1 }] }),
+    ).toBe(false);
+    expect(ok({ lifecycleRound: 65_536 })).toBe(false);
+    expect(ok({ scanKind: 'retro' })).toBe(false);
+    expect(ok({ reasonCodes: Array.from({ length: 33 }, (_, i) => `rule.r${i}`) })).toBe(false);
+    expect(ok({ reasonCodes: ['spam.score', 'spam.score'] })).toBe(false);
+    expect(ok({ reasonCodes: ['SPAM'] })).toBe(false);
+    expect(ok({ reasonCodes: [`a.${'b'.repeat(63)}`] })).toBe(false);
+    expect(ok({ emlS3Key: 'eml/7.eml' })).toBe(false);
+  });
+
+  it('carries no content: extra fields such as symbols, options, scores or addresses are refused', () => {
+    expect(ok({ symbols: [{ name: 'R_SPF_FAIL', options: ['a@example.com'] }] })).toBe(false);
+    expect(ok({ score: 12.5 })).toBe(false);
+    expect(ok({ envelopeFrom: 'a@example.com' })).toBe(false);
+    expect(
+      ok({
+        engines: [
+          {
+            engine: 'rspamd',
+            required: true,
+            outcome: 'clean',
+            attempts: 1,
+            options: ['http://bad.example/'],
+          },
+        ],
+      }),
+    ).toBe(false);
   });
 });

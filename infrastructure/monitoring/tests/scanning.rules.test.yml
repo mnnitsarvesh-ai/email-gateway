@@ -1,0 +1,156 @@
+# promtool unit tests of rules/scanning.rules.yml (step 4.1 S17):
+#   docker run --rm -v "$PWD/infrastructure/monitoring:/m:ro" --entrypoint promtool \
+#     prom/prometheus:v3.6.0 test rules /m/tests/scanning.rules.test.yml
+rule_files:
+  - ../rules/scanning.rules.yml
+evaluation_interval: 1m
+tests:
+  - name: breaker, failure rates, backlog, latency, deadline finalizations, version change
+    interval: 1m
+    input_series:
+      # Replica a's breaker opens at minute 5.
+      - series: 'scan_engine_circuit_state{job="email-worker",instance="a",engine="rspamd"}'
+        values: '0x5 2x40'
+      - series: 'scan_engine_circuit_state{job="email-worker",instance="b",engine="rspamd"}'
+        values: '0x45'
+      # 10 clean finals per minute; 1 error final per minute from minute 10 on (9 %).
+      - series: 'scan_engine_results_total{job="email-worker",instance="a",engine="rspamd",outcome="clean",final="true"}'
+        values: '0+10x45'
+      - series: 'scan_engine_results_total{job="email-worker",instance="a",engine="rspamd",outcome="error",final="true"}'
+        values: '0x10 1+1x35'
+      # Retried attempts never count toward the failure rate.
+      - series: 'scan_engine_results_total{job="email-worker",instance="a",engine="rspamd",outcome="timeout",final="false"}'
+        values: '0+50x45'
+      - series: 'scan_rounds_completed_total{job="email-worker",instance="a",outcome="scanned",verdict="clean",scan_kind="initial"}'
+        values: '0+10x45'
+      - series: 'scan_rounds_completed_total{job="email-worker",instance="a",outcome="scan_failed",verdict="error",scan_kind="initial"}'
+        values: '0x10 1+1x35'
+      # scan.spam backlog from minute 10.
+      - series: 'rabbitmq_detailed_queue_messages_ready{job="rabbitmq-detailed",vhost="email-gateway",queue="scan.spam"}'
+        values: '0x10 2000x35'
+      # Engine durations: 90 % of the calls above 10 s.
+      - series: 'scan_engine_duration_seconds_bucket{job="email-worker",instance="a",engine="rspamd",outcome="clean",le="10"}'
+        values: '0+1x45'
+      - series: 'scan_engine_duration_seconds_bucket{job="email-worker",instance="a",engine="rspamd",outcome="clean",le="20"}'
+        values: '0+10x45'
+      - series: 'scan_engine_duration_seconds_bucket{job="email-worker",instance="a",engine="rspamd",outcome="clean",le="+Inf"}'
+        values: '0+10x45'
+      # One deadline finalization at minute 10.
+      - series: 'scan_deadline_finalized_total{job="email-worker",instance="a",engine="rspamd"}'
+        values: '0x10 1x35'
+      # Version 3.12.0 until minute 10, then 3.12.1.
+      - series: 'scan_engine_info{job="email-worker",instance="a",engine="rspamd",version="3.12.0"}'
+        values: '1x10'
+      - series: 'scan_engine_info{job="email-worker",instance="a",engine="rspamd",version="3.12.1"}'
+        values: '_x10 1x35'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: ScanEngineCircuitOpen
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: ScanEngineCircuitOpen
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              engine: rspamd
+            exp_annotations:
+              summary: Scan engine circuit breaker open
+              description: >-
+                The rspamd circuit breaker has been open for 2 minutes on at least one
+                email-worker: the engine is down or failing. Scans are retried with backoff and
+                end scan_failed after SCAN_RSPAMD_MAX_ATTEMPTS or the round deadline (never
+                clean).
+              runbook_url: docs/runbooks/scan-pipeline.md#scanenginecircuitopen
+      - eval_time: 9m
+        alertname: ScanEngineFailureRateHigh
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: ScanEngineFailureRateHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              engine: rspamd
+            exp_annotations:
+              summary: Scan engine final failures above 5 %
+              description: >-
+                More than 5 % of the final rspamd results of the last 10 minutes are timeout or
+                error. Their rounds end scan_failed (policy fail-safe); rescan them after the
+                engine recovered.
+              runbook_url: docs/runbooks/scan-pipeline.md#scanenginefailureratehigh
+      - eval_time: 9m
+        alertname: ScanRoundsFailing
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: ScanRoundsFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Scan rounds failing above 1 %
+              description: >-
+                More than 1 % of the scan rounds of the last 15 minutes ended scan_failed (an
+                engine timeout, error or missing EML). Those messages wait for the policy
+                fail-safe; check the engine and rescan after recovery.
+              runbook_url: docs/runbooks/scan-pipeline.md#scanroundsfailing
+      - eval_time: 15m
+        alertname: ScanQueueBacklog
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: ScanQueueBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Scan queue backlog
+              description: >-
+                scan.spam has had more than 1000 ready messages, or the p95 age of scan triggers
+                at handling start has been above 120 s, for 10 minutes. Scale email-worker-scan
+                or check the engine latency.
+              runbook_url: docs/runbooks/scan-pipeline.md#scanqueuebacklog
+      - eval_time: 10m
+        alertname: ScanLatencyHigh
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: ScanLatencyHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              engine: rspamd
+            exp_annotations:
+              summary: Scan engine p95 latency above 10 s
+              description: >-
+                The p95 duration of rspamd calls has been above 10 s for 15 minutes (per-call
+                timeout SCAN_RSPAMD_TIMEOUT_MS = 20 s). The engine is overloaded or its DNS/Redis
+                is slow.
+              runbook_url: docs/runbooks/scan-pipeline.md#scanlatencyhigh
+      - eval_time: 5m
+        alertname: ScanDeadlineFinalizations
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: ScanDeadlineFinalizations
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              engine: rspamd
+            exp_annotations:
+              summary: Scan rounds finalized by the deadline sweeper
+              description: >-
+                1 rspamd results were finalized as timeout (deadline_exceeded) in the last 15
+                minutes: the engine's queue was not consumed in time (no consumer, a stuck
+                worker, or an engine registered but not deployed).
+              runbook_url: docs/runbooks/scan-pipeline.md#scandeadlinefinalizations
+      - eval_time: 5m
+        alertname: ScanEngineVersionChanged
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: ScanEngineVersionChanged
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              engine: rspamd
+            exp_annotations:
+              summary: Scan engine version changed
+              description: >-
+                More than one rspamd version reported results in the last 30 minutes. Expected
+                during an upgrade; compare verdict distributions before and after.
+              runbook_url: docs/runbooks/scan-pipeline.md#scanengineversionchanged

@@ -1,5 +1,5 @@
 {
-  "topology_version": 2,
+  "topology_version": 3,
   "exchanges": [
     {
       "name": "email.ingestion",
@@ -300,14 +300,6 @@
     {
       "source": "email.ingestion",
       "vhost": "email-gateway",
-      "destination": "scan.auth",
-      "destination_type": "queue",
-      "routing_key": "org.*.mail.message.parsed.v1",
-      "arguments": {}
-    },
-    {
-      "source": "email.ingestion",
-      "vhost": "email-gateway",
       "destination": "scan.dlp",
       "destination_type": "queue",
       "routing_key": "org.*.mail.message.parsed.v1",
@@ -399,14 +391,6 @@
       "destination": "scan.attachment",
       "destination_type": "queue",
       "routing_key": "retry.scan.attachment.#",
-      "arguments": {}
-    },
-    {
-      "source": "email.security",
-      "vhost": "email-gateway",
-      "destination": "scan.auth",
-      "destination_type": "queue",
-      "routing_key": "org.*.mail.message.rescan_requested.v1",
       "arguments": {}
     },
     {
@@ -517,9 +501,12 @@
       "apply-to": "queues",
       "priority": 10,
       "definition": {
-        "delivery-limit": -1,
-        "max-length": 10000,
-        "overflow": "drop-head"
+        "delivery-limit": 20,
+        "dead-letter-exchange": "email.events",
+        "dead-letter-routing-key": "dead-letter.scan.spam",
+        "dead-letter-strategy": "at-least-once",
+        "overflow": "reject-publish",
+        "max-length": 1000000
       }
     },
     {

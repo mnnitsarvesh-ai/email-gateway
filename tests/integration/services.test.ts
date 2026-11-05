@@ -15,7 +15,8 @@ const running = (await runningServices()).has('api');
  */
 const EXPECTED_CHECKS: Record<string, string[]> = {
   api: ['mysql', 'mysql-reader', 'redis', 's3'],
-  'email-worker': ['mysql', 'rabbitmq', 'redis', 's3'],
+  // Step 4.1 S1: MIME role (`rabbitmq`) and scan role (`rabbitmq-scanner`, user eg-scanner).
+  'email-worker': ['mysql', 'rabbitmq', 'rabbitmq-scanner', 'redis', 's3'],
   'policy-engine': ['mysql', 'redis'],
   'delivery-worker': ['mysql', 'rabbitmq', 'redis', 's3'],
   'notification-worker': ['mysql'],

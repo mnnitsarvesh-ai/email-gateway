@@ -1,9 +1,11 @@
 # dns-sink: TEST-ONLY authoritative DNS (Compose profile smtp-test, step 2.2 §6/D17, step 2.3 §6).
-# postfix-outbound uses it as its only upstream resolver, so locally the outbound MTA resolves
-# the zones below and NOTHING else: every other name is REFUSED (no forwarding, no recursion).
+# postfix-outbound (and, since step 4.1, the inbound rspamd) use it as their only upstream
+# resolver, so locally they resolve the zones below and NOTHING else: every other name is
+# REFUSED (no forwarding, no recursion).
 #   sink.test                      mail-sink, the gateway MX (gw-mx), relay-sink, *.gwtenant
 #   mail.protection.outlook.com    sink-m365 (Microsoft 365 preset)
 #   aspmx.l.google.com             sink-google / sink-google-alt (Google Workspace preset)
+#   scan.test                      scan corpus SPF/DKIM/DMARC, test RBL/DBL, phishing hosts (4.1)
 sink.test:53 {
     file /etc/coredns/sink.test.db
     errors
@@ -18,6 +20,14 @@ mail.protection.outlook.com:53 {
 
 aspmx.l.google.com:53 {
     file /etc/coredns/aspmx.l.google.com.db
+    errors
+    log
+}
+
+# Step 4.1 (docs/plan/steps/09-rspamd.md S12): authentication, RBL/DBL and phishing fixtures of the
+# scan corpus; the inbound rspamd's resolver locally and in CI.
+scan.test:53 {
+    file /etc/coredns/scan.test.db
     errors
     log
 }

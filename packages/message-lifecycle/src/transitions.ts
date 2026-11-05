@@ -63,8 +63,9 @@ export interface TransitionEdge {
 }
 
 /**
- * The transition table (step 3.3 L3, edges E1–E26), as data. Every allowed change of
- * `email_messages.status` is one of these edges; everything else is stale or invalid (L4).
+ * The transition table (step 3.3 L3, edges E1–E26; step 4.1 S15 adds E27 and retires E4), as
+ * data. Every allowed change of `email_messages.status` is one of these edges; everything else is
+ * stale or invalid (L4). Retired ids are never reused.
  * At most one edge exists per `(from, to)` pair (`transitions.test.ts`).
  */
 export const TRANSITIONS: readonly TransitionEdge[] = [
@@ -92,14 +93,8 @@ export const TRANSITIONS: readonly TransitionEdge[] = [
     reasons: ['scan_started'],
     producedBy: '4.1',
   },
-  {
-    id: 'E4',
-    from: ['persisted'],
-    to: 'approved',
-    roles: ['dev_passthrough'],
-    reasons: ['dev_passthrough'],
-    producedBy: '3.3',
-  },
+  // E4 (`persisted → approved`, dev pass-through before scanning, step 3.3) is retired by step
+  // 4.1 (S15): the pass-through approves after the scan (E27). The id is never reused.
   {
     id: 'E5',
     from: ['persisted'],
@@ -286,6 +281,16 @@ export const TRANSITIONS: readonly TransitionEdge[] = [
     roles: ['sweeper'],
     reasons: ['deadline_exceeded'],
     producedBy: '3.3',
+  },
+  {
+    // Step 4.1 S15: the development pass-through (local/ci only) approves after the scan instead
+    // of after persistence; it replaces the retired E4.
+    id: 'E27',
+    from: ['scanned'],
+    to: 'approved',
+    roles: ['dev_passthrough'],
+    reasons: ['dev_passthrough'],
+    producedBy: '4.1',
   },
 ];
 

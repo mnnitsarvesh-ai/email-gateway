@@ -33,6 +33,8 @@ flowchart LR
   end
   subgraph security[Security]
     email_scans[(email_scans P)]
+    email_auth_results[(email_auth_results P)]
+    scan_engine_settings
   end
   subgraph policy[Policy]
     email_policies
@@ -64,6 +66,8 @@ flowchart LR
   domains -.-> email_messages
   email_messages -.-> email_message_parses
   email_messages -.-> email_scans
+  email_scans -.-> email_auth_results
+  organizations --> scan_engine_settings
   email_messages -.-> email_deliveries
   delivery_reinjections -.-> email_deliveries
   email_deliveries -.-> delivery_status_events
@@ -405,8 +409,11 @@ Every write of the lifecycle columns of `email_messages` (`status`, `status_chan
 
 ```mermaid
 erDiagram
-  email_messages ||..o{ email_scans : "message_id + received_at"
-  email_scans ||..|{ scan_engine_results : "scan_id + received_at"
+  email_messages ||..o{ email_scans : "message_id + received_at, one per lifecycle_round"
+  email_scans ||..o{ scan_engine_results : "scan_id + received_at, attempts + one final per engine"
+  email_scans ||..o{ email_auth_results : "scan_id + received_at, one per engine"
+  organizations ||--o{ scan_engine_settings : "RESTRICT, one per engine"
+  users |o--o{ scan_engine_settings : "updated_by, SET NULL"
   organizations |o--o{ threat_indicators : "NULL = platform feed"
   organizations |o--o{ yara_rules : "NULL = platform rule"
   users |o--o{ yara_rules : "updated_by"
@@ -414,15 +421,42 @@ erDiagram
     bigint id PK
     datetime received_at PK "PARTITIONED month"
     bigint message_id
+    smallint lifecycle_round "UK with message_id, received_at"
     enum scan_kind
-    smallint attempt
+    enum status
+    enum scan_verdict
+    json required_engines
+    json reason_codes
+    datetime deadline_at
   }
   scan_engine_results {
     bigint id PK
     datetime received_at PK "PARTITIONED month"
     bigint scan_id
     varchar engine
+    smallint attempt
+    tinyint is_final
+    varchar final_engine "generated: IF(is_final = 1, engine, NULL); in a UK"
+    enum outcome
+    json reason_codes
     json evidence
+  }
+  email_auth_results {
+    bigint id PK
+    datetime received_at PK "PARTITIONED month"
+    bigint scan_id
+    varchar engine
+    enum spf
+    enum dkim
+    enum dmarc
+    enum arc
+  }
+  scan_engine_settings {
+    bigint id PK
+    bigint organization_id FK
+    varchar engine
+    json settings
+    int version
   }
   threat_indicators {
     bigint id PK
@@ -453,6 +487,8 @@ erDiagram
 ```
 
 The four reputation catalogs and `malware_signatures` are platform-wide and stand alone.
+
+Step 4.1 ([§3](../plan/steps/09-rspamd.md#3-data-model-one-forward-migration-scan_pipeline-wp1)): a scan round is `(message_id, received_at, lifecycle_round)`, one `email_scans` row; each engine writes its failed attempts as non-final `scan_engine_results` rows and exactly one final row (the unique key on the generated `final_engine`); the Rspamd engine also writes one `email_auth_results` row per round. All three are partitioned and copy the message's `received_at`, so a message's scan graph lives in one partition. `scan_engine_settings` (not partitioned) holds a tenant's override of an engine's platform thresholds, validated by `@email-gateway/security-contracts`.
 
 ## Policy
 

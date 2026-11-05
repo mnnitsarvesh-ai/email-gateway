@@ -118,8 +118,10 @@ describe.skipIf(gate.skip)(
       expect(delivered).toHaveLength(1);
       expect(delivered[0]).toMatchObject({ source: 'postfix_log', applied: true, smtpCode: 250 });
       expect(audit.find((e) => e.toStatus === 'queued')).toBeDefined();
-      // Step 3.3 lifecycle end to end (L5.2, E4, E20, E23): history received → persisted
-      // (SMTP commit) → approved (dev pass-through) → delivery_pending (planner) → delivered.
+      // Step 3.3 lifecycle end to end (L5.2, E20, E23), with the step 4.1 scan (E3, E6) and
+      // the pass-through after it (E27): history received → persisted (SMTP commit) → scanning
+      // → scanned (email-worker scan role) → approved (dev pass-through) → delivery_pending
+      // (planner) → delivered.
       await waitForLifecycle(fx.prisma, message, 'delivered', 'delivery_complete');
       expect(await pathOf(fx.prisma, message)).toEqual(
         DELIVERED_PATH('delivered', 'delivery_complete'),
@@ -129,6 +131,8 @@ describe.skipIf(gate.skip)(
       await expectStateChangedRows(fx.prisma, org, message);
       const history = await historyOf(fx.prisma, message);
       expect(history.slice(2).map((h) => [h.actorRole, h.actorService])).toEqual([
+        ['scanner', 'email-worker'],
+        ['scanner', 'email-worker'],
         ['dev_passthrough', 'delivery-worker'],
         ['delivery', 'delivery-worker'],
         ['delivery', 'delivery-worker'],

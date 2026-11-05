@@ -24,7 +24,7 @@ const request: TransitionRequest = {
   actor: { role: 'dev_passthrough', service: 'delivery-worker', type: 'system' },
   transitionKey: 'evt:0190f0a0-0000-7000-8000-000000000001:approved',
   expectedRound: 0,
-  expectedFrom: ['persisted'],
+  expectedFrom: ['scanned'],
 };
 
 function countingMetrics() {

@@ -13,31 +13,31 @@ Step 3.3 ([design](../plan/steps/08-message-lifecycle.md), [ADR-0025](../archite
 
 - [States](#states) · [Reading a message's lifecycle](#reading-a-messages-lifecycle) · [Series used by the alerts](#series-used-by-the-alerts)
 - Alerts: [LifecycleRecoveries](#lifecyclerecoveries) · [LifecycleStuckMessages](#lifecyclestuckmessages) · [LifecycleExpiryNoShardOwner](#lifecycleexpirynoshardowner) · [LifecycleInvalidTransitions](#lifecycleinvalidtransitions)
-- Procedures: [stuck messages](#stuck-messages) · [expiry](#expiry) · [recovery](#recovery) · [rescan before Phase 4](#rescan-before-phase-4) · [quarantine release](#quarantine-release) · [changing deadlines or shard counts](#changing-deadlines-or-shard-counts)
+- Procedures: [stuck messages](#stuck-messages) · [expiry](#expiry) · [recovery](#recovery) · [rescan](#rescan) · [quarantine release](#quarantine-release) · [dev pass-through after scanning](#dev-pass-through-after-scanning) · [changing deadlines or shard counts](#changing-deadlines-or-shard-counts)
 
 ## States
 
-Fifteen states (`MESSAGE_STATES`, the MySQL `ENUM` order). The transition table (edges E1–E26, roles, reason codes) is `packages/message-lifecycle/src/transitions.ts`; [diagram 11](../architecture/diagrams/11-message-state-machine.md) draws it.
+Fifteen states (`MESSAGE_STATES`, the MySQL `ENUM` order). The transition table (edges E1–E27, roles, reason codes; step 4.1 added E27 `scanned → approved` for the dev pass-through and retired E4 `persisted → approved`, whose id is never reused) is `packages/message-lifecycle/src/transitions.ts`; [diagram 11](../architecture/diagrams/11-message-state-machine.md) draws it.
 
-| State              | Meaning                                                                        | Left by (producer)                                        | Expires after (default) |
-| ------------------ | ------------------------------------------------------------------------------ | --------------------------------------------------------- | ----------------------- |
-| `received`         | SMTP accepted the DATA (history only; never visible after the commit)          | `persisted` (smtp-adapter, same transaction)              | —                       |
-| `persisted`        | Message, recipients, `received` event and `mail.message.received.v1` committed | `scanning` (4.1), `approved` (dev pass-through, local/ci) | 72 h                    |
-| `scanning`         | Security stages requested                                                      | `scanned` / `scan_failed` (4.x)                           | 24 h                    |
-| `scanned`          | Every required stage reported                                                  | `policy_evaluated` (5.2)                                  | 24 h                    |
-| `scan_failed`      | Scanning could not complete                                                    | `policy_evaluated` (5.2 fail-safe)                        | 72 h                    |
-| `policy_evaluated` | Policy decided                                                                 | `approved`, `quarantined`, `held_for_review`, `rejected`  | 24 h                    |
-| `approved`         | Delivery approved; the approval event is in the outbox                         | `delivery_pending` (delivery-worker planner)              | 24 h                    |
-| `quarantined`      | Held in quarantine                                                             | `approved` (release), `rejected` (5.3 delete)             | 2160 h (90 d)           |
-| `held_for_review`  | Held for an administrator                                                      | `approved` (release), `quarantined`, `rejected` (5.3)     | 336 h                   |
-| `delivery_pending` | Planned; a recipient is not settled, none deferred                             | derived from the recipients (recorder, lifecycle check)   | 168 h                   |
-| `delivery_retry`   | A recipient is deferred and retried by Postfix                                 | derived from the recipients                               | 168 h                   |
-| `delivered`        | Every recipient settled, at least one delivered (`delivery_complete/_partial`) | `archived` (8.1) only                                     | final                   |
-| `rejected`         | Delivered to nobody (`delivery_failed`, policy discard/reject, delete)         | `archived` (8.1) only                                     | final                   |
-| `archived`         | Retained in the archive                                                        | nothing                                                   | terminal                |
-| `expired`          | Stuck past its state's deadline                                                | `scanning` (administrative rescan, new round) only        | final                   |
+| State              | Meaning                                                                        | Left by (producer)                                                     | Expires after (default) |
+| ------------------ | ------------------------------------------------------------------------------ | ---------------------------------------------------------------------- | ----------------------- |
+| `received`         | SMTP accepted the DATA (history only; never visible after the commit)          | `persisted` (smtp-adapter, same transaction)                           | —                       |
+| `persisted`        | Message, recipients, `received` event and `mail.message.received.v1` committed | `scanning` (scan stage, 4.1)                                           | 72 h                    |
+| `scanning`         | Security stages requested                                                      | `scanned` / `scan_failed` (scan stage, 4.1)                            | 24 h                    |
+| `scanned`          | Every required stage reported                                                  | `policy_evaluated` (5.2), `approved` (dev pass-through, local/ci, E27) | 24 h                    |
+| `scan_failed`      | Scanning could not complete                                                    | `policy_evaluated` (5.2 fail-safe)                                     | 72 h                    |
+| `policy_evaluated` | Policy decided                                                                 | `approved`, `quarantined`, `held_for_review`, `rejected`               | 24 h                    |
+| `approved`         | Delivery approved; the approval event is in the outbox                         | `delivery_pending` (delivery-worker planner)                           | 24 h                    |
+| `quarantined`      | Held in quarantine                                                             | `approved` (release), `rejected` (5.3 delete)                          | 2160 h (90 d)           |
+| `held_for_review`  | Held for an administrator                                                      | `approved` (release), `quarantined`, `rejected` (5.3)                  | 336 h                   |
+| `delivery_pending` | Planned; a recipient is not settled, none deferred                             | derived from the recipients (recorder, lifecycle check)                | 168 h                   |
+| `delivery_retry`   | A recipient is deferred and retried by Postfix                                 | derived from the recipients                                            | 168 h                   |
+| `delivered`        | Every recipient settled, at least one delivered (`delivery_complete/_partial`) | `archived` (8.1) only                                                  | final                   |
+| `rejected`         | Delivered to nobody (`delivery_failed`, policy discard/reject, delete)         | `archived` (8.1) only                                                  | final                   |
+| `archived`         | Retained in the archive                                                        | nothing                                                                | terminal                |
+| `expired`          | Stuck past its state's deadline                                                | `scanning` (administrative rescan, new round) only                     | final                   |
 
-`version` grows by one per applied transition (0 = the `received` history row, 1 = `persisted`); `lifecycle_round` grows by one on a rescan or a release. Before Phase 4 nothing produces `scanning`, `scanned`, `scan_failed`, `policy_evaluated`, `quarantined`, `held_for_review` or `archived` except the api's rescan; locally the dev pass-through moves `persisted → approved`.
+`version` grows by one per applied transition (0 = the `received` history row, 1 = `persisted`); `lifecycle_round` grows by one on a rescan or a release. Since step 4.1 the email-worker scan stage moves `persisted → scanning → scanned | scan_failed` (and completes rescans); until 5.2 nothing produces `policy_evaluated`, `quarantined`, `held_for_review` or `archived`. Locally the dev pass-through moves `scanned → approved` (E27); `scan_failed` and `parse_failed` messages are never approved by it.
 
 Partial and failed delivery are **reasons**, not states: `delivered` + `delivery_partial` and `rejected` + `delivery_failed`; the per-recipient truth is `GET /api/v1/messages/{messageId}/deliveries`.
 
@@ -113,7 +113,7 @@ Producers keep requesting transitions the state machine refuses. An occasional `
 
 ## Stuck messages
 
-1. Which state: `lifecycle_stuck_messages{state}`. Before Phase 4, `scanning` after a rescan is **expected** (see [rescan before Phase 4](#rescan-before-phase-4)); `persisted` is expected on stacks without the dev pass-through (no producer leaves it until 4.1 / 5.2).
+1. Which state: `lifecycle_stuck_messages{state}`. `scanning`: the scan stage (email-worker scan role, Rspamd) is down or slow; see [scan-pipeline.md](scan-pipeline.md); a round past its deadline ends `scan_failed`. `scanned` / `scan_failed` are expected until policy (5.2) exists, except locally where the dev pass-through approves `scanned` ([below](#dev-pass-through-after-scanning)). `persisted`: the MIME or scan stage is not consuming, or the message failed to parse (`parse_failed` messages stay `persisted` until 5.2's fail-safe or their deadline).
 2. `approved`: the planner consumes `email.delivery.pending`. Check the queue's consumers and backlog ([WorkQueueNoConsumer / WorkQueueBacklog](rabbitmq-messaging.md#workqueuenoconsumer)), the delivery-worker log for `delivery_approvals_rejected_total{reason="lifecycle_state"}` (approval for a message in another state or round), and the step 3.2 reconciler (it re-drives approvals without a ledger row).
 3. `delivery_pending` / `delivery_retry`: per-recipient state (`GET …/deliveries`). Deferred recipients stay in `delivery_retry` until Postfix's queue lifetime (5 days) ends them; the lifecycle check re-derives messages whose derivation was lost.
 4. Anything stuck past its deadline is expired by the sweeper ([expiry](#expiry)); nothing needs to be changed by hand.
@@ -139,9 +139,13 @@ The sweeper (event-relay, `LIFECYCLE_EXPIRY_ENABLED`) moves messages unchanged f
 
 No procedure requires editing lifecycle rows. If a message's state is wrong, capture the history and events (above) and open an issue; do not "fix" the row.
 
-## Rescan before Phase 4
+## Rescan
 
-`POST /api/v1/messages/{messageId}/rescan` (permission `message:rescan`, `Idempotency-Key` required, body `{ expectedVersion, reason }`) moves the message to `scanning` with a new round and publishes `mail.message.rescan_requested.v1` to `email.security`. **Until the Phase 4 scan stages exist, nothing consumes it**: the request lands in the five dormant scan queues (bounded, `drop-head`), the response carries a `note` saying so, and the message stays `scanning` until the sweeper expires it after `LIFECYCLE_DEADLINE_SCANNING_HOURS` (24 h). After expiry another rescan is allowed. This is the documented contract, not an incident; `LifecycleStuckMessages{state="scanning"}` after a burst of rescans is expected.
+`POST /api/v1/messages/{messageId}/rescan` (permission `message:rescan`, `Idempotency-Key` required, body `{ expectedVersion, reason }`) moves the message to `scanning` with a new round and publishes `mail.message.rescan_requested.v1` to `email.security`. Since step 4.1 every registered scan engine (Rspamd on `scan.spam`) scans the new round: the message ends `scanned` or `scan_failed` with that round (`GET /api/v1/messages/{messageId}/scans` shows every round; old rounds are never changed). A late result of an older round completes its own scan row but no longer changes the state. Use it after an Rspamd outage for `scan_failed` messages, and after classifier training (`scan-training` does not rescan).
+
+## Dev pass-through after scanning
+
+Local and CI only (`DELIVERY_DEV_PASSTHROUGH_ENABLED`, refused elsewhere). The delivery-worker polls the outbox for `mail.message.scanned.v1` (consumer `delivery-worker.dev-passthrough-scanned`): `outcome = scanned` → **E27** `scanned → approved` (role `dev_passthrough`, reason `dev_passthrough`, key `evt:<scannedEventId>:approved`, expected round = the event's round) and approvals with that `lifecycleRound`; `outcome = scan_failed` → never approved (`delivery_approvals_skipped_total{reason="scan_failed"}`). `parse_failed` messages produce no `scanned.v1` and are never approved by it. A message that is no longer `scanned` in that round (rescanned, expired) is skipped and recorded as `lifecycle.ignored`. Details: [mail-routing.md](../deployment/mail-routing.md#development-pass-through-after-scanning-step-41).
 
 ## Quarantine release
 

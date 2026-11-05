@@ -101,12 +101,18 @@ describe.skipIf(gate.skip)('SMTP stack: inbound delivery (suite 1)', { timeout: 
       mtaQueueId: queueId,
     });
     // Step 3.3 (L5.2): the commit records `received` and `persisted` (versions 0 and 1) in the
-    // same transaction; the dev pass-through (E4) and the planner (E20) may already have moved
-    // the message on by the time this row is read. This destination-less domain's recipient is
-    // deferred by the reinjection refusal, so the derived state is `delivery_retry`.
-    expect(['persisted', 'approved', 'delivery_pending', 'delivery_retry']).toContain(
-      message.status,
-    );
+    // same transaction; the scan role (E3, E6, step 4.1), the dev pass-through (E27) and the
+    // planner (E20) may already have moved the message on by the time this row is read. This
+    // destination-less domain's recipient is deferred by the reinjection refusal, so the derived
+    // state is `delivery_retry`.
+    expect([
+      'persisted',
+      'scanning',
+      'scanned',
+      'approved',
+      'delivery_pending',
+      'delivery_retry',
+    ]).toContain(message.status);
     await expectIngestionRows(fx.prisma, message);
     await expectConsistentHistory(fx.prisma, message);
     expect(message.clientIp).toMatch(/^\d+\.\d+\.\d+\.\d+$/);
@@ -143,7 +149,8 @@ describe.skipIf(gate.skip)('SMTP stack: inbound delivery (suite 1)', { timeout: 
     // (docs/plan/steps/06-mime-ingestion.md M3.9) adds the email-worker's `parsed` event and its
     // `mail.message.parsed.v1` / `parse_failed.v1` outbox row, excluded the same way. Step 3.3
     // (L5.1, L5.2): the creation writes no `mail.message.state_changed.v1`; the later transitions
-    // of the pass-through and the planner do, so those rows are excluded too.
+    // of the pass-through and the planner do, so those rows are excluded too. Step 4.1 adds the
+    // scan role's `mail.message.scanned.v1` (and its transitions' `state_changed` rows).
     const events = await fx.prisma.emailEvent.findMany({
       where: { messageId: message.id, organizationId: orgA, sourceService: 'smtp-adapter' },
     });
@@ -163,6 +170,8 @@ describe.skipIf(gate.skip)('SMTP stack: inbound delivery (suite 1)', { timeout: 
                 'mail.message.parsed.v1',
                 'mail.message.parse_failed.v1',
                 'mail.message.state_changed.v1',
+                // Step 4.1: the scan role's round completion.
+                'mail.message.scanned.v1',
               ],
             },
           },

@@ -122,16 +122,16 @@ export async function buildQueries(
     {
       id: 'Q3',
       title: 'Scans and engine results for a message',
-      note: 'Both tables prune to the message partition; the join uses the (scan_id, engine, received_at) unique key.',
+      note: 'Both tables prune to the message partition; the rounds come from the (message_id, lifecycle_round, received_at) unique key, the engine rows (attempts and the final result) from the (scan_id, engine, attempt, received_at) unique key.',
       steps: [
         {
           label: 'scans + engine results',
-          sql: `SELECT s.id AS scan_id, s.scan_kind, s.verdict, s.risk_score,
-       r.engine, r.outcome, r.score, r.duration_ms
+          sql: `SELECT s.id AS scan_id, s.lifecycle_round, s.scan_kind, s.status, s.scan_verdict,
+       r.engine, r.attempt, r.is_final, r.outcome, r.score, r.duration_ms
   FROM email_scans s
   JOIN scan_engine_results r ON r.scan_id = s.id AND r.received_at = s.received_at
  WHERE s.message_id = ? AND s.received_at = ?
- ORDER BY s.id, r.engine`,
+ ORDER BY s.lifecycle_round DESC, r.engine, r.attempt`,
           params: [msg.id, msg.receivedAt],
         },
       ],

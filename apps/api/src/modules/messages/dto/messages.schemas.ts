@@ -48,7 +48,7 @@ export const RescanResponseSchema = z.object({
   version: Version,
   lifecycleRound: Round,
   rescanEventId: z.uuid().describe('Event id of mail.message.rescan_requested.v1'),
-  note: z.string().describe('Present while no scan stage is deployed (before Phase 4)'),
+  note: z.string().describe('Where the results of the new round appear (step 4.1)'),
 });
 export type RescanResponse = z.output<typeof RescanResponseSchema>;
 

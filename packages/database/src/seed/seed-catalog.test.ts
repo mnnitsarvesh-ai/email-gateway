@@ -71,7 +71,7 @@ describe('seed catalog', () => {
   const sorted = (list: readonly string[]) => [...list].sort();
   const role = (key: string) => SYSTEM_ROLES.find((r) => r.key === key)!.permissions;
 
-  it('contains the 37 permissions of D7, D8, steps 2.1 D14, 2.2, 2.3, 3.2 and 3.3, without duplicates', () => {
+  it('contains the 39 permissions of D7, D8, steps 2.1 D14, 2.2, 2.3, 3.2, 3.3 and 4.1, without duplicates', () => {
     expect(new Set(keys).size).toBe(keys.length);
     expect(sorted(keys)).toEqual(
       sorted([
@@ -112,19 +112,23 @@ describe('seed catalog', () => {
         'domain:routing_manage',
         'delivery:read',
         'platform:dead_letter_replay',
+        'scan:settings_manage',
+        'platform:scan_training',
       ]),
     );
-    expect(keys).toHaveLength(37);
+    expect(keys).toHaveLength(39);
     // Step 3.3 placed message:rescan next to the other message permissions (design §3.3); the
     // seed upserts by key, so on an existing database it simply gets the next id.
     expect(keys.indexOf('message:rescan')).toBe(keys.indexOf('message:read_content') + 1);
     // Otherwise appended in catalog order (permission ids follow it on a fresh database).
-    expect(keys.slice(-5)).toEqual([
+    expect(keys.slice(-7)).toEqual([
       'connector:read',
       'connector:manage',
       'domain:routing_manage',
       'delivery:read',
       'platform:dead_letter_replay',
+      'scan:settings_manage',
+      'platform:scan_training',
     ]);
     for (const key of keys) expect(key).toMatch(/^[a-z]+:[a-z_]+$/);
     for (const p of PERMISSIONS) expect(p.description.length, p.key).toBeGreaterThan(0);
@@ -135,6 +139,7 @@ describe('seed catalog', () => {
       'platform:dead_letter_replay',
       'platform:operations',
       'platform:organizations',
+      'platform:scan_training',
       'platform:tenant_override',
     ]);
     expect(TENANT_PERMISSIONS.some((p) => p.startsWith('platform:'))).toBe(false);
@@ -205,6 +210,7 @@ describe('seed catalog', () => {
         'platform:operations',
         'platform:tenant_override',
         'platform:dead_letter_replay',
+        'platform:scan_training',
         ...read,
         'audit:read',
       ],
@@ -232,6 +238,7 @@ describe('seed catalog', () => {
         'message:read',
         'message:read_content',
         'message:rescan',
+        'scan:settings_manage',
         'delivery:read',
         'quarantine:read',
         'quarantine:release',
@@ -296,6 +303,17 @@ describe('seed catalog', () => {
     ]);
     expect(TENANT_PERMISSIONS).toContain('message:rescan');
     expect(TENANT_READ_PERMISSIONS).not.toContain('message:rescan');
+    // Step 4.1 (S8, S16): tenant scan thresholds are a tenant write permission.
+    expect(holders('scan:settings_manage')).toEqual([
+      'super_admin',
+      'organization_admin',
+      'security_analyst',
+    ]);
+    expect(TENANT_PERMISSIONS).toContain('scan:settings_manage');
+    expect(TENANT_READ_PERMISSIONS).not.toContain('scan:settings_manage');
+    // Step 4.1 (S13): training the shared classifiers is platform-only.
+    expect(holders('platform:scan_training')).toEqual(['super_admin', 'platform_admin']);
+    expect(PLATFORM_PERMISSIONS).toContain('platform:scan_training');
   });
 
   it('maps every retired step-1.1 role key to an existing, non-retired role', () => {

@@ -167,6 +167,7 @@ const transaction = (service: IngestionService) =>
       queueId: 'Q1',
       clientAddress: null,
       clientHelo: null,
+      clientName: null,
     },
     'sender@external.test',
   );
@@ -257,6 +258,7 @@ describe('IngestionService.handleData', () => {
         queueId: 'Q2',
         clientAddress: null,
         clientHelo: null,
+        clientName: null,
       },
       'alice@one.test',
     );
@@ -279,6 +281,36 @@ describe('IngestionService.handleData', () => {
     expect(store.uploads).toHaveLength(0);
   });
 
+  it('stores the XFORWARD client host name (step 4.1), truncated to 255 characters', async () => {
+    const { repository, service } = setup();
+    const client = {
+      connectionId: 'c',
+      peerAddress: '127.0.0.1',
+      lhloName: 'mx.test',
+      queueId: 'Q1',
+      clientAddress: '203.0.113.7',
+      clientHelo: 'helo.example',
+    };
+    const named = service.beginTransaction(
+      'inbound',
+      { ...client, clientName: 'mail.example' },
+      'sender@external.test',
+    );
+    expect(named.clientName).toBe('mail.example');
+    await service.handleData(named, recipients, stream(MESSAGE));
+    expect(repository.commits.map((c) => c.clientName)).toEqual(['mail.example', 'mail.example']);
+    expect(
+      service.beginTransaction('inbound', { ...client, clientName: 'unknown' }, '').clientName,
+    ).toBe('unknown');
+    expect(
+      service.beginTransaction('inbound', { ...client, clientName: null }, '').clientName,
+    ).toBeNull();
+    const long = `${'a'.repeat(63)}.${'b'.repeat(63)}.${'c'.repeat(63)}.${'d'.repeat(80)}`;
+    expect(
+      service.beginTransaction('inbound', { ...client, clientName: long }, '').clientName,
+    ).toBe(long.slice(0, 255));
+  });
+
   it('requires XFORWARD IDENT and the LHLO name', () => {
     const { service } = setup();
     const base = {
@@ -288,6 +320,7 @@ describe('IngestionService.handleData', () => {
       queueId: 'Q1',
       clientAddress: null,
       clientHelo: null,
+      clientName: null,
     };
     expect(() => service.beginTransaction('inbound', { ...base, queueId: null }, '')).toThrow();
     expect(() => service.beginTransaction('inbound', { ...base, lhloName: null }, '')).toThrow();
@@ -302,6 +335,7 @@ describe('IngestionService classification at ingestion (step 2.3 R1)', () => {
     queueId: 'Q9',
     clientAddress: null,
     clientHelo: null,
+    clientName: null,
   };
   const domains: Record<string, DomainRow> = {
     'one.test': { id: 10n, organizationId: 1n, status: 'active' },

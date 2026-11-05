@@ -179,6 +179,23 @@ export class ManagementApi {
     }));
   }
 
+  /** Binds a queue to an exchange (`POST /api/bindings/<vhost>/e/<exchange>/q/<queue>`). */
+  async bindQueue(
+    vhost: string,
+    exchange: string,
+    queue: string,
+    routingKey: string,
+  ): Promise<void> {
+    const path = `/bindings/${encodeURIComponent(vhost)}/e/${encodeURIComponent(exchange)}/q/${encodeURIComponent(queue)}`;
+    const response = await fetch(`${this.base}/api${path}`, {
+      method: 'POST',
+      headers: { authorization: this.authorization, 'content-type': 'application/json' },
+      body: JSON.stringify({ routing_key: routingKey }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) throw new Error(`management POST ${path}: HTTP ${response.status}`);
+  }
+
   /** Deletes every message of a queue (`DELETE /api/queues/<vhost>/<name>/contents`). */
   async purge(vhost: string, name: string): Promise<void> {
     const path = `/queues/${encodeURIComponent(vhost)}/${encodeURIComponent(name)}/contents`;
@@ -234,8 +251,8 @@ export class ManagementApi {
  * queues are never in this list (a purge there would lose real events).
  */
 export const DORMANT_QUEUES = [
+  // `scan.spam` is a work queue since topology v3 (step 4.1 S2, consumed by the scan role).
   'scan.auth',
-  'scan.spam',
   'scan.url',
   'scan.attachment',
   'scan.dlp',

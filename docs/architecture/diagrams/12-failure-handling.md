@@ -13,7 +13,7 @@ flowchart LR
   subgraph edge["Edge: nothing accepted unchecked"]
     spool["Postfix disk spool<br/>IMPLEMENTED"]:::impl
     polFail["smtp-adapter down, slow or erroring<br/>(policy, socketmap, SASL, Redis, DB)<br/>4xx on both Postfix instances<br/>IMPLEMENTED"]:::impl
-    milFail["Rspamd milter down<br/>milter_default_action tempfail<br/>IMPLEMENTED config"]:::impl
+    milFail["Rspamd milter down or slow<br/>milter_default_action accept (ADR-0027):<br/>accepted, scanned post-queue<br/>IMPLEMENTED 4.1"]:::impl
   end
 
   subgraph ingest["Ingestion: 250 only after commit"]
@@ -34,13 +34,14 @@ flowchart LR
   end
 
   subgraph verdicts["Scanning"]
-    engFail["Engine error or timeout is an explicit outcome<br/>policy decides, e.g. quarantine engine_unavailable<br/>contract IMPLEMENTED, use PLANNED 4.x, 5.2"]:::planned
+    engFail["Engine error or timeout: non-final attempt row,<br/>hold retry, circuit breaker per engine;<br/>budget or round deadline spent → final error/timeout,<br/>round scan_failed, never clean, never approved<br/>IMPLEMENTED 4.1"]:::impl
+    polFs["Policy fail-safe for scan_failed<br/>(e.g. quarantine engine_unavailable)<br/>PLANNED 5.2"]:::planned
   end
 
   subgraph dbl["Database"]
     readerFb["Replica down, stopped or lagging:<br/>PrismaReadService falls back to the writer,<br/>readiness stays ok<br/>IMPLEMENTED"]:::impl
     partJob["Partition maintenance: future partitions,<br/>outbox drop guard, non-zero exit on failure"]:::impl
-    alerts["Alerts: messaging rules IMPLEMENTED 3.2<br/>(relay lag, poison, dead letters, backlog, …);<br/>reader mode, pmax rows, job failures, routing PLANNED 10.3"]:::planned
+    alerts["Alerts: messaging rules IMPLEMENTED 3.2<br/>(relay lag, poison, dead letters, backlog, …);<br/>lifecycle 3.3 and scanning 4.1 rules IMPLEMENTED;<br/>reader mode, pmax rows, job failures, routing PLANNED 10.3"]:::planned
   end
 
   delivery["postfix-outbound owns retries, backoff, DSNs;<br/>DSN copies → bounce_events, suppressions<br/>IMPLEMENTED"]:::impl
@@ -50,7 +51,7 @@ flowchart LR
 
   sender --> spool
   polFail -->|"4xx"| sender
-  milFail -->|"4xx"| sender
+  milFail -->|"accept"| spool
   spool -->|"LMTP retry"| ingFail
   ingFail -->|"4xx keeps mail in spool"| spool
   spool --> dedupe
@@ -66,7 +67,8 @@ flowchart LR
   replay --> quorum
   recon --> outbox
   crash --> quorum
-  once -.-> engFail
+  once --> engFail
+  engFail -.-> polFs
   once -->|"email.delivery.pending"| dworker
   dworker -->|"reinject 10026 / 10027"| delivery
   delivery --> dstatus
@@ -79,25 +81,25 @@ flowchart LR
 
 ## Status
 
-| Mechanism                                                  | Status                                                  | Evidence or delivering step                                                                                                                                                                      |
-| ---------------------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Policy service fail-closed (down, slow, throws, malformed) | IMPLEMENTED                                             | `main.cf` (`smtpd_policy_service_default_action`, 10 s timeout); `mail-plane.test.ts`, `policy-server.service.test.ts`, `smtp-fail-closed.test.ts` (Redis down; adapter container stopped in CI) |
-| Socketmap / SASL fail-closed                               | IMPLEMENTED                                             | `TEMP Lookup failed` → `451 4.3.0`; SASL temporary failure → `454 4.7.0` (`smtp-fail-closed.test.ts`)                                                                                            |
-| Milter fail-closed                                         | IMPLEMENTED                                             | `main.cf` (`milter_default_action = tempfail`). Configuration only; no automated test stops Rspamd mid-session                                                                                   |
-| Postfix spool (both instances), survives restarts          | IMPLEMENTED                                             | `postfix-spool`, `postfix-outbound-spool` volumes; `smtp-durability.test.ts` suite 6. EBS-backed ASG in production is PLANNED 10.1                                                               |
-| Ingestion `250 after commit`, `451` on failure             | IMPLEMENTED                                             | `ingestion.service.test.ts`, `apps/smtp-adapter/integration/ingestion.test.ts`, `smtp-durability.test.ts` suite 5 (MinIO stopped)                                                                |
-| Registry de-duplication `(organization_id, ingest_key)`    | IMPLEMENTED                                             | `schema.test.ts`; ingestion dedupe in `smtp-durability.test.ts` suite 7                                                                                                                          |
-| Outbox relay (event-relay), confirms, marking              | IMPLEMENTED 3.2                                         | `apps/event-relay`; `relay.test.ts` (broker and MySQL cut through TCP proxies, reject-publish, two relays), stack `messaging-restart.test.ts`, `messaging-db-outage.test.ts`                     |
-| Manual acks, retries, delay queue, dead letters            | IMPLEMENTED 3.2                                         | `packages/common/src/messaging/consumer.ts`; `consumer.test.ts`, `messaging-client.test.ts`, worker integration suites, `messaging-consumer-crash.test.ts`, `messaging-backlog.test.ts`          |
-| `processOnce`                                              | IMPLEMENTED                                             | `idempotency.test.ts`, `mysql.test.ts` (once, duplicate, rollback)                                                                                                                               |
-| RabbitMQ reconnect without process exit, node rotation     | IMPLEMENTED 3.2                                         | `connection.test.ts`, `messaging-client.test.ts` (proxy cut), `messaging-restart.test.ts`, `tests/integration/cluster/node-failure.test.ts` (leader killed). The crash-only module was removed   |
-| Reader to writer fallback                                  | IMPLEMENTED                                             | `prisma-read.service.test.ts`, `replication.test.ts`                                                                                                                                             |
-| Readiness gating                                           | IMPLEMENTED                                             | `health.service.test.ts` (2 s per check, 503 on any failure)                                                                                                                                     |
-| Engine `error` / `timeout` outcomes                        | IMPLEMENTED (contract)                                  | `packages/security-contracts`; `quarantine_messages.reason` includes `engine_unavailable`. Use PLANNED 4.x, 5.2                                                                                  |
-| Dead-letter replay, unconsumed-event reconciliation        | IMPLEMENTED 3.2                                         | api `dead-letters.test.ts`, `messaging-replay.test.ts`; event-relay `reconciler.test.ts`. Message-state reconciliation (Q7) PLANNED 3.3                                                          |
-| Partition maintenance                                      | IMPLEMENTED                                             | `packages/database/src/partitioning/*.test.ts`, `tests/integration/partitions.test.ts`, CI migrations job (runs `apply` twice)                                                                   |
-| Alerting                                                   | Rules IMPLEMENTED 3.2 (messaging); routing PLANNED 10.3 | `infrastructure/monitoring/rules/messaging.rules.yml` (`promtool check rules`, `promtool test rules`)                                                                                            |
-| Outbound retries and DSNs in Postfix, bounce processing    | IMPLEMENTED                                             | ADR-0006; `postfix-outbound` queue settings; `bounces.test.ts`, `smtp-outbound.test.ts` (hard bounce)                                                                                            |
-| delivery-worker hop retry, fail-closed rate limits         | IMPLEMENTED 2.3                                         | `reinjection.test.ts`, `rate-limit.test.ts` (worker integration); `routing-rate-limit.test.ts` (Redis stopped: nothing sent, delivered after recovery)                                           |
-| Destination outage → Postfix retry → delivered             | IMPLEMENTED 2.3                                         | `routing-retry.test.ts` (sink stopped and started, no `postqueue -f`; failover along the next-hop list); [diagram 19](19-retry-bounce-sequence.md)                                               |
-| Status signals idempotent, stale → `unknown`               | IMPLEMENTED 2.3                                         | `recorder.test.ts`, `status-tailer.test.ts`, `routing-signals.test.ts` (whole log re-read, bounce notice redelivered: no change)                                                                 |
+| Mechanism                                                  | Status                                                                               | Evidence or delivering step                                                                                                                                                                      |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Policy service fail-closed (down, slow, throws, malformed) | IMPLEMENTED                                                                          | `main.cf` (`smtpd_policy_service_default_action`, 10 s timeout); `mail-plane.test.ts`, `policy-server.service.test.ts`, `smtp-fail-closed.test.ts` (Redis down; adapter container stopped in CI) |
+| Socketmap / SASL fail-closed                               | IMPLEMENTED                                                                          | `TEMP Lookup failed` → `451 4.3.0`; SASL temporary failure → `454 4.7.0` (`smtp-fail-closed.test.ts`)                                                                                            |
+| Milter fail-open (accept, scanned post-queue)              | IMPLEMENTED 4.1                                                                      | `main.cf` (`milter_default_action = accept`, ADR-0027); `tests/integration/scan-resilience.test.ts` (Rspamd stopped: SMTP accepted, scanned after recovery or `scan_failed`)                     |
+| Postfix spool (both instances), survives restarts          | IMPLEMENTED                                                                          | `postfix-spool`, `postfix-outbound-spool` volumes; `smtp-durability.test.ts` suite 6. EBS-backed ASG in production is PLANNED 10.1                                                               |
+| Ingestion `250 after commit`, `451` on failure             | IMPLEMENTED                                                                          | `ingestion.service.test.ts`, `apps/smtp-adapter/integration/ingestion.test.ts`, `smtp-durability.test.ts` suite 5 (MinIO stopped)                                                                |
+| Registry de-duplication `(organization_id, ingest_key)`    | IMPLEMENTED                                                                          | `schema.test.ts`; ingestion dedupe in `smtp-durability.test.ts` suite 7                                                                                                                          |
+| Outbox relay (event-relay), confirms, marking              | IMPLEMENTED 3.2                                                                      | `apps/event-relay`; `relay.test.ts` (broker and MySQL cut through TCP proxies, reject-publish, two relays), stack `messaging-restart.test.ts`, `messaging-db-outage.test.ts`                     |
+| Manual acks, retries, delay queue, dead letters            | IMPLEMENTED 3.2                                                                      | `packages/common/src/messaging/consumer.ts`; `consumer.test.ts`, `messaging-client.test.ts`, worker integration suites, `messaging-consumer-crash.test.ts`, `messaging-backlog.test.ts`          |
+| `processOnce`                                              | IMPLEMENTED                                                                          | `idempotency.test.ts`, `mysql.test.ts` (once, duplicate, rollback)                                                                                                                               |
+| RabbitMQ reconnect without process exit, node rotation     | IMPLEMENTED 3.2                                                                      | `connection.test.ts`, `messaging-client.test.ts` (proxy cut), `messaging-restart.test.ts`, `tests/integration/cluster/node-failure.test.ts` (leader killed). The crash-only module was removed   |
+| Reader to writer fallback                                  | IMPLEMENTED                                                                          | `prisma-read.service.test.ts`, `replication.test.ts`                                                                                                                                             |
+| Readiness gating                                           | IMPLEMENTED                                                                          | `health.service.test.ts` (2 s per check, 503 on any failure)                                                                                                                                     |
+| Engine `error` / `timeout` attempts, breaker, deadline     | IMPLEMENTED 4.1; policy fail-safe PLANNED 5.2                                        | `apps/email-worker/src/scanning` (`round-service.ts`, `circuit-breaker.ts`, `deadline-sweeper.ts`); `scan-resilience` (package and stack suites): `scan_failed`, never `clean`, never approved   |
+| Dead-letter replay, unconsumed-event reconciliation        | IMPLEMENTED 3.2                                                                      | api `dead-letters.test.ts`, `messaging-replay.test.ts`; event-relay `reconciler.test.ts`. Message-state reconciliation (Q7) PLANNED 3.3                                                          |
+| Partition maintenance                                      | IMPLEMENTED                                                                          | `packages/database/src/partitioning/*.test.ts`, `tests/integration/partitions.test.ts`, CI migrations job (runs `apply` twice)                                                                   |
+| Alerting                                                   | Rules IMPLEMENTED (messaging 3.2, lifecycle 3.3, scanning 4.1); routing PLANNED 10.3 | `infrastructure/monitoring/rules/{messaging,lifecycle,scanning}.rules.yml` (`promtool check rules`, `promtool test rules`); no running Alertmanager verified                                     |
+| Outbound retries and DSNs in Postfix, bounce processing    | IMPLEMENTED                                                                          | ADR-0006; `postfix-outbound` queue settings; `bounces.test.ts`, `smtp-outbound.test.ts` (hard bounce)                                                                                            |
+| delivery-worker hop retry, fail-closed rate limits         | IMPLEMENTED 2.3                                                                      | `reinjection.test.ts`, `rate-limit.test.ts` (worker integration); `routing-rate-limit.test.ts` (Redis stopped: nothing sent, delivered after recovery)                                           |
+| Destination outage → Postfix retry → delivered             | IMPLEMENTED 2.3                                                                      | `routing-retry.test.ts` (sink stopped and started, no `postqueue -f`; failover along the next-hop list); [diagram 19](19-retry-bounce-sequence.md)                                               |
+| Status signals idempotent, stale → `unknown`               | IMPLEMENTED 2.3                                                                      | `recorder.test.ts`, `status-tailer.test.ts`, `routing-signals.test.ts` (whole log re-read, bounce notice redelivered: no change)                                                                 |

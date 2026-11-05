@@ -1,9 +1,11 @@
 #!/usr/bin/env node
-// RabbitMQ provisioning for topology v1 (step 3.2 Q5, Q10; ADR-0024). The only code that
-// declares broker objects: services verify passively and their users cannot configure.
+// RabbitMQ provisioning for topology v3 (step 3.2 Q5, Q10, ADR-0024; v2: step 3.3 L7; v3: step
+// 4.1 S2, ADR-0026). The only code that declares broker objects: services verify passively and
+// their users cannot configure.
 //
 //   node init.mjs [--vhost <name>] [--mgmt-url <url>] [--definitions <path>]
 //                 [--users] [--cleanup-legacy] [--legacy-vhost <name>]
+//   node init.mjs --prune-dry-run [--vhost <name>] # list the bindings step 4 would remove; no change
 //   node init.mjs --delete-vhost <name>            # test teardown; refuses email-gateway and /
 //
 // Plain Node 22 (ESM, global fetch, no dependencies) against the management HTTP API, as the
@@ -12,14 +14,19 @@
 //   2. create/update the vhost (description "email-gateway topology v<N>", default queue type
 //      quorum) and grant the administrator full permissions on it;
 //   3. import definitions.json (exchanges, quorum queues, bindings, policies) into the vhost;
-//   4. --users: create/update the role users (no tags) with exactly their Q10 permissions and
+//   4. prune bindings: an import only adds, so a binding that an earlier topology version
+//      declared and this one does not (v3: the two event bindings of scan.auth) is removed. Only
+//      bindings whose destination is a queue or exchange of the definitions are touched; objects
+//      outside the topology are never changed. Logs binding names and counts only;
+//   5. --users: create/update the role users (no tags) with exactly their Q10 permissions and
 //      their topic permissions (routing keys each user may publish per exchange; every other
 //      topic permission of the user on the vhost is removed);
-//   5. --cleanup-legacy: delete the ADR-0005 objects on vhost "/" only when empty (queues with
+//   6. --cleanup-legacy: delete the ADR-0005 objects on vhost "/" only when empty (queues with
 //      no messages and no consumers; RabbitMQ 4.x refuses `if-empty` deletes of quorum queues,
 //      so emptiness is checked first); --legacy-vhost points it at another vhost (tests only);
-//   6. verify: exactly the 6 exchanges and 14 quorum queues, every binding, every policy applied,
-//      and (--users) each role user's permissions and topic permissions exactly.
+//   7. verify: exactly the 6 exchanges and 14 quorum queues, exactly the bindings of the
+//      definitions (no missing and no extra binding), every policy applied, and (--users) each
+//      role user's permissions and topic permissions exactly.
 // Exits non-zero on any failure. Logs object names and counts only: never a password, never a
 // URL with credentials.
 import { readFileSync } from 'node:fs';
@@ -39,7 +46,10 @@ const topic = (exchange, write) => ({ exchange, write, read: '^$' });
  * Q10: role users, their environment keys, permissions on the vhost and topic permissions
  * (review round 1: the broker is a trust boundary for approvals, so each user may publish only
  * the routing keys of its role: the relay the event keys, a consumer the retry/delay/dead-letter
- * hops of its own queue, ops (dead-letter replay) the retry hops of the two replayable queues).
+ * hops of its own queue, ops (dead-letter replay) the retry hops of the replayable work queues).
+ * Topology v3 (step 4.1 S2) adds the scanner (email-worker scan role, queue scan.spam) and gives
+ * ops the retry hops of scan.spam. The relay needs nothing new: the reconciler re-drives an event
+ * through its outbox row, so the relay republishes it with its own `org.` event key.
  */
 const ROLE_USERS = [
   {
@@ -64,6 +74,19 @@ const ROLE_USERS = [
     ],
   },
   {
+    // Step 4.1 S1/S2: the email-worker scan role has its own broker user (least privilege).
+    role: 'scanner',
+    userKey: 'RABBITMQ_SCANNER_USER',
+    passwordKey: 'RABBITMQ_SCANNER_PASSWORD',
+    configure: '^$',
+    write: '^email\\.(security|events)$',
+    read: '^scan\\.spam$',
+    topics: [
+      topic('email.security', '^retry\\.scan\\.spam\\.'),
+      topic('email.events', '^dead-letter\\.scan\\.spam(\\.|$)'),
+    ],
+  },
+  {
     role: 'delivery-worker',
     userKey: 'RABBITMQ_DELIVERY_WORKER_USER',
     passwordKey: 'RABBITMQ_DELIVERY_WORKER_PASSWORD',
@@ -80,12 +103,14 @@ const ROLE_USERS = [
     userKey: 'RABBITMQ_OPS_USER',
     passwordKey: 'RABBITMQ_OPS_PASSWORD',
     configure: '^$',
-    // Replay republishes only to the home exchanges of the replayable work queues (Q9).
-    write: '^email\\.(ingestion|delivery)$',
+    // Replay republishes only to the home exchanges of the replayable work queues (Q9); v3 adds
+    // scan.spam (home exchange email.security).
+    write: '^email\\.(ingestion|delivery|security)$',
     read: '^email\\.dead-letter$',
     topics: [
       topic('email.ingestion', '^retry\\.email\\.received\\.'),
       topic('email.delivery', '^retry\\.email\\.delivery\\.pending\\.'),
+      topic('email.security', '^retry\\.scan\\.spam\\.'),
     ],
   },
 ];
@@ -119,6 +144,7 @@ function parseArgs(argv) {
     cleanupLegacy: false,
     legacyVhost: '/',
     deleteVhost: undefined,
+    pruneDryRun: false,
   };
   const valueOf = (flag, index) => {
     const value = argv[index + 1];
@@ -149,6 +175,9 @@ function parseArgs(argv) {
         break;
       case '--cleanup-legacy':
         options.cleanupLegacy = true;
+        break;
+      case '--prune-dry-run':
+        options.pruneDryRun = true;
         break;
       case '--legacy-vhost':
         options.legacyVhost = valueOf(arg, i);
@@ -407,6 +436,47 @@ async function cleanupLegacy(request, legacyVhost) {
   }
 }
 
+/**
+ * Bindings on topology-owned destinations (queues and exchanges of the definitions) that the
+ * definitions do not declare. The default exchange's implicit bindings (source '') are ignored.
+ */
+async function staleBindings(request, vhost, definitions) {
+  const ownedQueues = new Set(definitions.queues.map((q) => q.name));
+  const ownedExchanges = new Set(definitions.exchanges.map((e) => e.name));
+  const expected = new Set(definitions.bindings.map(bindingId));
+  const { data } = await request('GET', `/bindings/${enc(vhost)}`);
+  return (Array.isArray(data) ? data : []).filter((b) => {
+    if (b.source === '') return false;
+    const owned =
+      b.destination_type === 'queue'
+        ? ownedQueues.has(b.destination)
+        : b.destination_type === 'exchange' && ownedExchanges.has(b.destination);
+    return owned && !expected.has(bindingId(b));
+  });
+}
+
+async function pruneBindings(request, vhost, definitions, { dryRun = false } = {}) {
+  const stale = await staleBindings(request, vhost, definitions);
+  for (const b of stale) {
+    if (dryRun) {
+      log(`would remove binding ${bindingId(b)}`);
+      continue;
+    }
+    const kind = b.destination_type === 'queue' ? 'q' : 'e';
+    await request(
+      'DELETE',
+      `/bindings/${enc(vhost)}/e/${enc(b.source)}/${kind}/${enc(b.destination)}/${enc(b.properties_key)}`,
+      undefined,
+      { allow: [404] },
+    );
+    log(`removed binding ${bindingId(b)}`);
+  }
+  log(
+    `${dryRun ? 'prune dry run: ' : ''}${stale.length} binding(s) on topology objects of ${vhost} ` +
+      `${dryRun ? 'would be' : 'were'} removed (not in the definitions)`,
+  );
+}
+
 const sameDefinition = (a, b) => {
   const keys = new Set([...Object.keys(a ?? {}), ...Object.keys(b ?? {})]);
   return [...keys].every((key) => a?.[key] === b?.[key]);
@@ -551,10 +621,15 @@ async function main() {
   }
 
   const vhost = options.vhost ?? (process.env.RABBITMQ_VHOST || 'email-gateway');
-  if (vhost === '/') throw new InitError('topology v1 is never provisioned on vhost "/"');
+  if (vhost === '/') throw new InitError('the topology is never provisioned on vhost "/"');
   const definitions = loadDefinitions(options.definitions);
+  if (options.pruneDryRun) {
+    await pruneBindings(request, vhost, definitions, { dryRun: true });
+    return;
+  }
   await ensureVhost(request, vhost, definitions.topology_version, adminUser);
   await importDefinitions(request, vhost, definitions);
+  await pruneBindings(request, vhost, definitions);
   const users = options.users ? await ensureUsers(request, vhost) : [];
   if (options.cleanupLegacy) await cleanupLegacy(request, options.legacyVhost);
   await verify(request, vhost, definitions, users);

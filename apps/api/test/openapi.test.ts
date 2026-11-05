@@ -335,7 +335,10 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
       expect(schemes, key).toEqual([ACCESS_TOKEN_SCHEME, API_KEY_SCHEME].sort());
     }
     const messageOps = operations(doc).filter(
-      (op) => op.key.includes(' /api/v1/messages') && !op.key.includes('/deliveries'),
+      (op) =>
+        op.key.includes(' /api/v1/messages') &&
+        !op.key.includes('/deliveries') &&
+        !op.key.endsWith('/scans'),
     );
     expect(messageOps.map((op) => op.key).sort()).toEqual([...expected].sort());
 
@@ -376,6 +379,57 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     expect(JSON.stringify(doc.paths['/api/v1/messages/{messageId}/deliveries'])).toContain(
       'statusReason',
     );
+  });
+
+  it('documents the step 4.1 scan endpoints (S13, S16) with their security and errors', () => {
+    const byKey = new Map(operations(doc).map((op) => [op.key, op]));
+    const tenant: Record<string, string> = {
+      'GET /api/v1/messages/{messageId}/scans': 'messages',
+      'GET /api/v1/scan-settings': 'scan-settings',
+      'PUT /api/v1/scan-settings/{engine}': 'scan-settings',
+      'DELETE /api/v1/scan-settings/{engine}': 'scan-settings',
+    };
+    for (const [key, tag] of Object.entries(tenant)) {
+      const op = byKey.get(key);
+      expect(op?.tags, key).toEqual([tag]);
+      const schemes = op!.security.flatMap((s) => Object.keys(s)).sort();
+      expect(schemes, key).toEqual([ACCESS_TOKEN_SCHEME, API_KEY_SCHEME].sort());
+    }
+    const training =
+      'POST /api/v1/platform/organizations/{organizationId}/messages/{messageId}/scan-training';
+    expect(byKey.get(training)?.tags).toEqual(['platform']);
+    expect(byKey.get(training)!.security.flatMap((s) => Object.keys(s))).toEqual([
+      ACCESS_TOKEN_SCHEME,
+    ]);
+
+    type Op = { responses: Record<string, unknown>; description?: string };
+    const op = (path: string, method: string) => (doc.paths[path] as Record<string, Op>)[method]!;
+    const scans = op('/api/v1/messages/{messageId}/scans', 'get');
+    expect(Object.keys(scans.responses).sort()).toEqual(['200', '400', '401', '403', '404']);
+    expect(JSON.stringify(scans.responses)).toContain('message_not_found');
+    const put = op('/api/v1/scan-settings/{engine}', 'put');
+    expect(Object.keys(put.responses).sort()).toEqual(
+      ['200', '400', '401', '403', '404', '409', '422'].sort(),
+    );
+    for (const code of ['scan_engine_not_found', 'version_conflict', 'scan_settings_invalid']) {
+      expect(JSON.stringify(put.responses)).toContain(code);
+    }
+    expect(put.description).toContain('SCAN_SETTINGS_CACHE_TTL_MS');
+    const train = op(
+      '/api/v1/platform/organizations/{organizationId}/messages/{messageId}/scan-training',
+      'post',
+    );
+    expect(Object.keys(train.responses).sort()).toEqual(
+      ['200', '400', '401', '403', '404', '409', '422', '429', '503'].sort(),
+    );
+    for (const code of ['content_unavailable', 'rspamd_unavailable', 'organization_not_found']) {
+      expect(JSON.stringify(train.responses)).toContain(code);
+    }
+    // Step 4.1 S14: the rescan is scanned by the registered engines; scan.spam is replayable.
+    expect(op('/api/v1/messages/{messageId}/rescan', 'post').description).toContain(
+      'registered scan engine',
+    );
+    expect(op('/api/v1/platform/dead-letters/replay', 'post').description).toContain('scan.spam');
   });
 
   it('matches the committed snapshot docs/api/openapi.json', async () => {

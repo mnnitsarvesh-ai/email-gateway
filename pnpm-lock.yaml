@@ -108,6 +108,12 @@ importers:
       '@email-gateway/message-lifecycle':
         specifier: workspace:*
         version: link:../../packages/message-lifecycle
+      '@email-gateway/rspamd':
+        specifier: workspace:*
+        version: link:../../packages/rspamd
+      '@email-gateway/security-contracts':
+        specifier: workspace:*
+        version: link:../../packages/security-contracts
       '@email-gateway/shared-types':
         specifier: workspace:*
         version: link:../../packages/shared-types
@@ -327,9 +333,18 @@ importers:
       '@email-gateway/logger':
         specifier: workspace:*
         version: link:../../packages/logger
+      '@email-gateway/message-lifecycle':
+        specifier: workspace:*
+        version: link:../../packages/message-lifecycle
       '@email-gateway/mime-parser':
         specifier: workspace:*
         version: link:../../packages/mime-parser
+      '@email-gateway/rspamd':
+        specifier: workspace:*
+        version: link:../../packages/rspamd
+      '@email-gateway/security-contracts':
+        specifier: workspace:*
+        version: link:../../packages/security-contracts
       '@email-gateway/shared-types':
         specifier: workspace:*
         version: link:../../packages/shared-types
@@ -821,6 +836,12 @@ importers:
       yazl:
         specifier: 3.3.1
         version: 3.3.1
+
+  packages/rspamd:
+    dependencies:
+      zod:
+        specifier: ^4.1.5
+        version: 4.6.7
 
   packages/security-contracts:
     dependencies:

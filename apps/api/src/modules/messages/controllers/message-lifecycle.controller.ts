@@ -53,7 +53,6 @@ import {
   RELEASE_CONFLICTS,
   RESCAN_CONFLICTS,
 } from '../api-docs';
-import { RESCAN_NOTE } from '../domain/lifecycle-operations';
 import {
   type LifecycleHistoryEntry,
   LifecycleHistoryPageSchema,
@@ -146,8 +145,10 @@ export class MessageLifecycleController {
     description:
       'Moves the message to `scanning` with a new lifecycle round (allowed from `scanning`, ' +
       '`scanned`, `scan_failed`, `policy_evaluated`, `quarantined`, `held_for_review`, ' +
-      '`expired`) and publishes `mail.message.rescan_requested.v1` to the scan stages. ' +
-      `Before Phase 4: ${RESCAN_NOTE}. Audited as \`message.rescan_requested\`. Requires ` +
+      '`expired`) and publishes `mail.message.rescan_requested.v1` to the scan stages: every ' +
+      'registered scan engine (step 4.1: Rspamd) scans the new round and the message ends ' +
+      '`scanned` or `scan_failed` with that round; results of earlier rounds stay unchanged ' +
+      '(`GET /messages/{messageId}/scans`). Audited as `message.rescan_requested`. Requires ' +
       'the Idempotency-Key header.',
   })
   @ApiMessageId()

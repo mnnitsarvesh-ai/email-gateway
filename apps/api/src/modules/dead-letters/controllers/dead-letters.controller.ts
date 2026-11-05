@@ -59,7 +59,8 @@ export class DeadLettersController {
     summary: 'Replay dead letters into a work queue',
     description:
       'Fetches up to `limit` dead letters of `sourceQueue` (a work queue: `email.received`, ' +
-      '`email.delivery.pending`; other queues are 400 `source_queue_not_replayable`) matching ' +
+      '`email.delivery.pending`, `scan.spam`; other queues are 400 ' +
+      '`source_queue_not_replayable`) matching ' +
       'the optional filters, republishes each unchanged envelope to the source queue with ' +
       'fresh retry headers and a replay id, confirmed before the dead letter is removed. ' +
       'Non-matching and invalid messages stay in the queue. A replayed event that was already ' +

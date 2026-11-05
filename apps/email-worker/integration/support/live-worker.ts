@@ -15,10 +15,17 @@ import { execFileSync } from 'node:child_process';
  * Step 3.2 (WP5 fix): the live `event-relay` is paused too. It publishes every unpublished outbox
  * row to the real vhost and marks it, so it would publish (and mark) the fixtures' rows that the
  * suites assert on (`published_at IS NULL`) or publish through their throwaway vhost themselves.
+ *
+ * Step 4.1 (WP5 fix): the live `delivery-worker` is paused too. Its development pass-through
+ * reads `mail.message.scanned.v1` from the shared outbox and applies E27 (`scanned → approved`)
+ * to every scanned message, so it moved the scan suites' fixture messages on to `approved`
+ * (their recipients are `discarded`, so nothing was delivered, but the lifecycle assertions and
+ * the rescans of a `scanned` message saw the extra transition).
  */
 const SERVICES: { service: string; port: number }[] = [
   { service: 'email-worker', port: Number(process.env.EMAIL_WORKER_HOST_PORT ?? 3020) },
   { service: 'event-relay', port: Number(process.env.EVENT_RELAY_HOST_PORT ?? 3070) },
+  { service: 'delivery-worker', port: Number(process.env.DELIVERY_WORKER_HOST_PORT ?? 3040) },
 ];
 const COMPOSE = ['compose', '--project-name', process.env.COMPOSE_PROJECT_NAME || 'email-gateway'];
 

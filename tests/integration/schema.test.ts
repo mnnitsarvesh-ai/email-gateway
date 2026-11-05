@@ -46,6 +46,8 @@ const PARTITIONED: Record<string, string> = {
   delivery_reinjections: 'received_at',
   delivery_status_events: 'received_at',
   email_message_parses: 'received_at',
+  // Step 4.1 §3: authentication results of a scan round.
+  email_auth_results: 'received_at',
 };
 
 /** Tables with no `organization_id`: platform catalogs, the root, a join table, the ledger and
@@ -109,6 +111,9 @@ const TENANT_OWNED = [
   'email_message_parses',
   'email_scans',
   'scan_engine_results',
+  // Step 4.1 §3.
+  'email_auth_results',
+  'scan_engine_settings',
   'threat_indicators',
   'yara_rules',
   'email_policies',
@@ -141,17 +146,17 @@ const TENANT_OWNED = [
 const ALL_TABLES = [...NOT_TENANT_OWNED, ...TENANT_OWNED];
 
 describe('MySQL schema', () => {
-  it('has exactly the 73 data-model tables plus _prisma_migrations', async () => {
+  it('has exactly the 75 data-model tables plus _prisma_migrations', async () => {
     const rows = await prisma.$queryRaw<{ name: string }[]>`
       SELECT TABLE_NAME AS name FROM information_schema.TABLES
       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'`;
-    expect(ALL_TABLES).toHaveLength(73);
-    expect(new Set(ALL_TABLES).size).toBe(73);
+    expect(ALL_TABLES).toHaveLength(75);
+    expect(new Set(ALL_TABLES).size).toBe(75);
     expect(rows.map((r) => r.name).sort()).toEqual([...ALL_TABLES, '_prisma_migrations'].sort());
   });
 
-  it('partitions the 19 high-volume tables by RANGE COLUMNS with a pmax partition', async () => {
-    expect(Object.keys(PARTITIONED)).toHaveLength(19);
+  it('partitions the 20 high-volume tables by RANGE COLUMNS with a pmax partition', async () => {
+    expect(Object.keys(PARTITIONED)).toHaveLength(20);
     const rows = await prisma.$queryRaw<
       { tableName: string; method: string; expression: string; partitionName: string }[]
     >`
@@ -1501,7 +1506,8 @@ describe('message lifecycle schema (step 3.3, §3.1, §3.2)', () => {
       nullable: 'YES',
       columnDefault: null,
     });
-    expect(cols.size).toBe(27);
+    // 27 since step 3.3; step 4.1 §3 adds client_name.
+    expect(cols.size).toBe(28);
   });
 
   it('adds the actor, correlation, idempotency and occurrence columns to the history', async () => {
@@ -1759,5 +1765,100 @@ describe('message_identities retention purge', () => {
       await prisma.messageIdentity.deleteMany({ where: { organizationId } });
       await cleanup();
     }
+  });
+});
+
+describe('scan pipeline schema (step 4.1, docs/plan/steps/09-rspamd.md §3)', () => {
+  const uniqueSets = async (table: string) =>
+    [...(await indexes(table)).entries()]
+      .filter(([, i]) => i.unique)
+      .map(([name, i]) => `${name}(${i.columns.join(',')})`)
+      .sort();
+
+  it('stores the XFORWARD client host name on email_messages', async () => {
+    const cols = await columns(['email_messages']);
+    expect(cols.get('email_messages.client_name')).toMatchObject({
+      columnType: 'varchar(255)',
+      nullable: 'YES',
+      columnDefault: null,
+    });
+  });
+
+  it('identifies a scan round by (message, lifecycle round): one email_scans row per round', async () => {
+    const cols = await columns(['email_scans']);
+    expect(cols.get('email_scans.lifecycle_round')).toMatchObject({
+      columnType: 'smallint unsigned',
+      nullable: 'NO',
+      columnDefault: '0',
+    });
+    expect(cols.get('email_scans.scan_verdict')?.columnType).toBe(
+      "enum('clean','spam','suspicious','malicious','unknown','timeout','error')",
+    );
+    for (const column of ['required_engines', 'reason_codes']) {
+      expect(cols.get(`email_scans.${column}`)?.columnType, column).toBe('json');
+    }
+    expect(cols.get('email_scans.trigger_event_id')?.columnType).toBe('char(36)');
+    expect(cols.get('email_scans.deadline_at')?.columnType).toBe('datetime(3)');
+    const idx = await indexes('email_scans');
+    const unique = [...idx.values()].filter((i) => i.unique).map((i) => i.columns.join(','));
+    expect(unique).toContain('message_id,lifecycle_round,received_at');
+    expect(unique).not.toContain('message_id,scan_kind,attempt,received_at');
+    expect([...idx.values()].map((i) => i.columns.join(','))).toContain('status,deadline_at');
+  });
+
+  it('keeps one final result per round and engine (generated final_engine) and only failed attempts as non-final rows', async () => {
+    const cols = await columns(['scan_engine_results']);
+    expect(cols.get('scan_engine_results.outcome')?.columnType).toBe(
+      "enum('clean','suspicious','malicious','error','timeout','skipped','spam','unknown')",
+    );
+    expect(cols.get('scan_engine_results.is_final')).toMatchObject({
+      columnType: 'tinyint(1)',
+      nullable: 'NO',
+      columnDefault: '1',
+    });
+    const generated = await prisma.$queryRaw<{ extra: string; expression: string }[]>`
+      SELECT EXTRA AS extra, GENERATION_EXPRESSION AS expression FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'scan_engine_results'
+        AND COLUMN_NAME = 'final_engine'`;
+    expect(generated[0]?.extra).toBe('VIRTUAL GENERATED');
+    expect(generated[0]?.expression).toMatch(/if\(\(`is_final` = 1\),`engine`,NULL\)/i);
+    const unique = (await uniqueSets('scan_engine_results')).map((u) => u.replace(/^[^(]+/, ''));
+    expect(unique).toEqual(
+      expect.arrayContaining([
+        '(scan_id,engine,attempt,received_at)',
+        '(scan_id,final_engine,received_at)',
+      ]),
+    );
+    expect(unique).not.toContain('(scan_id,engine,received_at)');
+    const checks = await prisma.$queryRaw<{ clause: string }[]>`
+      SELECT cc.CHECK_CLAUSE AS clause FROM information_schema.CHECK_CONSTRAINTS cc
+      WHERE cc.CONSTRAINT_SCHEMA = DATABASE()
+        AND cc.CONSTRAINT_NAME = 'scan_engine_results_attempt_outcome_check'`;
+    expect(checks).toHaveLength(1);
+    expect(checks[0]!.clause).toMatch(/is_final/);
+  });
+
+  it('has email_auth_results (one row per round and engine) and scan_engine_settings (one row per organization and engine)', async () => {
+    const auth = await columns(['email_auth_results']);
+    const outcome = "enum('pass','fail','softfail','neutral','none','temperror','permerror')";
+    for (const column of ['spf', 'dkim', 'dmarc', 'arc']) {
+      expect(auth.get(`email_auth_results.${column}`)?.columnType, column).toBe(outcome);
+    }
+    expect(auth.get('email_auth_results.dmarc_policy')?.columnType).toBe(
+      "enum('none','quarantine','reject')",
+    );
+    expect((await uniqueSets('email_auth_results')).map((u) => u.replace(/^[^(]+/, ''))).toContain(
+      '(scan_id,engine,received_at)',
+    );
+    const settings = await columns(['scan_engine_settings']);
+    expect(settings.get('scan_engine_settings.settings')?.columnType).toBe('json');
+    expect(settings.get('scan_engine_settings.version')).toMatchObject({
+      columnType: 'int unsigned',
+      nullable: 'NO',
+      columnDefault: '1',
+    });
+    expect(
+      (await uniqueSets('scan_engine_settings')).map((u) => u.replace(/^[^(]+/, '')),
+    ).toContain('(organization_id,engine)');
   });
 });

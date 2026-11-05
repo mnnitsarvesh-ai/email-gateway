@@ -70,6 +70,19 @@ const LIFECYCLE_PATHS = {
     ['approved', 'policy_deliver', 'policy'],
     ['delivery_pending', 'delivery_planned', 'delivery'],
   ],
+  // Step 4.1: what the scan stage leaves for the dev pass-through (E6 / E7).
+  scanned: [
+    ['received', 'smtp_accepted', 'ingestion'],
+    ['persisted', 'committed', 'ingestion'],
+    ['scanning', 'scan_started', 'scanner'],
+    ['scanned', 'scan_complete', 'scanner'],
+  ],
+  scan_failed: [
+    ['received', 'smtp_accepted', 'ingestion'],
+    ['persisted', 'committed', 'ingestion'],
+    ['scanning', 'scan_started', 'scanner'],
+    ['scan_failed', 'scan_timeout', 'scanner'],
+  ],
   quarantined: [
     ['received', 'smtp_accepted', 'ingestion'],
     ['persisted', 'committed', 'ingestion'],
@@ -85,7 +98,7 @@ export type FixtureState = keyof typeof LIFECYCLE_PATHS;
 export interface MessageOptions {
   /**
    * Lifecycle state (default `approved`, round 0: what a delivery approval finds; the dev
-   * pass-through tests use `persisted`, as the SMTP commit leaves it).
+   * pass-through tests use `scanned` / `scan_failed`, as the scan stage leaves it, step 4.1).
    */
   state?: FixtureState;
   /** `lifecycle_round` of the message (default 0; > 0 as after a release or rescan). */

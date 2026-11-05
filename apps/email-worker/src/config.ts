@@ -10,6 +10,7 @@ import {
 import { HOLD_MAX_DELAY_MS, queueDefinition } from '@email-gateway/event-contracts';
 import { MAX_PART_PATH_CHARS } from '@email-gateway/mime-parser';
 import { z } from 'zod';
+import { scanConfigShape, validateScanConfig } from './scanning/config';
 
 const int = z.coerce.number().int();
 const positiveInt = int.min(1);
@@ -174,10 +175,11 @@ export function validateMimeConfig(cfg: MimeShapeConfig, ctx: z.RefinementCtx): 
 /**
  * RabbitMQ (step 3.2 Q10): the email-worker's own least-privilege role user on the topology
  * vhost (read `email.received`, write `email.ingestion` / `email.events`), one URL per cluster
- * node, comma-separated (`RABBITMQ_EMAIL_WORKER_URL_FILE` for a mounted secret).
+ * node, comma-separated (`RABBITMQ_EMAIL_WORKER_URL_FILE` for a mounted secret). Required when
+ * MIME_INGESTION_ENABLED (a scan-only replica, step 4.1 S1, connects as `eg-scanner` only).
  */
 export const amqpConfigShape = {
-  RABBITMQ_EMAIL_WORKER_URL: amqpUrlListSchema,
+  RABBITMQ_EMAIL_WORKER_URL: amqpUrlListSchema.optional(),
 };
 
 const objectSchema = baseConfigSchema
@@ -186,9 +188,13 @@ const objectSchema = baseConfigSchema
   .extend(amqpConfigShape)
   .extend(redisConfigSchema.shape)
   .extend(s3ConfigSchema.shape)
-  .extend(mimeConfigShape);
+  .extend(mimeConfigShape)
+  .extend(scanConfigShape);
 
-export const configSchema = objectSchema.superRefine(validateMimeConfig);
+export const configSchema = objectSchema.superRefine((cfg, ctx) => {
+  validateMimeConfig(cfg, ctx);
+  validateScanConfig(cfg, ctx);
+});
 
 export type WorkerConfig = z.infer<typeof configSchema>;
 

@@ -4,8 +4,8 @@ import {
   type DeliveryApprovedV1,
   type EventEnvelope,
   EventTypes,
-  messageReceivedV1,
-  type MessageReceivedV1,
+  messageScannedV1,
+  type MessageScannedV1,
 } from '@email-gateway/event-contracts';
 import {
   AdvisoryLocks,
@@ -29,7 +29,14 @@ import {
 import { ApprovalPipeline, Broker, counter } from './support/approvals';
 import { eventually, TcpProxy, urlVia } from './support/broker';
 import { FakePostfix } from './support/fake-postfix';
-import { Fixtures, newMetrics, requireEnv, silentLogger, workerConfig } from './support/fixtures';
+import {
+  Fixtures,
+  type MessageFixture,
+  newMetrics,
+  requireEnv,
+  silentLogger,
+  workerConfig,
+} from './support/fixtures';
 import { buildWorker, FAST, type TestWorker } from './support/worker';
 
 const fx = new Fixtures();
@@ -57,7 +64,7 @@ afterAll(async () => {
 function poller<T>(
   consumer: string,
   eventType: string,
-  schema: typeof deliveryApprovedV1 | typeof messageReceivedV1,
+  schema: typeof deliveryApprovedV1 | typeof messageScannedV1,
   safetyLagMs: number,
 ) {
   const locks = new AdvisoryLocks(requireEnv('DATABASE_URL'));
@@ -233,15 +240,60 @@ describe('outbox poller (R6, the dev pass-through feed since step 3.2) on the re
   });
 });
 
-describe('development pass-through (R5) end to end', () => {
-  it('turns mail.message.received.v1 into an approval the planner plans (via RabbitMQ) and the scheduler reinjects', async () => {
+/** `mail.message.scanned.v1` as the scan stage writes it (step 4.1 S6), for a fixture message. */
+function scannedPayload(
+  message: MessageFixture,
+  options: { round?: number; outcome?: 'scanned' | 'scan_failed'; verdict?: string } = {},
+): MessageScannedV1 {
+  const outcome = options.outcome ?? 'scanned';
+  const verdict = options.verdict ?? (outcome === 'scanned' ? 'suspicious' : 'error');
+  const round = options.round ?? 0;
+  return messageScannedV1.parse({
+    messageId: message.messageId.toString(),
+    receivedAt: message.receivedAt.toISOString(),
+    direction: 'outbound',
+    emlS3Key: message.emlObjectKey,
+    lifecycleRound: round,
+    scanId: '1',
+    scanKind: round === 0 ? 'initial' : 'rescan',
+    outcome,
+    verdict,
+    engines: [{ engine: 'rspamd', required: true, outcome: verdict, attempts: 1 }],
+    reasonCodes: outcome === 'scanned' ? ['spam.suspicious_score'] : ['engine.error'],
+    completedAt: new Date().toISOString(),
+  });
+}
+
+/** One `mail.message.scanned.v1` outbox row, as the scan stage commits it. */
+async function outboxScanned(
+  message: MessageFixture,
+  payload: MessageScannedV1,
+  correlationId: string,
+): Promise<string> {
+  const eventId = uuidv7();
+  await fx.prisma.messageOutbox.create({
+    data: {
+      eventId,
+      organizationId: org,
+      eventType: EventTypes.MessageScanned,
+      aggregateType: 'message',
+      aggregateId: message.messageId.toString(),
+      correlationId,
+      payload,
+    },
+  });
+  return eventId;
+}
+
+const approvalRows = (message: MessageFixture) =>
+  fx.prisma.messageOutbox.findMany({
+    where: { aggregateId: message.messageId.toString(), eventType: EventTypes.DeliveryApproved },
+  });
+
+describe('development pass-through after scanning (R5, step 4.1 S15) end to end', () => {
+  it('turns mail.message.scanned.v1 (scanned) into an approval the planner plans (via RabbitMQ) and the scheduler reinjects', async () => {
     const ptConsumer = fx.consumer('dev-passthrough');
-    const pt = poller<MessageReceivedV1>(
-      ptConsumer,
-      EventTypes.MessageReceived,
-      messageReceivedV1,
-      0,
-    );
+    const pt = poller<MessageScannedV1>(ptConsumer, EventTypes.MessageScanned, messageScannedV1, 0);
     // The planner consumes email.delivery.pending (step 3.2 Q13); the approval outbox row
     // reaches it as the event-relay publishes it.
     const planner = await ApprovalPipeline.start(fx, broker, worker.planner, {
@@ -254,7 +306,7 @@ describe('development pass-through (R5) end to end', () => {
       silentLogger,
       worker.metrics,
     );
-    const ptHandler = ours<MessageReceivedV1>(
+    const ptHandler = ours<MessageScannedV1>(
       ptConsumer,
       async (event, tx) => {
         await approver.approve(event, tx);
@@ -263,39 +315,18 @@ describe('development pass-through (R5) end to end', () => {
     );
     await pt.pollOnce(ptHandler); // first start: MAX(id), never replays old mail
 
-    // What ingestion commits: the message rows (persisted) and mail.message.received.v1.
+    // What the scan stage commits: the message `scanned` (round 0) and mail.message.scanned.v1.
     const message = await fx.message(org, {
-      state: 'persisted',
+      state: 'scanned',
       recipients: [{ address: 'p1@ext-pt.test' }, { address: 'p2@ext-pt.test' }],
     });
     await fx.prisma.emailRecipient.update({
       where: { id_receivedAt: { id: message.recipients[1]!.id, receivedAt: message.receivedAt } },
       data: { status: 'failed' }, // not pending: never approved
     });
-    const receivedEventId = uuidv7();
-    await fx.prisma.messageOutbox.create({
-      data: {
-        eventId: receivedEventId,
-        organizationId: org,
-        eventType: EventTypes.MessageReceived,
-        aggregateType: 'message',
-        aggregateId: message.messageId.toString(),
-        correlationId: 'it-ingest-0001',
-        payload: messageReceivedV1.parse({
-          messageId: message.messageId.toString(),
-          receivedAt: message.receivedAt.toISOString(),
-          direction: 'outbound',
-          emlS3Key: message.emlObjectKey,
-          sizeBytes: 10,
-          envelopeFrom: 'sender@example.org',
-          recipientCount: 2,
-        }),
-      },
-    });
+    const scannedEventId = await outboxScanned(message, scannedPayload(message), 'it-scan-0001');
     expect((await pt.pollOnce(ptHandler)).handled).toBeGreaterThanOrEqual(1);
-    const approvals = await fx.prisma.messageOutbox.findMany({
-      where: { aggregateId: message.messageId.toString(), eventType: EventTypes.DeliveryApproved },
-    });
+    const approvals = await approvalRows(message);
     expect(approvals).toHaveLength(1);
     const payload = deliveryApprovedV1.parse(approvals[0]!.payload);
     expect(payload).toMatchObject({
@@ -304,23 +335,23 @@ describe('development pass-through (R5) end to end', () => {
       lifecycleRound: 0,
       emlS3Key: message.emlObjectKey,
     });
-    // E4 (step 3.3 L8.3) in the pass-through's transaction, with its history row.
+    // E27 (step 4.1 S15) in the pass-through's transaction, with its history row.
     let lifecycle = await fx.lifecycle(message);
     expect(lifecycle).toMatchObject({
       status: 'approved',
       statusReason: 'dev_passthrough',
-      version: 2,
+      version: 4,
       lifecycleRound: 0,
     });
-    expect(lifecycle.history[2]).toMatchObject({
-      version: 2,
-      fromStatus: 'persisted',
+    expect(lifecycle.history[4]).toMatchObject({
+      version: 4,
+      fromStatus: 'scanned',
       toStatus: 'approved',
       reasonCode: 'dev_passthrough',
       actorRole: 'dev_passthrough',
       actorService: 'delivery-worker',
-      eventId: receivedEventId,
-      correlationId: 'it-ingest-0001',
+      eventId: scannedEventId,
+      correlationId: 'it-scan-0001',
       lifecycleRound: 0,
     });
     expect(payload.recipients).toEqual([
@@ -343,17 +374,127 @@ describe('development pass-through (R5) end to end', () => {
     expect(await planner.plan(broker, relayed)).toMatchObject({ status: 'planned', deliveries: 1 });
     expect(await fx.deliveries(message)).toHaveLength(1);
     lifecycle = await fx.lifecycle(message);
-    expect(lifecycle).toMatchObject({ status: 'delivery_pending', version: 3 });
+    expect(lifecycle).toMatchObject({ status: 'delivery_pending', version: 5 });
     await worker.reinjectOnce();
     expect(postfix.transactions.map((t) => t.rcpts.map((r) => r.address))).toEqual([
       ['p1@ext-pt.test'],
     ]);
     expect((await fx.deliveries(message))[0]).toMatchObject({ status: 'queued' });
+
+    // A redelivered copy of the same scanned.v1 is a ledger duplicate: nothing more.
+    const again = Broker.envelopeOf(
+      await fx.prisma.messageOutbox.findFirstOrThrow({ where: { eventId: scannedEventId } }),
+    ) as EventEnvelope<MessageScannedV1>;
+    expect(await ptHandler(again)).toBe('duplicate');
+    expect(await approvalRows(message)).toHaveLength(1);
     await pt.stop();
     await planner.stop();
   });
 
-  it('approves nothing for a message that is not persisted (ignored, counted, no approval)', async () => {
+  it('carries a rescan round to the approval, and the planner accepts it', async () => {
+    const planner = await ApprovalPipeline.start(fx, broker, worker.planner, {
+      consumer: fx.consumer('dev-planner-rescan'),
+    });
+    const approver = new DevPassThroughApprover(
+      { start: () => undefined, stop: () => Promise.resolve() },
+      fx.prisma,
+      RECORDER_TX_TIMEOUT_MS,
+      silentLogger,
+      worker.metrics,
+    );
+    // Round 2: the operator rescanned twice (E19) and the scan stage completed round 2.
+    const message = await fx.message(org, {
+      state: 'scanned',
+      lifecycleRound: 2,
+      recipients: [{ address: 'r2@ext-pt.test' }],
+    });
+    const payload = scannedPayload(message, { round: 2, verdict: 'clean' });
+    const eventId = await outboxScanned(message, payload, 'it-scan-0002');
+    const event: EventEnvelope<MessageScannedV1> = {
+      eventId,
+      eventType: EventTypes.MessageScanned,
+      occurredAt: new Date().toISOString(),
+      correlationId: 'it-scan-0002',
+      organizationId: org.toString(),
+      payload,
+    };
+    const result = await fx.prisma.$transaction((tx) => approver.approve(event, tx));
+    expect(result.approvals).toHaveLength(1);
+    const [approval] = await approvalRows(message);
+    expect(deliveryApprovedV1.parse(approval!.payload)).toMatchObject({
+      lifecycleRound: 2,
+      deliverySeq: 0,
+    });
+    expect(await fx.lifecycle(message)).toMatchObject({ status: 'approved', lifecycleRound: 2 });
+    const relayed = Broker.envelopeOf(approval!) as EventEnvelope<DeliveryApprovedV1>;
+    expect(await planner.plan(broker, relayed)).toMatchObject({ status: 'planned', deliveries: 1 });
+    expect(await fx.lifecycle(message)).toMatchObject({
+      status: 'delivery_pending',
+      lifecycleRound: 2,
+    });
+
+    // A late scanned.v1 of an older round (superseded by the rescan) is stale: not approved.
+    const older = await fx.message(org, {
+      state: 'scanned',
+      lifecycleRound: 1,
+      recipients: [{ address: 'r1@ext-pt.test' }],
+    });
+    const stale = {
+      ...event,
+      eventId: uuidv7(),
+      payload: scannedPayload(older, { round: 0 }),
+    };
+    expect(await fx.prisma.$transaction((tx) => approver.approve(stale, tx))).toEqual({
+      approvals: [],
+      recipients: 0,
+    });
+    expect(await fx.lifecycle(older)).toMatchObject({ status: 'scanned', lifecycleRound: 1 });
+    await planner.stop();
+  });
+
+  it('never approves a failed scan (ledger row, counted, the message stays scan_failed)', async () => {
+    const ptConsumer = fx.consumer('dev-passthrough-failed');
+    const pt = poller<MessageScannedV1>(ptConsumer, EventTypes.MessageScanned, messageScannedV1, 0);
+    const approver = new DevPassThroughApprover(
+      pt,
+      fx.prisma,
+      RECORDER_TX_TIMEOUT_MS,
+      silentLogger,
+      worker.metrics,
+    );
+    const ptHandler = ours<MessageScannedV1>(
+      ptConsumer,
+      async (event, tx) => {
+        await approver.approve(event, tx);
+      },
+      RECORDER_TX_TIMEOUT_MS,
+    );
+    await pt.pollOnce(ptHandler);
+    const skipped = async () =>
+      (await worker.metrics.approvalsSkipped.get()).values.find(
+        (v) => v.labels.reason === 'scan_failed',
+      )?.value ?? 0;
+    const before = await skipped();
+    const message = await fx.message(org, {
+      state: 'scan_failed',
+      recipients: [{ address: 'f1@ext-pt.test' }],
+    });
+    const eventId = await outboxScanned(
+      message,
+      scannedPayload(message, { outcome: 'scan_failed', verdict: 'error' }),
+      'it-scan-0003',
+    );
+    expect((await pt.pollOnce(ptHandler)).handled).toBeGreaterThanOrEqual(1);
+    expect(await approvalRows(message)).toHaveLength(0);
+    expect(await fx.lifecycle(message)).toMatchObject({ status: 'scan_failed', version: 3 });
+    expect(
+      await fx.prisma.messageIdempotency.count({ where: { consumer: ptConsumer, eventId } }),
+    ).toBe(1);
+    expect(await skipped()).toBe(before + 1);
+    await pt.stop();
+  });
+
+  it('approves nothing for a message that is not scanned (ignored, counted, no approval)', async () => {
     const approver = new DevPassThroughApprover(
       { start: () => undefined, stop: () => Promise.resolve() },
       fx.prisma,
@@ -366,40 +507,25 @@ describe('development pass-through (R5) end to end', () => {
         (v) => v.labels.reason === 'lifecycle_invalid',
       )?.value ?? 0;
     const before = await skipped();
-    // Already past persisted (approved by policy, delivering): a late or replayed received event.
+    // Already past scanned (approved by policy, delivering): a late or replayed scanned event.
     const message = await fx.message(org, {
       state: 'delivery_pending',
       recipients: [{ address: 'late@ext-pt.test' }],
     });
     const eventId = uuidv7();
-    const event: EventEnvelope<MessageReceivedV1> = {
+    const event: EventEnvelope<MessageScannedV1> = {
       eventId,
-      eventType: EventTypes.MessageReceived,
+      eventType: EventTypes.MessageScanned,
       occurredAt: new Date().toISOString(),
-      correlationId: 'it-ingest-0002',
+      correlationId: 'it-scan-0004',
       organizationId: org.toString(),
-      payload: messageReceivedV1.parse({
-        messageId: message.messageId.toString(),
-        receivedAt: message.receivedAt.toISOString(),
-        direction: 'outbound',
-        emlS3Key: message.emlObjectKey,
-        sizeBytes: 10,
-        envelopeFrom: 'sender@example.org',
-        recipientCount: 1,
-      }),
+      payload: scannedPayload(message),
     };
     const result = await fx.prisma.$transaction((tx) => approver.approve(event, tx));
     expect(result).toEqual({ approvals: [], recipients: 0 });
-    expect(
-      await fx.prisma.messageOutbox.count({
-        where: {
-          aggregateId: message.messageId.toString(),
-          eventType: EventTypes.DeliveryApproved,
-        },
-      }),
-    ).toBe(0);
+    expect(await approvalRows(message)).toHaveLength(0);
     expect(await fx.lifecycle(message)).toMatchObject({ status: 'delivery_pending', version: 3 });
-    // L6: the refused request is recorded once as lifecycle.ignored, caused by the received event.
+    // L6: the refused request is recorded once as lifecycle.ignored, caused by the scanned event.
     const ignored = await fx.prisma.emailEvent.findMany({
       where: {
         messageId: message.messageId,
@@ -412,11 +538,23 @@ describe('development pass-through (R5) end to end', () => {
     expect(ignored[0]!.details).toMatchObject({
       requested: 'approved',
       current: 'delivery_pending',
-      // expectedFrom [persisted] (L4 step 3): not a stale event but an unexpected source state.
+      // expectedFrom [scanned] (L4 step 3): not a stale event but an unexpected source state.
       result: 'invalid',
       why: 'unexpected_from',
     });
     expect(await skipped()).toBe(before + 1);
+
+    // A persisted (unscanned) message is never approved: E4 is retired.
+    const unscanned = await fx.message(org, {
+      state: 'persisted',
+      recipients: [{ address: 'unscanned@ext-pt.test' }],
+    });
+    const early = { ...event, eventId: uuidv7(), payload: scannedPayload(unscanned) };
+    expect(await fx.prisma.$transaction((tx) => approver.approve(early, tx))).toEqual({
+      approvals: [],
+      recipients: 0,
+    });
+    expect(await fx.lifecycle(unscanned)).toMatchObject({ status: 'persisted', version: 1 });
 
     // Another organization's envelope for the same message: not found, nothing written.
     const foreign = { ...event, eventId: uuidv7(), organizationId: (org + 999_999n).toString() };
@@ -575,6 +713,18 @@ describe('approvals through RabbitMQ (step 3.2 Q8, Q13)', () => {
         async () => (await broker.depth('email.dead-letter')) === 1,
         60_000,
         'the dead letter',
+      );
+      // The copy is queued once the broker confirms it; the consumer then writes its progress
+      // row and acks before it counts the dead letter. Wait for that to finish, not only for the
+      // copy (the counter was read too early on a slow writer).
+      await eventually(
+        async () =>
+          counter(await pipe.metrics(), 'amqp_consumer_dead_lettered_total', {
+            queue: 'email.delivery.pending',
+            reason: 'max_attempts_exceeded',
+          }) > 0,
+        10_000,
+        'the consumer to finish the dead letter',
       );
       expect(pipe.failuresOf(approval.eventId)).toBe(3);
       const text = await pipe.metrics();

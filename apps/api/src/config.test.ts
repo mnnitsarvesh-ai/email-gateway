@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { ConfigValidationError } from '@email-gateway/config';
 import { describe, expect, it } from 'vitest';
 import { TEST_DOMAIN_ENV } from '../test/support/test-env';
-import { loadApiConfig } from './config';
+import { loadApiConfig, rspamdPlatformSettingsOf } from './config';
 
 const hex64 = () => randomBytes(32).toString('hex');
 
@@ -600,5 +600,57 @@ describe('loadApiConfig: dead-letter replay (step 3.2 Q9)', () => {
     expect(rejection({ ...valid, DEAD_LETTER_REPLAY_SCAN_MAX: '100001' })).toContain(
       'DEAD_LETTER_REPLAY_SCAN_MAX',
     );
+  });
+});
+
+describe('loadApiConfig: security scanning (step 4.1 S8, S13)', () => {
+  it('defaults the Rspamd platform settings and leaves the controller unconfigured', () => {
+    const cfg = loadApiConfig(valid);
+    expect(rspamdPlatformSettingsOf(cfg)).toEqual({
+      spamScore: 6,
+      suspiciousScore: 4,
+      scoreMin: 1,
+      scoreMax: 15,
+      phishingVerdict: 'suspicious',
+      dmarcRejectVerdict: 'suspicious',
+      authFailureVerdict: 'reason_only',
+    });
+    expect(cfg.RSPAMD_CONTROLLER_URL).toBeUndefined();
+    expect(cfg.RSPAMD_CONTROLLER_ENABLE_PASSWORD).toBeUndefined();
+    expect(cfg.SCAN_FUZZY_WEIGHT).toBe(10);
+  });
+
+  it('reads the platform settings and the controller', () => {
+    const cfg = loadApiConfig({
+      ...valid,
+      SCAN_RSPAMD_SPAM_SCORE: '7.5',
+      SCAN_RSPAMD_SUSPICIOUS_SCORE: '5',
+      SCAN_RSPAMD_PHISHING_VERDICT: 'malicious',
+      RSPAMD_CONTROLLER_URL: 'http://rspamd:11334',
+      RSPAMD_CONTROLLER_ENABLE_PASSWORD: 'enable-secret',
+      SCAN_FUZZY_WEIGHT: '25',
+    });
+    expect(rspamdPlatformSettingsOf(cfg)).toMatchObject({
+      spamScore: 7.5,
+      suspiciousScore: 5,
+      phishingVerdict: 'malicious',
+    });
+    expect(cfg.RSPAMD_CONTROLLER_URL).toBe('http://rspamd:11334');
+    expect(cfg.SCAN_FUZZY_WEIGHT).toBe(25);
+  });
+
+  it.each([
+    [{ SCAN_RSPAMD_SUSPICIOUS_SCORE: '6' }, 'SCAN_RSPAMD_SUSPICIOUS_SCORE'],
+    [{ SCAN_RSPAMD_SPAM_SCORE: '20' }, 'SCAN_RSPAMD_SPAM_SCORE'],
+    [{ SCAN_RSPAMD_SCORE_MIN: '0' }, 'SCAN_RSPAMD_SCORE_MIN'],
+    [{ SCAN_RSPAMD_PHISHING_VERDICT: 'reason_only' }, 'SCAN_RSPAMD_PHISHING_VERDICT'],
+    [{ SCAN_RSPAMD_SPAM_SCORE: '6.123' }, 'SCAN_RSPAMD_SPAM_SCORE'],
+    [{ RSPAMD_CONTROLLER_URL: 'ftp://rspamd' }, 'RSPAMD_CONTROLLER_URL'],
+    [{ RSPAMD_CONTROLLER_URL: 'http://u:p@rspamd:11334' }, 'RSPAMD_CONTROLLER_URL'],
+    [{ SCAN_FUZZY_WEIGHT: '0' }, 'SCAN_FUZZY_WEIGHT'],
+  ])('refuses %j, naming the key', (env, key) => {
+    const message = rejection({ ...valid, ...env });
+    expect(message).toContain(key);
+    expect(message).not.toContain('u:p');
   });
 });

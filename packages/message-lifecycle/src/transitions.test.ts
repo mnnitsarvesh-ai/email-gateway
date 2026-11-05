@@ -11,12 +11,16 @@ import { findEdge, LIFECYCLE_REASON_CODES, TRANSITIONS } from './transitions';
 
 /** §9 item 2: invariants of the transition table. */
 
-/** The L3 table of the design, written out (edge, from, to, roles, reasons, new round, producer). */
+/**
+ * The L3 table of the design, written out (edge, from, to, roles, reasons, new round, producer),
+ * with step 4.1's changes: E4 (`persisted → approved`, dev pass-through) is retired and E27
+ * (`scanned → approved`) added (docs/plan/steps/09-rspamd.md S15).
+ */
+const RETIRED_EDGE_IDS = ['E4'];
 const L3 = `
 E1  - received ingestion smtp_accepted - 3.3
 E2  received persisted ingestion committed - 3.3
 E3  persisted scanning scanner scan_started - 4.1
-E4  persisted approved dev_passthrough dev_passthrough - 3.3
 E5  persisted policy_evaluated policy parse_failed_fail_safe - 5.2
 E6  scanning scanned scanner scan_complete - 4.x
 E7  scanning scan_failed scanner scan_error,scan_timeout,eml_unavailable - 4.x
@@ -39,10 +43,11 @@ E23 delivery_pending,delivery_retry delivered delivery,recovery delivery_complet
 E24 delivery_pending,delivery_retry rejected delivery,recovery delivery_failed - 3.3
 E25 delivered,rejected archived archive archived - 8.1
 E26 persisted,scanning,scanned,scan_failed,policy_evaluated,approved,quarantined,held_for_review,delivery_pending,delivery_retry expired sweeper deadline_exceeded - 3.3
+E27 scanned approved dev_passthrough dev_passthrough - 4.1
 `;
 
 describe('TRANSITIONS', () => {
-  it('is the L3 table verbatim (E1–E26)', () => {
+  it('is the L3 table verbatim (E1–E26) without the retired E4, plus step 4.1 E27', () => {
     const expected = L3.trim()
       .split('\n')
       .map((line) => {
@@ -83,7 +88,11 @@ describe('TRANSITIONS', () => {
         expect(findEdge(from, edge.to)).toBe(edge);
       }
     }
-    expect(TRANSITIONS.map((e) => e.id)).toEqual(TRANSITIONS.map((_, i) => `E${i + 1}`));
+    // Ids are E1, E2, … in order; a retired id (E4) is never reused.
+    const ids = Array.from({ length: 27 }, (_, i) => `E${i + 1}`).filter(
+      (id) => !RETIRED_EDGE_IDS.includes(id),
+    );
+    expect(TRANSITIONS.map((e) => e.id)).toEqual(ids);
   });
 
   it('has no edge out of archived; expired leads only to scanning; delivered/rejected only to archived', () => {
@@ -93,6 +102,22 @@ describe('TRANSITIONS', () => {
     expect(out('expired')).toEqual(['scanning']);
     expect(out('delivered')).toEqual(['archived']);
     expect(out('rejected')).toEqual(['archived']);
+  });
+
+  it('lets the dev pass-through approve only a scanned message (E27; E4 retired)', () => {
+    const passThrough = TRANSITIONS.filter((e) => e.roles.includes('dev_passthrough'));
+    expect(passThrough.map((e) => [e.id, [...e.from], e.to])).toEqual([
+      ['E27', ['scanned'], 'approved'],
+    ]);
+    expect(TRANSITIONS.some((e) => e.id === 'E4')).toBe(false);
+    expect(findEdge('persisted', 'approved')).toBeUndefined();
+    for (const edge of passThrough) {
+      expect(edge.roles).toEqual(['dev_passthrough']);
+      expect(edge.reasons).toEqual(['dev_passthrough']);
+      expect(edge.newRound).toBeUndefined();
+    }
+    expect(findEdge('scanned', 'approved')?.id).toBe('E27');
+    expect(findEdge('scan_failed', 'approved')).toBeUndefined();
   });
 
   it('opens new rounds only for operator/quarantine actors', () => {

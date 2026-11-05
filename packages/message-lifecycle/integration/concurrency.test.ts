@@ -44,7 +44,8 @@ function approve(m: MessageFixture, key: string): TransitionRequest {
     actor: { role: 'dev_passthrough', service: 'delivery-worker', type: 'system' },
     transitionKey: key,
     expectedRound: 0,
-    expectedFrom: ['persisted'],
+    // E27 (step 4.1): the dev pass-through approves a scanned message (E4 is retired).
+    expectedFrom: ['scanned'],
   };
 }
 
@@ -67,8 +68,8 @@ async function assertContiguous(m: MessageFixture): Promise<number> {
 }
 
 describe('concurrent transitions (§9 item 8)', () => {
-  it('(a) 64 parallel persisted → approved with distinct keys: 1 applied, 63 duplicate', async () => {
-    const m = await fx.message(org);
+  it('(a) 64 parallel scanned → approved with distinct keys: 1 applied, 63 duplicate', async () => {
+    const m = await fx.message(org, { state: 'scanned' });
     const outcomes = await Promise.all(
       Array.from({ length: 64 }, (_, i) =>
         transitionMessageWithRetry(prisma, approve(m, `evt:${randomUUID()}:approved:${i}`), TX),
@@ -79,18 +80,18 @@ describe('concurrent transitions (§9 item 8)', () => {
     expect((await fx.history(m)).filter((h) => h.toStatus === 'approved')).toHaveLength(1);
     expect(await fx.outbox(m)).toHaveLength(1);
     expect(await fx.events(m)).toHaveLength(1);
-    expect(await assertContiguous(m)).toBe(2);
+    expect(await assertContiguous(m)).toBe(3);
   });
 
   it('(b) 64 parallel requests with the same key: 1 applied', async () => {
-    const m = await fx.message(org);
+    const m = await fx.message(org, { state: 'scanned' });
     const key = `evt:${randomUUID()}:approved`;
     const outcomes = await Promise.all(
       Array.from({ length: 64 }, () => transitionMessageWithRetry(prisma, approve(m, key), TX)),
     );
     expect(tally(outcomes)).toEqual({ applied: 1, duplicate: 63 });
     expect(await fx.outbox(m)).toHaveLength(1);
-    expect(await assertContiguous(m)).toBe(2);
+    expect(await assertContiguous(m)).toBe(3);
   });
 
   it('(c) 16 workers race through a delivery chain: every step once, contiguous versions', async () => {
@@ -181,6 +182,8 @@ describe('concurrent transitions (§9 item 8)', () => {
     const messages: MessageFixture[] = [];
     for (let i = 0; i < 200; i += 1) messages.push(await fx.message(org));
     const steps: { to: MessageState; reason: TransitionRequest['reason']; role: string }[] = [
+      { to: 'scanning', reason: 'scan_started', role: 'scanner' },
+      { to: 'scanned', reason: 'scan_complete', role: 'scanner' },
       { to: 'approved', reason: 'dev_passthrough', role: 'dev_passthrough' },
       { to: 'delivery_pending', reason: 'delivery_planned', role: 'delivery' },
       { to: 'delivery_retry', reason: 'delivery_deferred', role: 'delivery' },
@@ -224,13 +227,14 @@ describe('concurrent transitions (§9 item 8)', () => {
       });
       if (states.every((s) => s.status === 'delivered')) break;
     }
-    // `delivered` may follow `delivery_pending` directly (E23), so a message has 3 or 4 applied
-    // transitions after creation; each has its history, event and outbox row.
+    // `delivered` may follow `delivery_pending` directly (E23), so a message has 5 or 6 applied
+    // transitions after creation (E3, E6, E27, E20, [E21], E23); each has its history, event and
+    // outbox row.
     let applied = 0;
     for (const m of messages) {
       expect((await fx.row(m)).status).toBe('delivered');
       const version = await assertContiguous(m);
-      expect([4, 5]).toContain(version);
+      expect([6, 7]).toContain(version);
       applied += version - 1;
     }
     const outbox = await prisma.messageOutbox.count({

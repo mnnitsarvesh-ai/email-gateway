@@ -17682,7 +17682,7 @@
     },
     "/api/v1/messages/{messageId}/rescan": {
       "post": {
-        "description": "Moves the message to `scanning` with a new lifecycle round (allowed from `scanning`, `scanned`, `scan_failed`, `policy_evaluated`, `quarantined`, `held_for_review`, `expired`) and publishes `mail.message.rescan_requested.v1` to the scan stages. Before Phase 4: scan stages are not deployed before Phase 4; the message stays in scanning until they are or until its expiry deadline. Audited as `message.rescan_requested`. Requires the Idempotency-Key header.",
+        "description": "Moves the message to `scanning` with a new lifecycle round (allowed from `scanning`, `scanned`, `scan_failed`, `policy_evaluated`, `quarantined`, `held_for_review`, `expired`) and publishes `mail.message.rescan_requested.v1` to the scan stages: every registered scan engine (step 4.1: Rspamd) scans the new round and the message ends `scanned` or `scan_failed` with that round; results of earlier rounds stay unchanged (`GET /messages/{messageId}/scans`). Audited as `message.rescan_requested`. Requires the Idempotency-Key header.",
         "operationId": "MessageLifecycleController_rescan_v1",
         "parameters": [
           {
@@ -17771,7 +17771,7 @@
                     },
                     "note": {
                       "type": "string",
-                      "description": "Present while no scan stage is deployed (before Phase 4)"
+                      "description": "Where the results of the new round appear (step 4.1)"
                     }
                   },
                   "required": [
@@ -18221,6 +18221,449 @@
         "tags": ["messages"]
       }
     },
+    "/api/v1/messages/{messageId}/scans": {
+      "get": {
+        "description": "One entry per scan round (`round` = lifecycle round: 0 is the initial scan, each rescan adds one), newest first, cursor-paginated (at most 20 rounds per page): status, aggregate verdict (`clean`, `spam`, `suspicious`, `malicious`, `unknown`, `timeout`, `error`; null while running), reason codes, required engines, the deadline, the SPF/DKIM/DMARC/ARC results and per engine its final result (outcome, score, threshold, action, reason codes, symbols with bounded options, engine and settings versions) and every attempt (failed attempts are retried and listed with their error code). From the read replica: a round that just completed may still show as running. Symbol options can contain addresses or URLs of the message.",
+        "operationId": "MessageScansController_scansOf_v1",
+        "parameters": [
+          {
+            "name": "messageId",
+            "required": true,
+            "in": "path",
+            "description": "Message public id",
+            "schema": { "format": "uuid", "type": "string" }
+          },
+          {
+            "name": "limit",
+            "required": false,
+            "in": "query",
+            "schema": { "default": 10, "type": "integer", "minimum": 1, "maximum": 20 }
+          },
+          {
+            "name": "cursor",
+            "required": false,
+            "in": "query",
+            "schema": { "type": "string", "minLength": 1, "maxLength": 64 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "messageId": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "round": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991,
+                            "description": "Lifecycle round the scan belongs to (0 = initial)"
+                          },
+                          "scanKind": {
+                            "type": "string",
+                            "enum": ["initial", "rescan", "release_revalidation", "retro"]
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": ["pending", "running", "completed", "failed", "timed_out"]
+                          },
+                          "verdict": {
+                            "nullable": true,
+                            "description": "Aggregate verdict; null while running",
+                            "type": "string",
+                            "enum": [
+                              "clean",
+                              "spam",
+                              "suspicious",
+                              "malicious",
+                              "unknown",
+                              "timeout",
+                              "error"
+                            ]
+                          },
+                          "reasonCodes": { "type": "array", "items": { "type": "string" } },
+                          "requiredEngines": { "type": "array", "items": { "type": "string" } },
+                          "startedAt": {
+                            "nullable": true,
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "completedAt": {
+                            "nullable": true,
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "deadlineAt": {
+                            "nullable": true,
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "auth": {
+                            "nullable": true,
+                            "description": "SPF/DKIM/DMARC/ARC; null before the engine reported",
+                            "type": "object",
+                            "properties": {
+                              "spf": {
+                                "nullable": true,
+                                "type": "string",
+                                "enum": [
+                                  "pass",
+                                  "fail",
+                                  "softfail",
+                                  "neutral",
+                                  "none",
+                                  "temperror",
+                                  "permerror"
+                                ]
+                              },
+                              "spfDomain": { "nullable": true, "type": "string" },
+                              "dkim": {
+                                "nullable": true,
+                                "type": "string",
+                                "enum": [
+                                  "pass",
+                                  "fail",
+                                  "softfail",
+                                  "neutral",
+                                  "none",
+                                  "temperror",
+                                  "permerror"
+                                ]
+                              },
+                              "dkimSignatures": {
+                                "type": "array",
+                                "items": {
+                                  "type": "object",
+                                  "properties": {
+                                    "domain": { "type": "string" },
+                                    "result": {
+                                      "type": "string",
+                                      "enum": [
+                                        "pass",
+                                        "fail",
+                                        "softfail",
+                                        "neutral",
+                                        "none",
+                                        "temperror",
+                                        "permerror"
+                                      ]
+                                    },
+                                    "selector": { "nullable": true, "type": "string" }
+                                  },
+                                  "required": ["domain", "result", "selector"],
+                                  "additionalProperties": false
+                                }
+                              },
+                              "dmarc": {
+                                "nullable": true,
+                                "type": "string",
+                                "enum": [
+                                  "pass",
+                                  "fail",
+                                  "softfail",
+                                  "neutral",
+                                  "none",
+                                  "temperror",
+                                  "permerror"
+                                ]
+                              },
+                              "dmarcPolicy": {
+                                "nullable": true,
+                                "type": "string",
+                                "enum": ["none", "quarantine", "reject"]
+                              },
+                              "dmarcDomain": { "nullable": true, "type": "string" },
+                              "arc": {
+                                "nullable": true,
+                                "type": "string",
+                                "enum": [
+                                  "pass",
+                                  "fail",
+                                  "softfail",
+                                  "neutral",
+                                  "none",
+                                  "temperror",
+                                  "permerror"
+                                ]
+                              }
+                            },
+                            "required": [
+                              "spf",
+                              "spfDomain",
+                              "dkim",
+                              "dkimSignatures",
+                              "dmarc",
+                              "dmarcPolicy",
+                              "dmarcDomain",
+                              "arc"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "engines": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "engine": { "type": "string" },
+                                "final": {
+                                  "type": "boolean",
+                                  "description": "Whether the engine has its final result; false while attempts are retried"
+                                },
+                                "engineVersion": { "nullable": true, "type": "string" },
+                                "outcome": {
+                                  "nullable": true,
+                                  "description": "Final outcome; null before the final result",
+                                  "type": "string",
+                                  "enum": [
+                                    "clean",
+                                    "spam",
+                                    "suspicious",
+                                    "malicious",
+                                    "unknown",
+                                    "timeout",
+                                    "error",
+                                    "skipped"
+                                  ]
+                                },
+                                "score": { "nullable": true, "type": "number" },
+                                "requiredScore": { "nullable": true, "type": "number" },
+                                "action": {
+                                  "nullable": true,
+                                  "description": "Engine action (Rspamd: `no action`, `reject`, …)",
+                                  "type": "string"
+                                },
+                                "reasonCodes": { "type": "array", "items": { "type": "string" } },
+                                "symbols": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "name": { "type": "string" },
+                                      "score": { "type": "number" },
+                                      "options": {
+                                        "type": "array",
+                                        "items": { "type": "string" },
+                                        "description": "At most 5 options of at most 200 characters (may contain addresses or URLs)"
+                                      }
+                                    },
+                                    "required": ["name", "score", "options"],
+                                    "additionalProperties": false
+                                  },
+                                  "description": "Rspamd symbols, by |score| descending"
+                                },
+                                "attempts": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "attempt": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 9007199254740991
+                                      },
+                                      "outcome": {
+                                        "type": "string",
+                                        "enum": [
+                                          "clean",
+                                          "spam",
+                                          "suspicious",
+                                          "malicious",
+                                          "unknown",
+                                          "timeout",
+                                          "error",
+                                          "skipped"
+                                        ]
+                                      },
+                                      "errorCode": {
+                                        "nullable": true,
+                                        "description": "Failure code of a timeout/error attempt (e.g. eml_unavailable)",
+                                        "type": "string"
+                                      },
+                                      "durationMs": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 9007199254740991
+                                      },
+                                      "at": {
+                                        "type": "string",
+                                        "format": "date-time",
+                                        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$",
+                                        "description": "When the attempt completed"
+                                      }
+                                    },
+                                    "required": [
+                                      "attempt",
+                                      "outcome",
+                                      "errorCode",
+                                      "durationMs",
+                                      "at"
+                                    ],
+                                    "additionalProperties": false
+                                  },
+                                  "description": "Every attempt of the engine in the round"
+                                },
+                                "durationMs": {
+                                  "nullable": true,
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 9007199254740991
+                                },
+                                "settingsVersion": { "nullable": true, "type": "string" },
+                                "completedAt": {
+                                  "nullable": true,
+                                  "type": "string",
+                                  "format": "date-time",
+                                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                                }
+                              },
+                              "required": [
+                                "engine",
+                                "final",
+                                "engineVersion",
+                                "outcome",
+                                "score",
+                                "requiredScore",
+                                "action",
+                                "reasonCodes",
+                                "symbols",
+                                "attempts",
+                                "durationMs",
+                                "settingsVersion",
+                                "completedAt"
+                              ],
+                              "additionalProperties": false
+                            }
+                          }
+                        },
+                        "required": [
+                          "round",
+                          "scanKind",
+                          "status",
+                          "verdict",
+                          "reasonCodes",
+                          "requiredEngines",
+                          "startedAt",
+                          "completedAt",
+                          "deadlineAt",
+                          "auth",
+                          "engines"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "description": "Newest round first"
+                    },
+                    "nextCursor": { "nullable": true, "type": "string" }
+                  },
+                  "required": ["messageId", "data", "nextCursor"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown message, or a message of another organization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [404] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["message_not_found"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "Get the security scan results of a message",
+        "tags": ["messages"]
+      }
+    },
     "/api/v1/platform/dead-letters": {
       "get": {
         "description": "Ready messages and consumers of `email.dead-letter` (passive check). 503 `dead_letter_replay_unavailable` when RABBITMQ_OPS_URL is not configured or the broker is unreachable.",
@@ -18327,7 +18770,7 @@
     },
     "/api/v1/platform/dead-letters/replay": {
       "post": {
-        "description": "Fetches up to `limit` dead letters of `sourceQueue` (a work queue: `email.received`, `email.delivery.pending`; other queues are 400 `source_queue_not_replayable`) matching the optional filters, republishes each unchanged envelope to the source queue with fresh retry headers and a replay id, confirmed before the dead letter is removed. Non-matching and invalid messages stay in the queue. A replayed event that was already processed is a ledger duplicate, so replays are safe to repeat. `dryRun` changes nothing. One replay at a time platform-wide (409 `replay_in_progress`); audited as `platform.dead_letters_replayed`. 503 `dead_letter_replay_unavailable` without RABBITMQ_OPS_URL or when the broker fails (the audit row then says `partial`).",
+        "description": "Fetches up to `limit` dead letters of `sourceQueue` (a work queue: `email.received`, `email.delivery.pending`, `scan.spam`; other queues are 400 `source_queue_not_replayable`) matching the optional filters, republishes each unchanged envelope to the source queue with fresh retry headers and a replay id, confirmed before the dead letter is removed. Non-matching and invalid messages stay in the queue. A replayed event that was already processed is a ledger duplicate, so replays are safe to repeat. `dryRun` changes nothing. One replay at a time platform-wide (409 `replay_in_progress`); audited as `platform.dead_letters_replayed`. 503 `dead_letter_replay_unavailable` without RABBITMQ_OPS_URL or when the broker fails (the audit row then says `partial`).",
         "operationId": "DeadLettersController_replay_v1",
         "parameters": [],
         "requestBody": {
@@ -18338,7 +18781,7 @@
                 "type": "object",
                 "properties": {
                   "sourceQueue": {
-                    "description": "The work queue whose dead letters are replayed: email.received, email.delivery.pending",
+                    "description": "The work queue whose dead letters are replayed: email.received, scan.spam, email.delivery.pending",
                     "type": "string"
                   },
                   "limit": {
@@ -18611,6 +19054,1266 @@
         },
         "security": [{ "access-token": [] }],
         "summary": "Replay dead letters into a work queue",
+        "tags": ["platform"]
+      }
+    },
+    "/api/v1/scan-settings": {
+      "get": {
+        "description": "For every registered scan engine: whether it is required, the platform settings, the bounds an override must respect, the organization’s override, the effective settings and the override `version` (0 = none). An override that no longer fits the platform settings is listed with its violations and not applied. Scan workers cache the settings per organization and engine for up to SCAN_SETTINGS_CACHE_TTL_MS (default 30 seconds): a change applies to messages scanned after that; rounds already scanned keep their results. From the read replica.",
+        "operationId": "ScanSettingsController_list_v1",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "engine": {
+                            "type": "string",
+                            "description": "Engine name (ENGINE_CATALOG; step 4.1: rspamd)"
+                          },
+                          "required": {
+                            "type": "boolean",
+                            "description": "Required for every scan round"
+                          },
+                          "tenantMayDisable": { "type": "boolean" },
+                          "platform": {
+                            "type": "object",
+                            "properties": {
+                              "spamScore": { "type": "number" },
+                              "suspiciousScore": { "type": "number" },
+                              "scoreMin": { "type": "number" },
+                              "scoreMax": { "type": "number" },
+                              "phishingVerdict": {
+                                "type": "string",
+                                "enum": ["suspicious", "malicious"]
+                              },
+                              "dmarcRejectVerdict": {
+                                "type": "string",
+                                "enum": ["suspicious", "malicious"]
+                              },
+                              "authFailureVerdict": {
+                                "type": "string",
+                                "enum": ["reason_only", "suspicious"]
+                              }
+                            },
+                            "required": [
+                              "spamScore",
+                              "suspiciousScore",
+                              "scoreMin",
+                              "scoreMax",
+                              "phishingVerdict",
+                              "dmarcRejectVerdict",
+                              "authFailureVerdict"
+                            ],
+                            "additionalProperties": false,
+                            "description": "Platform settings (SCAN_RSPAMD_*)"
+                          },
+                          "bounds": {
+                            "type": "object",
+                            "properties": {
+                              "spamScore": {
+                                "type": "object",
+                                "properties": {
+                                  "min": { "type": "number" },
+                                  "max": { "type": "number" }
+                                },
+                                "required": ["min", "max"],
+                                "additionalProperties": false
+                              },
+                              "suspiciousScore": {
+                                "type": "object",
+                                "properties": {
+                                  "min": { "type": "number" },
+                                  "max": { "type": "number" }
+                                },
+                                "required": ["min", "max"],
+                                "additionalProperties": false,
+                                "description": "Also below the effective spamScore"
+                              },
+                              "phishingVerdict": {
+                                "type": "array",
+                                "items": { "type": "string", "enum": ["suspicious", "malicious"] },
+                                "description": "Allowed values (raise-only)"
+                              },
+                              "dmarcRejectVerdict": {
+                                "type": "array",
+                                "items": { "type": "string", "enum": ["suspicious", "malicious"] },
+                                "description": "Allowed values"
+                              },
+                              "authFailureVerdict": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "enum": ["reason_only", "suspicious"]
+                                },
+                                "description": "Allowed values"
+                              }
+                            },
+                            "required": [
+                              "spamScore",
+                              "suspiciousScore",
+                              "phishingVerdict",
+                              "dmarcRejectVerdict",
+                              "authFailureVerdict"
+                            ],
+                            "additionalProperties": false,
+                            "description": "What an override may choose"
+                          },
+                          "override": {
+                            "nullable": true,
+                            "description": "The organization override; null for none",
+                            "type": "object",
+                            "properties": {
+                              "spamScore": { "type": "number" },
+                              "suspiciousScore": { "type": "number" },
+                              "phishingVerdict": {
+                                "type": "string",
+                                "enum": ["suspicious", "malicious"]
+                              },
+                              "dmarcRejectVerdict": {
+                                "type": "string",
+                                "enum": ["suspicious", "malicious"]
+                              },
+                              "authFailureVerdict": {
+                                "type": "string",
+                                "enum": ["reason_only", "suspicious"]
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          "effective": {
+                            "type": "object",
+                            "properties": {
+                              "spamScore": { "type": "number" },
+                              "suspiciousScore": { "type": "number" },
+                              "phishingVerdict": {
+                                "type": "string",
+                                "enum": ["suspicious", "malicious"]
+                              },
+                              "dmarcRejectVerdict": {
+                                "type": "string",
+                                "enum": ["suspicious", "malicious"]
+                              },
+                              "authFailureVerdict": {
+                                "type": "string",
+                                "enum": ["reason_only", "suspicious"]
+                              }
+                            },
+                            "required": [
+                              "spamScore",
+                              "suspiciousScore",
+                              "phishingVerdict",
+                              "dmarcRejectVerdict",
+                              "authFailureVerdict"
+                            ],
+                            "additionalProperties": false,
+                            "description": "What the scan stage applies"
+                          },
+                          "overrideApplied": {
+                            "type": "boolean",
+                            "description": "False when there is no override or it no longer fits the platform settings"
+                          },
+                          "violations": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "path": { "type": "string" },
+                                "code": {
+                                  "type": "string",
+                                  "enum": [
+                                    "invalid",
+                                    "unknown_key",
+                                    "out_of_bounds",
+                                    "threshold_order",
+                                    "severity_lowered"
+                                  ]
+                                },
+                                "message": { "type": "string" }
+                              },
+                              "required": ["path", "code", "message"],
+                              "additionalProperties": false
+                            },
+                            "description": "Why a stored override is ignored (platform settings tightened since it was saved)"
+                          },
+                          "version": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 4294967295,
+                            "description": "Version of the override row (0 = no row yet); +1 per change"
+                          },
+                          "updatedAt": {
+                            "nullable": true,
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          }
+                        },
+                        "required": [
+                          "engine",
+                          "required",
+                          "tenantMayDisable",
+                          "platform",
+                          "bounds",
+                          "override",
+                          "effective",
+                          "overrideApplied",
+                          "violations",
+                          "version",
+                          "updatedAt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "description": "Every registered engine (catalog order)"
+                    },
+                    "note": {
+                      "type": "string",
+                      "description": "Scan workers cache the settings per organization and engine for up to SCAN_SETTINGS_CACHE_TTL_MS (default 30 seconds): a change applies to messages scanned after that; rounds already scanned keep their results."
+                    }
+                  },
+                  "required": ["data", "note"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "List the security scan settings",
+        "tags": ["scan-settings"]
+      }
+    },
+    "/api/v1/scan-settings/{engine}": {
+      "put": {
+        "description": "Replaces the override with `settings` (rspamd: `spamScore` and `suspiciousScore` within the platform score bounds with suspiciousScore below spamScore; `phishingVerdict`, `dmarcRejectVerdict` and `authFailureVerdict` may only be raised above the platform value). Compare-and-set on `expectedVersion` (0 when there is no override yet). Audited as `scan_settings.updated` with the settings before and after. A required engine cannot be disabled. Scan workers cache the settings per organization and engine for up to SCAN_SETTINGS_CACHE_TTL_MS (default 30 seconds): a change applies to messages scanned after that; rounds already scanned keep their results.",
+        "operationId": "ScanSettingsController_replace_v1",
+        "parameters": [
+          {
+            "name": "engine",
+            "required": true,
+            "in": "path",
+            "description": "Scan engine name (step 4.1: `rspamd`)",
+            "schema": { "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4294967295,
+                    "description": "The `version` the caller saw (0 = no override yet); 409 `version_conflict` otherwise"
+                  },
+                  "settings": {
+                    "type": "object",
+                    "additionalProperties": {},
+                    "description": "The override, all keys optional (rspamd: spamScore, suspiciousScore, phishingVerdict, dmarcRejectVerdict, authFailureVerdict); replaces the previous override. Unknown keys are refused (422)"
+                  }
+                },
+                "required": ["expectedVersion", "settings"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "engine": {
+                      "type": "string",
+                      "description": "Engine name (ENGINE_CATALOG; step 4.1: rspamd)"
+                    },
+                    "required": {
+                      "type": "boolean",
+                      "description": "Required for every scan round"
+                    },
+                    "tenantMayDisable": { "type": "boolean" },
+                    "platform": {
+                      "type": "object",
+                      "properties": {
+                        "spamScore": { "type": "number" },
+                        "suspiciousScore": { "type": "number" },
+                        "scoreMin": { "type": "number" },
+                        "scoreMax": { "type": "number" },
+                        "phishingVerdict": {
+                          "type": "string",
+                          "enum": ["suspicious", "malicious"]
+                        },
+                        "dmarcRejectVerdict": {
+                          "type": "string",
+                          "enum": ["suspicious", "malicious"]
+                        },
+                        "authFailureVerdict": {
+                          "type": "string",
+                          "enum": ["reason_only", "suspicious"]
+                        }
+                      },
+                      "required": [
+                        "spamScore",
+                        "suspiciousScore",
+                        "scoreMin",
+                        "scoreMax",
+                        "phishingVerdict",
+                        "dmarcRejectVerdict",
+                        "authFailureVerdict"
+                      ],
+                      "additionalProperties": false,
+                      "description": "Platform settings (SCAN_RSPAMD_*)"
+                    },
+                    "bounds": {
+                      "type": "object",
+                      "properties": {
+                        "spamScore": {
+                          "type": "object",
+                          "properties": {
+                            "min": { "type": "number" },
+                            "max": { "type": "number" }
+                          },
+                          "required": ["min", "max"],
+                          "additionalProperties": false
+                        },
+                        "suspiciousScore": {
+                          "type": "object",
+                          "properties": {
+                            "min": { "type": "number" },
+                            "max": { "type": "number" }
+                          },
+                          "required": ["min", "max"],
+                          "additionalProperties": false,
+                          "description": "Also below the effective spamScore"
+                        },
+                        "phishingVerdict": {
+                          "type": "array",
+                          "items": { "type": "string", "enum": ["suspicious", "malicious"] },
+                          "description": "Allowed values (raise-only)"
+                        },
+                        "dmarcRejectVerdict": {
+                          "type": "array",
+                          "items": { "type": "string", "enum": ["suspicious", "malicious"] },
+                          "description": "Allowed values"
+                        },
+                        "authFailureVerdict": {
+                          "type": "array",
+                          "items": { "type": "string", "enum": ["reason_only", "suspicious"] },
+                          "description": "Allowed values"
+                        }
+                      },
+                      "required": [
+                        "spamScore",
+                        "suspiciousScore",
+                        "phishingVerdict",
+                        "dmarcRejectVerdict",
+                        "authFailureVerdict"
+                      ],
+                      "additionalProperties": false,
+                      "description": "What an override may choose"
+                    },
+                    "override": {
+                      "nullable": true,
+                      "description": "The organization override; null for none",
+                      "type": "object",
+                      "properties": {
+                        "spamScore": { "type": "number" },
+                        "suspiciousScore": { "type": "number" },
+                        "phishingVerdict": {
+                          "type": "string",
+                          "enum": ["suspicious", "malicious"]
+                        },
+                        "dmarcRejectVerdict": {
+                          "type": "string",
+                          "enum": ["suspicious", "malicious"]
+                        },
+                        "authFailureVerdict": {
+                          "type": "string",
+                          "enum": ["reason_only", "suspicious"]
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "effective": {
+                      "type": "object",
+                      "properties": {
+                        "spamScore": { "type": "number" },
+                        "suspiciousScore": { "type": "number" },
+                        "phishingVerdict": {
+                          "type": "string",
+                          "enum": ["suspicious", "malicious"]
+                        },
+                        "dmarcRejectVerdict": {
+                          "type": "string",
+                          "enum": ["suspicious", "malicious"]
+                        },
+                        "authFailureVerdict": {
+                          "type": "string",
+                          "enum": ["reason_only", "suspicious"]
+                        }
+                      },
+                      "required": [
+                        "spamScore",
+                        "suspiciousScore",
+                        "phishingVerdict",
+                        "dmarcRejectVerdict",
+                        "authFailureVerdict"
+                      ],
+                      "additionalProperties": false,
+                      "description": "What the scan stage applies"
+                    },
+                    "overrideApplied": {
+                      "type": "boolean",
+                      "description": "False when there is no override or it no longer fits the platform settings"
+                    },
+                    "violations": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": { "type": "string" },
+                          "code": {
+                            "type": "string",
+                            "enum": [
+                              "invalid",
+                              "unknown_key",
+                              "out_of_bounds",
+                              "threshold_order",
+                              "severity_lowered"
+                            ]
+                          },
+                          "message": { "type": "string" }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      },
+                      "description": "Why a stored override is ignored (platform settings tightened since it was saved)"
+                    },
+                    "version": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 4294967295,
+                      "description": "Version of the override row (0 = no row yet); +1 per change"
+                    },
+                    "updatedAt": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "note": {
+                      "type": "string",
+                      "description": "Scan workers cache the settings per organization and engine for up to SCAN_SETTINGS_CACHE_TTL_MS (default 30 seconds): a change applies to messages scanned after that; rounds already scanned keep their results."
+                    }
+                  },
+                  "required": [
+                    "engine",
+                    "required",
+                    "tenantMayDisable",
+                    "platform",
+                    "bounds",
+                    "override",
+                    "effective",
+                    "overrideApplied",
+                    "violations",
+                    "version",
+                    "updatedAt",
+                    "note"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The engine is not registered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [404] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["scan_engine_not_found"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`expectedVersion` is not the current version; `currentVersion` is the version now",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [409] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["version_conflict"] },
+                    "message": { "type": "string" },
+                    "currentVersion": { "type": "integer", "minimum": 0 },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The override breaks the platform settings: scores outside the bounds, suspiciousScore not below spamScore, a severity lowered below the platform value, or an unknown key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [422] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["scan_settings_invalid"] },
+                    "message": { "type": "string" },
+                    "violations": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": { "type": "string" },
+                          "code": {
+                            "type": "string",
+                            "enum": [
+                              "invalid",
+                              "unknown_key",
+                              "out_of_bounds",
+                              "threshold_order",
+                              "severity_lowered"
+                            ]
+                          },
+                          "message": { "type": "string" }
+                        },
+                        "required": ["path", "code", "message"]
+                      }
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "Set the organization’s scan settings of an engine",
+        "tags": ["scan-settings"]
+      },
+      "delete": {
+        "description": "Removes the organization’s override (compare-and-set on `expectedVersion`; the version still increases, so an older `expectedVersion` never matches again). Audited as `scan_settings.reset` with the settings before. Without an override nothing changes. Scan workers cache the settings per organization and engine for up to SCAN_SETTINGS_CACHE_TTL_MS (default 30 seconds): a change applies to messages scanned after that; rounds already scanned keep their results.",
+        "operationId": "ScanSettingsController_reset_v1",
+        "parameters": [
+          {
+            "name": "engine",
+            "required": true,
+            "in": "path",
+            "description": "Scan engine name (step 4.1: `rspamd`)",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "expectedVersion",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295,
+              "description": "The `version` the caller saw"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "engine": {
+                      "type": "string",
+                      "description": "Engine name (ENGINE_CATALOG; step 4.1: rspamd)"
+                    },
+                    "required": {
+                      "type": "boolean",
+                      "description": "Required for every scan round"
+                    },
+                    "tenantMayDisable": { "type": "boolean" },
+                    "platform": {
+                      "type": "object",
+                      "properties": {
+                        "spamScore": { "type": "number" },
+                        "suspiciousScore": { "type": "number" },
+                        "scoreMin": { "type": "number" },
+                        "scoreMax": { "type": "number" },
+                        "phishingVerdict": {
+                          "type": "string",
+                          "enum": ["suspicious", "malicious"]
+                        },
+                        "dmarcRejectVerdict": {
+                          "type": "string",
+                          "enum": ["suspicious", "malicious"]
+                        },
+                        "authFailureVerdict": {
+                          "type": "string",
+                          "enum": ["reason_only", "suspicious"]
+                        }
+                      },
+                      "required": [
+                        "spamScore",
+                        "suspiciousScore",
+                        "scoreMin",
+                        "scoreMax",
+                        "phishingVerdict",
+                        "dmarcRejectVerdict",
+                        "authFailureVerdict"
+                      ],
+                      "additionalProperties": false,
+                      "description": "Platform settings (SCAN_RSPAMD_*)"
+                    },
+                    "bounds": {
+                      "type": "object",
+                      "properties": {
+                        "spamScore": {
+                          "type": "object",
+                          "properties": {
+                            "min": { "type": "number" },
+                            "max": { "type": "number" }
+                          },
+                          "required": ["min", "max"],
+                          "additionalProperties": false
+                        },
+                        "suspiciousScore": {
+                          "type": "object",
+                          "properties": {
+                            "min": { "type": "number" },
+                            "max": { "type": "number" }
+                          },
+                          "required": ["min", "max"],
+                          "additionalProperties": false,
+                          "description": "Also below the effective spamScore"
+                        },
+                        "phishingVerdict": {
+                          "type": "array",
+                          "items": { "type": "string", "enum": ["suspicious", "malicious"] },
+                          "description": "Allowed values (raise-only)"
+                        },
+                        "dmarcRejectVerdict": {
+                          "type": "array",
+                          "items": { "type": "string", "enum": ["suspicious", "malicious"] },
+                          "description": "Allowed values"
+                        },
+                        "authFailureVerdict": {
+                          "type": "array",
+                          "items": { "type": "string", "enum": ["reason_only", "suspicious"] },
+                          "description": "Allowed values"
+                        }
+                      },
+                      "required": [
+                        "spamScore",
+                        "suspiciousScore",
+                        "phishingVerdict",
+                        "dmarcRejectVerdict",
+                        "authFailureVerdict"
+                      ],
+                      "additionalProperties": false,
+                      "description": "What an override may choose"
+                    },
+                    "override": {
+                      "nullable": true,
+                      "description": "The organization override; null for none",
+                      "type": "object",
+                      "properties": {
+                        "spamScore": { "type": "number" },
+                        "suspiciousScore": { "type": "number" },
+                        "phishingVerdict": {
+                          "type": "string",
+                          "enum": ["suspicious", "malicious"]
+                        },
+                        "dmarcRejectVerdict": {
+                          "type": "string",
+                          "enum": ["suspicious", "malicious"]
+                        },
+                        "authFailureVerdict": {
+                          "type": "string",
+                          "enum": ["reason_only", "suspicious"]
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "effective": {
+                      "type": "object",
+                      "properties": {
+                        "spamScore": { "type": "number" },
+                        "suspiciousScore": { "type": "number" },
+                        "phishingVerdict": {
+                          "type": "string",
+                          "enum": ["suspicious", "malicious"]
+                        },
+                        "dmarcRejectVerdict": {
+                          "type": "string",
+                          "enum": ["suspicious", "malicious"]
+                        },
+                        "authFailureVerdict": {
+                          "type": "string",
+                          "enum": ["reason_only", "suspicious"]
+                        }
+                      },
+                      "required": [
+                        "spamScore",
+                        "suspiciousScore",
+                        "phishingVerdict",
+                        "dmarcRejectVerdict",
+                        "authFailureVerdict"
+                      ],
+                      "additionalProperties": false,
+                      "description": "What the scan stage applies"
+                    },
+                    "overrideApplied": {
+                      "type": "boolean",
+                      "description": "False when there is no override or it no longer fits the platform settings"
+                    },
+                    "violations": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": { "type": "string" },
+                          "code": {
+                            "type": "string",
+                            "enum": [
+                              "invalid",
+                              "unknown_key",
+                              "out_of_bounds",
+                              "threshold_order",
+                              "severity_lowered"
+                            ]
+                          },
+                          "message": { "type": "string" }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      },
+                      "description": "Why a stored override is ignored (platform settings tightened since it was saved)"
+                    },
+                    "version": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 4294967295,
+                      "description": "Version of the override row (0 = no row yet); +1 per change"
+                    },
+                    "updatedAt": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "note": {
+                      "type": "string",
+                      "description": "Scan workers cache the settings per organization and engine for up to SCAN_SETTINGS_CACHE_TTL_MS (default 30 seconds): a change applies to messages scanned after that; rounds already scanned keep their results."
+                    }
+                  },
+                  "required": [
+                    "engine",
+                    "required",
+                    "tenantMayDisable",
+                    "platform",
+                    "bounds",
+                    "override",
+                    "effective",
+                    "overrideApplied",
+                    "violations",
+                    "version",
+                    "updatedAt",
+                    "note"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The engine is not registered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [404] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["scan_engine_not_found"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`expectedVersion` is not the current version; `currentVersion` is the version now",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [409] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["version_conflict"] },
+                    "message": { "type": "string" },
+                    "currentVersion": { "type": "integer", "minimum": 0 },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "Reset an engine to the platform settings",
+        "tags": ["scan-settings"]
+      }
+    },
+    "/api/v1/platform/organizations/{organizationId}/messages/{messageId}/scan-training": {
+      "post": {
+        "description": "Streams the stored message of the organization to the Rspamd controller: `learn_spam` / `learn_ham` train the Bayes classifier (`already_learned` when Rspamd has learned it before or already classifies it that way), `fuzzy_add` / `fuzzy_delete` add or remove its fuzzy hashes with `fuzzyFlag` `spam` (flag 11, `EG_FUZZY_SPAM`) or `phishing` (flag 12, `EG_FUZZY_PHISH`). Bayes and fuzzy storage are shared by every organization, hence the platform permission. Learning does not rescan the message (use the rescan route). Audited as `scan_training.<operation>` with the outcome (never content); a successful call also adds the timeline event `scan.training`. 60 calls per caller per minute.",
+        "operationId": "ScanTrainingController_train_v1",
+        "parameters": [
+          {
+            "name": "organizationId",
+            "required": true,
+            "in": "path",
+            "description": "Organization public id",
+            "schema": { "format": "uuid", "type": "string" }
+          },
+          {
+            "name": "messageId",
+            "required": true,
+            "in": "path",
+            "description": "Message public id",
+            "schema": { "format": "uuid", "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "operation": {
+                    "type": "string",
+                    "enum": ["learn_spam", "learn_ham", "fuzzy_add", "fuzzy_delete"]
+                  },
+                  "fuzzyFlag": {
+                    "description": "Required for fuzzy_add / fuzzy_delete (spam = flag 11, phishing = flag 12)",
+                    "type": "string",
+                    "enum": ["spam", "phishing"]
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512,
+                    "description": "Why the operator trains (audited; never sent to Rspamd)"
+                  }
+                },
+                "required": ["operation", "reason"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "operation": {
+                      "type": "string",
+                      "enum": ["learn_spam", "learn_ham", "fuzzy_add", "fuzzy_delete"]
+                    },
+                    "result": {
+                      "type": "string",
+                      "enum": ["learned", "already_learned", "added", "deleted"]
+                    },
+                    "engineVersion": {
+                      "type": "string",
+                      "description": "Rspamd version (`unknown` if it could not be read)"
+                    }
+                  },
+                  "required": ["operation", "result", "engineVersion"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown organization, or no such message in that organization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [404] },
+                    "error": { "type": "string" },
+                    "code": {
+                      "type": "string",
+                      "enum": ["organization_not_found", "message_not_found"]
+                    },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The stored message (EML) is no longer available",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [409] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["content_unavailable"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Fuzzy operation: Rspamd found no content it can hash",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [422] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["scan_training_not_applicable"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (`Retry-After` header when known)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The Rspamd controller is not configured, unreachable, timed out or failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [503] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["rspamd_unavailable"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "access-token": [] }],
+        "summary": "Train the shared spam classifiers from a message",
         "tags": ["platform"]
       }
     }

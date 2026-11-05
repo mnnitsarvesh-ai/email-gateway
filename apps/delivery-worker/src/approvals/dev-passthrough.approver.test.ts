@@ -1,7 +1,8 @@
 import {
   deliveryApprovedV1,
   EventTypes,
-  type MessageReceivedV1,
+  messageScannedV1,
+  type MessageScannedV1,
   type EventEnvelope,
 } from '@email-gateway/event-contracts';
 import { type EventHandler, MetricsService } from '@email-gateway/common';
@@ -30,10 +31,10 @@ vi.mock('@email-gateway/message-lifecycle', async (original) => ({
 
 const NOW = new Date('2026-11-03T12:00:00Z');
 
-const snapshot = (state: LifecycleSnapshot['state']): LifecycleSnapshot => ({
+const snapshot = (state: LifecycleSnapshot['state'], round = 0): LifecycleSnapshot => ({
   state,
-  version: state === 'approved' ? 2 : 1,
-  round: 0,
+  version: state === 'approved' ? 4 : 3,
+  round,
   statusChangedAt: NOW,
   statusReason: null,
   direction: 'outbound',
@@ -42,9 +43,9 @@ const snapshot = (state: LifecycleSnapshot['state']): LifecycleSnapshot => ({
 
 const applied: TransitionOutcome = {
   result: 'applied',
-  from: 'persisted',
+  from: 'scanned',
   to: 'approved',
-  version: 2,
+  version: 4,
   round: 0,
   historyId: 1n,
   stateEventId: '0190f0f0-0000-7000-8000-0000000000aa',
@@ -58,27 +59,52 @@ beforeEach(() => {
 
 const metricsService = () => new MetricsService({ service: 't' });
 const newMetrics = (service = metricsService()) => new DeliveryMetrics(service);
-const event: EventEnvelope<MessageReceivedV1> = {
-  eventId: '0190f0f0-0000-7000-8000-000000000001',
-  eventType: EventTypes.MessageReceived,
-  occurredAt: NOW.toISOString(),
-  correlationId: 'corr-12345678',
-  organizationId: '7',
-  payload: {
+const scannedPayload = (overrides: Partial<MessageScannedV1> = {}): MessageScannedV1 =>
+  messageScannedV1.parse({
     messageId: '100',
     receivedAt: '2026-11-03T11:59:00.000Z',
     direction: 'outbound',
     emlS3Key: 'org/7/eml/2026/11/03/abc.eml',
-    sizeBytes: 10,
-    envelopeFrom: 'a@x.test',
-    recipientCount: 2,
-  },
+    lifecycleRound: 0,
+    scanId: '900',
+    scanKind: 'initial',
+    outcome: 'scanned',
+    verdict: 'spam',
+    engines: [{ engine: 'rspamd', required: true, outcome: 'spam', attempts: 1 }],
+    reasonCodes: ['spam.score'],
+    completedAt: '2026-11-03T11:59:30.000Z',
+    ...overrides,
+  });
+
+const event: EventEnvelope<MessageScannedV1> = {
+  eventId: '0190f0f0-0000-7000-8000-000000000001',
+  eventType: EventTypes.MessageScanned,
+  occurredAt: NOW.toISOString(),
+  correlationId: 'corr-12345678',
+  organizationId: '7',
+  payload: scannedPayload(),
 };
 
-function fakeTx(options: { recipients?: number }) {
+const scanFailedEvent: EventEnvelope<MessageScannedV1> = {
+  ...event,
+  eventId: '0190f0f0-0000-7000-8000-000000000002',
+  payload: scannedPayload({
+    outcome: 'scan_failed',
+    verdict: 'timeout',
+    engines: [{ engine: 'rspamd', required: true, outcome: 'timeout', attempts: 6 }],
+    reasonCodes: ['engine.timeout'],
+  }),
+};
+
+function fakeTx(options: { recipients?: number; maxDeliverySeq?: number | null }) {
   const outbox: { data: Record<string, unknown> }[] = [];
   const events: { data: Record<string, unknown> }[] = [];
   const tx = {
+    emailDelivery: {
+      aggregate: vi.fn(() =>
+        Promise.resolve({ _max: { deliverySeq: options.maxDeliverySeq ?? null } }),
+      ),
+    },
     emailRecipient: {
       findMany: vi.fn(() =>
         Promise.resolve(
@@ -109,9 +135,9 @@ function fakeTx(options: { recipients?: number }) {
   return { tx, outbox, events };
 }
 
-const feed = (): ApprovalFeed<MessageReceivedV1> & {
+const feed = (): ApprovalFeed<MessageScannedV1> & {
   started: number;
-  handler?: EventHandler<MessageReceivedV1>;
+  handler?: EventHandler<MessageScannedV1>;
 } => ({
   started: 0,
   start(handler) {
@@ -144,7 +170,7 @@ function fakeWriter(tx: object) {
 
 const noWriter = {} as PrismaClient;
 
-describe('DevPassThroughApprover (R5, development only)', () => {
+describe('DevPassThroughApprover (R5, step 4.1 S15, development only)', () => {
   it('writes one approval for every pending recipient, from the stored message row', async () => {
     const { tx, outbox, events } = fakeTx({});
     const approver = new DevPassThroughApprover(
@@ -158,7 +184,7 @@ describe('DevPassThroughApprover (R5, development only)', () => {
     const result = await approver.approve(event, tx as never);
     expect(result.recipients).toBe(2);
     expect(result.approvals).toHaveLength(1);
-    // E4 first, for the envelope's organization (step 3.3 L8.3).
+    // E27 first, for the envelope's organization and the scan round (step 4.1 S15).
     expect(transition).toHaveBeenCalledTimes(1);
     expect(transition.mock.calls[0]![0]).toBe(tx);
     expect(transition.mock.calls[0]![1]).toEqual({
@@ -170,7 +196,7 @@ describe('DevPassThroughApprover (R5, development only)', () => {
       causationEventId: event.eventId,
       correlationId: 'corr-12345678',
       expectedRound: 0,
-      expectedFrom: ['persisted'],
+      expectedFrom: ['scanned'],
     });
     // Only pending recipients.
     expect(tx.emailRecipient.findMany).toHaveBeenCalledWith(
@@ -258,7 +284,7 @@ describe('DevPassThroughApprover (R5, development only)', () => {
     expect(none.outbox).toHaveLength(0);
   });
 
-  it('skips a message the lifecycle does not let it approve (not persisted, older round), counting the reason', async () => {
+  it('skips a message the lifecycle does not let it approve (not scanned, older round), counting the reason', async () => {
     const service = metricsService();
     const approver = new DevPassThroughApprover(
       feed(),
@@ -270,7 +296,7 @@ describe('DevPassThroughApprover (R5, development only)', () => {
     );
     const outcomes: TransitionOutcome[] = [
       { result: 'stale', why: 'overtaken', snapshot: snapshot('delivery_pending') },
-      { result: 'invalid', why: 'unexpected_from', snapshot: snapshot('scanning') },
+      { result: 'invalid', why: 'unexpected_from', snapshot: snapshot('delivery_retry') },
       { result: 'stale', why: 'older_round', snapshot: snapshot('approved') },
       { result: 'not_found' },
       // A re-run after a committed approval: nothing more, not counted as skipped.
@@ -300,6 +326,84 @@ describe('DevPassThroughApprover (R5, development only)', () => {
     expect(text).not.toContain('reason="lifecycle_duplicate"');
   });
 
+  it('approves a rescan round with that round, after the existing deliveries', async () => {
+    transition.mockResolvedValueOnce({ ...applied, round: 2, snapshot: snapshot('approved', 2) });
+    const { tx, outbox, events } = fakeTx({ recipients: 1, maxDeliverySeq: 1 });
+    const approver = new DevPassThroughApprover(
+      feed(),
+      noWriter,
+      RECORDER_TX_TIMEOUT_MS,
+      createLogger({ service: 't', level: 'silent' }),
+      newMetrics(),
+      () => NOW,
+    );
+    const rescan: EventEnvelope<MessageScannedV1> = {
+      ...event,
+      payload: scannedPayload({ lifecycleRound: 2, scanKind: 'rescan', verdict: 'clean' }),
+    };
+    const result = await approver.approve(rescan, tx as never);
+    expect(result.approvals).toHaveLength(1);
+    expect(transition.mock.calls[0]![1]).toMatchObject({
+      expectedRound: 2,
+      expectedFrom: ['scanned'],
+      transitionKey: `evt:${event.eventId}:approved`,
+    });
+    expect(deliveryApprovedV1.parse(outbox[0]!.data.payload)).toMatchObject({
+      lifecycleRound: 2,
+      deliverySeq: 2,
+    });
+    expect(events[0]!.data.details).toMatchObject({ lifecycleRound: 2, deliverySeq: 2 });
+  });
+
+  it('approves every verdict of a complete scan (the pass-through stands in for policy)', async () => {
+    const approver = new DevPassThroughApprover(
+      feed(),
+      noWriter,
+      RECORDER_TX_TIMEOUT_MS,
+      createLogger({ service: 't', level: 'silent' }),
+      newMetrics(),
+      () => NOW,
+    );
+    for (const verdict of ['clean', 'suspicious', 'malicious', 'unknown'] as const) {
+      const t = fakeTx({ recipients: 1 });
+      const result = await approver.approve(
+        {
+          ...event,
+          payload: scannedPayload({
+            verdict,
+            engines: [{ engine: 'rspamd', required: true, outcome: verdict, attempts: 1 }],
+          }),
+        },
+        t.tx as never,
+      );
+      expect(result.approvals).toHaveLength(1);
+    }
+  });
+
+  it('never approves a failed scan: no transition, no approval, counted as scan_failed', async () => {
+    const service = metricsService();
+    const approver = new DevPassThroughApprover(
+      feed(),
+      noWriter,
+      RECORDER_TX_TIMEOUT_MS,
+      createLogger({ service: 't', level: 'silent' }),
+      newMetrics(service),
+      () => NOW,
+    );
+    const t = fakeTx({});
+    expect(await approver.approve(scanFailedEvent, t.tx as never)).toEqual({
+      approvals: [],
+      recipients: 0,
+    });
+    expect(transition).not.toHaveBeenCalled();
+    expect(t.outbox).toHaveLength(0);
+    expect(t.events).toHaveLength(0);
+    expect(t.tx.emailRecipient.findMany).not.toHaveBeenCalled();
+    expect(await service.metrics()).toContain(
+      'delivery_approvals_skipped_total{reason="scan_failed",service="t"} 1',
+    );
+  });
+
   it('logs the startup warning when started', () => {
     const warn = vi.fn();
     const logger = { child: () => ({ warn, info: vi.fn() }) } as unknown as Logger;
@@ -327,5 +431,14 @@ describe('DevPassThroughApprover (R5, development only)', () => {
       { timeout: RECORDER_TX_TIMEOUT_MS, maxWait: RECORDER_TX_TIMEOUT_MS },
     ]);
     expect(outbox).toHaveLength(1);
+    // A failed scan commits its ledger row too (handled once, never approved).
+    expect(await f.handler!(scanFailedEvent)).toBe('handled');
+    expect(writer.ledger).toHaveLength(2);
+    expect(outbox).toHaveLength(1);
+  });
+
+  it('uses its own consumer name and warns that mail is delivered after scanning', () => {
+    expect(DEV_PASSTHROUGH_CONSUMER).toBe('delivery-worker.dev-passthrough-scanned');
+    expect(DEV_PASSTHROUGH_WARNING).toContain('after scanning but without policy');
   });
 });

@@ -70,7 +70,7 @@ describe('LMTP ingestion: inbound', () => {
       port: inboundPort,
       lhlo: MTA,
       xforward: {
-        NAME: 'client.external.test',
+        NAME: 'Client.External.test',
         ADDR: '203.0.113.9',
         HELO: 'Client.External.test',
         IDENT: ident,
@@ -118,6 +118,8 @@ describe('LMTP ingestion: inbound', () => {
       emlSha256: contentSha,
       clientIp: '203.0.113.9',
       clientHelo: 'client.external.test',
+      // Step 4.1 §3: XFORWARD NAME, the verified client host name (lower-cased).
+      clientName: 'client.external.test',
       mtaQueueId: ident,
     });
 

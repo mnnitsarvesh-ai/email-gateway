@@ -84,6 +84,18 @@ export const PERMISSIONS = Object.freeze([
     key: 'platform:dead_letter_replay',
     description: 'Platform: replay dead-lettered pipeline messages',
   },
+  // Step 4.1 (docs/plan/steps/09-rspamd.md S8, S16): per-tenant scan thresholds. A tenant write
+  // permission (organization_admin and super_admin hold it); security_analyst gets it explicitly.
+  {
+    key: 'scan:settings_manage',
+    description: "Change the organization's security scan thresholds",
+  },
+  // Step 4.1 (S13): the Bayes statfiles and the fuzzy storage are shared by every tenant, so
+  // training them is a platform permission (cross-tenant poisoning otherwise).
+  {
+    key: 'platform:scan_training',
+    description: 'Train the shared spam classifiers (Bayes, fuzzy) from a message',
+  },
 ] as const satisfies readonly PermissionDef[]);
 
 /** Every permission key of the catalog. */
@@ -180,6 +192,7 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'platform:operations',
       'platform:tenant_override',
       'platform:dead_letter_replay',
+      'platform:scan_training',
       ...TENANT_READ_PERMISSIONS,
       'audit:read',
     ],
@@ -222,6 +235,7 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'message:read',
       'message:read_content',
       'message:rescan',
+      'scan:settings_manage',
       'delivery:read',
       'quarantine:read',
       'quarantine:release',

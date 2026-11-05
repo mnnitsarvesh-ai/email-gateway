@@ -43,13 +43,14 @@ async function partitionNames(table: string): Promise<string[]> {
 }
 
 describe('partition maintenance', () => {
-  it('manages the 19 partitioned tables, including the step 2.3 and 3.1 tables', () => {
-    expect(PARTITION_REGISTRY).toHaveLength(19);
+  it('manages the 20 partitioned tables, including the step 2.3, 3.1 and 4.1 tables', () => {
+    expect(PARTITION_REGISTRY).toHaveLength(20);
     expect(PARTITION_REGISTRY.map((s) => s.table)).toEqual(
       expect.arrayContaining([
         'delivery_reinjections',
         'delivery_status_events',
         'email_message_parses',
+        'email_auth_results',
       ]),
     );
   });

@@ -57,7 +57,7 @@ export class DeliveryMetrics {
     );
     this.approvalsSkipped = metrics.counter(
       'delivery_approvals_skipped_total',
-      'Received messages the dev pass-through did not approve because the lifecycle refused the approval (reason = lifecycle_<result>)',
+      'Scanned messages the dev pass-through did not approve: scan_failed (a required engine failed) or the lifecycle refused the approval (lifecycle_<result>)',
       ['reason'],
     );
     this.approvalsRejected = metrics.counter(

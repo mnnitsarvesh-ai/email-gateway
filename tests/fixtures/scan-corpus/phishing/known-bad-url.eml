@@ -1,0 +1,13 @@
+From: IT Service Desk <helpdesk@phish-sender.scan.test>
+To: bob@customer.scan.test
+Subject: Mailbox storage almost full
+Date: Sun, 01 Nov 2026 15:30:00 +0000
+Message-ID: <quota-20261101-1530@phish-sender.scan.test>
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<html><body>
+<p>Your mailbox has reached 98% of its quota. To keep receiving email,
+<a href="http://bad-url.scan.test/mailbox/verify">verify your account here</a>.</p>
+<p>IT Service Desk</p>
+</body></html>

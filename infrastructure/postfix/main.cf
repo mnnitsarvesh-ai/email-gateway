@@ -88,9 +88,10 @@ postscreen_cache_map = btree:$data_directory/postscreen_cache
 
 # --- In-session checks (pre-queue) ----------------------------------------
 # Only two components may reject or defer during the SMTP session:
-#  1. smtp-adapter via the policy delegation protocol (tenant, rate limits, recipients, size)
-#  2. Rspamd via milter
-# Both fail CLOSED to a 4xx tempfail, never to accept-all.
+#  1. smtp-adapter via the policy delegation protocol (tenant, rate limits, recipients, size):
+#     fails CLOSED to a 4xx tempfail, never to accept-all.
+#  2. Rspamd via milter (ADR-0027): rejects only GTUBE and very high scores, and fails OPEN to
+#     accept; every accepted message is scanned again post-queue (step 4.1, ADR-0026).
 smtpd_helo_required = yes
 disable_vrfy_command = yes
 strict_rfc821_envelopes = yes
@@ -110,13 +111,34 @@ smtpd_policy_service_timeout = 10s
 smtpd_policy_service_max_idle = 300s
 smtpd_policy_service_default_action = DEFER_IF_PERMIT 4.3.5 Policy service unavailable
 
+# Forged result headers (ADR-0027 decision 3): cleanup(8) removes every inbound X-Spam*,
+# X-Rspamd-* header and every Authentication-Results carrying OUR authserv-id BEFORE the message
+# is queued, independently of the milter (which fails open below, so it cannot be the only
+# control). entrypoint.sh renders the table with the authserv-id(s). header_checks do not apply
+# to headers a milter adds (that would be milter_header_checks, unset), so the one
+# Authentication-Results Rspamd adds is kept.
+header_checks = regexp:/etc/postfix/header_checks
+
+# Rspamd milter (ADR-0027, docs/plan/steps/09-rspamd.md S11, docs/deployment/rspamd.md). The
+# SMTP-time pass is not the security control of record: when Rspamd is down or slow Postfix
+# ACCEPTS without it (milter_default_action = accept) and the post-queue scan classifies the
+# message (an unavailable Rspamd there ends in timeout/error attempts and scan_failed, never
+# clean). Rspamd's proxy timeout (25s) stays below milter_content_timeout.
 smtpd_milters = inet:rspamd:11332
 non_smtpd_milters = $smtpd_milters
 milter_protocol = 6
-milter_default_action = tempfail
-milter_mail_macros = i {mail_addr} {client_addr} {client_name} {auth_authen}
+milter_default_action = accept
 milter_connect_timeout = 10s
-milter_content_timeout = 60s
+milter_command_timeout = 10s
+milter_content_timeout = 30s
+# Macros Rspamd reads: j (MTA name = authserv-id of the Authentication-Results it adds), client
+# address/name, HELO (sent with the HELO command itself), queue id (i), envelope sender and the
+# SASL user ({auth_authen}).
+milter_connect_macros = j {daemon_name} {daemon_addr} v _ {client_addr} {client_name}
+milter_helo_macros = {tls_version} {cipher} {cipher_bits} {cert_subject} {cert_issuer}
+milter_mail_macros = i {auth_type} {auth_authen} {auth_author} {mail_addr} {mail_host} {mail_mailer} {client_addr} {client_name}
+milter_rcpt_macros = i {rcpt_addr} {rcpt_host} {rcpt_mailer}
+milter_end_of_data_macros = i
 
 # --- TLS (D15). Paths rendered from POSTFIX_TLS_CERT_PATH / POSTFIX_TLS_KEY_PATH. -------------
 smtpd_tls_security_level = may

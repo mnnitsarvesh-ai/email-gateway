@@ -1,0 +1,20 @@
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=clean.scan.test; s=eg2026;
+	t=1793491200; h=from:to:subject:date:message-id:mime-version:content-type;
+	bh=J89vEiOc6+4xXnUDQME9GQCmL1yHH//HV4VjQPe4pSU=;
+	b=KADJf71loznWc8CtFY8rQKKR+faEhd9LdaJmtO92LMXAFHFttBLsQLipTWrV9Dy5laTPaef3vTfxYPweeoB8MPskx1e+d7ERL1IBbLWJBvmr5kTTvAOP/kgcCtFjRKFoEVbQjBuSoYJGAV2VKDmcnuqSaFgVGglmdOqOWDMfnpWMlhvC3jtPqBtA0fJQ99Zq3egdwUhIyQdlkaIs6td6bUYRA7t9sF/pBXS0phK18H1Rdc228Df8BGuKd6Ua9AlbBBEvW8FCcnAICvPdYVwGWNBOVVLwYKlv3CQRRpaI2s+mmmr5tOTYTyt4b+ELby5wxjy6OzTLYZOSz/BwVWOW3A==
+From: Alice Martin <alice@clean.scan.test>
+To: Bob Stone <bob@customer.scan.test>
+Subject: Please confirm your account
+Date: Sun, 01 Nov 2026 15:00:00 +0000
+Message-ID: <confirm-20261101-1500@clean.scan.test>
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+<html><body>
+<p>Hello Bob,</p>
+<p>We noticed a sign-in to your account from a new device. If this was not you, please review
+your account activity at <a href="http://login.bad-url.scan.test/session/review">https://www.paypal.com/</a>
+within 24 hours.</p>
+<p>Thank you,<br>Account Security</p>
+</body></html>

@@ -10,8 +10,15 @@ import type { SchemaObject } from '@nestjs/swagger/dist/interfaces/open-api-spec
 import { getCorrelationId } from '@email-gateway/logger';
 import type { Response } from 'express';
 
-/** Extra fields of a coded error body: ids, states and versions only, never content. */
-export type CodedErrorDetails = Readonly<Record<string, string | number | boolean | null>>;
+type CodedErrorScalar = string | number | boolean | null;
+
+/**
+ * Extra fields of a coded error body: ids, states, versions and codes only, never content. A
+ * field may be a list of flat records (e.g. the `violations` of `scan_settings_invalid`).
+ */
+export type CodedErrorDetails = Readonly<
+  Record<string, CodedErrorScalar | readonly Readonly<Record<string, CodedErrorScalar>>[]>
+>;
 
 /**
  * An HTTP error with a stable machine-readable `code` (e.g. `message_version_conflict`) next to

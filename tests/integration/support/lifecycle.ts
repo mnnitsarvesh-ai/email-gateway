@@ -154,8 +154,29 @@ export async function expectIngestionRows(
   expect(history[0]!.eventId).toBe(history[1]!.eventId);
 }
 
-/** The dev pass-through path of a delivered message: ingestion → E4 → E20 → derived final. */
+/**
+ * The dev pass-through path of a delivered message: ingestion → scan (E3, E6; step 4.1) → E27
+ * (the pass-through approves only scanned mail; E4 is retired) → E20 → derived final.
+ */
 export const DELIVERED_PATH = (
+  finalState: MessageStatus,
+  finalReason: string,
+): [MessageStatus | null, MessageStatus, string | null][] => [
+  [null, 'received', 'smtp_accepted'],
+  ['received', 'persisted', 'committed'],
+  ['persisted', 'scanning', 'scan_started'],
+  ['scanning', 'scanned', 'scan_complete'],
+  ['scanned', 'approved', 'dev_passthrough'],
+  ['approved', 'delivery_pending', 'delivery_planned'],
+  ['delivery_pending', finalState, finalReason],
+];
+
+/**
+ * The path of an `approved` FIXTURE message (`insertFixtureMessage`, L8.6: inserted directly in
+ * `approved`, so it was never scanned) once it is delivered: creation rows, the fixture's
+ * `persisted → approved` row, then E20 and the derived final state.
+ */
+export const FIXTURE_APPROVED_DELIVERED_PATH = (
   finalState: MessageStatus,
   finalReason: string,
 ): [MessageStatus | null, MessageStatus, string | null][] => [
@@ -211,10 +232,11 @@ export async function lifecycleProblems(
   prisma: PrismaClient,
   organizationIds: readonly bigint[],
   n: number,
+  // Step 4.1: received, persisted, scanning, scanned, approved, delivery_pending, delivered.
   expected: { state: MessageStatus; reason: string; version: number } = {
     state: 'delivered',
     reason: 'delivery_complete',
-    version: 4,
+    version: 6,
   },
 ): Promise<string[]> {
   const problems: string[] = [];

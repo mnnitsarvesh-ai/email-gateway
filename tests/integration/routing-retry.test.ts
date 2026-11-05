@@ -140,7 +140,8 @@ describe.skipIf(gate.skip)('routing stack: outage, retry and failover (§9 item 
       const key = { id: messageId, receivedAt: delivered!.receivedAt };
       await waitForLifecycle(fx.prisma, key, 'delivered', 'delivery_complete');
       const path = await pathOf(fx.prisma, key);
-      expect(path.slice(0, 4)).toEqual(DELIVERED_PATH('delivery_retry', '').slice(0, 4));
+      // Ingestion, scan (step 4.1), pass-through approval and planning: the first six rows.
+      expect(path.slice(0, 6)).toEqual(DELIVERED_PATH('delivery_retry', '').slice(0, 6));
       expect(path).toContainEqual(['delivery_pending', 'delivery_retry', 'delivery_deferred']);
       // From delivery_retry (E23), or from delivery_pending if a requeue signal came first (E22).
       expect(path.at(-1)?.slice(1)).toEqual(['delivered', 'delivery_complete']);

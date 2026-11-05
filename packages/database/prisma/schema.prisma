@@ -14,7 +14,7 @@
 // - Timestamps are DATETIME(3) UTC. Append-only tables have no `updated_at`.
 // - snake_case table and column names via @@map / @map. Enum values are only ever appended.
 // - No email bodies or attachment content: only S3 object keys, sizes and hashes.
-// - Partitioned tables (19, marked PARTITIONED below) use a composite primary key
+// - Partitioned tables (20, marked PARTITIONED below) use a composite primary key
 //   (id, <partition column>), have no foreign keys in either direction, and every unique key
 //   ends with the partition column. The PARTITION BY clause is hand-written in the migration
 //   SQL; Prisma does not model partitions. Child rows of a message copy the message's
@@ -299,6 +299,8 @@ enum ScanStatus {
   timed_out
 }
 
+/// Per-engine outcome of one scan attempt. Append-only: step 4.1 appended `spam` and `unknown`
+/// (docs/plan/steps/09-rspamd.md S7). Non-final attempt rows hold `timeout` or `error` only.
 enum EngineOutcome {
   clean
   suspicious
@@ -306,6 +308,38 @@ enum EngineOutcome {
   error
   timeout
   skipped
+  spam
+  unknown
+}
+
+/// Aggregate verdict of a scan round (`email_scans.scan_verdict`, step 4.1 S6, S7). Lower-case,
+/// identical to SCAN_VERDICTS of @email-gateway/security-contracts.
+enum ScanVerdict {
+  clean
+  spam
+  suspicious
+  malicious
+  unknown
+  timeout
+  error
+}
+
+/// SPF / DKIM / DMARC / ARC result (RFC 8601 result names; step 4.1 S9).
+enum AuthOutcome {
+  pass
+  fail
+  softfail
+  neutral
+  none
+  temperror
+  permerror
+}
+
+/// Published DMARC policy of the evaluated domain (step 4.1 S9).
+enum DmarcPolicy {
+  none
+  quarantine
+  reject
 }
 
 enum IndicatorType {
@@ -630,6 +664,7 @@ model Organization {
   archiveRetentionPolicies ArchiveRetentionPolicy[]
   archiveLegalHolds        ArchiveLegalHold[]
   webhookSubscriptions     WebhookSubscription[]
+  scanEngineSettings       ScanEngineSetting[]
 
   @@index([status])
   @@index([status, purgeAfter])
@@ -747,26 +782,27 @@ model User {
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
 
-  userRoles               UserRole[]               @relation("UserRoleUser")
-  grantedUserRoles        UserRole[]               @relation("UserRoleGrantedBy")
-  sessions                UserSession[]
-  tokens                  UserToken[]              @relation("UserTokenUser")
-  createdTokens           UserToken[]              @relation("UserTokenCreatedBy")
-  mfaRecoveryCodes        UserMfaRecoveryCode[]
-  createdApiKeys          ApiKey[]
-  updatedYaraRules        YaraRule[]
-  createdEmailPolicies    EmailPolicy[]
-  publishedPolicyVersions PolicyVersion[]
-  createdPolicyExceptions PolicyException[]
-  createdSuppressions     DeliverySuppression[]
-  quarantineMessages      QuarantineMessage[]
-  quarantineActions       QuarantineAction[]
-  createdLegalHolds       ArchiveLegalHold[]       @relation("LegalHoldCreatedBy")
-  releasedLegalHolds      ArchiveLegalHold[]       @relation("LegalHoldReleasedBy")
-  createdWebhooks         WebhookSubscription[]
-  updatedSystemSettings   SystemSetting[]
-  createdSmtpConnectors   SmtpConnector[]
-  createdRecipients       DomainRecipientAddress[]
+  userRoles                 UserRole[]               @relation("UserRoleUser")
+  grantedUserRoles          UserRole[]               @relation("UserRoleGrantedBy")
+  sessions                  UserSession[]
+  tokens                    UserToken[]              @relation("UserTokenUser")
+  createdTokens             UserToken[]              @relation("UserTokenCreatedBy")
+  mfaRecoveryCodes          UserMfaRecoveryCode[]
+  createdApiKeys            ApiKey[]
+  updatedYaraRules          YaraRule[]
+  createdEmailPolicies      EmailPolicy[]
+  publishedPolicyVersions   PolicyVersion[]
+  createdPolicyExceptions   PolicyException[]
+  createdSuppressions       DeliverySuppression[]
+  quarantineMessages        QuarantineMessage[]
+  quarantineActions         QuarantineAction[]
+  createdLegalHolds         ArchiveLegalHold[]       @relation("LegalHoldCreatedBy")
+  releasedLegalHolds        ArchiveLegalHold[]       @relation("LegalHoldReleasedBy")
+  createdWebhooks           WebhookSubscription[]
+  updatedSystemSettings     SystemSetting[]
+  createdSmtpConnectors     SmtpConnector[]
+  createdRecipients         DomainRecipientAddress[]
+  updatedScanEngineSettings ScanEngineSetting[]
 
   @@unique([organizationId, email])
   @@index([organizationId, status])
@@ -1335,6 +1371,10 @@ model EmailMessage {
   emlSha256         String           @map("eml_sha256") @db.Char(64)
   clientIp          String?          @map("client_ip") @db.VarChar(45)
   clientHelo        String?          @map("client_helo") @db.VarChar(255)
+  /// Verified client host name from Postfix XFORWARD NAME (step 4.1 §3): Postfix's literal
+  /// `unknown` is stored as `unknown`; `[UNAVAILABLE]`, `[TEMPUNAVAIL]` and a missing attribute
+  /// are NULL. Trusted envelope data for the scan engines (§2.0 invariant 7).
+  clientName        String?          @map("client_name") @db.VarChar(255)
   /// Postfix queue id; collation utf8mb4_bin (case-sensitive Postfix queue ids, step 3.3).
   mtaQueueId        String?          @map("mta_queue_id") @db.VarChar(32)
   finalVerdict      MessageVerdict?  @map("final_verdict")
@@ -1575,48 +1615,132 @@ model EmailMessageStatusHistory {
 // ---------------------------------------------------------------------------------------------
 
 /// PARTITIONED by RANGE COLUMNS(received_at), monthly. No foreign keys.
+/// One row per scan round `(message_id, lifecycle_round, received_at)` (step 4.1 S3); old rounds'
+/// rows are never updated or deleted by a newer round.
 model EmailScan {
-  id             BigInt          @default(autoincrement()) @db.UnsignedBigInt
-  receivedAt     DateTime        @map("received_at") @db.DateTime(3)
-  messageId      BigInt          @map("message_id") @db.UnsignedBigInt
-  organizationId BigInt          @map("organization_id") @db.UnsignedBigInt
-  scanKind       ScanKind        @default(initial) @map("scan_kind")
-  attempt        Int             @default(1) @db.UnsignedSmallInt
-  status         ScanStatus      @default(pending)
-  verdict        MessageVerdict?
-  riskScore      Int?            @map("risk_score") @db.UnsignedSmallInt
-  scoringVersion String?         @map("scoring_version") @db.VarChar(32)
-  startedAt      DateTime?       @map("started_at") @db.DateTime(3)
-  completedAt    DateTime?       @map("completed_at") @db.DateTime(3)
-  createdAt      DateTime        @default(now()) @map("created_at") @db.DateTime(3)
-  updatedAt      DateTime        @updatedAt @map("updated_at") @db.DateTime(3)
+  id              BigInt          @default(autoincrement()) @db.UnsignedBigInt
+  receivedAt      DateTime        @map("received_at") @db.DateTime(3)
+  messageId       BigInt          @map("message_id") @db.UnsignedBigInt
+  organizationId  BigInt          @map("organization_id") @db.UnsignedBigInt
+  scanKind        ScanKind        @default(initial) @map("scan_kind")
+  /// Unused since step 4.1 (always 1): a round is identified by `lifecycle_round`; engine attempts
+  /// are rows of scan_engine_results.
+  attempt         Int             @default(1) @db.UnsignedSmallInt
+  status          ScanStatus      @default(pending)
+  /// Risk scoring (step 5.1); not written by the scan stage.
+  verdict         MessageVerdict?
+  riskScore       Int?            @map("risk_score") @db.UnsignedSmallInt
+  scoringVersion  String?         @map("scoring_version") @db.VarChar(32)
+  startedAt       DateTime?       @map("started_at") @db.DateTime(3)
+  completedAt     DateTime?       @map("completed_at") @db.DateTime(3)
+  createdAt       DateTime        @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt       DateTime        @updatedAt @map("updated_at") @db.DateTime(3)
+  /// email_messages.lifecycle_round of the round this row scans (step 4.1 S3).
+  lifecycleRound  Int             @default(0) @map("lifecycle_round") @db.UnsignedSmallInt
+  /// Aggregate verdict of the round (S6); NULL while running.
+  scanVerdict     ScanVerdict?    @map("scan_verdict")
+  /// JSON array of engine names required when the round opened (snapshot, S4).
+  requiredEngines Json?           @map("required_engines")
+  /// JSON array of reason codes (≤ 32), set at completion (S6).
+  reasonCodes     Json?           @map("reason_codes")
+  /// Event id of the event that opened the round (parsed.v1 or rescan_requested.v1).
+  triggerEventId  String?         @map("trigger_event_id") @db.Char(36)
+  /// The deadline sweeper finalizes a round still running after this instant (S10).
+  deadlineAt      DateTime?       @map("deadline_at") @db.DateTime(3)
 
   @@id([id, receivedAt])
-  @@unique([messageId, scanKind, attempt, receivedAt])
+  @@unique([messageId, lifecycleRound, receivedAt])
+  @@index([status, deadlineAt])
   @@map("email_scans")
 }
 
 /// PARTITIONED by RANGE COLUMNS(received_at), monthly. `evidence` holds variable engine
 /// evidence. No foreign keys.
 model ScanEngineResult {
-  id             BigInt        @default(autoincrement()) @db.UnsignedBigInt
-  receivedAt     DateTime      @map("received_at") @db.DateTime(3)
-  scanId         BigInt        @map("scan_id") @db.UnsignedBigInt
-  messageId      BigInt        @map("message_id") @db.UnsignedBigInt
-  organizationId BigInt        @map("organization_id") @db.UnsignedBigInt
+  id              BigInt        @default(autoincrement()) @db.UnsignedBigInt
+  receivedAt      DateTime      @map("received_at") @db.DateTime(3)
+  scanId          BigInt        @map("scan_id") @db.UnsignedBigInt
+  messageId       BigInt        @map("message_id") @db.UnsignedBigInt
+  organizationId  BigInt        @map("organization_id") @db.UnsignedBigInt
   /// rspamd, clamav, yara, url, bec, dlp, sandbox, reputation.
-  engine         String        @db.VarChar(32)
-  engineVersion  String?       @map("engine_version") @db.VarChar(64)
-  outcome        EngineOutcome
-  score          Decimal?      @db.Decimal(8, 3)
-  durationMs     Int           @map("duration_ms") @db.UnsignedInt
-  evidence       Json?
-  completedAt    DateTime      @map("completed_at") @db.DateTime(3)
-  createdAt      DateTime      @default(now()) @map("created_at") @db.DateTime(3)
+  engine          String        @db.VarChar(32)
+  engineVersion   String?       @map("engine_version") @db.VarChar(64)
+  outcome         EngineOutcome
+  score           Decimal?      @db.Decimal(8, 3)
+  durationMs      Int           @map("duration_ms") @db.UnsignedInt
+  /// `{ signals[], auth?, rcptTruncated? }` (step 4.1 S9): scores, symbol names and bounded
+  /// symbol options; never message content.
+  evidence        Json?
+  completedAt     DateTime      @map("completed_at") @db.DateTime(3)
+  createdAt       DateTime      @default(now()) @map("created_at") @db.DateTime(3)
+  /// 1-based attempt of this engine in the round (step 4.1 S5).
+  attempt         Int           @default(1) @db.UnsignedSmallInt
+  /// True for the one final result per (scan, engine); false for a failed attempt that was
+  /// retried (outcome `timeout` or `error` only).
+  isFinal         Boolean       @default(true) @map("is_final")
+  /// READ-ONLY, generated by MySQL: `GENERATED ALWAYS AS (IF(is_final = 1, engine, NULL))
+  /// VIRTUAL`. Its unique key (scan_id, final_engine, received_at) allows at most one final row
+  /// per engine and round (NULLs are distinct). Never write it.
+  finalEngine     String?       @map("final_engine") @db.VarChar(32)
+  requiredScore   Decimal?      @map("required_score") @db.Decimal(8, 3)
+  /// Engine action (Rspamd: `no action`, `reject`, ...), informational.
+  action          String?       @db.VarChar(32)
+  /// JSON array of reason codes (≤ 32).
+  reasonCodes     Json?         @map("reason_codes")
+  /// Failure code of a timeout/error row (e.g. `eml_unavailable`, `deadline_exceeded`).
+  errorCode       String?       @map("error_code") @db.VarChar(64)
+  /// `<mapping version>;p=<platform hash>;t=<row version | none>` (S8).
+  settingsVersion String?       @map("settings_version") @db.VarChar(96)
+
+  @@id([id, receivedAt])
+  @@unique([scanId, engine, attempt, receivedAt])
+  @@unique([scanId, finalEngine, receivedAt])
+  @@map("scan_engine_results")
+}
+
+/// PARTITIONED by RANGE COLUMNS(received_at), monthly (step 4.1 §3). Authentication results of a
+/// scan round as reported by an engine (Rspamd: SPF, DKIM, DMARC, ARC). No foreign keys.
+model EmailAuthResult {
+  id             BigInt       @default(autoincrement()) @db.UnsignedBigInt
+  receivedAt     DateTime     @map("received_at") @db.DateTime(3)
+  messageId      BigInt       @map("message_id") @db.UnsignedBigInt
+  organizationId BigInt       @map("organization_id") @db.UnsignedBigInt
+  scanId         BigInt       @map("scan_id") @db.UnsignedBigInt
+  engine         String       @db.VarChar(32)
+  spf            AuthOutcome?
+  spfDomain      String?      @map("spf_domain") @db.VarChar(253)
+  dkim           AuthOutcome?
+  /// JSON array (≤ 10) of `{ domain, result, selector }`.
+  dkimSignatures Json?        @map("dkim_signatures")
+  dmarc          AuthOutcome?
+  dmarcPolicy    DmarcPolicy? @map("dmarc_policy")
+  dmarcDomain    String?      @map("dmarc_domain") @db.VarChar(253)
+  arc            AuthOutcome?
+  createdAt      DateTime     @default(now()) @map("created_at") @db.DateTime(3)
 
   @@id([id, receivedAt])
   @@unique([scanId, engine, receivedAt])
-  @@map("scan_engine_results")
+  @@map("email_auth_results")
+}
+
+/// Per-tenant overrides of a scan engine's platform settings (step 4.1 S8). `settings` is
+/// validated by the engine's tenant schema of @email-gateway/security-contracts on write and
+/// again at use. `version` is the compare-and-set counter of the settings API.
+model ScanEngineSetting {
+  id              BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId  BigInt   @map("organization_id") @db.UnsignedBigInt
+  engine          String   @db.VarChar(32)
+  settings        Json
+  version         Int      @default(1) @db.UnsignedInt
+  updatedByUserId BigInt?  @map("updated_by_user_id") @db.UnsignedBigInt
+  createdAt       DateTime @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  updatedBy    User?        @relation(fields: [updatedByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([organizationId, engine])
+  @@map("scan_engine_settings")
 }
 
 /// `organization_id` NULL = platform-wide intelligence.

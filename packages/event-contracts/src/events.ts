@@ -24,14 +24,112 @@ export const messageReceivedV1 = z.object({
 });
 export type MessageReceivedV1 = z.infer<typeof messageReceivedV1>;
 
-/** Published by the email worker once all required security stages report or time out. */
-export const messageScannedV1 = z.object({
-  messageId: decimalIdSchema,
-  receivedAt: z.iso.datetime(),
-  /** `email_scans.id` values produced for this message. */
-  scanIds: z.array(decimalIdSchema),
-  timedOutStages: z.array(z.string()),
-});
+/**
+ * Standardized scan verdicts (step 4.1 S6, S7; ADR-0026), lower-case. Mirrors `SCAN_VERDICTS` of
+ * `@email-gateway/security-contracts` (event-contracts has no dependency on it; the email-worker,
+ * which depends on both, asserts that the lists are equal).
+ */
+export const SCAN_VERDICT_VALUES = [
+  'clean',
+  'spam',
+  'suspicious',
+  'malicious',
+  'unknown',
+  'timeout',
+  'error',
+] as const;
+/** Per-engine outcomes: the verdicts plus `skipped` (mirrors `ENGINE_OUTCOMES`). */
+export const ENGINE_OUTCOME_VALUES = [...SCAN_VERDICT_VALUES, 'skipped'] as const;
+const scanVerdict = z.enum(SCAN_VERDICT_VALUES);
+const engineOutcome = z.enum(ENGINE_OUTCOME_VALUES);
+const FAILURE_VERDICTS: readonly string[] = ['timeout', 'error'];
+/** Dotted reason code (`spam.score`, `auth.dmarc_reject`), mirrors `REASON_CODE_PATTERN`. */
+const scanReasonCode = z
+  .string()
+  .max(64)
+  .regex(/^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$/, 'Expected a dotted lower-case reason code');
+
+/**
+ * Published by the email-worker scan stage (step 4.1 S5, S6) when a scan round completes: every
+ * required engine of the round has a final result (or the round deadline finalized it). Written
+ * through `message_outbox` (`aggregate_type = 'message'`, correlation copied from the triggering
+ * `mail.message.parsed.v1` / `mail.message.rescan_requested.v1`) in the transaction that completes
+ * the `email_scans` row and applies E6 (`scanned`) or E7 (`scan_failed`). Not written when the
+ * round was superseded (stale transition). Bound to `email.policy.evaluate` (policy, 5.2) and the
+ * `email.analytics` firehose; the dev pass-through reads it from the outbox.
+ *
+ * v1 was redefined in place by step 4.1: the step 3.2 placeholder (`scanIds`, `timedOutStages`)
+ * never had a producer or a consumer.
+ *
+ * Content rules (§2.0 invariant 2): ids, the S3 key, codes, counts and times only. No symbol, no
+ * symbol option, no address, no URL, no score: the object is strict, so a producer cannot add
+ * such a field (a new field needs a new version). Consistency: `outcome = scanned` ⇒ no required
+ * engine ended `timeout`/`error` and the verdict is not a failure; `outcome = scan_failed` ⇒ at
+ * least one required engine ended `timeout`/`error`. Engine names are unique.
+ */
+export const messageScannedV1 = z
+  .strictObject({
+    messageId: decimalIdSchema,
+    receivedAt: z.iso.datetime(),
+    direction,
+    emlS3Key: s3Key,
+    lifecycleRound: z.number().int().min(0).max(65_535),
+    /** `email_scans.id` of the round. */
+    scanId: decimalIdSchema,
+    scanKind: z.enum(['initial', 'rescan']),
+    outcome: z.enum(['scanned', 'scan_failed']),
+    /** Aggregate verdict of the round (`email_scans.scan_verdict`). */
+    verdict: scanVerdict,
+    engines: z
+      .array(
+        z.strictObject({
+          engine: z.string().regex(/^[a-z][a-z0-9_]{0,31}$/, 'Expected an engine name'),
+          required: z.boolean(),
+          outcome: engineOutcome,
+          /** Attempts of this engine in the round, the final one included. */
+          attempts: z.number().int().min(1).max(65_535),
+        }),
+      )
+      .min(1)
+      .max(16),
+    /** Union of the final results' reason codes (`email_scans.reason_codes`), at most 32. */
+    reasonCodes: z.array(scanReasonCode).max(32),
+    completedAt: z.iso.datetime(),
+  })
+  .superRefine((payload, ctx) => {
+    const names = payload.engines.map((e) => e.engine);
+    if (new Set(names).size !== names.length) {
+      ctx.addIssue({ code: 'custom', path: ['engines'], message: 'Duplicate engine' });
+    }
+    if (new Set(payload.reasonCodes).size !== payload.reasonCodes.length) {
+      ctx.addIssue({ code: 'custom', path: ['reasonCodes'], message: 'Duplicate reason code' });
+    }
+    const requiredFailure = payload.engines.some(
+      (e) => e.required && FAILURE_VERDICTS.includes(e.outcome),
+    );
+    if (payload.outcome === 'scanned') {
+      if (requiredFailure) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['engines'],
+          message: 'scanned requires every required engine to have a definite outcome',
+        });
+      }
+      if (FAILURE_VERDICTS.includes(payload.verdict)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['verdict'],
+          message: 'scanned cannot carry a timeout or error verdict',
+        });
+      }
+    } else if (!requiredFailure) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['outcome'],
+        message: 'scan_failed requires at least one required engine with timeout or error',
+      });
+    }
+  });
 export type MessageScannedV1 = z.infer<typeof messageScannedV1>;
 
 /** Published by the policy engine with the final action for the message. */

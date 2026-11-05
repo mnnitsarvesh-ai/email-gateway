@@ -1,4 +1,5 @@
 import { stack } from './env';
+import { SCAN_HOW_TO_START, scanStageProblems } from './scan-stage';
 import { smtpStackGate, type SmtpStackGate } from './smtp-stack';
 
 /**
@@ -7,6 +8,8 @@ import { smtpStackGate, type SmtpStackGate } from './smtp-stack';
  * ready email-worker on EMAIL_WORKER_HOST_PORT (the apps-profile container or a host process)
  * that actually runs the MIME ingestion stage. A phase-0 email-worker image is also "ready", so
  * the gate checks that `/metrics` exports the step 3.1 series (`MIME_INGESTION_ENABLED=true`).
+ * Since step 4.1 every parsed message is scanned and then approved by the pass-through, so the
+ * gate also requires the scan stage (`scanStageProblems`, docs/plan/steps/09-rspamd.md S15).
  * Missing pieces FAIL the suite with an explanation; only `SMTP_STACK_TESTS=skip` skips it.
  */
 const HOW_TO_START = [
@@ -65,8 +68,13 @@ async function detect(): Promise<SmtpStackGate> {
       );
     }
   }
+  const scan = await scanStageProblems();
+  problems.push(...scan);
   return {
     ...base,
-    problem: problems.length > 0 ? `${problems.join('\n')}\n${HOW_TO_START}` : undefined,
+    problem:
+      problems.length > 0
+        ? `${problems.join('\n')}\n${HOW_TO_START}${scan.length > 0 ? `\n${SCAN_HOW_TO_START}` : ''}`
+        : undefined,
   };
 }

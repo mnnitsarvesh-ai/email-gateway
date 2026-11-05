@@ -36,6 +36,8 @@ spec:
             - configMapRef: { name: email-gateway-config }
           env:
             - { name: HTTP_PORT, value: '3020' }
+            # The MIME role only (step 4.1 S1): the scan role runs as email-worker-scan below.
+            - { name: SCAN_ENABLED, value: 'false' }
             # MIME ingestion (step 3.1, docs/plan/steps/06-mime-ingestion.md §5); defaults.
             - { name: MIME_INGESTION_ENABLED, value: 'true' }
             - { name: MIME_CONCURRENCY, value: '4' }
@@ -139,3 +141,167 @@ spec:
   minAvailable: 1
   selector:
     matchLabels: { app.kubernetes.io/name: email-worker }
+---
+# The scan role of the same image (step 4.1 S1, docs/plan/steps/09-rspamd.md): consumes the
+# engine queues (scan.spam) as role user eg-scanner, scans with the Rspamd normal-worker pool and
+# runs the round deadline sweeper (one leader per cluster through a MySQL advisory lock). Scaled
+# independently of the MIME Deployment; queue-lag autoscaling (scan.spam ready messages,
+# scan_event_lag_seconds) needs an external-metrics adapter and is configured per environment,
+# the base HPA scales on CPU.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: email-worker-scan
+  labels:
+    {
+      app.kubernetes.io/name: email-worker-scan,
+      app.kubernetes.io/component: scan,
+      app.kubernetes.io/part-of: email-gateway,
+    }
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels: { app.kubernetes.io/name: email-worker-scan }
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  template:
+    metadata:
+      labels:
+        {
+          app.kubernetes.io/name: email-worker-scan,
+          app.kubernetes.io/component: scan,
+          app.kubernetes.io/part-of: email-gateway,
+        }
+    spec:
+      serviceAccountName: email-worker-scan
+      automountServiceAccountToken: false
+      # In-flight scans finish (up to SCAN_RSPAMD_TIMEOUT_MS), held retries are requeued.
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile: { type: RuntimeDefault }
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app.kubernetes.io/name: email-worker-scan }
+      containers:
+        - name: email-worker
+          image: email-gateway/email-worker:latest
+          ports:
+            - { name: http, containerPort: 3020 }
+          envFrom:
+            - configMapRef: { name: email-gateway-config }
+          env:
+            - { name: HTTP_PORT, value: '3020' }
+            # The scan role only (S1).
+            - { name: MIME_INGESTION_ENABLED, value: 'false' }
+            - { name: SCAN_ENABLED, value: 'true' }
+            - { name: SCAN_ENGINES, value: rspamd }
+            # Security scanning (step 4.1 §5, S5, S8, S10); defaults. SCAN_RSPAMD_URL,
+            # RSPAMD_CONTROLLER_URL and the SCAN_RSPAMD_* platform thresholds come from the
+            # ConfigMap (shared with the api).
+            - { name: SCAN_RSPAMD_CONCURRENCY, value: '8' }
+            - { name: SCAN_RSPAMD_TIMEOUT_MS, value: '20000' }
+            - { name: SCAN_RSPAMD_MAX_ATTEMPTS, value: '6' }
+            - { name: SCAN_RSPAMD_MAX_BYTES, value: '26214400' }
+            - { name: SCAN_RETRY_BASE_MS, value: '2000' }
+            - { name: SCAN_RETRY_MAX_MS, value: '60000' }
+            - { name: SCAN_S3_TIMEOUT_MS, value: '30000' }
+            - { name: SCAN_DB_TIMEOUT_MS, value: '15000' }
+            - { name: SCAN_ROUND_DEADLINE_SECONDS, value: '1800' }
+            - { name: SCAN_SWEEP_INTERVAL_MS, value: '30000' }
+            - { name: SCAN_SWEEP_LOOKBACK_HOURS, value: '48' }
+            - { name: SCAN_SWEEP_BATCH_SIZE, value: '200' }
+            - { name: SCAN_BREAKER_FAILURE_THRESHOLD, value: '5' }
+            - { name: SCAN_BREAKER_FAILURE_RATIO, value: '0.5' }
+            - { name: SCAN_BREAKER_WINDOW, value: '20' }
+            - { name: SCAN_BREAKER_OPEN_MS, value: '15000' }
+            - { name: SCAN_BREAKER_HALF_OPEN_PROBES, value: '1' }
+            - { name: SCAN_SETTINGS_CACHE_TTL_MS, value: '30000' }
+            - { name: SCAN_ENGINE_VERSION_TTL_MS, value: '300000' }
+            # Secrets are mounted as files by External Secrets and read via the <KEY>_FILE convention.
+            - { name: DATABASE_URL_FILE, value: /var/run/secrets/gateway/database-url }
+            # Role user eg-scanner (step 4.1 S1/S2): read scan.spam, write email.security and
+            # email.events; comma-separated amqps:// URLs of the broker nodes.
+            - {
+                name: RABBITMQ_SCANNER_URL_FILE,
+                value: /var/run/secrets/gateway/rabbitmq-scanner-url,
+              }
+            # Read password of the Rspamd controller (engine version when a reply has no Server
+            # header). The enable password (training) is held by the api only (S18).
+            - {
+                name: RSPAMD_CONTROLLER_PASSWORD_FILE,
+                value: /var/run/secrets/gateway/rspamd-controller-password,
+              }
+            - { name: REDIS_URL_FILE, value: /var/run/secrets/gateway/redis-url }
+          volumeMounts:
+            - { name: secrets, mountPath: /var/run/secrets/gateway, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+          readinessProbe:
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /health/live, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          startupProbe:
+            httpGet: { path: /health/live, port: http }
+            periodSeconds: 5
+            failureThreshold: 24
+          # The EML is streamed to Rspamd (never buffered): memory is bounded by the handler
+          # concurrency, not the message size.
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+      volumes:
+        - name: secrets
+          secret: { secretName: email-gateway-secrets }
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: email-worker-scan
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: email-worker-scan
+  labels: { app.kubernetes.io/name: email-worker-scan }
+spec:
+  selector: { app.kubernetes.io/name: email-worker-scan }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: email-worker-scan
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: email-worker-scan }
+  minReplicas: 3
+  maxReplicas: 30
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 65 }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: email-worker-scan
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: email-worker-scan }

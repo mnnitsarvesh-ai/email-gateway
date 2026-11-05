@@ -11,6 +11,8 @@ import { mimeLimitsFromConfig } from './mime-ingestion/limits';
 const base = {
   DATABASE_URL: 'mysql://test:test@localhost:3306/test',
   RABBITMQ_EMAIL_WORKER_URL: 'amqp://ew:secret-pw@localhost:5672/email-gateway',
+  RABBITMQ_SCANNER_URL: 'amqp://sc:scan-pw@localhost:5672/email-gateway',
+  SCAN_RSPAMD_URL: 'http://127.0.0.1:11333',
   REDIS_URL: 'redis://localhost:6379',
   S3_REGION: 'ap-south-1',
   S3_BUCKET_MAIL: 'test-mail',

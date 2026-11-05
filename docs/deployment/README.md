@@ -12,7 +12,7 @@
 ## Topology
 
 - **EKS** runs the stateless Node services and the admin portal (`infrastructure/kubernetes/base`). Each Deployment has liveness, readiness and startup probes, an HPA, a PDB, zone spread and a hardened security context.
-- **EC2 Auto Scaling Groups** run Postfix inbound and outbound, with EBS spools behind an NLB on port 25. The spool must outlive any pod. Details (listeners, security groups, static egress IPs, drain and instance refresh, DKIM signer and redis-dkim): [SMTP gateway deployment](smtp-gateway.md). Routing per direction, the delivery log and its status-reader sidecar, retry schedule and egress rules (step 2.3): [Mail routing and delivery tracking](mail-routing.md).
+- **EC2 Auto Scaling Groups** run Postfix inbound and outbound, with EBS spools behind an NLB on port 25. The spool must outlive any pod. Details (listeners, security groups, static egress IPs, drain and instance refresh, DKIM signer and redis-dkim): [SMTP gateway deployment](smtp-gateway.md). The inbound Rspamd (milter and scan engine, step 4.1): [Rspamd deployment](rspamd.md). Routing per direction, the delivery log and its status-reader sidecar, retry schedule and egress rules (step 2.3): [Mail routing and delivery tracking](mail-routing.md).
 - **Managed services** (via Terraform): RDS/Aurora MySQL 8.4 (writer plus a reader endpoint for the api's control-plane reads), ElastiCache Redis, Amazon MQ for RabbitMQ (or self-managed), Amazon OpenSearch, S3 + KMS, and ClickHouse (Cloud or EC2).
 
 ## Release flow
@@ -86,6 +86,10 @@ The api verifies customer domains and checks their MX, SPF, DKIM and DMARC recor
 ### SMTP gateway (step 2.2)
 
 Inbound MX (`postfix`), outbound MTA (`postfix-outbound`: submission 587, connector relay 25, reinjection 10026/10027), the DKIM signer `rspamd-outbound` and its key store `redis-dkim`, and the test-only sinks of the `smtp-test` profile are described in [smtp-gateway.md](smtp-gateway.md), including every environment key, the fail-closed behaviour without smtp-adapter and the deviations from the design. New secrets: `REDIS_DKIM_WRITER_PASSWORD`, `REDIS_DKIM_READER_PASSWORD`, `REDIS_DKIM_PROBE_PASSWORD` (redis-dkim, rspamd-outbound; as URLs for the api and smtp-adapter) and `GATEWAY_TRACE_SECRET` (smtp-adapter).
+
+### Security scanning (step 4.1)
+
+The inbound `rspamd` is both the SMTP-time milter of the inbound Postfix (rejects only GTUBE and score >= `RSPAMD_MILTER_REJECT_SCORE`; Postfix **accepts** when it is down, `milter_default_action = accept`, [ADR-0027](../architecture/adr/0027-rspamd-milter-policy.md)) and the post-queue scan engine of the email-worker's scan role (`/checkv2`, [ADR-0026](../architecture/adr/0026-security-scan-pipeline.md)). Topology, every `RSPAMD_*` key, production feeds (Spamhaus DQS, SURBL/URIBL, OpenPhish, bad-URL map) as configuration, the recursive resolver requirement, dedicated Redis and sizing, Bayes/fuzzy operations, memory, local verification and the deviations from the design: [rspamd.md](rspamd.md). New secrets: `RSPAMD_CONTROLLER_PASSWORD` (rspamd, email-worker), `RSPAMD_CONTROLLER_ENABLE_PASSWORD` (rspamd, api), `RABBITMQ_SCANNER_PASSWORD` (rabbitmq-init, email-worker scan role), optional `RSPAMD_SPAMHAUS_DQS_KEY` (rspamd, production).
 
 ## Terraform
 

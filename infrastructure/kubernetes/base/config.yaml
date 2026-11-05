@@ -55,3 +55,16 @@ data:
   DOMAIN_RECHECK_INCOMPLETE_SECONDS: '1800'
   DOMAIN_RECHECK_INTERVAL_SECONDS: '86400'
   DKIM_ROTATION_OVERLAP_DAYS: '7'
+  # Security scanning (step 4.1 §5, S8): the inbound Rspamd scan pool (normal worker /checkv2 and
+  # controller), and the platform Rspamd thresholds read by both the api and email-worker-scan
+  # (they must agree: the api validates tenant overrides against them). Rspamd endpoints are set
+  # per environment.
+  SCAN_RSPAMD_URL: http://rspamd-scan.replace-per-environment.invalid:11333
+  RSPAMD_CONTROLLER_URL: http://rspamd-scan.replace-per-environment.invalid:11334
+  SCAN_RSPAMD_SPAM_SCORE: '6'
+  SCAN_RSPAMD_SUSPICIOUS_SCORE: '4'
+  SCAN_RSPAMD_SCORE_MIN: '1'
+  SCAN_RSPAMD_SCORE_MAX: '15'
+  SCAN_RSPAMD_PHISHING_VERDICT: suspicious
+  SCAN_RSPAMD_DMARC_REJECT_VERDICT: suspicious
+  SCAN_RSPAMD_AUTH_FAILURE_VERDICT: reason_only

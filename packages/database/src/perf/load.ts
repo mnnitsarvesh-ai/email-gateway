@@ -501,6 +501,9 @@ export async function loadSyntheticData(client: SqlClient, opts: LoadOptions): P
           sqlTime(m.receivedMs + 1500),
           m.received,
           m.received,
+          // Step 4.1 S3: one row per scan round, unique (message_id, lifecycle_round, received_at).
+          s,
+          m.verdict === 'malware' ? 'malicious' : 'clean',
         ]);
         scanOwners.push(k);
       }
@@ -703,6 +706,8 @@ export async function loadSyntheticData(client: SqlClient, opts: LoadOptions): P
         'completed_at',
         'created_at',
         'updated_at',
+        'lifecycle_round',
+        'scan_verdict',
       ],
       scanRows,
       true,

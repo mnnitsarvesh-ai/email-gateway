@@ -1,6 +1,6 @@
 # ADR-0007: Rspamd, ClamAV and YARA behind one engine contract
 
-**Status:** Accepted
+**Status:** Superseded by [ADR-0026](0026-security-scan-pipeline.md) (step 4.1): the engine contract and outcome set are replaced by standardized verdicts and per-engine scan queues; the SMTP-time milter behaviour is now [ADR-0027](0027-rspamd-milter-policy.md). Rspamd, ClamAV and YARA remain the chosen engines.
 
 **Decision.**
 

@@ -24,6 +24,12 @@ export interface LmtpClientInfo {
   clientAddress: string | null;
   /** XFORWARD HELO: the original SMTP client's HELO name. */
   clientHelo: string | null;
+  /**
+   * XFORWARD NAME: the original SMTP client's verified host name (lower-case, no trailing dot),
+   * Postfix's literal `unknown` when it has none; null when the attribute is missing, empty,
+   * `[UNAVAILABLE]` or `[TEMPUNAVAIL]` (step 4.1 §3, `xForwardClientName`).
+   */
+  clientName: string | null;
 }
 
 /**
@@ -101,6 +107,23 @@ const xForwardText = (session: SMTPServerSession, key: string): string | null =>
   const value = session.xForward.get(key);
   return typeof value === 'string' && value.length > 0 ? value : null;
 };
+
+/** Postfix's placeholders for an XFORWARD attribute it does not have (XFORWARD_README). */
+const XFORWARD_UNAVAILABLE = new Set(['[unavailable]', '[tempunavail]']);
+
+/**
+ * The client host name of an XFORWARD NAME value (step 4.1 §3): host names are
+ * case-insensitive, so lower-case without the root dot; Postfix's `unknown` (no verified reverse
+ * name) is kept as `unknown`; missing, empty and the unavailable placeholders are null.
+ * smtp-server already maps `[UNAVAILABLE]` to an empty value and refuses values that are not
+ * host names, so the placeholder check is a second line of defence.
+ */
+export function xForwardClientName(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const name = value.trim().toLowerCase().replace(/\.$/, '');
+  if (name.length === 0 || XFORWARD_UNAVAILABLE.has(name)) return null;
+  return name;
+}
 
 /**
  * An LMTP server (step 2.2 D7, D13) built on `smtp-server` in LMTP mode: XFORWARD on, AUTH and
@@ -262,6 +285,7 @@ export class LmtpListener<TTransaction, TRecipient> {
       queueId: ident !== null && QUEUE_ID.test(ident) ? ident : null,
       clientAddress: xForwardText(session, 'ADDR'),
       clientHelo: xForwardText(session, 'HELO'),
+      clientName: xForwardClientName(session.xForward.get('NAME')),
     };
   }
 

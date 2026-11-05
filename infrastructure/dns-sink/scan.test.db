@@ -1,0 +1,73 @@
+; Zone scan.test (TEST-ONLY, step 4.1 S12, docs/plan/steps/09-rspamd.md §9): the authentication,
+; reputation and phishing fixtures of the scan corpus (tests/fixtures/scan-corpus). The inbound
+; rspamd uses dns-sink as its only resolver locally and in CI (RSPAMD_DNS_SERVERS). The DKIM key of
+; eg2026._domainkey.clean (also published for the ARC test sealers) is a committed TEST-ONLY key
+; (tests/fixtures/scan-corpus/keys/README.md).
+$ORIGIN scan.test.
+$TTL 60
+@       IN SOA  ns.sink.test. hostmaster.sink.test. ( 2026110502 3600 600 86400 60 )
+@       IN NS   ns.sink.test.
+
+; clean.scan.test: aligned SPF (192.0.2.10 and the stack-test client network 172.31.250.0/24 for
+; the through-Postfix clean case), DKIM selector eg2026, DMARC p=reject with strict alignment.
+clean               IN A    192.0.2.10
+clean               IN MX   10 mx.clean.scan.test.
+mx.clean            IN A    192.0.2.10
+clean               IN TXT  "v=spf1 ip4:192.0.2.10 ip4:172.31.250.0/24 -all"
+eg2026._domainkey.clean IN TXT ( "v=DKIM1; k=rsa; "
+                                 "p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtVVezRHx2A0Sg7osAACN1lfpAM4baymCjtHf50IjX9l+2tpZyZVm3Fz2gOIr0gAEqYpgIFdhU2dFT8yJ2t3panJn7Yga/7rbCsVyAoVLjtPZmqa/wnpb2QMlfv54Lx1cfkAtAPg/9i4JOMcgmiAttTa+G6i1"
+                                 "rdMEkcF7b8f4i+nCRneIis56Q5m2PuqMOiC6Zuf7Pscqk2GDAzkoUegjo4sAk2Tz4ALk/YDeEhnur+3rJCoWDKnAE6P4D2vB3phnYWNdaNRj38CbveVvk/pK5v052islQpkoJD5Z+MuJbgFn0jqYOGQcSffWI1FHHh5esG6SRjBwoYBTuFWtXdkPhQIDAQAB" )
+_dmarc.clean        IN TXT  "v=DMARC1; p=reject; adkim=s; aspf=s"
+
+; ARC test sealers (step 4.1 S7 R6, scan corpus arc/): both seal with the TEST-ONLY eg2026 key;
+; only arc-trusted.scan.test is on RSPAMD_ARC_TRUSTED_SEALERS in the local/CI test profile.
+arc-trusted         IN A    192.0.2.90
+eg2026._domainkey.arc-trusted IN TXT ( "v=DKIM1; k=rsa; "
+                                 "p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtVVezRHx2A0Sg7osAACN1lfpAM4baymCjtHf50IjX9l+2tpZyZVm3Fz2gOIr0gAEqYpgIFdhU2dFT8yJ2t3panJn7Yga/7rbCsVyAoVLjtPZmqa/wnpb2QMlfv54Lx1cfkAtAPg/9i4JOMcgmiAttTa+G6i1"
+                                 "rdMEkcF7b8f4i+nCRneIis56Q5m2PuqMOiC6Zuf7Pscqk2GDAzkoUegjo4sAk2Tz4ALk/YDeEhnur+3rJCoWDKnAE6P4D2vB3phnYWNdaNRj38CbveVvk/pK5v052islQpkoJD5Z+MuJbgFn0jqYOGQcSffWI1FHHh5esG6SRjBwoYBTuFWtXdkPhQIDAQAB" )
+arc-untrusted       IN A    192.0.2.91
+eg2026._domainkey.arc-untrusted IN TXT ( "v=DKIM1; k=rsa; "
+                                 "p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtVVezRHx2A0Sg7osAACN1lfpAM4baymCjtHf50IjX9l+2tpZyZVm3Fz2gOIr0gAEqYpgIFdhU2dFT8yJ2t3panJn7Yga/7rbCsVyAoVLjtPZmqa/wnpb2QMlfv54Lx1cfkAtAPg/9i4JOMcgmiAttTa+G6i1"
+                                 "rdMEkcF7b8f4i+nCRneIis56Q5m2PuqMOiC6Zuf7Pscqk2GDAzkoUegjo4sAk2Tz4ALk/YDeEhnur+3rJCoWDKnAE6P4D2vB3phnYWNdaNRj38CbveVvk/pK5v052islQpkoJD5Z+MuJbgFn0jqYOGQcSffWI1FHHh5esG6SRjBwoYBTuFWtXdkPhQIDAQAB" )
+
+; spoof.scan.test: only 192.0.2.10 may send (spoofed sends from 198.51.100.7 or 172.31.250.x fail
+; SPF), DMARC p=reject.
+spoof               IN A    192.0.2.20
+spoof               IN MX   10 mx.spoof.scan.test.
+mx.spoof            IN A    192.0.2.20
+spoof               IN TXT  "v=spf1 ip4:192.0.2.10 -all"
+_dmarc.spoof        IN TXT  "v=DMARC1; p=reject"
+
+; quarantine.scan.test: DMARC p=quarantine (SPF as spoof.scan.test).
+quarantine          IN A    192.0.2.30
+quarantine          IN MX   10 mx.quarantine.scan.test.
+mx.quarantine       IN A    192.0.2.30
+quarantine          IN TXT  "v=spf1 ip4:192.0.2.10 -all"
+_dmarc.quarantine   IN TXT  "v=DMARC1; p=quarantine"
+
+; Test IP blocklist (rspamd rule EG_TEST_RBL): 192.0.2.66 is listed.
+rbl                 IN A    192.0.2.53
+66.2.0.192.rbl      IN A    127.0.0.2
+66.2.0.192.rbl      IN TXT  "Listed in the scan.test test RBL"
+
+; Test domain blocklist (rspamd rule EG_TEST_DBL, full host names): listed-spam.scan.test.
+dbl                 IN A    192.0.2.53
+listed-spam.scan.test.dbl   IN A   127.0.1.2
+*.listed-spam.scan.test.dbl IN A   127.0.1.2
+
+; Domains of the spam and phishing fixtures (resolvable; the host names below are what the
+; fixtures link to). bad-url.scan.test is in infrastructure/rspamd/maps/eg_bad_urls.map.
+listed-spam         IN A    192.0.2.70
+*.listed-spam       IN A    192.0.2.70
+bad-url             IN A    192.0.2.80
+*.bad-url           IN A    192.0.2.80
+
+; Sender hosts of the other fixtures (resolvable, no SPF/DKIM/DMARC records): the HELO name
+; mail.<domain> resolves to the fixture's client address.
+spam-sender         IN MX   10 mail.spam-sender.scan.test.
+mail.spam-sender    IN A    198.51.100.20
+phish-sender        IN MX   10 mail.phish-sender.scan.test.
+mail.phish-sender   IN A    198.51.100.30
+anomaly-sender      IN MX   10 mail.anomaly-sender.scan.test.
+mail.anomaly-sender IN A    198.51.100.40
+mail.spoof-sender   IN A    198.51.100.7

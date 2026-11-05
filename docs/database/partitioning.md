@@ -1,6 +1,6 @@
 # Partitioning
 
-Nineteen high-volume tables are range-partitioned by time ([ADR-0014](../architecture/adr/0014-mysql-data-model-partitioning-read-write-split.md) §3, design [D3](../plan/steps/01-database.md#d3-partitioning-adr-0014-3); step 2.3 added `delivery_reinjections` and `delivery_status_events`, [§3](../plan/steps/05-routing.md#3-data-model-one-forward-migration-mail_routing-wp1); step 3.1 added the parse stage table `email_message_parses`, [§3](../plan/steps/06-mime-ingestion.md#3-data-model-one-forward-migration-mime_ingestion-wp1)). Dropping a partition removes a month (or a day) of rows as a metadata operation, without the undo, purge lag and binlog volume of a batched `DELETE`.
+Twenty high-volume tables are range-partitioned by time ([ADR-0014](../architecture/adr/0014-mysql-data-model-partitioning-read-write-split.md) §3, design [D3](../plan/steps/01-database.md#d3-partitioning-adr-0014-3); step 2.3 added `delivery_reinjections` and `delivery_status_events`, [§3](../plan/steps/05-routing.md#3-data-model-one-forward-migration-mail_routing-wp1); step 3.1 added the parse stage table `email_message_parses`, [§3](../plan/steps/06-mime-ingestion.md#3-data-model-one-forward-migration-mime_ingestion-wp1); step 4.1 added the authentication results table `email_auth_results`, [§3](../plan/steps/09-rspamd.md#3-data-model-one-forward-migration-scan_pipeline-wp1)). Dropping a partition removes a month (or a day) of rows as a metadata operation, without the undo, purge lag and binlog volume of a batched `DELETE`.
 
 ## MySQL constraints we design for
 
@@ -39,13 +39,14 @@ The registry is `packages/database/src/partitioning/registry.ts`. "Retention N m
 | `delivery_reinjections`        | `received_at`       | month       | 6 months   | core        |                                         |
 | `delivery_status_events`       | `received_at`       | month       | 3 months   | detail      |                                         |
 | `email_message_parses`         | `received_at`       | month       | 6 months   | core        |                                         |
+| `email_auth_results`           | `received_at`       | month       | 6 months   | core        |                                         |
 | `email_archives`               | `received_at`       | month       | never      | compliance  | `drop: false` (legal hold, step 8.1)    |
 | `bounce_events`                | `occurred_at`       | month       | 6 months   | core        |                                         |
 | `audit_logs`                   | `created_at`        | month       | never      | compliance  | `drop: false` (export is an ops action) |
 | `webhook_deliveries`           | `event_occurred_at` | month       | 2 months   | operational |                                         |
 | `message_outbox`               | `created_at`        | **day**     | 7 days     | operational | no unpublished rows                     |
 
-Not partitioned, deliberately: `message_identities` (the uniqueness anchor), `message_idempotency` (its key must not contain time, or a late redelivery would pass), `message_consumer_progress` (same key, step 3.2), `api_idempotency_keys` (the api's Idempotency-Key store, step 3.3; its key must not contain time either), `quarantine_messages` (about 5% of volume, needs foreign keys, purged by `expires_at`) and every control-plane table.
+Not partitioned, deliberately: `scan_engine_settings` (step 4.1: one row per organization and engine, needs foreign keys), `message_identities` (the uniqueness anchor), `message_idempotency` (its key must not contain time, or a late redelivery would pass), `message_consumer_progress` (same key, step 3.2), `api_idempotency_keys` (the api's Idempotency-Key store, step 3.3; its key must not contain time either), `quarantine_messages` (about 5% of volume, needs foreign keys, purged by `expires_at`) and every control-plane table.
 
 ## Maintenance job
 

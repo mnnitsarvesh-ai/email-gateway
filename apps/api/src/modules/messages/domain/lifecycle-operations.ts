@@ -31,10 +31,13 @@ export const AUDIT_ACTIONS: Readonly<Record<LifecycleOperation, string>> = {
   release: 'message.quarantine_released',
 };
 
-/** Present in the rescan response while no scan stage exists (removed by step 4.1). */
+/**
+ * The note of the rescan response (step 4.1 S14): the scan stage consumes the rescan on every
+ * registered engine's queue and records a new round.
+ */
 export const RESCAN_NOTE =
-  'scan stages are not deployed before Phase 4; the message stays in scanning until they are ' +
-  'or until its expiry deadline';
+  'the new round is scanned by every registered scan engine (step 4.1: rspamd); read its ' +
+  'results with GET /api/v1/messages/{messageId}/scans once the message leaves scanning';
 
 /** `mail.delivery.approved.v1` carries at most 1000 recipients (step 2.3 R5). */
 export const MAX_APPROVAL_RECIPIENTS = 1000;

@@ -7,11 +7,14 @@ import {
 } from './registry';
 
 /**
- * RabbitMQ topology v2 as data (step 3.2 §3, ADR-0024; v2: step 3.3 L7, ADR-0025): exactly six
- * topic exchanges and fourteen quorum queues in the vhost `email-gateway`. v2 adds the bindings of
- * `mail.message.rescan_requested.v1` (`email.security`) to the five scan queues; the exchanges,
- * queues and policies of v1 are unchanged, and `mail.message.state_changed.v1` (`email.events`)
- * reaches only the `email.analytics` firehose. `infrastructure/rabbitmq/definitions.json` is
+ * RabbitMQ topology v3 as data (step 3.2 §3, ADR-0024; v2: step 3.3 L7, ADR-0025; v3: step 4.1
+ * S2, ADR-0026): exactly six topic exchanges and fourteen quorum queues in the vhost
+ * `email-gateway`. v2 added the bindings of `mail.message.rescan_requested.v1` (`email.security`)
+ * to the five scan queues, and `mail.message.state_changed.v1` (`email.events`) reaches only the
+ * `email.analytics` firehose. v3 makes `scan.spam` a work queue (the Rspamd engine of the
+ * email-worker scan role, ledger consumer `email-worker.scan.rspamd`) and unbinds `scan.auth`
+ * (reserved: authentication results come from the Rspamd engine on `scan.spam`); the exchanges
+ * and the other queues are unchanged. `infrastructure/rabbitmq/definitions.json` is
  * generated from `TOPOLOGY` (`pnpm --filter @email-gateway/event-contracts topology:export`) and
  * imported by `infrastructure/rabbitmq/init.mjs`; services never declare, they verify passively.
  *
@@ -19,7 +22,7 @@ import {
  * target, overflow, length limits) is a per-queue policy `eg.<queue>` (Q4), so it changes without
  * re-declaring a queue.
  */
-export const TOPOLOGY_VERSION = 2;
+export const TOPOLOGY_VERSION = 3;
 export const DEFAULT_VHOST = 'email-gateway';
 
 /** The six exchanges of the topology (ADR-0024): all topic, durable, not internal. */
@@ -53,7 +56,9 @@ export type QueueName = (typeof QUEUE_NAMES)[number];
 
 /**
  * - `work`: consumed in this step; bounded by reject-publish, dead-letters to `email.dead-letter`.
- * - `dormant`: bound for a stage not built yet; bounded lossy buffer (drop-head), no consumer.
+ * - `dormant`: bound for a stage not built yet; bounded lossy buffer (drop-head), no consumer. A
+ *   dormant queue with consumer kind `none` is reserved: it keeps only its retry binding and
+ *   receives no event (v3 `scan.auth`).
  * - `delay`: per-message TTL hop of the delivery retry; expires back to its work queue.
  * - `dead-letter`: `email.dead-letter`; operators replay through the api.
  */
@@ -247,6 +252,10 @@ const parsed = (): Binding => eventBinding('email.ingestion', 'mail.message.pars
 /** Topology v2 (step 3.3 L7): an administrative rescan reaches every scan stage. */
 const rescan = (): Binding => eventBinding('email.security', 'mail.message.rescan_requested.v1');
 
+/** Reason of the reserved `scan.auth` queue (v3, step 4.1 S2). */
+export const SCAN_AUTH_RESERVED_REASON =
+  'reserved: authentication results come from the rspamd engine on scan.spam (step 4.1, ADR-0026)';
+
 export const TOPOLOGY: Topology = {
   version: TOPOLOGY_VERSION,
   exchanges: EXCHANGE_NAMES,
@@ -279,22 +288,40 @@ export const TOPOLOGY: Topology = {
       policy: policyFor('work', 'email.received'),
       description: 'Received messages awaiting MIME ingestion',
     },
-    dormant(
-      'scan.auth',
-      'email.security',
-      [parsed(), rescan()],
-      '4.1',
-      'email-worker',
-      'SPF/DKIM/DMARC results via Rspamd',
-    ),
-    dormant(
-      'scan.spam',
-      'email.security',
-      [parsed(), rescan()],
-      '4.1',
-      'email-worker',
-      'Rspamd verdict',
-    ),
+    {
+      // v3 (step 4.1 S2): no event bindings; the queue stays (fourteen queues) so a future
+      // first-party authentication engine can bind it. Only the retry binding is kept, for
+      // uniformity with the other scan queues.
+      name: 'scan.auth',
+      role: 'dormant',
+      homeExchange: 'email.security',
+      bindings: [retryBinding('email.security', 'scan.auth')],
+      consumer: { kind: 'none', reason: SCAN_AUTH_RESERVED_REASON },
+      retry: { ...DORMANT_RETRY },
+      policy: policyFor('dormant', 'scan.auth'),
+      description: 'Reserved for a first-party authentication engine (SPF/DKIM/DMARC/ARC)',
+    },
+    {
+      // v3 (step 4.1 S2): the Rspamd engine of the email-worker scan role.
+      name: 'scan.spam',
+      role: 'work',
+      homeExchange: 'email.security',
+      bindings: [parsed(), rescan(), retryBinding('email.security', 'scan.spam')],
+      consumer: {
+        kind: 'ledger',
+        ledgerName: 'email-worker.scan.rspamd',
+        service: 'email-worker',
+      },
+      retry: {
+        strategy: 'hold',
+        maxAttempts: 10,
+        baseDelayMs: 2 * SECOND,
+        maxDelayMs: MINUTE,
+        maxRetryAgeMs: 24 * HOUR,
+      },
+      policy: policyFor('work', 'scan.spam'),
+      description: 'Rspamd: spam, phishing, reputation and SPF/DKIM/DMARC/ARC (step 4.1)',
+    },
     dormant(
       'scan.url',
       'email.security',
@@ -709,7 +736,12 @@ export function validateTopology(topology: Topology): string[] {
       ) {
         add(`${q}: needs exactly one retry binding retry.${q}.# on its home exchange`);
       }
-      if (!queue.bindings.some((b) => b.routingKey.startsWith('org.'))) {
+      const eventBound = queue.bindings.some((b) => b.routingKey.startsWith('org.'));
+      if (queue.consumer.kind === 'none') {
+        // A reserved dormant queue (v3 scan.auth) receives no event at all.
+        if (queue.role !== 'dormant') add(`${q}: only a dormant queue can be reserved`);
+        if (eventBound) add(`${q}: a reserved queue has no event binding`);
+      } else if (!eventBound) {
         add(`${q}: has no event binding`);
       }
     } else if (retryBindings.length > 0) {
@@ -721,14 +753,17 @@ export function validateTopology(topology: Topology): string[] {
       add(`${q}: policy differs from the ${queue.role} policy`);
     }
 
-    const consumerKind = {
-      work: 'ledger',
-      dormant: 'planned',
-      delay: 'none',
-      'dead-letter': 'none',
+    const consumerKinds: Record<QueueRole, readonly QueueConsumerInfo['kind'][]> = {
+      work: ['ledger'],
+      // `none`: reserved (no event binding, checked above).
+      dormant: ['planned', 'none'],
+      delay: ['none'],
+      'dead-letter': ['none'],
     };
-    if (queue.consumer.kind !== consumerKind[queue.role]) {
-      add(`${q}: a ${queue.role} queue must have consumer kind ${consumerKind[queue.role]}`);
+    if (!consumerKinds[queue.role].includes(queue.consumer.kind)) {
+      add(
+        `${q}: a ${queue.role} queue must have consumer kind ${consumerKinds[queue.role].join(' or ')}`,
+      );
     }
 
     if (queue.role === 'work' || queue.role === 'dormant') {

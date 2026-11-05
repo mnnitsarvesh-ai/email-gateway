@@ -1,0 +1,484 @@
+{
+  "description": "Scan corpus of step 4.1 (docs/plan/steps/09-rspamd.md \u00a79). Each fixture is scanned with its trusted envelope through /checkv2 of the inbound rspamd (RSPAMD_RBL_PROFILE=test, dns-sink scan.test zones). expect.verdict and expect.reasonCodes are what the S7 mapping (R0-R10) gives with the platform defaults (spam 6, suspicious 4, phishing/DMARC-reject suspicious, auth failures reason only); expect.absentReasonCodes must not be mapped (optional), expect.symbols must be present, expect.absentSymbols absent, expect.auth is a partial match of normalizeReply().auth, expect.scoreRange is [min, max): the interval in which the score keeps the expected verdict (wide on purpose: the reputation module learns from every scan, so repeated runs move scores by up to about +/-2.5). calibrated records the values observed on rspamd/rspamd:3.12.1 (2026-11-05). The arc/ fixtures need RSPAMD_ARC_TRUSTED_SEALERS=arc-trusted.scan.test (local/CI test profile).",
+  "rspamdVersion": "3.12.1",
+  "platformDefaults": {
+    "spamScore": 6,
+    "suspiciousScore": 4,
+    "phishingVerdict": "suspicious",
+    "dmarcRejectVerdict": "suspicious",
+    "authFailureVerdict": "reason_only"
+  },
+  "fixtures": [
+    {
+      "file": "clean/clean-dkim-aligned.eml",
+      "class": "clean",
+      "description": "Plain text from clean.scan.test via 192.0.2.10, DKIM-signed (eg2026), SPF and DMARC aligned",
+      "envelope": {
+        "direction": "inbound",
+        "ip": "192.0.2.10",
+        "helo": "mx.clean.scan.test",
+        "hostname": "mx.clean.scan.test",
+        "from": "alice@clean.scan.test",
+        "rcpt": ["bob@customer.scan.test"]
+      },
+      "expect": {
+        "verdict": "clean",
+        "reasonCodes": ["clean.below_threshold"],
+        "symbols": ["R_SPF_ALLOW", "R_DKIM_ALLOW", "DMARC_POLICY_ALLOW"],
+        "absentSymbols": ["EG_TEST_RBL", "EG_TEST_DBL", "EG_BAD_URL", "PHISHING", "GTUBE"],
+        "auth": {
+          "spf": {
+            "result": "pass",
+            "domain": "clean.scan.test"
+          },
+          "dkim": {
+            "result": "pass",
+            "signatures": [
+              {
+                "domain": "clean.scan.test",
+                "result": "pass",
+                "selector": "eg2026"
+              }
+            ]
+          },
+          "dmarc": {
+            "result": "pass",
+            "policy": "reject",
+            "domain": "clean.scan.test"
+          },
+          "arc": {
+            "result": "none"
+          }
+        },
+        "scoreRange": [-4, 4]
+      },
+      "calibrated": {
+        "score": 0.1,
+        "action": "no action"
+      }
+    },
+    {
+      "file": "spam/gtube.eml",
+      "class": "spam",
+      "description": "GTUBE test pattern (pre-filter result: is_skipped true, passthrough_module GTUBE)",
+      "envelope": {
+        "direction": "inbound",
+        "ip": "198.51.100.20",
+        "helo": "mail.spam-sender.scan.test",
+        "hostname": "mail.spam-sender.scan.test",
+        "from": "tester@spam-sender.scan.test",
+        "rcpt": ["bob@customer.scan.test"]
+      },
+      "expect": {
+        "verdict": "spam",
+        "reasonCodes": ["spam.gtube", "spam.reject_action"],
+        "symbols": ["GTUBE"],
+        "action": "reject",
+        "passthroughModule": "GTUBE",
+        "scoreRange": [15, 15.01]
+      },
+      "calibrated": {
+        "score": 15,
+        "action": "reject"
+      }
+    },
+    {
+      "file": "spam/rbl-dbl-lottery.eml",
+      "class": "spam",
+      "description": "Lottery/pharma HTML from the RBL-listed 192.0.2.66 with URLs on the DBL-listed listed-spam.scan.test",
+      "envelope": {
+        "direction": "inbound",
+        "ip": "192.0.2.66",
+        "helo": "lottery.listed-spam.scan.test",
+        "hostname": "unknown",
+        "from": "claims@listed-spam.scan.test",
+        "rcpt": ["bob@customer.scan.test"]
+      },
+      "expect": {
+        "verdict": "spam",
+        "reasonCodes": ["spam.score", "reputation.ip_listed", "reputation.domain_listed"],
+        "symbols": ["EG_TEST_RBL", "EG_TEST_DBL"],
+        "auth": {
+          "spf": {
+            "result": "none",
+            "domain": "listed-spam.scan.test"
+          },
+          "dkim": {
+            "result": "none"
+          },
+          "dmarc": {
+            "result": "none"
+          }
+        },
+        "scoreRange": [6, 100]
+      },
+      "calibrated": {
+        "score": 13.8,
+        "action": "no action"
+      }
+    },
+    {
+      "file": "spoofed/spf-fail.eml",
+      "class": "spoofed",
+      "description": "From/envelope spoof.scan.test sent from 198.51.100.7 (SPF -all fails, DMARC p=reject fails)",
+      "envelope": {
+        "direction": "inbound",
+        "ip": "198.51.100.7",
+        "helo": "mail.spoof-sender.scan.test",
+        "hostname": "mail.spoof-sender.scan.test",
+        "from": "ceo@spoof.scan.test",
+        "rcpt": ["bob@customer.scan.test"]
+      },
+      "expect": {
+        "verdict": "spam",
+        "reasonCodes": ["spam.score", "auth.spf_fail", "auth.dmarc_reject"],
+        "symbols": ["R_SPF_FAIL", "DMARC_POLICY_REJECT"],
+        "auth": {
+          "spf": {
+            "result": "fail",
+            "domain": "spoof.scan.test"
+          },
+          "dkim": {
+            "result": "none"
+          },
+          "dmarc": {
+            "result": "fail",
+            "policy": "reject",
+            "domain": "spoof.scan.test"
+          }
+        },
+        "scoreRange": [6, 100]
+      },
+      "calibrated": {
+        "score": 7.4,
+        "action": "no action"
+      }
+    },
+    {
+      "file": "spoofed/dkim-body-altered.eml",
+      "class": "spoofed",
+      "description": "DKIM-signed by clean.scan.test, body changed after signing (SPF still aligned, so DMARC passes)",
+      "envelope": {
+        "direction": "inbound",
+        "ip": "192.0.2.10",
+        "helo": "mx.clean.scan.test",
+        "hostname": "mx.clean.scan.test",
+        "from": "alice@clean.scan.test",
+        "rcpt": ["bob@customer.scan.test"]
+      },
+      "expect": {
+        "verdict": "clean",
+        "reasonCodes": ["auth.dkim_fail"],
+        "symbols": ["R_DKIM_REJECT", "R_SPF_ALLOW"],
+        "auth": {
+          "spf": {
+            "result": "pass",
+            "domain": "clean.scan.test"
+          },
+          "dkim": {
+            "result": "fail",
+            "signatures": [
+              {
+                "domain": "clean.scan.test",
+                "result": "fail",
+                "selector": "eg2026"
+              }
+            ]
+          },
+          "dmarc": {
+            "result": "pass",
+            "policy": "reject",
+            "domain": "clean.scan.test"
+          }
+        },
+        "scoreRange": [-4, 4]
+      },
+      "calibrated": {
+        "score": 0.3,
+        "action": "no action"
+      }
+    },
+    {
+      "file": "spoofed/dmarc-reject.eml",
+      "class": "spoofed",
+      "description": "Header From spoof.scan.test (p=reject), envelope clean.scan.test from 192.0.2.10: SPF passes unaligned, no DKIM",
+      "envelope": {
+        "direction": "inbound",
+        "ip": "192.0.2.10",
+        "helo": "mx.clean.scan.test",
+        "hostname": "mx.clean.scan.test",
+        "from": "bounce@clean.scan.test",
+        "rcpt": ["bob@customer.scan.test"]
+      },
+      "expect": {
+        "verdict": "suspicious",
+        "reasonCodes": ["auth.dmarc_reject"],
+        "symbols": ["DMARC_POLICY_REJECT", "R_SPF_ALLOW"],
+        "auth": {
+          "spf": {
+            "result": "pass",
+            "domain": "clean.scan.test"
+          },
+          "dkim": {
+            "result": "none"
+          },
+          "dmarc": {
+            "result": "fail",
+            "policy": "reject",
+            "domain": "spoof.scan.test"
+          }
+        },
+        "scoreRange": [-4, 6]
+      },
+      "calibrated": {
+        "score": 3.1,
+        "action": "no action"
+      }
+    },
+    {
+      "file": "spoofed/dmarc-quarantine.eml",
+      "class": "spoofed",
+      "description": "Header From quarantine.scan.test (p=quarantine), unaligned",
+      "envelope": {
+        "direction": "inbound",
+        "ip": "192.0.2.10",
+        "helo": "mx.clean.scan.test",
+        "hostname": "mx.clean.scan.test",
+        "from": "bounce@clean.scan.test",
+        "rcpt": ["bob@customer.scan.test"]
+      },
+      "expect": {
+        "verdict": "suspicious",
+        "reasonCodes": ["auth.dmarc_quarantine"],
+        "symbols": ["DMARC_POLICY_QUARANTINE"],
+        "auth": {
+          "dmarc": {
+            "result": "fail",
+            "policy": "quarantine",
+            "domain": "quarantine.scan.test"
+          }
+        },
+        "scoreRange": [-4, 6]
+      },
+      "calibrated": {
+        "score": 2.6,
+        "action": "no action"
+      }
+    },
+    {
+      "file": "phishing/link-mismatch.eml",
+      "class": "phishing",
+      "description": "Authenticated clean.scan.test HTML whose link text https://www.paypal.com/ points at login.bad-url.scan.test",
+      "envelope": {
+        "direction": "inbound",
+        "ip": "192.0.2.10",
+        "helo": "mx.clean.scan.test",
+        "hostname": "mx.clean.scan.test",
+        "from": "alice@clean.scan.test",
+        "rcpt": ["bob@customer.scan.test"]
+      },
+      "expect": {
+        "verdict": "suspicious",
+        "reasonCodes": ["phishing.link_mismatch"],
+        "symbols": ["PHISHING"],
+        "absentSymbols": ["EG_BAD_URL", "EG_PHISH_AUTH_FAIL"],
+        "auth": {
+          "spf": {
+            "result": "pass"
+          },
+          "dkim": {
+            "result": "pass"
+          },
+          "dmarc": {
+            "result": "pass"
+          }
+        },
+        "scoreRange": [-6, 6]
+      },
+      "calibrated": {
+        "score": 2.9,
+        "action": "no action"
+      }
+    },
+    {
+      "file": "phishing/known-bad-url.eml",
+      "class": "phishing",
+      "description": "Link to bad-url.scan.test, listed in infrastructure/rspamd/maps/eg_bad_urls.map",
+      "envelope": {
+        "direction": "inbound",
+        "ip": "198.51.100.30",
+        "helo": "mail.phish-sender.scan.test",
+        "hostname": "mail.phish-sender.scan.test",
+        "from": "helpdesk@phish-sender.scan.test",
+        "rcpt": ["bob@customer.scan.test"]
+      },
+      "expect": {
+        "verdict": "malicious",
+        "reasonCodes": ["phishing.known_bad_url", "spam.score"],
+        "symbols": ["EG_BAD_URL"],
+        "scoreRange": [6, 100]
+      },
+      "calibrated": {
+        "score": 12.2,
+        "action": "no action"
+      }
+    },
+    {
+      "file": "header-anomaly/missing-and-duplicate-headers.eml",
+      "class": "header_anomaly",
+      "description": "No Date, no Message-ID, two From headers, display name carrying an address of another domain",
+      "envelope": {
+        "direction": "inbound",
+        "ip": "198.51.100.40",
+        "helo": "mail.anomaly-sender.scan.test",
+        "hostname": "mail.anomaly-sender.scan.test",
+        "from": "service@anomaly-sender.scan.test",
+        "rcpt": ["bob@customer.scan.test"]
+      },
+      "expect": {
+        "verdict": "spam",
+        "reasonCodes": ["spam.score", "header.anomaly"],
+        "symbols": [
+          "MISSING_DATE",
+          "MISSING_MID",
+          "MULTIPLE_FROM",
+          "MULTIPLE_UNIQUE_HEADERS",
+          "EG_DISPLAY_NAME_ADDRESS"
+        ],
+        "scoreRange": [6, 100]
+      },
+      "calibrated": {
+        "score": 11.9,
+        "action": "no action"
+      }
+    },
+    {
+      "file": "header-anomaly/display-name-address.eml",
+      "class": "header_anomaly",
+      "description": "From display name \"billing@bank.scan.test\" on an anomaly-sender.scan.test address",
+      "envelope": {
+        "direction": "inbound",
+        "ip": "198.51.100.40",
+        "helo": "mail.anomaly-sender.scan.test",
+        "hostname": "mail.anomaly-sender.scan.test",
+        "from": "invoices@anomaly-sender.scan.test",
+        "rcpt": ["bob@customer.scan.test"]
+      },
+      "expect": {
+        "verdict": "spam",
+        "reasonCodes": ["spam.score", "header.anomaly"],
+        "symbols": ["EG_DISPLAY_NAME_ADDRESS", "FROM_NEQ_DISPLAY_NAME"],
+        "scoreRange": [6, 100]
+      },
+      "calibrated": {
+        "score": 8.9,
+        "action": "no action"
+      }
+    },
+    {
+      "file": "arc/arc-trusted-dmarc-reject.eml",
+      "class": "arc",
+      "description": "Forwarded: header From spoof.scan.test (p=reject) fails DMARC at the gateway; valid ARC chain (i=1, cv=none) sealed by arc-trusted.scan.test, which is on RSPAMD_ARC_TRUSTED_SEALERS in the test profile and whose ARC-Authentication-Results say dmarc=pass",
+      "envelope": {
+        "direction": "inbound",
+        "ip": "192.0.2.10",
+        "helo": "mx.clean.scan.test",
+        "hostname": "mx.clean.scan.test",
+        "from": "bounce@clean.scan.test",
+        "rcpt": ["bob@customer.scan.test"]
+      },
+      "expect": {
+        "verdict": "clean",
+        "reasonCodes": ["auth.dmarc_fail_arc_trusted", "clean.below_threshold"],
+        "absentReasonCodes": ["auth.dmarc_reject", "auth.arc_fail"],
+        "symbols": ["ARC_ALLOW", "ARC_ALLOW_TRUSTED", "DMARC_POLICY_REJECT", "R_SPF_ALLOW"],
+        "absentSymbols": ["ARC_REJECT"],
+        "auth": {
+          "dmarc": {
+            "result": "fail",
+            "policy": "reject",
+            "domain": "spoof.scan.test"
+          },
+          "arc": {
+            "result": "pass"
+          }
+        },
+        "scoreRange": [-4, 4]
+      },
+      "calibrated": {
+        "score": 0.0,
+        "action": "no action"
+      }
+    },
+    {
+      "file": "arc/arc-untrusted-dmarc-reject.eml",
+      "class": "arc",
+      "description": "The same forwarded message with a valid ARC chain sealed by arc-untrusted.scan.test (not on the trusted list): anyone can seal, so ARC_ALLOW alone keeps the DMARC verdict",
+      "envelope": {
+        "direction": "inbound",
+        "ip": "192.0.2.10",
+        "helo": "mx.clean.scan.test",
+        "hostname": "mx.clean.scan.test",
+        "from": "bounce@clean.scan.test",
+        "rcpt": ["bob@customer.scan.test"]
+      },
+      "expect": {
+        "verdict": "suspicious",
+        "reasonCodes": ["auth.dmarc_reject"],
+        "absentReasonCodes": ["auth.dmarc_fail_arc_trusted", "auth.arc_fail"],
+        "symbols": ["ARC_ALLOW", "DMARC_POLICY_REJECT"],
+        "absentSymbols": ["ARC_ALLOW_TRUSTED", "ARC_REJECT"],
+        "auth": {
+          "dmarc": {
+            "result": "fail",
+            "policy": "reject",
+            "domain": "spoof.scan.test"
+          },
+          "arc": {
+            "result": "pass"
+          }
+        },
+        "scoreRange": [-4, 6]
+      },
+      "calibrated": {
+        "score": 2.1,
+        "action": "no action"
+      }
+    },
+    {
+      "file": "arc/arc-broken-chain.eml",
+      "class": "arc",
+      "description": "Sealed by arc-trusted.scan.test, body changed after sealing: the ARC-Message-Signature fails (ARC_REJECT), so the chain is not trusted",
+      "envelope": {
+        "direction": "inbound",
+        "ip": "192.0.2.10",
+        "helo": "mx.clean.scan.test",
+        "hostname": "mx.clean.scan.test",
+        "from": "bounce@clean.scan.test",
+        "rcpt": ["bob@customer.scan.test"]
+      },
+      "expect": {
+        "verdict": "suspicious",
+        "reasonCodes": ["auth.dmarc_reject", "auth.arc_fail"],
+        "absentReasonCodes": ["auth.dmarc_fail_arc_trusted"],
+        "symbols": ["ARC_REJECT", "DMARC_POLICY_REJECT"],
+        "absentSymbols": ["ARC_ALLOW", "ARC_ALLOW_TRUSTED"],
+        "auth": {
+          "dmarc": {
+            "result": "fail",
+            "policy": "reject",
+            "domain": "spoof.scan.test"
+          },
+          "arc": {
+            "result": "fail"
+          }
+        },
+        "scoreRange": [-4, 6]
+      },
+      "calibrated": {
+        "score": 4.1,
+        "action": "no action"
+      }
+    }
+  ]
+}

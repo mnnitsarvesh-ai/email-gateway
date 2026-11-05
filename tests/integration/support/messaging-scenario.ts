@@ -142,7 +142,8 @@ export class MessagingScenario {
     const settled = await pipelineCounts(this.fx.prisma, [this.org]);
     expect(exactlyOnceProblems(settled, n)).toEqual([]);
     // Step 3.3: every message delivered/delivery_complete with exactly one history row per
-    // transition (received, persisted, approved, delivery_pending, delivered).
+    // transition (received, persisted, scanning, scanned (step 4.1), approved, delivery_pending,
+    // delivered).
     expect(await lifecycleProblems(this.fx.prisma, [this.org], n)).toEqual([]);
     expect(await this.broker.depth(QUEUES.deadLetter)).toBe(deadLettersBefore);
     // Delivered exactly once to the destination mailbox.
@@ -154,6 +155,8 @@ export class MessagingScenario {
       delivered_all_s: (doneAfterMs / 1000).toFixed(1),
       parses: settled.parses,
       mime_ledger: settled.mimeLedger,
+      scans: settled.scans,
+      scanned_events: settled.scannedEvents,
       approvals: settled.approvals,
       planner_ledger: settled.plannerLedger,
       deliveries: settled.deliveries,

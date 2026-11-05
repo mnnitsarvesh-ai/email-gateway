@@ -1,0 +1,23 @@
+ARC-Seal: i=1; a=rsa-sha256; t=1793491200; cv=none; d=arc-untrusted.scan.test; s=eg2026;
+	b=jv6lvgQ48s9uqSDz/EL6PicrWv5x56y30qKylUnyjhuVvOyVmqutg/TlnYiy0tZWtQC3x/KUV5HZTVijhnIhnqEhaC0tr6DKR+VqzseGWmcq0/GrHbjNOQoZm9g+pF+83M6mYqfx9UZ+SEgqXOLY0MMtiiKGxu3qlwtbdg+obq4vwArqUV7vuLGv/+Iu2n4LzbN4MaoojEOUWgUy8d60ShkQU2vaCsNIpUmJ+xwash1HYF+mKBM74bycgyexYycobnUdiL9YAquZETz1v4u4nXpSUheRN+uvep2//TBRLBW5FFMhZ1VqZrWSEVpGL40TI6x6k04h2xyk1g3+5CsAVA==
+ARC-Message-Signature: i=1; a=rsa-sha256; c=relaxed/relaxed; d=arc-untrusted.scan.test; s=eg2026;
+	t=1793491200; h=from:to:subject:date:message-id:mime-version:content-type;
+	bh=vxlr8IiSxVoZoOSRcElmwopXS2SQcOCe+PfwXiAD9ZE=;
+	b=gIfCYX5fWE+3nVQjliuDFZFhIDO2SmOFVav9sFm3ROXq0yykPu53cATap88wkyPvjxttoz3tiMwZ2JnUfgysH5zUzf1n4cMpYinG+necqHmUXdPL/V4XIf0kzKqQ3Sv1P24CA8Os5dFrVgeHUfCIYnHwI150RM6qeB6rjA7lZ/2oKH/W0HcooCKWBzH+/E4ZJdT2lDxoP7K9T++4GJvBy1yyaDNVM15l+f1kQ4fx3X2BWVSm6VEGIh98wbOfTK0y5Dc5+ksgSlE5raRKapEqa5bfvsl6zrctHCYTA672/2RQI8VtSHe6OY67d1WaSpJ/m7i8nTeuUpmEryObZhf7UA==
+ARC-Authentication-Results: i=1; arc-untrusted.scan.test;
+	spf=pass smtp.mailfrom=spoof.scan.test;
+	dmarc=pass header.from=spoof.scan.test
+From: Payroll <payroll@spoof.scan.test>
+To: bob@customer.scan.test
+Subject: Payroll run complete
+Date: Sun, 01 Nov 2026 17:00:00 +0000
+Message-ID: <payroll-arc-untrusted-20261101@spoof.scan.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Hello,
+
+The October payroll run is complete. Your payslip is available in the staff portal; contact
+payroll if anything is unclear.
+
+Payroll team

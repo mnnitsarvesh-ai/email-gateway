@@ -1,0 +1,27 @@
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=clean.scan.test; s=eg2026;
+	t=1793491200; h=from:to:subject:date:message-id:mime-version:content-type;
+	bh=hZi291++eicc4qZmVgDArJcL03cHx8KsIdg8MG15NJs=;
+	b=RVeZZttCMhwyQhM48qOH7eC1BiBjm2ekvU8u+V99lWbpU/RdA2nnSqeZijKefrclme2OFiNq4mcK7na8p3lyLCO5qLUwrz4iaD4NZSzWruSrbh6oeFVEXEpkvrOmm74ZlDoYvPhS1ThIDdmrpZghK6RjCJAQ7ZSxCikVizQIz6XFeZWvEDM/8smil6TemYezHfUAyDArZSt0NftM+JNShCyS+fZ+T4Hc8bVoz+Wr0cNss0ghuAHyd6NwgN1DFzt3fezY6HfR50x5+EkbASZhImCrOCOE3HSYItxsbuJdw3EMofNArpXtBQQ7ISybJYYvELD9vS3WaRKT8DYGuEyEsg==
+From: Alice Martin <alice@clean.scan.test>
+To: Bob Stone <bob@customer.scan.test>
+Subject: Warehouse inventory: next steps
+Date: Sun, 01 Nov 2026 09:15:00 +0000
+Message-ID: <inventory-20261101-0915@clean.scan.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+Hello Bob,
+
+Thank you for the meeting on Tuesday. As agreed, I am sending the summary of the next steps for
+the warehouse inventory project.
+
+1. Our team finishes the stock count for the north building by Friday.
+2. Your team reviews the reconciliation sheet and sends comments next week.
+3. We schedule a short call on the 14th to agree on the final numbers.
+
+Please let me know if any of the dates do not work for you, and I will find another slot.
+
+Kind regards,
+Alice Martin
+Operations Manager, Clean Example Ltd.

@@ -46,7 +46,8 @@ function approve(m: MessageFixture, eventId: string): TransitionRequest {
     transitionKey: `evt:${eventId}:approved`,
     causationEventId: eventId,
     expectedRound: 0,
-    expectedFrom: ['persisted'],
+    // E27 (step 4.1): the dev pass-through approves a scanned message (E4 is retired).
+    expectedFrom: ['scanned'],
   };
 }
 
@@ -58,7 +59,7 @@ async function keyRows(m: MessageFixture, key: string): Promise<number> {
 
 describe('failure recovery (§9 item 9)', () => {
   it('(a) a consumer crash between transition and commit leaves nothing; the re-run applies once', async () => {
-    const m = await fx.message(org);
+    const m = await fx.message(org, { state: 'scanned' });
     const consumer = fx.consumer('crash');
     const eventId = randomUUID();
     const event: EventEnvelope<{ messageId: string }> = {
@@ -82,25 +83,25 @@ describe('failure recovery (§9 item 9)', () => {
     );
 
     await expect(handler(event)).rejects.toThrow('crash after the transition');
-    expect(await fx.row(m)).toMatchObject({ status: 'persisted', version: 1 });
-    expect(await fx.history(m)).toHaveLength(2);
+    expect(await fx.row(m)).toMatchObject({ status: 'scanned', version: 2 });
+    expect(await fx.history(m)).toHaveLength(3);
     expect(await fx.outbox(m)).toHaveLength(0);
     expect(await fx.events(m)).toHaveLength(0);
     expect(await prisma.messageIdempotency.count({ where: { consumer, eventId } })).toBe(0);
 
     crash = false;
     expect(await handler(event)).toBe('handled');
-    expect(await fx.row(m)).toMatchObject({ status: 'approved', version: 2 });
+    expect(await fx.row(m)).toMatchObject({ status: 'approved', version: 3 });
     expect(await keyRows(m, `evt:${eventId}:approved`)).toBe(1);
     expect(await fx.outbox(m)).toHaveLength(1);
 
     expect(await handler(event)).toBe('duplicate');
-    expect(await fx.history(m)).toHaveLength(3);
+    expect(await fx.history(m)).toHaveLength(4);
     expect(await fx.outbox(m)).toHaveLength(1);
   });
 
   it('(b) a writer outage after SELECT … FOR UPDATE fails the call, releases the lock, and the retry applies once', async () => {
-    const m = await fx.message(org);
+    const m = await fx.message(org, { state: 'scanned' });
     const target = writerTarget();
     const proxy = await TcpProxy.start(target.host, target.port);
     proxies.push(proxy);
@@ -149,7 +150,7 @@ describe('failure recovery (§9 item 9)', () => {
     expect(proxy.cutActive).toBe(true);
 
     // Nothing committed, and the row is not left locked: another session locks it in time.
-    expect(await fx.row(m)).toMatchObject({ status: 'persisted', version: 1 });
+    expect(await fx.row(m)).toMatchObject({ status: 'scanned', version: 2 });
     const direct = new PrismaClient({
       datasourceUrl: (() => {
         const url = new URL(requireEnv('DATABASE_URL'));
@@ -174,7 +175,7 @@ describe('failure recovery (§9 item 9)', () => {
 
     proxy.restore();
     const outcome = await transitionMessageWithRetry(proxied, request, TX);
-    expect(outcome).toMatchObject({ result: 'applied', version: 2 });
+    expect(outcome).toMatchObject({ result: 'applied', version: 3 });
     expect(await keyRows(m, request.transitionKey)).toBe(1);
     expect(await fx.outbox(m)).toHaveLength(1);
     expect(await transitionMessageWithRetry(proxied, request, TX)).toMatchObject({

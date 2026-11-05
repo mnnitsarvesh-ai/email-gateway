@@ -249,6 +249,22 @@ describe('route security (e2e, dependencies stubbed)', () => {
     }
   });
 
+  it('the step 4.1 scan routes require exactly their permission (S13, S16)', () => {
+    const expected: Record<string, string> = {
+      'get /api/v1/messages/:messageId/scans': 'message:read',
+      'get /api/v1/scan-settings': 'policy:read',
+      'put /api/v1/scan-settings/:engine': 'scan:settings_manage',
+      'delete /api/v1/scan-settings/:engine': 'scan:settings_manage',
+      'post /api/v1/platform/organizations/:organizationId/messages/:messageId/scan-training':
+        'platform:scan_training',
+    };
+    for (const [key, permission] of Object.entries(expected)) {
+      const route = routes.find((r) => `${r.method} ${r.path}` === key);
+      expect(route?.isPublic, key).toBe(false);
+      expect(route?.requirement, key).toEqual({ mode: 'all', permissions: [permission] });
+    }
+  });
+
   it('non-public routes also reject a junk bearer token and a junk API key', async () => {
     const route = routes.find((r) => !r.isPublic)!;
     const path = route.path.replace(/:[A-Za-z0-9_]+/g, randomUUID());

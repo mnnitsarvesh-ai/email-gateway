@@ -50,8 +50,16 @@ export const EXAMPLE_EVENT_PAYLOADS: Readonly<Record<RegisteredEventType, unknow
   'mail.message.scanned.v1': {
     messageId,
     receivedAt,
-    scanIds: ['11', '12'],
-    timedOutStages: [],
+    direction: 'inbound',
+    emlS3Key,
+    lifecycleRound: 0,
+    scanId: '11',
+    scanKind: 'initial',
+    outcome: 'scanned',
+    verdict: 'spam',
+    engines: [{ engine: 'rspamd', required: true, outcome: 'spam', attempts: 1 }],
+    reasonCodes: ['spam.score', 'reputation.ip_listed', 'auth.spf_fail'],
+    completedAt: '2026-11-01T10:15:31.456Z',
   },
   'mail.policy.decided.v1': {
     messageId,

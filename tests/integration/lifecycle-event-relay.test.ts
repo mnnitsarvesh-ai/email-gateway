@@ -13,7 +13,7 @@ import {
   type HostRelay,
 } from './support/host-event-relay';
 import {
-  DELIVERED_PATH,
+  FIXTURE_APPROVED_DELIVERED_PATH,
   expectConsistentHistory,
   historyOf,
   insertFixtureMessage,
@@ -298,7 +298,7 @@ describe.skipIf(gate.skip)('lifecycle stack: event-relay roles on a host instanc
       ).catch(() => undefined);
       await new Promise((r) => setTimeout(r, 5_000));
       expect(await pathOf(fx.prisma, message)).toEqual(
-        DELIVERED_PATH('delivered', 'delivery_complete'),
+        FIXTURE_APPROVED_DELIVERED_PATH('delivered', 'delivery_complete'),
       );
       await expectConsistentHistory(fx.prisma, message);
       const history = await historyOf(fx.prisma, message);

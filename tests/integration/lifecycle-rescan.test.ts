@@ -7,23 +7,29 @@ import {
   historyOf,
   insertFixtureMessage,
   lifecycleOf,
+  pathOf,
+  waitForLifecycle,
 } from './support/lifecycle';
 import { MessagingScenario } from './support/messaging-scenario';
+import { RSPAMD_LEDGER, scanRoundsOf, waitForRoundComplete } from './support/scan-stack';
 import { messagingStackGate, record } from './support/messaging-stack';
 import { organizationRef } from './support/routing';
 import { SmtpFixtures } from './support/smtp-fixtures';
 import { assertStackReady } from './support/smtp-stack';
 
 /**
- * Administrative rescan through the LIVE api, relay and broker (docs/plan/steps/
- * 08-message-lifecycle.md L10.2, L7 topology v2, §9 "Stack"). A stored message in `scan_failed`
- * (fixture, L8.6) is rescanned with `POST /api/v1/messages/{id}/rescan`: E19 moves it to
- * `scanning` with round + 1 and writes `mail.message.rescan_requested.v1`, which the relay
- * publishes to `email.security`; topology v2 binds it to the five dormant scan queues
- * (`scan.auth`, `scan.spam`, `scan.url`, `scan.attachment`, `scan.dlp`) and nothing else. Each
- * queue holds exactly one copy (peeked through the management API, then purged).
+ * Administrative rescan through the LIVE api, relay, broker and scan stage (docs/plan/steps/
+ * 08-message-lifecycle.md L10.2, §9 "Stack"; topology v3 and the scan stage of step 4.1,
+ * docs/plan/steps/09-rspamd.md S2, S14). A stored message in `scan_failed` (fixture, L8.6) is
+ * rescanned with `POST /api/v1/messages/{id}/rescan`: E19 moves it to `scanning` with round + 1
+ * and writes `mail.message.rescan_requested.v1`, which the relay publishes to `email.security`.
+ * Topology v3 binds it to FOUR scan queues: the three dormant ones (`scan.url`,
+ * `scan.attachment`, `scan.dlp`) each hold exactly one copy (peeked through the management API,
+ * then purged); `scan.spam` is consumed by the email-worker scan role, which scans round 1 and
+ * completes it (`scanned`), after which the dev pass-through approves round 1 and the message is
+ * delivered. `scan.auth` lost its event bindings in v3 and receives nothing.
  */
-const SCAN_QUEUES = ['scan.auth', 'scan.spam', 'scan.url', 'scan.attachment', 'scan.dlp'];
+const DORMANT_SCAN_QUEUES = ['scan.url', 'scan.attachment', 'scan.dlp'];
 const gate = await messagingStackGate();
 const fx = new SmtpFixtures();
 const scenario = new MessagingScenario('lifecycle-rescan', fx);
@@ -47,8 +53,8 @@ afterAll(async () => {
   await scenario.teardown(); // purges the dormant queues (L16)
 }, 300_000);
 
-describe.skipIf(gate.skip)('lifecycle stack: administrative rescan', { timeout: 180_000 }, () => {
-  it('lands one rescan request in each of the five scan queues; the message is scanning, round 1', async () => {
+describe.skipIf(gate.skip)('lifecycle stack: administrative rescan', { timeout: 300_000 }, () => {
+  it('lands one rescan request in each dormant scan queue; scan.spam scans round 1 and the message is delivered', async () => {
     const message = await insertFixtureMessage(fx, {
       organizationId: scenario.org,
       domainId: scenario.domain.id,
@@ -73,13 +79,8 @@ describe.skipIf(gate.skip)('lifecycle stack: administrative rescan', { timeout: 
     });
     const rescanEventId = (res.body as { rescanEventId: string }).rescanEventId;
     expect(rescanEventId).toMatch(/^[0-9a-f-]{36}$/);
-    expect(await lifecycleOf(fx.prisma, message)).toEqual({
-      status: 'scanning',
-      statusReason: 'admin_rescan',
-      version: 3,
-      lifecycleRound: 1,
-    });
-    const history = await historyOf(fx.prisma, message);
+    // The E19 row (version 3, round 1); the scan stage may already have moved on since step 4.1.
+    const history = (await historyOf(fx.prisma, message)).filter((h) => h.version <= 3);
     expect(history.at(-1)).toMatchObject({
       fromStatus: 'scan_failed',
       toStatus: 'scanning',
@@ -91,14 +92,14 @@ describe.skipIf(gate.skip)('lifecycle stack: administrative rescan', { timeout: 
     });
     await expectConsistentHistory(fx.prisma, message);
 
-    // The relay publishes the request; one copy per scan queue, none elsewhere.
+    // The relay publishes the request; one copy per dormant scan queue, none elsewhere.
     await eventually(
       async () => {
-        const depths = await Promise.all(SCAN_QUEUES.map((q) => mgmt.queue(vhost, q)));
+        const depths = await Promise.all(DORMANT_SCAN_QUEUES.map((q) => mgmt.queue(vhost, q)));
         return depths.every((d) => d.messages === 1);
       },
       30_000,
-      'one rescan request in each scan queue',
+      'one rescan request in each dormant scan queue',
       250,
     );
     // The relay marks the row after the broker confirm, so the copies can be visible first.
@@ -118,7 +119,7 @@ describe.skipIf(gate.skip)('lifecycle stack: administrative rescan', { timeout: 
     });
     expect(outbox.eventType).toBe('mail.message.rescan_requested.v1');
     expect(outbox.publishedAt).not.toBeNull();
-    for (const queue of SCAN_QUEUES) {
+    for (const queue of DORMANT_SCAN_QUEUES) {
       const [copy] = await mgmt.peek(vhost, queue, 1);
       expect(copy!.routingKey).toBe(
         `org.${scenario.org.toString()}.mail.message.rescan_requested.v1`,
@@ -141,16 +142,56 @@ describe.skipIf(gate.skip)('lifecycle stack: administrative rescan', { timeout: 
       // Peeking requeued it: still exactly one.
       expect((await mgmt.queue(vhost, queue)).messages).toBe(1);
     }
-    // Not bound to the sandbox, policy, quarantine or archive queues.
-    for (const queue of ['scan.sandbox', 'email.policy.evaluate', 'email.quarantine']) {
-      expect((await mgmt.queue(vhost, queue)).messages).toBe(0);
+    // Not bound to scan.auth (v3), the sandbox, quarantine or policy queues. The dormant
+    // `email.policy.evaluate` (bound to `scanned.v1` for step 5.2) may already hold the
+    // `scanned.v1` of round 1 below, but never the rescan request itself.
+    for (const queue of ['scan.auth', 'scan.sandbox', 'email.quarantine']) {
+      expect((await mgmt.queue(vhost, queue)).messages, queue).toBe(0);
     }
+    const policy = await mgmt.peek(vhost, 'email.policy.evaluate', 20);
+    expect(policy.map((m) => m.routingKey)).not.toContain(
+      `org.${scenario.org.toString()}.mail.message.rescan_requested.v1`,
+    );
+
+    // scan.spam: the scan role consumed the copy (one ledger row for the rescan event), opened
+    // round 1 (`rescan`) and completed it; the pass-through approved round 1 and it was
+    // delivered (E19 → E6 → E27 → E20 → E23).
+    const round = await waitForRoundComplete(fx.prisma, message, 1);
+    expect(round).toMatchObject({
+      scanKind: 'rescan',
+      status: 'completed',
+      triggerEventId: rescanEventId,
+      requiredEngines: ['rspamd'],
+    });
+    expect(await scanRoundsOf(fx.prisma, message)).toHaveLength(1);
+    expect(
+      await fx.prisma.messageIdempotency.count({
+        where: { consumer: RSPAMD_LEDGER, eventId: rescanEventId },
+      }),
+    ).toBe(1);
+    expect((await mgmt.queue(vhost, 'scan.spam')).messages).toBe(0);
+    await waitForLifecycle(fx.prisma, message, 'delivered', 'delivery_complete');
+    expect(await pathOf(fx.prisma, message)).toEqual([
+      [null, 'received', 'smtp_accepted'],
+      ['received', 'persisted', 'committed'],
+      ['persisted', 'scan_failed', 'scan_error'],
+      ['scan_failed', 'scanning', 'admin_rescan'],
+      ['scanning', 'scanned', 'scan_complete'],
+      ['scanned', 'approved', 'dev_passthrough'],
+      ['approved', 'delivery_pending', 'delivery_planned'],
+      ['delivery_pending', 'delivered', 'delivery_complete'],
+    ]);
+    expect((await historyOf(fx.prisma, message)).slice(3).map((h) => h.lifecycleRound)).toEqual([
+      1, 1, 1, 1, 1,
+    ]);
+    await expectConsistentHistory(fx.prisma, message);
+
     const depths = await purgeDormantQueues(mgmt, vhost);
-    for (const queue of SCAN_QUEUES) expect(depths[queue]).toBe(1);
+    for (const queue of DORMANT_SCAN_QUEUES) expect(depths[queue]).toBe(1);
     // Queue statistics refresh every few seconds: wait for the purge to show.
     await eventually(
       async () =>
-        (await Promise.all(SCAN_QUEUES.map((q) => mgmt.queue(vhost, q)))).every(
+        (await Promise.all(DORMANT_SCAN_QUEUES.map((q) => mgmt.queue(vhost, q)))).every(
           (d) => d.messages === 0,
         ),
       20_000,
@@ -165,12 +206,19 @@ describe.skipIf(gate.skip)('lifecycle stack: administrative rescan', { timeout: 
       { 'Idempotency-Key': `it-rescan-${fx.suffix}-stale` },
     );
     expect(stale.status).toBe(409);
-    expect(stale.body).toMatchObject({ code: 'message_version_conflict', currentVersion: 3 });
+    const current = await lifecycleOf(fx.prisma, message);
+    expect(stale.body).toMatchObject({
+      code: 'message_version_conflict',
+      currentVersion: current.version,
+    });
     expect(
       await fx.prisma.messageOutbox.count({
         where: { organizationId: scenario.org, eventType: 'mail.message.rescan_requested.v1' },
       }),
     ).toBe(1);
-    record('lifecycle-rescan', { scan_queues_with_one_copy: SCAN_QUEUES.length });
+    record('lifecycle-rescan', {
+      dormant_scan_queues_with_one_copy: DORMANT_SCAN_QUEUES.length,
+      round1_verdict: round.scanVerdict,
+    });
   });
 });

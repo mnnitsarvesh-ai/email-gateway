@@ -1,0 +1,98 @@
+# Security scan pipeline alerts (step 4.1 S17, docs/plan/steps/09-rspamd.md). Series: the
+# email-worker scan stage (scan_*, labels engine/outcome/final/reason/verdict/scan_kind/version,
+# bounded enums only) and the topology vhost's queue series of job `rabbitmq-detailed`. Every alert
+# links its section of docs/runbooks/scan-pipeline.md. Validate with `promtool check rules` and
+# `promtool test rules tests/scanning.rules.test.yml`.
+groups:
+  - name: scan-pipeline
+    rules:
+      - alert: ScanEngineCircuitOpen
+        # 2 = open: the worker refuses engine calls and records circuit_open attempts.
+        expr: max by (engine) (scan_engine_circuit_state) == 2
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Scan engine circuit breaker open
+          description: >-
+            The {{ $labels.engine }} circuit breaker has been open for 2 minutes on at least one
+            email-worker: the engine is down or failing. Scans are retried with backoff and end
+            scan_failed after SCAN_RSPAMD_MAX_ATTEMPTS or the round deadline (never clean).
+          runbook_url: docs/runbooks/scan-pipeline.md#scanenginecircuitopen
+      - alert: ScanEngineFailureRateHigh
+        # Final results only: a failed attempt that was retried successfully is not counted.
+        expr: >-
+          sum by (engine) (rate(scan_engine_results_total{final="true",outcome=~"timeout|error"}[10m]))
+          / sum by (engine) (rate(scan_engine_results_total{final="true"}[10m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Scan engine final failures above 5 %
+          description: >-
+            More than 5 % of the final {{ $labels.engine }} results of the last 10 minutes are
+            timeout or error. Their rounds end scan_failed (policy
+            fail-safe); rescan them after the engine recovered.
+          runbook_url: docs/runbooks/scan-pipeline.md#scanenginefailureratehigh
+      - alert: ScanRoundsFailing
+        expr: >-
+          sum(rate(scan_rounds_completed_total{outcome="scan_failed"}[15m]))
+          / sum(rate(scan_rounds_completed_total[15m])) > 0.01
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Scan rounds failing above 1 %
+          description: >-
+            More than 1 % of the scan rounds of the last 15 minutes ended scan_failed (an engine timeout, error or missing EML). Those messages wait for the
+            policy fail-safe; check the engine and rescan after recovery.
+          runbook_url: docs/runbooks/scan-pipeline.md#scanroundsfailing
+      - alert: ScanQueueBacklog
+        expr: >-
+          (max(rabbitmq_detailed_queue_messages_ready{vhost="email-gateway",queue="scan.spam"}) > 1000)
+          or
+          (histogram_quantile(0.95, sum by (le) (rate(scan_event_lag_seconds_bucket[10m]))) > 120)
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Scan queue backlog
+          description: >-
+            scan.spam has had more than 1000 ready messages, or the p95 age of scan triggers at
+            handling start has been above 120 s, for 10 minutes. Scale email-worker-scan or
+            check the engine latency.
+          runbook_url: docs/runbooks/scan-pipeline.md#scanqueuebacklog
+      - alert: ScanLatencyHigh
+        expr: >-
+          histogram_quantile(0.95, sum by (le, engine) (rate(scan_engine_duration_seconds_bucket[15m]))) > 10
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Scan engine p95 latency above 10 s
+          description: >-
+            The p95 duration of {{ $labels.engine }} calls has been above 10 s for 15 minutes (per-call timeout SCAN_RSPAMD_TIMEOUT_MS = 20 s). The engine is
+            overloaded or its DNS/Redis is slow.
+          runbook_url: docs/runbooks/scan-pipeline.md#scanlatencyhigh
+      - alert: ScanDeadlineFinalizations
+        expr: sum by (engine) (increase(scan_deadline_finalized_total[15m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Scan rounds finalized by the deadline sweeper
+          description: >-
+            {{ $value | humanize }} {{ $labels.engine }} results were finalized as timeout
+            (deadline_exceeded) in the last 15 minutes: the engine's queue was not consumed in
+            time (no consumer, a stuck worker, or an engine registered but not deployed).
+          runbook_url: docs/runbooks/scan-pipeline.md#scandeadlinefinalizations
+      - alert: ScanEngineVersionChanged
+        # Two versions of one engine seen within 30 minutes (an upgrade, or a mixed fleet).
+        expr: count by (engine) (count by (engine, version) (max_over_time(scan_engine_info[30m]))) > 1
+        labels:
+          severity: info
+        annotations:
+          summary: Scan engine version changed
+          description: >-
+            More than one {{ $labels.engine }} version reported results in the last 30 minutes.
+            Expected during an upgrade; compare verdict distributions before and after.
+          runbook_url: docs/runbooks/scan-pipeline.md#scanengineversionchanged

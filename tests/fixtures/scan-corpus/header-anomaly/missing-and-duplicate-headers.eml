@@ -1,0 +1,9 @@
+From: "support@bank.scan.test" <service@anomaly-sender.scan.test>
+From: Second Sender <second@anomaly-sender.scan.test>
+To: bob@customer.scan.test
+Subject: Account notice
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Please read the attached account notice and contact support if you have questions about the
+recent changes to your account terms.

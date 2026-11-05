@@ -34,7 +34,7 @@ Details, parameters and procedures: [authentication.md](authentication.md). Deci
 ## Mail-path controls
 
 - Not an open relay: unknown recipient domains get a permanent `554 Relay access denied`.
-- The in-session policy service and the Rspamd milter **fail closed** (4xx tempfail).
+- The in-session policy service **fails closed** (4xx tempfail). The Rspamd milter **fails open to accept** (`milter_default_action = accept`, [ADR-0027](../architecture/adr/0027-rspamd-milter-policy.md)): it is not the security control of record, because every accepted message is scanned post-queue, and a scan that cannot finish ends `scan_failed`, never `clean` ([ADR-0026](../architecture/adr/0026-security-scan-pipeline.md)).
 - `VRFY` is disabled, HELO is required, connection/rate/recipient limits are set and messages are capped at 50 MB.
 - Post-queue processing never bounces, which prevents backscatter. `discard` is always audited.
 - Message content is untrusted after the `250` too: the post-queue MIME parser (step 3.1) streams under limits, never renders, executes or extracts anything, stores only allow-listed and sanitized header metadata, sanitizes and flags attachment filenames, and keeps bodies and attachments out of MySQL, events and logs ([security boundaries](../architecture/security-boundaries.md#untrusted-message-content-step-31)).

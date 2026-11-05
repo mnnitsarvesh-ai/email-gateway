@@ -4,7 +4,7 @@ import {
   deliveryApprovedV1,
   type EventEnvelope,
   EventTypes,
-  type MessageReceivedV1,
+  type MessageScannedV1,
 } from '@email-gateway/event-contracts';
 import type { Logger } from '@email-gateway/logger';
 import { transitionMessage } from '@email-gateway/message-lifecycle';
@@ -12,11 +12,16 @@ import type { DeliveryMetrics } from '../metrics/delivery-metrics';
 import { SOURCE_SERVICE } from '../planning/delivery-planner';
 import type { ApprovalFeed } from './approval-feed';
 
-/** `message_idempotency.consumer` of the development pass-through (R5). */
-export const DEV_PASSTHROUGH_CONSUMER = 'delivery-worker.dev-passthrough';
+/**
+ * `message_idempotency.consumer` and outbox cursor of the development pass-through (step 4.1
+ * S15). New in step 4.1: the step 2.3 consumer `delivery-worker.dev-passthrough` read
+ * `mail.message.received.v1`; this one reads `mail.message.scanned.v1` and starts at the latest
+ * outbox row (never replays old mail).
+ */
+export const DEV_PASSTHROUGH_CONSUMER = 'delivery-worker.dev-passthrough-scanned';
 
 export const DEV_PASSTHROUGH_WARNING =
-  'DEV PASS-THROUGH ENABLED: mail is delivered without scanning or policy (not production behaviour)';
+  'DEV PASS-THROUGH ENABLED: mail is delivered after scanning but without policy (not production behaviour)';
 
 /** `mail.delivery.approved.v1` carries at most 1000 recipients. */
 const MAX_APPROVAL_RECIPIENTS = 1000;
@@ -27,30 +32,38 @@ export interface PassThroughResult {
 }
 
 /**
- * DEVELOPMENT ONLY (step 2.3 R5): turns every `mail.message.received.v1` into
- * `mail.delivery.approved.v1` (`source = dev_passthrough`, `deliverySeq = 0`) for every recipient
- * of the message whose `email_recipients.status` is `pending`, so the stack can be tested end
- * to end before scanning (3.x) and policy (5.x) exist. **This is not production behaviour: it
- * delivers mail without scanning or policy.** Config validation refuses it unless `APP_ENV` is
- * `local` or `ci`; it starts from the outbox position at its first start (never replays old
- * mail). Step 5.x replaces it with the policy engine's approvals.
+ * DEVELOPMENT ONLY (step 2.3 R5, step 4.1 S15): turns every `mail.message.scanned.v1` with
+ * `outcome = scanned` into `mail.delivery.approved.v1` (`source = dev_passthrough`) for every
+ * recipient of the message whose `email_recipients.status` is `pending`, so the stack can be
+ * tested end to end before policy (5.2) exists. **This is not production behaviour: it delivers
+ * every scanned message, whatever its verdict, without policy.** Config validation refuses it
+ * unless `APP_ENV` is `local` or `ci`; it starts from the outbox position at its first start
+ * (never replays old mail). Step 5.2 replaces it with the policy engine's approvals.
  *
  * In the consumer's idempotency transaction (`processOnceHandler`, budget `txTimeoutMs`) it
- * first moves the message `persisted → approved` (step 3.3 L8.3, edge E4, role
- * `dev_passthrough`, key `evt:<receivedEventId>:approved`, expected round 0) through
- * @email-gateway/message-lifecycle, then writes the approval outbox row(s)
- * (`lifecycleRound: 0`) and one `email_events` row `delivery.approved` per approval
- * (`details.source = dev_passthrough`). A message that is not `persisted` (another stage or an
- * operator moved it, an older round), or that does not exist for the envelope's organization,
- * is not approved (`delivery_approvals_skipped_total{reason="lifecycle_<result>"}`). The
- * message and its EML key come from the writer row of the envelope's organization, never from
- * the event payload alone.
+ * first moves the message `scanned → approved` (edge E27, role `dev_passthrough`, key
+ * `evt:<scannedEventId>:approved`, expected round = the event's `lifecycleRound`) through
+ * @email-gateway/message-lifecycle, then writes the approval outbox row(s) with that
+ * `lifecycleRound` and one `email_events` row `delivery.approved` per approval
+ * (`details.source = dev_passthrough`). The verdict is logged, never acted upon.
+ *
+ * Never approved:
+ * - `outcome = scan_failed` (a required engine timed out or failed): ledger row only,
+ *   `delivery_approvals_skipped_total{reason="scan_failed"}`; the message waits for policy's
+ *   fail-safe (5.2) or its deadline;
+ * - a message that is not `scanned` in that round (another stage or an operator moved it, a
+ *   rescan superseded the round) or that does not exist for the envelope's organization
+ *   (`delivery_approvals_skipped_total{reason="lifecycle_<result>"}`);
+ * - `parse_failed` messages: they never produce `scanned.v1` (they stay `persisted`).
+ *
+ * The message and its EML key come from the writer row of the envelope's organization, never
+ * from the event payload alone.
  */
 export class DevPassThroughApprover {
   private readonly logger: Logger;
 
   constructor(
-    private readonly feed: ApprovalFeed<MessageReceivedV1>,
+    private readonly feed: ApprovalFeed<MessageScannedV1>,
     private readonly prisma: PrismaClient,
     private readonly txTimeoutMs: number,
     logger: Logger,
@@ -63,7 +76,7 @@ export class DevPassThroughApprover {
   start(): void {
     this.logger.warn(DEV_PASSTHROUGH_WARNING);
     this.feed.start(
-      processOnceHandler<MessageReceivedV1>(
+      processOnceHandler<MessageScannedV1>(
         this.prisma,
         DEV_PASSTHROUGH_CONSUMER,
         async (event, tx) => {
@@ -79,14 +92,30 @@ export class DevPassThroughApprover {
   }
 
   async approve(
-    event: EventEnvelope<MessageReceivedV1>,
+    event: EventEnvelope<MessageScannedV1>,
     tx: Prisma.TransactionClient,
   ): Promise<PassThroughResult> {
     const organizationId = BigInt(event.organizationId);
-    const messageId = BigInt(event.payload.messageId);
-    const receivedAt = new Date(event.payload.receivedAt);
-    const ids = { eventId: event.eventId, messageId: event.payload.messageId };
-    // E4 first, in the same transaction as the approvals: they exist iff the message is approved.
+    const payload = event.payload;
+    const messageId = BigInt(payload.messageId);
+    const receivedAt = new Date(payload.receivedAt);
+    const round = payload.lifecycleRound;
+    const ids = {
+      eventId: event.eventId,
+      messageId: payload.messageId,
+      scanId: payload.scanId,
+      round,
+    };
+    if (payload.outcome === 'scan_failed') {
+      // Invariant 1 of step 4.1: a failed scan is never delivered by the pass-through.
+      this.metrics.approvalsSkipped.inc({ reason: 'scan_failed' });
+      this.logger.info(
+        { ...ids, outcome: payload.outcome, verdict: payload.verdict },
+        'scan failed; the dev pass-through does not approve it (waits for policy or its deadline)',
+      );
+      return { approvals: [], recipients: 0 };
+    }
+    // E27 first, in the same transaction as the approvals: they exist iff the message is approved.
     const lifecycle = await transitionMessage(
       tx,
       {
@@ -97,8 +126,8 @@ export class DevPassThroughApprover {
         transitionKey: `evt:${event.eventId}:approved`,
         causationEventId: event.eventId,
         correlationId: event.correlationId,
-        expectedRound: 0,
-        expectedFrom: ['persisted'],
+        expectedRound: round,
+        expectedFrom: ['scanned'],
       },
       { metrics: this.metrics.lifecycle, logger: this.logger },
     );
@@ -117,7 +146,7 @@ export class DevPassThroughApprover {
       this.metrics.approvalsSkipped.inc({ reason: `lifecycle_${lifecycle.result}` });
       this.logger.info(
         { ...ids, result: lifecycle.result, why, state },
-        'message is not persisted for the organization (lifecycle); not approved',
+        'message is not scanned in this round for the organization (lifecycle); not approved',
       );
       return { approvals: [], recipients: 0 };
     }
@@ -127,16 +156,20 @@ export class DevPassThroughApprover {
       orderBy: { rcptSeq: 'asc' },
       select: { id: true, rcptSeq: true },
     });
+    // 0 for the first delivery (what step 2.3 always wrote); after a rescan of a message that
+    // already has deliveries (e.g. expired while delivering), the next sequence, so the planner
+    // never mistakes the new approval for a duplicate of the old one.
+    const deliverySeq = await this.nextDeliverySeq(tx, { messageId, receivedAt, organizationId });
     const approvals: string[] = [];
     const now = this.now();
     for (let i = 0; i < recipients.length; i += MAX_APPROVAL_RECIPIENTS) {
       const chunk = recipients.slice(i, i + MAX_APPROVAL_RECIPIENTS);
       const approvalId = uuidv7(now.getTime());
-      const payload = deliveryApprovedV1.parse({
+      const approval = deliveryApprovedV1.parse({
         messageId: messageId.toString(),
         receivedAt: receivedAt.toISOString(),
-        deliverySeq: 0,
-        lifecycleRound: 0,
+        deliverySeq,
+        lifecycleRound: round,
         source: 'dev_passthrough',
         emlS3Key: emlObjectKey,
         recipients: chunk.map((r) => ({ recipientId: r.id.toString(), rcptSeq: r.rcptSeq })),
@@ -150,7 +183,7 @@ export class DevPassThroughApprover {
           aggregateType: 'message',
           aggregateId: messageId.toString(),
           correlationId: event.correlationId,
-          payload,
+          payload: approval,
         },
         select: { id: true },
       });
@@ -166,8 +199,8 @@ export class DevPassThroughApprover {
           details: {
             source: 'dev_passthrough',
             approvalEventId: approvalId,
-            deliverySeq: 0,
-            lifecycleRound: 0,
+            deliverySeq,
+            lifecycleRound: round,
             recipientCount: chunk.length,
           },
         },
@@ -176,13 +209,38 @@ export class DevPassThroughApprover {
       approvals.push(approvalId);
     }
     if (approvals.length === 0) {
-      this.logger.info(ids, 'no pending recipients; nothing approved');
+      this.logger.info(
+        { ...ids, verdict: payload.verdict },
+        'no pending recipients; nothing approved',
+      );
     } else {
       this.logger.info(
-        { ...ids, approvals: approvals.length, recipients: recipients.length },
-        'dev pass-through approved the message (no scanning, no policy)',
+        {
+          ...ids,
+          verdict: payload.verdict,
+          deliverySeq,
+          approvals: approvals.length,
+          recipients: recipients.length,
+        },
+        'dev pass-through approved the scanned message (no policy)',
       );
     }
     return { approvals, recipients: recipients.length };
+  }
+
+  private async nextDeliverySeq(
+    tx: Prisma.TransactionClient,
+    message: { messageId: bigint; receivedAt: Date; organizationId: bigint },
+  ): Promise<number> {
+    const result = await tx.emailDelivery.aggregate({
+      where: {
+        messageId: message.messageId,
+        receivedAt: message.receivedAt,
+        organizationId: message.organizationId,
+      },
+      _max: { deliverySeq: true },
+    });
+    const max = result._max.deliverySeq;
+    return max === null || max === undefined ? 0 : max + 1;
   }
 }

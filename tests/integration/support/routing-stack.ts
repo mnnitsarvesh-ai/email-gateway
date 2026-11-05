@@ -1,15 +1,18 @@
 import { runningServices } from './compose';
 import { workerHealth } from './delivery-worker';
 import { maillogOffset, maillogPath } from './maillog';
+import { SCAN_HOW_TO_START, scanStageProblems } from './scan-stage';
 import { smtpStackGate, type SmtpStackGate } from './smtp-stack';
 
 /**
  * Gate of the step 2.3 routing stack suites (tests/integration/routing-*.test.ts,
  * docs/plan/steps/05-routing.md §9): everything the step 2.2 suites need, plus the step 2.3
  * sinks and forwarder, a ready delivery-worker with the DEVELOPMENT-ONLY pass-through
- * (`DELIVERY_DEV_PASSTHROUGH_ENABLED=true`: mail is delivered without scanning or policy, which
- * do not exist before steps 3.x/5.x) and the delivery log on the host. Missing pieces FAIL the
- * suites with an explanation; only `SMTP_STACK_TESTS=skip` skips them.
+ * (`DELIVERY_DEV_PASSTHROUGH_ENABLED=true`: mail is delivered without policy, which does not
+ * exist before step 5.x) and the delivery log on the host. Since step 4.1 the pass-through
+ * approves only scanned mail (E27, docs/plan/steps/09-rspamd.md S15), so the gate also requires
+ * the email-worker scan role and the scanned pass-through (`scanStageProblems`). Missing pieces
+ * FAIL the suites with an explanation; only `SMTP_STACK_TESTS=skip` skips them.
  */
 const REQUIRED_SERVICES = [
   'sink-m365',
@@ -45,8 +48,13 @@ async function detect(): Promise<SmtpStackGate> {
     problems.push('DELIVERY_DEV_PASSTHROUGH_ENABLED=true is required (local/CI only)');
   }
   if ((await maillogOffset()) === 0) problems.push(`delivery log ${maillogPath()} is missing`);
+  const scan = await scanStageProblems();
+  problems.push(...scan);
   return {
     ...base,
-    problem: problems.length > 0 ? `${problems.join('\n')}\n${HOW_TO_START}` : undefined,
+    problem:
+      problems.length > 0
+        ? `${problems.join('\n')}\n${HOW_TO_START}${scan.length > 0 ? `\n${SCAN_HOW_TO_START}` : ''}`
+        : undefined,
   };
 }

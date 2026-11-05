@@ -1,0 +1,20 @@
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=clean.scan.test; s=eg2026;
+	t=1793491200; h=from:to:subject:date:message-id:mime-version:content-type;
+	bh=PTBuVY6dWSYn1HZ+ONkcERpjwN2P7gB/Qf39Iz7jzZw=;
+	b=TdodaqsLtghCyNP3LZ2jWdwUyxNIMDe5KrAmOKjsg889STwiG51lnlT9L5pH3rvI7ZdwTJtVPDQLYhWhusseJcpPQURG0NwgFEJrWQCio2mVGVa+/MZdYwl5IPXeOKC1z5NQLOzwLQOGmC+pxoYnL5kyPpXHfHRT3wyHkz/yzrH+PvZTMpK7Ms4VRpali6oOjtz9dWpL6GAaCksTgbS04ZMp0rUssvyhSB7Gy3WfwqrvvOtIEg9NQl90e8XWBOwh6D9CyiAGB+x4k4rUEuG0K0NIGE0kvelAVgteewny7rXgPNGROf4MWgXgKT1OzsaVg0ND2F3RSsjWb/nwPwJ7Ow==
+From: Alice Martin <alice@clean.scan.test>
+To: Bob Stone <bob@customer.scan.test>
+Subject: Updated bank details for the next invoice
+Date: Sun, 01 Nov 2026 13:00:00 +0000
+Message-ID: <bank-20261101-1300@clean.scan.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+Hello Bob,
+
+Please note that the payment details for invoice 2026-114 have changed. Pay to IBAN XX00 9999 0000 1111 2222 from
+now on.
+
+Kind regards,
+Alice Martin

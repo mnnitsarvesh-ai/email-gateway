@@ -22,6 +22,7 @@ const commit: IngestCommit = {
   emlSha256: '0'.repeat(64),
   clientIp: null,
   clientHelo: null,
+  clientName: 'mail.external.test',
   queueId: '4ZQ1',
   recipients: ['a@tenant.test'],
   recipientDirections: ['inbound'],
@@ -84,6 +85,8 @@ describe('IngestionRepository.commit lifecycle (step 3.3 L8.1)', () => {
       lifecycleRound: 0,
       statusReason: 'committed',
       statusChangedAt: RECEIVED_AT,
+      // Step 4.1 §3: XFORWARD NAME is a column of the same insert, no extra statement.
+      clientName: 'mail.external.test',
     });
     const history = writer.calls[2]!.args.data as Record<string, unknown>[];
     expect(history).toEqual([

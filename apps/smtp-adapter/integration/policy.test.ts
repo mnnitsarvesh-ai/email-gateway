@@ -278,6 +278,12 @@ describe('policy: reinjection (D11)', () => {
     expect(await ask(`user@${open}`)).toBe(SENDER_NOT_AUTHORIZED);
     expect(await ask(`user@${sender}`, 'blocked@remote.example')).toBe(SUPPRESSED);
     expect(await ask(`user@${senderNoDkim}`)).toBe(SIGNING_UNAVAILABLE);
-    if (dkimWriter) expect(await ask(`user@${sender}`)).toBe(DUNNO);
+    if (dkimWriter) {
+      // The running api's DKIM publisher prunes selectors that MySQL does not hold on every
+      // sync tick (ADR-0020), so a tick since beforeAll may have removed the fixture selector:
+      // publish it again right before the check that needs it.
+      await dkimWriter.hset('dkim_selectors', sender, `s${fx.suffix}`);
+      expect(await ask(`user@${sender}`)).toBe(DUNNO);
+    }
   });
 });

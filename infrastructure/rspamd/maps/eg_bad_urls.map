@@ -1,0 +1,4 @@
+# Known-bad URL hosts (step 4.1 S12, multimap EG_BAD_URL). One host per line, exact match on the
+# URL host. Production adds a curated HTTPS feed with RSPAMD_BAD_URL_MAP_URL; this file stays
+# loaded as well and only carries the reserved test name below.
+bad-url.scan.test

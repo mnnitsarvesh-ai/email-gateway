@@ -1,8 +1,17 @@
-# Messaging topology (RabbitMQ, topology v2)
+# Messaging topology (RabbitMQ, topology v3)
 
 The reference for the RabbitMQ broker objects of the gateway: exchanges, queues, bindings, routing keys, headers, policies, dead-letter paths, retry hops, the dormant-queue rule, users and permissions, and provisioning. Decisions: [ADR-0024](adr/0024-rabbitmq-topology-retry-dead-letter.md) (topology, retry, dead-letter, replay, least privilege; supersedes ADR-0005) and [ADR-0023](adr/0023-outbox-relay-and-reconciliation.md) (outbox relay and reconciliation). Design: [step 3.2](../plan/steps/07-rabbitmq.md) (§ and Q references below point there).
 
 ## Status
+
+**Topology v3 (step 4.1, [design S2](../plan/steps/09-rspamd.md#s2-what-starts-a-scan-and-through-which-queues-topology-v3), [ADR-0026](adr/0026-security-scan-pipeline.md)).** `TOPOLOGY_VERSION = 3`; the six exchanges and the fourteen queues are unchanged:
+
+- `scan.spam` becomes a **work** queue: the Rspamd engine of the email-worker scan role (ledger consumer `email-worker.scan.rspamd`, broker user `eg-scanner`), the work policy (delivery limit 20, dead-letter `dead-letter.scan.spam`, `reject-publish`, max length 1 000 000) and retry `hold`, 10 attempts, 2 s–60 s, 24 h. Bindings unchanged (`parsed.v1`, `rescan_requested.v1`, `retry.scan.spam.#`). Rspamd supplies SPF/DKIM/DMARC/ARC in the same call.
+- `scan.auth` loses its two event bindings and keeps only `retry.scan.auth.#`: role dormant, consumer kind `none` ("reserved: authentication results come from the rspamd engine on scan.spam"). The queue stays (the fourteen queues are fixed) so a future first-party authentication engine can bind it. `validateTopology` allows a dormant queue with consumer kind `none` only without event bindings.
+- `mail.message.scanned.v1` is redefined in place (its step 3.2 placeholder never had a producer or consumer); see [Events](#mailmessagescannedv1-step-41) below.
+- Provisioning: new role user **`eg-scanner`** (`RABBITMQ_SCANNER_USER` / `RABBITMQ_SCANNER_PASSWORD`); `eg-ops` may also replay `scan.spam` dead letters (write `email.security`, topic `^retry\.scan\.spam\.`); `init.mjs` **prunes bindings** on topology-owned queues and exchanges that the definitions no longer declare (so an existing v2 vhost loses the two `scan.auth` event bindings), and its verification checks the exact binding set and the five role users. The vhost description is `email-gateway topology v3`. 35 bindings in total (v2: 37).
+- The reconciler may track `scan.spam` (`RECONCILE_QUEUES=email.received,email.delivery.pending,scan.spam`, env only; it is data-driven by the topology). It re-drives through the outbox row, so the relay republishes with the event's own `org.` key: no relay permission changes. Dead-letter replay covers `scan.spam` automatically (`REPLAYABLE_QUEUES` is derived from the work queues).
+- Upgrading a broker: `pnpm rabbitmq:init` (or the Compose `rabbitmq-init`) after the `.env` has the scanner keys. Messages that a v2 `scan.spam` buffered (dormant, drop-head) stay in the queue and are consumed by the scan role once it runs; it treats rounds whose message has moved on as stale (no effect). `node infrastructure/rabbitmq/init.mjs --prune-dry-run` lists the bindings a run would remove without changing anything.
 
 **Topology v2 (step 3.3, [design L7](../plan/steps/08-message-lifecycle.md#l7-events-packagesevent-contracts-registry-topology-v2), [ADR-0025](adr/0025-message-lifecycle-state-machine.md)).** `TOPOLOGY_VERSION = 2` adds two registered event types and five bindings to topology v1; the six exchanges, fourteen queues and their policies are unchanged:
 
@@ -22,13 +31,13 @@ The reference for the RabbitMQ broker objects of the gateway: exchanges, queues,
 ## Source of truth and provisioning
 
 - **`packages/event-contracts/src/registry.ts`**: `EVENT_REGISTRY` (every concrete event type `<name>.vN` → exchange, zod schema, outbox `aggregate_type`, version), `RESERVED_EVENT_TYPES`, `eventDefinition(type)`, `schemaVersionOf(type)`.
-- **`packages/event-contracts/src/topology.ts`**: `TOPOLOGY` (`TOPOLOGY_VERSION = 2`, `DEFAULT_VHOST = 'email-gateway'`), `EXCHANGE_NAMES`, `QUEUE_NAMES`, per-queue role, home exchange, bindings, consumer, retry policy and policy definition; helpers `queueDefinition`, `eventRoutingKey`, `retryRoutingKey`, `delayRoutingKey`, `deadLetterRoutingKey`, `parseRoutingKey`, `eventTypesBoundTo`, `routeMessage`/`topicMatches` (AMQP topic semantics), `retryPolicyViolations`, `validateTopology` (the §3 invariants, run by the tests and by the export CLI).
+- **`packages/event-contracts/src/topology.ts`**: `TOPOLOGY` (`TOPOLOGY_VERSION = 3`, `DEFAULT_VHOST = 'email-gateway'`), `EXCHANGE_NAMES`, `QUEUE_NAMES`, per-queue role, home exchange, bindings, consumer, retry policy and policy definition; helpers `queueDefinition`, `eventRoutingKey`, `retryRoutingKey`, `delayRoutingKey`, `deadLetterRoutingKey`, `parseRoutingKey`, `eventTypesBoundTo`, `routeMessage`/`topicMatches` (AMQP topic semantics), `retryPolicyViolations`, `validateTopology` (the §3 invariants, run by the tests and by the export CLI).
 - **`packages/event-contracts/src/definitions.ts`**: `toRabbitDefinitions(topology, { vhost })` → the body of `POST /api/definitions/{vhost}` plus `topology_version`. During the step 3.2 transition the package root still exports the ADR-0005 names (`EXCHANGES`, `QUEUES`, `QueueDefinition`, …) from `legacy-topology.ts`; topology v1's queue type is exported from the root as `TopologyQueueDefinition` until WP4 deletes the legacy file.
 - **`infrastructure/rabbitmq/definitions.json`**: generated, committed. `pnpm --filter @email-gateway/event-contracts topology:export` rewrites it (build, export, Prettier); a unit test fails when the committed file differs from the generated one. Never edit it by hand.
-- **`infrastructure/rabbitmq/init.mjs`**: the only provisioning code (plain Node 22, no dependencies, the management HTTP API as the administrator). It waits for the API (≤ 120 s); creates/updates the vhost (description `email-gateway topology v<N>`, `default_queue_type: quorum`) and gives the administrator full permissions on it; imports the definitions (without `topology_version`, every object's `vhost` set to the target); with `--users` creates/updates the four role users (no tags) and sets exactly their permissions; with `--cleanup-legacy` deletes the ADR-0005 objects on vhost `/` (below) only when empty; then **verifies**: exactly the 6 exchanges (topic, durable, not internal) and 14 queues (quorum, durable), each queue's effective policy is `eg.<queue>`, every binding present and no other binding, every policy equal to the file, the role users without tags and with exactly their permissions. Idempotent; exits non-zero on any failure; logs object names and counts only. `--vhost <name>` provisions another vhost (integration suites use `eg-it-<hex>`), `--mgmt-url <url>` another broker, `--definitions <path>` another file, `--delete-vhost <name>` tears a test vhost down (refuses `email-gateway` and `/`).
+- **`infrastructure/rabbitmq/init.mjs`**: the only provisioning code (plain Node 22, no dependencies, the management HTTP API as the administrator). It waits for the API (≤ 120 s); creates/updates the vhost (description `email-gateway topology v<N>`, `default_queue_type: quorum`) and gives the administrator full permissions on it; imports the definitions (without `topology_version`, every object's `vhost` set to the target); **prunes** every binding whose destination is a queue or exchange of the definitions and that the definitions do not declare (v3; objects outside the topology are never touched; names and counts are logged; `--prune-dry-run` only lists them); with `--users` creates/updates the five role users (no tags) and sets exactly their permissions; with `--cleanup-legacy` deletes the ADR-0005 objects on vhost `/` (below) only when empty; then **verifies**: exactly the 6 exchanges (topic, durable, not internal) and 14 queues (quorum, durable), each queue's effective policy is `eg.<queue>`, every binding present and no other binding, every policy equal to the file, the role users without tags and with exactly their permissions. Idempotent; exits non-zero on any failure; logs object names and counts only. `--vhost <name>` provisions another vhost (integration suites use `eg-it-<hex>`), `--mgmt-url <url>` another broker, `--definitions <path>` another file, `--delete-vhost <name>` tears a test vhost down (refuses `email-gateway` and `/`).
 - **Compose** `rabbitmq-init` (default profile, `node:22-bookworm-slim`, mounts `infrastructure/rabbitmq` read-only, `--users --cleanup-legacy`, after `rabbitmq` is healthy); every app service waits for it (`service_completed_successfully`). **Host:** `pnpm rabbitmq:init` (`node --env-file=.env infrastructure/rabbitmq/init.mjs --users`, management URL from `RABBITMQ_MGMT_URL`).
 - **Services never declare** (their users have `configure = ^$`). The client library (WP2) verifies passively (`checkExchange`/`checkQueue`) the exchanges a service publishes to and the queues it consumes; a missing object keeps readiness red, it does not crash the process.
-- An import never deletes: a binding, queue or policy removed from `TOPOLOGY` must be deleted explicitly (the verification reports leftovers as unexpected objects). Topology changes are a new `TOPOLOGY_VERSION` with a migration note.
+- An import never deletes. Since v3 `init.mjs` removes stale **bindings** on topology objects itself (the prune step); a queue, exchange or policy removed from `TOPOLOGY` must still be deleted explicitly (the verification reports leftover queues and exchanges as unexpected, leftover policies as a warning). Topology changes are a new `TOPOLOGY_VERSION` with a migration note.
 
 ## Exchanges
 
@@ -52,8 +61,8 @@ Fourteen quorum queues (durable, `x-queue-type: quorum` is the **only** queue ar
 | Queue                    | Role        | Home exchange     | Event bindings (exchange: key)                                                                                     | Consumer                                                                               | Retry policy                                             |
 | ------------------------ | ----------- | ----------------- | ------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------- | -------------------------------------------------------- |
 | `email.received`         | work        | `email.ingestion` | `email.ingestion`: `org.*.mail.message.received.v1`                                                                | email-worker MIME ingestion, ledger `email-worker.mime-parser` (step 3.2 WP4)          | hold, 8 attempts, 1 s–60 s, 24 h                         |
-| `scan.auth`              | dormant     | `email.security`  | `email.ingestion`: `org.*.mail.message.parsed.v1`; `email.security`: `org.*.mail.message.rescan_requested.v1` (v2) | **step 4.1** (email-worker): SPF/DKIM/DMARC results via Rspamd                         | hold, 5, 1 s–60 s, 24 h                                  |
-| `scan.spam`              | dormant     | `email.security`  | `email.ingestion`: `org.*.mail.message.parsed.v1`; `email.security`: `org.*.mail.message.rescan_requested.v1` (v2) | **step 4.1** (email-worker): Rspamd verdict                                            | hold, 5, 1 s–60 s, 24 h                                  |
+| `scan.auth`              | dormant     | `email.security`  | none (v3): reserved, only its retry binding                                                                        | none: authentication results come from the Rspamd engine on `scan.spam` (step 4.1)     | hold, 5, 1 s–60 s, 24 h                                  |
+| `scan.spam`              | work        | `email.security`  | `email.ingestion`: `org.*.mail.message.parsed.v1`; `email.security`: `org.*.mail.message.rescan_requested.v1` (v2) | email-worker scan role, Rspamd engine, ledger `email-worker.scan.rspamd` (step 4.1)    | hold, 10 attempts, 2 s–60 s, 24 h                        |
 | `scan.url`               | dormant     | `email.security`  | `email.ingestion`: `org.*.mail.message.parsed.v1`; `email.security`: `org.*.mail.message.rescan_requested.v1` (v2) | **step 4.3** (email-worker): URL protection                                            | hold, 5, 1 s–60 s, 24 h                                  |
 | `scan.attachment`        | dormant     | `email.security`  | `email.ingestion`: `org.*.mail.message.parsed.v1`; `email.security`: `org.*.mail.message.rescan_requested.v1` (v2) | **step 4.2** (email-worker): ClamAV + YARA                                             | hold, 5, 1 s–60 s, 24 h                                  |
 | `scan.dlp`               | dormant     | `email.security`  | `email.ingestion`: `org.*.mail.message.parsed.v1`; `email.security`: `org.*.mail.message.rescan_requested.v1` (v2) | **step 4.5** (email-worker): DLP                                                       | hold, 5, 1 s–60 s, 24 h                                  |
@@ -66,23 +75,23 @@ Fourteen quorum queues (durable, `x-queue-type: quorum` is the **only** queue ar
 | `email.analytics`        | dormant     | `email.events`    | `email.events`: `org.#` (the firehose: every event of every exchange)                                              | ClickHouse ingestion (ADR-0009), **not scheduled yet**                                 | hold, 5, 1 s–60 s, 24 h                                  |
 | `email.dead-letter`      | dead-letter | `email.events`    | none; internal binding `email.events`: `dead-letter.#`                                                             | none: operators replay through the api (Q9, step 3.2 WP4)                              | –                                                        |
 
-Plus, on every work and dormant queue, exactly one **retry binding** `retry.<queue>.#` on its home exchange. 37 bindings in total (v1: 32): 32 queue bindings and the five exchange-to-exchange bindings `email.{ingestion,security,policy,delivery,archive}` → `email.events` (`org.#`).
+Plus, on every work and dormant queue, exactly one **retry binding** `retry.<queue>.#` on its home exchange. 35 bindings in total (v1: 32, v2: 37): 30 queue bindings and the five exchange-to-exchange bindings `email.{ingestion,security,policy,delivery,archive}` → `email.events` (`org.#`).
 
 Where each event lands (`routeMessage`, asserted by `topology.test.ts`):
 
-| Event type                         | Queues                                                                                      |
-| ---------------------------------- | ------------------------------------------------------------------------------------------- |
-| `mail.message.received.v1`         | `email.received`, `email.analytics`                                                         |
-| `mail.message.parsed.v1`           | `scan.auth`, `scan.spam`, `scan.url`, `scan.attachment`, `scan.dlp`, `email.analytics`      |
-| `mail.message.parse_failed.v1`     | `email.policy.evaluate`, `email.analytics`                                                  |
-| `mail.message.scanned.v1`          | `email.policy.evaluate`, `email.analytics`                                                  |
-| `mail.policy.decided.v1`           | `email.quarantine`, `email.archive`, `email.analytics`                                      |
-| `mail.delivery.approved.v1`        | `email.delivery.pending`, `email.analytics`                                                 |
-| `mail.delivery.status_changed.v1`  | `email.analytics` (webhooks/notifications 6.2 add a queue later)                            |
-| `domain.status.changed.v1`         | `email.analytics` (the smtp-adapter cache invalidation stays an outbox tail, Q13)           |
-| `domain.routing.changed.v1`        | `email.analytics` (same)                                                                    |
-| `mail.message.state_changed.v1`    | `email.analytics` (v2; analytics and webhooks 6.2 consume it later)                         |
-| `mail.message.rescan_requested.v1` | `scan.auth`, `scan.spam`, `scan.url`, `scan.attachment`, `scan.dlp`, `email.analytics` (v2) |
+| Event type                         | Queues                                                                                              |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `mail.message.received.v1`         | `email.received`, `email.analytics`                                                                 |
+| `mail.message.parsed.v1`           | `scan.spam`, `scan.url`, `scan.attachment`, `scan.dlp`, `email.analytics` (v3: not `scan.auth`)     |
+| `mail.message.parse_failed.v1`     | `email.policy.evaluate`, `email.analytics`                                                          |
+| `mail.message.scanned.v1`          | `email.policy.evaluate`, `email.analytics`                                                          |
+| `mail.policy.decided.v1`           | `email.quarantine`, `email.archive`, `email.analytics`                                              |
+| `mail.delivery.approved.v1`        | `email.delivery.pending`, `email.analytics`                                                         |
+| `mail.delivery.status_changed.v1`  | `email.analytics` (webhooks/notifications 6.2 add a queue later)                                    |
+| `domain.status.changed.v1`         | `email.analytics` (the smtp-adapter cache invalidation stays an outbox tail, Q13)                   |
+| `domain.routing.changed.v1`        | `email.analytics` (same)                                                                            |
+| `mail.message.state_changed.v1`    | `email.analytics` (v2; analytics and webhooks 6.2 consume it later)                                 |
+| `mail.message.rescan_requested.v1` | `scan.spam`, `scan.url`, `scan.attachment`, `scan.dlp`, `email.analytics` (v2; v3: not `scan.auth`) |
 
 ```mermaid
 flowchart LR
@@ -101,10 +110,14 @@ flowchart LR
   R -->|org.id.domain.*, mail.message.state_changed.v1| XE{{email.events}}
   XA{{email.archive}}
   XI -->|org.*.received.v1| Q1[email.received\nwork: email-worker]
-  XI -->|org.*.parsed.v1| QS[scan.auth / spam / url / attachment / dlp\ndormant: 4.1-4.5]
+  XI -->|org.*.parsed.v1| QSP[scan.spam\nwork: email-worker scan role]
+  XI -->|org.*.parsed.v1| QS[scan.url / attachment / dlp\ndormant: 4.2-4.5]
+  QAU[scan.auth\nreserved, unbound]
   XI -->|org.*.parse_failed.v1| QP[email.policy.evaluate\ndormant: 5.1/5.2]
   XS -->|org.*.scanned.v1| QP
   XS -->|org.*.rescan_requested.v1 v2| QS
+  XS -->|org.*.rescan_requested.v1 v2| QSP
+  XS -->|retry.scan.spam.#| QSP
   XS -->|org.*.sandbox_requested.v1| QSB[scan.sandbox\ndormant: 4.6]
   XP -->|org.*.policy.decided.v1| QQ[email.quarantine\ndormant: 5.3]
   XP -->|org.*.policy.decided.v1| QA[email.archive\ndormant: 8.1]
@@ -118,8 +131,27 @@ flowchart LR
   XE -->|dead-letter.#| DLQ[email.dead-letter\nreplay via api]
   Q1 -. dead-letter.email.received .-> XE
   QD -. dead-letter.email.delivery.pending .-> XE
+  QSP -. dead-letter.scan.spam .-> XE
   classDef p fill:#eef,stroke:#88a
 ```
+
+### `mail.message.scanned.v1` (step 4.1)
+
+Published by the email-worker scan stage when a scan round completes ([S6](../plan/steps/09-rspamd.md#s6-aggregation-lifecycle-outcome-and-mailmessagescannedv1)), through `message_outbox` in the transaction that completes `email_scans` and applies E6/E7; registry exchange `email.security`, aggregate `message`. Payload (strict object: ids, the S3 key, codes, counts and times only):
+
+| Field                                              | Type                                                                                                                        |
+| -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `messageId`, `receivedAt`, `direction`, `emlS3Key` | as in `received.v1` (`emlS3Key` organization-prefixed)                                                                      |
+| `lifecycleRound`                                   | 0..65535                                                                                                                    |
+| `scanId`                                           | decimal `email_scans.id`                                                                                                    |
+| `scanKind`                                         | `initial` \| `rescan`                                                                                                       |
+| `outcome`                                          | `scanned` \| `scan_failed`                                                                                                  |
+| `verdict`                                          | `clean`, `spam`, `suspicious`, `malicious`, `unknown`, `timeout`, `error`                                                   |
+| `engines`                                          | 1..16 of `{ engine: /^[a-z][a-z0-9_]{0,31}$/, required, outcome: <verdict> \| skipped, attempts ≥ 1 }`, unique engine names |
+| `reasonCodes`                                      | ≤ 32 unique, each `/^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$/`, ≤ 64 characters                                                     |
+| `completedAt`                                      | ISO time                                                                                                                    |
+
+Consistency: `scanned` ⇒ no required engine ended `timeout`/`error` and the verdict is not a failure; `scan_failed` ⇒ at least one required engine ended `timeout`/`error`. No symbol, symbol option, score, address or URL (the schema refuses unknown fields). Bound to `email.policy.evaluate` (dormant until 5.2) and `email.analytics`; the dev pass-through reads it from the outbox.
 
 ## Routing keys
 
@@ -174,7 +206,7 @@ The `DormantQueueAtLimit` alert (WP3) shows when a dormant queue is full and dro
 
 Behaviour of the consumer library (Q8, **step 3.2 WP2**):
 
-- **Hold** (`email.received`, dormant queues): on a retryable or transient failure the consumer keeps the delivery (its prefetch slot) for the backoff delay (≤ 60 s), republishes a copy with `retry.<queue>.org.<id>.<type>` to the home exchange, waits for the confirm and acks the original.
+- **Hold** (`email.received`, `scan.spam`, dormant queues): on a retryable or transient failure the consumer keeps the delivery (its prefetch slot) for the backoff delay (≤ 60 s), republishes a copy with `retry.<queue>.org.<id>.<type>` to the home exchange, waits for the confirm and acks the original.
 - **Delay queue** (`email.delivery.pending`): the consumer republishes a copy to `email.delivery` with `delay.email.delivery.pending.org.<id>.<type>` and a per-message `expiration`, confirms, acks. `email.delivery.retry` has no consumer; on expiry the broker dead-letters the copy with `retry.email.delivery.pending.expired` back to `email.delivery.pending`. Quorum queues expire at the head only, so a short delay behind a longer one waits for it (lateness ≤ `maxDelayMs`).
 - **Dead letter**: after `maxAttempts` counted failures, `maxRetryAgeMs` of transient retries, a fatal error or a contract failure, the consumer republishes a copy with `dead-letter.<queue>.org.<id>.<type>` and the failure headers to `email.events`. Crash loops hit `delivery-limit` and the broker dead-letters with `dead-letter.<queue>`. Both land in `email.dead-letter`.
 - Backoff: `d = min(maxDelayMs, baseDelayMs · 2^(n−1))`, delay ∈ `[d/2, d]` (equal jitter). A copy keeps `messageId = eventId` and `correlationId`, so ledgers absorb duplicates.
@@ -231,17 +263,18 @@ Consequences for the library and its users:
 
 Vhost **`email-gateway`** (`RABBITMQ_VHOST`). Role users have **no tags** (no management UI/API access); passwords and URLs come only from `.env` / secrets.
 
-| User (`.env` key)                                      | Used by                                          | configure | write                                                               | read                         |
-| ------------------------------------------------------ | ------------------------------------------------ | --------- | ------------------------------------------------------------------- | ---------------------------- |
-| `RABBITMQ_USER` (administrator, broker default user)   | `init.mjs`, tests, operators                     | `.*`      | `.*`                                                                | `.*`                         |
-| `RABBITMQ_RELAY_USER` = `eg-relay`                     | event-relay (`RABBITMQ_RELAY_URL`)               | `^$`      | `^email\.(ingestion\|security\|policy\|delivery\|archive\|events)$` | `^$`                         |
-| `RABBITMQ_EMAIL_WORKER_USER` = `eg-email-worker`       | email-worker (`RABBITMQ_EMAIL_WORKER_URL`)       | `^$`      | `^email\.(ingestion\|events)$`                                      | `^email\.received$`          |
-| `RABBITMQ_DELIVERY_WORKER_USER` = `eg-delivery-worker` | delivery-worker (`RABBITMQ_DELIVERY_WORKER_URL`) | `^$`      | `^email\.(delivery\|events)$`                                       | `^email\.delivery\.pending$` |
-| `RABBITMQ_OPS_USER` = `eg-ops`                         | api replay and stats (`RABBITMQ_OPS_URL`)        | `^$`      | `^email\.(ingestion\|delivery)$`                                    | `^email\.dead-letter$`       |
+| User (`.env` key)                                      | Used by                                                   | configure | write                                                               | read                         |
+| ------------------------------------------------------ | --------------------------------------------------------- | --------- | ------------------------------------------------------------------- | ---------------------------- |
+| `RABBITMQ_USER` (administrator, broker default user)   | `init.mjs`, tests, operators                              | `.*`      | `.*`                                                                | `.*`                         |
+| `RABBITMQ_RELAY_USER` = `eg-relay`                     | event-relay (`RABBITMQ_RELAY_URL`)                        | `^$`      | `^email\.(ingestion\|security\|policy\|delivery\|archive\|events)$` | `^$`                         |
+| `RABBITMQ_EMAIL_WORKER_USER` = `eg-email-worker`       | email-worker (`RABBITMQ_EMAIL_WORKER_URL`)                | `^$`      | `^email\.(ingestion\|events)$`                                      | `^email\.received$`          |
+| `RABBITMQ_SCANNER_USER` = `eg-scanner`                 | email-worker scan role (`RABBITMQ_SCANNER_URL`, step 4.1) | `^$`      | `^email\.(security\|events)$`                                       | `^scan\.spam$`               |
+| `RABBITMQ_DELIVERY_WORKER_USER` = `eg-delivery-worker` | delivery-worker (`RABBITMQ_DELIVERY_WORKER_URL`)          | `^$`      | `^email\.(delivery\|events)$`                                       | `^email\.delivery\.pending$` |
+| `RABBITMQ_OPS_USER` = `eg-ops`                         | api replay and stats (`RABBITMQ_OPS_URL`)                 | `^$`      | `^email\.(ingestion\|delivery\|security)$` (v3: + `security`)       | `^email\.dead-letter$`       |
 
 - Each service reads only its own URL key (a comma-separated list of `amqp(s)://` URLs for cluster nodes, `amqpUrlListSchema` in `@email-gateway/config`; `*_FILE` in Kubernetes). `RABBITMQ_URL` is the administrator URL on `/` for tests and tools only; Compose no longer passes it to services. `RABBITMQ_PREFETCH` is no longer read.
 - policy-engine, archive-worker and notification-worker get no broker user in step 3.2 (they consume nothing); their steps add one.
-- The email-worker cannot publish approvals (no write on `email.delivery`); consumers still check every event against the writer row.
+- The email-worker cannot publish approvals (no write on `email.delivery`); consumers still check every event against the writer row. The scan role connects as `eg-scanner` (its own connection, step 4.1 S1): it reads only `scan.spam` and publishes only its retry and dead-letter hops; `mail.message.scanned.v1` goes through the outbox and the relay. Production runs the MIME role (`eg-email-worker`) and the scan role (`eg-scanner`) as separate Deployments of the same image.
 - **Topic permissions** (routing keys each user may publish, per exchange; `init.mjs --users` sets and verifies them exactly; read `^$`, no user binds):
 
 | User                 | Exchange          | write (routing keys)                            |
@@ -249,10 +282,13 @@ Vhost **`email-gateway`** (`RABBITMQ_VHOST`). Role users have **no tags** (no ma
 | `eg-relay`           | each of the six   | `^org\.[1-9][0-9]{0,19}\.` (event keys only)    |
 | `eg-email-worker`    | `email.ingestion` | `^retry\.email\.received\.`                     |
 | `eg-email-worker`    | `email.events`    | `^dead-letter\.email\.received(\.\|$)`          |
+| `eg-scanner`         | `email.security`  | `^retry\.scan\.spam\.` (v3)                     |
+| `eg-scanner`         | `email.events`    | `^dead-letter\.scan\.spam(\.\|$)` (v3)          |
 | `eg-delivery-worker` | `email.delivery`  | `^(retry\|delay)\.email\.delivery\.pending\.`   |
 | `eg-delivery-worker` | `email.events`    | `^dead-letter\.email\.delivery\.pending(\.\|$)` |
 | `eg-ops`             | `email.ingestion` | `^retry\.email\.received\.`                     |
 | `eg-ops`             | `email.delivery`  | `^retry\.email\.delivery\.pending\.`            |
+| `eg-ops`             | `email.security`  | `^retry\.scan\.spam\.` (v3)                     |
 
 - Only the relay can publish an event key (`org.<id>.<type>`). A retry key still reaches its work queue, so the broker alone cannot stop a leaked `eg-delivery-worker` or `eg-ops` credential from sending an approval-shaped retry message: the delivery planner plans only approvals with a matching `message_outbox` row (same event id, type, organization and payload) and dead-letters others as `approval_not_issued` / `approval_mismatch` (ADR-0024 amendment).
 

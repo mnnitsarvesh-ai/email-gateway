@@ -28,6 +28,7 @@ afterAll(async () => {
   await fx.cleanup();
 });
 
+/** E27 (step 4.1): the dev pass-through approves a scanned message (E4 is retired). */
 const devPassThrough = (m: MessageFixture, eventId = randomUUID()): TransitionRequest => ({
   message: m,
   to: 'approved',
@@ -37,7 +38,7 @@ const devPassThrough = (m: MessageFixture, eventId = randomUUID()): TransitionRe
   causationEventId: eventId,
   correlationId: `it-corr-${eventId.slice(0, 8)}`,
   expectedRound: 0,
-  expectedFrom: ['persisted'],
+  expectedFrom: ['scanned'],
 });
 
 function recordingMetrics() {
@@ -53,7 +54,7 @@ function recordingMetrics() {
 
 describe('transitionMessage: an applied transition (§9 item 7)', () => {
   it('writes the row, one history row with every column, one event and one outbox row', async () => {
-    const m = await fx.message(org);
+    const m = await fx.message(org, { state: 'scanned' });
     const eventId = randomUUID();
     const occurredAt = new Date(Date.now() - 5000);
     const { metrics, calls } = recordingMetrics();
@@ -63,30 +64,30 @@ describe('transitionMessage: an applied transition (§9 item 7)', () => {
     );
     expect(outcome).toMatchObject({
       result: 'applied',
-      from: 'persisted',
+      from: 'scanned',
       to: 'approved',
-      version: 2,
+      version: 3,
       round: 0,
     });
     if (outcome.result !== 'applied') throw new Error('not applied');
-    expect(calls).toEqual(['persisted>approved:applied']);
+    expect(calls).toEqual(['scanned>approved:applied']);
 
     const row = await fx.row(m);
     expect(row).toMatchObject({
       status: 'approved',
-      version: 2,
+      version: 3,
       lifecycleRound: 0,
       statusReason: 'dev_passthrough',
     });
     expect(row.statusChangedAt.getTime()).toBeGreaterThanOrEqual(before - 1000);
 
     const history = await fx.history(m);
-    expect(history.map((h) => h.version)).toEqual([0, 1, 2]);
-    const h = history[2]!;
+    expect(history.map((h) => h.version)).toEqual([0, 1, 2, 3]);
+    const h = history[3]!;
     expect(h).toMatchObject({
       id: outcome.historyId,
       organizationId: org,
-      fromStatus: 'persisted',
+      fromStatus: 'scanned',
       toStatus: 'approved',
       reasonCode: 'dev_passthrough',
       lifecycleRound: 0,
@@ -111,9 +112,9 @@ describe('transitionMessage: an applied transition (§9 item 7)', () => {
       actorType: 'system',
       actorId: null,
       details: {
-        from: 'persisted',
+        from: 'scanned',
         to: 'approved',
-        version: 2,
+        version: 3,
         round: 0,
         reason: 'dev_passthrough',
         actorRole: 'dev_passthrough',
@@ -136,9 +137,9 @@ describe('transitionMessage: an applied transition (§9 item 7)', () => {
       messageId: m.id.toString(),
       receivedAt: m.receivedAt.toISOString(),
       direction: 'outbound',
-      previousState: 'persisted',
+      previousState: 'scanned',
       state: 'approved',
-      version: 2,
+      version: 3,
       lifecycleRound: 0,
       reasonCode: 'dev_passthrough',
       actorRole: 'dev_passthrough',
@@ -181,7 +182,7 @@ describe('transitionMessage: an applied transition (§9 item 7)', () => {
   });
 
   it('is not_found for another organization and for an unknown row (nothing written)', async () => {
-    const m = await fx.message(org);
+    const m = await fx.message(org, { state: 'scanned' });
     const foreign = { ...m, organizationId: otherOrg };
     const outcome = await transitionMessageWithRetry(prisma, devPassThrough(foreign), TX);
     expect(outcome).toEqual({ result: 'not_found' });
@@ -189,20 +190,20 @@ describe('transitionMessage: an applied transition (§9 item 7)', () => {
     expect(await transitionMessageWithRetry(prisma, devPassThrough(unknown), TX)).toEqual({
       result: 'not_found',
     });
-    expect((await fx.row(m)).version).toBe(1);
+    expect((await fx.row(m)).version).toBe(2);
     expect(await fx.events(m)).toHaveLength(0);
     expect(await prisma.$transaction((tx) => lockLifecycle(tx, foreign))).toBeNull();
   });
 
   it('answers duplicate/transition_key for the same key (metric only, nothing written)', async () => {
-    const m = await fx.message(org);
+    const m = await fx.message(org, { state: 'scanned' });
     const request = devPassThrough(m);
     await transitionMessageWithRetry(prisma, request, TX);
     const { metrics, calls } = recordingMetrics();
     const again = await transitionMessageWithRetry(prisma, request, TX, { metrics });
     expect(again).toMatchObject({ result: 'duplicate', why: 'transition_key' });
     expect(calls).toEqual(['approved>approved:duplicate']);
-    expect(await fx.history(m)).toHaveLength(3);
+    expect(await fx.history(m)).toHaveLength(4);
     expect(await fx.events(m)).toHaveLength(1);
     expect(await fx.outbox(m)).toHaveLength(1);
   });

@@ -37,6 +37,8 @@ export interface IngestCommit {
   emlSha256: string;
   clientIp: string | null;
   clientHelo: string | null;
+  /** Verified client host name from XFORWARD NAME (`email_messages.client_name`, step 4.1). */
+  clientName: string | null;
   queueId: string;
   /** In RCPT order (`rcpt_seq` 0..n-1). */
   recipients: readonly string[];
@@ -143,6 +145,7 @@ export class IngestionRepository {
             emlSha256: data.emlSha256,
             clientIp: data.clientIp,
             clientHelo: data.clientHelo,
+            clientName: data.clientName,
             mtaQueueId: data.queueId,
           },
           select: { id: true },

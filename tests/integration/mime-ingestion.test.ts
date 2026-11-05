@@ -178,9 +178,16 @@ describe.skipIf(gate.skip)('MIME ingestion stack (step 3.1 §9)', { timeout: 180
       ].sort(),
     );
 
-    // email_events: one `parsed` row by the email-worker, linked to the outbox event.
-    const parsedEvents = state.events.filter((e) => e.sourceService === 'email-worker');
+    // email_events: one `parsed` row by the email-worker, linked to the outbox event. Since
+    // step 4.1 the email-worker's scan role also writes the lifecycle events of its transitions
+    // (`lifecycle.scanning`, `lifecycle.scanned`, through the transition service), excluded here.
+    const parsedEvents = state.events.filter(
+      (e) => e.sourceService === 'email-worker' && !e.eventType.startsWith('lifecycle.'),
+    );
     expect(parsedEvents.map((e) => e.eventType)).toEqual(['parsed']);
+    for (const e of state.events.filter((x) => x.sourceService === 'email-worker')) {
+      expect(['parsed', 'lifecycle.scanning', 'lifecycle.scanned']).toContain(e.eventType);
+    }
 
     // message_outbox: exactly one mail.message.parsed.v1, ids and codes only.
     expect(state.outbox).toHaveLength(1);
@@ -269,7 +276,9 @@ describe.skipIf(gate.skip)('MIME ingestion stack (step 3.1 §9)', { timeout: 180
     expect(sha256(await fx.object(attachment.objectKey!))).toBe(attachment.sha256);
 
     expect(
-      state.events.filter((e) => e.sourceService === 'email-worker').map((e) => e.eventType),
+      state.events
+        .filter((e) => e.sourceService === 'email-worker' && !e.eventType.startsWith('lifecycle.'))
+        .map((e) => e.eventType),
     ).toEqual(['parsed']);
     expect(state.outbox).toHaveLength(1);
     const payload = messageParsedV1.parse(state.outbox[0]!.payload);

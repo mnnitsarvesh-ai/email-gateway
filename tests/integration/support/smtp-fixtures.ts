@@ -468,6 +468,7 @@ export class SmtpFixtures {
         await this.prisma.emailMessage.deleteMany({ where });
         await this.deleteDeliveryRows(ids);
         await this.deleteParseRows(ids);
+        await this.deleteScanRows(ids);
         await this.prisma.messageOutbox.deleteMany({ where });
         await this.prisma.emailEvent.deleteMany({ where });
         await this.prisma.emailRecipient.deleteMany({ where });
@@ -475,6 +476,8 @@ export class SmtpFixtures {
         await this.prisma.messageIdentity.deleteMany({ where });
         // Step 3.3: api Idempotency-Key records of lifecycle operations (no foreign key).
         await this.prisma.apiIdempotencyKey.deleteMany({ where });
+        // Step 4.1: tenant scan thresholds (foreign key to organizations, Restrict).
+        await this.prisma.scanEngineSetting.deleteMany({ where });
         await this.prisma.bounceEvent.deleteMany({ where });
         await this.prisma.deliverySuppression.deleteMany({ where });
         await this.prisma.organizationLimit.deleteMany({ where });
@@ -490,6 +493,7 @@ export class SmtpFixtures {
         await new Promise((r) => setTimeout(r, 1_500));
         await this.deleteDeliveryRows(ids);
         await this.deleteParseRows(ids);
+        await this.deleteScanRows(ids);
         for (const id of ids) {
           for (const key of await this.objectKeys(id)) {
             await this.s3.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
@@ -532,6 +536,20 @@ export class SmtpFixtures {
     await this.prisma.emailAttachment.deleteMany({ where });
     await this.prisma.emailHeader.deleteMany({ where });
     await this.prisma.emailMessageParse.deleteMany({ where });
+    await this.prisma.messageOutbox.deleteMany({ where });
+    await this.prisma.emailEvent.deleteMany({ where });
+  }
+
+  /**
+   * Step 4.1 rows (docs/plan/steps/09-rspamd.md §3): with the email-worker scan role running,
+   * every parsed message of a run is also scanned (scan round, engine results incl. failed
+   * attempts, authentication results, `scanned.v1` outbox row and `scan.*` events).
+   */
+  private async deleteScanRows(ids: readonly bigint[]): Promise<void> {
+    const where = { organizationId: { in: [...ids] } };
+    await this.prisma.emailAuthResult.deleteMany({ where });
+    await this.prisma.scanEngineResult.deleteMany({ where });
+    await this.prisma.emailScan.deleteMany({ where });
     await this.prisma.messageOutbox.deleteMany({ where });
     await this.prisma.emailEvent.deleteMany({ where });
   }

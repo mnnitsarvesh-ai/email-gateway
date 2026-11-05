@@ -9,6 +9,8 @@ set -eu
 . /usr/local/lib/postfix-entrypoint/validate.sh
 
 : "${POSTFIX_MYHOSTNAME:=mx.gateway.local}"
+# authserv-id of the Authentication-Results the Rspamd milter adds (default: myhostname).
+: "${RSPAMD_AUTHSERV_ID:=$POSTFIX_MYHOSTNAME}"
 : "${SMTP_ADAPTER_HOST:=smtp-adapter}"
 : "${POSTFIX_MESSAGE_SIZE_LIMIT:=52428800}"
 : "${POSTFIX_CLIENT_CONNECTION_COUNT_LIMIT:=50}"
@@ -27,6 +29,7 @@ set -eu
 : "${POSTFIX_TLS_KEY_PATH:=/etc/ssl/private/ssl-cert-snakeoil.key}"
 
 require_hostname POSTFIX_MYHOSTNAME "$POSTFIX_MYHOSTNAME"
+require_hostname RSPAMD_AUTHSERV_ID "$RSPAMD_AUTHSERV_ID"
 require_hostname SMTP_ADAPTER_HOST "$SMTP_ADAPTER_HOST"
 require_uint POSTFIX_MESSAGE_SIZE_LIMIT "$POSTFIX_MESSAGE_SIZE_LIMIT" 1048576
 require_uint POSTFIX_CLIENT_CONNECTION_COUNT_LIMIT "$POSTFIX_CLIENT_CONNECTION_COUNT_LIMIT" 1
@@ -65,6 +68,22 @@ postconf -e \
   "bounce_queue_lifetime=${POSTFIX_MAXIMAL_QUEUE_LIFETIME}" \
   "smtpd_tls_cert_file=${POSTFIX_TLS_CERT_PATH}" \
   "smtpd_tls_key_file=${POSTFIX_TLS_KEY_PATH}"
+
+# Forged result headers (ADR-0027 decision 3, main.cf header_checks): removed by cleanup before
+# the message is queued, whether or not the milter answers. Our authserv-id is the first token of
+# the value (after an optional RFC 8601 comment), followed by white space, `;` or the end; the
+# regexp table is case-insensitive. Host names are validated above, so escaping `.` suffices.
+regex_host() { printf '%s' "$1" | sed -e 's/\./\\./g'; }
+{
+  echo '# Rendered by postfix-entrypoint (ADR-0027 decision 3). Do not edit.'
+  for _id in $(printf '%s\n%s\n' "$POSTFIX_MYHOSTNAME" "$RSPAMD_AUTHSERV_ID" | tr 'A-Z' 'a-z' | sort -u); do
+    printf '/^Authentication-Results:[[:space:]]*(\\([^)]*\\)[[:space:]]*)?%s([[:space:];]|$)/ IGNORE\n' \
+      "$(regex_host "$_id")"
+  done
+  echo '/^X-Spam/ IGNORE'
+  echo '/^X-Rspamd-/ IGNORE'
+} >/etc/postfix/header_checks
+chmod 0644 /etc/postfix/header_checks
 
 # postscreen's pregreet test runs even when its result is ignored: it sends a "220-" teaser and
 # delays every first contact by postscreen_greet_wait. With action `ignore` (local, CI) that

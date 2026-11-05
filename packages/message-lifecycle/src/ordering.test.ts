@@ -57,13 +57,27 @@ describe('ordering rule (L4): table tests', () => {
         reason: 'dev_passthrough',
         actor: { role: 'dev_passthrough' },
         expectedRound: 0,
-        expectedFrom: ['persisted'],
+        expectedFrom: ['scanned'],
       },
       'invalid',
       'unexpected_from',
     ],
     [
-      at('approved', 2, 0),
+      at('approved', 3, 0),
+      {
+        to: 'approved',
+        reason: 'dev_passthrough',
+        actor: { role: 'dev_passthrough' },
+        expectedRound: 0,
+        expectedFrom: ['scanned'],
+      },
+      'duplicate',
+      'same_state',
+    ],
+    // E4 (persisted → approved) is retired by step 4.1: the pass-through never approves an
+    // unscanned message.
+    [
+      at('persisted', 1, 0),
       {
         to: 'approved',
         reason: 'dev_passthrough',
@@ -71,14 +85,63 @@ describe('ordering rule (L4): table tests', () => {
         expectedRound: 0,
         expectedFrom: ['persisted'],
       },
-      'duplicate',
-      'same_state',
+      'invalid',
+      'edge_not_allowed',
     ],
     [
       at('delivery_retry', 5, 0),
       { to: 'delivery_retry', reason: 'delivery_deferred', actor: { role: 'delivery' } },
       'duplicate',
       'same_state',
+    ],
+    // Step 4.1 E27 (scanned → approved, dev pass-through after the scan).
+    [
+      at('scanned', 4, 1),
+      {
+        to: 'approved',
+        reason: 'dev_passthrough',
+        actor: { role: 'dev_passthrough' },
+        expectedRound: 0,
+        expectedFrom: ['scanned'],
+      },
+      'stale',
+      'older_round',
+    ],
+    [
+      at('approved', 5, 1),
+      {
+        to: 'approved',
+        reason: 'dev_passthrough',
+        actor: { role: 'dev_passthrough' },
+        expectedRound: 1,
+        expectedFrom: ['scanned'],
+      },
+      'duplicate',
+      'same_state',
+    ],
+    [
+      at('scanning', 5, 2),
+      {
+        to: 'approved',
+        reason: 'dev_passthrough',
+        actor: { role: 'dev_passthrough' },
+        expectedRound: 1,
+        expectedFrom: ['scanned'],
+      },
+      'stale',
+      'older_round',
+    ],
+    [
+      at('delivery_pending', 6, 1),
+      {
+        to: 'approved',
+        reason: 'dev_passthrough',
+        actor: { role: 'dev_passthrough' },
+        expectedRound: 1,
+        expectedFrom: ['scanned'],
+      },
+      'invalid',
+      'unexpected_from',
     ],
     [
       at('delivered', 6, 0),

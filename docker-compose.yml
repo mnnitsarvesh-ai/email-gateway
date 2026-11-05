@@ -17,8 +17,9 @@
 #
 # Mail plane (step 2.2, docs/deployment/smtp-gateway.md): `postfix` (inbound MX, 25 behind
 # postscreen), `postfix-outbound` (submission 587, connector relay 25, internal reinjection
-# 10026/10027, never published), `rspamd` (inbound content milter), `rspamd-outbound` (DKIM
-# signing milter of 10027 only), `redis-dkim` (DKIM keys, ACL per role, no persistence).
+# 10026/10027, never published), `rspamd` (inbound content milter and, since step 4.1, the
+# post-queue scan engine; docs/deployment/rspamd.md), `rspamd-outbound` (DKIM signing milter of
+# 10027 only), `redis-dkim` (DKIM keys, ACL per role, no persistence).
 # Both Postfix instances reach smtp-adapter at SMTP_ADAPTER_HOST: `smtp-adapter` (apps profile,
 # CI) or `host.docker.internal` (adapter run on the host with pnpm dev). Without the adapter
 # every lookup, policy check, AUTH and LMTP delivery fails closed (4xx). postfix-outbound
@@ -37,6 +38,12 @@
 # RABBITMQ_EMAIL_WORKER_URL, delivery-worker RABBITMQ_DELIVERY_WORKER_URL, api RABBITMQ_OPS_URL,
 # event-relay (outbox relay and reconciler, ADR-0023) RABBITMQ_RELAY_URL. policy-engine,
 # archive-worker and notification-worker consume nothing yet and do not connect to RabbitMQ.
+#
+# Security scanning (step 4.1, docs/plan/steps/09-rspamd.md, ADR-0026/ADR-0027): the email-worker
+# scan role consumes scan.spam as eg-scanner (RABBITMQ_SCANNER_URL) and scans every parsed
+# message with `rspamd` /checkv2 (SCAN_RSPAMD_URL); the api trains Bayes/fuzzy through the
+# controller with the enable password. Postfix accepts when the milter is down (ADR-0027).
+# Locally/CI rspamd resolves only the dns-sink test zones (RSPAMD_DNS_SERVERS, mailtest .11).
 
 name: ${COMPOSE_PROJECT_NAME:-email-gateway}
 
@@ -67,6 +74,16 @@ x-node-env: &node-env
   S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:?}
   S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?}
   OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+
+# Platform verdict thresholds of the Rspamd mapping (step 4.1 S8): api and email-worker read them.
+x-scan-platform-env: &scan-platform-env
+  SCAN_RSPAMD_SPAM_SCORE: ${SCAN_RSPAMD_SPAM_SCORE:-6}
+  SCAN_RSPAMD_SUSPICIOUS_SCORE: ${SCAN_RSPAMD_SUSPICIOUS_SCORE:-4}
+  SCAN_RSPAMD_SCORE_MIN: ${SCAN_RSPAMD_SCORE_MIN:-1}
+  SCAN_RSPAMD_SCORE_MAX: ${SCAN_RSPAMD_SCORE_MAX:-15}
+  SCAN_RSPAMD_PHISHING_VERDICT: ${SCAN_RSPAMD_PHISHING_VERDICT:-suspicious}
+  SCAN_RSPAMD_DMARC_REJECT_VERDICT: ${SCAN_RSPAMD_DMARC_REJECT_VERDICT:-suspicious}
+  SCAN_RSPAMD_AUTH_FAILURE_VERDICT: ${SCAN_RSPAMD_AUTH_FAILURE_VERDICT:-reason_only}
 
 x-rabbitmq-cluster-node: &rabbitmq-cluster-node
   image: rabbitmq:4.1-management-alpine
@@ -220,6 +237,9 @@ services:
       RABBITMQ_DELIVERY_WORKER_PASSWORD: ${RABBITMQ_DELIVERY_WORKER_PASSWORD:?append the RabbitMQ keys from .env.example}
       RABBITMQ_OPS_USER: ${RABBITMQ_OPS_USER:-eg-ops}
       RABBITMQ_OPS_PASSWORD: ${RABBITMQ_OPS_PASSWORD:?append the RabbitMQ keys from .env.example}
+      # Scan role of the email-worker (step 4.1 S2): reads scan.spam only.
+      RABBITMQ_SCANNER_USER: ${RABBITMQ_SCANNER_USER:-eg-scanner}
+      RABBITMQ_SCANNER_PASSWORD: ${RABBITMQ_SCANNER_PASSWORD:?append the security scanning keys from .env.example}
     volumes: ['./infrastructure/rabbitmq:/rabbitmq:ro']
     depends_on:
       rabbitmq: { condition: service_healthy }
@@ -283,23 +303,52 @@ services:
 
   # ---------------------------------------------------------------- mail plane
   rspamd:
+    # Inbound Rspamd (step 4.1, ADR-0026/ADR-0027, docs/deployment/rspamd.md): milter of the
+    # inbound Postfix (11332; rejects only GTUBE and score >= RSPAMD_MILTER_REJECT_SCORE, Postfix
+    # accepts when it is down), /checkv2 of the post-queue scan (11333, no auth) and the
+    # controller (11334; read password for the email-worker, enable password for the api's
+    # training route). Bayes, fuzzy storage (loopback 11335), reputation and history live in Redis
+    # DB ${RSPAMD_REDIS_DB}. entrypoint.sh renders secrets and environment into tmpfs.
     image: rspamd/rspamd:3.12
     restart: unless-stopped
     entrypoint: ['/bin/sh', '/opt/rspamd/entrypoint.sh']
+    mem_limit: 768m
     environment:
       REDIS_SERVERS: redis:6379
       REDIS_PASSWORD: ${REDIS_PASSWORD:?}
+      RSPAMD_REDIS_DB: ${RSPAMD_REDIS_DB:-1}
+      RSPAMD_CONTROLLER_PASSWORD: ${RSPAMD_CONTROLLER_PASSWORD:?append the security scanning keys from .env.example}
+      RSPAMD_CONTROLLER_ENABLE_PASSWORD: ${RSPAMD_CONTROLLER_ENABLE_PASSWORD:?append the security scanning keys from .env.example}
+      # Empty = the container's resolver. Local/CI: dns-sink (scan.test zones, smtp-test profile).
+      RSPAMD_DNS_SERVERS: ${RSPAMD_DNS_SERVERS:-}
+      RSPAMD_LOCAL_ADDRS: ${RSPAMD_LOCAL_ADDRS:-127.0.0.0/8, ::1}
+      RSPAMD_NORMAL_WORKERS: ${RSPAMD_NORMAL_WORKERS:-1}
+      RSPAMD_BAYES_MIN_LEARNS: ${RSPAMD_BAYES_MIN_LEARNS:-200}
+      RSPAMD_RBL_PROFILE: ${RSPAMD_RBL_PROFILE:-production}
+      RSPAMD_SPAMHAUS_DQS_KEY: ${RSPAMD_SPAMHAUS_DQS_KEY:-}
+      RSPAMD_PHISH_FEEDS: ${RSPAMD_PHISH_FEEDS:-false}
+      RSPAMD_BAD_URL_MAP_URL: ${RSPAMD_BAD_URL_MAP_URL:-}
+      RSPAMD_MILTER_REJECT_SCORE: ${RSPAMD_MILTER_REJECT_SCORE:-15}
+      RSPAMD_MILTER_DMARC_REJECT: ${RSPAMD_MILTER_DMARC_REJECT:-false}
+      RSPAMD_AUTHSERV_ID: ${RSPAMD_AUTHSERV_ID:-${POSTFIX_MYHOSTNAME:-mx.gateway.local}}
+      # Trusted ARC sealers (S7 R6): only these may make a DMARC failure a reason only. Empty = none.
+      RSPAMD_ARC_TRUSTED_SEALERS: ${RSPAMD_ARC_TRUSTED_SEALERS:-}
+      RSPAMD_MAX_MESSAGE_BYTES: ${RSPAMD_MAX_MESSAGE_BYTES:-52428800}
     tmpfs:
       - /etc/rspamd/local.d:uid=11333,gid=11333,mode=0750
+      - /etc/rspamd/override.d:uid=11333,gid=11333,mode=0750
     volumes:
-      - ./infrastructure/rspamd/entrypoint.sh:/opt/rspamd/entrypoint.sh:ro
-      - ./infrastructure/rspamd/local.d:/opt/rspamd/local.d:ro
+      - ./infrastructure/rspamd:/opt/rspamd:ro
       - rspamd-data:/var/lib/rspamd
     ports:
       [
         '127.0.0.1:${RSPAMD_HOST_PORT:-11333}:11333',
         '127.0.0.1:${RSPAMD_CONTROLLER_HOST_PORT:-11334}:11334',
       ]
+    # mailtest (fixed .11): dns-sink is reachable as the test resolver (RSPAMD_DNS_SERVERS).
+    networks:
+      default: {}
+      mailtest: { ipv4_address: 172.31.250.11 }
     depends_on:
       redis: { condition: service_healthy }
     healthcheck:
@@ -346,6 +395,8 @@ services:
         POSTFIX_QUEUE_RUN_DELAY: ${POSTFIX_QUEUE_RUN_DELAY:-300s}
         POSTFIX_MAXIMAL_QUEUE_LIFETIME: ${POSTFIX_MAXIMAL_QUEUE_LIFETIME:-5d}
       POSTFIX_MYHOSTNAME: ${POSTFIX_MYHOSTNAME:-mx.gateway.local}
+      # authserv-id whose forged Authentication-Results cleanup strips (header_checks, ADR-0027).
+      RSPAMD_AUTHSERV_ID: ${RSPAMD_AUTHSERV_ID:-${POSTFIX_MYHOSTNAME:-mx.gateway.local}}
       POSTFIX_POSTSCREEN_GREET_ACTION: ${POSTFIX_POSTSCREEN_GREET_ACTION:-ignore}
       POSTFIX_POSTSCREEN_DNSBL_SITES: ${POSTFIX_POSTSCREEN_DNSBL_SITES:-}
       POSTFIX_TLS_CERT_PATH: ${POSTFIX_TLS_CERT_PATH:-/etc/ssl/certs/ssl-cert-snakeoil.pem}
@@ -625,8 +676,10 @@ services:
       postfix-outbound: { condition: service_healthy }
 
   dns-sink:
-    # Authoritative only for sink.test (MX 10 mx.sink.test -> 172.31.250.25), and since step 2.3
-    # for the test stand-ins mail.protection.outlook.com and aspmx.l.google.com; refuses all else.
+    # Authoritative only for sink.test (MX 10 mx.sink.test -> 172.31.250.25), since step 2.3 for
+    # the test stand-ins mail.protection.outlook.com and aspmx.l.google.com, and since step 4.1
+    # for scan.test (scan corpus SPF/DKIM/DMARC, test RBL/DBL; rspamd's resolver locally/in CI);
+    # refuses all else.
     # Distroless image: no shell, so no health check (dependants wait for service_started).
     profiles: [smtp-test]
     image: coredns/coredns:1.11.3
@@ -685,7 +738,7 @@ services:
       mysql-replica-setup: { condition: service_completed_successfully }
       redis-dkim: { condition: service_healthy }
     environment:
-      <<: *node-env
+      <<: [*node-env, *scan-platform-env]
       HTTP_PORT: 3000
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3001}
       # Dead-letter replay and queue stats (step 3.2 Q9): role user eg-ops.
@@ -747,6 +800,11 @@ services:
       ROUTING_DENIED_DESTINATION_SUFFIXES: ${ROUTING_DENIED_DESTINATION_SUFFIXES:-}
       ROUTING_MAX_DESTINATIONS_PER_DOMAIN: ${ROUTING_MAX_DESTINATIONS_PER_DOMAIN:-10}
       ROUTING_ALLOWED_DESTINATION_PORTS: ${ROUTING_ALLOWED_DESTINATION_PORTS:-25,587,2525}
+      # Security scanning (step 4.1 S8/S13/S16): platform thresholds of the scan settings API and
+      # the platform training route (Bayes/fuzzy via the controller's enable password).
+      RSPAMD_CONTROLLER_URL: http://rspamd:11334
+      RSPAMD_CONTROLLER_ENABLE_PASSWORD: ${RSPAMD_CONTROLLER_ENABLE_PASSWORD:?append the security scanning keys from .env.example}
+      SCAN_FUZZY_WEIGHT: ${SCAN_FUZZY_WEIGHT:-10}
     ports: ['127.0.0.1:${API_HOST_PORT:-3000}:3000']
     healthcheck:
       <<: *node-healthcheck
@@ -846,12 +904,42 @@ services:
         args: { APP: email-worker },
       }
     image: email-gateway/email-worker:local
+    depends_on:
+      <<: *app-deps
+      rspamd: { condition: service_healthy }
     environment:
-      <<: *node-env
+      <<: [*node-env, *scan-platform-env]
       HTTP_PORT: 3020
       # Consumes email.received (step 3.2): role user eg-email-worker.
       RABBITMQ_EMAIL_WORKER_URL: amqp://${RABBITMQ_EMAIL_WORKER_USER:-eg-email-worker}:${RABBITMQ_EMAIL_WORKER_PASSWORD:?append the RabbitMQ keys from .env.example}@rabbitmq:5672/${RABBITMQ_VHOST:-email-gateway}
-      RSPAMD_URL: http://rspamd:11333
+      # Scan role (step 4.1, docs/plan/steps/09-rspamd.md S1/S5/S10): consumes scan.spam as role
+      # user eg-scanner, scans with the inbound rspamd (/checkv2; controller read password for
+      # the engine version).
+      RABBITMQ_SCANNER_URL: amqp://${RABBITMQ_SCANNER_USER:-eg-scanner}:${RABBITMQ_SCANNER_PASSWORD:?append the security scanning keys from .env.example}@rabbitmq:5672/${RABBITMQ_VHOST:-email-gateway}
+      SCAN_ENABLED: ${SCAN_ENABLED:-true}
+      SCAN_ENGINES: ${SCAN_ENGINES:-rspamd}
+      SCAN_RSPAMD_URL: http://rspamd:11333
+      RSPAMD_CONTROLLER_URL: http://rspamd:11334
+      RSPAMD_CONTROLLER_PASSWORD: ${RSPAMD_CONTROLLER_PASSWORD:?append the security scanning keys from .env.example}
+      SCAN_RSPAMD_CONCURRENCY: ${SCAN_RSPAMD_CONCURRENCY:-8}
+      SCAN_RSPAMD_TIMEOUT_MS: ${SCAN_RSPAMD_TIMEOUT_MS:-20000}
+      SCAN_RSPAMD_MAX_ATTEMPTS: ${SCAN_RSPAMD_MAX_ATTEMPTS:-6}
+      SCAN_RSPAMD_MAX_BYTES: ${SCAN_RSPAMD_MAX_BYTES:-26214400}
+      SCAN_RETRY_BASE_MS: ${SCAN_RETRY_BASE_MS:-2000}
+      SCAN_RETRY_MAX_MS: ${SCAN_RETRY_MAX_MS:-60000}
+      SCAN_S3_TIMEOUT_MS: ${SCAN_S3_TIMEOUT_MS:-30000}
+      SCAN_DB_TIMEOUT_MS: ${SCAN_DB_TIMEOUT_MS:-15000}
+      SCAN_ROUND_DEADLINE_SECONDS: ${SCAN_ROUND_DEADLINE_SECONDS:-1800}
+      SCAN_SWEEP_INTERVAL_MS: ${SCAN_SWEEP_INTERVAL_MS:-30000}
+      SCAN_SWEEP_LOOKBACK_HOURS: ${SCAN_SWEEP_LOOKBACK_HOURS:-48}
+      SCAN_SWEEP_BATCH_SIZE: ${SCAN_SWEEP_BATCH_SIZE:-200}
+      SCAN_BREAKER_FAILURE_THRESHOLD: ${SCAN_BREAKER_FAILURE_THRESHOLD:-5}
+      SCAN_BREAKER_FAILURE_RATIO: ${SCAN_BREAKER_FAILURE_RATIO:-0.5}
+      SCAN_BREAKER_WINDOW: ${SCAN_BREAKER_WINDOW:-20}
+      SCAN_BREAKER_OPEN_MS: ${SCAN_BREAKER_OPEN_MS:-15000}
+      SCAN_BREAKER_HALF_OPEN_PROBES: ${SCAN_BREAKER_HALF_OPEN_PROBES:-1}
+      SCAN_SETTINGS_CACHE_TTL_MS: ${SCAN_SETTINGS_CACHE_TTL_MS:-30000}
+      SCAN_ENGINE_VERSION_TTL_MS: ${SCAN_ENGINE_VERSION_TTL_MS:-300000}
       CLAMAV_HOST: clamav
       CLAMAV_PORT: 3310
       # MIME ingestion (step 3.1, docs/plan/steps/06-mime-ingestion.md §5).
@@ -1022,7 +1110,7 @@ services:
       RECONCILE_MAX_REDRIVES: ${RECONCILE_MAX_REDRIVES:-3}
       RECONCILE_LOOKBACK_HOURS: ${RECONCILE_LOOKBACK_HOURS:-72}
       RECONCILE_BATCH_SIZE: ${RECONCILE_BATCH_SIZE:-1000}
-      RECONCILE_QUEUES: ${RECONCILE_QUEUES:-email.received,email.delivery.pending}
+      RECONCILE_QUEUES: ${RECONCILE_QUEUES:-email.received,email.delivery.pending,scan.spam}
       RECONCILE_START_POSITION: ${RECONCILE_START_POSITION:-oldest}
       # Message lifecycle jobs (step 3.3 L13, L14; docs/plan/steps/08-message-lifecycle.md §5).
       LIFECYCLE_EXPIRY_ENABLED: ${LIFECYCLE_EXPIRY_ENABLED:-true}
@@ -1235,6 +1323,9 @@ services:
       # Alert rules (step 3.2 Q15), loaded through rule_files in prometheus.yml.
       - ./infrastructure/monitoring/rules:/etc/prometheus/rules:ro
       - prometheus-data:/prometheus
+    # Read password of the inbound Rspamd controller for the `rspamd` scrape job (step 4.1 S17),
+    # mounted at /run/secrets/rspamd_controller_password; never written into prometheus.yml.
+    secrets: [rspamd_controller_password]
     ports: ['127.0.0.1:${PROMETHEUS_HOST_PORT:-9090}:9090']
     healthcheck:
       test: ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://127.0.0.1:9090/-/ready']
@@ -1260,6 +1351,11 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+
+secrets:
+  # Compose secrets from the environment (.env), mounted read-only under /run/secrets.
+  rspamd_controller_password:
+    environment: RSPAMD_CONTROLLER_PASSWORD
 
 volumes:
   mysql-data:

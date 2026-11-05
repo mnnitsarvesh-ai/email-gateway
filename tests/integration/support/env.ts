@@ -30,6 +30,8 @@ export const stack = {
   rabbitmqRoleUrls: () => ({
     relay: required('RABBITMQ_RELAY_URL'),
     emailWorker: required('RABBITMQ_EMAIL_WORKER_URL'),
+    /** Step 4.1 S1: the email-worker scan role's own user (`eg-scanner`). */
+    scanner: required('RABBITMQ_SCANNER_URL'),
     deliveryWorker: required('RABBITMQ_DELIVERY_WORKER_URL'),
     ops: required('RABBITMQ_OPS_URL'),
   }),

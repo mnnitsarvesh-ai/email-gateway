@@ -22,6 +22,8 @@
     "@email-gateway/logger": "workspace:*",
     "@email-gateway/mail-routing": "workspace:*",
     "@email-gateway/message-lifecycle": "workspace:*",
+    "@email-gateway/rspamd": "workspace:*",
+    "@email-gateway/security-contracts": "workspace:*",
     "@email-gateway/shared-types": "workspace:*",
     "@nestjs/common": "^11.1.6",
     "@nestjs/core": "^11.1.6",

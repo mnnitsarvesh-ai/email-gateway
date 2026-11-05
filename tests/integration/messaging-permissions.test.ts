@@ -6,7 +6,8 @@ import { ManagementApi } from './support/broker';
 import { stack } from './support/env';
 
 /**
- * Least privilege of the role users on the real vhost (step 3.2 Q10, review round 1). Probes
+ * Least privilege of the role users on the real vhost (step 3.2 Q10, review round 1; the
+ * step 4.1 scanner user and the ops replay of scan.spam, docs/plan/steps/09-rspamd.md S2). Probes
  * never leave a message in a real queue: every publish probe is one the broker refuses (a
  * refused publish routes nothing), and the allowed read is a passive checkQueue. Topic
  * permissions restrict the routing keys each user may publish: an allowed key always matches a
@@ -18,7 +19,7 @@ const PROBE_KEY = 'it.permission-probe';
 const ACCESS_REFUSED = 403;
 const api = new ManagementApi();
 
-type Role = 'relay' | 'emailWorker' | 'deliveryWorker' | 'ops';
+type Role = 'relay' | 'emailWorker' | 'scanner' | 'deliveryWorker' | 'ops';
 const models = new Map<Role, ChannelModel>();
 let countsBefore: number[] = [];
 
@@ -109,6 +110,11 @@ const EXPECTED_TOPICS: Record<Role, TopicPermission[]> = {
     { exchange: 'email.ingestion', write: '^retry\\.email\\.received\\.', read: '^$' },
     { exchange: 'email.events', write: '^dead-letter\\.email\\.received(\\.|$)', read: '^$' },
   ],
+  // Step 4.1 S2: the scan role publishes only the retry and dead-letter hops of scan.spam.
+  scanner: [
+    { exchange: 'email.security', write: '^retry\\.scan\\.spam\\.', read: '^$' },
+    { exchange: 'email.events', write: '^dead-letter\\.scan\\.spam(\\.|$)', read: '^$' },
+  ],
   deliveryWorker: [
     {
       exchange: 'email.delivery',
@@ -124,11 +130,13 @@ const EXPECTED_TOPICS: Record<Role, TopicPermission[]> = {
   ops: [
     { exchange: 'email.ingestion', write: '^retry\\.email\\.received\\.', read: '^$' },
     { exchange: 'email.delivery', write: '^retry\\.email\\.delivery\\.pending\\.', read: '^$' },
+    // Step 4.1 S2: replay of the new work queue scan.spam (home exchange email.security).
+    { exchange: 'email.security', write: '^retry\\.scan\\.spam\\.', read: '^$' },
   ],
 };
 
 describe('RabbitMQ role permissions on the real vhost', () => {
-  it.each(['relay', 'emailWorker', 'deliveryWorker', 'ops'] as const)(
+  it.each(['relay', 'emailWorker', 'scanner', 'deliveryWorker', 'ops'] as const)(
     '%s has exactly its topic permissions (the routing keys it may publish)',
     async (role) => {
       const actual = await api.get<TopicPermission[]>(
@@ -239,7 +247,9 @@ describe('RabbitMQ role permissions on the real vhost', () => {
       queue: 'email.dead-letter',
     });
     await channel.close();
-    // Review round 1: write narrowed to the home exchanges of the replayable queues.
+    // Review round 1: write narrowed to the home exchanges of the replayable queues. Step 4.1
+    // adds email.security (scan.spam), where the topic permission still refuses every key but
+    // `retry.scan.spam.`, so the probe key is refused there too.
     for (const exchange of ['email.security', 'email.policy', 'email.archive', 'email.events']) {
       expect(await publishRefused('ops', exchange), exchange).toBe(ACCESS_REFUSED);
     }
@@ -248,7 +258,7 @@ describe('RabbitMQ role permissions on the real vhost', () => {
     );
   });
 
-  it.each(['relay', 'emailWorker', 'deliveryWorker', 'ops'] as const)(
+  it.each(['relay', 'emailWorker', 'scanner', 'deliveryWorker', 'ops'] as const)(
     '%s cannot declare queues or exchanges, nor bind',
     async (role) => {
       const name = `it.probe.${randomUUID()}`;
@@ -263,6 +273,41 @@ describe('RabbitMQ role permissions on the real vhost', () => {
       ).toBe(ACCESS_REFUSED);
     },
   );
+
+  it('scanner (step 4.1) reads scan.spam (passive) and nothing else', async () => {
+    const channel = await model('scanner').createChannel();
+    await expect(channel.checkQueue('scan.spam')).resolves.toMatchObject({ queue: 'scan.spam' });
+    await channel.close();
+    for (const queue of ['email.received', 'email.delivery.pending', 'scan.auth', 'scan.url']) {
+      expect(await replyCodeOf('scanner', (ch) => ch.consume(queue, () => undefined)), queue).toBe(
+        ACCESS_REFUSED,
+      );
+    }
+  });
+
+  it('scanner publishes only the hops of scan.spam: no event key, no other exchange', async () => {
+    // Scan results reach the broker through the outbox and the relay, never from the worker.
+    expect(
+      await publishKeyRefused('scanner', 'email.security', 'org.1.mail.message.scanned.v1'),
+    ).toBe(ACCESS_REFUSED);
+    expect(
+      await publishKeyRefused(
+        'scanner',
+        'email.security',
+        'retry.scan.url.org.1.mail.message.parsed.v1',
+      ),
+    ).toBe(ACCESS_REFUSED);
+    expect(
+      await publishKeyRefused(
+        'scanner',
+        'email.events',
+        'dead-letter.email.received.org.1.mail.message.received.v1',
+      ),
+    ).toBe(ACCESS_REFUSED);
+    for (const exchange of ['email.ingestion', 'email.delivery', 'email.policy', 'email.archive']) {
+      expect(await publishRefused('scanner', exchange), exchange).toBe(ACCESS_REFUSED);
+    }
+  });
 
   it('role users cannot open the administrator vhost /', async () => {
     const url = new URL(stack.rabbitmqRoleUrls().relay);

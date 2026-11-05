@@ -10,7 +10,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { waitFor } from './support/compose';
 import { waitForAllDeliveries } from './support/deliveries';
 import {
-  DELIVERED_PATH,
+  FIXTURE_APPROVED_DELIVERED_PATH,
   expectConsistentHistory,
   insertFixtureMessage,
   pathOf,
@@ -298,7 +298,7 @@ describe.skipIf(gate.skip)(
       // duplicate replay added no history row.
       await waitForLifecycle(fx.prisma, message.key, 'delivered', 'delivery_complete');
       expect(await pathOf(fx.prisma, message.key)).toEqual(
-        DELIVERED_PATH('delivered', 'delivery_complete'),
+        FIXTURE_APPROVED_DELIVERED_PATH('delivered', 'delivery_complete'),
       );
       await expectConsistentHistory(fx.prisma, message.key);
       expect(await scenario.broker.depth(QUEUES.deadLetter)).toBe(before);

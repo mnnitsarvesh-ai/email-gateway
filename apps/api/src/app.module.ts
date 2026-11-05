@@ -25,6 +25,7 @@ import { LoginAuditModule } from './modules/login-audit/login-audit.module';
 import { MessagesModule } from './modules/messages/messages.module';
 import { OrganizationsModule } from './modules/organizations/organizations.module';
 import { RolesModule } from './modules/roles/roles.module';
+import { ScansModule } from './modules/scans/scans.module';
 import { SmtpConnectorsModule } from './modules/smtp-connectors/smtp-connectors.module';
 import { TenantDataModule } from './modules/tenant-data/tenant-data.module';
 import { UsersModule } from './modules/users/users.module';
@@ -74,6 +75,8 @@ export class AppModule {
         MessagesModule,
         // Step 3.2 Q9: dead-letter view and audited replay (platform).
         DeadLettersModule,
+        // Step 4.1 S8, S13, S16: scan settings (tenant) and classifier training (platform).
+        ScansModule,
       ],
       providers: [{ provide: API_CONFIG, useValue: config }],
       exports: [API_CONFIG],

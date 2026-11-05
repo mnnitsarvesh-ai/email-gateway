@@ -37,12 +37,15 @@ export interface IngestTransaction {
   envelopeFrom: string;
   clientIp: string | null;
   clientHelo: string | null;
+  /** XFORWARD NAME (verified client host name or `unknown`), at most 255 characters. */
+  clientName: string | null;
   /** Owner lookups of this transaction by domain (one query per domain). */
   owners: Map<string, Promise<DomainOwner | null>>;
 }
 
 const MAX_ENVELOPE_FROM = 320;
 const MAX_CLIENT_HELO = 255;
+const MAX_CLIENT_NAME = 255;
 /** Best-effort cleanup of a superseded object must not hold the replies for long. */
 const DELETE_TIMEOUT_MS = 10_000;
 
@@ -111,6 +114,7 @@ export class IngestionService {
       envelopeFrom: mailFrom,
       clientIp: client.clientAddress,
       clientHelo: client.clientHelo === null ? null : client.clientHelo.slice(0, MAX_CLIENT_HELO),
+      clientName: client.clientName === null ? null : client.clientName.slice(0, MAX_CLIENT_NAME),
       owners: new Map(),
     };
   }
@@ -423,6 +427,7 @@ export class IngestionService {
             emlSha256: input.sha256,
             clientIp: transaction.clientIp,
             clientHelo: transaction.clientHelo,
+            clientName: transaction.clientName,
             queueId: ref.queueId,
             recipients: group.recipients.map((recipient) => recipient.address),
             recipientDirections: group.recipients.map((recipient) => recipient.direction),

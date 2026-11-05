@@ -1,0 +1,2 @@
+# Scan corpus: byte-exact (CRLF; DKIM signatures cover the bytes); never normalise line endings.
+*.eml -text

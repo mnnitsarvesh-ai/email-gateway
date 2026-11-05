@@ -14,13 +14,16 @@ import type { SmtpStackGate } from './smtp-stack';
  * docs/plan/steps/07-rabbitmq.md §10, WP5). They run against the LIVE containers of the apps
  * profile: smtp-tools → postfix:25 → smtp-adapter (EML in MinIO, `mail.message.received.v1` in
  * the outbox) → event-relay (confirmed publish) → `email.received` → email-worker (MIME parse,
- * `mail.message.parsed.v1`) and, 120 s later (DELIVERY_OUTBOX_SAFETY_LAG_MS), the
- * DEVELOPMENT-ONLY dev pass-through approval (outbox) → event-relay → `email.delivery.pending` →
+ * `mail.message.parsed.v1`) → event-relay → `scan.spam` → email-worker scan role (Rspamd,
+ * `mail.message.scanned.v1`, step 4.1) → the DEVELOPMENT-ONLY dev pass-through approval of
+ * scanned mail (outbox feed) → event-relay → `email.delivery.pending` →
  * delivery-worker planner → reinjection → postfix-outbound → mail-sink. Chaos is applied to the
  * real containers (`docker compose restart|pause|kill`), so the suites need the containers, not
  * host processes.
  */
 export const MIME_LEDGER = 'email-worker.mime-parser';
+/** Ledger of the Rspamd engine consumer on `scan.spam` (step 4.1 S2). */
+export const SCAN_LEDGER = 'email-worker.scan.rspamd';
 export const PLANNER_LEDGER = 'delivery-worker.planner';
 export const QUEUES = {
   received: 'email.received',
@@ -193,6 +196,14 @@ export interface PipelineCounts {
   mimeLedger: number;
   /** `mail.message.parsed.v1` + `parse_failed.v1` outbox rows (one per handled parse). */
   parseEvents: number;
+  /** Step 4.1: `email_scans` rows (one per message and round by a unique key). */
+  scans: number;
+  /** Final `scan_engine_results` rows (one per round and engine by a unique key). */
+  scanFinals: number;
+  /** `message_idempotency` rows of `email-worker.scan.rspamd` for the parsed events. */
+  scanLedger: number;
+  /** `mail.message.scanned.v1` outbox rows (one per completed round). */
+  scannedEvents: number;
   approvals: number;
   /** `message_idempotency` rows of `delivery-worker.planner` for the approvals. */
   plannerLedger: number;
@@ -230,6 +241,10 @@ export async function pipelineCounts(
     where: { ...where, eventType: EventTypes.DeliveryApproved },
     select: { eventId: true },
   });
+  const parsed = await prisma.messageOutbox.findMany({
+    where: { ...where, eventType: EventTypes.MessageParsed },
+    select: { eventId: true },
+  });
   const perRecipient = await prisma.emailDelivery.groupBy({
     by: ['recipientId', 'deliverySeq'],
     where,
@@ -254,6 +269,16 @@ export async function pipelineCounts(
         eventType: { in: [EventTypes.MessageParsed, EventTypes.MessageParseFailed] },
       },
     }),
+    scans: await prisma.emailScan.count({ where }),
+    scanFinals: await prisma.scanEngineResult.count({ where: { ...where, isFinal: true } }),
+    scanLedger: await ledgerCount(
+      prisma,
+      SCAN_LEDGER,
+      parsed.map((p) => p.eventId),
+    ),
+    scannedEvents: await prisma.messageOutbox.count({
+      where: { ...where, eventType: EventTypes.MessageScanned },
+    }),
     approvals: approvals.length,
     plannerLedger: await ledgerCount(
       prisma,
@@ -269,13 +294,18 @@ export async function pipelineCounts(
   };
 }
 
-/** True once `n` single-recipient messages went the whole way: parsed, planned, delivered. */
+/**
+ * True once `n` single-recipient messages went the whole way: parsed, scanned (step 4.1),
+ * planned, delivered.
+ */
 export function pipelineComplete(c: PipelineCounts, n: number): boolean {
   return (
     c.messages === n &&
     c.parsesFinal === n &&
     c.mimeLedger === n &&
     c.parseEvents === n &&
+    c.scannedEvents === n &&
+    c.scanLedger === n &&
     c.approvals === n &&
     c.plannerLedger === n &&
     c.delivered === n &&
@@ -307,8 +337,9 @@ export async function waitForPipeline(
 
 /**
  * The exactly-once assertions of every chaos suite for `n` single-recipient messages: one parse
- * row, one MIME ledger row and one parse event per message; one approval, one planner ledger
- * row, one delivery and one reinjection group per message; nothing unpublished.
+ * row, one MIME ledger row and one parse event per message; one scan round, one final Rspamd
+ * result, one scan ledger row and one `scanned.v1` per message (step 4.1); one approval, one
+ * planner ledger row, one delivery and one reinjection group per message; nothing unpublished.
  */
 export function exactlyOnceProblems(c: PipelineCounts, n: number): string[] {
   const expected: [keyof PipelineCounts, number][] = [
@@ -319,6 +350,10 @@ export function exactlyOnceProblems(c: PipelineCounts, n: number): string[] {
     ['receivedEvents', n],
     ['mimeLedger', n],
     ['parseEvents', n],
+    ['scans', n],
+    ['scanFinals', n],
+    ['scanLedger', n],
+    ['scannedEvents', n],
     ['approvals', n],
     ['plannerLedger', n],
     ['deliveries', n],

@@ -36,9 +36,9 @@ const daily = (...names: string[]): ExistingPartition[] => [
 const utc = (iso: string) => new Date(iso);
 
 describe('registry', () => {
-  it('lists the 19 partitioned tables (D3, steps 2.3 and 3.1) with their retention', () => {
-    expect(PARTITION_REGISTRY).toHaveLength(19);
-    expect(new Set(PARTITION_REGISTRY.map((s) => s.table)).size).toBe(19);
+  it('lists the 20 partitioned tables (D3, steps 2.3, 3.1 and 4.1) with their retention', () => {
+    expect(PARTITION_REGISTRY).toHaveLength(20);
+    expect(new Set(PARTITION_REGISTRY.map((s) => s.table)).size).toBe(20);
     const byTable = Object.fromEntries(PARTITION_REGISTRY.map((s) => [s.table, s]));
     expect(byTable.email_messages).toMatchObject({
       column: 'received_at',
@@ -72,6 +72,15 @@ describe('registry', () => {
       drop: true,
       tier: 'core',
     });
+    // Step 4.1 authentication results (same retention as email_scans).
+    expect(byTable.email_auth_results).toMatchObject({
+      column: 'received_at',
+      granularity: 'month',
+      retention: 6,
+      drop: true,
+      tier: 'core',
+    });
+    expect(byTable.email_auth_results!.retention).toBe(byTable.email_scans!.retention);
     expect(byTable.audit_logs).toMatchObject({
       column: 'created_at',
       retention: null,

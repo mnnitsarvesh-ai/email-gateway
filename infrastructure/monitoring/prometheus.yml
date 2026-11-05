@@ -2,7 +2,8 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
-# Alert rules (step 3.2 Q15: messaging.rules.yml; step 3.3 L14: lifecycle.rules.yml). Alertmanager
+# Alert rules (step 3.2 Q15: messaging.rules.yml; step 3.3 L14: lifecycle.rules.yml; step 4.1 S17:
+# scanning.rules.yml). Alertmanager
 # routing is step 10.3; until then the alerts are visible on the Prometheus /alerts page.
 rule_files:
   - rules/*.rules.yml
@@ -31,7 +32,8 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: ['smtp-adapter:3010']
-  # email-worker (steps 3.1, 3.2): MIME ingestion and its queue consumer (amqp_consumer_*).
+  # email-worker (steps 3.1, 3.2, 4.1): MIME ingestion, the security scan stage (scan_*, S17) and
+  # their queue consumers (amqp_consumer_*).
   - job_name: email-worker
     metrics_path: /metrics
     static_configs:
@@ -48,6 +50,17 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: ['event-relay:3070']
+  # Inbound Rspamd (step 4.1 S17): the controller's OpenMetrics endpoint (rspamd_* scan, action,
+  # learn and memory series). The controller answers only with its read password outside its
+  # loopback secure_ip, so the header is read from a mounted secret file (Compose secret
+  # `rspamd_controller_password`, never written into this file).
+  - job_name: rspamd
+    metrics_path: /metrics
+    http_headers:
+      Password:
+        files: [/run/secrets/rspamd_controller_password]
+    static_configs:
+      - targets: ['rspamd:11334']
   - job_name: prometheus
     static_configs:
       - targets: ['localhost:9090']

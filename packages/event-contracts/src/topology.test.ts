@@ -21,6 +21,7 @@ import {
   retryPolicyViolations,
   retryRoutingKey,
   routeMessage,
+  SCAN_AUTH_RESERVED_REASON,
   TOPOLOGY,
   TOPOLOGY_VERSION,
   type Topology,
@@ -38,13 +39,13 @@ const mutableQueue = (topology: { queues: QueueDefinition[] }, name: QueueName) 
   return queue;
 };
 
-describe('TOPOLOGY v2', () => {
+describe('TOPOLOGY v3', () => {
   it('satisfies every invariant of design §3', () => {
     expect(validateTopology(TOPOLOGY)).toEqual([]);
   });
 
   it('declares exactly the six exchanges and fourteen queues of the brief', () => {
-    expect(TOPOLOGY_VERSION).toBe(2);
+    expect(TOPOLOGY_VERSION).toBe(3);
     expect(DEFAULT_VHOST).toBe('email-gateway');
     expect([...TOPOLOGY.exchanges]).toEqual([
       'email.ingestion',
@@ -60,13 +61,14 @@ describe('TOPOLOGY v2', () => {
     expect(new Set(QUEUE_NAMES).size).toBe(14);
   });
 
-  it('assigns roles: two work queues, one delay, one dead-letter, ten dormant', () => {
+  it('assigns roles: three work queues, one delay, one dead-letter, nine dormant (v3)', () => {
     const byRole = (role: string) =>
       TOPOLOGY.queues.filter((q) => q.role === role).map((q) => q.name);
-    expect(byRole('work')).toEqual(['email.received', 'email.delivery.pending']);
+    expect(byRole('work')).toEqual(['email.received', 'scan.spam', 'email.delivery.pending']);
     expect(byRole('delay')).toEqual(['email.delivery.retry']);
     expect(byRole('dead-letter')).toEqual(['email.dead-letter']);
-    expect(byRole('dormant')).toHaveLength(10);
+    expect(byRole('dormant')).toHaveLength(9);
+    expect(byRole('dormant')).toContain('scan.auth');
   });
 
   it('has the bindings and home exchanges of design §3', () => {
@@ -82,12 +84,8 @@ describe('TOPOLOGY v2', () => {
         'email.ingestion org.*.mail.message.received.v1',
         'email.ingestion retry.email.received.#',
       ],
-      'scan.auth': [
-        'email.security',
-        'email.ingestion org.*.mail.message.parsed.v1',
-        'email.security org.*.mail.message.rescan_requested.v1',
-        'email.security retry.scan.auth.#',
-      ],
+      // v3 (step 4.1 S2): reserved, only its retry binding.
+      'scan.auth': ['email.security', 'email.security retry.scan.auth.#'],
       'scan.spam': [
         'email.security',
         'email.ingestion org.*.mail.message.parsed.v1',
@@ -164,14 +162,28 @@ describe('TOPOLOGY v2', () => {
       ledgerName: 'delivery-worker.planner',
       service: 'delivery-worker',
     });
+    // v3 (step 4.1 S2): the Rspamd engine of the email-worker scan role.
+    expect(queueDefinition('scan.spam').consumer).toEqual({
+      kind: 'ledger',
+      ledgerName: 'email-worker.scan.rspamd',
+      service: 'email-worker',
+    });
+    expect(queueDefinition('scan.spam').description).toBe(
+      'Rspamd: spam, phishing, reputation and SPF/DKIM/DMARC/ARC (step 4.1)',
+    );
+    expect(queueDefinition('scan.auth').consumer).toEqual({
+      kind: 'none',
+      reason: SCAN_AUTH_RESERVED_REASON,
+    });
+    expect(SCAN_AUTH_RESERVED_REASON).toBe(
+      'reserved: authentication results come from the rspamd engine on scan.spam (step 4.1, ADR-0026)',
+    );
     const planned = Object.fromEntries(
       TOPOLOGY.queues
         .filter((q) => q.consumer.kind === 'planned')
         .map((q) => [q.name, q.consumer.kind === 'planned' ? q.consumer.plannedStep : '']),
     );
     expect(planned).toEqual({
-      'scan.auth': '4.1',
-      'scan.spam': '4.1',
       'scan.url': '4.3',
       'scan.attachment': '4.2',
       'scan.dlp': '4.5',
@@ -203,6 +215,15 @@ describe('policies (Q4)', () => {
       overflow: 'reject-publish',
       'max-length': 1_000_000,
     });
+    expect(queueDefinition('scan.spam').policy).toEqual({
+      'delivery-limit': 20,
+      'dead-letter-exchange': 'email.events',
+      'dead-letter-routing-key': 'dead-letter.scan.spam',
+      'dead-letter-strategy': 'at-least-once',
+      overflow: 'reject-publish',
+      'max-length': 1_000_000,
+    });
+    expect(queueDefinition('scan.auth').policy).toEqual(policyFor('dormant', 'scan.auth'));
     expect(queueDefinition('scan.url').policy).toEqual({
       'delivery-limit': -1,
       'max-length': 10_000,
@@ -254,6 +275,14 @@ describe('retry policies (Q8)', () => {
       maxDelayMs: 900_000,
       maxRetryAgeMs: 172_800_000,
       delayQueue: 'email.delivery.retry',
+    });
+    // v3 (step 4.1 S2): the engine budget (SCAN_RSPAMD_MAX_ATTEMPTS < 10) finalizes first.
+    expect(queueDefinition('scan.spam').retry).toEqual({
+      strategy: 'hold',
+      maxAttempts: 10,
+      baseDelayMs: 2000,
+      maxDelayMs: 60_000,
+      maxRetryAgeMs: 86_400_000,
     });
     for (const queue of TOPOLOGY.queues.filter((q) => q.role === 'dormant')) {
       expect(queue.retry, queue.name).toEqual({
@@ -444,15 +473,9 @@ describe('routing (topic semantics)', () => {
     const route = (type: keyof typeof EVENT_REGISTRY) =>
       routeMessage(EVENT_REGISTRY[type].exchange, eventRoutingKey('42', type));
     expect(route('mail.message.received.v1')).toEqual(['email.analytics', 'email.received']);
+    // v3: scan.auth is unbound (step 4.1 S2).
     expect(route('mail.message.parsed.v1')).toEqual(
-      [
-        'email.analytics',
-        'scan.attachment',
-        'scan.auth',
-        'scan.dlp',
-        'scan.spam',
-        'scan.url',
-      ].sort(),
+      ['email.analytics', 'scan.attachment', 'scan.dlp', 'scan.spam', 'scan.url'].sort(),
     );
     expect(route('mail.message.parse_failed.v1')).toEqual([
       'email.analytics',
@@ -472,14 +495,7 @@ describe('routing (topic semantics)', () => {
     // Topology v2 (step 3.3 L7).
     expect(route('mail.message.state_changed.v1')).toEqual(['email.analytics']);
     expect(route('mail.message.rescan_requested.v1')).toEqual(
-      [
-        'email.analytics',
-        'scan.attachment',
-        'scan.auth',
-        'scan.dlp',
-        'scan.spam',
-        'scan.url',
-      ].sort(),
+      ['email.analytics', 'scan.attachment', 'scan.dlp', 'scan.spam', 'scan.url'].sort(),
     );
   });
 
@@ -531,12 +547,13 @@ describe('routing (topic semantics)', () => {
       'mail.message.scanned.v1',
     ]);
     expect(eventTypesBoundTo('scan.sandbox')).toEqual(['mail.attachment.sandbox_requested.v1']);
-    for (const queue of ['scan.auth', 'scan.spam', 'scan.url', 'scan.attachment', 'scan.dlp']) {
+    for (const queue of ['scan.spam', 'scan.url', 'scan.attachment', 'scan.dlp']) {
       expect(eventTypesBoundTo(queue), queue).toEqual([
         'mail.message.parsed.v1',
         'mail.message.rescan_requested.v1',
       ]);
     }
+    expect(eventTypesBoundTo('scan.auth')).toEqual([]);
     expect(eventTypesBoundTo('email.analytics')).toEqual(
       [...Object.keys(EVENT_REGISTRY), ...Object.keys(RESERVED_EVENT_TYPES)].sort(),
     );
@@ -633,6 +650,29 @@ describe('validateTopology (negative cases)', () => {
     expect(violations).toContain('email.received: a work queue must have consumer kind ledger');
   });
 
+  it('allows only an unbound dormant queue to be reserved (consumer kind none)', () => {
+    const t = clone();
+    mutableQueue(t, 'scan.auth').bindings.unshift({
+      exchange: 'email.ingestion',
+      routingKey: 'org.*.mail.message.parsed.v1',
+    });
+    expect(validateTopology(t)).toContain('scan.auth: a reserved queue has no event binding');
+    const u = clone();
+    mutableQueue(u, 'scan.url').bindings = [
+      { exchange: 'email.security', routingKey: 'retry.scan.url.#' },
+    ];
+    expect(validateTopology(u)).toContain('scan.url: has no event binding');
+    const w = clone();
+    mutableQueue(w, 'scan.auth').consumer = {
+      kind: 'ledger',
+      ledgerName: 'x',
+      service: 'email-worker',
+    };
+    expect(validateTopology(w)).toContain(
+      'scan.auth: a dormant queue must have consumer kind planned or none',
+    );
+  });
+
   it('detects a missing exchange-to-exchange binding', () => {
     const t = clone();
     t.exchangeBindings = t.exchangeBindings.filter((b) => b.source !== 'email.archive');
@@ -653,7 +693,7 @@ describe('toRabbitDefinitions (Q5)', () => {
   const definitions = toRabbitDefinitions(TOPOLOGY, { vhost: DEFAULT_VHOST });
 
   it('declares topic exchanges and quorum queues with no other argument', () => {
-    expect(definitions.topology_version).toBe(2);
+    expect(definitions.topology_version).toBe(3);
     expect(definitions.exchanges).toHaveLength(6);
     for (const exchange of definitions.exchanges) {
       expect(exchange).toEqual({

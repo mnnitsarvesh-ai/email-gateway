@@ -2,16 +2,24 @@ import {
   EXCHANGE_NAMES,
   policyFor,
   QUEUE_NAMES,
+  queueDefinition,
   TOPOLOGY,
   TOPOLOGY_VERSION,
 } from '@email-gateway/event-contracts';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { ManagementApi, type RawBinding, type RawExchange, type RawPolicy } from './support/broker';
+import {
+  ManagementApi,
+  runInit,
+  type RawBinding,
+  type RawExchange,
+  type RawPolicy,
+} from './support/broker';
 import { stack } from './support/env';
 
 /**
  * The provisioned vhost `email-gateway` matches the topology exactly (step 3.2 Q1, Q4, §3; v2:
- * step 3.3 L7): read-only checks through the management API.
+ * step 3.3 L7; v3: step 4.1 S2): checks through the management API. The prune case adds one
+ * stray binding to the dormant `scan.auth` and lets `init.mjs` remove it again.
  */
 const api = new ManagementApi();
 const vhost = stack.rabbitmqVhost();
@@ -112,10 +120,10 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
     expect(bindings.filter((b) => b.destination_type === 'exchange')).toHaveLength(5);
   });
 
-  it('is topology v2: the vhost description and the rescan bindings of step 3.3', async () => {
-    expect(TOPOLOGY_VERSION).toBe(2);
+  it('is topology v3: the vhost description and the rescan bindings (step 4.1 S2)', async () => {
+    expect(TOPOLOGY_VERSION).toBe(3);
     const info = await api.get<{ description?: string }>(`/vhosts/${encodeURIComponent(vhost)}`);
-    expect(info.description).toBe('email-gateway topology v2');
+    expect(info.description).toBe('email-gateway topology v3');
     const rescan = bindings
       .filter(
         (b) =>
@@ -124,11 +132,70 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
       )
       .map((b) => `${b.destination_type}:${b.destination}`)
       .sort();
+    // v2 bound five scan queues; v3 removed scan.auth's event bindings (authentication results
+    // come from the rspamd engine on scan.spam, ADR-0026).
     expect(rescan).toEqual(
-      ['scan.attachment', 'scan.auth', 'scan.dlp', 'scan.spam', 'scan.url'].map(
-        (q) => `queue:${q}`,
-      ),
+      ['scan.attachment', 'scan.dlp', 'scan.spam', 'scan.url'].map((q) => `queue:${q}`),
     );
-    expect(bindings.filter((b) => b.source !== '')).toHaveLength(37);
+    expect(bindings.filter((b) => b.source !== '')).toHaveLength(35);
+  });
+
+  it('scan.auth keeps only its retry binding (reserved, no event binding)', () => {
+    const auth = bindings
+      .filter((b) => b.source !== '' && b.destination === 'scan.auth')
+      .map((b) => `${b.source} [${b.routing_key}]`);
+    expect(auth).toEqual(['email.security [retry.scan.auth.#]']);
+    expect(queueDefinition('scan.auth')).toMatchObject({ role: 'dormant' });
+  });
+
+  it('scan.spam is a work queue (work policy) consumed by the scanner role user eg-scanner', async () => {
+    expect(queueDefinition('scan.spam')).toMatchObject({
+      role: 'work',
+      consumer: { kind: 'ledger', ledgerName: 'email-worker.scan.rspamd', service: 'email-worker' },
+    });
+    const spam = bindings
+      .filter((b) => b.source !== '' && b.destination === 'scan.spam')
+      .map((b) => `${b.source} [${b.routing_key}]`)
+      .sort();
+    expect(spam).toEqual(
+      [
+        'email.ingestion [org.*.mail.message.parsed.v1]',
+        'email.security [org.*.mail.message.rescan_requested.v1]',
+        'email.security [retry.scan.spam.#]',
+      ].sort(),
+    );
+    const details = await api.get<{
+      consumer_details?: { channel_details?: { user?: string } }[];
+    }>(`/queues/${encodeURIComponent(vhost)}/scan.spam`);
+    const users = (details.consumer_details ?? []).map((c) => c.channel_details?.user);
+    expect(users.length, 'consumers on scan.spam').toBeGreaterThanOrEqual(1);
+    const scanner = process.env.RABBITMQ_SCANNER_USER || 'eg-scanner';
+    expect(new Set(users)).toEqual(new Set([scanner]));
+  });
+
+  it('init.mjs prunes a binding on a topology queue that the definitions do not have', async () => {
+    // The v2 binding scan.auth lost in v3, re-added by hand as on a broker upgraded from v2.
+    const stray = {
+      source: 'email.ingestion',
+      destination: 'scan.auth',
+      routing_key: 'org.*.mail.message.parsed.v1',
+    };
+    await api.bindQueue(vhost, stray.source, stray.destination, stray.routing_key);
+    const has = async () =>
+      (await api.bindings(vhost)).some(
+        (b) =>
+          b.source === stray.source &&
+          b.destination === stray.destination &&
+          b.routing_key === stray.routing_key,
+      );
+    expect(await has()).toBe(true);
+    const dryRun = await runInit(['--prune-dry-run', '--vhost', vhost]);
+    expect(dryRun).toMatch(/scan\.auth/);
+    expect(await has()).toBe(true);
+    const output = await runInit(['--vhost', vhost]);
+    expect(output).toContain(`1 binding(s) on topology objects of ${vhost} were removed`);
+    expect(await has()).toBe(false);
+    expect((await api.bindings(vhost)).filter((b) => b.source !== '')).toHaveLength(35);
+    await api.purge(vhost, 'scan.auth');
   });
 });

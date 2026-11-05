@@ -101,7 +101,7 @@ export const deliveryConfigShape = {
 
 /** The text of the startup refusal (also asserted by the tests). */
 export const DEV_PASSTHROUGH_REFUSAL =
-  'true is allowed only when APP_ENV is local or ci: the dev pass-through delivers mail without scanning or policy';
+  'true is allowed only when APP_ENV is local or ci: the dev pass-through delivers scanned mail without policy';
 
 /** Cross-field rules. */
 export function validateWorkerConfig(

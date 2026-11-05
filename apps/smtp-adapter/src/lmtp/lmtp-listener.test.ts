@@ -4,7 +4,12 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { deliver, LmtpTestClient } from '../../integration/support/lmtp-client';
 import { parseNetworkList } from '../shared/internal-networks';
 import { LMTP_OK, LMTP_TEMPFAIL, LOOP, type SmtpReply } from '../shared/replies';
-import { type LmtpClientInfo, type LmtpHandler, LmtpListener } from './lmtp-listener';
+import {
+  type LmtpClientInfo,
+  type LmtpHandler,
+  LmtpListener,
+  xForwardClientName,
+} from './lmtp-listener';
 import { LmtpReplyException } from './lmtp-reply';
 
 const logger = createLogger({ service: 'smtp-adapter', level: 'silent' });
@@ -68,6 +73,29 @@ async function start(
   return listener.port();
 }
 
+describe('xForwardClientName', () => {
+  it('normalizes the verified host name and keeps Postfix unknown', () => {
+    expect(xForwardClientName('Mail.Example.')).toBe('mail.example');
+    expect(xForwardClientName('unknown')).toBe('unknown');
+    expect(xForwardClientName('UNKNOWN')).toBe('unknown');
+  });
+
+  it('maps missing, empty and the unavailable placeholders to null', () => {
+    for (const value of [
+      undefined,
+      null,
+      false,
+      '',
+      '  ',
+      '[UNAVAILABLE]',
+      '[TEMPUNAVAIL]',
+      '[tempunavail]',
+    ]) {
+      expect(xForwardClientName(value), String(value)).toBeNull();
+    }
+  });
+});
+
 describe('LmtpListener', () => {
   it('answers per recipient after DATA and reports XFORWARD and the LHLO name', async () => {
     const seen: Seen = { clients: [], froms: [], bodies: [] };
@@ -76,7 +104,7 @@ describe('LmtpListener', () => {
       port,
       lhlo: 'MX.Gateway.Local',
       xforward: {
-        NAME: 'mail.example',
+        NAME: 'Mail.Example.',
         ADDR: '203.0.113.7',
         HELO: 'client.example',
         IDENT: '4ZbK3B2xyzQ',
@@ -103,6 +131,7 @@ describe('LmtpListener', () => {
       queueId: '4ZbK3B2xyzQ',
       clientAddress: '203.0.113.7',
       clientHelo: 'client.example',
+      clientName: 'mail.example',
       peerAddress: '127.0.0.1',
     });
     expect(seen.froms).toEqual(['alice@example.test']);
@@ -122,6 +151,20 @@ describe('LmtpListener', () => {
     });
     expect(seen.froms[0]).toBe('');
     expect(seen.clients.map((c) => c.queueId)).toEqual([null, null]);
+  });
+
+  it('reports XFORWARD NAME unknown as unknown and an unavailable or missing NAME as null', async () => {
+    const seen: Seen = { clients: [], froms: [], bodies: [] };
+    const port = await start(recordingHandler(seen));
+    const requests: Record<string, string>[] = [
+      { NAME: 'unknown', ADDR: '198.51.100.9' },
+      { NAME: '[UNAVAILABLE]', ADDR: '198.51.100.9' },
+      { ADDR: '198.51.100.9' },
+    ];
+    for (const xforward of requests) {
+      await deliver({ port, xforward, from: 'a@b.test', to: ['ok@a.test'], message: 'x\r\n' });
+    }
+    expect(seen.clients.map((c) => c.clientName)).toEqual(['unknown', null, null]);
   });
 
   it('keeps the LHLO name for every transaction of a cached connection', async () => {

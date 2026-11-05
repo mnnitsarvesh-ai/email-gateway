@@ -11,6 +11,12 @@ import {
   validateNotifySmtpConfig,
 } from '@email-gateway/config';
 import { parseAllowedDestinationPorts } from '@email-gateway/mail-routing';
+import {
+  RSPAMD_PLATFORM_DEFAULTS,
+  RSPAMD_PLATFORM_ENV_KEYS,
+  type RspamdPlatformSettings,
+  rspamdPlatformSettingsSchema,
+} from '@email-gateway/security-contracts';
 import { z } from 'zod';
 import {
   checkDohUrl,
@@ -388,6 +394,94 @@ const deadLetterConfigShape = {
   DEAD_LETTER_REPLAY_SCAN_MAX: int(1, 100_000).default(10_000),
 };
 
+/** An optional http(s) URL; empty or unset is undefined. */
+const optionalHttpUrl = z
+  .string()
+  .default('')
+  .transform((value, ctx): string | undefined => {
+    const trimmed = value.trim();
+    if (trimmed === '') return undefined;
+    let url: URL;
+    try {
+      url = new URL(trimmed);
+    } catch {
+      ctx.addIssue({ code: 'custom', message: 'must be an http:// or https:// URL' });
+      return z.NEVER;
+    }
+    if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'must be an http:// or https:// URL without credentials',
+      });
+      return z.NEVER;
+    }
+    return trimmed;
+  });
+
+/**
+ * Security scanning (step 4.1 S8, S13): the Rspamd platform thresholds (the same `SCAN_RSPAMD_*`
+ * keys the email-worker reads; the settings API validates tenant overrides against them) and the
+ * Rspamd controller for the platform training route. Without the controller URL or the enable
+ * password the training route answers 503 `rspamd_unavailable`; every other route is unaffected.
+ */
+const scanConfigShape = {
+  SCAN_RSPAMD_SPAM_SCORE: z.coerce.number().default(RSPAMD_PLATFORM_DEFAULTS.spamScore),
+  SCAN_RSPAMD_SUSPICIOUS_SCORE: z.coerce.number().default(RSPAMD_PLATFORM_DEFAULTS.suspiciousScore),
+  SCAN_RSPAMD_SCORE_MIN: z.coerce.number().default(RSPAMD_PLATFORM_DEFAULTS.scoreMin),
+  SCAN_RSPAMD_SCORE_MAX: z.coerce.number().default(RSPAMD_PLATFORM_DEFAULTS.scoreMax),
+  SCAN_RSPAMD_PHISHING_VERDICT: z.string().default(RSPAMD_PLATFORM_DEFAULTS.phishingVerdict),
+  SCAN_RSPAMD_DMARC_REJECT_VERDICT: z.string().default(RSPAMD_PLATFORM_DEFAULTS.dmarcRejectVerdict),
+  SCAN_RSPAMD_AUTH_FAILURE_VERDICT: z.string().default(RSPAMD_PLATFORM_DEFAULTS.authFailureVerdict),
+  /** Rspamd controller (`/learnspam`, `/learnham`, `/fuzzyadd`, `/fuzzydel`, `/stat`). */
+  RSPAMD_CONTROLLER_URL: optionalHttpUrl,
+  /** Controller enable password (`_FILE` accepted); held only by the api (S18). */
+  RSPAMD_CONTROLLER_ENABLE_PASSWORD: z.string().optional(),
+  /** Weight of an administrator fuzzy hash (`/fuzzyadd` `Weight`). */
+  SCAN_FUZZY_WEIGHT: int(1, 1_000_000).default(10),
+};
+
+type ScanConfigKeys = {
+  [K in keyof typeof scanConfigShape]: z.output<(typeof scanConfigShape)[K]>;
+};
+
+/** The validated Rspamd platform settings of the api config (S8). */
+export function rspamdPlatformSettingsOf(
+  cfg: Pick<ScanConfigKeys, (typeof RSPAMD_PLATFORM_ENV_KEYS)[keyof RspamdPlatformSettings]>,
+): RspamdPlatformSettings {
+  return rspamdPlatformSettingsSchema.parse(rawPlatformSettings(cfg));
+}
+
+function rawPlatformSettings(
+  cfg: Pick<ScanConfigKeys, (typeof RSPAMD_PLATFORM_ENV_KEYS)[keyof RspamdPlatformSettings]>,
+): Record<keyof RspamdPlatformSettings, unknown> {
+  return {
+    spamScore: cfg.SCAN_RSPAMD_SPAM_SCORE,
+    suspiciousScore: cfg.SCAN_RSPAMD_SUSPICIOUS_SCORE,
+    scoreMin: cfg.SCAN_RSPAMD_SCORE_MIN,
+    scoreMax: cfg.SCAN_RSPAMD_SCORE_MAX,
+    phishingVerdict: cfg.SCAN_RSPAMD_PHISHING_VERDICT,
+    dmarcRejectVerdict: cfg.SCAN_RSPAMD_DMARC_REJECT_VERDICT,
+    authFailureVerdict: cfg.SCAN_RSPAMD_AUTH_FAILURE_VERDICT,
+  };
+}
+
+/** Cross-field rules of the scan keys: the platform settings must validate (S8). */
+function validateScanConfig(
+  cfg: Pick<ScanConfigKeys, (typeof RSPAMD_PLATFORM_ENV_KEYS)[keyof RspamdPlatformSettings]>,
+  ctx: z.RefinementCtx,
+): void {
+  const parsed = rspamdPlatformSettingsSchema.safeParse(rawPlatformSettings(cfg));
+  if (parsed.success) return;
+  for (const issue of parsed.error.issues) {
+    const setting = issue.path[0] as keyof RspamdPlatformSettings | undefined;
+    ctx.addIssue({
+      code: 'custom',
+      path: [setting ? RSPAMD_PLATFORM_ENV_KEYS[setting] : 'SCAN_RSPAMD_SPAM_SCORE'],
+      message: issue.message,
+    });
+  }
+}
+
 export const apiConfigSchema = baseConfigSchema
   .extend(httpConfigSchema(3000).shape)
   .extend(databaseConfigSchema.shape)
@@ -401,6 +495,7 @@ export const apiConfigSchema = baseConfigSchema
   .extend(smtpGatewayConfigShape)
   .extend(routingConfigShape)
   .extend(deadLetterConfigShape)
+  .extend(scanConfigShape)
   .extend({
     /** Comma-separated allow-list of admin portal origins. */
     CORS_ORIGINS: z
@@ -416,6 +511,7 @@ export const apiConfigSchema = baseConfigSchema
   .superRefine((cfg, ctx) => {
     validateNotifySmtpConfig(cfg, ctx);
     validateDomainConfig(cfg, ctx);
+    validateScanConfig(cfg, ctx);
     if (cfg.AUTH_SESSION_MAX_AGE_SECONDS < cfg.AUTH_REFRESH_TOKEN_TTL_SECONDS) {
       ctx.addIssue({
         code: 'custom',
