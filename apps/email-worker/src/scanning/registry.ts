@@ -6,6 +6,7 @@ import type { WorkerConfig } from '../config';
 import type { ScanEngineAdapter } from './engine';
 import { attachmentRegistration } from './engines/attachment/registration';
 import { rspamdRegistration } from './engines/rspamd/registration';
+import { urlRegistration } from './engines/url/registration';
 import type { ScanMetrics } from './scan-metrics';
 
 /** A tenant override row of `scan_engine_settings` (S8). */
@@ -68,10 +69,11 @@ export interface ScanEngineRegistration {
   ): EngineSettingsResolution;
 }
 
-/** Every engine with an adapter in this worker (step 4.1: Rspamd; step 4.2: attachment). */
+/** Every engine with an adapter in this worker (4.1: Rspamd; 4.2: attachment; 4.3: url). */
 export const ENGINE_REGISTRY: readonly ScanEngineRegistration[] = Object.freeze([
   rspamdRegistration,
   attachmentRegistration,
+  urlRegistration,
 ]);
 
 /** The registrations of the platform-enabled engines (`SCAN_ENGINES`), in catalog order. */

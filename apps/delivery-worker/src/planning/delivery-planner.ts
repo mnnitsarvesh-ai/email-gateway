@@ -408,7 +408,12 @@ export class DeliveryPlanner {
       });
     }
 
-    this.deps.metrics.approvals.inc({ source: payload.source });
+    this.deps.metrics.approvals.inc({
+      source: payload.source,
+      object: payload.emlS3Key.startsWith(`org/${organizationId.toString()}/rewrite/`)
+        ? 'rewritten'
+        : 'original',
+    });
     this.logger.info(
       {
         ...ids,

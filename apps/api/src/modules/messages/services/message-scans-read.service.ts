@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import type { TenantScope } from '../../../auth-contracts/tenant-scope';
-import { decodeScanCursor, encodeScanCursor, roundOf } from '../domain/message-scans';
+import { decodeScanCursor, encodeScanCursor, roundOf, URL_ENGINE } from '../domain/message-scans';
 import type { MessageScansPage, MessageScansQuery } from '../dto/message-scans.schemas';
 import { messageNotFound } from '../messages.errors';
 import { MessageLifecycleReadRepository } from '../repositories/message-lifecycle-read.repository';
@@ -8,7 +8,7 @@ import { MessageScansReadRepository } from '../repositories/message-scans-read.r
 
 /**
  * `GET /messages/{messageId}/scans` (step 4.1 S16; step 4.2 A16: per-attachment results on the
- * `attachment` engine entry): the scan rounds of a message of the caller's organization, newest
+ * `attachment` engine entry; step 4.3 U16: per-URL results and the rewrite on the `url` entry): the scan rounds of a message of the caller's organization, newest
  * round first, from the read replica (a few seconds behind the writer: a round that just
  * completed may still show as running). Every query filters by the scope's organization;
  * another organization's message is `404 message_not_found`.
@@ -40,16 +40,28 @@ export class MessageScansReadService {
       this.rounds.attachmentResults(scope, message, scanIds),
       this.rounds.sandboxSubmissions(scope, message, scanIds),
     ]);
+    // Step 4.3 U16: URL rows only when a page round has a url engine row.
+    const hasUrl = engineRows.some((row) => row.engine === URL_ENGINE);
+    const [urls, urlResults, rewrites, inspections, clicks] = hasUrl
+      ? await Promise.all([
+          this.rounds.messageUrls(scope, message),
+          this.rounds.urlResults(scope, message, scanIds),
+          this.rounds.urlRewrites(scope, message, scanIds),
+          this.rounds.urlInspections(scope, message, scanIds),
+          this.rounds.urlClicks(scope, message),
+        ])
+      : [[], [], [], [], []];
     const parts = await this.rounds.attachmentParts(
       scope,
       message,
       results.map((row) => row.partIndex),
     );
     const attachments = { results, parts, submissions };
+    const urlInputs = { urls, results: urlResults, rewrites, inspections, clicks };
     const last = page.at(-1);
     return {
       messageId: message.publicId,
-      data: page.map((scan) => roundOf(scan, engineRows, authRows, attachments)),
+      data: page.map((scan) => roundOf(scan, engineRows, authRows, attachments, urlInputs)),
       nextCursor: rows.length > query.limit && last ? encodeScanCursor(last.lifecycleRound) : null,
     };
   }

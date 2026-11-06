@@ -104,8 +104,84 @@ export interface SandboxSubmissionRow {
  */
 const MAX_ATTACHMENT_ROWS = 2_000;
 
+const messageUrlSelect = {
+  urlSeq: true,
+  url: true,
+  urlSha256: true,
+  host: true,
+  unicodeHost: true,
+  registrableDomain: true,
+  hostKind: true,
+  flags: true,
+  sources: true,
+} satisfies Prisma.MessageUrlSelect;
+
+export type MessageUrlRow = Prisma.MessageUrlGetPayload<{ select: typeof messageUrlSelect }>;
+
+const urlResultSelect = {
+  scanId: true,
+  urlSeq: true,
+  urlSha256: true,
+  verdict: true,
+  reasonCodes: true,
+  reputation: true,
+  lookalike: true,
+  fetchStatus: true,
+  fetchError: true,
+  hopCount: true,
+  redirectChain: true,
+  finalUrl: true,
+  finalStatus: true,
+  landing: true,
+  rewritten: true,
+  // Not `fetch_cache` / `duration_ms`: never shown to tenants (they reveal the cross-tenant
+  // reputation/chain caches, step 4.3 U6/U16).
+} satisfies Prisma.UrlScanResultSelect;
+
+export type UrlResultRow = Prisma.UrlScanResultGetPayload<{ select: typeof urlResultSelect }>;
+
+const urlRewriteSelect = {
+  scanId: true,
+  lifecycleRound: true,
+  status: true,
+  skipReason: true,
+  linksRewritten: true,
+  partsRewritten: true,
+  dkimSigned: true,
+  expiresAt: true,
+} satisfies Prisma.UrlRewriteSelect;
+
+export type UrlRewriteRow = Prisma.UrlRewriteGetPayload<{ select: typeof urlRewriteSelect }>;
+
+const urlInspectionSelect = {
+  scanId: true,
+  urlSeq: true,
+  urlSha256: true,
+  status: true,
+  verdict: true,
+  reasonCodes: true,
+  signals: true,
+} satisfies Prisma.UrlDynamicInspectionSelect;
+
+export type UrlInspectionRow = Prisma.UrlDynamicInspectionGetPayload<{
+  select: typeof urlInspectionSelect;
+}>;
+
+/** The click summary of one URL of a message (`url_click_events`, every round). */
+export interface UrlClickSummaryRow {
+  urlSeq: number;
+  total: number;
+  lastDecision: 'allowed' | 'warned' | 'blocked' | 'continued' | 'expired' | 'not_found' | null;
+  lastAt: Date | null;
+}
+
+/** Most URL rows a message has (U4 `URL_MAX_PER_MESSAGE` ≤ 200, the seq space is stable). */
+const MAX_MESSAGE_URLS = 1_000;
+/** Most per-URL result / inspection rows one page reads: ≤ 20 rounds × 200 URLs. */
+const MAX_URL_RESULT_ROWS = 4_000;
+
 /**
- * Read-only, tenant-scoped scan reads (step 4.1 S16) on the replica (`PrismaReadService`, with
+ * Read-only, tenant-scoped scan reads (step 4.1 S16; 4.2 attachments; 4.3 URLs) on the replica (`PrismaReadService`, with
  * the writer fallback above the lag threshold; ADR-0014, §2.0 invariant 6). Every query matches
  * the organization of the caller's scope and the message's `(message_id, received_at)`, so the
  * partitioned tables are pruned and another tenant's rows are never read.
@@ -232,5 +308,114 @@ export class MessageScansReadRepository {
       select: authSelect,
       orderBy: [{ scanId: 'desc' }, { engine: 'asc' }],
     });
+  }
+
+  /** The URLs of the message (`message_urls`, seqs stable across rounds, step 4.3 U3/U16). */
+  messageUrls(scope: TenantScope, message: LifecycleMessageRow): Promise<MessageUrlRow[]> {
+    return this.db.messageUrl.findMany({
+      where: tenantWhere(scope, { messageId: message.id, receivedAt: message.receivedAt }),
+      select: messageUrlSelect,
+      orderBy: { urlSeq: 'asc' },
+      take: MAX_MESSAGE_URLS,
+    });
+  }
+
+  /** The per-URL results of the given scans (`url_scan_results`), by round and seq. */
+  urlResults(
+    scope: TenantScope,
+    message: LifecycleMessageRow,
+    scanIds: readonly bigint[],
+  ): Promise<UrlResultRow[]> {
+    if (scanIds.length === 0) return Promise.resolve([]);
+    return this.db.urlScanResult.findMany({
+      where: tenantWhere(scope, {
+        messageId: message.id,
+        receivedAt: message.receivedAt,
+        scanId: { in: [...scanIds] },
+      }),
+      select: urlResultSelect,
+      orderBy: [{ scanId: 'desc' }, { urlSeq: 'asc' }],
+      take: MAX_URL_RESULT_ROWS,
+    });
+  }
+
+  /** The rewrite rows of the given scans (`url_rewrites`, one per round). */
+  urlRewrites(
+    scope: TenantScope,
+    message: LifecycleMessageRow,
+    scanIds: readonly bigint[],
+  ): Promise<UrlRewriteRow[]> {
+    if (scanIds.length === 0) return Promise.resolve([]);
+    return this.db.urlRewrite.findMany({
+      where: tenantWhere(scope, {
+        messageId: message.id,
+        receivedAt: message.receivedAt,
+        scanId: { in: [...scanIds] },
+      }),
+      select: urlRewriteSelect,
+      take: MAX_URL_RESULT_ROWS,
+    });
+  }
+
+  /** The dynamic inspections of the given scans (`url_dynamic_inspections`, ≤ 3 per round). */
+  urlInspections(
+    scope: TenantScope,
+    message: LifecycleMessageRow,
+    scanIds: readonly bigint[],
+  ): Promise<UrlInspectionRow[]> {
+    if (scanIds.length === 0) return Promise.resolve([]);
+    return this.db.urlDynamicInspection.findMany({
+      where: tenantWhere(scope, {
+        messageId: message.id,
+        receivedAt: message.receivedAt,
+        scanId: { in: [...scanIds] },
+      }),
+      select: urlInspectionSelect,
+      take: MAX_URL_RESULT_ROWS,
+    });
+  }
+
+  /**
+   * The click summary per URL of the message (`url_click_events`, partitioned by `clicked_at`;
+   * matched on the `(message_id, message_received_at)` index and the scope's organization): the
+   * count, the newest click's decision and time. Two queries: the per-seq count and newest time,
+   * then the decisions of those newest clicks.
+   */
+  async urlClicks(scope: TenantScope, message: LifecycleMessageRow): Promise<UrlClickSummaryRow[]> {
+    const where = tenantWhere(scope, {
+      messageId: message.id,
+      messageReceivedAt: message.receivedAt,
+    });
+    const groups = await this.db.urlClickEvent.groupBy({
+      by: ['urlSeq'],
+      where,
+      _count: { _all: true },
+      _max: { clickedAt: true },
+      orderBy: { urlSeq: 'asc' },
+      take: MAX_MESSAGE_URLS,
+    });
+    if (groups.length === 0) return [];
+    const newest = groups.flatMap((g) =>
+      g._max.clickedAt ? [{ urlSeq: g.urlSeq, clickedAt: g._max.clickedAt }] : [],
+    );
+    const last =
+      newest.length === 0
+        ? []
+        : await this.db.urlClickEvent.findMany({
+            where: { AND: [where, { OR: newest }] },
+            select: { urlSeq: true, clickedAt: true, decision: true, id: true },
+            orderBy: [{ clickedAt: 'desc' }, { id: 'desc' }],
+            take: MAX_MESSAGE_URLS * 4,
+          });
+    const decisionOf = new Map<number, UrlClickSummaryRow['lastDecision']>();
+    for (const row of last) {
+      if (!decisionOf.has(row.urlSeq)) decisionOf.set(row.urlSeq, row.decision);
+    }
+    return groups.map((g) => ({
+      urlSeq: g.urlSeq,
+      total: g._count._all,
+      lastDecision: decisionOf.get(g.urlSeq) ?? null,
+      lastAt: g._max.clickedAt ?? null,
+    }));
   }
 }

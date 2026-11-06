@@ -1,0 +1,585 @@
+{
+  "version": 1,
+  "description": "Protected platform brands for lookalike detection (docs/plan/steps/11-url-protection.md U7). label = registrable domain minus public suffix; officialDomains are registrable domains never treated as lookalikes of the entry. Reviewed list; replace with URL_PROTECTED_BRANDS_FILE.",
+  "brands": [
+    {
+      "id": "microsoft",
+      "label": "microsoft",
+      "officialDomains": [
+        "microsoft.com",
+        "microsoftonline.com",
+        "office.com",
+        "office365.com",
+        "outlook.com",
+        "live.com",
+        "hotmail.com",
+        "msn.com",
+        "sharepoint.com",
+        "onmicrosoft.com",
+        "onedrive.com",
+        "azure.com",
+        "windows.net",
+        "windows.com",
+        "bing.com",
+        "skype.com",
+        "xbox.com",
+        "microsoft365.com"
+      ]
+    },
+    {
+      "id": "office365",
+      "label": "office365",
+      "officialDomains": [
+        "microsoft.com",
+        "microsoftonline.com",
+        "office.com",
+        "office365.com",
+        "outlook.com",
+        "live.com",
+        "hotmail.com",
+        "msn.com",
+        "sharepoint.com",
+        "onmicrosoft.com",
+        "onedrive.com",
+        "azure.com",
+        "windows.net",
+        "windows.com",
+        "bing.com",
+        "skype.com",
+        "xbox.com",
+        "microsoft365.com"
+      ]
+    },
+    {
+      "id": "outlook",
+      "label": "outlook",
+      "officialDomains": [
+        "microsoft.com",
+        "microsoftonline.com",
+        "office.com",
+        "office365.com",
+        "outlook.com",
+        "live.com",
+        "hotmail.com",
+        "msn.com",
+        "sharepoint.com",
+        "onmicrosoft.com",
+        "onedrive.com",
+        "azure.com",
+        "windows.net",
+        "windows.com",
+        "bing.com",
+        "skype.com",
+        "xbox.com",
+        "microsoft365.com"
+      ]
+    },
+    {
+      "id": "hotmail",
+      "label": "hotmail",
+      "officialDomains": [
+        "microsoft.com",
+        "microsoftonline.com",
+        "office.com",
+        "office365.com",
+        "outlook.com",
+        "live.com",
+        "hotmail.com",
+        "msn.com",
+        "sharepoint.com",
+        "onmicrosoft.com",
+        "onedrive.com",
+        "azure.com",
+        "windows.net",
+        "windows.com",
+        "bing.com",
+        "skype.com",
+        "xbox.com",
+        "microsoft365.com"
+      ]
+    },
+    {
+      "id": "sharepoint",
+      "label": "sharepoint",
+      "officialDomains": [
+        "microsoft.com",
+        "microsoftonline.com",
+        "office.com",
+        "office365.com",
+        "outlook.com",
+        "live.com",
+        "hotmail.com",
+        "msn.com",
+        "sharepoint.com",
+        "onmicrosoft.com",
+        "onedrive.com",
+        "azure.com",
+        "windows.net",
+        "windows.com",
+        "bing.com",
+        "skype.com",
+        "xbox.com",
+        "microsoft365.com"
+      ]
+    },
+    {
+      "id": "onedrive",
+      "label": "onedrive",
+      "officialDomains": [
+        "microsoft.com",
+        "microsoftonline.com",
+        "office.com",
+        "office365.com",
+        "outlook.com",
+        "live.com",
+        "hotmail.com",
+        "msn.com",
+        "sharepoint.com",
+        "onmicrosoft.com",
+        "onedrive.com",
+        "azure.com",
+        "windows.net",
+        "windows.com",
+        "bing.com",
+        "skype.com",
+        "xbox.com",
+        "microsoft365.com"
+      ]
+    },
+    {
+      "id": "microsoftonline",
+      "label": "microsoftonline",
+      "officialDomains": [
+        "microsoft.com",
+        "microsoftonline.com",
+        "office.com",
+        "office365.com",
+        "outlook.com",
+        "live.com",
+        "hotmail.com",
+        "msn.com",
+        "sharepoint.com",
+        "onmicrosoft.com",
+        "onedrive.com",
+        "azure.com",
+        "windows.net",
+        "windows.com",
+        "bing.com",
+        "skype.com",
+        "xbox.com",
+        "microsoft365.com"
+      ]
+    },
+    {
+      "id": "google",
+      "label": "google",
+      "officialDomains": [
+        "google.com",
+        "gmail.com",
+        "googlemail.com",
+        "google.co.in",
+        "youtube.com",
+        "gstatic.com",
+        "googleusercontent.com",
+        "goo.gl",
+        "android.com"
+      ]
+    },
+    {
+      "id": "gmail",
+      "label": "gmail",
+      "officialDomains": [
+        "google.com",
+        "gmail.com",
+        "googlemail.com",
+        "google.co.in",
+        "youtube.com",
+        "gstatic.com",
+        "googleusercontent.com",
+        "goo.gl",
+        "android.com"
+      ]
+    },
+    {
+      "id": "youtube",
+      "label": "youtube",
+      "officialDomains": [
+        "google.com",
+        "gmail.com",
+        "googlemail.com",
+        "google.co.in",
+        "youtube.com",
+        "gstatic.com",
+        "googleusercontent.com",
+        "goo.gl",
+        "android.com"
+      ]
+    },
+    {
+      "id": "apple",
+      "label": "apple",
+      "officialDomains": ["apple.com", "icloud.com", "me.com", "mac.com", "itunes.com", "apple.co"]
+    },
+    {
+      "id": "icloud",
+      "label": "icloud",
+      "officialDomains": ["apple.com", "icloud.com", "me.com", "mac.com", "itunes.com", "apple.co"]
+    },
+    {
+      "id": "itunes",
+      "label": "itunes",
+      "officialDomains": ["apple.com", "icloud.com", "me.com", "mac.com", "itunes.com", "apple.co"]
+    },
+    {
+      "id": "amazon",
+      "label": "amazon",
+      "officialDomains": [
+        "amazon.com",
+        "amazon.in",
+        "amazon.co.uk",
+        "amazon.de",
+        "amazon.fr",
+        "amazon.ca",
+        "amazon.com.au",
+        "amazon.co.jp",
+        "amazonaws.com",
+        "primevideo.com",
+        "amzn.to",
+        "a2z.com"
+      ]
+    },
+    {
+      "id": "paypal",
+      "label": "paypal",
+      "officialDomains": ["paypal.com", "paypal.me", "paypalobjects.com", "paypal-community.com"]
+    },
+    {
+      "id": "docusign",
+      "label": "docusign",
+      "officialDomains": ["docusign.com", "docusign.net"]
+    },
+    {
+      "id": "dropbox",
+      "label": "dropbox",
+      "officialDomains": ["dropbox.com", "dropboxusercontent.com", "db.tt"]
+    },
+    {
+      "id": "linkedin",
+      "label": "linkedin",
+      "officialDomains": ["linkedin.com", "licdn.com", "lnkd.in"]
+    },
+    {
+      "id": "facebook",
+      "label": "facebook",
+      "officialDomains": [
+        "facebook.com",
+        "fb.com",
+        "fb.me",
+        "fbcdn.net",
+        "meta.com",
+        "messenger.com",
+        "instagram.com",
+        "cdninstagram.com",
+        "whatsapp.com",
+        "whatsapp.net",
+        "wa.me"
+      ]
+    },
+    {
+      "id": "instagram",
+      "label": "instagram",
+      "officialDomains": [
+        "facebook.com",
+        "fb.com",
+        "fb.me",
+        "fbcdn.net",
+        "meta.com",
+        "messenger.com",
+        "instagram.com",
+        "cdninstagram.com",
+        "whatsapp.com",
+        "whatsapp.net",
+        "wa.me"
+      ]
+    },
+    {
+      "id": "whatsapp",
+      "label": "whatsapp",
+      "officialDomains": [
+        "facebook.com",
+        "fb.com",
+        "fb.me",
+        "fbcdn.net",
+        "meta.com",
+        "messenger.com",
+        "instagram.com",
+        "cdninstagram.com",
+        "whatsapp.com",
+        "whatsapp.net",
+        "wa.me"
+      ]
+    },
+    {
+      "id": "netflix",
+      "label": "netflix",
+      "officialDomains": ["netflix.com", "netflix.net", "nflxext.com"]
+    },
+    {
+      "id": "adobe",
+      "label": "adobe",
+      "officialDomains": ["adobe.com", "adobelogin.com", "acrobat.com", "adobesign.com"]
+    },
+    {
+      "id": "dhl",
+      "label": "dhl",
+      "officialDomains": ["dhl.com", "dhl.de", "dhl.co.in", "dhl.co.uk"]
+    },
+    {
+      "id": "fedex",
+      "label": "fedex",
+      "officialDomains": ["fedex.com"]
+    },
+    {
+      "id": "ups",
+      "label": "ups",
+      "officialDomains": ["ups.com"]
+    },
+    {
+      "id": "sbi",
+      "label": "sbi",
+      "officialDomains": [
+        "sbi.co.in",
+        "onlinesbi.sbi",
+        "onlinesbi.com",
+        "sbicard.com",
+        "sbi.bank.in"
+      ]
+    },
+    {
+      "id": "onlinesbi",
+      "label": "onlinesbi",
+      "officialDomains": ["sbi.co.in", "onlinesbi.sbi", "onlinesbi.com", "sbi.bank.in"]
+    },
+    {
+      "id": "hdfc",
+      "label": "hdfc",
+      "officialDomains": [
+        "hdfc.com",
+        "hdfcbank.com",
+        "hdfcbank.net",
+        "hdfclife.com",
+        "hdfc.bank.in"
+      ]
+    },
+    {
+      "id": "hdfcbank",
+      "label": "hdfcbank",
+      "officialDomains": ["hdfc.com", "hdfcbank.com", "hdfcbank.net", "hdfc.bank.in"]
+    },
+    {
+      "id": "icici",
+      "label": "icici",
+      "officialDomains": [
+        "icici.com",
+        "icicibank.com",
+        "icicidirect.com",
+        "iciciprulife.com",
+        "icici.bank.in"
+      ]
+    },
+    {
+      "id": "icicibank",
+      "label": "icicibank",
+      "officialDomains": ["icici.com", "icicibank.com", "icicidirect.com", "icici.bank.in"]
+    },
+    {
+      "id": "axis",
+      "label": "axisbank",
+      "officialDomains": ["axisbank.com", "axisbank.co.in", "axisdirect.in", "axis.bank.in"]
+    },
+    {
+      "id": "kotak",
+      "label": "kotak",
+      "officialDomains": ["kotak.com", "kotakbank.com", "kotaksecurities.com", "kotak.bank.in"]
+    },
+    {
+      "id": "paytm",
+      "label": "paytm",
+      "officialDomains": ["paytm.com", "paytm.in", "paytmbank.com", "paytmmall.com"]
+    },
+    {
+      "id": "phonepe",
+      "label": "phonepe",
+      "officialDomains": ["phonepe.com"]
+    },
+    {
+      "id": "irctc",
+      "label": "irctc",
+      "officialDomains": ["irctc.co.in", "irctc.com"]
+    },
+    {
+      "id": "incometax",
+      "label": "incometax",
+      "officialDomains": [
+        "incometax.gov.in",
+        "incometaxindia.gov.in",
+        "incometaxindiaefiling.gov.in"
+      ]
+    },
+    {
+      "id": "uidai",
+      "label": "uidai",
+      "officialDomains": ["uidai.gov.in"]
+    },
+    {
+      "id": "epfindia",
+      "label": "epfindia",
+      "officialDomains": ["epfindia.gov.in"]
+    },
+    {
+      "id": "npci",
+      "label": "npci",
+      "officialDomains": ["npci.org.in"]
+    },
+    {
+      "id": "flipkart",
+      "label": "flipkart",
+      "officialDomains": ["flipkart.com"]
+    },
+    {
+      "id": "airtel",
+      "label": "airtel",
+      "officialDomains": ["airtel.in", "airtel.com"]
+    },
+    {
+      "id": "jio",
+      "label": "jio",
+      "officialDomains": ["jio.com"]
+    },
+    {
+      "id": "licindia",
+      "label": "licindia",
+      "officialDomains": ["licindia.in"]
+    },
+    {
+      "id": "bankofbaroda",
+      "label": "bankofbaroda",
+      "officialDomains": ["bankofbaroda.in", "bankofbaroda.com", "bankofbaroda.bank.in"]
+    },
+    {
+      "id": "pnbindia",
+      "label": "pnbindia",
+      "officialDomains": ["pnbindia.in", "pnb.bank.in"]
+    },
+    {
+      "id": "canarabank",
+      "label": "canarabank",
+      "officialDomains": ["canarabank.com", "canarabank.in", "canarabank.bank.in"]
+    },
+    {
+      "id": "yesbank",
+      "label": "yesbank",
+      "officialDomains": ["yesbank.in", "yes.bank.in"]
+    },
+    {
+      "id": "indusind",
+      "label": "indusind",
+      "officialDomains": ["indusind.com", "indusind.bank.in"]
+    },
+    {
+      "id": "indiapost",
+      "label": "indiapost",
+      "officialDomains": ["indiapost.gov.in"]
+    },
+    {
+      "id": "bluedart",
+      "label": "bluedart",
+      "officialDomains": ["bluedart.com"]
+    },
+    {
+      "id": "zoom",
+      "label": "zoom",
+      "officialDomains": ["zoom.us", "zoom.com", "zoomgov.com"]
+    },
+    {
+      "id": "slack",
+      "label": "slack",
+      "officialDomains": ["slack.com", "slack-edge.com"]
+    },
+    {
+      "id": "github",
+      "label": "github",
+      "officialDomains": ["github.com"]
+    },
+    {
+      "id": "twitter",
+      "label": "twitter",
+      "officialDomains": ["twitter.com", "x.com", "t.co", "twimg.com"]
+    },
+    {
+      "id": "yahoo",
+      "label": "yahoo",
+      "officialDomains": ["yahoo.com", "yahoo.co.in", "ymail.com", "yimg.com"]
+    },
+    {
+      "id": "ebay",
+      "label": "ebay",
+      "officialDomains": ["ebay.com", "ebay.in", "ebay.co.uk", "ebaystatic.com"]
+    },
+    {
+      "id": "wellsfargo",
+      "label": "wellsfargo",
+      "officialDomains": ["wellsfargo.com"]
+    },
+    {
+      "id": "chase",
+      "label": "chase",
+      "officialDomains": ["chase.com", "jpmorganchase.com"]
+    },
+    {
+      "id": "bankofamerica",
+      "label": "bankofamerica",
+      "officialDomains": ["bankofamerica.com", "bofa.com"]
+    },
+    {
+      "id": "citibank",
+      "label": "citibank",
+      "officialDomains": ["citibank.com", "citi.com", "citibank.co.in"]
+    },
+    {
+      "id": "hsbc",
+      "label": "hsbc",
+      "officialDomains": ["hsbc.com", "hsbc.co.in", "hsbc.co.uk"]
+    },
+    {
+      "id": "americanexpress",
+      "label": "americanexpress",
+      "officialDomains": ["americanexpress.com", "aexp.com"]
+    },
+    {
+      "id": "mastercard",
+      "label": "mastercard",
+      "officialDomains": ["mastercard.com", "mastercard.co.in"]
+    },
+    {
+      "id": "visa",
+      "label": "visa",
+      "officialDomains": ["visa.com", "visa.co.in"]
+    },
+    {
+      "id": "coinbase",
+      "label": "coinbase",
+      "officialDomains": ["coinbase.com"]
+    },
+    {
+      "id": "binance",
+      "label": "binance",
+      "officialDomains": ["binance.com"]
+    },
+    {
+      "id": "wetransfer",
+      "label": "wetransfer",
+      "officialDomains": ["wetransfer.com", "we.tl"]
+    }
+  ]
+}

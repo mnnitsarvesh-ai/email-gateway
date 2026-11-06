@@ -21,32 +21,45 @@ registry, standardized verdicts, with Rspamd as the first engine. Since step 4.2
 engine is the **attachment engine** (queue `scan.attachment`): known-threat hashes, ClamAV over
 clamd INSTREAM, YARA-X, true file types and archive limits in resource-limited inspector child
 processes, a Redis content cache, sandbox submissions and signature-update rescans (below).
+Since step 4.3 ([11-url-protection.md](../../docs/plan/steps/11-url-protection.md),
+[ADR-0029](../../docs/architecture/adr/0029-url-security-engine.md),
+[ADR-0030](../../docs/architecture/adr/0030-url-rewriting-and-click-tokens.md)) the third required
+engine is the **url engine** (queue `scan.url`): URL extraction from the stored parts,
+normalization, lookalikes, reputation providers with an authenticated Redis cache, SSRF-guarded
+redirect-chain fetches, the verdict map `url-map/1`, URL rewriting into a new S3 object with
+signed click tokens, dynamic-inspection requests, their results consumer (`scan.url.results`) and
+the pending-inspection sweeper (below).
 
 Data plane: the MySQL **writer** only (ADR-0014, no `PrismaReadService`), S3 (`S3_BUCKET_MAIL`)
 and RabbitMQ with one least-privilege user per role: the MIME role uses `RABBITMQ_EMAIL_WORKER_URL`
 (read `email.received`, write `email.ingestion` and `email.events` for retry and dead-letter
 copies; it cannot configure anything or reach `email.delivery`), the scan role
-`RABBITMQ_SCANNER_URL` (user `eg-scanner`: read `scan.spam`, write `email.security` and
-`email.events`). Redis holds the attachment engine's content cache (`eg:scan:att:v2:*`, values authenticated with
-the worker-only `ATTACHMENT_CACHE_HMAC_KEY`, A10;
+`RABBITMQ_SCANNER_URL` (user `eg-scanner`: read `scan.spam`, `scan.attachment`, `scan.url`,
+`scan.url.results`, write `email.security` and `email.events`). Redis holds the attachment
+engine's content cache (`eg:scan:att:v2:*`, values authenticated with the worker-only
+`ATTACHMENT_CACHE_HMAC_KEY`, A10) and the URL cache (`eg:url:*`, `URL_CACHE_HMAC_KEY`, U6;
 Rspamd keeps its own state in Redis DB `RSPAMD_REDIS_DB`). Health is `GET /health/live` and
 `GET /health/ready` (checks `mysql`, `rabbitmq` with the MIME role, `rabbitmq-scanner` with the
-scan role, `clamav` and `attachment-inspector` where the attachment consumer runs, `redis`,
+scan role, `clamav` and `attachment-inspector` where the attachment consumer runs, `url-engine`
+(Redis of the URL cache; the DNS resolver's reachability as a detail) where the url consumer runs,
+`redis`,
 `s3`; a broker check = connected, not blocked by a resource alarm, the
 exchanges and queues of the role verified passively). Metrics are on `GET /metrics`. The default
 port is 3020.
 
 ## Roles (step 4.1 S1)
 
-| Role | Flag                                    | Broker user (URL)                               | Consumes                                                                | Readiness                                            |
-| ---- | --------------------------------------- | ----------------------------------------------- | ----------------------------------------------------------------------- | ---------------------------------------------------- |
-| MIME | `MIME_INGESTION_ENABLED` (default true) | `eg-email-worker` (`RABBITMQ_EMAIL_WORKER_URL`) | `email.received`                                                        | `rabbitmq`                                           |
-| Scan | `SCAN_ENABLED` (default true)           | `eg-scanner` (`RABBITMQ_SCANNER_URL`)           | `scan.spam`, `scan.attachment` (one queue per engine, `SCAN_CONSUMERS`) | `rabbitmq-scanner`, `clamav`, `attachment-inspector` |
+| Role | Flag                                    | Broker user (URL)                               | Consumes                                                                                                 | Readiness                                                          |
+| ---- | --------------------------------------- | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| MIME | `MIME_INGESTION_ENABLED` (default true) | `eg-email-worker` (`RABBITMQ_EMAIL_WORKER_URL`) | `email.received`                                                                                         | `rabbitmq`                                                         |
+| Scan | `SCAN_ENABLED` (default true)           | `eg-scanner` (`RABBITMQ_SCANNER_URL`)           | `scan.spam`, `scan.attachment`, `scan.url` + `scan.url.results` (one queue per engine, `SCAN_CONSUMERS`) | `rabbitmq-scanner`, `clamav`, `attachment-inspector`, `url-engine` |
 
 Locally (Compose, host) one process runs both roles. Production runs two Deployments of the same
 image (`infrastructure/kubernetes/base/email-worker.yaml`): `email-worker` (`SCAN_ENABLED=false`)
 and `email-worker-scan` (`MIME_INGESTION_ENABLED=false`, `SCAN_CONSUMERS=rspamd`), plus
-`email-worker-attachment` (`SCAN_CONSUMERS=attachment`, step 4.2), scaled independently. The global
+`email-worker-attachment` (`SCAN_CONSUMERS=attachment`, step 4.2) and `email-worker-url`
+(`SCAN_CONSUMERS=url`, step 4.3, `infrastructure/kubernetes/base/email-worker-url.yaml`), scaled
+independently. The global
 `AmqpModule` is imported only with the MIME role; `ScanningModule` builds its own connection and
 confirm publisher. At least one role must be enabled.
 
@@ -253,6 +266,52 @@ limit).
 (`bench/attachment-bench.ts`; real pool + ClamdClient, cache off/on; results in
 [docs/performance/attachment-scanning.md](../../docs/performance/attachment-scanning.md)). The
 compiled child (`dist/`) is used when built (`pnpm --filter @email-gateway/email-worker build`).
+
+## URL engine (step 4.3)
+
+Design [11-url-protection.md](../../docs/plan/steps/11-url-protection.md) (decision ids U*n*),
+runbook [url-scanning.md](../../docs/runbooks/url-scanning.md). The URL primitives live in
+[`@email-gateway/url-security`](../../packages/url-security/README.md); this worker wires them.
+Code: `src/scanning/engines/url/`, `src/scanning/url-config.ts`, `src/scanning/parts/`.
+
+| File                         | Content                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `registration.ts`            | `urlRegistration` (consumer `email-worker.scan.url`, budget `SCAN_URL_*`, `settingsFor` = `resolveUrlSettings`, an invalid tenant row falls back to the platform, `settingsVersion` with `url-map/1`), `createUrlEngine` (SSRF guard, restricted resolver, guarded fetchers `engine`/`rdap` sharing `URL_FETCH_CONCURRENCY`, providers + breakers, cache, brands/shorteners, token key, engine version)                                                                                                    |
+| `url.engine.ts`              | The adapter (U3): echo-checked writer reads, S3 part reads (org prefix, size, SHA-256), extraction + normalization, stable seqs, lookalikes, resolved host addresses (`HostAddressResolver`, IP reputation), reputation (a local-feed MySQL failure is internal: `FeedErrorScope`), fetch selection and chains (chain cache), final-URL, hop and hop-address reputation and final-URL lookalike, `url-map/1`, aggregation, the streaming rewrite, inspection selection, child rows, readiness `url-engine` |
+| `url-rows.ts`                | Pure helpers: E1 completeness, extra parts, seq assignment, static risk, the bounded JSON columns, rewrite object keys (`chainItems` and `mergeLookalike` are re-exported from url-security, shared with the click-service)                                                                                                                                                                                                                                                                                |
+| `url-store.ts`               | `PrismaUrlStore`: parse row, attachment rows, `message_urls` of earlier rounds, active tenant domains (LRU 60 s), the `local_feed` query (`org_scope = 0`, not expired); every read echo-checked (`InconsistentUrlReadError`)                                                                                                                                                                                                                                                                              |
+| `rewrite-store.ts`           | `S3RewriteStore`: multipart `Upload` of the rewritten EML (`message/rfc822`, tag `eg-object=rewrite` as `Tagging` of the creating request, never a separate PutObjectTagging); a skipped rewrite aborts (and deletes a completed single-part object); an upload error deletes the key and is thrown (transient)                                                                                                                                                                                            |
+| `url-results.ts`             | `UrlResultsService` + consumer of `scan.url.results` (U15): `processOnce`, strict payload, echo-checked load by `inspectionId`, forged/mismatched results dropped, `WHERE status = 'pending'` update with the dynamic verdict (M5/S9/U3 from the stored lookalike confidence), dynamic cache entry                                                                                                                                                                                                         |
+| `inspection-sweeper.ts`      | `InspectionSweeper` (U15): leader lock `scan:url-inspections`, expires pending rows older than `URL_DYNAMIC_PENDING_TTL_SECONDS` in batches of 500                                                                                                                                                                                                                                                                                                                                                         |
+| `url-metrics.ts`             | The U18 email-worker series (bounded labels; unknown values become `other`)                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `../../parts/part-reader.ts` | `S3PartReader`, shared with the attachment engine (moved from `engines/attachment/`)                                                                                                                                                                                                                                                                                                                                                                                                                       |
+
+Generic changes of the orchestrator (as 4.2 A12): `EngineChildRows.urls { messageUrls, results,
+rewrite, inspections }`; `ScanRepository.insertFinal` writes them in the final row's transaction
+only when the final row was inserted (`message_urls` `createMany … skipDuplicates` plus a seq/hash
+read-back, `url_scan_results`, `url_rewrites` with the `org/<org>/rewrite/` key check,
+`url_dynamic_inspections` + one validated `mail.url.inspection_requested.v1` outbox row each);
+the failure codes `inconsistent_read` and `extract_timeout` have their own reason codes and metric
+reasons. `ScanningModule` starts the results consumer and the sweeper where `SCAN_CONSUMERS`
+contains `url` (and verifies `scan.url.results` passively).
+
+**Configuration** (`.env.example` section "URL protection (step 4.3)"; validated by
+`scanning/url-config.ts`): `SCAN_ENGINES` (default `rspamd,attachment,url`), `SCAN_URL_*` (attempts
+< 10; the round deadline covers `6 × (120 + 60) s`), `URL_MAX_*`, `URL_EXTRA_PART_MAX_BYTES`,
+`URL_EXTRACT_TIMEOUT_MS`, `URL_REPUTATION_PROVIDERS` (documented-only providers refused),
+`URL_DNSBL_*` (never echoed in errors), `URL_RDAP_BASE_URL`, `URL_PROVIDER_*`, `URL_DNS_*`,
+`URL_CACHE_*` (`URL_CACHE_HMAC_KEY` ≥ 32 characters required where the url engine consumes with
+the cache), `URL_SCAN_TIME_FETCH`, `URL_FETCH_*` (proxy mode with `URL_EGRESS_PROXY_TOKEN`),
+`URL_SHORTENER_*`, `URL_PROTECTED_*`, `URL_LOOKALIKE_*`, `URL_REWRITE_*`, `URL_CLICK_BASE_URL`
+(https in production), `URL_TOKEN_KEY_*` (64 hex, ids 1..255, previous slot with its own id),
+`URL_TOKEN_*_EXPIRY_DAYS`, `URL_DYNAMIC_*`. TEST-ONLY `URL_FETCH_TEST_ALLOW_CIDRS` (documentation
+ranges only) and `URL_FETCH_TEST_DIAL_MAP` are refused unless APP_ENV is `local`/`ci`
+(NODE_ENV=production with APP_ENV `staging`/`production`).
+
+**Tests:** unit tests in `src/scanning/engines/url/*.test.ts` and `src/scanning/url-config.test.ts`;
+package integration `integration/url-*.test.ts` against the real writer, MinIO, Redis, RabbitMQ,
+dns-sink and url-test (host-run with `URL_FETCH_TEST_DIAL_MAP`; `docker compose --profile smtp-test
+up -d test-pki dns-sink url-test`).
 
 ## Message lifecycle (step 3.3 L8.2)
 

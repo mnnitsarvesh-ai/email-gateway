@@ -1,3 +1,4 @@
+import { QUEUE_NAMES } from '@email-gateway/event-contracts';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createTestVhost, ManagementApi, runInit, type TestVhost } from './support/broker';
 import { stack } from './support/env';
@@ -121,8 +122,8 @@ describe('init.mjs --cleanup-legacy (quorum legacy queues)', () => {
     const exchanges = new Set((await mgmt.exchanges(legacy)).map((e) => e.name));
     expect(exchanges.has('mail.dlx')).toBe(false); // only the deleted .dlq queues were bound
     expect(exchanges.has('mail.events')).toBe(true); // still bound to the kept queue
-    // The topology v1 vhost is untouched (14 queues).
-    expect((await mgmt.queues(vhost.vhost)).length).toBe(14);
+    // The topology vhost is untouched (every queue of the current topology, 16 in v5).
+    expect((await mgmt.queues(vhost.vhost)).length).toBe(QUEUE_NAMES.length);
 
     // Idempotent: a second run changes nothing and still succeeds.
     await runInit(['--vhost', vhost.vhost, '--cleanup-legacy', '--legacy-vhost', legacy]);

@@ -5,7 +5,7 @@
 ; (tests/fixtures/scan-corpus/keys/README.md).
 $ORIGIN scan.test.
 $TTL 60
-@       IN SOA  ns.sink.test. hostmaster.sink.test. ( 2026110502 3600 600 86400 60 )
+@       IN SOA  ns.sink.test. hostmaster.sink.test. ( 2026110602 3600 600 86400 60 )
 @       IN NS   ns.sink.test.
 
 ; clean.scan.test: aligned SPF (192.0.2.10 and the stack-test client network 172.31.250.0/24 for
@@ -54,6 +54,17 @@ rbl                 IN A    192.0.2.53
 dbl                 IN A    192.0.2.53
 listed-spam.scan.test.dbl   IN A   127.0.1.2
 *.listed-spam.scan.test.dbl IN A   127.0.1.2
+
+; Step 4.3 (U6/U19): URL corpus entries of the same test DBL/RBL (dnsbl provider zones
+; dbl.scan.test=127.0.1.2:spam,127.0.1.4:phishing,127.0.1.5:malware,127.0.1.6:c2 and
+; rbl.scan.test=127.0.0.2:spam). The names themselves resolve to url-test (url-test.hosts).
+evil-dbl.test.dbl           IN A   127.0.1.4
+malware-dbl.test.dbl        IN A   127.0.1.5
+; 203.0.113.66 (bad-ip-host.test; nothing listens there) is on the test RBL. The url-test web
+; server's own 203.0.113.10 is NOT listed: the engine and the click-service look up the addresses
+; every corpus name resolves to (IP reputation of resolved addresses), so listing it would flag
+; every corpus URL.
+66.113.0.203.rbl            IN A   127.0.0.2
 
 ; Domains of the spam and phishing fixtures (resolvable; the host names below are what the
 ; fixtures link to). bad-url.scan.test is in infrastructure/rspamd/maps/eg_bad_urls.map.

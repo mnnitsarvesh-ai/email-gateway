@@ -19,6 +19,9 @@ import {
   type RspamdPlatformSettings,
 } from '@email-gateway/security-contracts';
 import { z } from 'zod';
+import { urlConfigShape, validateUrlConfig } from './url-config';
+
+export { urlPlatformFromConfig, urlProductionLike } from './url-config';
 
 const int = z.coerce.number().int();
 const positiveInt = int.min(1);
@@ -167,7 +170,7 @@ export const scanConfigShape = {
   /** Platform-enabled engines (S4), comma-separated, validated against ENGINE_CATALOG. */
   SCAN_ENGINES: z
     .string()
-    .default('rspamd,attachment')
+    .default('rspamd,attachment,url')
     .transform((value, ctx): EngineName[] => {
       try {
         return parseEnabledEngines(value);
@@ -253,6 +256,7 @@ export const scanConfigShape = {
     .default(RSPAMD_PLATFORM_DEFAULTS.authFailureVerdict),
 
   ...attachmentConfigShape(),
+  ...urlConfigShape(),
 };
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars -- only its type is used
@@ -307,6 +311,12 @@ export function engineBudgetFromConfig(
         timeoutMs: cfg.SCAN_ATTACHMENT_TIMEOUT_MS,
         maxAttempts: cfg.SCAN_ATTACHMENT_MAX_ATTEMPTS,
       };
+    case 'url':
+      return {
+        concurrency: cfg.SCAN_URL_CONCURRENCY,
+        timeoutMs: cfg.SCAN_URL_TIMEOUT_MS,
+        maxAttempts: cfg.SCAN_URL_MAX_ATTEMPTS,
+      };
     default:
       return null;
   }
@@ -341,6 +351,10 @@ export function consumerEngines(cfg: ScanShapeConfig): EngineName[] {
 /** True when this replica runs the attachment engine's consumer. */
 export const runsAttachmentConsumer = (cfg: ScanShapeConfig): boolean =>
   cfg.SCAN_ENABLED && consumerEngines(cfg).includes('attachment');
+
+/** True when this replica runs the url engine's consumer (and its results consumer, U1). */
+export const runsUrlConsumer = (cfg: ScanShapeConfig): boolean =>
+  cfg.SCAN_ENABLED && cfg.SCAN_ENGINES.includes('url') && consumerEngines(cfg).includes('url');
 
 /** The platform attachment settings of the config (A8). Not validated (see the schema). */
 export function attachmentPlatformFromConfig(cfg: ScanShapeConfig): AttachmentPlatformSettings {
@@ -379,7 +393,9 @@ export function attachmentScalingWarnings(cfg: ScanShapeConfig): string[] {
 
 type AttachmentValidationConfig = ScanShapeConfig & {
   NODE_ENV: 'development' | 'test' | 'production';
+  APP_ENV: string;
   MIME_MAX_ATTACHMENT_BYTES: number;
+  MIME_MAX_BODY_BYTES: number;
 };
 
 /** The cross-field refusals of the attachment engine (A4, A8, A12, A14, A20). */
@@ -505,6 +521,9 @@ export function validateScanConfig(
     }
   }
   if (cfg.SCAN_ENGINES.includes('attachment')) validateAttachmentConfig(cfg, refuse);
+  if (cfg.SCAN_ENGINES.includes('url')) {
+    validateUrlConfig(cfg, runsUrlConsumer(cfg), engineQueueMaxAttempts('url'), refuse);
+  }
   if (!cfg.SCAN_ENABLED) return;
   if (
     consumerEngines(cfg).includes('attachment') &&

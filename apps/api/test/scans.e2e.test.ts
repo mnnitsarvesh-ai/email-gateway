@@ -8,7 +8,7 @@
  * coded 404, the training route's 503 without a configured controller and its rate limit. The
  * same routes against the real MySQL, MinIO and Rspamd run in integration/scans.test.ts.
  */
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import {
@@ -44,6 +44,7 @@ import { AttachmentRescansRepository } from '../src/modules/scans/repositories/a
 import { ScanSettingsRepository } from '../src/modules/scans/repositories/scan-settings.repository';
 import { ScanTrainingRepository } from '../src/modules/scans/repositories/scan-training.repository';
 import { ThreatHashesRepository } from '../src/modules/scans/repositories/threat-hashes.repository';
+import { ThreatIndicatorsRepository } from '../src/modules/scans/repositories/threat-indicators.repository';
 import { InMemoryKeyValueStore } from './support/in-memory-key-value-store';
 import { RecordingEmailSender } from './support/recording-email-sender';
 import { TEST_DOMAIN_ENV } from './support/test-env';
@@ -178,6 +179,64 @@ const attachmentResultRow = {
   cacheResult: 'miss' as const,
   durationMs: 15,
 };
+const urlEngineRow = {
+  ...engineRow(1, true),
+  engine: 'url',
+  engineVersion: 'url/1;url-fetch/1;aaaaaaaa;bbbbbbbb',
+  outcome: 'suspicious' as const,
+  score: null,
+  requiredScore: null,
+  action: null,
+  reasonCodes: ['url.redirect_blocked_internal'],
+  settingsVersion: 'url-map/1;p=abc;t=none',
+  durationMs: 987,
+  evidence: { signals: [] },
+  completedAt: new Date('2026-11-05T08:00:04.321Z'),
+};
+const URL_SHA = 'a'.repeat(64);
+const messageUrlRow = {
+  urlSeq: 0,
+  url: 'http://short-link.test/s/internal',
+  urlSha256: URL_SHA,
+  host: 'short-link.test',
+  unicodeHost: null,
+  registrableDomain: 'short-link.test',
+  hostKind: 'domain' as const,
+  flags: [],
+  sources: { html_href: 1 },
+};
+const urlResultRow = {
+  scanId: 900n,
+  urlSeq: 0,
+  urlSha256: URL_SHA,
+  verdict: 'suspicious' as const,
+  reasonCodes: ['url.redirect_blocked_internal', 'url.shortened'],
+  reputation: [
+    {
+      provider: 'local_feed',
+      version: 'local_feed/1',
+      kind: 'url',
+      status: 'clear',
+      category: null,
+      severity: null,
+      cache: 'none',
+    },
+  ],
+  lookalike: null,
+  fetchStatus: 'blocked' as const,
+  fetchError: 'loopback',
+  hopCount: 1,
+  redirectChain: [
+    { host: 'short-link.test', port: 80, status: 302, kind: 'initial', blocked: null },
+    { host: '127.0.0.1', port: 80, status: null, kind: 'http', blocked: 'loopback' },
+  ],
+  finalUrl: null,
+  finalStatus: null,
+  landing: null,
+  rewritten: true,
+  fetchCache: 'miss' as const,
+  durationMs: 33,
+};
 const hashRow = (sha256 = SHA) => ({
   id: 12n,
   sha256,
@@ -238,6 +297,37 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
     ),
     create: vi.fn((_tx: unknown, input: { sha256: string }) =>
       Promise.resolve(hashRow(input.sha256)),
+    ),
+    remove: vi.fn(() => Promise.resolve()),
+  };
+  const indicatorRow = (value = 'evil.example', id = 21n) => ({
+    id,
+    organizationId: null,
+    indicatorType: 'domain' as const,
+    value,
+    valueSha256: createHash('sha256').update(value).digest('hex'),
+    severity: 'high' as const,
+    category: 'phishing' as const,
+    source: 'analyst',
+    reason: 'campaign',
+    expiresAt: null,
+    firstSeenAt: new Date('2026-11-06T09:00:00.000Z'),
+    lastSeenAt: new Date('2026-11-06T09:00:00.000Z'),
+    createdAt: new Date('2026-11-06T09:00:00.000Z'),
+    updatedAt: new Date('2026-11-06T09:00:00.000Z'),
+    addedBy: { publicId: ids.user },
+  });
+  const LISTED_SHA = createHash('sha256').update('listed.example').digest('hex');
+  const indicators = {
+    list: vi.fn(() => Promise.resolve([indicatorRow()])),
+    findAnalystForUpdate: vi.fn((_tx: unknown, _type: string, valueSha256: string) =>
+      Promise.resolve(valueSha256 === LISTED_SHA ? indicatorRow('listed.example', 22n) : null),
+    ),
+    findPlatformForUpdate: vi.fn((_tx: unknown, id: bigint) =>
+      Promise.resolve(id === 21n ? indicatorRow() : null),
+    ),
+    create: vi.fn((_tx: unknown, input: { value: string }) =>
+      Promise.resolve(indicatorRow(input.value, 23n)),
     ),
     remove: vi.fn(() => Promise.resolve()),
   };
@@ -324,7 +414,37 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
       .useValue({
         rounds: () => Promise.resolve([scanRow]),
         engineResults: () =>
-          Promise.resolve([engineRow(2, true), engineRow(1, false), attachmentEngineRow]),
+          Promise.resolve([
+            engineRow(2, true),
+            engineRow(1, false),
+            attachmentEngineRow,
+            urlEngineRow,
+          ]),
+        messageUrls: () => Promise.resolve([messageUrlRow]),
+        urlResults: () => Promise.resolve([urlResultRow]),
+        urlRewrites: () =>
+          Promise.resolve([
+            {
+              scanId: 900n,
+              lifecycleRound: 0,
+              status: 'rewritten',
+              skipReason: null,
+              linksRewritten: 1,
+              partsRewritten: 1,
+              dkimSigned: false,
+              expiresAt: new Date('2026-12-05T08:00:04.321Z'),
+            },
+          ]),
+        urlInspections: () => Promise.resolve([]),
+        urlClicks: () =>
+          Promise.resolve([
+            {
+              urlSeq: 0,
+              total: 2,
+              lastDecision: 'warned',
+              lastAt: new Date('2026-11-05T09:10:11.999Z'),
+            },
+          ]),
         attachmentResults: () => Promise.resolve([attachmentResultRow]),
         attachmentParts: () =>
           Promise.resolve([{ partIndex: 1, filename: 'invoice.pdf', declaredContentType: null }]),
@@ -352,6 +472,8 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
       .useValue(training)
       .overrideProvider(ThreatHashesRepository)
       .useValue(hashes)
+      .overrideProvider(ThreatIndicatorsRepository)
+      .useValue(indicators)
       .overrideProvider(AttachmentRescansRepository)
       .useValue(rescans)
       .compile();
@@ -492,10 +614,83 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
                   },
                 ],
               },
+              {
+                engine: 'url',
+                final: true,
+                engineVersion: 'url/1;url-fetch/1;aaaaaaaa;bbbbbbbb',
+                outcome: 'suspicious',
+                score: null,
+                requiredScore: null,
+                action: null,
+                reasonCodes: ['url.redirect_blocked_internal'],
+                symbols: [],
+                attempts: [
+                  {
+                    attempt: 1,
+                    outcome: 'suspicious',
+                    errorCode: null,
+                    // Withheld for the url engine (cross-tenant caches, U6/U16).
+                    durationMs: null,
+                    at: '2026-11-05T08:00:04.000Z',
+                  },
+                ],
+                durationMs: null,
+                settingsVersion: 'url-map/1;p=abc;t=none',
+                completedAt: '2026-11-05T08:00:04.000Z',
+                urls: [
+                  {
+                    urlSeq: 0,
+                    url: 'http://short-link.test/s/internal',
+                    host: 'short-link.test',
+                    unicodeHost: null,
+                    registrableDomain: 'short-link.test',
+                    hostKind: 'domain',
+                    sources: { html_href: 1 },
+                    flags: [],
+                    verdict: 'suspicious',
+                    reasonCodes: ['url.redirect_blocked_internal', 'url.shortened'],
+                    reputation: [
+                      { provider: 'local_feed', kind: 'url', status: 'clear', category: null },
+                    ],
+                    lookalike: [],
+                    fetch: {
+                      status: 'blocked',
+                      error: null,
+                      hops: 1,
+                      chain: [
+                        { host: 'short-link.test', status: 302, kind: 'initial', blocked: null },
+                        { host: '127.0.0.1', status: null, kind: 'http', blocked: 'loopback' },
+                      ],
+                      finalUrl: null,
+                      finalStatus: null,
+                    },
+                    landing: null,
+                    dynamic: null,
+                    rewritten: true,
+                    clicks: {
+                      total: 2,
+                      lastDecision: 'warned',
+                      lastAt: '2026-11-05T09:10:11.000Z',
+                    },
+                  },
+                ],
+                rewrite: {
+                  status: 'rewritten',
+                  skipReason: null,
+                  linksRewritten: 1,
+                  partsRewritten: 1,
+                  dkimSigned: false,
+                  expiresAt: '2026-12-05T08:00:04.000Z',
+                },
+              },
             ],
           },
         ],
       });
+      // No cache outcome or per-URL duration reaches the tenant (cross-tenant caches, U16).
+      expect(JSON.stringify(res.body.data[0].engines[2])).not.toMatch(
+        /fetchCache|"cache"|"durationMs":\d/,
+      );
     });
 
     it('answers the coded 404 for an unknown (or another organization’s) message', async () => {
@@ -544,6 +739,16 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
           effective: expect.objectContaining({
             allowedTypes: null,
             deniedTypeVerdict: 'suspicious',
+          }),
+        }),
+        expect.objectContaining({
+          engine: 'url',
+          required: true,
+          tenantMayDisable: false,
+          override: null,
+          platform: expect.objectContaining({ scanTimeFetch: 'suspicious' }),
+          effective: expect.objectContaining({
+            click: { suspicious: 'warn', unknown: 'warn', allowContinue: true },
           }),
         }),
       ]);
@@ -836,6 +1041,203 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
       expect(missing.body.code).toBe('threat_hash_not_found');
       await http()
         .delete(`${url}/${SHA}`)
+        .set(await bearer())
+        .expect(400);
+    });
+
+    it('allows 60 calls per caller per minute (429 after)', async () => {
+      const auth = await bearer();
+      for (let i = 0; i < 60; i += 1) await http().get(url).set(auth).expect(200);
+      await http().get(url).set(auth).expect(429);
+    });
+  });
+
+  describe('url settings (step 4.3 U13)', () => {
+    it('PUT normalizes domains and stores the override (audited scan_settings.updated)', async () => {
+      const res = await http()
+        .put('/api/v1/scan-settings/url')
+        .set(await bearer())
+        .send({
+          expectedVersion: 0,
+          settings: { allowedDomains: ['Partner.Example.'], click: { unknown: 'block' } },
+        })
+        .expect(200);
+      expect(res.body).toMatchObject({ engine: 'url' });
+      expect(settingsRows.create).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({
+          engine: 'url',
+          settings: { allowedDomains: ['partner.example'], click: { unknown: 'block' } },
+        }),
+      );
+      expect(audit.record.mock.calls[0]![0]).toMatchObject({
+        action: 'scan_settings.updated',
+        resourceId: 'url',
+      });
+    });
+
+    it('PUT refuses public suffixes, conflicts and out-of-bounds values (422) without a write', async () => {
+      const res = await http()
+        .put('/api/v1/scan-settings/url')
+        .set(await bearer())
+        .send({
+          expectedVersion: 0,
+          settings: { blockedDomains: ['co.uk', 'github.io'], scanTimeFetch: 'all' },
+        })
+        .expect(422);
+      expect(res.body.code).toBe('scan_settings_invalid');
+      expect(res.body.violations.map((v: { path: string }) => v.path)).toEqual([
+        'blockedDomains.0',
+        'blockedDomains.1',
+      ]);
+      const conflict = await http()
+        .put('/api/v1/scan-settings/url')
+        .set(await bearer())
+        .send({
+          expectedVersion: 0,
+          settings: { allowedDomains: ['a.example'], blockedDomains: ['a.example'] },
+        })
+        .expect(422);
+      expect(conflict.body.violations[0]).toMatchObject({
+        path: 'blockedDomains',
+        code: 'invalid',
+      });
+      const bounds = await http()
+        .put('/api/v1/scan-settings/url')
+        .set(await bearer())
+        .send({ expectedVersion: 0, settings: { rewrite: { expiryDays: 365 } } })
+        .expect(422);
+      expect(bounds.body.violations[0]).toMatchObject({
+        path: 'rewrite.expiryDays',
+        code: 'out_of_bounds',
+      });
+      expect(settingsRows.create).not.toHaveBeenCalled();
+      expect(transactions.run).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('platform threat indicators (step 4.3 U16)', () => {
+    const url = '/api/v1/platform/threat-indicators';
+    const body = {
+      type: 'domain',
+      value: 'Evil-New.Example.',
+      severity: 'high',
+      category: 'phishing',
+      reason: 'campaign',
+    };
+    beforeEach(() => principalWith([THREAT_INTEL], 'platform'));
+
+    it('refuses API keys, sessions without MFA, users without the permission and tenants', async () => {
+      apiKeyPermissions = new Set([THREAT_INTEL]);
+      await http().get(url).set(apiKey).expect(403);
+      await http()
+        .post(url)
+        .set(await bearer(['pwd']))
+        .send(body)
+        .expect(403);
+      principalWith([TRAIN, RESCAN], 'platform');
+      await http()
+        .delete(`${url}/21?reason=x`)
+        .set(await bearer())
+        .expect(403);
+      principalWith([READ, POLICY_READ, MANAGE]);
+      await http()
+        .get(url)
+        .set(await bearer())
+        .expect(403);
+      expect(indicators.list).not.toHaveBeenCalled();
+      expect(indicators.create).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [{ ...body, type: 'email' }, 'type'],
+      [{ ...body, value: '' }, 'value'],
+      [{ ...body, value: 'co.uk' }, 'value'],
+      [{ ...body, value: '10.0.0.1' }, 'value'],
+      [{ ...body, type: 'ip', value: 'evil.example' }, 'value'],
+      [{ ...body, type: 'url', value: 'javascript:alert(1)' }, 'value'],
+      [{ ...body, severity: 'severe' }, 'severity'],
+      [{ ...body, category: 'nasty' }, 'category'],
+      [{ ...body, reason: '' }, 'reason'],
+      [{ ...body, expiresAt: '2020-01-01T00:00:00.000Z' }, 'expiresAt'],
+      [{ ...body, source: 'feed:x' }, 'source'],
+    ])('400 for body %j', async (input, text) => {
+      const res = await http()
+        .post(url)
+        .set(await bearer())
+        .send(input)
+        .expect(400);
+      expect(JSON.stringify(res.body.message)).toContain(text);
+      expect(indicators.create).not.toHaveBeenCalled();
+    });
+
+    it('adds normalized (201, audited), 409 for a listed value, lists and deletes (204, 404)', async () => {
+      const created = await http()
+        .post(url)
+        .set(await bearer())
+        .send(body)
+        .expect(201);
+      expect(created.body).toMatchObject({
+        id: '23',
+        type: 'domain',
+        value: 'evil-new.example',
+        source: 'analyst',
+      });
+      expect(indicators.create).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          value: 'evil-new.example',
+          valueSha256: createHash('sha256').update('evil-new.example').digest('hex'),
+        }),
+      );
+      expect(audit.record.mock.calls[0]![0]).toMatchObject({
+        action: 'threat_indicator.added',
+        organizationId: null,
+      });
+      const exists = await http()
+        .post(url)
+        .set(await bearer())
+        .send({ ...body, value: 'LISTED.example' })
+        .expect(409);
+      expect(exists.body).toMatchObject({ code: 'indicator_exists', id: '22' });
+      const list = await http()
+        .get(`${url}?limit=5&type=domain&value=Evil.Example`)
+        .set(await bearer())
+        .expect(200);
+      expect(list.body.data[0]).toMatchObject({ id: '21', value: 'evil.example' });
+      expect(indicators.list).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'domain',
+          valueSha256: createHash('sha256').update('evil.example').digest('hex'),
+        }),
+      );
+      await http()
+        .get(`${url}?value=evil.example`)
+        .set(await bearer())
+        .expect(400);
+      await http()
+        .delete(`${url}/21?reason=false%20positive`)
+        .set(await bearer())
+        .expect(204);
+      expect(audit.record.mock.calls.at(-1)![0]).toMatchObject({
+        action: 'threat_indicator.removed',
+        metadata: {
+          reason: 'false positive',
+          before: expect.objectContaining({ id: '21', value: 'evil.example' }),
+        },
+      });
+      const missing = await http()
+        .delete(`${url}/99?reason=x`)
+        .set(await bearer())
+        .expect(404);
+      expect(missing.body.code).toBe('threat_indicator_not_found');
+      await http()
+        .delete(`${url}/21`)
+        .set(await bearer())
+        .expect(400);
+      await http()
+        .delete(`${url}/abc?reason=x`)
         .set(await bearer())
         .expect(400);
     });

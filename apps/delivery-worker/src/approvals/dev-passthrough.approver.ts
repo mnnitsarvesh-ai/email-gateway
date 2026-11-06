@@ -23,6 +23,29 @@ export const DEV_PASSTHROUGH_CONSUMER = 'delivery-worker.dev-passthrough-scanned
 export const DEV_PASSTHROUGH_WARNING =
   'DEV PASS-THROUGH ENABLED: mail is delivered after scanning without policy; malicious verdicts are held in scanned (not production behaviour)';
 
+/**
+ * A writer read of `url_rewrites` returned a row other than the one asked for (Prisma 6 wrong
+ * read, step 4.2 §6). Thrown inside the ledger transaction: nothing is approved, the event is
+ * redelivered.
+ */
+export class InconsistentRewriteReadError extends Error {
+  constructor() {
+    super('inconsistent read of url_rewrites');
+    this.name = 'InconsistentRewriteReadError';
+  }
+}
+
+/** The object an approval delivers (step 4.3 U20). */
+export type ApprovalObject = 'rewritten' | 'original';
+
+/** True when `key` is a rewritten copy of `organizationId` (`org/<org>/rewrite/…`, no `..`). */
+export function isRewriteKeyOf(key: string, organizationId: bigint): boolean {
+  return (
+    key.startsWith(`org/${organizationId.toString()}/rewrite/`) &&
+    !key.split('/').some((segment) => segment === '..' || segment === '.' || segment === '')
+  );
+}
+
 /** `mail.delivery.approved.v1` carries at most 1000 recipients. */
 const MAX_APPROVAL_RECIPIENTS = 1000;
 
@@ -64,6 +87,17 @@ export interface PassThroughResult {
  *
  * The message and its EML key come from the writer row of the envelope's organization, never
  * from the event payload alone.
+ *
+ * **Which object is delivered (step 4.3 U11 "Delivery", U20):** when the URL engine produced a
+ * rewritten copy for this round (`url_rewrites` row with `status = rewritten` for the message,
+ * organization, `lifecycle_round` and scan of the event), `emlS3Key` is that copy's
+ * `object_key`; otherwise the original `email_messages.eml_object_key`. The rewrite row is read in
+ * this transaction and echo-checked (message, organization, `received_at`, round, scan, status;
+ * a shifted read throws `InconsistentRewriteReadError` and the event is redelivered, 4.2 §6); its
+ * key must start with `org/<org>/rewrite/` and contain no `..` segment, else the original is
+ * delivered and a warning logged (never another tenant's or an unexpected object). The planner
+ * counts `delivery_approvals_total{source, object}`. Policy (5.2) and the quarantine release
+ * (5.3) follow the same rule (docs/architecture/contracts.md).
  */
 export class DevPassThroughApprover {
   private readonly logger: Logger;
@@ -166,7 +200,16 @@ export class DevPassThroughApprover {
       );
       return { approvals: [], recipients: 0 };
     }
-    const emlObjectKey = lifecycle.snapshot.emlObjectKey;
+    const delivered = await this.deliveryObject(tx, {
+      messageId,
+      receivedAt,
+      organizationId,
+      round,
+      scanId: BigInt(payload.scanId),
+      original: lifecycle.snapshot.emlObjectKey,
+      ids,
+    });
+    const emlObjectKey = delivered.key;
     const recipients = await tx.emailRecipient.findMany({
       where: { messageId, receivedAt, organizationId, status: 'pending' },
       orderBy: { rcptSeq: 'asc' },
@@ -234,6 +277,7 @@ export class DevPassThroughApprover {
         {
           ...ids,
           verdict: payload.verdict,
+          object: delivered.object,
           deliverySeq,
           approvals: approvals.length,
           recipients: recipients.length,
@@ -242,6 +286,65 @@ export class DevPassThroughApprover {
       );
     }
     return { approvals, recipients: recipients.length };
+  }
+
+  /**
+   * The object to deliver for this round (U11 "Delivery", U20): the round's rewritten copy when
+   * the URL engine wrote one, else the original EML. Echo-checked writer read in the ledger
+   * transaction.
+   */
+  private async deliveryObject(
+    tx: Prisma.TransactionClient,
+    input: {
+      messageId: bigint;
+      receivedAt: Date;
+      organizationId: bigint;
+      round: number;
+      scanId: bigint;
+      original: string;
+      ids: Record<string, unknown>;
+    },
+  ): Promise<{ key: string; object: ApprovalObject }> {
+    const row = await tx.urlRewrite.findFirst({
+      where: {
+        messageId: input.messageId,
+        receivedAt: input.receivedAt,
+        organizationId: input.organizationId,
+        lifecycleRound: input.round,
+        scanId: input.scanId,
+        status: 'rewritten',
+      },
+      select: {
+        messageId: true,
+        receivedAt: true,
+        organizationId: true,
+        lifecycleRound: true,
+        scanId: true,
+        status: true,
+        objectKey: true,
+      },
+      orderBy: { id: 'desc' },
+    });
+    if (row === null) return { key: input.original, object: 'original' };
+    if (
+      row.messageId !== input.messageId ||
+      row.organizationId !== input.organizationId ||
+      row.receivedAt.getTime() !== input.receivedAt.getTime() ||
+      row.lifecycleRound !== input.round ||
+      row.scanId !== input.scanId ||
+      row.status !== 'rewritten'
+    ) {
+      this.metrics.inconsistentReads.inc({ read: 'url_rewrite' });
+      throw new InconsistentRewriteReadError();
+    }
+    if (row.objectKey === null || !isRewriteKeyOf(row.objectKey, input.organizationId)) {
+      this.logger.warn(
+        { ...input.ids, reason: row.objectKey === null ? 'missing_key' : 'key_prefix' },
+        'rewritten copy of the round is not usable; delivering the original message',
+      );
+      return { key: input.original, object: 'original' };
+    }
+    return { key: row.objectKey, object: 'rewritten' };
   }
 
   private async nextDeliverySeq(

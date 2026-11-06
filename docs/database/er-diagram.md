@@ -36,6 +36,11 @@ flowchart LR
     email_auth_results[(email_auth_results P)]
     attachment_scan_results[(attachment_scan_results P)]
     sandbox_submissions[(sandbox_submissions P)]
+    message_urls[(message_urls P)]
+    url_scan_results[(url_scan_results P)]
+    url_rewrites[(url_rewrites P)]
+    url_dynamic_inspections[(url_dynamic_inspections P)]
+    url_click_events[(url_click_events P)]
     scan_engine_settings
     attachment_rescan_jobs
   end
@@ -72,6 +77,11 @@ flowchart LR
   email_scans -.-> email_auth_results
   email_scans -.-> attachment_scan_results
   email_scans -.-> sandbox_submissions
+  email_messages -.-> message_urls
+  email_scans -.-> url_scan_results
+  email_scans -.-> url_rewrites
+  email_scans -.-> url_dynamic_inspections
+  message_urls -.-> url_click_events
   organizations --> scan_engine_settings
   organizations --> attachment_rescan_jobs
   email_messages -.-> email_deliveries
@@ -427,6 +437,13 @@ erDiagram
   users |o--o{ attachment_rescan_jobs : "requested_by, SET NULL"
   users |o--o{ malware_signatures : "added_by, SET NULL"
   organizations |o--o{ threat_indicators : "NULL = platform feed"
+  users |o--o{ threat_indicators : "added_by, SET NULL"
+  email_messages ||..o{ message_urls : "message_id + received_at, one per unique URL"
+  email_scans ||..o{ url_scan_results : "scan_id + received_at, one per URL"
+  message_urls ||..o{ url_scan_results : "url_seq, one per round"
+  email_scans ||..o| url_rewrites : "scan_id + received_at, one per round"
+  email_scans ||..o{ url_dynamic_inspections : "scan_id + received_at, one per inspected URL"
+  message_urls ||..o{ url_click_events : "message_id + message_received_at + url_seq"
   organizations |o--o{ yara_rules : "NULL = platform rule"
   users |o--o{ yara_rules : "updated_by"
   email_scans {
@@ -475,6 +492,53 @@ erDiagram
     bigint organization_id "nullable"
     char value_sha256
     bigint org_scope "generated: IFNULL(organization_id, 0); in the UK"
+    enum category "nullable, step 4.3"
+    bigint added_by_user_id FK "nullable, step 4.3"
+  }
+  message_urls {
+    bigint id PK
+    datetime received_at PK "PARTITIONED month"
+    bigint message_id "UK with url_seq / url_sha256, received_at"
+    smallint url_seq
+    varchar url "normalized redirect form, the only redirect target"
+    char url_sha256 "identity form"
+    varchar host
+    enum host_kind
+  }
+  url_scan_results {
+    bigint id PK
+    datetime received_at PK "PARTITIONED month"
+    bigint scan_id "UK with url_seq, received_at"
+    smallint url_seq
+    enum verdict "UrlVerdict"
+    json reason_codes
+    json reputation
+    json redirect_chain "hosts only"
+  }
+  url_rewrites {
+    bigint id PK
+    datetime received_at PK "PARTITIONED month"
+    bigint scan_id "UK with received_at"
+    enum status "rewritten, skipped"
+    varchar object_key "S3 org/ORG/rewrite/..., nullable"
+    varchar skip_reason "nullable"
+  }
+  url_dynamic_inspections {
+    bigint id PK
+    datetime received_at PK "PARTITIONED month"
+    bigint scan_id "UK with url_seq, received_at"
+    smallint url_seq
+    enum status "pending, completed, failed, expired"
+    json signals "counts, hosts, brand ids"
+  }
+  url_click_events {
+    bigint id PK
+    datetime clicked_at PK "PARTITIONED month by clicked_at"
+    char public_id "reference id"
+    bigint message_id
+    datetime message_received_at
+    enum decision
+    varchar client_network "truncated, nullable"
   }
   ip_reputation {
     bigint id PK
@@ -541,7 +605,7 @@ Step 4.1 ([§3](../plan/steps/09-rspamd.md#3-data-model-one-forward-migration-sc
 
 Step 4.2 ([§3](../plan/steps/10-attachment-scanning.md#3-data-model-one-forward-migration-attachment_scanning-wp1)): the attachment engine writes, in the finalize transaction of its final `scan_engine_results` row, one `attachment_scan_results` row per attachment (logical reference to `email_attachments.id`) and one `sandbox_submissions` row per attachment submitted to the sandbox; both are partitioned and copy the message's `received_at`. Archive entries are findings inside their attachment's row (index paths), not rows. `attachment_rescan_jobs` and `scan_signature_versions` are not partitioned.
 
-## Policy
+Step 4.3 ([§3](../plan/steps/11-url-protection.md#3-data-model-one-forward-migration-url_protection-wp1)): the URL engine writes, in the finalize transaction of its final `scan_engine_results` row, the message's new `message_urls` rows (one per unique URL; a rescan keeps the seqs already stored), one `url_scan_results` row per URL, one `url_rewrites` row and one `url_dynamic_inspections` row per URL sent to the browser worker; all four copy the message's `received_at`. The click-service writes one `url_click_events` row per decided click, partitioned by `clicked_at` and pointing to its URL by `(message_id, message_received_at, url_seq)`. No foreign keys (all five are partitioned); `threat_indicators` gains the analyst who added a platform indicator (`SET NULL`).
 
 ```mermaid
 erDiagram

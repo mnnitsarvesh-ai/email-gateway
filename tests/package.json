@@ -14,6 +14,7 @@
     "@email-gateway/common": "workspace:*",
     "@email-gateway/database": "workspace:*",
     "@email-gateway/event-contracts": "workspace:*",
+    "@email-gateway/url-security": "workspace:*",
     "amqplib": "^0.10.9",
     "argon2": "^0.45.1",
     "ioredis": "^5.8.0",

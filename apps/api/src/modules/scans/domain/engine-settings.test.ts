@@ -2,25 +2,36 @@ import {
   ATTACHMENT_PLATFORM_DEFAULTS,
   RSPAMD_PLATFORM_DEFAULTS,
   type RspamdPlatformSettings,
+  URL_PLATFORM_DEFAULTS,
+  type UrlPlatformSettings,
 } from '@email-gateway/security-contracts';
 import { describe, expect, it } from 'vitest';
 import {
   type EngineSettingsDefinition,
   engineSettingsDefinitions,
   holdsOverride,
+  normalizeUrlOverrideDomains,
   type PlatformEngineSettings,
 } from './engine-settings';
 
-const platforms = (rspamd: Partial<RspamdPlatformSettings> = {}): PlatformEngineSettings => ({
+const platforms = (
+  rspamd: Partial<RspamdPlatformSettings> = {},
+  url: UrlPlatformSettings = URL_PLATFORM_DEFAULTS,
+): PlatformEngineSettings => ({
   rspamd: { ...RSPAMD_PLATFORM_DEFAULTS, ...rspamd },
   attachment: ATTACHMENT_PLATFORM_DEFAULTS,
+  url,
 });
 const rspamd = engineSettingsDefinitions(platforms()).get('rspamd')!;
 const updatedAt = new Date('2026-11-05T09:00:00Z');
 
 describe('engine settings (step 4.1 S8, S16)', () => {
-  it('defines settings for the catalog engines rspamd and attachment (catalog order)', () => {
-    expect([...engineSettingsDefinitions(platforms()).keys()]).toEqual(['rspamd', 'attachment']);
+  it('defines settings for the catalog engines rspamd, attachment and url (catalog order)', () => {
+    expect([...engineSettingsDefinitions(platforms()).keys()]).toEqual([
+      'rspamd',
+      'attachment',
+      'url',
+    ]);
   });
 
   it('views the platform settings without an override', () => {
@@ -192,5 +203,149 @@ describe('attachment engine settings (step 4.2 A8)', () => {
     expect(view.overrideApplied).toBe(false);
     expect(view.engine === 'attachment' && view.effective.maxAttachmentBytes).toBe(2_097_152);
     expect(view.violations).toEqual([expect.objectContaining({ code: 'out_of_bounds' })]);
+  });
+});
+
+describe('url engine settings (step 4.3 U13)', () => {
+  const url = engineSettingsDefinitions(platforms()).get('url')!;
+
+  it('views the platform settings, bounds and defaults without an override', () => {
+    const view = url.view(null);
+    expect(view).toMatchObject({
+      engine: 'url',
+      required: true,
+      tenantMayDisable: false,
+      platform: {
+        scanTimeFetch: 'suspicious',
+        rewrite: {
+          enabled: true,
+          directions: ['inbound'],
+          defaultExpiryDays: 30,
+          maxExpiryDays: 90,
+          dkimSignedPolicy: 'rewrite',
+        },
+        dynamicInspection: true,
+      },
+      bounds: {
+        allowedDomains: { maxItems: 500 },
+        scanTimeFetch: ['off', 'shorteners', 'suspicious'],
+        rewrite: { enabled: [false, true], expiryDays: { min: 1, max: 90 } },
+        dynamicInspection: [false, true],
+      },
+      override: null,
+      effective: {
+        allowedDomains: [],
+        scanTimeFetch: 'suspicious',
+        rewrite: { enabled: true, directions: ['inbound'], expiryDays: 30, plainText: true },
+        click: { suspicious: 'warn', unknown: 'warn', allowContinue: true },
+        dynamicInspection: true,
+      },
+      overrideApplied: false,
+      version: 0,
+    });
+  });
+
+  it('normalizes domains through url-security (IDNA, case, trailing dot) and stores them', () => {
+    const checked = url.check({
+      allowedDomains: ['Example.COM.', 'bücher.example'],
+      blockedDomains: ['evil.test'],
+      lookalike: { extraProtectedDomains: ['MyBank.co.uk'] },
+      rewrite: { excludedDomains: ['intranet.example.org'], expiryDays: 7 },
+      click: { unknown: 'block' },
+    });
+    expect(checked).toEqual({
+      ok: true,
+      settings: {
+        allowedDomains: ['example.com', 'xn--bcher-kva.example'],
+        blockedDomains: ['evil.test'],
+        lookalike: { extraProtectedDomains: ['mybank.co.uk'] },
+        rewrite: { excludedDomains: ['intranet.example.org'], expiryDays: 7 },
+        click: { unknown: 'block' },
+      },
+    });
+    const view = url.view({
+      settings: (checked as { settings: object }).settings,
+      version: 2,
+      updatedAt,
+    });
+    expect(view.overrideApplied).toBe(true);
+    expect(view).toMatchObject({
+      effective: {
+        allowedDomains: ['example.com', 'xn--bcher-kva.example'],
+        rewrite: { expiryDays: 7 },
+        click: { suspicious: 'warn', unknown: 'block', allowContinue: true },
+      },
+    });
+  });
+
+  it('refuses public suffixes, IP literals and single labels with the list path', () => {
+    const checked = url.check({
+      allowedDomains: ['co.uk', 'fine.example'],
+      blockedDomains: ['10.0.0.1'],
+      rewrite: { excludedDomains: ['localhost', 'github.io'] },
+    });
+    expect(checked.ok).toBe(false);
+    expect(!checked.ok && checked.violations.map((v) => [v.path, v.code])).toEqual([
+      ['allowedDomains.0', 'invalid'],
+      ['blockedDomains.0', 'invalid'],
+      ['rewrite.excludedDomains.0', 'invalid'],
+      ['rewrite.excludedDomains.1', 'invalid'],
+    ]);
+  });
+
+  it('refuses a domain both allowed and blocked, bounds above the platform and unknown keys', () => {
+    expect(
+      url.check({ allowedDomains: ['a.example'], blockedDomains: ['A.example'] }),
+    ).toMatchObject({ ok: false, violations: [{ path: 'blockedDomains', code: 'invalid' }] });
+    expect(url.check({ scanTimeFetch: 'all' })).toMatchObject({
+      ok: false,
+      violations: [{ path: 'scanTimeFetch', code: 'out_of_bounds' }],
+    });
+    expect(url.check({ rewrite: { expiryDays: 91 } })).toMatchObject({
+      ok: false,
+      violations: [{ path: 'rewrite.expiryDays', code: 'out_of_bounds' }],
+    });
+    expect(url.check({ rewrite: { colour: 'red' } })).toMatchObject({
+      ok: false,
+      violations: [{ path: 'rewrite.colour', code: 'unknown_key' }],
+    });
+  });
+
+  it('allows switching rewriting on only when the platform has it on', () => {
+    const off = engineSettingsDefinitions(
+      platforms(
+        {},
+        { ...URL_PLATFORM_DEFAULTS, rewrite: { ...URL_PLATFORM_DEFAULTS.rewrite, enabled: false } },
+      ),
+    ).get('url')!;
+    expect(off.check({ rewrite: { enabled: true } })).toMatchObject({
+      ok: false,
+      violations: [{ path: 'rewrite.enabled', code: 'out_of_bounds' }],
+    });
+    expect(off.check({ rewrite: { enabled: false } }).ok).toBe(true);
+    expect(off.view(null).bounds).toMatchObject({ rewrite: { enabled: [false] } });
+  });
+
+  it('ignores a stored override the platform no longer allows, listing why', () => {
+    const view = url.view({ settings: { scanTimeFetch: 'all' }, version: 4, updatedAt });
+    expect(view.overrideApplied).toBe(false);
+    expect(view.violations).toEqual([
+      expect.objectContaining({ path: 'scanTimeFetch', code: 'out_of_bounds' }),
+    ]);
+    expect(view).toMatchObject({ effective: { scanTimeFetch: 'suspicious' } });
+  });
+
+  it('never modifies the input when normalizing', () => {
+    const input = { allowedDomains: ['A.Example'], rewrite: { excludedDomains: ['B.Example'] } };
+    const out = normalizeUrlOverrideDomains(input);
+    expect(input).toEqual({
+      allowedDomains: ['A.Example'],
+      rewrite: { excludedDomains: ['B.Example'] },
+    });
+    expect(out.override).toEqual({
+      allowedDomains: ['a.example'],
+      rewrite: { excludedDomains: ['b.example'] },
+    });
+    expect(normalizeUrlOverrideDomains('x')).toEqual({ override: 'x', violations: [] });
   });
 });

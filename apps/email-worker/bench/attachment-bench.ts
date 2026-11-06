@@ -45,7 +45,7 @@ import type { InspectLimits } from '../src/scanning/engines/attachment/content';
 import { CACHE_PREFIX, ContentCache } from '../src/scanning/engines/attachment/content-cache';
 import { BUNDLED_RULES_DIR, bundleIdOf } from '../src/scanning/engines/attachment/inspector/bundle';
 import { InspectorPool } from '../src/scanning/engines/attachment/inspector/pool';
-import type { PartSource } from '../src/scanning/engines/attachment/part-reader';
+import type { PartSource } from '../src/scanning/parts/part-reader';
 
 const envFile = resolve(__dirname, '../../../.env');
 if (existsSync(envFile)) process.loadEnvFile(envFile);

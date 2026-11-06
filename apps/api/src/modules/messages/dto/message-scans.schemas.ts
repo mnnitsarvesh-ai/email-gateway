@@ -1,8 +1,11 @@
 import {
   attachmentResultSchema,
   AUTH_OUTCOMES,
+  CLICK_DECISIONS,
   DMARC_POLICIES,
+  REWRITE_SKIP_REASONS,
   SCAN_VERDICTS,
+  urlResultSchema,
 } from '@email-gateway/security-contracts';
 import { z } from 'zod';
 
@@ -14,7 +17,10 @@ import { z } from 'zod';
  * Scores, codes, symbol names, bounded symbol options and authentication outcomes only: never
  * message content. Step 4.2 A16: the `attachment` engine entry also lists its per-attachment
  * results (`attachment_scan_results`; hashes, sizes, type ids, signature and rule names, counts
- * and codes, never file content or archive entry names).
+ * and codes, never file content or archive entry names). Step 4.3 U16: the `url` engine entry also
+ * lists its per-URL results (`message_urls` + `url_scan_results`, the latest dynamic inspection,
+ * a click summary from `url_click_events`) and the round's rewrite (`url_rewrites`); normalized
+ * URLs, hosts, codes and counts, never page content, anchor text or titles.
  */
 
 /** Rounds per page (S16: at most 20). */
@@ -55,9 +61,11 @@ export const ScanAttemptSchema = z.object({
     .int()
     .min(0)
     .nullable()
-    .describe('Attempt duration; null for the `attachment` engine (it would reveal cache hits)'),
+    .describe(
+      'Attempt duration; null for the `attachment` and `url` engines (it would reveal cache hits)',
+    ),
   at: IsoDate.describe(
-    'When the attempt completed (whole seconds for the `attachment` engine, see durationMs)',
+    'When the attempt completed (whole seconds for the `attachment` and `url` engines)',
   ),
 });
 export type ScanAttempt = z.output<typeof ScanAttemptSchema>;
@@ -107,6 +115,91 @@ export const AttachmentScanViewSchema = z.object({
 });
 export type AttachmentScanView = z.output<typeof AttachmentScanViewSchema>;
 
+/**
+ * The per-URL fields shown to a tenant (step 4.3 U16): the normalized `urlResultSchema` shape of
+ * `@email-gateway/security-contracts`. The stored rows also hold the reputation cache outcome,
+ * the fetch-cache outcome and per-URL durations; the reputation, chain and dynamic caches are
+ * shared by every organization (U6), so these would tell a tenant whether another organization
+ * received the same URL recently. They are never returned (operators keep them in the rows and
+ * the metrics). Platform threat-feed hits are shown (platform facts, not another tenant's data).
+ * `registrableDomain` is null also for a host that is itself a public suffix (WP3 deviation 12).
+ */
+const {
+  reputation: _reputation,
+  lookalike: _lookalike,
+  fetch: _fetch,
+  ...tenantUrlShape
+} = urlResultSchema.shape;
+
+export const UrlClickDecisionSchema = z.enum(CLICK_DECISIONS);
+
+export const UrlScanViewSchema = z.object({
+  ...tenantUrlShape,
+  reputation: z
+    .array(
+      z.object({
+        provider: z.string().describe('`local_feed` (platform feed), `dnsbl`, `rdap`, …'),
+        kind: z.enum(['url', 'domain', 'ip']),
+        status: z.enum(['listed', 'clear', 'error']),
+        category: z.enum(['phishing', 'malware', 'spam', 'scam', 'c2', 'other']).nullable(),
+      }),
+    )
+    .describe('Reputation answers (≤ 12; listed first); never the cache outcome'),
+  lookalike: z
+    .array(
+      z.object({
+        rule: z.enum(['L1', 'L2', 'L3', 'L4', 'L5', 'L6']),
+        targetKind: z.enum(['brand', 'tenant', 'extra']).nullable(),
+        targetDomain: z.string().nullable(),
+        score: z.number(),
+      }),
+    )
+    .describe('Lookalike findings (≤ 5); L4 mixed script and L6 IDN without a target'),
+  fetch: z
+    .object({
+      status: z.enum(['completed', 'error', 'blocked']),
+      error: z.string().nullable().describe('Fetch error code when status is error'),
+      hops: z.number().int().min(0).describe('Redirects followed'),
+      chain: z
+        .array(
+          z.object({
+            host: z.string(),
+            status: z.number().int().nullable(),
+            kind: z.enum(['initial', 'http', 'meta']),
+            blocked: z.string().nullable().describe('SSRF guard reason when the hop was refused'),
+          }),
+        )
+        .describe('Hosts of the redirect chain only (≤ 10; no paths or queries)'),
+      finalUrl: z.string().nullable(),
+      finalStatus: z.number().int().nullable(),
+    })
+    .nullable()
+    .describe('Scan-time fetch (redirect chain); null when the URL was not fetched'),
+  clicks: z
+    .object({
+      total: z.number().int().min(0),
+      lastDecision: UrlClickDecisionSchema.nullable(),
+      lastAt: IsoDate.nullable().describe('Whole seconds'),
+    })
+    .describe('Clicks on the rewritten link (all rounds of the message: one token per URL)'),
+});
+export type UrlScanView = z.output<typeof UrlScanViewSchema>;
+
+export const UrlRewriteViewSchema = z.object({
+  status: z.enum(['rewritten', 'skipped']),
+  skipReason: z
+    .enum(REWRITE_SKIP_REASONS)
+    .nullable()
+    .describe('Why the round was not rewritten (e.g. signed_smime, no_urls)'),
+  linksRewritten: z.number().int().min(0),
+  partsRewritten: z.number().int().min(0),
+  dkimSigned: z
+    .boolean()
+    .describe('The message carried a DKIM signature that no longer verifies downstream'),
+  expiresAt: IsoDate.nullable().describe('When the click tokens expire (whole seconds)'),
+});
+export type UrlRewriteView = z.output<typeof UrlRewriteViewSchema>;
+
 export const ScanEngineResultSchema = z.object({
   engine: z.string(),
   final: z
@@ -127,18 +220,28 @@ export const ScanEngineResultSchema = z.object({
       'Engine `attachment` only (step 4.2 A16): one result per scanned attachment of the ' +
         'round, by part index; empty before the final result and for `skipped`',
     ),
+  urls: z
+    .array(UrlScanViewSchema)
+    .optional()
+    .describe(
+      'Engine `url` only (step 4.3 U16): one result per URL of the round (≤ 200, by urlSeq); ' +
+        'empty before the final result and for `skipped`',
+    ),
+  rewrite: UrlRewriteViewSchema.nullable()
+    .optional()
+    .describe("Engine `url` only: the round's link rewriting; null before the final result"),
   durationMs: z
     .number()
     .int()
     .min(0)
     .nullable()
     .describe(
-      'Engine duration of the final result; always null for the `attachment` engine, whose ' +
-        'timing would reveal whether a file was in the cross-tenant content cache',
+      'Engine duration of the final result; always null for the `attachment` and `url` ' +
+        'engines, whose timing would reveal cross-tenant cache hits',
     ),
   settingsVersion: z.string().nullable(),
   completedAt: IsoDate.nullable().describe(
-    'Final result time (whole seconds for the `attachment` engine)',
+    'Final result time (whole seconds for the `attachment` and `url` engines)',
   ),
 });
 export type ScanEngineResultView = z.output<typeof ScanEngineResultSchema>;

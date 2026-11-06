@@ -252,9 +252,9 @@ export class ManagementApi {
  */
 export const DORMANT_QUEUES = [
   // `scan.spam` is a work queue since topology v3 (step 4.1 S2, consumed by the scan role),
-  // `scan.attachment` since v4 (step 4.2 A2, the attachment engine).
+  // `scan.attachment` since v4 (step 4.2 A2, the attachment engine), `scan.url` since v5 (step
+  // 4.3 U2, the URL engine).
   'scan.auth',
-  'scan.url',
   'scan.dlp',
   'scan.sandbox',
   'email.policy.evaluate',

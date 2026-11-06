@@ -19,6 +19,9 @@ import {
   RSPAMD_PLATFORM_ENV_KEYS,
   type RspamdPlatformSettings,
   rspamdPlatformSettingsSchema,
+  URL_PLATFORM_ENV_KEYS,
+  type UrlPlatformSettings,
+  urlPlatformSettingsFromEnv,
 } from '@email-gateway/security-contracts';
 import { z } from 'zod';
 import {
@@ -494,6 +497,52 @@ function validateAttachmentConfig(cfg: AttachmentConfigKeys, ctx: z.RefinementCt
   }
 }
 
+/**
+ * URL protection (step 4.3 U13): the platform URL settings tenants may override (the same
+ * `URL_SCAN_TIME_FETCH`, `URL_REWRITE_ENABLED`, `URL_REWRITE_DIRECTIONS`, `URL_REWRITE_DKIM_SIGNED`,
+ * `URL_TOKEN_DEFAULT_EXPIRY_DAYS`, `URL_TOKEN_MAX_EXPIRY_DAYS`, `URL_DYNAMIC_INSPECTION` keys the
+ * email-worker and the click-service read). Raw strings, parsed by `urlPlatformSettingsFromEnv`
+ * (unset or empty → default), so every service interprets them identically. The api holds no
+ * URL secret (token keys, cache key).
+ */
+const urlConfigShape = Object.fromEntries(
+  Object.values(URL_PLATFORM_ENV_KEYS).map((key) => [key, z.string().optional()]),
+) as Record<
+  (typeof URL_PLATFORM_ENV_KEYS)[keyof typeof URL_PLATFORM_ENV_KEYS],
+  z.ZodOptional<z.ZodString>
+>;
+
+type UrlConfigKeys = Partial<
+  Record<(typeof URL_PLATFORM_ENV_KEYS)[keyof typeof URL_PLATFORM_ENV_KEYS], string>
+>;
+
+/** The validated URL platform settings of the api config (U13). */
+export function urlPlatformSettingsOf(cfg: UrlConfigKeys): UrlPlatformSettings {
+  return urlPlatformSettingsFromEnv(cfg);
+}
+
+function validateUrlConfig(cfg: UrlConfigKeys, ctx: z.RefinementCtx): void {
+  try {
+    urlPlatformSettingsFromEnv(cfg);
+  } catch (err) {
+    if (!(err instanceof z.ZodError)) throw err;
+    const keyOf = (path: readonly PropertyKey[]): string => {
+      const [first, second] = path.map(String);
+      if (first === 'scanTimeFetch') return URL_PLATFORM_ENV_KEYS.scanTimeFetch;
+      if (first === 'dynamicInspection') return URL_PLATFORM_ENV_KEYS.dynamicInspection;
+      if (second === 'enabled') return URL_PLATFORM_ENV_KEYS.rewriteEnabled;
+      if (second === 'directions') return URL_PLATFORM_ENV_KEYS.rewriteDirections;
+      if (second === 'defaultExpiryDays') return URL_PLATFORM_ENV_KEYS.defaultExpiryDays;
+      if (second === 'maxExpiryDays') return URL_PLATFORM_ENV_KEYS.maxExpiryDays;
+      if (second === 'dkimSignedPolicy') return URL_PLATFORM_ENV_KEYS.dkimSignedPolicy;
+      return URL_PLATFORM_ENV_KEYS.scanTimeFetch;
+    };
+    for (const issue of err.issues) {
+      ctx.addIssue({ code: 'custom', path: [keyOf(issue.path)], message: issue.message });
+    }
+  }
+}
+
 /** The validated Rspamd platform settings of the api config (S8). */
 export function rspamdPlatformSettingsOf(
   cfg: Pick<ScanConfigKeys, (typeof RSPAMD_PLATFORM_ENV_KEYS)[keyof RspamdPlatformSettings]>,
@@ -547,6 +596,7 @@ export const apiConfigSchema = baseConfigSchema
   .extend(deadLetterConfigShape)
   .extend(scanConfigShape)
   .extend(attachmentConfigShape)
+  .extend(urlConfigShape)
   .extend({
     /** Comma-separated allow-list of admin portal origins. */
     CORS_ORIGINS: z
@@ -564,6 +614,7 @@ export const apiConfigSchema = baseConfigSchema
     validateDomainConfig(cfg, ctx);
     validateScanConfig(cfg, ctx);
     validateAttachmentConfig(cfg, ctx);
+    validateUrlConfig(cfg, ctx);
     if (cfg.AUTH_SESSION_MAX_AGE_SECONDS < cfg.AUTH_REFRESH_TOKEN_TTL_SECONDS) {
       ctx.addIssue({
         code: 'custom',

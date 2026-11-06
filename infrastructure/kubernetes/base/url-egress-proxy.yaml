@@ -1,0 +1,183 @@
+# Egress proxy (step 4.3 U8 egress mode 2, U15; ADR-0032; docs/deployment/url-protection.md):
+# the authenticated forward proxy every URL fetcher and the browser worker use. It runs the same
+# SSRF guard + restricted resolver per request and dials the validated IP; the NetworkPolicy is
+# the second layer: Internet only (no RFC 1918, CGNAT, link-local/metadata), clients only from
+# pods labelled email-gateway.io/egress-client=true. In production this is the only route to the
+# Internet for URL traffic; run it on the egress-only node group/subnet where available.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: url-egress-proxy
+  labels:
+    {
+      app.kubernetes.io/name: url-egress-proxy,
+      app.kubernetes.io/component: egress-proxy,
+      app.kubernetes.io/part-of: email-gateway,
+    }
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels: { app.kubernetes.io/name: url-egress-proxy }
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  template:
+    metadata:
+      labels:
+        {
+          app.kubernetes.io/name: url-egress-proxy,
+          app.kubernetes.io/component: egress-proxy,
+          app.kubernetes.io/part-of: email-gateway,
+        }
+    spec:
+      serviceAccountName: url-egress-proxy
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 35
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app.kubernetes.io/name: url-egress-proxy }
+      containers:
+        - name: url-egress-proxy
+          # Same image as url-browser-worker (infrastructure/docker/url-browser-worker.Dockerfile).
+          image: email-gateway/url-browser-worker:latest
+          command: ['/usr/bin/tini', '--', 'node', '--enable-source-maps', 'dist/proxy-main.js']
+          ports:
+            - { name: proxy, containerPort: 3128 }
+            - { name: admin, containerPort: 3091 }
+          # Explicit environment, no shared ConfigMap: the process refuses database, S3, Redis
+          # and token/cache keys (U15).
+          env:
+            - { name: NODE_ENV, value: production }
+            - { name: APP_ENV, value: production }
+            - { name: LOG_LEVEL, value: info }
+            - { name: HTTP_HOST, value: 0.0.0.0 }
+            - { name: URL_EGRESS_PORT, value: '3128' }
+            - { name: URL_EGRESS_ADMIN_PORT, value: '3091' }
+            - { name: URL_EGRESS_MAX_CONNECTIONS, value: '64' }
+            - { name: URL_EGRESS_MAX_BYTES_PER_CONNECTION, value: '10485760' }
+            - { name: URL_EGRESS_IDLE_TIMEOUT_MS, value: '15000' }
+            - { name: URL_EGRESS_MAX_CONNECTION_MS, value: '30000' }
+            # A recursive resolver that does not serve internal zones (deployment doc); empty =
+            # the pod's resolv.conf. Replace per environment.
+            - { name: URL_DNS_SERVERS, value: '' }
+            - { name: URL_DNS_TIMEOUT_MS, value: '2000' }
+            - { name: URL_DNS_TRIES, value: '2' }
+            - { name: URL_FETCH_ALLOWED_PORTS, value: '80,443' }
+            # The platform's own public ranges (replace per environment).
+            - { name: URL_FETCH_DENY_CIDRS, value: '' }
+            - { name: URL_FETCH_DENY_HOSTS, value: '' }
+            - { name: URL_FETCH_CONNECT_TIMEOUT_MS, value: '3000' }
+            - { name: URL_CLICK_BASE_URL, value: https://protect.replace-per-environment.invalid }
+            - { name: URL_EGRESS_PROXY_TOKEN_FILE, value: /var/run/secrets/url-egress/token }
+          volumeMounts:
+            - { name: url-egress, mountPath: /var/run/secrets/url-egress, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+          readinessProbe:
+            httpGet: { path: /health/ready, port: admin }
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /health/live, port: admin }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: '1', memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+      volumes:
+        - name: url-egress
+          secret: { secretName: email-gateway-url-egress-token }
+        - name: tmp
+          emptyDir: { sizeLimit: 16Mi }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: url-egress-proxy
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: url-egress-proxy
+  labels: { app.kubernetes.io/name: url-egress-proxy }
+spec:
+  selector: { app.kubernetes.io/name: url-egress-proxy }
+  ports:
+    - { name: proxy, port: 3128, targetPort: proxy }
+    - { name: admin, port: 3091, targetPort: admin }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: url-egress-proxy
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: url-egress-proxy }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: url-egress-proxy
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: url-egress-proxy }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # Only labelled clients (browser worker, click-service, email-worker-url in proxy mode).
+    - from:
+        - podSelector:
+            matchLabels: { email-gateway.io/egress-client: 'true' }
+      ports: [{ protocol: TCP, port: 3128 }]
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: observability }
+          podSelector:
+            matchLabels: { app.kubernetes.io/name: prometheus }
+      ports: [{ protocol: TCP, port: 3091 }]
+  egress:
+    # The Internet on the allowed ports, never private, CGNAT, link-local/metadata or loopback.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 0.0.0.0/8
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.0.0.0/24
+              - 192.168.0.0/16
+              - 198.18.0.0/15
+              - 224.0.0.0/4
+              - 240.0.0.0/4
+        - ipBlock:
+            cidr: ::/0
+            except:
+              - ::1/128
+              - 64:ff9b::/96
+              - fc00::/7
+              - fe80::/10
+              - ff00::/8
+      ports: [{ protocol: TCP, port: 80 }, { protocol: TCP, port: 443 }]
+    # The resolver (cluster DNS forwarding to a resolver without internal zones, or replace with
+    # the dedicated resolver's ipBlock).
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }]

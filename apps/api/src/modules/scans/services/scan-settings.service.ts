@@ -4,7 +4,11 @@ import { API_CONFIG } from '../../../api-config.token';
 import { AuditService } from '../../../audit/audit.service';
 import type { Principal } from '../../../auth-contracts/principal';
 import type { TenantScope } from '../../../auth-contracts/tenant-scope';
-import { attachmentPlatformSettingsOf, rspamdPlatformSettingsOf } from '../../../config';
+import {
+  attachmentPlatformSettingsOf,
+  rspamdPlatformSettingsOf,
+  urlPlatformSettingsOf,
+} from '../../../config';
 import { TransactionRunner } from '../../../database/transaction-runner';
 import type { ClientContext } from '../../auth/services/session.service';
 import { isUniqueViolation } from '../../domains/repositories/domains.repository';
@@ -34,7 +38,8 @@ export const SCAN_SETTINGS_AUDIT = {
 export const SCAN_SETTINGS_RESOURCE = 'scan_engine_settings';
 
 type ScanConfig = Parameters<typeof rspamdPlatformSettingsOf>[0] &
-  Parameters<typeof attachmentPlatformSettingsOf>[0];
+  Parameters<typeof attachmentPlatformSettingsOf>[0] &
+  Parameters<typeof urlPlatformSettingsOf>[0];
 
 const stored = (row: ScanSettingsRow | null) =>
   row === null ? null : { settings: row.settings, version: row.version, updatedAt: row.updatedAt };
@@ -43,10 +48,11 @@ const userIdOf = (principal: Principal): bigint | null =>
   principal.kind === 'user' ? principal.userId : null;
 
 /**
- * Per-organization scan settings (step 4.1 S8, S16; step 4.2 A8: `attachment`). Reads list every
+ * Per-organization scan settings (step 4.1 S8, S16; step 4.2 A8: `attachment`; step 4.3 U13:
+ * `url`, domains normalized through `@email-gateway/url-security`). Reads list every
  * catalog engine with tenant settings, its platform settings, bounds, the organization's override
  * and the effective settings (replica). Changes validate the override against the platform
- * settings (`resolveRspamdSettings` / `resolveAttachmentSettings`: bounds, threshold order,
+ * settings (`resolveRspamdSettings` / `resolveAttachmentSettings` / `resolveUrlSettings`: bounds, threshold order,
  * raise-only severities and verdicts, tighten-only size, platform-denied types never allowed,
  * no unknown keys; `422 scan_settings_invalid`), compare
  * and set the row version (`409 version_conflict`) and write the `audit_logs` row with the
@@ -68,6 +74,7 @@ export class ScanSettingsService {
     this.definitions = engineSettingsDefinitions({
       rspamd: rspamdPlatformSettingsOf(config),
       attachment: attachmentPlatformSettingsOf(config),
+      url: urlPlatformSettingsOf(config),
     });
   }
 

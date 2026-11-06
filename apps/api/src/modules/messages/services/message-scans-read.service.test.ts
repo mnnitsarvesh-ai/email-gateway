@@ -46,6 +46,11 @@ function setup(rows: ScanRoundRow[], found = true) {
     attachmentResults: vi.fn(() => Promise.resolve([] as unknown[])),
     attachmentParts: vi.fn((..._args: unknown[]) => Promise.resolve([] as unknown[])),
     sandboxSubmissions: vi.fn(() => Promise.resolve([] as unknown[])),
+    messageUrls: vi.fn(() => Promise.resolve([] as unknown[])),
+    urlResults: vi.fn(() => Promise.resolve([] as unknown[])),
+    urlRewrites: vi.fn(() => Promise.resolve([] as unknown[])),
+    urlInspections: vi.fn(() => Promise.resolve([] as unknown[])),
+    urlClicks: vi.fn(() => Promise.resolve([] as unknown[])),
   };
   const service = new MessageScansReadService(
     lifecycle as unknown as MessageLifecycleReadRepository,
@@ -151,6 +156,60 @@ describe('MessageScansReadService (step 4.1 S16)', () => {
           sandbox: null,
         },
       ],
+    });
+  });
+
+  it('reads the URL rows only when a page round has a url engine row (step 4.3 U16)', async () => {
+    const without = setup([round(30n, 2)]);
+    await without.service.list(scope, message.publicId, { limit: 10 });
+    expect(without.scans.messageUrls).not.toHaveBeenCalled();
+    expect(without.scans.urlClicks).not.toHaveBeenCalled();
+
+    const { service, scans } = setup([round(30n, 2)]);
+    scans.engineResults.mockResolvedValue([
+      {
+        scanId: 30n,
+        engine: 'url',
+        engineVersion: 'url/1;url-fetch/1;aaaaaaaa;bbbbbbbb',
+        outcome: 'skipped',
+        score: null,
+        requiredScore: null,
+        action: null,
+        reasonCodes: ['url.none'],
+        errorCode: null,
+        settingsVersion: 'url-map/1;p=abc;t=none',
+        durationMs: 40,
+        evidence: { signals: [] },
+        attempt: 1,
+        isFinal: true,
+        completedAt: new Date('2026-11-05T08:00:05.500Z'),
+      },
+    ]);
+    scans.urlRewrites.mockResolvedValue([
+      {
+        scanId: 30n,
+        lifecycleRound: 2,
+        status: 'skipped',
+        skipReason: 'no_urls',
+        linksRewritten: 0,
+        partsRewritten: 0,
+        dkimSigned: false,
+        expiresAt: null,
+      },
+    ]);
+    const page = await service.list(scope, message.publicId, { limit: 10 });
+    expect(scans.messageUrls).toHaveBeenCalledWith(scope, message);
+    expect(scans.urlResults).toHaveBeenCalledWith(scope, message, [30n]);
+    expect(scans.urlRewrites).toHaveBeenCalledWith(scope, message, [30n]);
+    expect(scans.urlInspections).toHaveBeenCalledWith(scope, message, [30n]);
+    expect(scans.urlClicks).toHaveBeenCalledWith(scope, message);
+    expect(page.data[0]!.engines[0]).toMatchObject({
+      engine: 'url',
+      outcome: 'skipped',
+      durationMs: null,
+      completedAt: '2026-11-05T08:00:05.000Z',
+      urls: [],
+      rewrite: { status: 'skipped', skipReason: 'no_urls' },
     });
   });
 });

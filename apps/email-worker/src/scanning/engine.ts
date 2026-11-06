@@ -96,10 +96,97 @@ export interface SandboxSubmissionInput {
   reasonCodes: string[];
 }
 
+/** One new `message_urls` row (step 4.3 U16; existing rows of earlier rounds are kept). */
+export interface MessageUrlInput {
+  urlSeq: number;
+  /** Redirect form (U5), at most URL_MAX_LENGTH characters (`truncated` when cut). */
+  url: string;
+  /** SHA-256 of the full identity form. */
+  urlSha256: string;
+  scheme: 'http' | 'https';
+  host: string;
+  unicodeHost: string | null;
+  registrableDomain: string | null;
+  hostKind: 'domain' | 'ipv4' | 'ipv6';
+  port: number | null;
+  truncated: boolean;
+  /** Extraction and normalization codes. */
+  flags: string[];
+  /** `{ source: count }` (U18 sources). */
+  sources: Record<string, number>;
+  occurrences: number;
+  firstLifecycleRound: number;
+  extractorVersion: string;
+}
+
+/** One `url_scan_results` row of a definite url-engine final (U16). Bounded JSON only. */
+export interface UrlScanResultInput {
+  urlSeq: number;
+  urlSha256: string;
+  verdict: 'clean' | 'suspicious' | 'malicious' | 'unknown';
+  /** At most 32 codes of URL_REASON_CODES. */
+  reasonCodes: string[];
+  /** At most 12 answers `{ provider, version, kind, status, category, severity, cache }`. */
+  reputation: Array<Record<string, unknown>>;
+  /** At most 5 lookalike entries, or null. */
+  lookalike: Array<Record<string, unknown>> | null;
+  fetchStatus: 'not_attempted' | 'completed' | 'error' | 'blocked';
+  fetchError: string | null;
+  hopCount: number;
+  /** At most 10 hops `{ host, port, status, kind, blocked }` (no paths), or null. */
+  redirectChain: Array<Record<string, unknown>> | null;
+  finalUrl: string | null;
+  finalUrlSha256: string | null;
+  finalHost: string | null;
+  finalStatus: number | null;
+  landing: Record<string, unknown> | null;
+  rewritten: boolean;
+  dynamicRequested: boolean;
+  fetchCache: 'hit' | 'miss' | 'none';
+  durationMs: number;
+}
+
+/** The `url_rewrites` row of the round (U11): rewritten (object named) or skipped (reason). */
+export interface UrlRewriteInput {
+  status: 'rewritten' | 'skipped';
+  skipReason: string | null;
+  /** `org/<org>/rewrite/…` (checked against the organization in the finalize transaction). */
+  objectKey: string | null;
+  objectSha256: string | null;
+  objectSizeBytes: number | null;
+  linksRewritten: number;
+  linksUnmapped: number;
+  partsRewritten: number;
+  partsSkipped: number;
+  dkimSigned: boolean;
+  tokenKid: number | null;
+  expiresAt: Date | null;
+  settingsVersion: string;
+}
+
+/** One `url_dynamic_inspections` row and its `inspection_requested.v1` outbox row (U15). */
+export interface UrlInspectionInput {
+  urlSeq: number;
+  urlSha256: string;
+  /** The redirect form sent to the browser worker (the only event with a URL, U2). */
+  url: string;
+  requestedAt: Date;
+  deadlineAt: Date;
+}
+
+/** The url engine's child rows (U16), written in the final row's transaction. */
+export interface UrlChildRows {
+  messageUrls: MessageUrlInput[];
+  results: UrlScanResultInput[];
+  rewrite: UrlRewriteInput;
+  inspections: UrlInspectionInput[];
+}
+
 /** Engine-specific child rows written in the finalize transaction of the final row (A12). */
 export interface EngineChildRows {
   attachments?: AttachmentResultInput[];
   sandbox?: SandboxSubmissionInput[];
+  urls?: UrlChildRows;
 }
 
 /** A definite result (S9); `evidence` adds engine flags to `scan_engine_results.evidence`. */
@@ -163,7 +250,8 @@ export class EngineAttemptFailedError extends Error {
 /**
  * Reason code of a failed attempt or a failure final (S7 R0, S10; step 4.2 A6 adds the attachment
  * engine's own failures `inspector_timeout`, `inspector_crash`, `part_unavailable`,
- * `part_integrity`, `part_key_mismatch`, `parse_row_missing`).
+ * `part_integrity`, `part_key_mismatch`, `parse_row_missing`; step 4.3 U10 adds
+ * `inconsistent_read` (a writer read echo mismatch, §6) and `extract_timeout`).
  */
 export function failureReasonCode(failure: Pick<EngineFailure, 'outcome' | 'errorCode'>): string {
   switch (failure.errorCode) {
@@ -180,6 +268,8 @@ export function failureReasonCode(failure: Pick<EngineFailure, 'outcome' | 'erro
     case 'part_integrity':
     case 'part_key_mismatch':
     case 'parse_row_missing':
+    case 'inconsistent_read':
+    case 'extract_timeout':
       return `engine.${failure.errorCode}`;
     default:
       return failure.outcome === 'timeout' ? 'engine.timeout' : 'engine.error';
@@ -200,7 +290,9 @@ export type FailureMetricReason =
   | 'part_unavailable'
   | 'part_integrity'
   | 'part_key_mismatch'
-  | 'parse_row_missing';
+  | 'parse_row_missing'
+  | 'inconsistent_read'
+  | 'extract_timeout';
 
 export function failureMetricReason(
   failure: Pick<EngineFailure, 'outcome' | 'errorCode'>,
@@ -217,6 +309,8 @@ export function failureMetricReason(
     case 'part_integrity':
     case 'part_key_mismatch':
     case 'parse_row_missing':
+    case 'inconsistent_read':
+    case 'extract_timeout':
       return failure.errorCode;
     default:
       return failure.outcome;

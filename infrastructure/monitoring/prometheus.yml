@@ -3,7 +3,7 @@ global:
   evaluation_interval: 15s
 
 # Alert rules (step 3.2 Q15: messaging.rules.yml; step 3.3 L14: lifecycle.rules.yml; step 4.1 S17:
-# scanning.rules.yml). Alertmanager
+# scanning.rules.yml; step 4.3 U18: click-service.rules.yml, url-scanning.rules.yml). Alertmanager
 # routing is step 10.3; until then the alerts are visible on the Prometheus /alerts page.
 rule_files:
   - rules/*.rules.yml
@@ -61,6 +61,24 @@ scrape_configs:
         files: [/run/secrets/rspamd_controller_password]
     static_configs:
       - targets: ['rspamd:11334']
+  # click-service (step 4.3 U18): its ADMIN listener only (3081; the public 3080 has no /metrics).
+  # click_* series plus url_* with component="click".
+  - job_name: click-service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['click-service:3081']
+  # Isolated browser worker and egress proxy (step 4.3 U15, U18; profile url-browser). The
+  # worker sits on the internal url-sandbox network only: this job answers only where Prometheus
+  # can reach that network (Kubernetes: the NetworkPolicy admits Prometheus on 3090). Locally
+  # `up{job="url-browser-worker"}` is 0 unless Prometheus is attached to url-sandbox.
+  - job_name: url-browser-worker
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['url-browser-worker:3090']
+  - job_name: url-egress-proxy
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['url-egress-proxy:3091']
   - job_name: prometheus
     static_configs:
       - targets: ['localhost:9090']

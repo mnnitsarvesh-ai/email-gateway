@@ -5,7 +5,10 @@ import type {
   AttachmentResultRow,
   AuthResultRow,
   EngineResultRow,
+  MessageUrlRow,
   ScanRoundRow,
+  UrlInspectionRow,
+  UrlResultRow,
 } from '../repositories/message-scans-read.repository';
 import {
   attachmentOf,
@@ -13,9 +16,12 @@ import {
   decodeScanCursor,
   encodeScanCursor,
   engineOf,
+  rewriteOf,
   roundOf,
   stringArray,
   symbolsOf,
+  type UrlInputs,
+  urlsOf,
 } from './message-scans';
 
 const at = (s: number) => new Date(Date.UTC(2026, 10, 5, 8, 0, s));
@@ -287,5 +293,269 @@ describe('attachment results (step 4.2 A16)', () => {
     expect(
       attachmentsOf(7n, { results: rows, parts: [], submissions: [] }).map((a) => a.partIndex),
     ).toEqual([1, 3]);
+  });
+});
+
+describe('url results (step 4.3 U16)', () => {
+  const URL_SHA = 'b'.repeat(64);
+  const messageUrl = (overrides: Partial<MessageUrlRow> = {}): MessageUrlRow => ({
+    urlSeq: 0,
+    url: 'https://clean-site.test/landing#top',
+    urlSha256: URL_SHA,
+    host: 'clean-site.test',
+    unicodeHost: null,
+    registrableDomain: 'clean-site.test',
+    hostKind: 'domain',
+    flags: ['url.idn', 'url.none', 'bogus'],
+    sources: { html_href: 2, text: 1, nonsense: 4 },
+    ...overrides,
+  });
+  const result = (overrides: Partial<UrlResultRow> = {}): UrlResultRow => ({
+    scanId: 5n,
+    urlSeq: 0,
+    urlSha256: URL_SHA,
+    verdict: 'suspicious',
+    reasonCodes: ['url.redirect_blocked_internal', 'engine.error'],
+    reputation: [
+      {
+        provider: 'local_feed',
+        version: 'local_feed/1',
+        kind: 'domain',
+        status: 'listed',
+        category: 'phishing',
+        severity: 'high',
+        cache: 'none',
+      },
+      {
+        provider: 'dnsbl',
+        version: 'dnsbl/1;x',
+        kind: 'url',
+        status: 'clear',
+        category: null,
+        cache: 'hit',
+      },
+      { bad: true },
+    ],
+    lookalike: [
+      { rule: 'L1', targetKind: 'brand', targetDomain: 'paypal.com', score: 1, distance: 0 },
+      { rule: 'L6', targetKind: null, targetDomain: null, score: 0, distance: null },
+    ],
+    fetchStatus: 'blocked',
+    fetchError: 'loopback',
+    hopCount: 1,
+    redirectChain: [
+      { host: 'short-link.test', port: 80, status: 302, kind: 'initial', blocked: null },
+      { host: '127.0.0.1', port: 80, status: null, kind: 'http', blocked: 'loopback' },
+    ],
+    finalUrl: null,
+    finalStatus: null,
+    landing: null,
+    rewritten: true,
+    ...overrides,
+  });
+  const inputs = (over: Partial<UrlInputs> = {}): UrlInputs => ({
+    urls: [messageUrl()],
+    results: [result()],
+    rewrites: [],
+    inspections: [],
+    clicks: [],
+    ...over,
+  });
+
+  it('maps a URL: picked reputation without cache, chain without ports, codes filtered', () => {
+    const [view] = urlsOf(5n, inputs());
+    expect(view).toEqual({
+      urlSeq: 0,
+      url: 'https://clean-site.test/landing#top',
+      host: 'clean-site.test',
+      unicodeHost: null,
+      registrableDomain: 'clean-site.test',
+      hostKind: 'domain',
+      sources: { html_href: 2, text: 1 },
+      flags: ['url.idn'],
+      verdict: 'suspicious',
+      reasonCodes: ['url.redirect_blocked_internal'],
+      reputation: [
+        { provider: 'local_feed', kind: 'domain', status: 'listed', category: 'phishing' },
+        { provider: 'dnsbl', kind: 'url', status: 'clear', category: null },
+      ],
+      lookalike: [
+        { rule: 'L1', targetKind: 'brand', targetDomain: 'paypal.com', score: 1 },
+        { rule: 'L6', targetKind: null, targetDomain: null, score: 0 },
+      ],
+      fetch: {
+        status: 'blocked',
+        error: null,
+        hops: 1,
+        chain: [
+          { host: 'short-link.test', status: 302, kind: 'initial', blocked: null },
+          { host: '127.0.0.1', status: null, kind: 'http', blocked: 'loopback' },
+        ],
+        finalUrl: null,
+        finalStatus: null,
+      },
+      landing: null,
+      dynamic: null,
+      rewritten: true,
+      clicks: { total: 0, lastDecision: null, lastAt: null },
+    });
+    expect(JSON.stringify(view)).not.toMatch(/cache|durationMs|distance|severity/);
+  });
+
+  it('adds landing, dynamic inspection (eleven signal keys) and clicks rounded to the second', () => {
+    const [view] = urlsOf(
+      5n,
+      inputs({
+        results: [
+          result({
+            fetchStatus: 'completed',
+            fetchError: null,
+            landing: {
+              passwordFields: 1,
+              forms: 1,
+              crossOriginFormAction: true,
+              formActionHosts: ['collector-site.test'],
+              titleBrandMatches: [],
+            },
+          }),
+        ],
+        inspections: [
+          {
+            scanId: 5n,
+            urlSeq: 0,
+            urlSha256: URL_SHA,
+            status: 'completed',
+            verdict: 'malicious',
+            reasonCodes: ['url.dynamic_phishing'],
+            signals: {
+              passwordFields: 1,
+              forms: 1,
+              crossOriginFormAction: false,
+              formActionHosts: [],
+              downloadAttempted: false,
+              blockedRequests: 2,
+              requests: 9,
+              bytes: 1000,
+              titleBrandMatches: ['paypal'],
+              jsRedirect: true,
+              dialogs: 0,
+              navigations: [{ host: 'x.test' }],
+            },
+          },
+          { ...({} as UrlInspectionRow), scanId: 6n, urlSeq: 0 },
+        ],
+        clicks: [
+          {
+            urlSeq: 0,
+            total: 3,
+            lastDecision: 'blocked',
+            lastAt: new Date('2026-11-05T08:00:09.987Z'),
+          },
+        ],
+      }),
+    );
+    expect(view!.landing).toEqual({
+      passwordFields: 1,
+      forms: 1,
+      crossOriginFormAction: true,
+      titleBrandMatches: [],
+    });
+    expect(view!.fetch).toMatchObject({ status: 'completed', error: null });
+    expect(view!.dynamic).toEqual({
+      status: 'completed',
+      verdict: 'malicious',
+      reasonCodes: ['url.dynamic_phishing'],
+      signals: expect.objectContaining({ blockedRequests: 2, jsRedirect: true }),
+    });
+    expect(view!.dynamic!.signals).not.toHaveProperty('navigations');
+    expect(view!.clicks).toEqual({
+      total: 3,
+      lastDecision: 'blocked',
+      lastAt: '2026-11-05T08:00:09.000Z',
+    });
+  });
+
+  it('drops results of other rounds and results whose URL row is missing or another URL', () => {
+    const views = urlsOf(
+      5n,
+      inputs({
+        urls: [messageUrl(), messageUrl({ urlSeq: 1, urlSha256: 'c'.repeat(64) })],
+        results: [result({ urlSeq: 1 }), result({ urlSeq: 2 }), result({ scanId: 6n }), result()],
+      }),
+    );
+    expect(views.map((v) => v.urlSeq)).toEqual([0]);
+  });
+
+  it('maps the round rewrite (unknown skip reasons shown as error) and times to the second', () => {
+    const expiresAt = new Date('2026-12-05T08:00:00.456Z');
+    expect(
+      rewriteOf(
+        5n,
+        inputs({
+          rewrites: [
+            {
+              scanId: 5n,
+              lifecycleRound: 0,
+              status: 'rewritten',
+              skipReason: null,
+              linksRewritten: 3,
+              partsRewritten: 2,
+              dkimSigned: true,
+              expiresAt,
+            },
+          ],
+        }),
+      ),
+    ).toEqual({
+      status: 'rewritten',
+      skipReason: null,
+      linksRewritten: 3,
+      partsRewritten: 2,
+      dkimSigned: true,
+      expiresAt: '2026-12-05T08:00:00.000Z',
+    });
+    const skipped = (skipReason: string) =>
+      rewriteOf(
+        5n,
+        inputs({
+          rewrites: [
+            {
+              scanId: 5n,
+              lifecycleRound: 0,
+              status: 'skipped',
+              skipReason,
+              linksRewritten: 0,
+              partsRewritten: 0,
+              dkimSigned: false,
+              expiresAt: null,
+            },
+          ],
+        }),
+      );
+    expect(skipped('signed_smime')!.skipReason).toBe('signed_smime');
+    expect(skipped('weird')!.skipReason).toBe('error');
+    expect(rewriteOf(9n, inputs())).toBeNull();
+  });
+
+  it('withholds the url engine timing and attaches urls and rewrite to its entry', () => {
+    const final = row({
+      scanId: 5n,
+      engine: 'url',
+      outcome: 'suspicious',
+      reasonCodes: ['url.redirect_blocked_internal'],
+      errorCode: null,
+      durationMs: 1234,
+      isFinal: true,
+      completedAt: new Date('2026-11-05T08:00:03.789Z'),
+    });
+    const view = engineOf('url', [final]);
+    expect(view.durationMs).toBeNull();
+    expect(view.completedAt).toBe('2026-11-05T08:00:03.000Z');
+    expect(view.attempts[0]).toMatchObject({ durationMs: null, at: '2026-11-05T08:00:03.000Z' });
+    const round = roundOf(scan(5n, 0), [final, row({ scanId: 5n })], [], undefined, inputs());
+    const urlEntry = round.engines.find((e) => e.engine === 'url')!;
+    expect(urlEntry.urls).toHaveLength(1);
+    expect(urlEntry.rewrite).toBeNull();
+    expect(round.engines.find((e) => e.engine === 'rspamd')).not.toHaveProperty('urls');
   });
 });

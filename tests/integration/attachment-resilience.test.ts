@@ -305,7 +305,7 @@ describe.skipIf(gate.skip)('attachment stack: ClamAV outage', { timeout: 900_000
     });
     const all = await engineResultsOf(fx.prisma, message);
     const round1Finals = all.filter((r) => r.scanId === round1.id && r.isFinal);
-    expect(round1Finals.map((r) => r.engine).sort()).toEqual(['attachment', 'rspamd']);
+    expect(round1Finals.map((r) => r.engine).sort()).toEqual(['attachment', 'rspamd', 'url']);
     expect(round1Finals.find((r) => r.engine === 'attachment')!.outcome).toBe('clean');
     const results = await attachmentResultsOf(fx.prisma, message);
     expect(results.map((r) => [r.scanId, r.verdict])).toEqual([[round1.id, 'clean']]);

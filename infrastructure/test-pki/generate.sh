@@ -8,6 +8,9 @@
 #   ca-private/ca.key                         CA key (0600), never mounted by anything else
 #   m365/{cert,key}.pem                       SAN mail.protection.outlook.com, *.mail.protection.outlook.com
 #   google/{cert,key}.pem                     SAN mx.google.com, aspmx.l.google.com, *.aspmx.l.google.com
+#   url-test/{cert,key}.pem                   step 4.3 U19: every url-test corpus name + 203.0.113.10
+#                                             (HTTPS of the url-test container; trusted by the URL
+#                                             fetchers through URL_FETCH_CA_FILE=/pki/ca/ca.pem)
 #
 # The leaves mimic the real providers' certificate names, so postfix-outbound's `secure match=`
 # policies for the Microsoft 365 and Google Workspace presets are verified against the same names
@@ -53,7 +56,11 @@ fi
 leaf() {
   dir=$PKI_DIR/$1
   install -d -m 0755 "$dir"
-  if [ "$regenerate_leaves" = no ] && valid_for_a_week "$dir/cert.pem" && [ -s "$dir/key.pem" ] \
+  # A leaf created with a recorded SAN list (san.txt, since step 4.3) is re-issued when the list
+  # changes; leaves without san.txt (m365, google from step 2.3) keep the old rule.
+  san_changed=no
+  if [ -f "$dir/san.txt" ] && [ "$(cat "$dir/san.txt")" != "$3" ]; then san_changed=yes; fi
+  if [ "$regenerate_leaves" = no ] && [ "$san_changed" = no ] && valid_for_a_week "$dir/cert.pem" && [ -s "$dir/key.pem" ] \
     && openssl verify -CAfile "$ca_cert" "$dir/cert.pem" >/dev/null 2>&1; then
     log "$1 leaf present: $(openssl x509 -in "$dir/cert.pem" -noout -ext subjectAltName | tail -n 1 | sed 's/^ *//')"
     return 0
@@ -76,6 +83,7 @@ EOF
   chmod 0644 "$tmp/cert.pem"
   mv "$tmp/key.pem" "$dir/key.pem"
   mv "$tmp/cert.pem" "$dir/cert.pem"
+  if [ "${4:-}" = record-san ]; then printf '%s' "$3" > "$dir/san.txt"; fi
   rm -rf "$tmp"
 }
 
@@ -83,6 +91,17 @@ leaf m365 mail.protection.outlook.com \
   "DNS:mail.protection.outlook.com,DNS:*.mail.protection.outlook.com"
 leaf google mx.google.com \
   "DNS:mx.google.com,DNS:aspmx.l.google.com,DNS:*.aspmx.l.google.com"
+
+# Step 4.3 U19: the url-test web server (TEST-ONLY corpus, all names under .test; the Cyrillic
+# homoglyph exаmplebank.test is listed as its A-label xn--exmplebank-0qi.test).
+URL_TEST_NAMES="clean-site.test www.clean-site.test short-link.test redirect-chain.test evil-site.test \
+phish-login.test collector-site.test examplebank.test examp1ebank.test examplebank-login.test \
+xn--exmplebank-0qi.test new-domain.test slow-site.test trickle-site.test huge-site.test \
+many-headers.test gzip-bomb.test rdap.test bad-ip-host.test evil-dbl.test malware-dbl.test \
+rebind.test url-test"
+url_test_san=""
+for name in $URL_TEST_NAMES; do url_test_san="${url_test_san:+$url_test_san,}DNS:$name"; done
+leaf url-test url-test "$url_test_san,IP:203.0.113.10" record-san
 
 # Hash links (<subject hash>.0) so OpenSSL finds the CA in a CApath directory.
 openssl rehash "$PKI_DIR/ca"

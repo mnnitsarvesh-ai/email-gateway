@@ -1,0 +1,35 @@
+{
+  "name": "@email-gateway/url-security",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "data"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src integration",
+    "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "confusables:generate": "node scripts/generate-confusables.mjs"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "1.10.0",
+    "@opentelemetry/core": "3.0.0",
+    "@zone-eu/mailsplit": "5.4.29",
+    "iconv-lite": "0.7.3",
+    "libbase64": "1.4.1",
+    "libqp": "3.0.1",
+    "parse5": "7.3.0",
+    "tldts": "7.4.18",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "@opentelemetry/context-async-hooks": "3.0.0",
+    "@opentelemetry/instrumentation-http": "0.300.0",
+    "@opentelemetry/sdk-trace": "3.0.0"
+  }
+}

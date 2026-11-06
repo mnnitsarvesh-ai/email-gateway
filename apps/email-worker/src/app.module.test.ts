@@ -23,9 +23,13 @@ import { MIME_CONSUMER } from './mime-ingestion/mime-ingestion.service';
 import { classifyScanFailure } from './scanning/engine-consumer';
 import { ATTACHMENT_CONSUMER } from './scanning/engines/attachment/registration';
 import { RSPAMD_CONSUMER } from './scanning/engines/rspamd/registration';
+import { URL_CONSUMER } from './scanning/engines/url/registration';
+import { URL_RESULTS_CONSUMER } from './scanning/engines/url/url-results';
 import {
   ATTACHMENT_JOBS,
   type AttachmentJobs,
+  URL_JOBS,
+  type UrlJobs,
   type EngineRuntime,
   SCAN_ENGINES,
   SCAN_LOCKS,
@@ -40,6 +44,9 @@ const env = {
   SCAN_RSPAMD_URL: 'http://127.0.0.1:11333',
   REDIS_URL: 'redis://localhost:6379',
   ATTACHMENT_CACHE_HMAC_KEY: 'test-content-cache-mac-key-0123456789',
+  URL_CACHE_HMAC_KEY: 'test-url-cache-mac-key-0123456789abcdef',
+  URL_TOKEN_KEY_CURRENT: '0123456789abcdef'.repeat(4),
+  URL_DNSBL_DOMAIN_ZONES: 'dbl.scan.test=127.0.1.2:spam,127.0.1.4:phishing',
   S3_REGION: 'ap-south-1',
   S3_BUCKET_MAIL: 'test-mail',
   S3_BUCKET_ARCHIVE: 'test-archive',
@@ -418,5 +425,83 @@ describe('AppModule wiring', () => {
     }
     const jobs = moduleRef.get<AttachmentJobs | null>(ATTACHMENT_JOBS, { strict: false });
     expect(jobs?.watcher.running).toBe(false);
+  });
+
+  it('wires the url consumer, its results consumer, sweeper and readiness check (step 4.3 U1, U15)', async () => {
+    const { RABBITMQ_EMAIL_WORKER_URL: _omitted, ...scanOnlyEnv } = env;
+    const config = loadWorkerConfig({
+      ...scanOnlyEnv,
+      MIME_INGESTION_ENABLED: 'false',
+      SCAN_ENGINES: 'rspamd,url',
+      SCAN_CONSUMERS: 'url',
+      URL_DNS_SERVERS: '127.0.0.1:1',
+      URL_DNS_TIMEOUT_MS: '200',
+      URL_DNS_TRIES: '1',
+    });
+    const scanner = idleAmqp();
+    const locks = idleLocks();
+    const moduleRef = await Test.createTestingModule({ imports: [AppModule.forRoot(config)] })
+      .overrideProvider(PrismaService)
+      .useValue(stub('mysql'))
+      .overrideProvider(SCANNER_AMQP_CONNECTION)
+      .useValue(scanner.connection)
+      .overrideProvider(SCAN_LOCKS)
+      .useValue(locks.locks)
+      .overrideProvider(RedisService)
+      .useValue(stub('redis', { client: { ping: () => Promise.resolve('PONG') } }))
+      .overrideProvider(S3Service)
+      .useValue(stub('s3', { client: {}, mailBucket: 'test-mail' }))
+      .compile();
+    await moduleRef.init();
+    try {
+      const engines = moduleRef.get<EngineRuntime[]>(SCAN_ENGINES, { strict: false });
+      expect(engines.map((e) => e.registration.catalog.name)).toEqual(['url']);
+      const feed = engines[0]!.consumer;
+      expect(feed.queue).toBe('scan.url');
+      expect(feed.consumerName).toBe(URL_CONSUMER);
+      expect(feed.retryPolicy.maxAttempts).toBe(10);
+      expect((feed as unknown as { options: { prefetch: number } }).options.prefetch).toBe(4);
+      expect(scanner.calls.topology).toContainEqual({
+        exchanges: ['email.security', 'email.events'],
+        queues: ['scan.url', 'scan.url.results'],
+      });
+      const jobs = moduleRef.get<UrlJobs | null>(URL_JOBS, { strict: false });
+      expect(jobs?.consumer.queue).toBe('scan.url.results');
+      expect(jobs?.consumer.consumerName).toBe(URL_RESULTS_CONSUMER);
+      expect(jobs?.sweeper.running).toBe(true);
+      expect(jobs?.sweeper.lockName).toBe('scan:url-inspections');
+      const report = await moduleRef.get(HealthService).readiness();
+      expect(report.checks.map((c) => c.name)).toEqual([
+        'mysql',
+        'rabbitmq-scanner',
+        'url-engine',
+        'redis',
+        's3',
+      ]);
+      // The resolver is unreachable: a detail, not a readiness failure (U3).
+      const url = report.checks.find((c) => c.name === 'url-engine')!;
+      expect(url).toMatchObject({
+        status: 'ok',
+        details: { cache: 'ok', dns: 'unreachable', egress: 'direct' },
+      });
+      const metrics = await moduleRef.get(MetricsService).metrics();
+      for (const name of [
+        'scan_url_urls_total',
+        'scan_url_rewrites_total',
+        'scan_url_dynamic_inspections_total',
+        'scan_url_inconsistent_reads_total',
+        'url_cache_total',
+        'url_provider_breaker_state',
+      ]) {
+        expect(metrics).toContain(`# TYPE ${name} `);
+      }
+      expect(metrics).toContain(
+        'url_provider_breaker_state{provider="dnsbl",service="email-worker"} 0',
+      );
+    } finally {
+      await moduleRef.close();
+    }
+    const jobs = moduleRef.get<UrlJobs | null>(URL_JOBS, { strict: false });
+    expect(jobs?.sweeper.running).toBe(false);
   });
 });

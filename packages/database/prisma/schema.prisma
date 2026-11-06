@@ -413,6 +413,57 @@ enum UrlVerdict {
   unknown
 }
 
+/// Category of a threat indicator (step 4.3 U6; THREAT_CATEGORIES of security-contracts).
+enum ThreatCategory {
+  phishing
+  malware
+  spam
+  scam
+  c2
+  other
+}
+
+enum UrlHostKind {
+  domain
+  ipv4
+  ipv6
+}
+
+enum UrlFetchStatus {
+  not_attempted
+  completed
+  error
+  blocked
+}
+
+enum UrlFetchCache {
+  hit
+  miss
+  none
+}
+
+enum UrlRewriteStatus {
+  rewritten
+  skipped
+}
+
+enum UrlInspectionStatus {
+  pending
+  completed
+  failed
+  expired
+}
+
+/// CLICK_DECISIONS of security-contracts (step 4.3 U14).
+enum UrlClickDecision {
+  allowed
+  warned
+  blocked
+  continued
+  expired
+  not_found
+}
+
 enum PolicyDirection {
   inbound
   outbound
@@ -855,6 +906,7 @@ model User {
   updatedScanEngineSettings  ScanEngineSetting[]
   addedMalwareSignatures     MalwareSignature[]
   requestedAttachmentRescans AttachmentRescanJob[]
+  addedThreatIndicators      ThreatIndicator[]
 
   @@unique([organizationId, email])
   @@index([organizationId, status])
@@ -1717,7 +1769,8 @@ model ScanEngineResult {
   messageId       BigInt        @map("message_id") @db.UnsignedBigInt
   organizationId  BigInt        @map("organization_id") @db.UnsignedBigInt
   /// ENGINE_NAMES of @email-gateway/security-contracts: rspamd, attachment, url, bec, dlp,
-  /// sandbox (step 4.2 A1: ClamAV and YARA are components of the `attachment` engine).
+  /// sandbox (step 4.2 A1: ClamAV and YARA are components of the `attachment` engine; step 4.3
+  /// U1: `url` is written by the URL engine on scan.url).
   engine          String        @db.VarChar(32)
   engineVersion   String?       @map("engine_version") @db.VarChar(64)
   outcome         EngineOutcome
@@ -1947,39 +2000,259 @@ model ScanSignatureVersion {
   @@map("scan_signature_versions")
 }
 
-/// `organization_id` NULL = platform-wide intelligence.
+/// PARTITIONED by RANGE COLUMNS(received_at), monthly (6 months, core; step 4.3 §3, U3, U16).
+/// One row per unique URL of a message (identity form, U5), written by the `url` engine in the
+/// finalize transaction of a definite final result (`createMany … skipDuplicates`; a rescan keeps
+/// the `url_seq` of a URL already stored). `url` is the redirect form (no userinfo, with the
+/// fragment) and the only copy of the URL the click-service redirects to; never anchor text, page
+/// content or HTML. No foreign keys.
+model MessageUrl {
+  id                  BigInt      @default(autoincrement()) @db.UnsignedBigInt
+  receivedAt          DateTime    @map("received_at") @db.DateTime(3)
+  messageId           BigInt      @map("message_id") @db.UnsignedBigInt
+  organizationId      BigInt      @map("organization_id") @db.UnsignedBigInt
+  /// Per-message sequence (0-based, stable across rounds); part of the click token (U12).
+  urlSeq              Int         @map("url_seq") @db.UnsignedSmallInt
+  /// Redirect form (U5); the first 2 048 characters when `truncated`.
+  url                 String      @db.VarChar(2048)
+  /// Hex SHA-256 of the identity form (no userinfo, no fragment) of the full URL.
+  urlSha256           String      @map("url_sha256") @db.Char(64)
+  /// `http` or `https`.
+  scheme              String      @db.VarChar(8)
+  /// ASCII host (A-labels; canonical IPv4/IPv6 text for IP hosts).
+  host                String      @db.VarChar(253)
+  /// U-label form of an IDN host; NULL when it equals `host`.
+  unicodeHost         String?     @map("unicode_host") @db.VarChar(253)
+  /// Registrable domain (tldts, private suffixes included); NULL for IP hosts.
+  registrableDomain   String?     @map("registrable_domain") @db.VarChar(253)
+  hostKind            UrlHostKind @map("host_kind")
+  /// Non-default port; NULL for the scheme's default port.
+  port                Int?        @db.UnsignedSmallInt
+  /// True when the normalized URL was longer than 2 048 characters (never rewritten or fetched).
+  truncated           Boolean     @default(false)
+  /// JSON array of extraction reason codes (URL_REASON_CODES), e.g. `url.userinfo`.
+  flags               Json?
+  /// `{ <source>: count }` (sources of U18: text, html_href, html_src, form_action,
+  /// meta_refresh, srcset, attachment).
+  sources             Json
+  occurrences         Int         @db.UnsignedSmallInt
+  /// Lifecycle round of the scan that first stored the URL.
+  firstLifecycleRound Int         @map("first_lifecycle_round") @db.UnsignedSmallInt
+  /// `url-extract/<n>`.
+  extractorVersion    String      @map("extractor_version") @db.VarChar(16)
+  createdAt           DateTime    @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@id([id, receivedAt])
+  @@unique([messageId, urlSeq, receivedAt])
+  @@unique([messageId, urlSha256, receivedAt])
+  @@index([organizationId, urlSha256])
+  @@index([organizationId, registrableDomain(length: 100)])
+  @@map("message_urls")
+}
+
+/// PARTITIONED by RANGE COLUMNS(received_at), monthly (6 months, core; step 4.3 §3, U10, U16).
+/// One row per URL per scan round with a definite final result of the `url` engine, written in
+/// that final row's finalize transaction. Codes, provider answers, hosts and counts only: never
+/// page bodies, titles or HTML. No foreign keys.
+model UrlScanResult {
+  id               BigInt         @default(autoincrement()) @db.UnsignedBigInt
+  receivedAt       DateTime       @map("received_at") @db.DateTime(3)
+  messageId        BigInt         @map("message_id") @db.UnsignedBigInt
+  organizationId   BigInt         @map("organization_id") @db.UnsignedBigInt
+  /// email_scans.id of the round.
+  scanId           BigInt         @map("scan_id") @db.UnsignedBigInt
+  /// message_urls.url_seq of the URL.
+  urlSeq           Int            @map("url_seq") @db.UnsignedSmallInt
+  urlSha256        String         @map("url_sha256") @db.Char(64)
+  verdict          UrlVerdict
+  /// JSON array (≤ 32) of URL_REASON_CODES.
+  reasonCodes      Json           @map("reason_codes")
+  /// JSON array (≤ 12) of `{ provider, version, kind, status, category, severity, cache }`;
+  /// `cache` is never returned to tenants (U16).
+  reputation       Json
+  /// JSON array (≤ 5) of `{ rule, targetKind, targetDomain, score, distance }` (U7).
+  lookalike        Json?
+  fetchStatus      UrlFetchStatus @map("fetch_status")
+  /// Fetcher error token (U8) when `fetch_status` is `error`.
+  fetchError       String?        @map("fetch_error") @db.VarChar(32)
+  hopCount         Int            @default(0) @map("hop_count") @db.UnsignedTinyInt
+  /// JSON array (≤ 10) of `{ host, port, status, kind, blocked }`; hosts only, no paths.
+  redirectChain    Json?          @map("redirect_chain")
+  /// Final URL of the redirect chain (redirect form, ≤ 2 048 characters).
+  finalUrl         String?        @map("final_url") @db.VarChar(2048)
+  finalUrlSha256   String?        @map("final_url_sha256") @db.Char(64)
+  finalHost        String?        @map("final_host") @db.VarChar(253)
+  finalStatus      Int?           @map("final_status") @db.UnsignedSmallInt
+  /// `{ passwordFields, forms, crossOriginFormAction, formActionHosts, titleBrandMatches }`
+  /// (U9); counts, booleans, hosts and brand ids only.
+  landing          Json?
+  rewritten        Boolean
+  dynamicRequested Boolean        @map("dynamic_requested")
+  /// Chain cache result of the fetch (never returned to tenants).
+  fetchCache       UrlFetchCache  @map("fetch_cache")
+  durationMs       Int            @map("duration_ms") @db.UnsignedInt
+  createdAt        DateTime       @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@id([id, receivedAt])
+  @@unique([scanId, urlSeq, receivedAt])
+  @@index([messageId, receivedAt])
+  @@index([organizationId, urlSha256])
+  @@map("url_scan_results")
+}
+
+/// PARTITIONED by RANGE COLUMNS(received_at), monthly (6 months, core; step 4.3 §3, U11). One
+/// row per scan round of the `url` engine: the rewritten copy of the EML (`org/<org>/rewrite/…`,
+/// S3 reference only) or why the round was not rewritten (REWRITE_SKIP_REASONS). The original
+/// EML is never modified. No foreign keys.
+model UrlRewrite {
+  id              BigInt           @default(autoincrement()) @db.UnsignedBigInt
+  receivedAt      DateTime         @map("received_at") @db.DateTime(3)
+  messageId       BigInt           @map("message_id") @db.UnsignedBigInt
+  organizationId  BigInt           @map("organization_id") @db.UnsignedBigInt
+  scanId          BigInt           @map("scan_id") @db.UnsignedBigInt
+  lifecycleRound  Int              @map("lifecycle_round") @db.UnsignedSmallInt
+  status          UrlRewriteStatus
+  /// REWRITE_SKIP_REASONS when `status = skipped`.
+  skipReason      String?          @map("skip_reason") @db.VarChar(32)
+  /// `org/{organizationId}/rewrite/yyyy/mm/dd/{messageId}/r{round}-{uuid}.eml` when rewritten.
+  objectKey       String?          @map("object_key") @db.VarChar(512)
+  objectSha256    String?          @map("object_sha256") @db.Char(64)
+  objectSizeBytes Int?             @map("object_size_bytes") @db.UnsignedInt
+  linksRewritten  Int              @default(0) @map("links_rewritten") @db.UnsignedSmallInt
+  linksUnmapped   Int              @default(0) @map("links_unmapped") @db.UnsignedSmallInt
+  partsRewritten  Int              @default(0) @map("parts_rewritten") @db.UnsignedTinyInt
+  partsSkipped    Int              @default(0) @map("parts_skipped") @db.UnsignedTinyInt
+  /// True when the message carried a DKIM-Signature header (the rewrite breaks it downstream).
+  dkimSigned      Boolean          @default(false) @map("dkim_signed")
+  /// Key id of the click tokens (U12).
+  tokenKid        Int?             @map("token_kid") @db.UnsignedTinyInt
+  /// Expiry of the click tokens of this copy.
+  expiresAt       DateTime?        @map("expires_at") @db.DateTime(3)
+  settingsVersion String           @map("settings_version") @db.VarChar(96)
+  createdAt       DateTime         @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@id([id, receivedAt])
+  @@unique([scanId, receivedAt])
+  @@index([messageId, lifecycleRound, receivedAt])
+  @@map("url_rewrites")
+}
+
+/// PARTITIONED by RANGE COLUMNS(received_at), monthly (6 months, core; step 4.3 §3, U15). One
+/// row per URL of a round sent to the isolated browser worker, written in the `url` engine's
+/// finalize transaction together with the `mail.url.inspection_requested.v1` outbox row; updated
+/// from `pending` by the results consumer (or `expired` by the sweeper). Signals are counts,
+/// booleans, hosts and brand ids only. No foreign keys.
+model UrlDynamicInspection {
+  id               BigInt              @default(autoincrement()) @db.UnsignedBigInt
+  receivedAt       DateTime            @map("received_at") @db.DateTime(3)
+  messageId        BigInt              @map("message_id") @db.UnsignedBigInt
+  organizationId   BigInt              @map("organization_id") @db.UnsignedBigInt
+  scanId           BigInt              @map("scan_id") @db.UnsignedBigInt
+  urlSeq           Int                 @map("url_seq") @db.UnsignedSmallInt
+  urlSha256        String              @map("url_sha256") @db.Char(64)
+  status           UrlInspectionStatus @default(pending)
+  /// Envelope event id of the inspection_requested.v1 outbox row.
+  requestedEventId String              @map("requested_event_id") @db.Char(36)
+  verdict          UrlVerdict?
+  /// JSON array (≤ 16) of URL_REASON_CODES.
+  reasonCodes      Json?               @map("reason_codes")
+  /// The `signals` object of mail.url.inspection_completed.v1 plus the navigation hosts.
+  signals          Json?
+  finalUrlSha256   String?             @map("final_url_sha256") @db.Char(64)
+  finalHost        String?             @map("final_host") @db.VarChar(253)
+  workerVersion    String?             @map("worker_version") @db.VarChar(64)
+  errorCode        String?             @map("error_code") @db.VarChar(32)
+  completedAt      DateTime?           @map("completed_at") @db.DateTime(3)
+  createdAt        DateTime            @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt        DateTime            @updatedAt @map("updated_at") @db.DateTime(3)
+
+  @@id([id, receivedAt])
+  @@unique([scanId, urlSeq, receivedAt])
+  @@index([status, createdAt])
+  @@index([organizationId, urlSha256])
+  @@map("url_dynamic_inspections")
+}
+
+/// PARTITIONED by RANGE COLUMNS(clicked_at), monthly (6 months, core; step 4.3 §3, U14). One row
+/// per decided click of a rewritten link, written by the click-service (account gateway_click)
+/// together with the `mail.url.clicked.v1` outbox row. No URL, no user agent, no user identity;
+/// the client address only as a truncated network. No foreign keys.
+model UrlClickEvent {
+  id                BigInt           @default(autoincrement()) @db.UnsignedBigInt
+  clickedAt         DateTime         @map("clicked_at") @db.DateTime(3)
+  /// UUIDv7; the `clickId` of the event and the reference id shown on pages.
+  publicId          String           @map("public_id") @db.Char(36)
+  organizationId    BigInt           @map("organization_id") @db.UnsignedBigInt
+  messageId         BigInt           @map("message_id") @db.UnsignedBigInt
+  /// received_at of the message (partition key of message_urls).
+  messageReceivedAt DateTime         @map("message_received_at") @db.DateTime(3)
+  urlSeq            Int              @map("url_seq") @db.UnsignedSmallInt
+  decision          UrlClickDecision
+  verdict           UrlVerdict?
+  /// JSON array (≤ 16) of URL_REASON_CODES.
+  reasonCodes       Json?            @map("reason_codes")
+  /// `{ reputation, chain, dynamic }` (U14).
+  recheck           Json?
+  tokenKid          Int              @map("token_kid") @db.UnsignedTinyInt
+  /// `/24` IPv4 or `/48` IPv6 network of the client (CLICK_STORE_CLIENT_NETWORK); else NULL.
+  clientNetwork     String?          @map("client_network") @db.VarChar(49)
+  durationMs        Int              @map("duration_ms") @db.UnsignedInt
+  createdAt         DateTime         @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@id([id, clickedAt])
+  @@index([organizationId, clickedAt])
+  @@index([messageId, messageReceivedAt])
+  @@index([publicId])
+  @@map("url_click_events")
+}
+
+/// `organization_id` NULL = platform-wide intelligence. Step 4.3 (U6, U16) writes platform rows
+/// only (`organization_id` NULL, `source = 'analyst'`, through the api's threat-indicator routes)
+/// and the URL engine and the click-service read them on every scan and click (never cached).
+/// `value` is normalized by `@email-gateway/url-security`: a `url` in its identity form (no
+/// userinfo, no fragment), a `domain` as the ASCII registrable domain or host (never a public
+/// suffix), an `ip` in canonical text form; `value_sha256` is the hex SHA-256 of that value.
 model ThreatIndicator {
-  id             BigInt        @id @default(autoincrement()) @db.UnsignedBigInt
-  organizationId BigInt?       @map("organization_id") @db.UnsignedBigInt
-  indicatorType  IndicatorType @map("indicator_type")
-  value          String        @db.VarChar(2048)
-  valueSha256    String        @map("value_sha256") @db.Char(64)
+  id             BigInt          @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId BigInt?         @map("organization_id") @db.UnsignedBigInt
+  indicatorType  IndicatorType   @map("indicator_type")
+  value          String          @db.VarChar(2048)
+  valueSha256    String          @map("value_sha256") @db.Char(64)
   /// `feed:<name>`, `org:<id>` or `analyst`. Uniqueness is per tenant scope (`orgScope`), so the
   /// same source string in two organizations never collides.
-  source         String        @db.VarChar(64)
+  source         String          @db.VarChar(64)
   severity       Severity
   /// 0–100.
-  confidence     Int           @db.UnsignedTinyInt
-  firstSeenAt    DateTime      @map("first_seen_at") @db.DateTime(3)
-  lastSeenAt     DateTime      @map("last_seen_at") @db.DateTime(3)
-  expiresAt      DateTime?     @map("expires_at") @db.DateTime(3)
+  confidence     Int             @db.UnsignedTinyInt
+  firstSeenAt    DateTime        @map("first_seen_at") @db.DateTime(3)
+  lastSeenAt     DateTime        @map("last_seen_at") @db.DateTime(3)
+  expiresAt      DateTime?       @map("expires_at") @db.DateTime(3)
   metadata       Json?
   /// READ-ONLY, generated by MySQL: `GENERATED ALWAYS AS (IFNULL(organization_id, 0)) VIRTUAL`.
   /// 0 is the platform scope. It puts the tenant in the unique key below; a plain
   /// organization_id would not dedupe platform rows (MySQL treats NULLs as distinct). Never write it.
-  orgScope       BigInt?       @map("org_scope") @db.UnsignedBigInt
-  createdAt      DateTime      @default(now()) @map("created_at") @db.DateTime(3)
-  updatedAt      DateTime      @updatedAt @map("updated_at") @db.DateTime(3)
+  orgScope       BigInt?         @map("org_scope") @db.UnsignedBigInt
+  createdAt      DateTime        @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt      DateTime        @updatedAt @map("updated_at") @db.DateTime(3)
+  /// The analyst who added the indicator (NULL for feeds, or after the user is deleted).
+  addedByUserId  BigInt?         @map("added_by_user_id") @db.UnsignedBigInt
+  /// Why the indicator was added (analyst input; never message content).
+  reason         String?         @db.VarChar(512)
+  /// THREAT_CATEGORIES of @email-gateway/security-contracts; NULL for rows without a category.
+  category       ThreatCategory?
 
   organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  addedBy      User?         @relation(fields: [addedByUserId], references: [id], onDelete: SetNull)
 
   @@unique([orgScope, source, indicatorType, valueSha256])
   @@index([indicatorType, valueSha256])
   @@index([organizationId, indicatorType])
+  @@index([source, createdAt])
   @@map("threat_indicators")
 }
 
-/// Platform catalog.
+/// Platform catalog. Unused: reputation answers are cached in Redis (step 4.3 U6); reserved
+/// for feed ingestion.
 model IpReputation {
   id         BigInt    @id @default(autoincrement()) @db.UnsignedBigInt
   ipAddress  String    @unique @map("ip_address") @db.VarChar(45)
@@ -1996,7 +2269,8 @@ model IpReputation {
   @@map("ip_reputation")
 }
 
-/// Platform catalog.
+/// Platform catalog. Unused: reputation answers are cached in Redis (step 4.3 U6); reserved
+/// for feed ingestion.
 model DomainReputation {
   id           BigInt    @id @default(autoincrement()) @db.UnsignedBigInt
   domain       String    @unique @db.VarChar(253)
@@ -2013,7 +2287,8 @@ model DomainReputation {
   @@map("domain_reputation")
 }
 
-/// Platform catalog.
+/// Platform catalog. Unused: reputation answers are cached in Redis (step 4.3 U6); reserved
+/// for feed ingestion.
 model UrlReputation {
   id            BigInt     @id @default(autoincrement()) @db.UnsignedBigInt
   urlSha256     String     @unique @map("url_sha256") @db.Char(64)

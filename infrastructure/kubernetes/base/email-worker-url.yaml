@@ -1,0 +1,241 @@
+# The URL engine (step 4.3 U1, U3, U15, U19; docs/plan/steps/11-url-protection.md,
+# docs/deployment/url-protection.md): the scan role of the email-worker image with only the url
+# consumer (scan.url) plus the url results consumer (scan.url.results) and the pending-inspection
+# sweeper (one leader through the MySQL advisory lock scan:url-inspections), as role user
+# eg-scanner. It reads stored bodies and text/html parts from S3, looks URLs up through the
+# reputation providers (local feed in MySQL, DNSBL over the restricted resolver, RDAP), fetches
+# selected URLs through the egress proxy (proxy mode: this pod never dials a URL target itself),
+# writes the rewritten EML copy to S3 (tag eg-object=rewrite) and signs click tokens.
+#
+# Keys this Deployment needs (WP4 adds the shared ones to config.yaml `email-gateway-config`):
+#   From config.yaml (shared with the click-service; platform-wide, identical on every replica):
+#     SCAN_ENGINES (must contain url, identical on every scan replica), URL_REPUTATION_PROVIDERS,
+#     URL_DNSBL_DOMAIN_ZONES, URL_DNSBL_IP_ZONES, URL_DNSBL_ERROR_CODES, URL_RDAP_BASE_URL,
+#     URL_NEW_DOMAIN_DAYS, URL_PROVIDER_TIMEOUT_MS, URL_PROVIDER_CONCURRENCY,
+#     URL_PROVIDER_BREAKER_THRESHOLD, URL_PROVIDER_BREAKER_RESET_MS, URL_DNS_SERVERS (a recursive
+#     resolver that does not serve internal zones), URL_DNS_TIMEOUT_MS, URL_DNS_TRIES,
+#     URL_CACHE_ENABLED, URL_CACHE_CLEAN_TTL_SECONDS, URL_CACHE_MALICIOUS_TTL_SECONDS,
+#     URL_CACHE_OTHER_TTL_SECONDS, URL_CACHE_ERROR_TTL_SECONDS, URL_CACHE_TIMEOUT_MS,
+#     URL_SCAN_TIME_FETCH, URL_FETCH_MAX_HOPS, URL_FETCH_SUSPICIOUS_HOPS,
+#     URL_FETCH_CONNECT_TIMEOUT_MS, URL_FETCH_HEADER_TIMEOUT_MS, URL_FETCH_TOTAL_TIMEOUT_MS,
+#     URL_FETCH_MAX_BODY_BYTES, URL_FETCH_MAX_HEADER_BYTES, URL_FETCH_ALLOWED_PORTS,
+#     URL_FETCH_DENY_CIDRS (the platform's own public ranges), URL_FETCH_DENY_HOSTS,
+#     URL_FETCH_USER_AGENT, URL_FETCH_EGRESS_PROXY_URL, URL_SHORTENER_HOSTS_FILE,
+#     URL_SHORTENER_EXTRA_HOSTS, URL_PROTECTED_BRANDS_FILE, URL_PROTECTED_EXTRA_DOMAINS,
+#     URL_LOOKALIKE_MIN_LABEL, URL_LOOKALIKE_LONG_LABEL, URL_LOOKALIKE_MAX_DISTANCE_SHORT,
+#     URL_LOOKALIKE_MAX_DISTANCE_LONG, URL_LOOKALIKE_HIGH_SCORE, URL_REWRITE_ENABLED,
+#     URL_REWRITE_DIRECTIONS, URL_REWRITE_DKIM_SIGNED, URL_REWRITE_MAX_MESSAGE_BYTES,
+#     URL_REWRITE_MAX_PART_BYTES, URL_CLICK_BASE_URL (https://protect.<domain>, https required),
+#     URL_TOKEN_DEFAULT_EXPIRY_DAYS, URL_TOKEN_MAX_EXPIRY_DAYS, URL_DYNAMIC_INSPECTION, and
+#     APP_ENV=production (without it the config falls back to APP_ENV=local, which would allow
+#     the TEST-ONLY seams; set here as well).
+#   Set below (engine budgets and per-replica bounds): SCAN_CONSUMERS=url,
+#     MIME_INGESTION_ENABLED=false, SCAN_URL_*, URL_MAX_*, URL_EXTRA_PART_MAX_BYTES,
+#     URL_EXTRACT_TIMEOUT_MS, URL_FETCH_MAX_PER_MESSAGE, URL_FETCH_CONCURRENCY,
+#     URL_DYNAMIC_MAX_PER_MESSAGE, URL_DYNAMIC_PENDING_TTL_SECONDS, URL_DYNAMIC_SWEEP_INTERVAL_MS.
+#   Secrets (files, External Secrets): URL_TOKEN_KEY_CURRENT (+ _ID; URL_TOKEN_KEY_PREVIOUS and
+#     _PREVIOUS_ID only during a rotation) from email-gateway-url-token-keys,
+#     URL_CACHE_HMAC_KEY from email-gateway-url-cache-key, URL_EGRESS_PROXY_TOKEN from
+#     email-gateway-url-egress-token; DATABASE_URL, RABBITMQ_SCANNER_URL, REDIS_URL and the S3
+#     credentials from email-gateway-secrets.
+#   Never set here: URL_FETCH_TEST_ALLOW_CIDRS, URL_FETCH_TEST_DIAL_MAP, URL_FETCH_CA_FILE (TEST-ONLY;
+#     the config refuses the first two outside APP_ENV local/ci).
+#
+# Sizing: SCAN_URL_CONCURRENCY messages in flight, each with at most URL_MAX_PART_BYTES of body
+# text, URL_MAX_EXTRA_PARTS small parts and the rewriter's part buffer (URL_REWRITE_MAX_PART_BYTES)
+# plus one S3 multipart part; fetches are bounded per process by URL_FETCH_CONCURRENCY.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: email-worker-url
+  labels:
+    {
+      app.kubernetes.io/name: email-worker-url,
+      app.kubernetes.io/component: scan-url,
+      app.kubernetes.io/part-of: email-gateway,
+    }
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels: { app.kubernetes.io/name: email-worker-url }
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  template:
+    metadata:
+      labels: {
+          app.kubernetes.io/name: email-worker-url,
+          app.kubernetes.io/component: scan-url,
+          app.kubernetes.io/part-of: email-gateway,
+          # Allowed client of the egress proxy (its NetworkPolicy admits labelled clients only).
+          email-gateway.io/egress-client: 'true',
+        }
+    spec:
+      serviceAccountName: email-worker-url
+      automountServiceAccountToken: false
+      # In-flight scans are not awaited (held retries are requeued); the results consumer and
+      # the sweeper stop with the consumers.
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app.kubernetes.io/name: email-worker-url }
+      containers:
+        - name: email-worker
+          image: email-gateway/email-worker:latest
+          ports:
+            - { name: http, containerPort: 3020 }
+          envFrom:
+            - configMapRef: { name: email-gateway-config }
+          env:
+            - { name: HTTP_PORT, value: '3020' }
+            - { name: APP_ENV, value: production }
+            - { name: MIME_INGESTION_ENABLED, value: 'false' }
+            - { name: SCAN_ENABLED, value: 'true' }
+            - { name: SCAN_CONSUMERS, value: url }
+            # The engine's budgets (U17): 6 x (120 + 60) s = 1 080 s <= SCAN_ROUND_DEADLINE_SECONDS.
+            - { name: SCAN_URL_CONCURRENCY, value: '4' }
+            - { name: SCAN_URL_TIMEOUT_MS, value: '120000' }
+            - { name: SCAN_URL_MAX_ATTEMPTS, value: '6' }
+            - { name: SCAN_RETRY_BASE_MS, value: '2000' }
+            - { name: SCAN_RETRY_MAX_MS, value: '60000' }
+            - { name: SCAN_S3_TIMEOUT_MS, value: '30000' }
+            - { name: SCAN_DB_TIMEOUT_MS, value: '120000' }
+            - { name: SCAN_ROUND_DEADLINE_SECONDS, value: '1800' }
+            # Extraction bounds (U4).
+            - { name: URL_MAX_PER_MESSAGE, value: '200' }
+            - { name: URL_MAX_OCCURRENCES, value: '5000' }
+            - { name: URL_MAX_LENGTH, value: '2048' }
+            - { name: URL_MAX_PART_BYTES, value: '10485760' }
+            - { name: URL_MAX_EXTRA_PARTS, value: '5' }
+            - { name: URL_EXTRA_PART_MAX_BYTES, value: '2097152' }
+            - { name: URL_EXTRACT_TIMEOUT_MS, value: '5000' }
+            # Fetches per message and per process (U8, U9, U17).
+            - { name: URL_FETCH_MAX_PER_MESSAGE, value: '10' }
+            - { name: URL_FETCH_CONCURRENCY, value: '8' }
+            # Dynamic inspection requests, results consumer and sweeper (U15).
+            - { name: URL_DYNAMIC_MAX_PER_MESSAGE, value: '3' }
+            - { name: URL_DYNAMIC_PENDING_TTL_SECONDS, value: '3600' }
+            - { name: URL_DYNAMIC_SWEEP_INTERVAL_MS, value: '60000' }
+            - { name: SCAN_BREAKER_FAILURE_THRESHOLD, value: '5' }
+            - { name: SCAN_BREAKER_FAILURE_RATIO, value: '0.5' }
+            - { name: SCAN_BREAKER_WINDOW, value: '20' }
+            - { name: SCAN_BREAKER_OPEN_MS, value: '15000' }
+            - { name: SCAN_BREAKER_HALF_OPEN_PROBES, value: '1' }
+            - { name: SCAN_SETTINGS_CACHE_TTL_MS, value: '30000' }
+            # Secrets are mounted as files by External Secrets and read via the <KEY>_FILE convention.
+            - { name: DATABASE_URL_FILE, value: /var/run/secrets/gateway/database-url }
+            - {
+                name: RABBITMQ_SCANNER_URL_FILE,
+                value: /var/run/secrets/gateway/rabbitmq-scanner-url,
+              }
+            - { name: REDIS_URL_FILE, value: /var/run/secrets/gateway/redis-url }
+            # Click token keys (U12): only this Deployment and the click-service mount them.
+            - { name: URL_TOKEN_KEY_CURRENT_FILE, value: /var/run/secrets/url-token/current }
+            - name: URL_TOKEN_KEY_CURRENT_ID
+              valueFrom:
+                secretKeyRef: { name: email-gateway-url-token-keys, key: current-id }
+            # The previous slot exists only during a rotation (verification only; optional).
+            - name: URL_TOKEN_KEY_PREVIOUS
+              valueFrom:
+                secretKeyRef: { name: email-gateway-url-token-keys, key: previous, optional: true }
+            - name: URL_TOKEN_KEY_PREVIOUS_ID
+              valueFrom:
+                secretKeyRef:
+                  { name: email-gateway-url-token-keys, key: previous-id, optional: true }
+            # The URL cache MAC key (U6): its own Secret (not in email-gateway-secrets).
+            - { name: URL_CACHE_HMAC_KEY_FILE, value: /var/run/secrets/url-cache/hmac-key }
+            # Basic credentials of the egress proxy (URL_FETCH_EGRESS_PROXY_URL from config.yaml).
+            - { name: URL_EGRESS_PROXY_TOKEN_FILE, value: /var/run/secrets/url-egress/token }
+          volumeMounts:
+            - { name: secrets, mountPath: /var/run/secrets/gateway, readOnly: true }
+            - { name: token-keys, mountPath: /var/run/secrets/url-token, readOnly: true }
+            - { name: cache-mac, mountPath: /var/run/secrets/url-cache, readOnly: true }
+            - { name: egress-token, mountPath: /var/run/secrets/url-egress, readOnly: true }
+            # Nothing is written to disk (bodies and parts are buffers; the rewritten copy is
+            # streamed to S3); /tmp only for the runtime.
+            - { name: tmp, mountPath: /tmp }
+          readinessProbe:
+            # Includes `url-engine` (Redis when the cache is on; DNS reachability as a detail).
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /health/live, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          startupProbe:
+            httpGet: { path: /health/live, port: http }
+            periodSeconds: 5
+            failureThreshold: 24
+          resources:
+            requests: { cpu: 500m, memory: 512Mi }
+            limits: { cpu: '1', memory: 1Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+      volumes:
+        - name: secrets
+          secret: { secretName: email-gateway-secrets }
+        - name: token-keys
+          secret:
+            secretName: email-gateway-url-token-keys
+            items: [{ key: current, path: current }]
+        - name: cache-mac
+          secret: { secretName: email-gateway-url-cache-key }
+        - name: egress-token
+          secret: { secretName: email-gateway-url-egress-token }
+        - name: tmp
+          emptyDir: { sizeLimit: 64Mi }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: email-worker-url
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: email-worker-url
+  labels: { app.kubernetes.io/name: email-worker-url }
+spec:
+  selector: { app.kubernetes.io/name: email-worker-url }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+---
+# CPU-based base HPA. Production adds the queue signal with KEDA (docs/deployment/
+# url-protection.md): a ScaledObject on rabbitmq_queue_messages_ready of scan.url (vhost
+# email-gateway), target 200 ready messages per replica, replacing this HPA. scan.url.results is
+# small (one event per inspection) and needs no scaling signal of its own.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: email-worker-url
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: email-worker-url }
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 65 }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: email-worker-url
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: email-worker-url }

@@ -247,9 +247,10 @@ describe.skipIf(gate.skip)('scan stack: Rspamd outage', { timeout: 600_000 }, ()
         expect.arrayContaining([
           { engine: 'rspamd', required: true, outcome: 'error', attempts: maxAttempts },
           { engine: 'attachment', required: true, outcome: 'skipped', attempts: 1 },
+          expect.objectContaining({ engine: 'url', required: true }),
         ]),
       );
-      expect(failedPayload.engines).toHaveLength(2);
+      expect(failedPayload.engines).toHaveLength(REQUIRED_ENGINES.length);
 
       // The pass-through skips it: no approval, no delivery, the state stays scan_failed.
       await waitFor(

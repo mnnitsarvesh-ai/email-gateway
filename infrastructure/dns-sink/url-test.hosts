@@ -1,0 +1,27 @@
+# url-test corpus (TEST-ONLY, step 4.3 U19, docs/plan/steps/11-url-protection.md): served by the
+# CoreDNS `hosts` plugin for the zones listed in the Corefile block "URL protection corpus".
+# Every web name resolves to the url-test container (urltest network, TEST-NET-3 203.0.113.10);
+# the *-a.test / *-v6.test names resolve to internal addresses for the SSRF suites (nothing ever
+# listens there: the guard must refuse them before connecting).
+# The Cyrillic homoglyph exаmplebank.test (U+0430 at position 3) is its A-label
+# xn--exmplebank-0qi.test (WHATWG/UTS #46, verified with node:url domainToASCII).
+# clean-site.test (apex, www, wildcard) is a zone file: clean-site.test.db.
+203.0.113.10 short-link.test redirect-chain.test
+203.0.113.10 evil-site.test phish-login.test collector-site.test
+203.0.113.10 examplebank.test examp1ebank.test examplebank-login.test xn--exmplebank-0qi.test
+203.0.113.10 new-domain.test rdap.test
+203.0.113.10 slow-site.test trickle-site.test huge-site.test many-headers.test gzip-bomb.test
+203.0.113.10 evil-dbl.test malware-dbl.test
+# On the test RBL (scan.test.db, 66.113.0.203.rbl); not served (IP reputation of resolved
+# addresses: the host is flagged without a fetch).
+203.0.113.66 bad-ip-host.test
+10.0.0.5 private-a.test
+127.0.0.1 loopback-a.test
+169.254.169.254 meta-a.test
+100.64.0.1 cgnat-a.test
+0.0.0.0 zero-a.test
+::1 v6-loop.test
+fd00:ec2::254 ula-v6.test
+# Mixed answers (any-blocked rule): one public, one private.
+203.0.113.10 mixed-a.test
+10.0.0.5 mixed-a.test

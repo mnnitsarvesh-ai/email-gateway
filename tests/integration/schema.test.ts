@@ -16,8 +16,10 @@ import { stack } from './support/env';
  * domain onboarding changes of docs/plan/steps/03-domain-onboarding.md (§3), the SMTP gateway
  * tables of docs/plan/steps/04-smtp-gateway.md (§3), the mail routing and delivery tracking
  * changes of docs/plan/steps/05-routing.md (§3), the MIME ingestion changes of
- * docs/plan/steps/06-mime-ingestion.md (§3) and the message lifecycle changes of
- * docs/plan/steps/08-message-lifecycle.md (§3.1, §3.2).
+ * docs/plan/steps/06-mime-ingestion.md (§3), the message lifecycle changes of
+ * docs/plan/steps/08-message-lifecycle.md (§3.1, §3.2), the scan pipeline, attachment scanning
+ * and URL protection tables of steps 4.1–4.3 (docs/plan/steps/09-rspamd.md,
+ * 10-attachment-scanning.md, 11-url-protection.md, §3 each).
  */
 const prisma = new PrismaClient({ datasourceUrl: stack.databaseUrl() });
 
@@ -51,6 +53,12 @@ const PARTITIONED: Record<string, string> = {
   // Step 4.2 §3: per-attachment results and sandbox submissions of a scan round.
   attachment_scan_results: 'received_at',
   sandbox_submissions: 'received_at',
+  // Step 4.3 §3: URLs of a message, their results, rewrites, inspections and clicks.
+  message_urls: 'received_at',
+  url_scan_results: 'received_at',
+  url_rewrites: 'received_at',
+  url_dynamic_inspections: 'received_at',
+  url_click_events: 'clicked_at',
 };
 
 /** Tables with no `organization_id`: platform catalogs, the root, a join table, the ledger and
@@ -125,6 +133,12 @@ const TENANT_OWNED = [
   'attachment_scan_results',
   'sandbox_submissions',
   'attachment_rescan_jobs',
+  // Step 4.3 §3.
+  'message_urls',
+  'url_scan_results',
+  'url_rewrites',
+  'url_dynamic_inspections',
+  'url_click_events',
   'threat_indicators',
   'yara_rules',
   'email_policies',
@@ -157,17 +171,17 @@ const TENANT_OWNED = [
 const ALL_TABLES = [...NOT_TENANT_OWNED, ...TENANT_OWNED];
 
 describe('MySQL schema', () => {
-  it('has exactly the 79 data-model tables plus _prisma_migrations', async () => {
+  it('has exactly the 84 data-model tables plus _prisma_migrations', async () => {
     const rows = await prisma.$queryRaw<{ name: string }[]>`
       SELECT TABLE_NAME AS name FROM information_schema.TABLES
       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'`;
-    expect(ALL_TABLES).toHaveLength(79);
-    expect(new Set(ALL_TABLES).size).toBe(79);
+    expect(ALL_TABLES).toHaveLength(84);
+    expect(new Set(ALL_TABLES).size).toBe(84);
     expect(rows.map((r) => r.name).sort()).toEqual([...ALL_TABLES, '_prisma_migrations'].sort());
   });
 
-  it('partitions the 22 high-volume tables by RANGE COLUMNS with a pmax partition', async () => {
-    expect(Object.keys(PARTITIONED)).toHaveLength(22);
+  it('partitions the 27 high-volume tables by RANGE COLUMNS with a pmax partition', async () => {
+    expect(Object.keys(PARTITIONED)).toHaveLength(27);
     const rows = await prisma.$queryRaw<
       { tableName: string; method: string; expression: string; partitionName: string }[]
     >`
@@ -2028,6 +2042,226 @@ describe('attachment scanning schema (step 4.2, docs/plan/steps/10-attachment-sc
       });
     } finally {
       await prisma.attachmentScanResult.deleteMany({ where: { scanId } });
+    }
+  });
+});
+
+describe('URL protection schema (step 4.3, docs/plan/steps/11-url-protection.md §3)', () => {
+  const uniqueSets = async (table: string) =>
+    [...(await indexes(table)).values()]
+      .filter((i) => i.unique)
+      .map((i) => i.columns.join(','))
+      .sort();
+  const indexSets = async (table: string) =>
+    [...(await indexes(table)).values()].map((i) => i.columns.join(','));
+  const foreignKeys = async (table: string) =>
+    prisma.$queryRaw<{ columnName: string; referenced: string; onDelete: string }[]>`
+      SELECT k.COLUMN_NAME AS columnName, k.REFERENCED_TABLE_NAME AS referenced,
+             r.DELETE_RULE AS onDelete
+      FROM information_schema.KEY_COLUMN_USAGE k
+      JOIN information_schema.REFERENTIAL_CONSTRAINTS r
+        ON r.CONSTRAINT_SCHEMA = k.TABLE_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+      WHERE k.TABLE_SCHEMA = DATABASE() AND k.TABLE_NAME = ${table}
+        AND k.REFERENCED_TABLE_NAME IS NOT NULL
+      ORDER BY k.COLUMN_NAME`;
+  const URL_VERDICT_ENUM = "enum('clean','suspicious','malicious','unknown')";
+  const CONTENT_COLUMNS = ['body', 'content', 'html', 'title', 'anchor_text', 'text', 'page'];
+  const uniqueId = () => BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000));
+
+  it('evolves threat_indicators into the platform URL/domain/IP feed (U6, U16)', async () => {
+    const cols = await columns(['threat_indicators']);
+    expect(cols.get('threat_indicators.added_by_user_id')).toMatchObject({
+      columnType: 'bigint unsigned',
+      nullable: 'YES',
+    });
+    expect(cols.get('threat_indicators.reason')).toMatchObject({
+      columnType: 'varchar(512)',
+      nullable: 'YES',
+    });
+    expect(cols.get('threat_indicators.category')).toMatchObject({
+      columnType: "enum('phishing','malware','spam','scam','c2','other')",
+      nullable: 'YES',
+    });
+    expect(await indexSets('threat_indicators')).toContain('source,created_at');
+    expect(await uniqueSets('threat_indicators')).toContain(
+      'org_scope,source,indicator_type,value_sha256',
+    );
+    expect(await foreignKeys('threat_indicators')).toEqual([
+      { columnName: 'added_by_user_id', referenced: 'users', onDelete: 'SET NULL' },
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+    ]);
+  });
+
+  it('has message_urls: one row per URL of a message, unique by seq and by identity hash (U3, U5)', async () => {
+    const cols = await columns(['message_urls']);
+    expect(cols.get('message_urls.url')?.columnType).toBe('varchar(2048)');
+    expect(cols.get('message_urls.url_sha256')?.columnType).toBe('char(64)');
+    expect(cols.get('message_urls.url_seq')?.columnType).toBe('smallint unsigned');
+    expect(cols.get('message_urls.host')?.columnType).toBe('varchar(253)');
+    expect(cols.get('message_urls.host_kind')?.columnType).toBe("enum('domain','ipv4','ipv6')");
+    expect(cols.get('message_urls.truncated')).toMatchObject({ columnDefault: '0' });
+    expect(cols.get('message_urls.sources')).toMatchObject({ columnType: 'json', nullable: 'NO' });
+    expect(cols.get('message_urls.extractor_version')?.columnType).toBe('varchar(16)');
+    const names = [...cols.keys()].map((k) => k.split('.')[1]!);
+    for (const forbidden of CONTENT_COLUMNS) expect(names, forbidden).not.toContain(forbidden);
+    expect(await uniqueSets('message_urls')).toEqual(
+      [
+        'id,received_at',
+        'message_id,url_seq,received_at',
+        'message_id,url_sha256,received_at',
+      ].sort(),
+    );
+    const idx = await indexes('message_urls');
+    expect([...idx.values()].map((i) => i.columns.join(','))).toEqual(
+      expect.arrayContaining(['organization_id,url_sha256', 'organization_id,registrable_domain']),
+    );
+  });
+
+  it('has url_scan_results: one row per (scan, url_seq), reusing the UrlVerdict enum (U10)', async () => {
+    const cols = await columns(['url_scan_results']);
+    expect(cols.get('url_scan_results.verdict')?.columnType).toBe(URL_VERDICT_ENUM);
+    expect(cols.get('url_scan_results.fetch_status')?.columnType).toBe(
+      "enum('not_attempted','completed','error','blocked')",
+    );
+    expect(cols.get('url_scan_results.fetch_cache')?.columnType).toBe("enum('hit','miss','none')");
+    expect(cols.get('url_scan_results.hop_count')).toMatchObject({
+      columnType: 'tinyint unsigned',
+      columnDefault: '0',
+    });
+    expect(cols.get('url_scan_results.final_url')?.columnType).toBe('varchar(2048)');
+    for (const json of ['reason_codes', 'reputation']) {
+      expect(cols.get(`url_scan_results.${json}`), json).toMatchObject({
+        columnType: 'json',
+        nullable: 'NO',
+      });
+    }
+    const names = [...cols.keys()].map((k) => k.split('.')[1]!);
+    for (const forbidden of CONTENT_COLUMNS) expect(names, forbidden).not.toContain(forbidden);
+    expect(await uniqueSets('url_scan_results')).toEqual(
+      ['id,received_at', 'scan_id,url_seq,received_at'].sort(),
+    );
+    expect(await indexSets('url_scan_results')).toEqual(
+      expect.arrayContaining(['message_id,received_at', 'organization_id,url_sha256']),
+    );
+  });
+
+  it('has url_rewrites: one row per round with an S3 reference or a skip reason (U11)', async () => {
+    const cols = await columns(['url_rewrites']);
+    expect(cols.get('url_rewrites.status')?.columnType).toBe("enum('rewritten','skipped')");
+    expect(cols.get('url_rewrites.object_key')).toMatchObject({
+      columnType: 'varchar(512)',
+      nullable: 'YES',
+    });
+    expect(cols.get('url_rewrites.skip_reason')?.columnType).toBe('varchar(32)');
+    expect(cols.get('url_rewrites.settings_version')?.columnType).toBe('varchar(96)');
+    expect(cols.get('url_rewrites.dkim_signed')).toMatchObject({ columnDefault: '0' });
+    expect(await uniqueSets('url_rewrites')).toEqual(
+      ['id,received_at', 'scan_id,received_at'].sort(),
+    );
+    expect(await indexSets('url_rewrites')).toContain('message_id,lifecycle_round,received_at');
+  });
+
+  it('has url_dynamic_inspections: pending by default, unique per (scan, url_seq) (U15)', async () => {
+    const cols = await columns(['url_dynamic_inspections']);
+    expect(cols.get('url_dynamic_inspections.status')).toMatchObject({
+      columnType: "enum('pending','completed','failed','expired')",
+      nullable: 'NO',
+      columnDefault: 'pending',
+    });
+    expect(cols.get('url_dynamic_inspections.verdict')).toMatchObject({
+      columnType: URL_VERDICT_ENUM,
+      nullable: 'YES',
+    });
+    expect(cols.get('url_dynamic_inspections.requested_event_id')?.columnType).toBe('char(36)');
+    expect(await uniqueSets('url_dynamic_inspections')).toEqual(
+      ['id,received_at', 'scan_id,url_seq,received_at'].sort(),
+    );
+    expect(await indexSets('url_dynamic_inspections')).toEqual(
+      expect.arrayContaining(['status,created_at', 'organization_id,url_sha256']),
+    );
+  });
+
+  it('has url_click_events partitioned by clicked_at, without URL or client address columns (U14)', async () => {
+    const cols = await columns(['url_click_events']);
+    expect(cols.get('url_click_events.decision')?.columnType).toBe(
+      "enum('allowed','warned','blocked','continued','expired','not_found')",
+    );
+    expect(cols.get('url_click_events.public_id')?.columnType).toBe('char(36)');
+    expect(cols.get('url_click_events.client_network')).toMatchObject({
+      columnType: 'varchar(49)',
+      nullable: 'YES',
+    });
+    const names = [...cols.keys()].map((k) => k.split('.')[1]!);
+    for (const forbidden of ['url', 'client_ip', 'user_agent', 'user_id', 'email']) {
+      expect(names, forbidden).not.toContain(forbidden);
+    }
+    expect(await uniqueSets('url_click_events')).toEqual(['id,clicked_at']);
+    expect(await indexSets('url_click_events')).toEqual(
+      expect.arrayContaining([
+        'organization_id,clicked_at',
+        'message_id,message_received_at',
+        'public_id',
+      ]),
+    );
+  });
+
+  it('rejects a second message_urls row for the same message and identity hash or seq', async () => {
+    const receivedAt = new Date();
+    const messageId = uniqueId();
+    const row = {
+      receivedAt,
+      messageId,
+      organizationId: 1n,
+      urlSeq: 0,
+      url: 'https://clean-site.test/a',
+      urlSha256: 'a'.repeat(64),
+      scheme: 'https',
+      host: 'clean-site.test',
+      registrableDomain: 'clean-site.test',
+      hostKind: 'domain' as const,
+      sources: { html_href: 1 },
+      occurrences: 1,
+      firstLifecycleRound: 1,
+      extractorVersion: 'url-extract/1',
+    };
+    try {
+      await prisma.messageUrl.create({ data: row });
+      await expect(prisma.messageUrl.create({ data: { ...row, urlSeq: 1 } })).rejects.toMatchObject(
+        { code: 'P2002' },
+      );
+      await expect(
+        prisma.messageUrl.create({ data: { ...row, urlSha256: 'b'.repeat(64) } }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+      // createMany with skipDuplicates is how the engine stores URLs (U16): a duplicate is skipped.
+      const result = await prisma.messageUrl.createMany({
+        data: [row, { ...row, urlSeq: 1, urlSha256: 'b'.repeat(64) }],
+        skipDuplicates: true,
+      });
+      expect(result.count).toBe(1);
+    } finally {
+      await prisma.messageUrl.deleteMany({ where: { messageId } });
+    }
+  });
+
+  it('rejects a second url_dynamic_inspections row for the same (scan, url_seq, received_at)', async () => {
+    const scanId = uniqueId();
+    const row = {
+      receivedAt: new Date(),
+      messageId: 1n,
+      organizationId: 1n,
+      scanId,
+      urlSeq: 0,
+      urlSha256: 'a'.repeat(64),
+      requestedEventId: randomUUID(),
+    };
+    try {
+      const created = await prisma.urlDynamicInspection.create({ data: row });
+      expect(created.status).toBe('pending');
+      await expect(prisma.urlDynamicInspection.create({ data: row })).rejects.toMatchObject({
+        code: 'P2002',
+      });
+    } finally {
+      await prisma.urlDynamicInspection.deleteMany({ where: { scanId } });
     }
   });
 });

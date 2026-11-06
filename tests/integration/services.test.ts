@@ -17,7 +17,8 @@ const EXPECTED_CHECKS: Record<string, string[]> = {
   api: ['mysql', 'mysql-reader', 'redis', 's3'],
   // Step 4.1 S1: MIME role (`rabbitmq`) and scan role (`rabbitmq-scanner`, user eg-scanner).
   // Step 4.2 A12: the attachment consumer adds `clamav` (clamd PING) and `attachment-inspector`
-  // (ready inspector children).
+  // (ready inspector children). Step 4.3: the URL consumer adds `url-engine` (Redis PING of the
+  // URL cache; DNS reachability and egress mode as details).
   'email-worker': [
     'attachment-inspector',
     'clamav',
@@ -26,6 +27,7 @@ const EXPECTED_CHECKS: Record<string, string[]> = {
     'rabbitmq-scanner',
     'redis',
     's3',
+    'url-engine',
   ],
   'policy-engine': ['mysql', 'redis'],
   'delivery-worker': ['mysql', 'rabbitmq', 'redis', 's3'],
@@ -52,6 +54,18 @@ describe.skipIf(!running)('Application services (compose profile: apps)', () => 
     const expected = EXPECTED_CHECKS[name];
     if (expected) expect(body.checks.map((c) => c.name).sort()).toEqual([...expected].sort());
     else expect(body.checks.map((c) => c.name)).not.toContain('rabbitmq');
+  });
+
+  it('click-service (step 4.3) is ready on its admin port only: mysql (gateway_click) and redis', async () => {
+    const admin = `http://${stack.host}:${Number(process.env.CLICK_SERVICE_ADMIN_HOST_PORT ?? 3081)}`;
+    const res = await fetch(`${admin}/health/ready`);
+    const body = (await res.json()) as { checks: { name: string; status: string }[] };
+    expect(res.status, JSON.stringify(body.checks)).toBe(200);
+    expect(body.checks.map((c) => c.name).sort()).toEqual(['mysql', 'redis']);
+    expect(body.checks.every((c) => c.status === 'ok')).toBe(true);
+    // The public port serves the click routes only (no health or metrics there).
+    const publicPort = Number(process.env.CLICK_SERVICE_HOST_PORT ?? 3080);
+    expect((await fetch(`http://${stack.host}:${publicPort}/health/ready`)).status).toBe(404);
   });
 
   it('event-relay holds every relay shard and reports no outbox lag', async () => {

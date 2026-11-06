@@ -27,6 +27,7 @@
     "@email-gateway/rspamd": "workspace:*",
     "@email-gateway/security-contracts": "workspace:*",
     "@email-gateway/shared-types": "workspace:*",
+    "@email-gateway/url-security": "workspace:*",
     "@litko/yara-x": "0.10.0",
     "@nestjs/common": "^11.1.6",
     "@nestjs/core": "^11.1.6",

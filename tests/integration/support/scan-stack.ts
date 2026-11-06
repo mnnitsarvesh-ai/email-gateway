@@ -14,6 +14,7 @@ export {
   REQUIRED_ENGINES,
   RSPAMD_LEDGER,
   scanStageProblems,
+  URL_LEDGER,
 } from './scan-stage';
 
 async function ready(service: 'event-relay' | 'api'): Promise<boolean> {

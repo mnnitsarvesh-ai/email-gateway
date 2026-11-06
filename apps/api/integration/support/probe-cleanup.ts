@@ -90,10 +90,10 @@ export function mailBucketClient(): { s3: InstanceType<S3Commands['S3Client']>; 
 const pad = (n: number, width = 2) => String(n).padStart(width, '0');
 
 /** `org/{organizationId}/part/{yyyy}/{mm}/{dd}/{messageId}/` (step 3.1 M11 part keys). */
-export function partPrefix(message: ProbeMessage): string {
+export function partPrefix(message: ProbeMessage, kind: 'part' | 'rewrite' = 'part'): string {
   const at = message.receivedAt;
   return (
-    `org/${message.organizationId.toString()}/part/${pad(at.getUTCFullYear(), 4)}/` +
+    `org/${message.organizationId.toString()}/${kind}/${pad(at.getUTCFullYear(), 4)}/` +
     `${pad(at.getUTCMonth() + 1)}/${pad(at.getUTCDate())}/${message.id.toString()}/`
   );
 }
@@ -185,18 +185,21 @@ export async function cleanupProbeMessages(
       if (message.emlObjectKey.startsWith(`org/${message.organizationId.toString()}/`)) {
         keys.add(message.emlObjectKey);
       }
-      let token: string | undefined;
-      do {
-        const page = await s3.send(
-          new ListObjectsV2Command({
-            Bucket: bucket,
-            Prefix: partPrefix(message),
-            ...(token !== undefined && { ContinuationToken: token }),
-          }),
-        );
-        for (const item of page.Contents ?? []) if (item.Key) keys.add(item.Key);
-        token = page.IsTruncated ? page.NextContinuationToken : undefined;
-      } while (token !== undefined);
+      // Part objects (3.1) and rewritten copies of the URL engine (4.3, same date/message path).
+      for (const kind of ['part', 'rewrite'] as const) {
+        let token: string | undefined;
+        do {
+          const page = await s3.send(
+            new ListObjectsV2Command({
+              Bucket: bucket,
+              Prefix: partPrefix(message, kind),
+              ...(token !== undefined && { ContinuationToken: token }),
+            }),
+          );
+          for (const item of page.Contents ?? []) if (item.Key) keys.add(item.Key);
+          token = page.IsTruncated ? page.NextContinuationToken : undefined;
+        } while (token !== undefined);
+      }
       for (const key of keys) {
         await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
         objects += 1;
@@ -208,6 +211,17 @@ export async function cleanupProbeMessages(
 
   // 3. Rows of the message graph (partitioned tables, no foreign keys).
   const byMessage = { messageId: { in: ids } };
+  // Scan rows of the live scan role (steps 4.1–4.3): the probe is scanned like any message.
+  await prisma.urlClickEvent.deleteMany({ where: byMessage });
+  await prisma.urlDynamicInspection.deleteMany({ where: byMessage });
+  await prisma.urlRewrite.deleteMany({ where: byMessage });
+  await prisma.urlScanResult.deleteMany({ where: byMessage });
+  await prisma.messageUrl.deleteMany({ where: byMessage });
+  await prisma.sandboxSubmission.deleteMany({ where: byMessage });
+  await prisma.attachmentScanResult.deleteMany({ where: byMessage });
+  await prisma.emailAuthResult.deleteMany({ where: byMessage });
+  await prisma.scanEngineResult.deleteMany({ where: byMessage });
+  await prisma.emailScan.deleteMany({ where: byMessage });
   await prisma.deliveryStatusEvent.deleteMany({ where: byMessage });
   await prisma.deliveryAttempt.deleteMany({ where: byMessage });
   await prisma.emailDelivery.deleteMany({ where: byMessage });

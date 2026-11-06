@@ -554,6 +554,13 @@ export class SmtpFixtures {
     // sandbox submissions of the attachment engine (child rows of the final, no foreign keys).
     await this.prisma.attachmentScanResult.deleteMany({ where });
     await this.prisma.sandboxSubmission.deleteMany({ where });
+    // Step 4.3 (docs/plan/steps/11-url-protection.md §3): the URL engine's child rows and the
+    // click-service's click events (the rewritten copies go with the org prefix in S3).
+    await this.prisma.urlClickEvent.deleteMany({ where });
+    await this.prisma.urlDynamicInspection.deleteMany({ where });
+    await this.prisma.urlRewrite.deleteMany({ where });
+    await this.prisma.urlScanResult.deleteMany({ where });
+    await this.prisma.messageUrl.deleteMany({ where });
     await this.prisma.emailAuthResult.deleteMany({ where });
     await this.prisma.scanEngineResult.deleteMany({ where });
     await this.prisma.emailScan.deleteMany({ where });

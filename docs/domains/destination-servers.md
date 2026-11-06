@@ -148,6 +148,16 @@ In the **Google Admin console → Apps → Google Workspace → Gmail → Spam, 
 
 Gmail can route outgoing mail to another server (**Apps → Google Workspace → Gmail → Routing**, or the **Outbound gateway** setting). Point it at the gateway's submission host and port shown in the portal and require TLS. The gateway accepts it only through an **SMTP connector** of your organization that authenticates with **SMTP AUTH** (or a client certificate unique to your organization). Check that your Gmail routing option can authenticate that way: a route identified only by Google's sending IP addresses is refused, because those addresses are shared by all Google customers and would let anyone send as your domain. If your edition cannot authenticate the route, keep outbound mail on Google and use the gateway for inbound protection.
 
+## Link protection rewrites messages: trust the gateway
+
+With link protection on (the default for inbound mail; settings `rewrite.*` of the URL engine), the gateway replaces the links of a message with protected links (`https://protect.<gateway domain>/c/…`) that are checked again when someone clicks. **Rewriting changes the message body**, so a DKIM signature the original sender added **no longer verifies** at your mailbox platform. The gateway already checked SPF, DKIM, DMARC and ARC when it received the message (shown with the scan results); your mailbox platform has to rely on that:
+
+- **Microsoft 365:** the inbound connector and **Enhanced Filtering for Connectors** above are required (Microsoft then evaluates the original sender's address; without it, rewritten mail from DMARC `p=reject` domains can be junked or rejected). Also exclude the gateway from Microsoft's own link rewriting if you do not want two rewrites (Defender Safe Links), or accept that Safe Links wraps the gateway's links.
+- **Google Workspace:** the **inbound gateway** with "Reject all mail not from gateway IPs" above is required; Gmail then treats the gateway as the edge and does not fail DMARC on the changed body.
+- **Other servers:** configure your server to accept the gateway as a trusted relay (skip DKIM/DMARC re-evaluation for mail from the gateway's outbound addresses, or honour the gateway's `Authentication-Results`).
+
+If you cannot configure trust, ask your administrator to set `rewrite.dkimSignedPolicy` to `skip` (DKIM-signed messages are then delivered without rewriting) or to switch rewriting off for your organization. Messages that are **S/MIME or PGP signed or encrypted are never rewritten** (changing them would break the signature); their links are still scanned. The gateway does not add an ARC seal to rewritten mail yet.
+
 ## Mail between your own domains
 
 When someone in your organization sends through the gateway to another active domain of your organization, the message is delivered to that domain's destination servers: Microsoft 365 or Google Workspace hosts, or your own servers. Configure destinations for every domain that receives mail, otherwise such mail waits (`deferred`, "Destination not configured") until a destination exists or 5 days have passed.

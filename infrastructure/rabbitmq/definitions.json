@@ -1,5 +1,5 @@
 {
-  "topology_version": 4,
+  "topology_version": 5,
   "exchanges": [
     {
       "name": "email.ingestion",
@@ -86,6 +86,24 @@
     },
     {
       "name": "scan.url",
+      "vhost": "email-gateway",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-queue-type": "quorum"
+      }
+    },
+    {
+      "name": "scan.url.inspect",
+      "vhost": "email-gateway",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-queue-type": "quorum"
+      }
+    },
+    {
+      "name": "scan.url.results",
       "vhost": "email-gateway",
       "durable": true,
       "auto_delete": false,
@@ -462,7 +480,39 @@
       "vhost": "email-gateway",
       "destination": "scan.url",
       "destination_type": "queue",
-      "routing_key": "retry.scan.url.#",
+      "routing_key": "retry.scan.url.org.#",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
+      "destination": "scan.url.inspect",
+      "destination_type": "queue",
+      "routing_key": "org.*.mail.url.inspection_requested.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
+      "destination": "scan.url.inspect",
+      "destination_type": "queue",
+      "routing_key": "retry.scan.url.inspect.#",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
+      "destination": "scan.url.results",
+      "destination_type": "queue",
+      "routing_key": "org.*.mail.url.inspection_completed.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
+      "destination": "scan.url.results",
+      "destination_type": "queue",
+      "routing_key": "retry.scan.url.results.#",
       "arguments": {}
     }
   ],
@@ -516,9 +566,42 @@
       "apply-to": "queues",
       "priority": 10,
       "definition": {
-        "delivery-limit": -1,
-        "max-length": 10000,
-        "overflow": "drop-head"
+        "delivery-limit": 20,
+        "dead-letter-exchange": "email.events",
+        "dead-letter-routing-key": "dead-letter.scan.url",
+        "dead-letter-strategy": "at-least-once",
+        "overflow": "reject-publish",
+        "max-length": 1000000
+      }
+    },
+    {
+      "vhost": "email-gateway",
+      "name": "eg.scan.url.inspect",
+      "pattern": "^scan\\.url\\.inspect$",
+      "apply-to": "queues",
+      "priority": 10,
+      "definition": {
+        "delivery-limit": 20,
+        "dead-letter-exchange": "email.events",
+        "dead-letter-routing-key": "dead-letter.scan.url.inspect",
+        "dead-letter-strategy": "at-most-once",
+        "overflow": "drop-head",
+        "max-length": 10000
+      }
+    },
+    {
+      "vhost": "email-gateway",
+      "name": "eg.scan.url.results",
+      "pattern": "^scan\\.url\\.results$",
+      "apply-to": "queues",
+      "priority": 10,
+      "definition": {
+        "delivery-limit": 20,
+        "dead-letter-exchange": "email.events",
+        "dead-letter-routing-key": "dead-letter.scan.url.results",
+        "dead-letter-strategy": "at-least-once",
+        "overflow": "reject-publish",
+        "max-length": 1000000
       }
     },
     {

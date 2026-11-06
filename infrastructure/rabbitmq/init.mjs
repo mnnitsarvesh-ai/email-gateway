@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// RabbitMQ provisioning for topology v4 (step 3.2 Q5, Q10, ADR-0024; v2: step 3.3 L7; v3: step
-// 4.1 S2, ADR-0026; v4: step 4.2 A2, ADR-0028). The only code that declares broker objects:
-// services verify passively and their users cannot configure.
+// RabbitMQ provisioning for topology v5 (step 3.2 Q5, Q10, ADR-0024; v2: step 3.3 L7; v3: step
+// 4.1 S2, ADR-0026; v4: step 4.2 A2, ADR-0028; v5: step 4.3 U2, ADR-0029). The only code that
+// declares broker objects: services verify passively and their users cannot configure.
 //
 //   node init.mjs [--vhost <name>] [--mgmt-url <url>] [--definitions <path>]
 //                 [--users] [--cleanup-legacy] [--legacy-vhost <name>]
@@ -15,7 +15,8 @@
 //      quorum) and grant the administrator full permissions on it;
 //   3. import definitions.json (exchanges, quorum queues, bindings, policies) into the vhost;
 //   4. prune bindings: an import only adds, so a binding that an earlier topology version
-//      declared and this one does not (v3: the two event bindings of scan.auth) is removed. Only
+//      declared and this one does not (v3: the two event bindings of scan.auth; v5: the
+//      unqualified retry binding retry.scan.url.# of scan.url) is removed. Only
 //      bindings whose destination is a queue or exchange of the definitions are touched; objects
 //      outside the topology are never changed. Logs binding names and counts only;
 //   5. --users: create/update the role users (no tags) with exactly their Q10 permissions and
@@ -24,7 +25,7 @@
 //   6. --cleanup-legacy: delete the ADR-0005 objects on vhost "/" only when empty (queues with
 //      no messages and no consumers; RabbitMQ 4.x refuses `if-empty` deletes of quorum queues,
 //      so emptiness is checked first); --legacy-vhost points it at another vhost (tests only);
-//   7. verify: exactly the 6 exchanges and 14 quorum queues, exactly the bindings of the
+//   7. verify: exactly the 6 exchanges and 16 quorum queues, exactly the bindings of the
 //      definitions (no missing and no extra binding), every policy applied, and (--users) each
 //      role user's permissions and topic permissions exactly.
 // Exits non-zero on any failure. Logs object names and counts only: never a password, never a
@@ -54,7 +55,16 @@ const topic = (exchange, write) => ({ exchange, write, read: '^$' });
  * mail.attachment.sandbox_requested.v1 itself (outbox → relay). The relay needs nothing new: the
  * reconciler re-drives an event through its outbox row, so the relay republishes it with its own
  * `org.` event key.
+ *
+ * Topology v5 (step 4.3 U2) extends the scanner to the URL engine (scan.url) and the inspection
+ * results (scan.url.results); its retry and dead-letter keys are anchored on `.org.` so that the
+ * `url` alternative never covers the hops of scan.url.inspect (a dot-extension of scan.url). The
+ * new url-browser user (the isolated browser worker, no database) reads only scan.url.inspect and
+ * publishes only its own result event key (`mail.url.inspection_completed.v1`, direct publish with
+ * confirms) and its queue's retry/dead-letter hops; it configures nothing. ops may replay the
+ * three new work queues. The click-service has no broker user (its events go through the outbox).
  */
+const SCANNER_QUEUES = '(spam|attachment|url|url\\.results)';
 const ROLE_USERS = [
   {
     role: 'relay',
@@ -85,10 +95,27 @@ const ROLE_USERS = [
     passwordKey: 'RABBITMQ_SCANNER_PASSWORD',
     configure: '^$',
     write: '^email\\.(security|events)$',
-    read: '^scan\\.(spam|attachment)$',
+    read: `^scan\\.${SCANNER_QUEUES}$`,
     topics: [
-      topic('email.security', '^retry\\.scan\\.(spam|attachment)\\.'),
-      topic('email.events', '^dead-letter\\.scan\\.(spam|attachment)(\\.|$)'),
+      topic('email.security', `^retry\\.scan\\.${SCANNER_QUEUES}\\.org\\.`),
+      topic('email.events', `^dead-letter\\.scan\\.${SCANNER_QUEUES}(\\.org\\.|$)`),
+    ],
+  },
+  {
+    // Step 4.3 U2, U15 (v5): the isolated url-browser-worker. Reads its one queue, publishes only
+    // its result events (with publisher confirms) and the hops of its own queue.
+    role: 'url-browser',
+    userKey: 'RABBITMQ_URL_BROWSER_USER',
+    passwordKey: 'RABBITMQ_URL_BROWSER_PASSWORD',
+    configure: '^$',
+    write: '^email\\.(security|events)$',
+    read: '^scan\\.url\\.inspect$',
+    topics: [
+      topic(
+        'email.security',
+        '^(org\\.[1-9][0-9]{0,19}\\.mail\\.url\\.inspection_completed\\.v1$|retry\\.scan\\.url\\.inspect\\.)',
+      ),
+      topic('email.events', '^dead-letter\\.scan\\.url\\.inspect(\\.|$)'),
     ],
   },
   {
@@ -109,13 +136,14 @@ const ROLE_USERS = [
     passwordKey: 'RABBITMQ_OPS_PASSWORD',
     configure: '^$',
     // Replay republishes only to the home exchanges of the replayable work queues (Q9); v3 adds
-    // scan.spam, v4 scan.attachment (home exchange email.security).
+    // scan.spam, v4 scan.attachment, v5 scan.url, scan.url.inspect and scan.url.results (home
+    // exchange email.security).
     write: '^email\\.(ingestion|delivery|security)$',
     read: '^email\\.dead-letter$',
     topics: [
       topic('email.ingestion', '^retry\\.email\\.received\\.'),
       topic('email.delivery', '^retry\\.email\\.delivery\\.pending\\.'),
-      topic('email.security', '^retry\\.scan\\.(spam|attachment)\\.'),
+      topic('email.security', '^retry\\.scan\\.(spam|attachment|url|url\\.inspect|url\\.results)\\.'),
     ],
   },
 ];

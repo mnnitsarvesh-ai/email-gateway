@@ -292,6 +292,7 @@ describe('attachment settings through /scan-settings/attachment (A8)', () => {
     expect(listed.body.data.map((v: { engine: string }) => v.engine)).toEqual([
       'rspamd',
       'attachment',
+      'url',
     ]);
     const url = '/api/v1/scan-settings/attachment';
     const invalid = await ctx.http

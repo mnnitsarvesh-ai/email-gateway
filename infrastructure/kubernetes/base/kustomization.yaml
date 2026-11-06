@@ -13,6 +13,12 @@ resources:
   # Attachment scanning (step 4.2 A20): the attachment consumer and clamd.
   - email-worker-attachment.yaml
   - clamav.yaml
+  # URL protection (step 4.3 U19): the url engine, the time-of-click service, the egress proxy and
+  # the isolated browser worker.
+  - email-worker-url.yaml
+  - click-service.yaml
+  - url-egress-proxy.yaml
+  - url-browser-worker.yaml
   - policy-engine.yaml
   - delivery-worker.yaml
   - notification-worker.yaml

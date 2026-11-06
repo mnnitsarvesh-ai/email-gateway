@@ -639,6 +639,249 @@ export function organizationIdOfKey(key: string): string | null {
   return /^org\/([1-9][0-9]{0,19})\//.exec(key)?.[1] ?? null;
 }
 
+/**
+ * URL verdicts (step 4.3 U10). Mirrors `URL_VERDICTS` of `@email-gateway/security-contracts`
+ * (event-contracts has no dependency on it; a consumer that depends on both asserts equality, as
+ * for `SCAN_VERDICT_VALUES`).
+ */
+export const URL_VERDICT_VALUES = ['clean', 'suspicious', 'malicious', 'unknown'] as const;
+/** Click decisions (step 4.3 U14). Mirrors `CLICK_DECISIONS` of security-contracts. */
+export const CLICK_DECISION_VALUES = [
+  'allowed',
+  'warned',
+  'blocked',
+  'continued',
+  'expired',
+  'not_found',
+] as const;
+/** Kinds of a main-frame navigation recorded by the browser worker (step 4.3 U2). */
+export const URL_NAVIGATION_KINDS = ['initial', 'http', 'js', 'meta'] as const;
+
+/** Longest URL an event carries (U4 `URL_MAX_LENGTH`, after normalization). */
+export const URL_EVENT_MAX_LENGTH = 2048;
+
+const hasControlOrSpace = (value: string): boolean => {
+  for (let i = 0; i < value.length; i += 1) {
+    const c = value.charCodeAt(i);
+    if (c <= 0x20 || c === 0x7f) return true;
+  }
+  return false;
+};
+
+/**
+ * A normalized http(s) URL (U5 redirect form): absolute, `http:` or `https:`, no userinfo, no
+ * whitespace or control characters, at most 2 048 characters.
+ */
+const normalizedHttpUrl = z
+  .string()
+  .min(1)
+  .max(URL_EVENT_MAX_LENGTH)
+  .refine((value) => /^https?:\/\//.test(value) && !hasControlOrSpace(value), {
+    message: 'Expected a normalized http(s) URL',
+  })
+  .refine(
+    (value) => {
+      try {
+        const url = new URL(value);
+        return (
+          (url.protocol === 'http:' || url.protocol === 'https:') &&
+          url.username === '' &&
+          url.password === '' &&
+          url.hostname !== ''
+        );
+      } catch {
+        return false;
+      }
+    },
+    { message: 'Expected an absolute http(s) URL without userinfo' },
+  );
+
+/**
+ * An ASCII host as WHATWG `URL.hostname` serializes it: a lower-case name (A-labels) or dotted
+ * IPv4, or a bracketed IPv6 literal. At most 253 characters.
+ */
+export const URL_HOST_PATTERN =
+  /^(?:(?=.{1,253}$)[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?(?:\.[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?)*|\[[0-9a-f:.]{2,45}\])$/;
+const urlHost = z.string().max(253).regex(URL_HOST_PATTERN, 'Expected an ASCII host');
+/** A brand id of the protected brand list (`packages/url-security/data/brands.json`). */
+const brandId = z.string().regex(/^[a-z0-9][a-z0-9_-]{0,31}$/, 'Expected a brand id');
+/** A snake_case token (error codes). */
+const token = z.string().regex(/^[a-z][a-z0-9_]{0,31}$/, 'Expected a snake_case token');
+const urlSeq = z.number().int().min(0).max(65_535);
+const boundedCount = (max: number) => z.number().int().min(0).max(max);
+/** A software version for display (spaces allowed, no control characters), at most 64. */
+const versionString = z
+  .string()
+  .min(1)
+  .max(64)
+  .refine((value) => [...value].every((c) => c.charCodeAt(0) >= 0x20 && c !== '\x7f'), {
+    message: 'Expected a version string without control characters',
+  });
+
+/**
+ * A request to inspect one URL in the isolated browser worker (step 4.3 U2, U15). Written by the
+ * email-worker's URL engine through `message_outbox` (`aggregate_type = 'message'`) in the
+ * finalize transaction of the engine's final result, together with the `url_dynamic_inspections`
+ * row (`inspectionId` = its id). Published to `email.security`
+ * (`org.<id>.mail.url.inspection_requested.v1`) and bound to `scan.url.inspect` (a bounded lossy
+ * work queue). The round never waits for it.
+ *
+ * The only event that carries a URL (the browser worker has no database). Like every
+ * `email.security` key it also reaches the `email.analytics` firehose: the analytics consumer
+ * (not built) must drop or hash `url` (docs/architecture/data-ownership.md). No other content:
+ * strict object.
+ */
+export const urlInspectionRequestedV1 = z
+  .strictObject({
+    /** `url_dynamic_inspections.id`. */
+    inspectionId: decimalIdSchema,
+    messageId: decimalIdSchema,
+    receivedAt: z.iso.datetime(),
+    /** `email_scans.id` of the round. */
+    scanId: decimalIdSchema,
+    lifecycleRound: z.number().int().min(0).max(65_535),
+    /** `message_urls.url_seq`. */
+    urlSeq,
+    /** The URL to open (U5 redirect form, as stored in `message_urls.url`). */
+    url: normalizedHttpUrl,
+    /** SHA-256 of the identity form (`message_urls.url_sha256`). */
+    urlSha256: sha256Hex,
+    requestedAt: z.iso.datetime(),
+    /** After this instant the worker publishes `failed`/`deadline_passed` without navigating. */
+    deadlineAt: z.iso.datetime(),
+  })
+  .superRefine((payload, ctx) => {
+    if (Date.parse(payload.deadlineAt) <= Date.parse(payload.requestedAt)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['deadlineAt'],
+        message: 'deadlineAt must be after requestedAt',
+      });
+    }
+  });
+export type UrlInspectionRequestedV1 = z.infer<typeof urlInspectionRequestedV1>;
+
+/**
+ * The result of one browser inspection (step 4.3 U2, U15). Published by the url-browser-worker
+ * **directly** (broker user `eg-url-browser`, publisher confirms; no outbox: the worker has no
+ * database), routing key `org.<id>.mail.url.inspection_completed.v1` on `email.security`; the
+ * request is acked only after the confirm. Bound to `scan.url.results` (ledger consumer
+ * `email-worker.scan.url.results`), which applies it to the pending `url_dynamic_inspections` row
+ * after echo-checking organization, message, `urlSeq` and `urlSha256` (a forged result cannot
+ * create rows).
+ *
+ * Counts, booleans, hosts and brand ids only: no page body, no title text, no screenshot, no URL
+ * (the final URL only as a hash and its host). `failed` carries an `errorCode`; `completed` none.
+ */
+export const urlInspectionCompletedV1 = z
+  .strictObject({
+    inspectionId: decimalIdSchema,
+    messageId: decimalIdSchema,
+    receivedAt: z.iso.datetime(),
+    urlSeq,
+    urlSha256: sha256Hex,
+    status: z.enum(['completed', 'failed']),
+    /** E.g. `navigation_timeout`, `proxy_refused`, `browser_crash`, `job_timeout`, `deadline_passed`. */
+    errorCode: token.nullable(),
+    workerVersion: versionString,
+    browserVersion: versionString,
+    finalUrlSha256: sha256Hex.nullable(),
+    finalHost: urlHost.nullable(),
+    /** Main-frame navigations and redirect responses, in order. */
+    navigations: z
+      .array(
+        z.strictObject({
+          host: urlHost,
+          status: z.number().int().min(100).max(599).nullable(),
+          kind: z.enum(URL_NAVIGATION_KINDS),
+        }),
+      )
+      .max(10),
+    signals: z.strictObject({
+      passwordFields: boundedCount(1000),
+      forms: boundedCount(1000),
+      crossOriginFormAction: z.boolean(),
+      formActionHosts: z.array(urlHost).max(5),
+      downloadAttempted: z.boolean(),
+      blockedRequests: boundedCount(100_000),
+      requests: boundedCount(100_000),
+      bytes: z.number().int().nonnegative(),
+      titleBrandMatches: z.array(brandId).max(5),
+      jsRedirect: z.boolean(),
+      dialogs: boundedCount(1000),
+    }),
+    durationMs: z.number().int().nonnegative(),
+    completedAt: z.iso.datetime(),
+  })
+  .superRefine((payload, ctx) => {
+    if (payload.status === 'failed' && payload.errorCode === null) {
+      ctx.addIssue({ code: 'custom', path: ['errorCode'], message: 'failed requires errorCode' });
+    }
+    if (payload.status === 'completed' && payload.errorCode !== null) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['errorCode'],
+        message: 'completed carries no errorCode',
+      });
+    }
+    if ((payload.finalUrlSha256 === null) !== (payload.finalHost === null)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['finalHost'],
+        message: 'finalUrlSha256 and finalHost are both set or both null',
+      });
+    }
+    const unique = <T>(values: readonly T[]) => new Set(values).size === values.length;
+    if (!unique(payload.signals.formActionHosts)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['signals', 'formActionHosts'],
+        message: 'Duplicate host',
+      });
+    }
+    if (!unique(payload.signals.titleBrandMatches)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['signals', 'titleBrandMatches'],
+        message: 'Duplicate brand id',
+      });
+    }
+  });
+export type UrlInspectionCompletedV1 = z.infer<typeof urlInspectionCompletedV1>;
+
+/**
+ * One decided click of a rewritten link (step 4.3 U2, U14). Written by the click-service through
+ * `message_outbox` (`aggregate_type = 'message'`, its own MySQL account) in the transaction of
+ * the `url_click_events` row (`clickId` = its `public_id`, UUIDv7). Published to
+ * `email.security`; no queue binding: it reaches only the `email.analytics` firehose. No URL, no
+ * client address, no user identity (strict object). `expired` and `not_found` carry no verdict
+ * (the URL was not evaluated).
+ */
+export const urlClickedV1 = z
+  .strictObject({
+    clickId: z.uuid(),
+    messageId: decimalIdSchema,
+    receivedAt: z.iso.datetime(),
+    urlSeq,
+    decision: z.enum(CLICK_DECISION_VALUES),
+    verdict: z.enum(URL_VERDICT_VALUES).nullable(),
+    reasonCodes: z.array(scanReasonCode).max(16),
+    clickedAt: z.iso.datetime(),
+  })
+  .superRefine((payload, ctx) => {
+    if (new Set(payload.reasonCodes).size !== payload.reasonCodes.length) {
+      ctx.addIssue({ code: 'custom', path: ['reasonCodes'], message: 'Duplicate reason code' });
+    }
+    if ((payload.decision === 'expired' || payload.decision === 'not_found') && payload.verdict) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['verdict'],
+        message: `${payload.decision} carries no verdict`,
+      });
+    }
+  });
+export type UrlClickedV1 = z.infer<typeof urlClickedV1>;
+
 export const EventTypes = {
   MessageReceived: 'mail.message.received.v1',
   MessageScanned: 'mail.message.scanned.v1',
@@ -652,4 +895,7 @@ export const EventTypes = {
   MessageStateChanged: 'mail.message.state_changed.v1',
   MessageRescanRequested: 'mail.message.rescan_requested.v1',
   AttachmentSandboxRequested: 'mail.attachment.sandbox_requested.v1',
+  UrlInspectionRequested: 'mail.url.inspection_requested.v1',
+  UrlInspectionCompleted: 'mail.url.inspection_completed.v1',
+  UrlClicked: 'mail.url.clicked.v1',
 } as const;

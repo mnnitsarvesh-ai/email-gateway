@@ -1,0 +1,269 @@
+# Time-of-click service (step 4.3 U14, U19; ADR-0031; docs/deployment/url-protection.md,
+# docs/runbooks/click-service.md). Every rewritten link in every delivered message points here
+# (https://protect.<domain>/c/<token>): an outage breaks links in mailboxes, so >= 3 replicas
+# spread over zones, a PDB, an HPA on CPU and request rate, and a critical alert.
+#
+# Two listeners: public 3080 (GET /c/:token, /c/:token/continue, /static/click.css) behind the
+# Ingress, and admin 3081 (/health/*, /metrics) reachable only by the kubelet and Prometheus
+# (never in the Ingress). Data access: its own MySQL account gateway_click on the writer
+# (Secret email-gateway-click-db), Redis (rate limits, URL cache), the token keys and the cache
+# MAC key (their own Secrets, mounted only here and by email-worker-url). No S3, no RabbitMQ.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: click-service
+  labels:
+    {
+      app.kubernetes.io/name: click-service,
+      app.kubernetes.io/component: time-of-click,
+      app.kubernetes.io/part-of: email-gateway,
+    }
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels: { app.kubernetes.io/name: click-service }
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  template:
+    metadata:
+      labels: {
+          app.kubernetes.io/name: click-service,
+          app.kubernetes.io/component: time-of-click,
+          app.kubernetes.io/part-of: email-gateway,
+          # Allowed to use the egress proxy (url-egress-proxy NetworkPolicy).
+          email-gateway.io/egress-client: 'true',
+        }
+    spec:
+      serviceAccountName: click-service
+      automountServiceAccountToken: false
+      # Pending click event writes drain (bounded 10 s) before the database client closes.
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels: { app.kubernetes.io/name: click-service }
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app.kubernetes.io/name: click-service }
+      containers:
+        - name: click-service
+          image: email-gateway/click-service:latest
+          ports:
+            - { name: http, containerPort: 3080 }
+            - { name: admin, containerPort: 3081 }
+          envFrom:
+            # Shared non-secret URL_* and CLICK_* keys (config.yaml).
+            - configMapRef: { name: email-gateway-config }
+          env:
+            # Without APP_ENV the shared base schema would default to `local` (test seams); the
+            # click-service also treats NODE_ENV=production without APP_ENV as production.
+            - { name: APP_ENV, value: production }
+            - { name: CLICK_HTTP_PORT, value: '3080' }
+            - { name: CLICK_ADMIN_PORT, value: '3081' }
+            # Secrets are mounted as files and read via the <KEY>_FILE convention.
+            - { name: CLICK_DATABASE_URL_FILE, value: /var/run/secrets/click-db/database-url }
+            - { name: REDIS_URL_FILE, value: /var/run/secrets/gateway/redis-url }
+            # Click token keys (U12): only this Deployment and email-worker-url mount them. The
+            # previous slot exists only during a rotation (runbook; verification only).
+            - { name: URL_TOKEN_KEY_CURRENT_FILE, value: /var/run/secrets/url-token/current }
+            - name: URL_TOKEN_KEY_CURRENT_ID
+              valueFrom:
+                secretKeyRef: { name: email-gateway-url-token-keys, key: current-id }
+            - name: URL_TOKEN_KEY_PREVIOUS
+              valueFrom:
+                secretKeyRef: { name: email-gateway-url-token-keys, key: previous, optional: true }
+            - name: URL_TOKEN_KEY_PREVIOUS_ID
+              valueFrom:
+                secretKeyRef:
+                  { name: email-gateway-url-token-keys, key: previous-id, optional: true }
+            - { name: URL_CACHE_HMAC_KEY_FILE, value: /var/run/secrets/url-cache/hmac-key }
+            # Egress mode 2: URL_FETCH_EGRESS_PROXY_URL comes from config.yaml.
+            - { name: URL_EGRESS_PROXY_TOKEN_FILE, value: /var/run/secrets/url-egress/token }
+          volumeMounts:
+            - { name: gateway-secrets, mountPath: /var/run/secrets/gateway, readOnly: true }
+            - { name: click-db, mountPath: /var/run/secrets/click-db, readOnly: true }
+            - { name: url-token, mountPath: /var/run/secrets/url-token, readOnly: true }
+            - { name: url-cache, mountPath: /var/run/secrets/url-cache, readOnly: true }
+            - { name: url-egress, mountPath: /var/run/secrets/url-egress, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+          readinessProbe:
+            # mysql (click account) + redis.
+            httpGet: { path: /health/ready, port: admin }
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /health/live, port: admin }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          startupProbe:
+            httpGet: { path: /health/live, port: admin }
+            periodSeconds: 5
+            failureThreshold: 24
+          resources:
+            requests: { cpu: 250m, memory: 256Mi }
+            limits: { cpu: '1', memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+      volumes:
+        - name: gateway-secrets
+          secret:
+            secretName: email-gateway-secrets
+            items: [{ key: redis-url, path: redis-url }]
+        - name: click-db
+          secret: { secretName: email-gateway-click-db }
+        - name: url-token
+          secret:
+            secretName: email-gateway-url-token-keys
+            items: [{ key: current, path: current }]
+        - name: url-cache
+          secret: { secretName: email-gateway-url-cache-key }
+        - name: url-egress
+          secret: { secretName: email-gateway-url-egress-token }
+        - name: tmp
+          emptyDir: { sizeLimit: 16Mi }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: click-service
+automountServiceAccountToken: false
+---
+# Public Service (Ingress backend): port 3080 only.
+apiVersion: v1
+kind: Service
+metadata:
+  name: click-service
+  labels: { app.kubernetes.io/name: click-service }
+spec:
+  selector: { app.kubernetes.io/name: click-service }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+---
+# Admin Service (Prometheus scrape target; never referenced by an Ingress).
+apiVersion: v1
+kind: Service
+metadata:
+  name: click-service-admin
+  labels: { app.kubernetes.io/name: click-service, app.kubernetes.io/component: admin }
+spec:
+  selector: { app.kubernetes.io/name: click-service }
+  ports:
+    - { name: admin, port: 3081, targetPort: admin }
+---
+# protect.<domain>: TLS terminated at the ingress controller (certificate per environment, e.g.
+# cert-manager); only the public routes are routed. A CDN/WAF in front is optional (step 4.3 §10)
+# and must not cache (the service sends Cache-Control: no-store) nor add query parameters.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: click-service
+  labels: { app.kubernetes.io/name: click-service }
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: 'true'
+    nginx.ingress.kubernetes.io/limit-rps: '50'
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [protect.replace-per-environment.invalid]
+      secretName: click-service-tls
+  rules:
+    - host: protect.replace-per-environment.invalid
+      http:
+        paths:
+          - path: /c/
+            pathType: Prefix
+            backend: { service: { name: click-service, port: { name: http } } }
+          - path: /static/click.css
+            pathType: Exact
+            backend: { service: { name: click-service, port: { name: http } } }
+---
+# CPU and request rate. The `click_requests_per_second` pods metric needs prometheus-adapter
+# (rule: rate(click_requests_total[2m]) summed per pod); without it the HPA scales on CPU only.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: click-service
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: click-service }
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 60 }
+    - type: Pods
+      pods:
+        metric: { name: click_requests_per_second }
+        target: { type: AverageValue, averageValue: '100' }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: click-service
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels: { app.kubernetes.io/name: click-service }
+---
+# U19: ingress from the ingress controller on 3080 and Prometheus on 3081 (plus the kubelet
+# probes, which NetworkPolicies do not filter); egress to the MySQL writer, Redis, DNS, the
+# egress proxy and the OTel collector. The database and Redis CIDRs are the managed services'
+# subnets: replace per environment.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: click-service
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: click-service }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: ingress-nginx }
+          podSelector:
+            matchLabels: { app.kubernetes.io/name: ingress-nginx }
+      ports: [{ protocol: TCP, port: 3080 }]
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: observability }
+          podSelector:
+            matchLabels: { app.kubernetes.io/name: prometheus }
+      ports: [{ protocol: TCP, port: 3081 }]
+  egress:
+    # MySQL writer (RDS/Aurora subnet).
+    - to: [{ ipBlock: { cidr: 10.0.32.0/20 } }]
+      ports: [{ protocol: TCP, port: 3306 }]
+    # Redis (ElastiCache subnet).
+    - to: [{ ipBlock: { cidr: 10.0.48.0/20 } }]
+      ports: [{ protocol: TCP, port: 6379 }]
+    # Cluster DNS (service names, DNSBL queries through URL_DNS_SERVERS).
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }]
+    # Click-time rechecks and RDAP through the egress proxy (egress mode 2).
+    - to:
+        - podSelector:
+            matchLabels: { app.kubernetes.io/name: url-egress-proxy }
+      ports: [{ protocol: TCP, port: 3128 }]
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: observability }
+      ports: [{ protocol: TCP, port: 4318 }]

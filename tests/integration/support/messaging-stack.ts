@@ -26,8 +26,13 @@ export const MIME_LEDGER = 'email-worker.mime-parser';
 export const SCAN_LEDGER = 'email-worker.scan.rspamd';
 /** Step 4.2: the attachment engine's ledger consumer (scan.attachment). */
 export const ATTACHMENT_SCAN_LEDGER = 'email-worker.scan.attachment';
-/** Step 4.2 A1: every round requires Rspamd and the attachment engine (`SCAN_ENGINES`). */
-export const REQUIRED_ENGINE_COUNT = 2;
+/** Step 4.3: the URL engine's ledger consumer (scan.url). */
+export const URL_SCAN_LEDGER = 'email-worker.scan.url';
+/**
+ * Step 4.2 A1, step 4.3 U1: every round requires Rspamd, the attachment engine and the URL
+ * engine (`SCAN_ENGINES=rspamd,attachment,url`).
+ */
+export const REQUIRED_ENGINE_COUNT = 3;
 export const PLANNER_LEDGER = 'delivery-worker.planner';
 export const QUEUES = {
   received: 'email.received',
@@ -208,6 +213,8 @@ export interface PipelineCounts {
   scanLedger: number;
   /** Step 4.2: `message_idempotency` rows of `email-worker.scan.attachment` (parsed events). */
   attachmentLedger: number;
+  /** Step 4.3: `message_idempotency` rows of `email-worker.scan.url` (parsed events). */
+  urlLedger: number;
   /** `mail.message.scanned.v1` outbox rows (one per completed round). */
   scannedEvents: number;
   approvals: number;
@@ -285,6 +292,11 @@ export async function pipelineCounts(
     attachmentLedger: await ledgerCount(
       prisma,
       ATTACHMENT_SCAN_LEDGER,
+      parsed.map((p) => p.eventId),
+    ),
+    urlLedger: await ledgerCount(
+      prisma,
+      URL_SCAN_LEDGER,
       parsed.map((p) => p.eventId),
     ),
     scannedEvents: await prisma.messageOutbox.count({
@@ -366,6 +378,7 @@ export function exactlyOnceProblems(c: PipelineCounts, n: number): string[] {
     ['scanFinals', n * REQUIRED_ENGINE_COUNT],
     ['scanLedger', n],
     ['attachmentLedger', n],
+    ['urlLedger', n],
     ['scannedEvents', n],
     ['approvals', n],
     ['plannerLedger', n],

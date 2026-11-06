@@ -13,6 +13,9 @@ import {
   messageScannedV1,
   messageStateChangedV1,
   policyDecidedV1,
+  urlClickedV1,
+  urlInspectionCompletedV1,
+  urlInspectionRequestedV1,
 } from './events';
 import type { ExchangeName } from './topology';
 
@@ -140,6 +143,23 @@ export const EVENT_REGISTRY = {
     attachmentSandboxRequestedV1,
     'attachment',
   ),
+  // Step 4.3 U2: producer email-worker (URL engine) through the outbox; bound to scan.url.inspect.
+  [EventTypes.UrlInspectionRequested]: define(
+    EventTypes.UrlInspectionRequested,
+    'email.security',
+    urlInspectionRequestedV1,
+    'message',
+  ),
+  // Step 4.3 U2: producer url-browser-worker by direct publish with publisher confirms (no
+  // outbox: the worker has no database); bound to scan.url.results.
+  [EventTypes.UrlInspectionCompleted]: define(
+    EventTypes.UrlInspectionCompleted,
+    'email.security',
+    urlInspectionCompletedV1,
+    'message',
+  ),
+  // Step 4.3 U2: producer click-service through the outbox; no queue binding (analytics only).
+  [EventTypes.UrlClicked]: define(EventTypes.UrlClicked, 'email.security', urlClickedV1, 'message'),
 } as const satisfies Record<string, EventDefinition>;
 
 export type RegisteredEventType = keyof typeof EVENT_REGISTRY;

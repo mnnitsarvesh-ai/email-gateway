@@ -22,7 +22,7 @@ export interface PlatformAdminSession {
   /** `users.public_id` (the audit actor id). */
   userPublicId: string;
   call(
-    method: 'GET' | 'POST',
+    method: 'GET' | 'POST' | 'DELETE',
     path: string,
     body?: unknown,
   ): Promise<{ status: number; body: Record<string, unknown> }>;
@@ -140,6 +140,7 @@ export async function platformAdminSession(prisma: PrismaClient): Promise<Platfo
       call: async (method, path, body) => {
         if (method === 'POST') return post(path, body ?? {}, token);
         const res = await fetch(`${apiBaseUrl()}/api/v1${path}`, {
+          method,
           headers: { authorization: `Bearer ${token}` },
           signal: AbortSignal.timeout(60_000),
         });

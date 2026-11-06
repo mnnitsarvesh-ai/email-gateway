@@ -1,0 +1,179 @@
+# promtool unit tests of rules/url-scanning.rules.yml (step 4.3 U18):
+#   docker run --rm -v "$PWD/infrastructure/monitoring:/m:ro" --entrypoint promtool \
+#     prom/prometheus:v3.6.0 test rules /m/tests/url-scanning.rules.test.yml
+rule_files:
+  - ../rules/url-scanning.rules.yml
+evaluation_interval: 1m
+tests:
+  - name: failures, backlog, providers, SSRF, rewrites, cache, inspections
+    interval: 1m
+    input_series:
+      # 10 clean finals per minute; 1 error final per minute from minute 10 (9 %).
+      - series: 'scan_engine_results_total{job="email-worker",instance="a",engine="url",outcome="clean",final="true"}'
+        values: '0+10x80'
+      - series: 'scan_engine_results_total{job="email-worker",instance="a",engine="url",outcome="error",final="true"}'
+        values: '0x10 1+1x70'
+      # Retried attempts never count; neither do attachment failures.
+      - series: 'scan_engine_results_total{job="email-worker",instance="a",engine="url",outcome="error",final="false"}'
+        values: '0+50x80'
+      - series: 'scan_engine_results_total{job="email-worker",instance="a",engine="attachment",outcome="error",final="true"}'
+        values: '0+50x80'
+      # scan.url backlog from minute 10; scan.spam backlog never alerts here.
+      - series: 'rabbitmq_detailed_queue_messages_ready{job="rabbitmq-detailed",vhost="email-gateway",queue="scan.url"}'
+        values: '0x10 2000x70'
+      - series: 'rabbitmq_detailed_queue_messages_ready{job="rabbitmq-detailed",vhost="email-gateway",queue="scan.spam"}'
+        values: '5000x80'
+      # The dnsbl breaker opens at minute 5; local_feed stays closed.
+      - series: 'url_provider_breaker_state{job="email-worker",instance="a",provider="dnsbl"}'
+        values: '0x5 2x75'
+      - series: 'url_provider_breaker_state{job="email-worker",instance="a",provider="local_feed"}'
+        values: '0x80'
+      # 2 internal blocks per second from minute 10; port refusals never count.
+      - series: 'url_fetch_blocked_total{job="email-worker",instance="a",reason="loopback",component="engine"}'
+        values: '0x10 120+120x70'
+      - series: 'url_fetch_blocked_total{job="email-worker",instance="a",reason="port",component="engine"}'
+        values: '0+600x80'
+      # 0.2 rewrite errors per second from minute 10; skip reasons never count.
+      - series: 'scan_url_rewrites_total{job="email-worker",instance="a",result="error"}'
+        values: '0x10 12+12x70'
+      - series: 'scan_url_rewrites_total{job="email-worker",instance="a",result="signed_smime"}'
+        values: '0+600x80'
+      # 2 reputation cache errors per second from minute 10; hits never count.
+      - series: 'url_cache_total{job="email-worker",instance="a",cache="reputation",result="error"}'
+        values: '0x10 120+120x70'
+      - series: 'url_cache_total{job="email-worker",instance="a",cache="reputation",result="hit"}'
+        values: '0+6000x80'
+      # scan.url.inspect above 1000 from minute 10.
+      - series: 'rabbitmq_detailed_queue_messages_ready{job="rabbitmq-detailed",vhost="email-gateway",queue="scan.url.inspect"}'
+        values: '0x10 2000x70'
+      # 0.2 expired inspections per second from minute 10.
+      - series: 'scan_url_dynamic_inspections_total{job="email-worker",instance="a",status="expired"}'
+        values: '0x10 12+12x70'
+      - series: 'scan_url_dynamic_inspections_total{job="email-worker",instance="a",status="requested"}'
+        values: '0+600x80'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: UrlEngineFailuresHigh
+        exp_alerts: []
+      # The 10-minute ratio crosses 5 % at minute 16; pending for 5 minutes.
+      - eval_time: 25m
+        alertname: UrlEngineFailuresHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: URL engine final failures above 5 %
+              description: >-
+                More than 5 % of the final url engine results of the last 10 minutes are timeout
+                or error (S3 part reads, MySQL, inconsistent reads, extraction timeouts). Their
+                rounds end scan_failed; rescan them after the cause is fixed.
+              runbook_url: docs/runbooks/url-scanning.md#urlenginefailureshigh
+      - eval_time: 15m
+        alertname: UrlScanQueueBacklog
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: UrlScanQueueBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: URL scan queue backlog
+              description: >-
+                scan.url has had more than 1000 ready messages, or the p95 age of url scan
+                triggers at handling start has been above 180 s, for 10 minutes. Scale
+                email-worker-url or check provider and fetch latency.
+              runbook_url: docs/runbooks/url-scanning.md#urlscanqueuebacklog
+      - eval_time: 8m
+        alertname: UrlReputationProviderDown
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: UrlReputationProviderDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              provider: dnsbl
+            exp_annotations:
+              summary: URL reputation provider dnsbl unavailable
+              description: >-
+                The dnsbl breaker has been open for 5 minutes on at least one email-worker. URLs
+                whose lookups depend on it are unknown (url.reputation_unavailable), never clean,
+                so more clicks are warned.
+              runbook_url: docs/runbooks/url-scanning.md#urlreputationproviderdown
+      - eval_time: 15m
+        alertname: UrlFetchInternalTargetsSpike
+        exp_alerts: []
+      # The 10-minute rate crosses 1/s at minute 16; pending for 10 minutes.
+      - eval_time: 30m
+        alertname: UrlFetchInternalTargetsSpike
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: engine
+            exp_annotations:
+              summary: SSRF guard blocking internal targets (engine)
+              description: >-
+                The SSRF guard of engine has refused more than one internal target per second
+                (loopback, private, metadata, rebinding, deny list) for 10 minutes: a campaign
+                probing internal addresses, or a resolver serving internal zones.
+              runbook_url: docs/runbooks/url-scanning.md#urlfetchinternaltargetsspike
+      - eval_time: 15m
+        alertname: UrlRewriteErrors
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: UrlRewriteErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: URL rewriter failing
+              description: >-
+                More than 0.1 rewrites per second have ended with an unexpected rewriter error
+                for 10 minutes. Those messages are delivered unrewritten (no protected links).
+              runbook_url: docs/runbooks/url-scanning.md#urlrewriteerrors
+      - eval_time: 15m
+        alertname: UrlCacheErrors
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: UrlCacheErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              cache: reputation
+            exp_annotations:
+              summary: URL cache errors or rejected entries (reputation)
+              description: >-
+                More than one reputation cache operation per second has failed or was rejected
+                (wrong MAC or shape) for 10 minutes: Redis down or slow, a rotated
+                URL_CACHE_HMAC_KEY, or entries planted by another Redis client.
+              runbook_url: docs/runbooks/url-scanning.md#urlcacheerrors
+      - eval_time: 20m
+        alertname: UrlDynamicInspectionBacklog
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: UrlDynamicInspectionBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: info
+            exp_annotations:
+              summary: Dynamic URL inspection backlog
+              description: >-
+                scan.url.inspect has held more than 1000 inspection requests for 15 minutes (a
+                bounded lossy queue: the url-browser-worker is not running or too slow). Requests
+                beyond 10000 are dropped and expire; clicks then use the static signals only.
+              runbook_url: docs/runbooks/url-scanning.md#urldynamicinspectionbacklog
+      # The 30-minute rate crosses 0.1/s at minute 26; pending for 30 minutes.
+      - eval_time: 50m
+        alertname: UrlDynamicInspectionsExpiring
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: UrlDynamicInspectionsExpiring
+        exp_alerts:
+          - exp_labels:
+              severity: info
+            exp_annotations:
+              summary: Dynamic URL inspections expiring
+              description: >-
+                More than 0.1 pending inspections per second have been expired by the sweeper
+                for 30 minutes: their results never arrived (browser worker down, dropped
+                requests).
+              runbook_url: docs/runbooks/url-scanning.md#urldynamicinspectionsexpiring

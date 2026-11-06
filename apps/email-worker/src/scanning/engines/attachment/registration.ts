@@ -17,7 +17,7 @@ import type { InspectLimits } from './content';
 import { ContentCache } from './content-cache';
 import { BUNDLED_RULES_DIR, bundleIdOf } from './inspector/bundle';
 import { InspectorPool, type InspectorPoolOptions } from './inspector/pool';
-import { S3PartReader } from './part-reader';
+import { S3PartReader } from '../../parts/part-reader';
 import { MAPPING_VERSION } from './verdict-mapper';
 
 /** Ledger consumer of `scan.attachment` (topology v4 `ledgerName`). */

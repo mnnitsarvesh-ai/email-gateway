@@ -1,0 +1,134 @@
+# promtool unit tests of rules/click-service.rules.yml (step 4.3 U18):
+#   docker run --rm -v "$PWD/infrastructure/monitoring:/m:ro" --entrypoint promtool \
+#     prom/prometheus:v3.6.0 test rules /m/tests/click-service.rules.test.yml
+rule_files:
+  - ../rules/click-service.rules.yml
+evaluation_interval: 1m
+tests:
+  - name: down, errors, latency, invalid tokens, event failures, browser restarts, proxy down
+    interval: 1m
+    input_series:
+      # Instance b of the click-service stops answering at minute 5; a stays up.
+      - series: 'up{job="click-service",instance="a"}'
+        values: '1x40'
+      - series: 'up{job="click-service",instance="b"}'
+        values: '1x5 0x35'
+      # 100 allowed clicks per minute; 5 unavailable per minute from minute 10 (~4.8 %).
+      - series: 'click_requests_total{job="click-service",instance="a",decision="allowed"}'
+        values: '0+100x40'
+      - series: 'click_requests_total{job="click-service",instance="a",decision="unavailable"}'
+        values: '0x10 5+5x30'
+      # Latency: every request between 1.5 s and 2.5 s.
+      - series: 'click_request_duration_seconds_bucket{job="click-service",instance="a",decision="allowed",le="1.5"}'
+        values: '0x40'
+      - series: 'click_request_duration_seconds_bucket{job="click-service",instance="a",decision="allowed",le="2.5"}'
+        values: '0+100x40'
+      - series: 'click_request_duration_seconds_bucket{job="click-service",instance="a",decision="allowed",le="+Inf"}'
+        values: '0+100x40'
+      # 600 invalid tokens per minute (10/s) from minute 10.
+      - series: 'click_token_invalid_total{job="click-service",instance="a",reason="bad_mac"}'
+        values: '0x10 600+600x30'
+      # Written events only until minute 20, then one dropped event.
+      - series: 'click_events_total{job="click-service",instance="a",result="written"}'
+        values: '0+100x40'
+      - series: 'click_events_total{job="click-service",instance="a",result="dropped"}'
+        values: '0x20 1x20'
+      # 6 crash restarts per minute (0.1/s) from minute 10.
+      - series: 'url_browser_restarts_total{job="url-browser-worker",instance="w",reason="crash"}'
+        values: '0x10 6+6x30'
+      # The proxy goes down at minute 30.
+      - series: 'up{job="url-egress-proxy",instance="p"}'
+        values: '1x30 0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: ClickServiceDown
+      - eval_time: 8m
+        alertname: ClickServiceDown
+        exp_alerts:
+          - exp_labels: { severity: critical, job: click-service, instance: b }
+            exp_annotations:
+              summary: click-service instance down
+              description: >-
+                A click-service instance has not answered its scrape for 2 minutes. If all
+                replicas are down, every rewritten link (https://protect.<domain>/c/...) in
+                delivered mail fails.
+              runbook_url: docs/runbooks/click-service.md#clickservicedown
+      - eval_time: 9m
+        alertname: ClickServiceErrorsHigh
+      - eval_time: 25m
+        alertname: ClickServiceErrorsHigh
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: More than 2 % of clicks answered 503
+              description: >-
+                More than 2 % of the click requests of the last 5 minutes were answered with the
+                "temporarily unavailable" page: the click-service cannot read MySQL through its
+                gateway_click account (writer down, grants missing, pool exhausted, wrong reads).
+              runbook_url: docs/runbooks/click-service.md#clickserviceerrorshigh
+      - eval_time: 5m
+        alertname: ClickLatencyHigh
+      - eval_time: 25m
+        alertname: ClickLatencyHigh
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: Click p95 latency above 1.5 s
+              description: >-
+                The 95th percentile of click handling has been above 1.5 s for 10 minutes. The
+                recheck budget (CLICK_RECHECK_BUDGET_MS) bounds it: providers, the egress proxy,
+                DNS or MySQL are slow; clicks that hit the budget end `unknown` (tenant policy).
+              runbook_url: docs/runbooks/click-service.md#clicklatencyhigh
+      - eval_time: 15m
+        alertname: ClickInvalidTokensSpike
+      - eval_time: 30m
+        alertname: ClickInvalidTokensSpike
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: Invalid click tokens above 5/s
+              description: >-
+                More than 5 invalid click tokens per second for 10 minutes (label reason:
+                malformed, bad_mac, unknown_kid, bad_version): token guessing or scanning, or a
+                key rotation that removed a key still in use (unknown_kid).
+              runbook_url: docs/runbooks/click-service.md#clickinvalidtokensspike
+      - eval_time: 19m
+        alertname: ClickEventWriteFailures
+      - eval_time: 23m
+        alertname: ClickEventWriteFailures
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: Click events not written
+              description: >-
+                Click events failed (result=error) or were dropped above CLICK_EVENT_MAX_PENDING
+                (result=dropped) in the last 10 minutes: the clicks were answered, but the
+                url_click_events row and the mail.url.clicked.v1 outbox row are missing for them.
+              runbook_url: docs/runbooks/click-service.md#clickeventwritefailures
+      - eval_time: 9m
+        alertname: UrlBrowserWorkerRestarts
+      - eval_time: 30m
+        alertname: UrlBrowserWorkerRestarts
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: Browser restarts above 0.05/s
+              description: >-
+                The isolated browser has been restarted more than 0.05 times per second over 15
+                minutes (label reason: crash, rss, launch_failed, max_jobs). Crashes and memory
+                restarts point at hostile pages or a Chromium regression; launch failures at the
+                image or the container limits.
+              runbook_url: docs/runbooks/url-browser-worker.md#urlbrowserworkerrestarts
+      - eval_time: 31m
+        alertname: UrlEgressProxyDown
+      - eval_time: 34m
+        alertname: UrlEgressProxyDown
+        exp_alerts:
+          - exp_labels: { severity: critical, job: url-egress-proxy, instance: p }
+            exp_annotations:
+              summary: url-egress-proxy instance down
+              description: >-
+                An egress proxy instance has not answered its scrape for 2 minutes. Dynamic
+                inspections fail and, in egress mode 2, scan-time and click-time fetches end
+                `unknown` (never clean).
+              runbook_url: docs/runbooks/url-browser-worker.md#urlegressproxydown

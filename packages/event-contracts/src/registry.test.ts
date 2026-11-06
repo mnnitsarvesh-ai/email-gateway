@@ -42,6 +42,10 @@ describe('EVENT_REGISTRY', () => {
       'domain.routing.changed.v1': ['email.events', 'domain'],
       // Step 4.2 A2: the sandbox submission is its own aggregate.
       'mail.attachment.sandbox_requested.v1': ['email.security', 'attachment'],
+      // Step 4.3 U2: the three URL events (aggregate message).
+      'mail.url.inspection_requested.v1': ['email.security', 'message'],
+      'mail.url.inspection_completed.v1': ['email.security', 'message'],
+      'mail.url.clicked.v1': ['email.security', 'message'],
     });
     for (const definition of Object.values(EVENT_REGISTRY)) {
       expect(EXCHANGE_NAMES).toContain(definition.exchange);

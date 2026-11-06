@@ -34,7 +34,7 @@ import { type ContentResult, INSPECTOR_VERSION, type InspectLimits } from './con
 import { type ContentCache, contentVersion } from './content-cache';
 import { extensionTypeOfName } from './inspector/file-type';
 import type { InspectOutcome } from './inspector/pool';
-import type { PartSource } from './part-reader';
+import type { PartSource } from '../../parts/part-reader';
 import type { VersionSource } from './signature-watcher';
 import {
   contentVerdict,

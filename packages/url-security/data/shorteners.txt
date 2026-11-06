@@ -1,0 +1,43 @@
+# URL shortener hosts (docs/plan/steps/11-url-protection.md U9): a URL whose host is one of these
+# (or a subdomain) is `url.shortened`; its destination is resolved by the guarded fetcher when
+# scanTimeFetch is not `off` and at click time. One host per line; `#` starts a comment.
+# Extended by URL_SHORTENER_EXTRA_HOSTS, replaced by URL_SHORTENER_HOSTS_FILE.
+0rz.tw
+1url.com
+adf.ly
+amzn.to
+bit.do
+bit.ly
+bitly.com
+bl.ink
+buff.ly
+chilp.it
+clck.ru
+cutt.ly
+db.tt
+fb.me
+gg.gg
+goo.gl
+han.gl
+is.gd
+lnkd.in
+mcaf.ee
+ow.ly
+qr.ae
+rb.gy
+rebrand.ly
+s.id
+shorte.st
+shorturl.at
+soo.gd
+surl.li
+t.co
+t.ly
+tiny.cc
+tinyurl.com
+tr.im
+u.to
+urlz.fr
+v.gd
+x.co
+y2u.be

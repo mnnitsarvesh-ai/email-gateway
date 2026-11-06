@@ -1,0 +1,113 @@
+# URL scanning alerts (step 4.3 U18, docs/plan/steps/11-url-protection.md). Series: the
+# email-worker's url engine (scan_url_*, url_reputation_*, url_provider_breaker_state, url_fetch_*,
+# url_cache_total; labels verdict/source/code/provider/result/component/reason/cache/part/status/
+# read, bounded enums only, never a URL or host), the 4.1 generic scan series with engine="url",
+# and the topology vhost's queue series of job `rabbitmq-detailed`. `url_fetch_blocked_total` is
+# also exported by the click-service (component="click") and the egress proxy (component="proxy"):
+# the SSRF alert covers every component. Every alert links its section of
+# docs/runbooks/url-scanning.md. Validate with `promtool check rules` and
+# `promtool test rules tests/url-scanning.rules.test.yml`.
+groups:
+  - name: url-scanning
+    rules:
+      - alert: UrlEngineFailuresHigh
+        # Final results only: an attempt that was retried successfully is not counted.
+        expr: >-
+          sum(rate(scan_engine_results_total{engine="url",final="true",outcome=~"timeout|error"}[10m]))
+          / sum(rate(scan_engine_results_total{engine="url",final="true"}[10m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: URL engine final failures above 5 %
+          description: >-
+            More than 5 % of the final url engine results of the last 10 minutes are timeout or
+            error (S3 part reads, MySQL, inconsistent reads, extraction timeouts). Their rounds
+            end scan_failed; rescan them after the cause is fixed.
+          runbook_url: docs/runbooks/url-scanning.md#urlenginefailureshigh
+      - alert: UrlScanQueueBacklog
+        expr: >-
+          (max(rabbitmq_detailed_queue_messages_ready{vhost="email-gateway",queue="scan.url"}) > 1000)
+          or
+          (histogram_quantile(0.95, sum by (le) (rate(scan_event_lag_seconds_bucket{engine="url"}[10m]))) > 180)
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: URL scan queue backlog
+          description: >-
+            scan.url has had more than 1000 ready messages, or the p95 age of url scan triggers
+            at handling start has been above 180 s, for 10 minutes. Scale email-worker-url or
+            check provider and fetch latency.
+          runbook_url: docs/runbooks/url-scanning.md#urlscanqueuebacklog
+      - alert: UrlReputationProviderDown
+        # 2 = open: every lookup of the provider is answered `error` (URLs end `unknown`).
+        expr: max by (provider) (url_provider_breaker_state) == 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: URL reputation provider {{ $labels.provider }} unavailable
+          description: >-
+            The {{ $labels.provider }} breaker has been open for 5 minutes on at least one
+            email-worker. URLs whose lookups depend on it are unknown (url.reputation_unavailable),
+            never clean, so more clicks are warned.
+          runbook_url: docs/runbooks/url-scanning.md#urlreputationproviderdown
+      - alert: UrlFetchInternalTargetsSpike
+        expr: sum by (component) (rate(url_fetch_blocked_total{reason!~"port|scheme"}[10m])) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: SSRF guard blocking internal targets ({{ $labels.component }})
+          description: >-
+            The SSRF guard of {{ $labels.component }} has refused more than one internal target
+            per second (loopback, private, metadata, rebinding, deny list) for 10 minutes: a
+            campaign probing internal addresses, or a resolver serving internal zones.
+          runbook_url: docs/runbooks/url-scanning.md#urlfetchinternaltargetsspike
+      - alert: UrlRewriteErrors
+        expr: sum(rate(scan_url_rewrites_total{result="error"}[10m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: URL rewriter failing
+          description: >-
+            More than 0.1 rewrites per second have ended with an unexpected rewriter error for
+            10 minutes. Those messages are delivered unrewritten (no protected links).
+          runbook_url: docs/runbooks/url-scanning.md#urlrewriteerrors
+      - alert: UrlCacheErrors
+        expr: sum by (cache) (rate(url_cache_total{result=~"error|rejected"}[10m])) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: URL cache errors or rejected entries ({{ $labels.cache }})
+          description: >-
+            More than one {{ $labels.cache }} cache operation per second has failed or was
+            rejected (wrong MAC or shape) for 10 minutes: Redis down or slow, a rotated
+            URL_CACHE_HMAC_KEY, or entries planted by another Redis client.
+          runbook_url: docs/runbooks/url-scanning.md#urlcacheerrors
+      - alert: UrlDynamicInspectionBacklog
+        expr: max(rabbitmq_detailed_queue_messages_ready{vhost="email-gateway",queue="scan.url.inspect"}) > 1000
+        for: 15m
+        labels:
+          severity: info
+        annotations:
+          summary: Dynamic URL inspection backlog
+          description: >-
+            scan.url.inspect has held more than 1000 inspection requests for 15 minutes (a
+            bounded lossy queue: the url-browser-worker is not running or too slow). Requests
+            beyond 10000 are dropped and expire; clicks then use the static signals only.
+          runbook_url: docs/runbooks/url-scanning.md#urldynamicinspectionbacklog
+      - alert: UrlDynamicInspectionsExpiring
+        expr: sum(rate(scan_url_dynamic_inspections_total{status="expired"}[30m])) > 0.1
+        for: 30m
+        labels:
+          severity: info
+        annotations:
+          summary: Dynamic URL inspections expiring
+          description: >-
+            More than 0.1 pending inspections per second have been expired by the sweeper for
+            30 minutes: their results never arrived (browser worker down, dropped requests).
+          runbook_url: docs/runbooks/url-scanning.md#urldynamicinspectionsexpiring

@@ -2,7 +2,7 @@
 
 Step 4.1 ([design](../plan/steps/09-rspamd.md), [ADR-0026](../architecture/adr/0026-security-scan-pipeline.md), [ADR-0027](../architecture/adr/0027-rspamd-milter-policy.md), Rspamd deployment: [rspamd.md](../deployment/rspamd.md)). The scan stage is the **scan role** of the email-worker (`SCAN_ENABLED`; production Deployment `email-worker-scan`). Every alert of `infrastructure/monitoring/rules/scanning.rules.yml` links a section of this page.
 
-**Attachment engine (step 4.2):** ClamAV, YARA, the inspector, the content cache, signature updates and rescan jobs have their own runbook, [attachment-scanning.md](attachment-scanning.md) (alerts of `attachment-scanning.rules.yml`). The generic alerts below apply to it with `engine="attachment"`; since step 4.2 both `rspamd` and `attachment` are required in every round.
+**Attachment engine (step 4.2):** ClamAV, YARA, the inspector, the content cache, signature updates and rescan jobs have their own runbook, [attachment-scanning.md](attachment-scanning.md) (alerts of `attachment-scanning.rules.yml`). The generic alerts below apply to it with `engine="attachment"`; since step 4.2 both `rspamd` and `attachment` are required in every round. **URL engine (step 4.3):** extraction, reputation providers, the SSRF-guarded fetcher, rewriting and dynamic inspection have their own runbooks — [url-scanning.md](url-scanning.md) (alerts of `url-scanning.rules.yml`), the time-of-click [click-service.md](click-service.md) and the isolated [url-browser-worker.md](url-browser-worker.md); since step 4.3 `rspamd`, `attachment` and `url` are required in every round.
 
 **Rules that hold in every procedure below:**
 

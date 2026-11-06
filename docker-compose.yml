@@ -44,6 +44,18 @@
 # message with `rspamd` /checkv2 (SCAN_RSPAMD_URL); the api trains Bayes/fuzzy through the
 # controller with the enable password. Postfix accepts when the milter is down (ADR-0027).
 # Locally/CI rspamd resolves only the dns-sink test zones (RSPAMD_DNS_SERVERS, mailtest .11).
+#
+# URL protection (step 4.3, docs/plan/steps/11-url-protection.md, ADR-0029..0032): the email-worker
+# url engine (scan.url) fetches through the SSRF-guarded fetcher and resolves ONLY through
+# dns-sink (URL_DNS_SERVERS, mailtest .53); it joins `mailtest` and `urltest`. `click-service`
+# (apps profile, 3080 public / 3081 admin) uses its own MySQL account gateway_click, created by the
+# `mysql-grants` one-shot after db-migrate (01-users.sh needs the migrated tables), and Redis; no
+# S3, no RabbitMQ. `url-browser-worker` + `url-egress-proxy` run only in profile `url-browser`
+# (never together with analytics/observability on the 8 GB VM): the browser sits on the internal
+# network `url-sandbox` (only the proxy and rabbitmq) and holds no DB/S3/Redis/token/cache secret.
+# TEST-ONLY `url-test` (smtp-test profile) is the local "Internet": 203.0.113.10 on `urltest`,
+# 172.31.250.60 on `mailtest` (its DNS responder serves the rebinding name for dns-sink).
+#   docker compose --profile smtp-test --profile apps --profile url-browser up -d --wait
 
 name: ${COMPOSE_PROJECT_NAME:-email-gateway}
 
@@ -88,6 +100,67 @@ x-scan-platform-env: &scan-platform-env
   SCAN_RSPAMD_DMARC_REJECT_VERDICT: ${SCAN_RSPAMD_DMARC_REJECT_VERDICT:-suspicious}
   SCAN_RSPAMD_AUTH_FAILURE_VERDICT: ${SCAN_RSPAMD_AUTH_FAILURE_VERDICT:-reason_only}
 
+# URL protection platform settings shared by the email-worker (url engine) and the click-service
+# (step 4.3 §5). Container values: DNS only through dns-sink, the TEST-ONLY documentation-range
+# allowance for url-test (refused unless APP_ENV is local/ci), the test CA of test-pki, no dial
+# map (the containers reach 203.0.113.10 directly on urltest). Secrets: URL_CACHE_HMAC_KEY,
+# URL_TOKEN_KEY_* and URL_EGRESS_PROXY_TOKEN reach only these two services (and the proxy token
+# the url-browser profile).
+x-url-platform-env: &url-platform-env
+  URL_REPUTATION_PROVIDERS: ${URL_REPUTATION_PROVIDERS:-local_feed,dnsbl}
+  URL_DNSBL_DOMAIN_ZONES: ${URL_DNSBL_DOMAIN_ZONES:-dbl.scan.test=127.0.1.2:spam,127.0.1.4:phishing,127.0.1.5:malware,127.0.1.6:c2}
+  URL_DNSBL_IP_ZONES: ${URL_DNSBL_IP_ZONES:-rbl.scan.test=127.0.0.2:spam}
+  URL_DNSBL_ERROR_CODES: ${URL_DNSBL_ERROR_CODES:-127.255.255.252,127.255.255.254,127.255.255.255,127.0.1.255}
+  URL_RDAP_BASE_URL: ${URL_RDAP_BASE_URL:-}
+  URL_NEW_DOMAIN_DAYS: ${URL_NEW_DOMAIN_DAYS:-30}
+  URL_PROVIDER_TIMEOUT_MS: ${URL_PROVIDER_TIMEOUT_MS:-3000}
+  URL_PROVIDER_CONCURRENCY: ${URL_PROVIDER_CONCURRENCY:-16}
+  URL_PROVIDER_BREAKER_THRESHOLD: ${URL_PROVIDER_BREAKER_THRESHOLD:-5}
+  URL_PROVIDER_BREAKER_RESET_MS: ${URL_PROVIDER_BREAKER_RESET_MS:-30000}
+  URL_DNS_SERVERS: 172.31.250.53
+  URL_DNS_TIMEOUT_MS: ${URL_DNS_TIMEOUT_MS:-2000}
+  URL_DNS_TRIES: ${URL_DNS_TRIES:-2}
+  URL_CACHE_ENABLED: ${URL_CACHE_ENABLED:-true}
+  URL_CACHE_CLEAN_TTL_SECONDS: ${URL_CACHE_CLEAN_TTL_SECONDS:-900}
+  URL_CACHE_MALICIOUS_TTL_SECONDS: ${URL_CACHE_MALICIOUS_TTL_SECONDS:-86400}
+  URL_CACHE_OTHER_TTL_SECONDS: ${URL_CACHE_OTHER_TTL_SECONDS:-300}
+  URL_CACHE_ERROR_TTL_SECONDS: ${URL_CACHE_ERROR_TTL_SECONDS:-30}
+  URL_CACHE_TIMEOUT_MS: ${URL_CACHE_TIMEOUT_MS:-200}
+  URL_CACHE_HMAC_KEY: ${URL_CACHE_HMAC_KEY:?append the URL protection keys from .env.example}
+  URL_SCAN_TIME_FETCH: ${URL_SCAN_TIME_FETCH:-suspicious}
+  URL_FETCH_MAX_HOPS: ${URL_FETCH_MAX_HOPS:-8}
+  URL_FETCH_SUSPICIOUS_HOPS: ${URL_FETCH_SUSPICIOUS_HOPS:-4}
+  URL_FETCH_CONNECT_TIMEOUT_MS: ${URL_FETCH_CONNECT_TIMEOUT_MS:-3000}
+  URL_FETCH_HEADER_TIMEOUT_MS: ${URL_FETCH_HEADER_TIMEOUT_MS:-5000}
+  URL_FETCH_TOTAL_TIMEOUT_MS: ${URL_FETCH_TOTAL_TIMEOUT_MS:-10000}
+  URL_FETCH_MAX_BODY_BYTES: ${URL_FETCH_MAX_BODY_BYTES:-262144}
+  URL_FETCH_MAX_HEADER_BYTES: ${URL_FETCH_MAX_HEADER_BYTES:-16384}
+  URL_FETCH_CONCURRENCY: ${URL_FETCH_CONCURRENCY:-8}
+  URL_FETCH_ALLOWED_PORTS: ${URL_FETCH_ALLOWED_PORTS:-80,443}
+  URL_FETCH_DENY_CIDRS: ${URL_FETCH_DENY_CIDRS:-}
+  URL_FETCH_DENY_HOSTS: ${URL_FETCH_DENY_HOSTS:-}
+  URL_FETCH_USER_AGENT: ${URL_FETCH_USER_AGENT:-Mozilla/5.0 (compatible; EmailGatewayLinkScanner/1.0)}
+  URL_FETCH_EGRESS_PROXY_URL: ${URL_FETCH_EGRESS_PROXY_URL:-}
+  URL_EGRESS_PROXY_TOKEN: ${URL_EGRESS_PROXY_TOKEN:?append the URL protection keys from .env.example}
+  # The test CA (volume test-pki, created by the smtp-test profile's test-pki job).
+  URL_FETCH_CA_FILE: /pki/ca/ca.pem
+  URL_FETCH_TEST_ALLOW_CIDRS: 203.0.113.0/24
+  URL_FETCH_TEST_DIAL_MAP: ''
+  URL_SHORTENER_HOSTS_FILE: ''
+  URL_SHORTENER_EXTRA_HOSTS: ${URL_SHORTENER_EXTRA_HOSTS:-}
+  URL_PROTECTED_BRANDS_FILE: ''
+  URL_PROTECTED_EXTRA_DOMAINS: ${URL_PROTECTED_EXTRA_DOMAINS:-}
+  URL_LOOKALIKE_MIN_LABEL: ${URL_LOOKALIKE_MIN_LABEL:-5}
+  URL_LOOKALIKE_LONG_LABEL: ${URL_LOOKALIKE_LONG_LABEL:-9}
+  URL_LOOKALIKE_MAX_DISTANCE_SHORT: ${URL_LOOKALIKE_MAX_DISTANCE_SHORT:-1}
+  URL_LOOKALIKE_MAX_DISTANCE_LONG: ${URL_LOOKALIKE_MAX_DISTANCE_LONG:-2}
+  URL_LOOKALIKE_HIGH_SCORE: ${URL_LOOKALIKE_HIGH_SCORE:-0.85}
+  URL_CLICK_BASE_URL: ${URL_CLICK_BASE_URL:-http://localhost:3080}
+  URL_TOKEN_KEY_CURRENT: ${URL_TOKEN_KEY_CURRENT:?append the URL protection keys from .env.example}
+  URL_TOKEN_KEY_CURRENT_ID: ${URL_TOKEN_KEY_CURRENT_ID:-1}
+  URL_TOKEN_KEY_PREVIOUS: ${URL_TOKEN_KEY_PREVIOUS:-}
+  URL_TOKEN_KEY_PREVIOUS_ID: ${URL_TOKEN_KEY_PREVIOUS_ID:-}
+
 x-rabbitmq-cluster-node: &rabbitmq-cluster-node
   image: rabbitmq:4.1-management-alpine
   profiles: [rabbitmq-cluster]
@@ -127,6 +200,9 @@ services:
       MYSQL_READER_PASSWORD: ${MYSQL_READER_PASSWORD:?}
       MYSQL_REPLICATION_USER: ${MYSQL_REPLICATION_USER:?}
       MYSQL_REPLICATION_PASSWORD: ${MYSQL_REPLICATION_PASSWORD:?}
+      # Click-service account (step 4.3 §3.9): table grants only, see 01-users.sh.
+      MYSQL_CLICK_USER: ${MYSQL_CLICK_USER:-gateway_click}
+      MYSQL_CLICK_PASSWORD: ${MYSQL_CLICK_PASSWORD:?append the URL protection keys from .env.example}
     volumes:
       - mysql-data:/var/lib/mysql
       - ./infrastructure/mysql/conf.d/gateway.cnf:/etc/mysql/conf.d/gateway.cnf:ro
@@ -192,6 +268,8 @@ services:
       MYSQL_READER_PASSWORD: ${MYSQL_READER_PASSWORD:?}
       MYSQL_REPLICATION_USER: ${MYSQL_REPLICATION_USER:?}
       MYSQL_REPLICATION_PASSWORD: ${MYSQL_REPLICATION_PASSWORD:?}
+      MYSQL_CLICK_USER: ${MYSQL_CLICK_USER:-gateway_click}
+      MYSQL_CLICK_PASSWORD: ${MYSQL_CLICK_PASSWORD:?append the URL protection keys from .env.example}
     volumes:
       - ./infrastructure/mysql/replica/setup-replica.sh:/setup/setup-replica.sh:ro
       - ./infrastructure/mysql/init/01-users.sh:/setup/01-users.sh:ro
@@ -209,6 +287,10 @@ services:
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
       - ./infrastructure/rabbitmq/rabbitmq.conf:/etc/rabbitmq/conf.d/20-gateway.conf:ro
+    # url-sandbox (step 4.3 U15): the browser worker's only broker path (it has no other route).
+    networks:
+      default: {}
+      url-sandbox: { aliases: [rabbitmq] }
     ports:
       [
         '127.0.0.1:${RABBITMQ_HOST_PORT:-5672}:5672',
@@ -243,6 +325,9 @@ services:
       # Scan role of the email-worker (step 4.1 S2): reads scan.spam only.
       RABBITMQ_SCANNER_USER: ${RABBITMQ_SCANNER_USER:-eg-scanner}
       RABBITMQ_SCANNER_PASSWORD: ${RABBITMQ_SCANNER_PASSWORD:?append the security scanning keys from .env.example}
+      # Browser worker (step 4.3 U2): reads scan.url.inspect, publishes inspection_completed only.
+      RABBITMQ_URL_BROWSER_USER: ${RABBITMQ_URL_BROWSER_USER:-eg-url-browser}
+      RABBITMQ_URL_BROWSER_PASSWORD: ${RABBITMQ_URL_BROWSER_PASSWORD:?append the URL protection keys from .env.example}
     volumes: ['./infrastructure/rabbitmq:/rabbitmq:ro']
     depends_on:
       rabbitmq: { condition: service_healthy }
@@ -298,6 +383,8 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?}
       S3_BUCKET_MAIL: ${S3_BUCKET_MAIL:?}
       S3_BUCKET_ARCHIVE: ${S3_BUCKET_ARCHIVE:?}
+      # Step 4.3 U11: lifecycle rule expiring objects tagged eg-object=rewrite.
+      URL_REWRITE_OBJECT_RETENTION_DAYS: ${URL_REWRITE_OBJECT_RETENTION_DAYS:-30}
       MC_CONFIG_DIR: /tmp/mc
     volumes: ['./infrastructure/minio/init-buckets.sh:/init-buckets.sh:ro']
     depends_on:
@@ -691,13 +778,52 @@ services:
     # for scan.test (scan corpus SPF/DKIM/DMARC, test RBL/DBL; rspamd's resolver locally/in CI);
     # refuses all else.
     # Distroless image: no shell, so no health check (dependants wait for service_started).
+    # Since step 4.3 (U19) also the URL corpus (url-test.hosts, mapped-v6.test, rebind.test
+    # forwarded to url-test 172.31.250.60:5300 without cache) and published on 127.0.0.1 for
+    # host-run suites (URL_DNS_SERVERS=127.0.0.1:${DNS_SINK_HOST_PORT}).
     profiles: [smtp-test]
     image: coredns/coredns:1.11.3
     restart: unless-stopped
     command: ['-conf', '/etc/coredns/Corefile']
     volumes: ['./infrastructure/dns-sink:/etc/coredns:ro']
+    ports:
+      [
+        '127.0.0.1:${DNS_SINK_HOST_PORT:-1053}:53/udp',
+        '127.0.0.1:${DNS_SINK_HOST_PORT:-1053}:53/tcp',
+      ]
     networks:
       mailtest: { ipv4_address: 172.31.250.53 }
+
+  url-test:
+    # TEST-ONLY local "Internet" of step 4.3 (U19): HTTP 80 / HTTPS 443 for every corpus name
+    # (infrastructure/url-test/server.mjs, generated content only) and the rebinding DNS
+    # responder on 5300 (dns.mjs, reached through dns-sink). No build, no dependencies.
+    profiles: [smtp-test]
+    image: node:22-alpine
+    restart: unless-stopped
+    command: ['node', '/url-test/server.mjs']
+    read_only: true
+    mem_limit: 128m
+    volumes:
+      - ./infrastructure/url-test:/url-test:ro
+      - test-pki:/pki:ro
+    environment:
+      URL_TEST_PKI_DIR: /pki/url-test
+    networks:
+      urltest: { ipv4_address: 203.0.113.10 }
+      mailtest: { ipv4_address: 172.31.250.60 }
+    ports:
+      [
+        '127.0.0.1:${URL_TEST_HTTP_HOST_PORT:-18080}:80',
+        '127.0.0.1:${URL_TEST_HTTPS_HOST_PORT:-18443}:443',
+      ]
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://127.0.0.1/health']
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    depends_on:
+      test-pki: { condition: service_completed_successfully }
 
   smtp-tools:
     # swaks, smtp-source/smtp-sink, openssl, dig, nc. Use: docker compose exec smtp-tools swaks …
@@ -738,6 +864,33 @@ services:
       mysql: { condition: service_healthy }
     restart: 'no'
 
+  mysql-grants:
+    # One-shot (step 4.3 §3.9): re-runs the idempotent 01-users.sh after the migrations, so table
+    # grants of gateway_click (tables created by the url_protection migration) exist on fresh
+    # volumes. Same image and host as mysql-replica-setup.
+    profiles: [apps]
+    image: mysql:8.4
+    restart: 'no'
+    entrypoint: ['/bin/bash', '/setup/01-users.sh']
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?run pnpm env:init}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:?}
+      MYSQL_APP_USER: ${MYSQL_APP_USER:?}
+      MYSQL_APP_PASSWORD: ${MYSQL_APP_PASSWORD:?}
+      MYSQL_MIGRATOR_USER: ${MYSQL_MIGRATOR_USER:?}
+      MYSQL_MIGRATOR_PASSWORD: ${MYSQL_MIGRATOR_PASSWORD:?}
+      MYSQL_READER_USER: ${MYSQL_READER_USER:?}
+      MYSQL_READER_PASSWORD: ${MYSQL_READER_PASSWORD:?}
+      MYSQL_REPLICATION_USER: ${MYSQL_REPLICATION_USER:?}
+      MYSQL_REPLICATION_PASSWORD: ${MYSQL_REPLICATION_PASSWORD:?}
+      MYSQL_CLICK_USER: ${MYSQL_CLICK_USER:-gateway_click}
+      MYSQL_CLICK_PASSWORD: ${MYSQL_CLICK_PASSWORD:?append the URL protection keys from .env.example}
+    volumes: ['./infrastructure/mysql/init/01-users.sh:/setup/01-users.sh:ro']
+    depends_on:
+      mysql: { condition: service_healthy }
+      db-migrate: { condition: service_completed_successfully }
+
   api:
     <<: *node-service
     build:
@@ -754,6 +907,15 @@ services:
       # Dead-letter replay and queue stats (step 3.2 Q9): role user eg-ops.
       RABBITMQ_OPS_URL: amqp://${RABBITMQ_OPS_USER:-eg-ops}:${RABBITMQ_OPS_PASSWORD:?append the RabbitMQ keys from .env.example}@rabbitmq:5672/${RABBITMQ_VHOST:-email-gateway}
       DEAD_LETTER_REPLAY_SCAN_MAX: ${DEAD_LETTER_REPLAY_SCAN_MAX:-10000}
+      # URL protection (step 4.3 U13): the platform settings the url settings route validates
+      # tenant overrides against (same keys as the email-worker / click-service). No URL secret.
+      URL_SCAN_TIME_FETCH: ${URL_SCAN_TIME_FETCH:-suspicious}
+      URL_REWRITE_ENABLED: ${URL_REWRITE_ENABLED:-true}
+      URL_REWRITE_DIRECTIONS: ${URL_REWRITE_DIRECTIONS:-inbound}
+      URL_REWRITE_DKIM_SIGNED: ${URL_REWRITE_DKIM_SIGNED:-rewrite}
+      URL_TOKEN_DEFAULT_EXPIRY_DAYS: ${URL_TOKEN_DEFAULT_EXPIRY_DAYS:-30}
+      URL_TOKEN_MAX_EXPIRY_DAYS: ${URL_TOKEN_MAX_EXPIRY_DAYS:-90}
+      URL_DYNAMIC_INSPECTION: ${URL_DYNAMIC_INSPECTION:-on}
       # Only the api reads from the replica (control-plane reads). Data-plane services are writer-only.
       DATABASE_READ_URL: mysql://${MYSQL_READER_USER:?}:${MYSQL_READER_PASSWORD:?}@mysql-replica:3306/${MYSQL_DATABASE:?}
       DATABASE_READ_MAX_LAG_SECONDS: ${DATABASE_READ_MAX_LAG_SECONDS:-10}
@@ -934,7 +1096,7 @@ services:
       rspamd: { condition: service_healthy }
       clamav: { condition: service_healthy }
     environment:
-      <<: [*node-env, *scan-platform-env]
+      <<: [*node-env, *scan-platform-env, *url-platform-env]
       HTTP_PORT: 3020
       # Consumes email.received (step 3.2): role user eg-email-worker.
       RABBITMQ_EMAIL_WORKER_URL: amqp://${RABBITMQ_EMAIL_WORKER_USER:-eg-email-worker}:${RABBITMQ_EMAIL_WORKER_PASSWORD:?append the RabbitMQ keys from .env.example}@rabbitmq:5672/${RABBITMQ_VHOST:-email-gateway}
@@ -943,7 +1105,7 @@ services:
       # the engine version).
       RABBITMQ_SCANNER_URL: amqp://${RABBITMQ_SCANNER_USER:-eg-scanner}:${RABBITMQ_SCANNER_PASSWORD:?append the security scanning keys from .env.example}@rabbitmq:5672/${RABBITMQ_VHOST:-email-gateway}
       SCAN_ENABLED: ${SCAN_ENABLED:-true}
-      SCAN_ENGINES: ${SCAN_ENGINES:-rspamd,attachment}
+      SCAN_ENGINES: ${SCAN_ENGINES:-rspamd,attachment,url}
       # Engine consumers of this replica (subset of SCAN_ENGINES; empty = every enabled engine).
       SCAN_CONSUMERS: ${SCAN_CONSUMERS:-}
       SCAN_RSPAMD_URL: http://rspamd:11333
@@ -1049,6 +1211,38 @@ services:
       MIME_ARCHIVE_MAX_RATIO: ${MIME_ARCHIVE_MAX_RATIO:-100}
       MIME_ARCHIVE_MAX_TOTAL_UNCOMPRESSED_BYTES: ${MIME_ARCHIVE_MAX_TOTAL_UNCOMPRESSED_BYTES:-1073741824}
       MIME_ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES: ${MIME_ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES:-8388608}
+      # URL protection (step 4.3, docs/plan/steps/11-url-protection.md §5): the url engine, the
+      # results consumer and the inspection sweeper. Container values: DNS only through dns-sink,
+      # the TEST-ONLY documentation-range allowance for url-test (203.0.113.10), the test CA
+      # (shared keys: x-url-platform-env, merged above).
+      SCAN_URL_CONCURRENCY: ${SCAN_URL_CONCURRENCY:-4}
+      SCAN_URL_TIMEOUT_MS: ${SCAN_URL_TIMEOUT_MS:-120000}
+      SCAN_URL_MAX_ATTEMPTS: ${SCAN_URL_MAX_ATTEMPTS:-6}
+      URL_MAX_PER_MESSAGE: ${URL_MAX_PER_MESSAGE:-200}
+      URL_MAX_OCCURRENCES: ${URL_MAX_OCCURRENCES:-5000}
+      URL_MAX_LENGTH: ${URL_MAX_LENGTH:-2048}
+      URL_MAX_PART_BYTES: ${URL_MAX_PART_BYTES:-10485760}
+      URL_MAX_EXTRA_PARTS: ${URL_MAX_EXTRA_PARTS:-5}
+      URL_EXTRA_PART_MAX_BYTES: ${URL_EXTRA_PART_MAX_BYTES:-2097152}
+      URL_EXTRACT_TIMEOUT_MS: ${URL_EXTRACT_TIMEOUT_MS:-5000}
+      URL_FETCH_MAX_PER_MESSAGE: ${URL_FETCH_MAX_PER_MESSAGE:-10}
+      URL_REWRITE_ENABLED: ${URL_REWRITE_ENABLED:-true}
+      URL_REWRITE_DIRECTIONS: ${URL_REWRITE_DIRECTIONS:-inbound}
+      URL_REWRITE_DKIM_SIGNED: ${URL_REWRITE_DKIM_SIGNED:-rewrite}
+      URL_REWRITE_MAX_MESSAGE_BYTES: ${URL_REWRITE_MAX_MESSAGE_BYTES:-26214400}
+      URL_REWRITE_MAX_PART_BYTES: ${URL_REWRITE_MAX_PART_BYTES:-5242880}
+      URL_REWRITE_OBJECT_RETENTION_DAYS: ${URL_REWRITE_OBJECT_RETENTION_DAYS:-30}
+      URL_TOKEN_DEFAULT_EXPIRY_DAYS: ${URL_TOKEN_DEFAULT_EXPIRY_DAYS:-30}
+      URL_TOKEN_MAX_EXPIRY_DAYS: ${URL_TOKEN_MAX_EXPIRY_DAYS:-90}
+      URL_DYNAMIC_INSPECTION: ${URL_DYNAMIC_INSPECTION:-on}
+      URL_DYNAMIC_MAX_PER_MESSAGE: ${URL_DYNAMIC_MAX_PER_MESSAGE:-3}
+      URL_DYNAMIC_PENDING_TTL_SECONDS: ${URL_DYNAMIC_PENDING_TTL_SECONDS:-3600}
+      URL_DYNAMIC_SWEEP_INTERVAL_MS: ${URL_DYNAMIC_SWEEP_INTERVAL_MS:-60000}
+    networks:
+      default: {}
+      mailtest: {}
+      urltest: {}
+    volumes: ['test-pki:/pki:ro']
     ports: ['127.0.0.1:${EMAIL_WORKER_HOST_PORT:-3020}:3020']
     healthcheck:
       <<: *node-healthcheck
@@ -1192,7 +1386,7 @@ services:
       RECONCILE_MAX_REDRIVES: ${RECONCILE_MAX_REDRIVES:-3}
       RECONCILE_LOOKBACK_HOURS: ${RECONCILE_LOOKBACK_HOURS:-72}
       RECONCILE_BATCH_SIZE: ${RECONCILE_BATCH_SIZE:-1000}
-      RECONCILE_QUEUES: ${RECONCILE_QUEUES:-email.received,email.delivery.pending,scan.spam,scan.attachment}
+      RECONCILE_QUEUES: ${RECONCILE_QUEUES:-email.received,email.delivery.pending,scan.spam,scan.attachment,scan.url}
       RECONCILE_START_POSITION: ${RECONCILE_START_POSITION:-oldest}
       # Message lifecycle jobs (step 3.3 L13, L14; docs/plan/steps/08-message-lifecycle.md §5).
       LIFECYCLE_EXPIRY_ENABLED: ${LIFECYCLE_EXPIRY_ENABLED:-true}
@@ -1272,6 +1466,174 @@ services:
           'node',
           '-e',
           "fetch('http://127.0.0.1:3060/health/ready').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))",
+        ]
+
+  # Time-of-click service (step 4.3 U14, ADR-0031): public 3080 (GET /c/:token), admin 3081
+  # (health, metrics). Its own MySQL account (CLICK_DATABASE_URL), Redis for rate limits and the
+  # URL cache; no S3, no RabbitMQ, no app DATABASE_URL (x-node-env is not used on purpose).
+  click-service:
+    profiles: [apps]
+    restart: unless-stopped
+    build:
+      {
+        context: .,
+        dockerfile: infrastructure/docker/node-service.Dockerfile,
+        args: { APP: click-service },
+      }
+    image: email-gateway/click-service:local
+    depends_on:
+      mysql-grants: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    environment:
+      <<: *url-platform-env
+      NODE_ENV: production
+      APP_ENV: local
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      SERVICE_VERSION: ${SERVICE_VERSION:-0.1.0-local}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      HTTP_HOST: 0.0.0.0
+      CLICK_HTTP_PORT: 3080
+      CLICK_ADMIN_PORT: 3081
+      CLICK_DATABASE_URL: mysql://${MYSQL_CLICK_USER:-gateway_click}:${MYSQL_CLICK_PASSWORD:?append the URL protection keys from .env.example}@mysql:3306/${MYSQL_DATABASE:?}
+      DATABASE_SOCKET_TIMEOUT_SECONDS: ${DATABASE_SOCKET_TIMEOUT_SECONDS:-0}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?}@redis:6379/0
+      CLICK_DB_TX_TIMEOUT_MS: ${CLICK_DB_TX_TIMEOUT_MS:-120000}
+      CLICK_RATE_LIMIT_IP_PER_MINUTE: ${CLICK_RATE_LIMIT_IP_PER_MINUTE:-120}
+      CLICK_RATE_LIMIT_TOKEN_PER_MINUTE: ${CLICK_RATE_LIMIT_TOKEN_PER_MINUTE:-30}
+      CLICK_RATE_LIMIT_INVALID_PER_MINUTE: ${CLICK_RATE_LIMIT_INVALID_PER_MINUTE:-20}
+      CLICK_RECHECK_BUDGET_MS: ${CLICK_RECHECK_BUDGET_MS:-2500}
+      CLICK_EVENT_WRITE_WAIT_MS: ${CLICK_EVENT_WRITE_WAIT_MS:-300}
+      CLICK_EVENT_MAX_PENDING: ${CLICK_EVENT_MAX_PENDING:-1000}
+      CLICK_CONTINUE_TTL_SECONDS: ${CLICK_CONTINUE_TTL_SECONDS:-600}
+      CLICK_TRUST_PROXY: ${CLICK_TRUST_PROXY:-0}
+      CLICK_STORE_CLIENT_NETWORK: ${CLICK_STORE_CLIENT_NETWORK:-true}
+    networks:
+      default: {}
+      mailtest: {}
+      urltest: {}
+    volumes: ['test-pki:/pki:ro']
+    ports:
+      [
+        '127.0.0.1:${CLICK_SERVICE_HOST_PORT:-3080}:3080',
+        '127.0.0.1:${CLICK_SERVICE_ADMIN_HOST_PORT:-3081}:3081',
+      ]
+    healthcheck:
+      <<: *node-healthcheck
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3081/health/ready').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))",
+        ]
+
+  # Isolated dynamic inspection (step 4.3 U15, ADR-0032), profile url-browser ONLY (never together
+  # with analytics/observability on the 8 GB VM). Headless Chromium behind the egress proxy; the
+  # container holds no DB/S3/Redis/token/cache secret and sits on the internal url-sandbox network
+  # only (rabbitmq and url-egress-proxy). Its published port works only where Docker allows
+  # publishing for a container without an external network (see §12 WP2).
+  url-browser-worker:
+    profiles: [url-browser]
+    restart: unless-stopped
+    build: { context: ., dockerfile: infrastructure/docker/url-browser-worker.Dockerfile }
+    image: email-gateway/url-browser-worker:local
+    command: ['node', '--enable-source-maps', 'dist/main.js']
+    read_only: true
+    tmpfs: ['/tmp:size=256m,mode=1777']
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    pids_limit: 256
+    mem_limit: 1g
+    cpus: 1
+    user: '1000:1000'
+    depends_on:
+      rabbitmq: { condition: service_healthy }
+      rabbitmq-init: { condition: service_completed_successfully }
+      url-egress-proxy: { condition: service_healthy }
+    environment:
+      NODE_ENV: production
+      APP_ENV: local
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      SERVICE_VERSION: ${SERVICE_VERSION:-0.1.0-local}
+      HTTP_HOST: 0.0.0.0
+      URL_BROWSER_HTTP_PORT: ${URL_BROWSER_HTTP_PORT:-3090}
+      RABBITMQ_URL_BROWSER_URL: amqp://${RABBITMQ_URL_BROWSER_USER:-eg-url-browser}:${RABBITMQ_URL_BROWSER_PASSWORD:?append the URL protection keys from .env.example}@rabbitmq:5672/${RABBITMQ_VHOST:-email-gateway}
+      URL_BROWSER_PROXY_URL: http://url-egress-proxy:3128
+      URL_EGRESS_PROXY_TOKEN: ${URL_EGRESS_PROXY_TOKEN:?append the URL protection keys from .env.example}
+      URL_BROWSER_CONCURRENCY: ${URL_BROWSER_CONCURRENCY:-1}
+      URL_BROWSER_JOB_TIMEOUT_MS: ${URL_BROWSER_JOB_TIMEOUT_MS:-20000}
+      URL_BROWSER_NAVIGATION_TIMEOUT_MS: ${URL_BROWSER_NAVIGATION_TIMEOUT_MS:-15000}
+      URL_BROWSER_MAX_JOBS_PER_BROWSER: ${URL_BROWSER_MAX_JOBS_PER_BROWSER:-50}
+      URL_BROWSER_MAX_RSS_MB: ${URL_BROWSER_MAX_RSS_MB:-768}
+      URL_PROTECTED_BRANDS_FILE: ''
+      URL_PROTECTED_EXTRA_DOMAINS: ${URL_PROTECTED_EXTRA_DOMAINS:-}
+    networks:
+      url-sandbox: {}
+    ports: ['127.0.0.1:${URL_BROWSER_HOST_PORT:-3090}:3090']
+    healthcheck:
+      <<: *node-healthcheck
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3090/health/ready').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))",
+        ]
+
+  # Egress proxy of the browser worker (U15): authenticated HTTP forward/CONNECT proxy that runs
+  # the SSRF guard + restricted resolver (dns-sink) per request and dials the validated IP. Same
+  # image as url-browser-worker (built there; one build, never in parallel on the 8 GB VM).
+  url-egress-proxy:
+    profiles: [url-browser]
+    restart: unless-stopped
+    image: email-gateway/url-browser-worker:local
+    pull_policy: never
+    command: ['node', '--enable-source-maps', 'dist/proxy-main.js']
+    read_only: true
+    tmpfs: ['/tmp:size=16m,mode=1777']
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    pids_limit: 64
+    mem_limit: 256m
+    user: '1000:1000'
+    environment:
+      NODE_ENV: production
+      APP_ENV: local
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      SERVICE_VERSION: ${SERVICE_VERSION:-0.1.0-local}
+      HTTP_HOST: 0.0.0.0
+      URL_EGRESS_PORT: ${URL_EGRESS_PORT:-3128}
+      URL_EGRESS_ADMIN_PORT: ${URL_EGRESS_ADMIN_PORT:-3091}
+      URL_EGRESS_PROXY_TOKEN: ${URL_EGRESS_PROXY_TOKEN:?append the URL protection keys from .env.example}
+      URL_EGRESS_MAX_CONNECTIONS: ${URL_EGRESS_MAX_CONNECTIONS:-64}
+      URL_EGRESS_MAX_BYTES_PER_CONNECTION: ${URL_EGRESS_MAX_BYTES_PER_CONNECTION:-10485760}
+      URL_EGRESS_IDLE_TIMEOUT_MS: ${URL_EGRESS_IDLE_TIMEOUT_MS:-15000}
+      URL_EGRESS_MAX_CONNECTION_MS: ${URL_EGRESS_MAX_CONNECTION_MS:-30000}
+      URL_DNS_SERVERS: 172.31.250.53
+      URL_DNS_TIMEOUT_MS: ${URL_DNS_TIMEOUT_MS:-2000}
+      URL_DNS_TRIES: ${URL_DNS_TRIES:-2}
+      URL_FETCH_ALLOWED_PORTS: ${URL_FETCH_ALLOWED_PORTS:-80,443}
+      URL_FETCH_DENY_CIDRS: ${URL_FETCH_DENY_CIDRS:-}
+      URL_FETCH_DENY_HOSTS: ${URL_FETCH_DENY_HOSTS:-}
+      URL_FETCH_CONNECT_TIMEOUT_MS: ${URL_FETCH_CONNECT_TIMEOUT_MS:-3000}
+      # TEST-ONLY (APP_ENV=local): url-test lives in TEST-NET-3; the dial map is never used here.
+      URL_FETCH_TEST_ALLOW_CIDRS: 203.0.113.0/24
+      URL_FETCH_TEST_DIAL_MAP: ''
+      URL_CLICK_BASE_URL: ${URL_CLICK_BASE_URL:-http://localhost:3080}
+    networks:
+      default: {}
+      url-sandbox: { aliases: [url-egress-proxy] }
+      mailtest: {}
+      urltest: {}
+    ports: ['127.0.0.1:${URL_EGRESS_ADMIN_HOST_PORT:-3091}:3091']
+    healthcheck:
+      <<: *node-healthcheck
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3091/health/ready').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))",
         ]
 
   admin-portal:
@@ -1467,7 +1829,8 @@ networks:
   # Isolated mail test network (step 2.2 D17): dns-sink .53, mail-sink .25, plus postfix-outbound
   # and smtp-tools. Fixed subnet so dns-sink can be the outbound MTA's only resolver. Step 2.3:
   # postfix (gateway MX) .10, sink-m365 .26, sink-google .27, sink-google-alt .28, relay-sink .29,
-  # reinject-forwarder .30. Dynamic addresses come from the upper half only (ip_range), so they
+  # reinject-forwarder .30. Step 4.3: url-test .60 (rebinding DNS responder for dns-sink); the
+  # email-worker, click-service and url-egress-proxy join it to resolve through dns-sink. Dynamic addresses come from the upper half only (ip_range), so they
   # can never take one of the fixed addresses.
   mailtest:
     ipam:
@@ -1479,4 +1842,16 @@ networks:
   # attached only here, together with postfix-outbound (its only milter client) and redis-dkim
   # (its key store). internal: no route outside the network, nothing published.
   dkim-signing:
+    internal: true
+  # TEST-ONLY "Internet" of step 4.3 (U19): TEST-NET-3, url-test fixed at .10; dynamic addresses
+  # (email-worker, click-service, url-egress-proxy) come from the upper half only.
+  urltest:
+    ipam:
+      config:
+        - subnet: 203.0.113.0/24
+          gateway: 203.0.113.1
+          ip_range: 203.0.113.128/25
+  # The browser worker's network (U15): internal (no route out); only url-egress-proxy and
+  # rabbitmq are on it.
+  url-sandbox:
     internal: true

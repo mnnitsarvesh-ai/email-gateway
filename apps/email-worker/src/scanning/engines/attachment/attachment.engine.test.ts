@@ -31,7 +31,7 @@ import { BUNDLED_RULES_DIR } from './inspector/bundle';
 import { inspectBytes } from './inspector/inspect';
 import type { InspectOutcome } from './inspector/pool';
 import { YaraXScanner } from './inspector/yara-scanner';
-import type { PartRead, PartSource } from './part-reader';
+import type { PartRead, PartSource } from '../../parts/part-reader';
 import type { KnownHashHit } from './verdict-mapper';
 
 const ORG = 7n;

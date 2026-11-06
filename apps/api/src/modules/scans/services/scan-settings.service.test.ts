@@ -282,7 +282,7 @@ describe('ScanSettingsService (step 4.1 S8, S16)', () => {
       updatedAt: new Date('2026-11-05T09:00:00Z'),
     });
     const list = await service.list(scope);
-    expect(list.data.map((view) => view.engine)).toEqual(['rspamd', 'attachment']);
+    expect(list.data.map((view) => view.engine)).toEqual(['rspamd', 'attachment', 'url']);
     expect(list.data[0]).toMatchObject({
       engine: 'rspamd',
       version: 2,
@@ -331,6 +331,67 @@ describe('ScanSettingsService (step 4.1 S8, S16)', () => {
         ),
       ),
     ).toMatchObject({ status: 422, code: 'scan_settings_invalid' });
+    expect(row()).toBeNull();
+  });
+
+  it('replaces the url override with normalized domains, audited (step 4.3 U13)', async () => {
+    const { service, audits, row } = fakeStore();
+    const view = await service.replace(
+      user,
+      scope,
+      'url',
+      {
+        expectedVersion: 0,
+        settings: {
+          allowedDomains: ['Partner.Example.'],
+          blockedDomains: ['bücher.example'],
+          click: { suspicious: 'block' },
+        },
+      },
+      client,
+    );
+    expect(view).toMatchObject({
+      engine: 'url',
+      version: 1,
+      overrideApplied: true,
+      effective: {
+        allowedDomains: ['partner.example'],
+        blockedDomains: ['xn--bcher-kva.example'],
+        click: { suspicious: 'block', unknown: 'warn' },
+      },
+    });
+    expect(row()?.settings).toEqual({
+      allowedDomains: ['partner.example'],
+      blockedDomains: ['xn--bcher-kva.example'],
+      click: { suspicious: 'block' },
+    });
+    expect(audits).toEqual([
+      expect.objectContaining({
+        action: 'scan_settings.updated',
+        resourceId: 'url',
+        metadata: expect.objectContaining({
+          engine: 'url',
+          after: expect.objectContaining({ allowedDomains: ['partner.example'] }),
+        }),
+      }),
+    ]);
+  });
+
+  it('refuses a url override with a public suffix (422) before any transaction', async () => {
+    const { service, row } = fakeStore();
+    const result = await codeOf(
+      service.replace(
+        user,
+        scope,
+        'url',
+        { expectedVersion: 0, settings: { blockedDomains: ['co.uk'] } },
+        client,
+      ),
+    );
+    expect(result).toMatchObject({ status: 422, code: 'scan_settings_invalid' });
+    expect((result.error as { details: { violations: unknown[] } }).details.violations).toEqual([
+      expect.objectContaining({ path: 'blockedDomains.0', code: 'invalid' }),
+    ]);
     expect(row()).toBeNull();
   });
 });

@@ -16,12 +16,13 @@ import {
 import { createLogger } from '@email-gateway/logger';
 import { MIME_QUEUE, type WorkerConfig } from './config';
 import { MimeIngestionModule } from './mime-ingestion/mime-ingestion.module';
-import { runsAttachmentConsumer } from './scanning/config';
+import { runsAttachmentConsumer, runsUrlConsumer } from './scanning/config';
 import {
   ClamavHealth,
   InspectorHealth,
   ScannerBrokerHealth,
   ScanningModule,
+  UrlEngineHealth,
 } from './scanning/scanning.module';
 
 export const SERVICE_NAME = 'email-worker';
@@ -61,6 +62,8 @@ export class AppModule {
     if (scanning) indicators.push(ScannerBrokerHealth);
     // Step 4.2 A12: clamd PING and the inspector pool on replicas running the attachment engine.
     if (scanning && runsAttachmentConsumer(config)) indicators.push(ClamavHealth, InspectorHealth);
+    // Step 4.3 U3: Redis (URL cache) and the DNS resolver on replicas running the url engine.
+    if (scanning && runsUrlConsumer(config)) indicators.push(UrlEngineHealth);
     indicators.push(RedisService, S3Service);
     return {
       module: AppModule,

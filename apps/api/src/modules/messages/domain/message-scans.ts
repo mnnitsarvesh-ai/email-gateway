@@ -6,6 +6,16 @@ import {
   fileTypeFamilySchema,
   fileTypeIdSchema,
   isAttachmentReasonCode,
+  isUrlReasonCode,
+  REWRITE_SKIP_REASONS,
+  URL_ENGINE_LEVEL_CODES,
+  URL_SOURCES,
+  urlChainEntrySchema,
+  urlDynamicSignalsSchema,
+  urlLandingSchema,
+  urlLookalikeFindingSchema,
+  urlReputationAnswerSchema,
+  type UrlReasonCode,
 } from '@email-gateway/security-contracts';
 import { z } from 'zod';
 import type {
@@ -15,14 +25,21 @@ import type {
   ScanEngineResultView,
   ScanRoundView,
   ScanSymbol,
+  UrlRewriteView,
+  UrlScanView,
 } from '../dto/message-scans.schemas';
 import type {
   AttachmentPartRow,
   AttachmentResultRow,
   AuthResultRow,
   EngineResultRow,
+  MessageUrlRow,
   SandboxSubmissionRow,
   ScanRoundRow,
+  UrlClickSummaryRow,
+  UrlInspectionRow,
+  UrlResultRow,
+  UrlRewriteRow,
 } from '../repositories/message-scans-read.repository';
 
 /**
@@ -103,15 +120,15 @@ function attemptOf(row: EngineResultRow, coarse: boolean): ScanAttempt {
 
 /**
  * One engine of a round: the final row as the result (if any), every row as an attempt. For the
- * `attachment` engine the durations are withheld and the times rounded down to the second: its
- * content cache is shared across organizations (A10), and a fast result would tell a tenant
- * that another organization received the same file. Operators keep the exact values in
+ * `attachment` and `url` engines the durations are withheld and the times rounded down to the
+ * second: their caches are shared across organizations (A10, U6), and a fast result would tell
+ * a tenant that another organization received the same file or URL. Operators keep the exact values in
  * `scan_engine_results` and the metrics.
  */
 export function engineOf(engine: string, rows: readonly EngineResultRow[]): ScanEngineResultView {
   const sorted = [...rows].sort((a, b) => a.attempt - b.attempt);
   const final = sorted.find((row) => row.isFinal) ?? null;
-  const coarse = engine === ATTACHMENT_ENGINE;
+  const coarse = COARSE_ENGINES.has(engine);
   const completedAt = (value: Date): string => (coarse ? toSecond(value) : value.toISOString());
   return {
     engine,
@@ -132,6 +149,13 @@ export function engineOf(engine: string, rows: readonly EngineResultRow[]): Scan
 
 /** The attachment engine's name (step 4.2 A1). */
 export const ATTACHMENT_ENGINE = 'attachment';
+/** The URL engine's name (step 4.3 U1). */
+export const URL_ENGINE = 'url';
+/**
+ * Engines whose durations are withheld and times rounded to the second: their caches are shared
+ * across organizations (attachment content cache A10; URL reputation/chain/dynamic caches U6).
+ */
+const COARSE_ENGINES: ReadonlySet<string> = new Set([ATTACHMENT_ENGINE, URL_ENGINE]);
 
 /** The per-attachment rows of a page with the display metadata they are joined with. */
 export interface AttachmentInputs {
@@ -218,6 +242,210 @@ export function attachmentsOf(scanId: bigint, inputs: AttachmentInputs): Attachm
     );
 }
 
+/** The URL rows of a page joined for the url engine entries (step 4.3 U16). */
+export interface UrlInputs {
+  urls: readonly MessageUrlRow[];
+  results: readonly UrlResultRow[];
+  rewrites: readonly UrlRewriteRow[];
+  inspections: readonly UrlInspectionRow[];
+  clicks: readonly UrlClickSummaryRow[];
+}
+
+export const NO_URLS: UrlInputs = Object.freeze({
+  urls: [],
+  results: [],
+  rewrites: [],
+  inspections: [],
+  clicks: [],
+});
+
+const ENGINE_LEVEL: ReadonlySet<string> = new Set(URL_ENGINE_LEVEL_CODES);
+const SOURCES: ReadonlySet<string> = new Set(URL_SOURCES);
+const SKIP_REASONS: ReadonlySet<string> = new Set(REWRITE_SKIP_REASONS);
+
+/** URL reason codes of a JSON array (unknown and engine-level codes dropped, unique). */
+function urlCodes(value: unknown, max: number): UrlReasonCode[] {
+  if (!Array.isArray(value)) return [];
+  const out = new Set<UrlReasonCode>();
+  for (const code of value) {
+    if (typeof code === 'string' && isUrlReasonCode(code) && !ENGINE_LEVEL.has(code)) {
+      out.add(code);
+    }
+    if (out.size >= max) break;
+  }
+  return [...out];
+}
+
+/** Keeps only the given keys of a JSON object (stored rows may carry more, e.g. `cache`). */
+function pick(value: unknown, keys: readonly string[]): Record<string, unknown> | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const source = value as Record<string, unknown>;
+  return Object.fromEntries(keys.filter((k) => k in source).map((k) => [k, source[k]]));
+}
+
+/** Each entry of a JSON array picked and validated; invalid entries are skipped. */
+function entries<T>(
+  value: unknown,
+  keys: readonly string[],
+  schema: z.ZodType<T>,
+  max: number,
+): T[] {
+  if (!Array.isArray(value)) return [];
+  const out: T[] = [];
+  for (const entry of value) {
+    const parsed = schema.safeParse(pick(entry, keys));
+    if (parsed.success) out.push(parsed.data);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+function sourcesOf(value: unknown): UrlScanView['sources'] {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return {};
+  const out: Record<string, number> = {};
+  for (const [key, count] of Object.entries(value as Record<string, unknown>)) {
+    if (SOURCES.has(key) && Number.isInteger(count) && (count as number) >= 1) {
+      out[key] = Math.min(count as number, 65_535);
+    }
+  }
+  return out;
+}
+
+const LANDING_KEYS = ['passwordFields', 'forms', 'crossOriginFormAction', 'titleBrandMatches'];
+const SIGNAL_KEYS = [
+  'passwordFields',
+  'forms',
+  'crossOriginFormAction',
+  'formActionHosts',
+  'downloadAttempted',
+  'blockedRequests',
+  'requests',
+  'bytes',
+  'titleBrandMatches',
+  'jsRedirect',
+  'dialogs',
+];
+
+function fetchOf(row: UrlResultRow): UrlScanView['fetch'] {
+  if (row.fetchStatus === 'not_attempted') return null;
+  return {
+    status: row.fetchStatus,
+    error: row.fetchStatus === 'error' ? row.fetchError : null,
+    hops: row.hopCount,
+    chain: entries(
+      row.redirectChain,
+      ['host', 'status', 'kind', 'blocked'],
+      urlChainEntrySchema,
+      10,
+    ),
+    finalUrl: row.finalUrl,
+    finalStatus: row.finalStatus,
+  };
+}
+
+function dynamicOf(row: UrlInspectionRow | undefined): UrlScanView['dynamic'] {
+  if (!row) return null;
+  const signals =
+    row.signals === null ? null : urlDynamicSignalsSchema.safeParse(pick(row.signals, SIGNAL_KEYS));
+  return {
+    status: row.status,
+    verdict: row.verdict,
+    reasonCodes: urlCodes(row.reasonCodes, 16),
+    signals: signals?.success ? signals.data : null,
+  };
+}
+
+/**
+ * One `url_scan_results` row joined with its `message_urls` row as the U16 view. Stored JSON is
+ * picked (no `cache`, `version`, `severity` or `distance`) and validated per entry; a malformed
+ * value is shown as empty/null, never passed through raw. A result whose `message_urls` row is
+ * missing or names another URL (hash differs) is not shown.
+ */
+export function urlOf(
+  row: UrlResultRow,
+  url: MessageUrlRow | undefined,
+  inspection: UrlInspectionRow | undefined,
+  clicks: UrlClickSummaryRow | undefined,
+): UrlScanView | null {
+  if (!url || url.urlSha256 !== row.urlSha256) return null;
+  const landing =
+    row.landing === null ? null : urlLandingSchema.safeParse(pick(row.landing, LANDING_KEYS));
+  const reasonCodes = urlCodes(row.reasonCodes, 32);
+  return {
+    urlSeq: row.urlSeq,
+    url: url.url,
+    host: url.host,
+    unicodeHost: url.unicodeHost,
+    registrableDomain: url.registrableDomain,
+    hostKind: url.hostKind,
+    sources: sourcesOf(url.sources),
+    flags: urlCodes(url.flags, 32),
+    verdict: row.verdict,
+    reasonCodes,
+    reputation: entries(
+      row.reputation,
+      ['provider', 'kind', 'status', 'category'],
+      urlReputationAnswerSchema,
+      12,
+    ),
+    lookalike: entries(
+      row.lookalike,
+      ['rule', 'targetKind', 'targetDomain', 'score'],
+      urlLookalikeFindingSchema,
+      5,
+    ),
+    fetch: fetchOf(row),
+    landing: landing?.success ? landing.data : null,
+    dynamic: dynamicOf(inspection),
+    rewritten: row.rewritten,
+    clicks: {
+      total: clicks?.total ?? 0,
+      lastDecision: clicks?.lastDecision ?? null,
+      lastAt: clicks?.lastAt ? toSecond(clicks.lastAt) : null,
+    },
+  };
+}
+
+/** The URLs of one round (by seq). */
+export function urlsOf(scanId: bigint, inputs: UrlInputs): UrlScanView[] {
+  const urls = new Map(inputs.urls.map((u) => [u.urlSeq, u]));
+  const inspections = new Map(
+    inputs.inspections.filter((i) => i.scanId === scanId).map((i) => [i.urlSeq, i]),
+  );
+  const clicks = new Map(inputs.clicks.map((c) => [c.urlSeq, c]));
+  return inputs.results
+    .filter((row) => row.scanId === scanId)
+    .sort((a, b) => a.urlSeq - b.urlSeq)
+    .flatMap((row) => {
+      const view = urlOf(
+        row,
+        urls.get(row.urlSeq),
+        inspections.get(row.urlSeq),
+        clicks.get(row.urlSeq),
+      );
+      return view ? [view] : [];
+    });
+}
+
+/** The rewrite of one round, or null when the engine wrote none (yet). */
+export function rewriteOf(scanId: bigint, inputs: UrlInputs): UrlRewriteView | null {
+  const row = inputs.rewrites.find((r) => r.scanId === scanId);
+  if (!row) return null;
+  return {
+    status: row.status,
+    skipReason:
+      row.skipReason !== null && SKIP_REASONS.has(row.skipReason)
+        ? (row.skipReason as UrlRewriteView['skipReason'])
+        : row.status === 'skipped'
+          ? 'error'
+          : null,
+    linksRewritten: row.linksRewritten,
+    partsRewritten: row.partsRewritten,
+    dkimSigned: row.dkimSigned,
+    expiresAt: row.expiresAt ? toSecond(row.expiresAt) : null,
+  };
+}
+
 const catalogRank = (engine: string): number => {
   const index = ENGINE_CATALOG.findIndex((entry) => entry.name === engine);
   return index === -1 ? ENGINE_CATALOG.length : index;
@@ -226,14 +454,16 @@ const byCatalog = (a: string, b: string): number =>
   catalogRank(a) - catalogRank(b) || (a < b ? -1 : a > b ? 1 : 0);
 
 /**
- * A round with its engines (catalog order), the first engine's authentication results and, on
- * the `attachment` engine entry, its per-attachment results (step 4.2 A16).
+ * A round with its engines (catalog order), the first engine's authentication results, on the
+ * `attachment` engine entry its per-attachment results (step 4.2 A16) and on the `url` engine
+ * entry its per-URL results and rewrite (step 4.3 U16).
  */
 export function roundOf(
   scan: ScanRoundRow,
   engineRows: readonly EngineResultRow[],
   authRows: readonly AuthResultRow[],
   attachments: AttachmentInputs = NO_ATTACHMENTS,
+  urls: UrlInputs = NO_URLS,
 ): ScanRoundView {
   const byEngine = new Map<string, EngineResultRow[]>();
   for (const row of engineRows) {
@@ -258,9 +488,13 @@ export function roundOf(
     auth: auth ? authOf(auth) : null,
     engines: [...byEngine.keys()].sort(byCatalog).map((engine) => {
       const view = engineOf(engine, byEngine.get(engine)!);
-      return engine === ATTACHMENT_ENGINE
-        ? { ...view, attachments: attachmentsOf(scan.id, attachments) }
-        : view;
+      if (engine === ATTACHMENT_ENGINE) {
+        return { ...view, attachments: attachmentsOf(scan.id, attachments) };
+      }
+      if (engine === URL_ENGINE) {
+        return { ...view, urls: urlsOf(scan.id, urls), rewrite: rewriteOf(scan.id, urls) };
+      }
+      return view;
     }),
   };
 }

@@ -3,10 +3,12 @@ import { ApiCodedError } from '../../http/coded-exception';
 import {
   CONTENT_UNAVAILABLE,
   HASH_EXISTS,
+  INDICATOR_EXISTS,
   ORGANIZATION_NOT_FOUND,
   RESCAN_JOB_NOT_CANCELLABLE,
   RESCAN_JOB_NOT_FOUND,
   THREAT_HASH_NOT_FOUND,
+  THREAT_INDICATOR_NOT_FOUND,
   RSPAMD_UNAVAILABLE,
   SCAN_ENGINE_NOT_FOUND,
   SCAN_SETTINGS_INVALID,
@@ -19,7 +21,7 @@ import { MESSAGE_NOT_FOUND } from '../messages/messages.errors';
 export const POLICY_READ = 'policy:read';
 export const SCAN_SETTINGS_MANAGE = 'scan:settings_manage';
 export const PLATFORM_SCAN_TRAINING = 'platform:scan_training';
-/** Known-threat hash catalog (step 4.2 A16, A17). */
+/** Known-threat hash catalog (step 4.2 A16, A17) and threat indicators (step 4.3 U16). */
 export const PLATFORM_THREAT_INTEL_MANAGE = 'platform:threat_intel_manage';
 /** Bulk attachment rescan jobs (step 4.2 A13). */
 export const PLATFORM_SCAN_RESCAN = 'platform:scan_rescan';
@@ -29,7 +31,8 @@ export const ApiEngineParam = (): MethodDecorator =>
   ApiParam({
     name: 'engine',
     description:
-      'Scan engine name with tenant settings: `rspamd` (step 4.1), `attachment` (step 4.2)',
+      'Scan engine name with tenant settings: `rspamd` (step 4.1), `attachment` (step 4.2), ' +
+      '`url` (step 4.3)',
   });
 
 export const ApiScanEngineNotFound = (): MethodDecorator =>
@@ -49,7 +52,11 @@ export const ApiScanSettingsInvalid = (): MethodDecorator =>
     'The override breaks the platform settings: scores outside the bounds, suspiciousScore not ' +
       'below spamScore, a severity or verdict lowered below the platform value, ' +
       'maxAttachmentBytes outside [1 MiB, ATTACHMENT_MAX_BYTES], a platform-denied type on ' +
-      'allowedTypes, an unknown file type or an unknown key',
+      'allowedTypes, an unknown file type, a URL domain that is not a registrable domain or ' +
+      'host (IP literal, single label, public suffix), a domain both allowed and blocked, a ' +
+      'fetch mode above the platform mode, an expiry outside [1, URL_TOKEN_MAX_EXPIRY_DAYS], ' +
+      'rewriting or dynamic inspection switched on while the platform has it off, or an ' +
+      'unknown key',
     [SCAN_SETTINGS_INVALID],
     {
       violations: {
@@ -114,3 +121,14 @@ export const ApiRescanJobNotCancellable = (): MethodDecorator =>
     [RESCAN_JOB_NOT_CANCELLABLE],
     { status: { type: 'string' } },
   );
+
+export const ApiIndicatorExists = (): MethodDecorator =>
+  ApiCodedError(
+    409,
+    'The normalized value is already a platform analyst indicator of that type; `id` names it',
+    [INDICATOR_EXISTS],
+    { id: { type: 'string' } },
+  );
+
+export const ApiThreatIndicatorNotFound = (): MethodDecorator =>
+  ApiCodedError(404, 'No platform threat indicator with that id', [THREAT_INDICATOR_NOT_FOUND]);

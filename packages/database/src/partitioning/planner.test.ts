@@ -36,9 +36,9 @@ const daily = (...names: string[]): ExistingPartition[] => [
 const utc = (iso: string) => new Date(iso);
 
 describe('registry', () => {
-  it('lists the 22 partitioned tables (D3, steps 2.3, 3.1, 4.1 and 4.2) with their retention', () => {
-    expect(PARTITION_REGISTRY).toHaveLength(22);
-    expect(new Set(PARTITION_REGISTRY.map((s) => s.table)).size).toBe(22);
+  it('lists the 27 partitioned tables (D3, steps 2.3, 3.1, 4.1, 4.2 and 4.3) with their retention', () => {
+    expect(PARTITION_REGISTRY).toHaveLength(27);
+    expect(new Set(PARTITION_REGISTRY.map((s) => s.table)).size).toBe(27);
     const byTable = Object.fromEntries(PARTITION_REGISTRY.map((s) => [s.table, s]));
     expect(byTable.email_messages).toMatchObject({
       column: 'received_at',
@@ -93,6 +93,30 @@ describe('registry', () => {
       expect(byTable[table]!.retention).toBe(byTable.email_scans!.retention);
       expect(byTable[table]!.guard).toBeUndefined();
     }
+    // Step 4.3 URL tables (6 months, core); clicks are partitioned by the click instant.
+    for (const table of [
+      'message_urls',
+      'url_scan_results',
+      'url_rewrites',
+      'url_dynamic_inspections',
+    ]) {
+      expect(byTable[table], table).toMatchObject({
+        column: 'received_at',
+        granularity: 'month',
+        retention: 6,
+        drop: true,
+        tier: 'core',
+      });
+      expect(byTable[table]!.guard).toBeUndefined();
+    }
+    expect(byTable.url_click_events).toMatchObject({
+      column: 'clicked_at',
+      granularity: 'month',
+      retention: 6,
+      drop: true,
+      tier: 'core',
+    });
+    expect(byTable.url_click_events!.guard).toBeUndefined();
     expect(byTable.audit_logs).toMatchObject({
       column: 'created_at',
       retention: null,

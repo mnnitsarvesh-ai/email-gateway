@@ -15,8 +15,8 @@ export type SecurityStage = (typeof SECURITY_STAGES)[number];
 export const securityStageSchema = z.enum(SECURITY_STAGES);
 
 /**
- * Every engine name the platform knows (4.1 registers `rspamd`, 4.2 `attachment`; 4.3–4.6 add the
- * rest). `clamav` and `yara` were never registered or stored: they are components of the
+ * Every engine name the platform knows (4.1 registers `rspamd`, 4.2 `attachment`, 4.3 `url`;
+ * 4.4–4.6 add the rest). `clamav` and `yara` were never registered or stored: they are components of the
  * `attachment` engine (step 4.2 A1, ADR-0028).
  */
 export const ENGINE_NAMES = ['rspamd', 'attachment', 'url', 'bec', 'dlp', 'sandbox'] as const;
@@ -38,7 +38,10 @@ export interface EngineCatalogEntry {
   readonly description: string;
 }
 
-/** The registered engines (step 4.1: Rspamd; step 4.2: the attachment engine, A1). */
+/**
+ * The registered engines (step 4.1: Rspamd; step 4.2: the attachment engine, A1; step 4.3: the URL
+ * engine, U1).
+ */
 export const ENGINE_CATALOG: readonly EngineCatalogEntry[] = Object.freeze([
   Object.freeze({
     name: 'rspamd',
@@ -58,6 +61,15 @@ export const ENGINE_CATALOG: readonly EngineCatalogEntry[] = Object.freeze([
     description:
       'Attachments: file type, known-threat hashes, ClamAV, YARA, archive limits (step 4.2)',
   } as const),
+  Object.freeze({
+    name: 'url',
+    stage: 'url',
+    queue: 'scan.url',
+    requiredByDefault: true,
+    tenantMayDisable: false,
+    description:
+      'URLs: extraction, normalization, reputation, lookalikes, redirect chains, rewriting (step 4.3)',
+  } as const),
 ]);
 
 export const isEngineName = (value: string): value is EngineName =>
@@ -70,8 +82,9 @@ export function engineCatalogEntry(name: string): EngineCatalogEntry | undefined
 
 /**
  * Parses the platform's enabled engines (`SCAN_ENGINES`, a comma-separated list, default
- * `rspamd,attachment` from step 4.2). Throws on an empty list, a duplicate or a name that is not in the catalog, so a
- * misconfigured worker refuses to start instead of scanning with fewer engines.
+ * `rspamd,attachment,url` from step 4.3). Throws on an empty list, a duplicate or a name that is
+ * not in the catalog, so a misconfigured worker refuses to start instead of scanning with fewer
+ * engines.
  */
 export function parseEnabledEngines(value: string): EngineName[] {
   const names = value

@@ -5,7 +5,14 @@
 #   sink.test                      mail-sink, the gateway MX (gw-mx), relay-sink, *.gwtenant
 #   mail.protection.outlook.com    sink-m365 (Microsoft 365 preset)
 #   aspmx.l.google.com             sink-google / sink-google-alt (Google Workspace preset)
-#   scan.test                      scan corpus SPF/DKIM/DMARC, test RBL/DBL, phishing hosts (4.1)
+#   scan.test                      scan corpus SPF/DKIM/DMARC, test RBL/DBL, phishing hosts (4.1);
+#                                  since step 4.3 also the URL corpus DBL/RBL entries
+#   <URL corpus names>.test        step 4.3 U19: url-test web names and the SSRF names (hosts
+#                                  plugin, url-test.hosts; mapped-v6.test from a zone file)
+#   rebind.test                    step 4.3 U19: forwarded WITHOUT cache to the url-test DNS
+#                                  responder (172.31.250.60:5300), which alternates 203.0.113.10
+#                                  and 127.0.0.1 with TTL 0 (DNS rebinding suite)
+# Published on 127.0.0.1:${DNS_SINK_HOST_PORT:-1053} (udp+tcp) for host-run suites (step 4.3).
 sink.test:53 {
     file /etc/coredns/sink.test.db
     errors
@@ -28,6 +35,40 @@ aspmx.l.google.com:53 {
 # scan corpus; the inbound rspamd's resolver locally and in CI.
 scan.test:53 {
     file /etc/coredns/scan.test.db
+    errors
+    log
+}
+
+# Step 4.3 (docs/plan/steps/11-url-protection.md U19): URL protection corpus. Only the zones listed
+# here are answered (everything else stays REFUSED, so the rspamd suites are unaffected); names
+# inside them that are not in the hosts file are NXDOMAIN.
+short-link.test:53 redirect-chain.test:53 evil-site.test:53 phish-login.test:53 collector-site.test:53 examplebank.test:53 examp1ebank.test:53 examplebank-login.test:53 xn--exmplebank-0qi.test:53 new-domain.test:53 slow-site.test:53 trickle-site.test:53 huge-site.test:53 many-headers.test:53 gzip-bomb.test:53 rdap.test:53 bad-ip-host.test:53 evil-dbl.test:53 malware-dbl.test:53 private-a.test:53 loopback-a.test:53 meta-a.test:53 cgnat-a.test:53 zero-a.test:53 v6-loop.test:53 ula-v6.test:53 mixed-a.test:53 {
+    hosts /etc/coredns/url-test.hosts {
+        ttl 60
+        no_reverse
+    }
+    errors
+    log
+}
+
+# clean-site.test from a zone file: the apex, www and a wildcard (per-run hosts such as
+# r<run>.clean-site.test of the stack suites resolve, because the click-service re-resolves every
+# clicked URL at time of click).
+clean-site.test:53 {
+    file /etc/coredns/clean-site.test.db
+    errors
+    log
+}
+
+mapped-v6.test:53 {
+    file /etc/coredns/mapped-v6.test.db
+    errors
+    log
+}
+
+# DNS rebinding (U19): no `cache` plugin, so every query reaches the alternating responder.
+rebind.test:53 {
+    forward . 172.31.250.60:5300
     errors
     log
 }

@@ -168,7 +168,7 @@ describe.skipIf(gate.skip)('attachment stack: engine through Postfix', { timeout
       requiredEngines: [...REQUIRED_ENGINES],
     });
     expect(codes(round.reasonCodes)).toContain('malware.clamav');
-    expect(finals.map((f) => f.engine).sort()).toEqual(['attachment', 'rspamd']);
+    expect(finals.map((f) => f.engine).sort()).toEqual(['attachment', 'rspamd', 'url']);
     expect(attachmentFinal).toMatchObject({ outcome: 'malicious', errorCode: null });
     expect(codes(attachmentFinal!.reasonCodes)).toContain('malware.clamav');
     expect(attachmentFinal!.engineVersion).toMatch(/^clamav\/1\.\d+\.\d+\/\d+;yara-x\//);

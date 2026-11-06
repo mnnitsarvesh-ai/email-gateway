@@ -1,9 +1,9 @@
 import type { S3Client } from '@aws-sdk/client-s3';
 import { createHash } from 'node:crypto';
-import { EML_MISSING, S3EmlSource } from '../../../mime-ingestion/eml-source';
+import { EML_MISSING, S3EmlSource } from '../../mime-ingestion/eml-source';
 
 /**
- * Full, bounded reads of attachment part objects (step 4.2 A3 d): `GetObject` of the row's key
+ * Full, bounded reads of part objects (step 4.2 A3 d; shared with the url engine, step 4.3 U3 step 2): `GetObject` of the row's key
  * with SCAN_S3_TIMEOUT_MS per wait into one Buffer of at most `sizeBytes + 1` bytes. The bytes
  * live in memory only (never written anywhere, §2.0 invariant 2).
  */

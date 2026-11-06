@@ -31,14 +31,15 @@ import { assertStackReady } from './support/smtp-stack';
  * message in `scan_failed` (fixture, L8.6, with its parse row and no attachments) is rescanned
  * with `POST /api/v1/messages/{id}/rescan`: E19 moves it to `scanning` with round + 1 and writes
  * `mail.message.rescan_requested.v1`, which the relay publishes to `email.security`. The topology
- * binds it to FOUR scan queues: the two dormant ones (`scan.url`, `scan.dlp`) each hold exactly
- * one copy (peeked through the management API, then purged); `scan.spam` and (since v4)
- * `scan.attachment` are consumed by the email-worker scan role, which scans round 1 with both
- * required engines (Rspamd; the attachment engine `skipped`, `attachment.none`) and completes it
- * (`scanned`), after which the dev pass-through approves round 1 and the message is delivered.
- * `scan.auth` lost its event bindings in v3 and receives nothing.
+ * binds it to FOUR scan queues: the dormant `scan.dlp` holds exactly one copy (peeked through the
+ * management API, then purged); `scan.spam`, (since v4) `scan.attachment` and (since v5, step 4.3
+ * U2) `scan.url` are consumed by the email-worker scan role, which scans round 1 with the three
+ * required engines (Rspamd; the attachment engine `skipped`, `attachment.none`; the URL engine
+ * `skipped`, `url.none`: the fixture has no stored body) and completes it (`scanned`), after which
+ * the dev pass-through approves round 1 and the message is delivered. `scan.auth` lost its event
+ * bindings in v3 and receives nothing.
  */
-const DORMANT_SCAN_QUEUES = ['scan.url', 'scan.dlp'];
+const DORMANT_SCAN_QUEUES = ['scan.dlp'];
 const gate = await messagingStackGate();
 const fx = new SmtpFixtures();
 const scenario = new MessagingScenario('lifecycle-rescan', fx);
@@ -183,12 +184,16 @@ describe.skipIf(gate.skip)('lifecycle stack: administrative rescan', { timeout: 
       ).toBe(1);
     }
     const finals = (await engineResultsOf(fx.prisma, message)).filter((r) => r.isFinal);
-    expect(finals.map((r) => r.engine).sort()).toEqual(['attachment', 'rspamd']);
+    expect(finals.map((r) => r.engine).sort()).toEqual(['attachment', 'rspamd', 'url']);
     expect(finals.find((r) => r.engine === 'attachment')).toMatchObject({
       outcome: 'skipped',
       reasonCodes: ['attachment.none'],
     });
-    for (const queue of ['scan.spam', 'scan.attachment']) {
+    expect(finals.find((r) => r.engine === 'url')).toMatchObject({
+      outcome: 'skipped',
+      reasonCodes: ['url.none'],
+    });
+    for (const queue of ['scan.spam', 'scan.attachment', 'scan.url']) {
       expect((await mgmt.queue(vhost, queue)).messages, queue).toBe(0);
     }
     await waitForLifecycle(fx.prisma, message, 'delivered', 'delivery_complete');

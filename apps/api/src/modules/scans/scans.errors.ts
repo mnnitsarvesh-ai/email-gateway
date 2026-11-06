@@ -94,3 +94,23 @@ export const rescanJobNotCancellable = (status: string): CodedHttpException =>
     'Only pending or running rescan jobs can be cancelled',
     { status },
   );
+
+/** Step 4.3 U16 platform threat indicators. */
+export const INDICATOR_EXISTS = 'indicator_exists';
+export const THREAT_INDICATOR_NOT_FOUND = 'threat_indicator_not_found';
+
+/** The normalized value is already a platform analyst indicator of that type. */
+export const indicatorExists = (id: string | null): CodedHttpException =>
+  new CodedHttpException(
+    HttpStatus.CONFLICT,
+    INDICATOR_EXISTS,
+    'The value is already in the platform threat-indicator catalog',
+    id === null ? {} : { id },
+  );
+
+export const threatIndicatorNotFound = (): CodedHttpException =>
+  new CodedHttpException(
+    HttpStatus.NOT_FOUND,
+    THREAT_INDICATOR_NOT_FOUND,
+    'No platform threat indicator with that id',
+  );

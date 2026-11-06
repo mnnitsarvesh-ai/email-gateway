@@ -29,12 +29,26 @@ import type { HealthDetails } from '@email-gateway/shared-types';
 import type { WorkerConfig } from '../config';
 import { errorFields } from '../mime-ingestion/error-fields';
 import { CircuitBreaker } from './circuit-breaker';
-import { attachmentScalingWarnings, consumerEngines, runsAttachmentConsumer } from './config';
+import {
+  attachmentScalingWarnings,
+  consumerEngines,
+  runsAttachmentConsumer,
+  runsUrlConsumer,
+} from './config';
 import type { EngineHealthCheck, ScanEngineAdapter } from './engine';
 import { AttachmentEngine } from './engines/attachment/attachment.engine';
 import { AttachmentMetrics } from './engines/attachment/attachment-metrics';
 import { RescanJobRunner } from './engines/attachment/rescan-runner';
 import { SignatureWatcher } from './engines/attachment/signature-watcher';
+import { InspectionSweeper } from './engines/url/inspection-sweeper';
+import { UrlEngine } from './engines/url/url.engine';
+import { UrlMetrics } from './engines/url/url-metrics';
+import {
+  createUrlResultsConsumer,
+  URL_RESULTS_QUEUE,
+  UrlResultsService,
+} from './engines/url/url-results';
+import type { UrlInspectionCompletedV1 } from '@email-gateway/event-contracts';
 import { DeadlineSweeper, type LeaderLock } from './deadline-sweeper';
 import { createEngineConsumer, s3EmlOpener } from './engine-consumer';
 import { type EngineDeps, enabledRegistrations, type ScanEngineRegistration } from './registry';
@@ -62,6 +76,15 @@ export const ATTACHMENT_JOBS = Symbol('ATTACHMENT_JOBS');
 export interface AttachmentJobs {
   watcher: SignatureWatcher;
   runner: RescanJobRunner;
+}
+
+/** The url engine's results consumer and pending-inspection sweeper (U15), or null. */
+export const URL_JOBS = Symbol('URL_JOBS');
+
+export interface UrlJobs {
+  results: UrlResultsService;
+  consumer: QueueConsumer<UrlInspectionCompletedV1>;
+  sweeper: InspectionSweeper;
 }
 
 /** `amqp_connection_up{connection}` of the scan role. */
@@ -187,6 +210,70 @@ export class InspectorHealth implements HealthIndicator {
   }
 }
 
+/** Readiness `url-engine` (Redis when the cache is on; DNS reachability as a detail; U3). */
+@Injectable()
+export class UrlEngineHealth implements HealthIndicator {
+  readonly healthName = 'url-engine';
+  constructor(@Inject(SCAN_ENGINES) private readonly engines: EngineRuntime[]) {}
+
+  async checkHealth(): Promise<void | HealthDetails> {
+    const check = engineHealthCheck(this.engines, this.healthName);
+    if (!check) throw new Error('the url engine does not run in this worker');
+    return (await check.check()) as void | HealthDetails;
+  }
+}
+
+/** The results consumer and the sweeper of the url engine (U15), on the scan role's connection. */
+export function createUrlJobs(options: {
+  config: Readonly<WorkerConfig>;
+  prisma: PrismaClient;
+  engine: UrlEngine;
+  locks: LeaderLock;
+  registry: MetricsService;
+  connection: AmqpConnection;
+  publisher: ConfirmPublisher;
+  messaging?: MessagingMetrics;
+  logger: Logger;
+  consumer?: string;
+  lockName?: string;
+  organizationIds?: readonly bigint[];
+}): UrlJobs {
+  const { config } = options;
+  const metrics = UrlMetrics.for(options.registry);
+  const results = new UrlResultsService({
+    prisma: options.prisma,
+    txTimeoutMs: config.SCAN_DB_TIMEOUT_MS,
+    cache: options.engine.cache,
+    metrics,
+    logger: options.logger,
+    highScore: config.URL_LOOKALIKE_HIGH_SCORE,
+    ...(options.consumer ? { consumer: options.consumer } : {}),
+  });
+  return {
+    results,
+    consumer: createUrlResultsConsumer({
+      connection: options.connection,
+      publisher: options.publisher,
+      service: results,
+      prefetch: config.SCAN_URL_CONCURRENCY,
+      retry: { baseDelayMs: config.SCAN_RETRY_BASE_MS, maxDelayMs: config.SCAN_RETRY_MAX_MS },
+      logger: options.logger,
+      ...(options.messaging ? { metrics: options.messaging } : {}),
+    }),
+    sweeper: new InspectionSweeper({
+      prisma: options.prisma,
+      locks: options.locks,
+      metrics,
+      logger: options.logger,
+      intervalMs: config.URL_DYNAMIC_SWEEP_INTERVAL_MS,
+      pendingTtlSeconds: config.URL_DYNAMIC_PENDING_TTL_SECONDS,
+      txTimeoutMs: config.SCAN_DB_TIMEOUT_MS,
+      ...(options.lockName ? { lockName: options.lockName } : {}),
+      ...(options.organizationIds ? { organizationIds: options.organizationIds } : {}),
+    }),
+  };
+}
+
 /** The signature watcher and the rescan runner of the attachment engine (A13). */
 export function createAttachmentJobs(options: {
   config: Readonly<WorkerConfig>;
@@ -276,6 +363,7 @@ export class ScanningRuntime implements OnModuleInit, OnApplicationBootstrap, On
     @Inject(SCAN_LOCKS) private readonly locks: LeaderLock & { close(): Promise<void> },
     @Inject(SCAN_LOGGER) private readonly logger: Logger,
     @Inject(ATTACHMENT_JOBS) private readonly jobs: AttachmentJobs | null,
+    @Inject(URL_JOBS) private readonly urlJobs: UrlJobs | null,
   ) {}
 
   get running(): boolean {
@@ -285,7 +373,10 @@ export class ScanningRuntime implements OnModuleInit, OnApplicationBootstrap, On
   onModuleInit(): void {
     this.connection.requireTopology({
       exchanges: SCANNER_EXCHANGES,
-      queues: this.engines.map((e) => e.registration.catalog.queue),
+      queues: [
+        ...this.engines.map((e) => e.registration.catalog.queue),
+        ...(this.urlJobs ? [URL_RESULTS_QUEUE] : []),
+      ],
     });
     this.connection.start();
   }
@@ -302,6 +393,11 @@ export class ScanningRuntime implements OnModuleInit, OnApplicationBootstrap, On
     this.sweeper.start();
     this.jobs?.watcher.start();
     this.jobs?.runner.start();
+    if (this.urlJobs) {
+      const { results } = this.urlJobs;
+      this.urlJobs.consumer.start((event) => results.handle(event));
+      this.urlJobs.sweeper.start();
+    }
     this.started = true;
     this.logger.info(
       {
@@ -330,6 +426,14 @@ export class ScanningRuntime implements OnModuleInit, OnApplicationBootstrap, On
         await this.jobs.runner
           .stop()
           .catch(() => this.logger.warn('attachment rescan runner stop failed'));
+      }
+      if (this.urlJobs) {
+        await this.urlJobs.consumer
+          .stop()
+          .catch(() => this.logger.warn('url results consumer stop failed'));
+        await this.urlJobs.sweeper
+          .stop()
+          .catch(() => this.logger.warn('url inspection sweeper stop failed'));
       }
     }
     // Kills the inspector children (graceful shutdown) after the consumers stopped.
@@ -496,12 +600,55 @@ export class ScanningModule {
           },
           inject: [SCAN_ENGINES, PrismaService, SCAN_LOCKS, MetricsService, ScanMetrics],
         },
+        {
+          provide: URL_JOBS,
+          useFactory: (
+            engines: EngineRuntime[],
+            prisma: PrismaService,
+            locks: LeaderLock,
+            registry: MetricsService,
+            connection: AmqpConnection,
+            publisher: ConfirmPublisher,
+            messaging: MessagingMetrics,
+          ): UrlJobs | null => {
+            const url = engines.find((e) => e.adapter instanceof UrlEngine);
+            if (!url || !runsUrlConsumer(config)) return null;
+            return createUrlJobs({
+              config,
+              prisma,
+              engine: url.adapter as UrlEngine,
+              locks,
+              registry,
+              connection,
+              publisher,
+              messaging,
+              logger: scanLogger,
+            });
+          },
+          inject: [
+            SCAN_ENGINES,
+            PrismaService,
+            SCAN_LOCKS,
+            MetricsService,
+            SCANNER_AMQP_CONNECTION,
+            SCANNER_PUBLISHER,
+            SCANNER_MESSAGING_METRICS,
+          ],
+        },
         ScannerBrokerHealth,
         ClamavHealth,
         InspectorHealth,
+        UrlEngineHealth,
         ScanningRuntime,
       ],
-      exports: [ScanMetrics, ScanningRuntime, ScannerBrokerHealth, ClamavHealth, InspectorHealth],
+      exports: [
+        ScanMetrics,
+        ScanningRuntime,
+        ScannerBrokerHealth,
+        ClamavHealth,
+        InspectorHealth,
+        UrlEngineHealth,
+      ],
     };
   }
 }

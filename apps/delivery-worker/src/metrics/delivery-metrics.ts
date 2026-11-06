@@ -30,7 +30,7 @@ export type ReconcilerAction =
  * transitions this worker applies (dev pass-through, planner, recorder).
  */
 export class DeliveryMetrics {
-  readonly approvals: Counter<'source'>;
+  readonly approvals: Counter<'source' | 'object'>;
   readonly approvalsSkipped: Counter<'reason'>;
   readonly approvalsRejected: Counter<'reason'>;
   readonly lifecycleTransitions: Counter<'from' | 'to' | 'result'>;
@@ -54,8 +54,8 @@ export class DeliveryMetrics {
   constructor(metrics: MetricsService) {
     this.approvals = metrics.counter(
       'delivery_approvals_total',
-      'Delivery approvals planned, by approval source',
-      ['source'],
+      "Delivery approvals planned, by approval source and delivered object (rewritten: the URL engine's rewritten copy of the round, org/<org>/rewrite/; original: the stored EML; step 4.3 U20)",
+      ['source', 'object'],
     );
     this.approvalsSkipped = metrics.counter(
       'delivery_approvals_skipped_total',

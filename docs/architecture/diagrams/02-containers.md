@@ -32,6 +32,9 @@ flowchart LR
     aw["archive-worker<br/>:3060"]:::impl
     nw["notification-worker<br/>:3050"]:::impl
     er["event-relay<br/>outbox relay + reconciler<br/>:3070 (3.2)"]:::impl
+    click["click-service (4.3)<br/>public GET /c/{token} :3080,<br/>admin :3081"]:::impl
+    ubw["url-browser-worker (4.3, profile url-browser)<br/>Chromium headless shell, :3090,<br/>network url-sandbox (internal)"]:::impl
+    uep["url-egress-proxy (4.3)<br/>:3128, admin :3091,<br/>SSRF guard"]:::impl
   end
 
   subgraph data["Data stores"]
@@ -64,8 +67,15 @@ flowchart LR
   mysqlW -->|"message_outbox (shards, writer)"| er
   er -->|"confirmed publish, eg-relay"| mq
   mq -->|"email.received (MIME, 3.1/3.2)"| ew
-  ew -.->|"scan.* queues, /checkv2, P 4.1"| rspamd
-  ew -.->|"INSTREAM, P 4.2"| clamav
+  ew -->|"scan.spam: /checkv2 (4.1)"| rspamd
+  ew -->|"scan.attachment: INSTREAM (4.2)"| clamav
+  mq -->|"scan.url, scan.url.results (4.3)"| ew
+  ew -->|"rewritten copies org/{org}/rewrite/ (4.3)"| s3
+  mq -->|"scan.url.inspect (lossy), eg-url-browser"| ubw
+  ubw -->|"inspection_completed.v1 (confirms)"| mq
+  ubw -->|"all browser traffic (token auth)"| uep
+  click -->|"gateway_click: URL rows, click events + clicked.v1"| mysqlW
+  click -->|"rate limits, URL cache (HMAC)"| redis
   ew -->|"read EML, write parts (3.1)"| s3
   mq -.->|"email.policy.evaluate (dormant), P 5.x"| pe
   mq -->|"email.delivery.pending (3.2)"| dw
@@ -99,24 +109,26 @@ flowchart LR
 
 ## Status
 
-| Element                                               | Status          | Evidence or delivering step                                                                                                                                      |
-| ----------------------------------------------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Postfix inbound, policy delegation, socketmap, milter | IMPLEMENTED     | `infrastructure/postfix/*`; `mail-plane.test.ts`, `smtp-inbound.test.ts`, `smtp-relay-control.test.ts`                                                           |
-| postfix-outbound (587, 25, 10026, 10027), SASL        | IMPLEMENTED     | `infrastructure/postfix-outbound/*`; `smtp-relay-control.test.ts`, `smtp-outbound.test.ts`                                                                       |
-| rspamd-outbound + redis-dkim (DKIM signing)           | IMPLEMENTED     | `infrastructure/rspamd-outbound/*`, `infrastructure/redis-dkim/*`; `smtp-outbound.test.ts` (signature verifies)                                                  |
-| Rspamd, ClamAV daemons                                | IMPLEMENTED     | `mail-plane.test.ts` (`/checkv2` verdict, EICAR)                                                                                                                 |
-| 8 Nest deployables + admin-portal                     | IMPLEMENTED     | `apps/*/src/app.module.ts`, `app.module.test.ts` per app; `services.test.ts` (readiness checks per service)                                                      |
-| MySQL primary + replica, GTID replication             | IMPLEMENTED     | `docker-compose.yml`; `replication.test.ts`                                                                                                                      |
-| `api` reads from the replica                          | IMPLEMENTED     | `PrismaReadService` (`prisma-read.service.test.ts`); no feature module reads from it yet                                                                         |
-| RabbitMQ topology v1 (vhost, 6 exchanges, 14 queues)  | IMPLEMENTED 3.2 | `packages/event-contracts/src/topology.ts`, `infrastructure/rabbitmq/{definitions.json,init.mjs}`; `messaging-topology.test.ts`, `messaging-permissions.test.ts` |
-| Redis, MinIO                                          | IMPLEMENTED     | `rabbitmq-redis.test.ts` (auth, TTL), `storage.test.ts` (buckets, tenant-prefixed key, anonymous denied)                                                         |
-| OpenSearch, ClickHouse containers                     | IMPLEMENTED     | Compose `analytics` profile, validated by `docker compose config` in CI. Not exercised by tests                                                                  |
-| Observability containers, OTLP export                 | IMPLEMENTED     | Compose `observability` profile, `packages/logger/src/tracing.ts`. Validated by `docker compose config`; no runtime test                                         |
-| LMTP ingestion, S3 write, ingestion transaction       | IMPLEMENTED     | `apps/smtp-adapter/src/{lmtp,ingestion}`; `smtp-inbound.test.ts`, `smtp-durability.test.ts`, `smtp-concurrency.test.ts`                                          |
-| Bounce notices → bounce_events, suppressions          | IMPLEMENTED     | `apps/smtp-adapter/src/bounces`; `bounces.test.ts`, `smtp-outbound.test.ts`                                                                                      |
-| MIME parsing (headers, attachments rows)              | IMPLEMENTED     | step 3.1: email-worker `MimeIngestionModule`, consuming `email.received` since 3.2; `mime-ingestion.test.ts`                                                     |
-| event-relay (outbox relay, reconciler)                | IMPLEMENTED 3.2 | `apps/event-relay`; relay/reconciler integration suites, `services.test.ts`, `messaging-*.test.ts` stack suites                                                  |
-| Consumers email-worker, delivery-worker               | IMPLEMENTED 3.2 | `QueueConsumer` on `email.received` / `email.delivery.pending`; worker integration suites, `messaging-*.test.ts`                                                 |
-| Dead-letter view and replay (api)                     | IMPLEMENTED 3.2 | `apps/api/src/modules/dead-letters`; `dead-letters.test.ts`, `messaging-replay.test.ts`                                                                          |
-| Consumers policy-engine, archive, notification, scans | PLANNED 4.1–8.1 | Their queues are declared and bound (dormant); no consumer code                                                                                                  |
-| OpenSearch and ClickHouse feeds                       | PLANNED         | ADR-0009. **No execution-plan step owns them yet** (reported as an open item)                                                                                    |
+| Element                                               | Status              | Evidence or delivering step                                                                                                                                      |
+| ----------------------------------------------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Postfix inbound, policy delegation, socketmap, milter | IMPLEMENTED         | `infrastructure/postfix/*`; `mail-plane.test.ts`, `smtp-inbound.test.ts`, `smtp-relay-control.test.ts`                                                           |
+| postfix-outbound (587, 25, 10026, 10027), SASL        | IMPLEMENTED         | `infrastructure/postfix-outbound/*`; `smtp-relay-control.test.ts`, `smtp-outbound.test.ts`                                                                       |
+| rspamd-outbound + redis-dkim (DKIM signing)           | IMPLEMENTED         | `infrastructure/rspamd-outbound/*`, `infrastructure/redis-dkim/*`; `smtp-outbound.test.ts` (signature verifies)                                                  |
+| Rspamd, ClamAV daemons                                | IMPLEMENTED         | `mail-plane.test.ts` (`/checkv2` verdict, EICAR)                                                                                                                 |
+| 8 Nest deployables + admin-portal                     | IMPLEMENTED         | `apps/*/src/app.module.ts`, `app.module.test.ts` per app; `services.test.ts` (readiness checks per service)                                                      |
+| MySQL primary + replica, GTID replication             | IMPLEMENTED         | `docker-compose.yml`; `replication.test.ts`                                                                                                                      |
+| `api` reads from the replica                          | IMPLEMENTED         | `PrismaReadService` (`prisma-read.service.test.ts`); no feature module reads from it yet                                                                         |
+| RabbitMQ topology v1 (vhost, 6 exchanges, 14 queues)  | IMPLEMENTED 3.2     | `packages/event-contracts/src/topology.ts`, `infrastructure/rabbitmq/{definitions.json,init.mjs}`; `messaging-topology.test.ts`, `messaging-permissions.test.ts` |
+| Redis, MinIO                                          | IMPLEMENTED         | `rabbitmq-redis.test.ts` (auth, TTL), `storage.test.ts` (buckets, tenant-prefixed key, anonymous denied)                                                         |
+| OpenSearch, ClickHouse containers                     | IMPLEMENTED         | Compose `analytics` profile, validated by `docker compose config` in CI. Not exercised by tests                                                                  |
+| Observability containers, OTLP export                 | IMPLEMENTED         | Compose `observability` profile, `packages/logger/src/tracing.ts`. Validated by `docker compose config`; no runtime test                                         |
+| LMTP ingestion, S3 write, ingestion transaction       | IMPLEMENTED         | `apps/smtp-adapter/src/{lmtp,ingestion}`; `smtp-inbound.test.ts`, `smtp-durability.test.ts`, `smtp-concurrency.test.ts`                                          |
+| Bounce notices → bounce_events, suppressions          | IMPLEMENTED         | `apps/smtp-adapter/src/bounces`; `bounces.test.ts`, `smtp-outbound.test.ts`                                                                                      |
+| MIME parsing (headers, attachments rows)              | IMPLEMENTED         | step 3.1: email-worker `MimeIngestionModule`, consuming `email.received` since 3.2; `mime-ingestion.test.ts`                                                     |
+| event-relay (outbox relay, reconciler)                | IMPLEMENTED 3.2     | `apps/event-relay`; relay/reconciler integration suites, `services.test.ts`, `messaging-*.test.ts` stack suites                                                  |
+| Consumers email-worker, delivery-worker               | IMPLEMENTED 3.2     | `QueueConsumer` on `email.received` / `email.delivery.pending`; worker integration suites, `messaging-*.test.ts`                                                 |
+| Dead-letter view and replay (api)                     | IMPLEMENTED 3.2     | `apps/api/src/modules/dead-letters`; `dead-letters.test.ts`, `messaging-replay.test.ts`                                                                          |
+| Scan consumers (rspamd, attachment, url)              | IMPLEMENTED 4.1–4.3 | email-worker scan role; `scan-*`, `attachment-*`, `url-*` stack suites                                                                                           |
+| click-service, url-browser-worker, url-egress-proxy   | IMPLEMENTED 4.3     | `apps/click-service`, `apps/url-browser-worker`; click-service unit/e2e/integration, the browser container suite (profile `url-browser`), `url-smtp.test.ts`     |
+| Consumers policy-engine, archive, notification        | PLANNED 5.x–8.1     | Their queues are declared and bound (dormant); no consumer code                                                                                                  |
+| OpenSearch and ClickHouse feeds                       | PLANNED             | ADR-0009. **No execution-plan step owns them yet** (reported as an open item)                                                                                    |

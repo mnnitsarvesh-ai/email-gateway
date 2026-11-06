@@ -22,6 +22,8 @@ import {
   DEV_PASSTHROUGH_CONSUMER,
   DEV_PASSTHROUGH_WARNING,
   DevPassThroughApprover,
+  InconsistentRewriteReadError,
+  isRewriteKeyOf,
 } from './dev-passthrough.approver';
 
 vi.mock('@email-gateway/message-lifecycle', async (original) => ({
@@ -96,10 +98,17 @@ const scanFailedEvent: EventEnvelope<MessageScannedV1> = {
   }),
 };
 
-function fakeTx(options: { recipients?: number; maxDeliverySeq?: number | null }) {
+function fakeTx(options: {
+  recipients?: number;
+  maxDeliverySeq?: number | null;
+  rewrite?: Record<string, unknown> | null;
+}) {
   const outbox: { data: Record<string, unknown> }[] = [];
   const events: { data: Record<string, unknown> }[] = [];
   const tx = {
+    urlRewrite: {
+      findFirst: vi.fn((_args: unknown) => Promise.resolve(options.rewrite ?? null)),
+    },
     emailDelivery: {
       aggregate: vi.fn(() =>
         Promise.resolve({ _max: { deliverySeq: options.maxDeliverySeq ?? null } }),
@@ -508,5 +517,109 @@ describe('DevPassThroughApprover (R5, step 4.1 S15, development only)', () => {
     expect(DEV_PASSTHROUGH_CONSUMER).toBe('delivery-worker.dev-passthrough-scanned');
     expect(DEV_PASSTHROUGH_WARNING).toContain('delivered after scanning without policy');
     expect(DEV_PASSTHROUGH_WARNING).toContain('malicious verdicts are held in scanned');
+  });
+});
+
+describe('DevPassThroughApprover: rewritten copy of the round (step 4.3 U11, U20)', () => {
+  const REWRITE_KEY = 'org/7/rewrite/2026/11/03/100/r0-0190f0f0-0000-7000-8000-0000000000ff.eml';
+  const rewriteRow = (overrides: Record<string, unknown> = {}) => ({
+    messageId: 100n,
+    receivedAt: new Date(event.payload.receivedAt),
+    organizationId: 7n,
+    lifecycleRound: 0,
+    scanId: 900n,
+    status: 'rewritten',
+    objectKey: REWRITE_KEY,
+    ...overrides,
+  });
+  const approverWith = (metrics = newMetrics()) =>
+    new DevPassThroughApprover(
+      feed(),
+      noWriter,
+      RECORDER_TX_TIMEOUT_MS,
+      createLogger({ service: 't', level: 'silent' }),
+      metrics,
+      () => NOW,
+    );
+
+  it('approves the rewritten object of the round, read for (message, org, round, scan)', async () => {
+    const { tx, outbox, events } = fakeTx({ rewrite: rewriteRow() });
+    const result = await approverWith().approve(event, tx as never);
+    expect(result.approvals).toHaveLength(1);
+    expect(tx.urlRewrite.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          messageId: 100n,
+          receivedAt: new Date(event.payload.receivedAt),
+          organizationId: 7n,
+          lifecycleRound: 0,
+          scanId: 900n,
+          status: 'rewritten',
+        },
+      }),
+    );
+    expect(deliveryApprovedV1.parse(outbox[0]!.data.payload).emlS3Key).toBe(REWRITE_KEY);
+    expect(events).toHaveLength(1);
+  });
+
+  it('approves the original when the round has no rewritten copy (skipped or absent)', async () => {
+    const { tx, outbox } = fakeTx({ rewrite: null });
+    await approverWith().approve(event, tx as never);
+    expect(deliveryApprovedV1.parse(outbox[0]!.data.payload).emlS3Key).toBe(
+      'org/7/eml/2026/11/03/stored.eml',
+    );
+  });
+
+  it.each([
+    ['another organization prefix', 'org/8/rewrite/2026/11/03/100/r0-x.eml'],
+    ['not a rewrite object', 'org/7/eml/2026/11/03/other.eml'],
+    ['a dot-dot segment', 'org/7/rewrite/../eml/x.eml'],
+    ['no key', null],
+  ])('falls back to the original for %s', async (_label, objectKey) => {
+    const { tx, outbox } = fakeTx({ rewrite: rewriteRow({ objectKey }) });
+    await approverWith().approve(event, tx as never);
+    expect(deliveryApprovedV1.parse(outbox[0]!.data.payload).emlS3Key).toBe(
+      'org/7/eml/2026/11/03/stored.eml',
+    );
+  });
+
+  it.each([
+    ['message', { messageId: 101n }],
+    ['organization', { organizationId: 8n }],
+    ['round', { lifecycleRound: 1 }],
+    ['scan', { scanId: 901n }],
+    ['receivedAt', { receivedAt: new Date(0) }],
+    ['status', { status: 'skipped' }],
+  ])('throws (redelivered, nothing approved) on a shifted read: %s', async (_label, overrides) => {
+    const service = metricsService();
+    const { tx, outbox } = fakeTx({ rewrite: rewriteRow(overrides) });
+    await expect(
+      approverWith(newMetrics(service)).approve(event, tx as never),
+    ).rejects.toBeInstanceOf(InconsistentRewriteReadError);
+    expect(outbox).toHaveLength(0);
+    expect(
+      await service.registry.getSingleMetricAsString('delivery_inconsistent_reads_total'),
+    ).toContain('read="url_rewrite"');
+  });
+
+  it('still holds malicious and skips scan_failed without reading the rewrite', async () => {
+    const malicious = fakeTx({ rewrite: rewriteRow() });
+    await approverWith().approve(
+      { ...event, payload: scannedPayload({ verdict: 'malicious' }) },
+      malicious.tx as never,
+    );
+    expect(malicious.outbox).toHaveLength(0);
+    expect(malicious.tx.urlRewrite.findFirst).not.toHaveBeenCalled();
+    const failed = fakeTx({ rewrite: rewriteRow() });
+    await approverWith().approve(scanFailedEvent, failed.tx as never);
+    expect(failed.outbox).toHaveLength(0);
+    expect(failed.tx.urlRewrite.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('isRewriteKeyOf accepts only org/<org>/rewrite/ keys without dot segments', () => {
+    expect(isRewriteKeyOf(REWRITE_KEY, 7n)).toBe(true);
+    expect(isRewriteKeyOf(REWRITE_KEY, 70n)).toBe(false);
+    expect(isRewriteKeyOf('org/7/rewrite//x.eml', 7n)).toBe(false);
+    expect(isRewriteKeyOf('org/7/rewriteX/x.eml', 7n)).toBe(false);
   });
 });

@@ -1,17 +1,23 @@
 import {
   ATTACHMENT_RULE_VERDICTS,
   AUTH_FAILURE_VERDICTS,
+  CLICK_SUSPICIOUS_ACTIONS,
+  CLICK_UNKNOWN_ACTIONS,
+  DKIM_SIGNED_POLICIES,
   DMARC_REJECT_VERDICTS,
   FILE_TYPE_IDS,
+  MESSAGE_DIRECTIONS,
   PHISHING_VERDICTS,
+  SCAN_TIME_FETCH_MODES,
 } from '@email-gateway/security-contracts';
 import { z } from 'zod';
 
 /**
  * Request and response shapes of the scan settings routes (step 4.1 S8, S16; step 4.2 A8):
  * `GET /scan-settings`, `PUT /scan-settings/{engine}`, `DELETE /scan-settings/{engine}`.
- * Engines with tenant settings: `rspamd` (thresholds and severities) and `attachment` (type
- * rules, raise-only verdicts, a tighter size limit); one view shape per engine.
+ * Engines with tenant settings: `rspamd` (thresholds and severities), `attachment` (type
+ * rules, raise-only verdicts, a tighter size limit) and `url` (step 4.3 U13: domain lists,
+ * fetch mode, rewriting, click policy, dynamic inspection); one view shape per engine.
  */
 
 const Version = z
@@ -31,7 +37,11 @@ export const ScanSettingsPutSchema = z.strictObject({
       'The override, all keys optional (rspamd: spamScore, suspiciousScore, phishingVerdict, ' +
         'dmarcRejectVerdict, authFailureVerdict; attachment: deniedTypes, allowedTypes, ' +
         'deniedTypeVerdict, typeMismatchVerdict, encryptedArchiveVerdict, ' +
-        'maxAttachmentBytes); replaces the previous override. Unknown keys are refused (422)',
+        'maxAttachmentBytes; url: allowedDomains, blockedDomains, scanTimeFetch, ' +
+        'lookalike.extraProtectedDomains, rewrite.{enabled, directions, expiryDays, ' +
+        'excludedDomains, dkimSignedPolicy, plainText}, click.{suspicious, unknown, ' +
+        'allowContinue}, dynamicInspection); replaces the previous override. Unknown keys are ' +
+        'refused (422)',
     ),
 });
 export type ScanSettingsPut = z.output<typeof ScanSettingsPutSchema>;
@@ -166,10 +176,121 @@ export const AttachmentSettingsViewSchema = z.object({
   ...viewCommon,
 });
 
+const Domain = z.string().describe('Lower-case ASCII domain or host (A-labels after IDNA)');
+const DomainList = z.array(Domain);
+const MaxItems = z.object({ maxItems: z.number().int() });
+const FetchMode = z.enum(SCAN_TIME_FETCH_MODES);
+const Direction = z.enum(MESSAGE_DIRECTIONS);
+const DkimPolicy = z.enum(DKIM_SIGNED_POLICIES);
+const SuspiciousAction = z.enum(CLICK_SUSPICIOUS_ACTIONS);
+const UnknownAction = z.enum(CLICK_UNKNOWN_ACTIONS);
+
+/** URL platform settings (`URL_SCAN_TIME_FETCH`, `URL_REWRITE_*`, `URL_TOKEN_*_EXPIRY_DAYS`, …). */
+export const UrlPlatformSettingsDoc = z.object({
+  scanTimeFetch: FetchMode.describe('The most scan-time fetching a tenant may choose'),
+  rewrite: z.object({
+    enabled: z.boolean().describe('Platform switch: false = no rewriting for any tenant'),
+    directions: z.array(Direction).describe('Default directions'),
+    defaultExpiryDays: z.number().int(),
+    maxExpiryDays: z.number().int(),
+    dkimSignedPolicy: DkimPolicy,
+  }),
+  dynamicInspection: z.boolean().describe('Platform switch of the isolated browser inspection'),
+});
+
+export const UrlOverrideDoc = z.object({
+  allowedDomains: DomainList.optional().describe(
+    'Suppresses lookalike/structure/landing rules and excludes from rewriting (never feed or ' +
+      'DNSBL malicious findings)',
+  ),
+  blockedDomains: DomainList.optional().describe('→ malicious (rule M4) for this organization'),
+  scanTimeFetch: FetchMode.optional().describe('At most the platform mode'),
+  lookalike: z
+    .object({ extraProtectedDomains: DomainList.optional() })
+    .optional()
+    .describe('Further domains protected against lookalikes'),
+  rewrite: z
+    .object({
+      enabled: z.boolean().optional(),
+      directions: z.array(Direction).optional(),
+      expiryDays: z.number().int().optional(),
+      excludedDomains: DomainList.optional(),
+      dkimSignedPolicy: DkimPolicy.optional(),
+      plainText: z.boolean().optional(),
+    })
+    .optional(),
+  click: z
+    .object({
+      suspicious: SuspiciousAction.optional(),
+      unknown: UnknownAction.optional(),
+      allowContinue: z.boolean().optional(),
+    })
+    .optional()
+    .describe('Time-of-click policy (clean is always allowed, malicious always blocked)'),
+  dynamicInspection: z.boolean().optional(),
+});
+
+export const UrlEffectiveSettingsDoc = z.object({
+  allowedDomains: DomainList,
+  blockedDomains: DomainList,
+  scanTimeFetch: FetchMode,
+  lookalike: z.object({ extraProtectedDomains: DomainList }),
+  rewrite: z.object({
+    enabled: z.boolean(),
+    directions: z.array(Direction),
+    expiryDays: z.number().int(),
+    excludedDomains: DomainList,
+    dkimSignedPolicy: DkimPolicy,
+    plainText: z.boolean(),
+  }),
+  click: z.object({
+    suspicious: SuspiciousAction,
+    unknown: UnknownAction,
+    allowContinue: z.boolean(),
+  }),
+  dynamicInspection: z.boolean(),
+});
+
+export const UrlBoundsDoc = z.object({
+  allowedDomains: MaxItems,
+  blockedDomains: MaxItems,
+  scanTimeFetch: z.array(FetchMode).describe('Modes up to the platform mode'),
+  lookalike: z.object({ extraProtectedDomains: MaxItems }),
+  rewrite: z.object({
+    enabled: z.array(z.boolean()).describe('[false] when the platform disabled rewriting'),
+    directions: z.array(Direction),
+    expiryDays: z.object({ min: z.number().int(), max: z.number().int() }),
+    excludedDomains: MaxItems,
+    dkimSignedPolicy: z.array(DkimPolicy),
+  }),
+  click: z.object({
+    suspicious: z.array(SuspiciousAction),
+    unknown: z.array(UnknownAction),
+  }),
+  dynamicInspection: z
+    .array(z.boolean())
+    .describe('[false] when the platform disabled dynamic inspection'),
+});
+
+export const UrlSettingsViewSchema = z.object({
+  engine: z.literal('url').describe('Engine name (ENGINE_CATALOG)'),
+  platform: UrlPlatformSettingsDoc.describe('Platform settings (URL_*)'),
+  bounds: UrlBoundsDoc.describe('What an override may choose'),
+  override: UrlOverrideDoc.nullable().describe(
+    'The organization override (domains normalized to ASCII); null for none',
+  ),
+  effective: UrlEffectiveSettingsDoc.describe(
+    'What the URL engine (rewrite and scan settings) and the click-service (click policy and ' +
+      'lists, read live) apply',
+  ),
+  ...viewCommon,
+});
+
 /** The settings of one engine, by `engine`. */
 export const EngineSettingsViewSchema = z.discriminatedUnion('engine', [
   RspamdSettingsViewSchema,
   AttachmentSettingsViewSchema,
+  UrlSettingsViewSchema,
 ]);
 export type EngineSettingsView = z.output<typeof EngineSettingsViewSchema>;
 
@@ -189,5 +310,6 @@ const Note = z.string().describe(SETTINGS_APPLY_NOTE);
 export const ScanSettingsResponseSchema = z.discriminatedUnion('engine', [
   RspamdSettingsViewSchema.extend({ note: Note }),
   AttachmentSettingsViewSchema.extend({ note: Note }),
+  UrlSettingsViewSchema.extend({ note: Note }),
 ]);
 export type ScanSettingsResponse = z.output<typeof ScanSettingsResponseSchema>;

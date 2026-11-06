@@ -7,9 +7,9 @@ import {
 } from './registry';
 
 /**
- * RabbitMQ topology v4 as data (step 3.2 §3, ADR-0024; v2: step 3.3 L7, ADR-0025; v3: step 4.1
- * S2, ADR-0026; v4: step 4.2 A2, ADR-0028): exactly six topic exchanges and fourteen quorum
- * queues in the vhost `email-gateway`. v2 added the bindings of `mail.message.rescan_requested.v1`
+ * RabbitMQ topology v5 as data (step 3.2 §3, ADR-0024; v2: step 3.3 L7, ADR-0025; v3: step 4.1
+ * S2, ADR-0026; v4: step 4.2 A2, ADR-0028; v5: step 4.3 U2, ADR-0029): exactly six topic
+ * exchanges and sixteen quorum queues in the vhost `email-gateway`. v2 added the bindings of `mail.message.rescan_requested.v1`
  * (`email.security`) to the five scan queues, and `mail.message.state_changed.v1`
  * (`email.events`) reaches only the `email.analytics` firehose. v3 makes `scan.spam` a work queue
  * (the Rspamd engine of the email-worker scan role, ledger consumer `email-worker.scan.rspamd`)
@@ -17,7 +17,16 @@ import {
  * `scan.spam`). v4 makes `scan.attachment` a work queue (the attachment engine of the
  * email-worker scan role, ledger consumer `email-worker.scan.attachment`; bindings unchanged) and
  * registers `mail.attachment.sandbox_requested.v1`, the event the dormant `scan.sandbox` (step
- * 4.6) was already bound to; the exchanges and the other queues are unchanged.
+ * 4.6) was already bound to. v5 makes `scan.url` a work queue (the URL engine of the email-worker
+ * scan role, ledger consumer `email-worker.scan.url`; event bindings unchanged), adds
+ * `scan.url.inspect` (inspection requests for the isolated browser worker: consumer kind
+ * `stateless`, the bounded lossy work policy `work-lossy`) and `scan.url.results` (inspection
+ * results, ledger consumer `email-worker.scan.url.results`), and registers the three URL events
+ * (`mail.url.inspection_requested.v1`, `mail.url.inspection_completed.v1`, `mail.url.clicked.v1`;
+ * the last reaches only the `email.analytics` firehose). Because `scan.url` is a dot-prefix of the
+ * two new queue names, its retry binding is the qualified `retry.scan.url.org.#` (every retry key
+ * is `retry.<queue>.org.<id>.<type>`), so it never captures their retry hops
+ * (`retryBindingKey`). The exchanges and the other queues are unchanged.
  * `infrastructure/rabbitmq/definitions.json` is
  * generated from `TOPOLOGY` (`pnpm --filter @email-gateway/event-contracts topology:export`) and
  * imported by `infrastructure/rabbitmq/init.mjs`; services never declare, they verify passively.
@@ -26,7 +35,7 @@ import {
  * target, overflow, length limits) is a per-queue policy `eg.<queue>` (Q4), so it changes without
  * re-declaring a queue.
  */
-export const TOPOLOGY_VERSION = 4;
+export const TOPOLOGY_VERSION = 5;
 export const DEFAULT_VHOST = 'email-gateway';
 
 /** The six exchanges of the topology (ADR-0024): all topic, durable, not internal. */
@@ -45,6 +54,8 @@ export const QUEUE_NAMES = [
   'scan.auth',
   'scan.spam',
   'scan.url',
+  'scan.url.inspect',
+  'scan.url.results',
   'scan.attachment',
   'scan.dlp',
   'scan.sandbox',
@@ -59,7 +70,8 @@ export const QUEUE_NAMES = [
 export type QueueName = (typeof QUEUE_NAMES)[number];
 
 /**
- * - `work`: consumed in this step; bounded by reject-publish, dead-letters to `email.dead-letter`.
+ * - `work`: consumed in this step; bounded by reject-publish, dead-letters to `email.dead-letter`
+ *   (a `lossy` work queue is bounded by drop-head instead: policy `work-lossy`, v5).
  * - `dormant`: bound for a stage not built yet; bounded lossy buffer (drop-head), no consumer. A
  *   dormant queue with consumer kind `none` is reserved: it keeps only its retry binding and
  *   receives no event (v3 `scan.auth`).
@@ -95,19 +107,29 @@ export interface ExchangeBinding {
   routingKey: string;
 }
 
-/** Who consumes a queue: a ledger consumer of this step, a planned stage, or nobody by design. */
+/**
+ * Who consumes a queue: a ledger consumer of this step, a stateless consumer (v5: a service with
+ * no database, hence no `message_idempotency` ledger; its effects are deduplicated downstream, so
+ * the reconciler never re-drives it), a planned stage, or nobody by design.
+ */
 export type QueueConsumerInfo =
   | { kind: 'ledger'; ledgerName: string; service: string }
+  | { kind: 'stateless'; service: string; reason: string }
   | { kind: 'planned'; plannedStep: string; plannedService: string }
   | { kind: 'none'; reason: string };
 
 export interface QueueDefinition {
   name: QueueName;
   role: QueueRole;
-  /** The exchange that carries this queue's retry hops (`retry.<queue>.#`). */
+  /** The exchange that carries this queue's retry hops (`retryBindingKey(queue)`). */
   homeExchange: ExchangeName;
   bindings: Binding[];
   consumer: QueueConsumerInfo;
+  /**
+   * Work queues only (v5): the queue is a bounded lossy buffer (policy `work-lossy`: drop-head
+   * at `LOSSY_WORK_QUEUE_MAX_LENGTH`) instead of rejecting publishes when full.
+   */
+  lossy?: true;
   /** Present for work and dormant queues (dormant: for their future consumer). */
   retry?: RetryPolicy;
   /** The definition of policy `eg.<queue>` (Q4). */
@@ -134,6 +156,8 @@ export const DELAY_EXPIRED_ROUTING_KEY = 'retry.email.delivery.pending.expired';
 
 const WORK_QUEUE_MAX_LENGTH = 1_000_000;
 const DORMANT_QUEUE_MAX_LENGTH = 10_000;
+/** Length bound of a lossy work queue (v5 `scan.url.inspect`, step 4.3 U2). */
+export const LOSSY_WORK_QUEUE_MAX_LENGTH = 10_000;
 
 /**
  * `delivery-limit: -1` disables the quorum-queue delivery limit. RabbitMQ 4.x applies a default
@@ -145,9 +169,21 @@ const DORMANT_QUEUE_MAX_LENGTH = 10_000;
  */
 export const UNLIMITED_DELIVERIES = -1;
 
-/** The Q4 policy definition of a queue of `role`. */
-export function policyFor(role: QueueRole, queue: string): Record<string, string | number> {
-  switch (role) {
+/**
+ * Policy kinds: one per queue role, plus `work-lossy` (v5, step 4.3 U2) for a work queue that is a
+ * bounded lossy buffer by design (`scan.url.inspect`: the browser worker is an optional
+ * deployable, a dropped request is expired by the sweeper, and the outbox relay must never be
+ * blocked by `reject-publish` on it).
+ */
+export type PolicyKind = QueueRole | 'work-lossy';
+
+/** The policy kind of a queue definition. */
+export const policyKindOf = (queue: Pick<QueueDefinition, 'role' | 'lossy'>): PolicyKind =>
+  queue.role === 'work' && queue.lossy === true ? 'work-lossy' : queue.role;
+
+/** The Q4 policy definition of a queue of policy kind `kind`. */
+export function policyFor(kind: PolicyKind, queue: string): Record<string, string | number> {
+  switch (kind) {
     case 'work':
       return {
         'delivery-limit': 20,
@@ -156,6 +192,20 @@ export function policyFor(role: QueueRole, queue: string): Record<string, string
         'dead-letter-strategy': 'at-least-once',
         overflow: 'reject-publish',
         'max-length': WORK_QUEUE_MAX_LENGTH,
+      };
+    case 'work-lossy':
+      // Dead-lettered like a work queue (delivery limit, consumer dead letters). RabbitMQ
+      // supports at-least-once dead-lettering of quorum queues only with overflow reject-publish
+      // (with drop-head it falls back to at-most-once), so the strategy is stated as what the
+      // broker does: at-most-once. Heads dropped at max-length are dead-lettered (reason maxlen)
+      // at most once to email.dead-letter (itself bounded, reject-publish).
+      return {
+        'delivery-limit': 20,
+        'dead-letter-exchange': 'email.events',
+        'dead-letter-routing-key': `dead-letter.${queue}`,
+        'dead-letter-strategy': 'at-most-once',
+        overflow: 'drop-head',
+        'max-length': LOSSY_WORK_QUEUE_MAX_LENGTH,
       };
     case 'dormant':
       return {
@@ -227,9 +277,24 @@ const eventBinding = (exchange: ExchangeName, eventType: string): Binding => ({
   exchange,
   routingKey: `org.*.${eventType}`,
 });
+
+/**
+ * The retry binding key of `queue`: `retry.<queue>.#`, or the qualified `retry.<queue>.org.#`
+ * when `queue` is a dot-prefix of another queue name (v5: `scan.url` of `scan.url.inspect` and
+ * `scan.url.results`), so that it never matches the other queue's retry hops. Retry keys are
+ * always `retry.<queue>.org.<organizationId>.<eventType>` (`retryRoutingKey`).
+ */
+export function retryBindingKey(
+  queue: string,
+  queueNames: readonly string[] = QUEUE_NAMES,
+): string {
+  const prefixOfAnother = queueNames.some((other) => other.startsWith(`${queue}.`));
+  return prefixOfAnother ? `retry.${queue}.org.#` : `retry.${queue}.#`;
+}
+
 const retryBinding = (exchange: ExchangeName, queue: QueueName): Binding => ({
   exchange,
-  routingKey: `retry.${queue}.#`,
+  routingKey: retryBindingKey(queue),
 });
 
 function dormant(
@@ -326,14 +391,75 @@ export const TOPOLOGY: Topology = {
       policy: policyFor('work', 'scan.spam'),
       description: 'Rspamd: spam, phishing, reputation and SPF/DKIM/DMARC/ARC (step 4.1)',
     },
-    dormant(
-      'scan.url',
-      'email.security',
-      [parsed(), rescan()],
-      '4.3',
-      'email-worker',
-      'URL protection',
-    ),
+    {
+      // v5 (step 4.3 U1, U2): the URL engine of the email-worker scan role.
+      name: 'scan.url',
+      role: 'work',
+      homeExchange: 'email.security',
+      bindings: [parsed(), rescan(), retryBinding('email.security', 'scan.url')],
+      consumer: { kind: 'ledger', ledgerName: 'email-worker.scan.url', service: 'email-worker' },
+      retry: {
+        strategy: 'hold',
+        maxAttempts: 10,
+        baseDelayMs: 2 * SECOND,
+        maxDelayMs: MINUTE,
+        maxRetryAgeMs: 24 * HOUR,
+      },
+      policy: policyFor('work', 'scan.url'),
+      description:
+        'URLs: extraction, normalization, reputation, lookalikes, redirect chains, rewriting (step 4.3)',
+    },
+    {
+      // v5 (step 4.3 U2, U15): inspection requests for the isolated browser worker. A bounded
+      // lossy buffer by design (work-lossy): the browser worker is optional, a dropped request is
+      // expired by the email-worker's sweeper.
+      name: 'scan.url.inspect',
+      role: 'work',
+      homeExchange: 'email.security',
+      bindings: [
+        eventBinding('email.security', 'mail.url.inspection_requested.v1'),
+        retryBinding('email.security', 'scan.url.inspect'),
+      ],
+      consumer: {
+        kind: 'stateless',
+        service: 'url-browser-worker',
+        reason: 'no database; results are deduplicated by inspectionId in scan.url.results',
+      },
+      retry: {
+        strategy: 'hold',
+        maxAttempts: 3,
+        baseDelayMs: 5 * SECOND,
+        maxDelayMs: MINUTE,
+        maxRetryAgeMs: HOUR,
+      },
+      lossy: true,
+      policy: policyFor('work-lossy', 'scan.url.inspect'),
+      description: 'Dynamic URL inspection requests for the isolated browser worker (step 4.3)',
+    },
+    {
+      // v5 (step 4.3 U2, U15): inspection results, applied by the email-worker scan role.
+      name: 'scan.url.results',
+      role: 'work',
+      homeExchange: 'email.security',
+      bindings: [
+        eventBinding('email.security', 'mail.url.inspection_completed.v1'),
+        retryBinding('email.security', 'scan.url.results'),
+      ],
+      consumer: {
+        kind: 'ledger',
+        ledgerName: 'email-worker.scan.url.results',
+        service: 'email-worker',
+      },
+      retry: {
+        strategy: 'hold',
+        maxAttempts: 10,
+        baseDelayMs: 2 * SECOND,
+        maxDelayMs: MINUTE,
+        maxRetryAgeMs: 24 * HOUR,
+      },
+      policy: policyFor('work', 'scan.url.results'),
+      description: 'Dynamic URL inspection results of the browser worker (step 4.3)',
+    },
     {
       // v4 (step 4.2 A2): the attachment engine of the email-worker scan role.
       name: 'scan.attachment',
@@ -686,11 +812,9 @@ export function validateTopology(topology: Topology): string[] {
   if (!sameMembers(queueNames, QUEUE_NAMES))
     add(`queues must be exactly ${QUEUE_NAMES.join(', ')}`);
 
-  for (const a of queueNames) {
-    for (const b of queueNames) {
-      if (a !== b && b.startsWith(`${a}.`)) add(`queue ${a} is a dot-prefix of ${b}`);
-    }
-  }
+  // A queue may be a dot-prefix of another (v5 scan.url / scan.url.inspect) only because its retry
+  // binding is then the qualified retry.<queue>.org.# (retryBindingKey); the routing checks below
+  // prove that every retry hop still reaches exactly its own queue.
 
   const expectedSources = EXCHANGE_NAMES.filter((name) => name !== 'email.events');
   for (const source of expectedSources) {
@@ -732,7 +856,9 @@ export function validateTopology(topology: Topology): string[] {
       } else if (key.startsWith('org.')) {
         add(`${q}: unsupported event binding ${key}`);
       } else if (key.startsWith('retry.')) {
-        if (key !== `retry.${q}.#`) add(`${q}: retry binding ${key} names another queue`);
+        if (key !== retryBindingKey(q, queueNames)) {
+          add(`${q}: retry binding ${key} is not ${retryBindingKey(q, queueNames)}`);
+        }
       } else if (key.startsWith('delay.')) {
         if (queue.role !== 'delay') add(`${q}: only a delay queue binds delay keys`);
       } else if (key === 'dead-letter.#') {
@@ -749,9 +875,11 @@ export function validateTopology(topology: Topology): string[] {
       if (
         retryBindings.length !== 1 ||
         retryBindings[0]?.exchange !== queue.homeExchange ||
-        retryBindings[0]?.routingKey !== `retry.${q}.#`
+        retryBindings[0]?.routingKey !== retryBindingKey(q, queueNames)
       ) {
-        add(`${q}: needs exactly one retry binding retry.${q}.# on its home exchange`);
+        add(
+          `${q}: needs exactly one retry binding ${retryBindingKey(q, queueNames)} on its home exchange`,
+        );
       }
       const eventBound = queue.bindings.some((b) => b.routingKey.startsWith('org.'));
       if (queue.consumer.kind === 'none') {
@@ -765,13 +893,18 @@ export function validateTopology(topology: Topology): string[] {
       add(`${q}: a ${queue.role} queue has no retry binding`);
     }
 
-    const expectedPolicy = policyFor(queue.role, q);
+    if (queue.lossy !== undefined && queue.role !== 'work') {
+      add(`${q}: only a work queue can be lossy`);
+    }
+    const policyKind = policyKindOf(queue);
+    const expectedPolicy = policyFor(policyKind, q);
     if (JSON.stringify(queue.policy) !== JSON.stringify(expectedPolicy)) {
-      add(`${q}: policy differs from the ${queue.role} policy`);
+      add(`${q}: policy differs from the ${policyKind} policy`);
     }
 
     const consumerKinds: Record<QueueRole, readonly QueueConsumerInfo['kind'][]> = {
-      work: ['ledger'],
+      // `stateless` (v5): a work queue consumer without a ledger (scan.url.inspect).
+      work: ['ledger', 'stateless'],
       // `none`: reserved (no event binding, checked above).
       dormant: ['planned', 'none'],
       delay: ['none'],

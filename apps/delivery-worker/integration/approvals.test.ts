@@ -1,3 +1,4 @@
+import { PutObjectCommand } from '@aws-sdk/client-s3';
 import { ConfigValidationError } from '@email-gateway/config';
 import {
   deliveryApprovedV1,
@@ -449,6 +450,113 @@ describe('development pass-through after scanning (R5, step 4.1 S15) end to end'
       recipients: 0,
     });
     expect(await fx.lifecycle(older)).toMatchObject({ status: 'scanned', lifecycleRound: 1 });
+    await planner.stop();
+  });
+
+  it("delivers the round's rewritten copy when the URL engine wrote one, else the original (step 4.3 U20)", async () => {
+    const planner = await ApprovalPipeline.start(fx, broker, worker.planner, {
+      consumer: fx.consumer('dev-planner-rewrite'),
+    });
+    const approver = new DevPassThroughApprover(
+      { start: () => undefined, stop: () => Promise.resolve() },
+      fx.prisma,
+      RECORDER_TX_TIMEOUT_MS,
+      silentLogger,
+      worker.metrics,
+    );
+    const approveOnce = async (message: MessageFixture, correlation: string) => {
+      const payload = scannedPayload(message, { verdict: 'clean' });
+      const eventId = await outboxScanned(message, payload, correlation);
+      const event: EventEnvelope<MessageScannedV1> = {
+        eventId,
+        eventType: EventTypes.MessageScanned,
+        occurredAt: new Date().toISOString(),
+        correlationId: correlation,
+        organizationId: org.toString(),
+        payload,
+      };
+      await fx.prisma.$transaction((tx) => approver.approve(event, tx));
+      const [approval] = await approvalRows(message);
+      return deliveryApprovedV1.parse(approval!.payload);
+    };
+    const rewriteRow = (
+      message: MessageFixture,
+      status: 'rewritten' | 'skipped',
+      key: string | null,
+    ) =>
+      fx.prisma.urlRewrite.create({
+        data: {
+          receivedAt: message.receivedAt,
+          messageId: message.messageId,
+          organizationId: message.organizationId,
+          scanId: 1n,
+          lifecycleRound: 0,
+          status,
+          skipReason: status === 'skipped' ? 'signed_smime' : null,
+          objectKey: key,
+          linksRewritten: status === 'rewritten' ? 1 : 0,
+          settingsVersion: 'url-map/1;p=0123456789ab;t=none',
+        },
+      });
+
+    // Rewritten: the approval names the rewrite object, the reinjector streams it.
+    const rewritten = await fx.message(org, {
+      state: 'scanned',
+      recipients: [{ address: 'rw@ext-pt.test' }],
+    });
+    const rewriteKey = `org/${org.toString()}/rewrite/2026/11/06/${rewritten.messageId.toString()}/r0-${uuidv7()}.eml`;
+    await fx.s3.client.send(
+      new PutObjectCommand({
+        Bucket: fx.s3.mailBucket,
+        Key: rewriteKey,
+        Body: Buffer.from(
+          'From: a@example.org\r\nTo: rw@ext-pt.test\r\nSubject: rw\r\n\r\n' +
+            'Protected link: http://localhost:3080/c/REWRITTEN-MARKER\r\n',
+          'utf8',
+        ),
+      }),
+    );
+    await rewriteRow(rewritten, 'rewritten', rewriteKey);
+    const rewrittenApprovals = async () =>
+      (await worker.metrics.approvals.get()).values
+        .filter((v) => v.labels.source === 'dev_passthrough' && v.labels.object === 'rewritten')
+        .reduce((sum, v) => sum + v.value, 0);
+    const before = await rewrittenApprovals();
+    const approval = await approveOnce(rewritten, 'it-scan-rw01');
+    expect(approval.emlS3Key).toBe(rewriteKey);
+    const relayed = Broker.envelopeOf(
+      (await approvalRows(rewritten))[0]!,
+    ) as EventEnvelope<DeliveryApprovedV1>;
+    expect(await planner.plan(broker, relayed)).toMatchObject({ status: 'planned', deliveries: 1 });
+    expect(await rewrittenApprovals()).toBe(before + 1);
+    await worker.reinjectOnce();
+    const delivered = postfix.transactions.find((t) =>
+      t.rcpts.some((r) => r.address === 'rw@ext-pt.test'),
+    );
+    expect(delivered?.data.toString('utf8')).toContain('REWRITTEN-MARKER');
+
+    // Skipped (signed): the original is approved.
+    const skipped = await fx.message(org, {
+      state: 'scanned',
+      recipients: [{ address: 'sk@ext-pt.test' }],
+    });
+    await rewriteRow(skipped, 'skipped', null);
+    expect((await approveOnce(skipped, 'it-scan-rw02')).emlS3Key).toBe(skipped.emlObjectKey);
+
+    // A rewrite row naming another organization's object is never used.
+    const foreign = await fx.message(org, {
+      state: 'scanned',
+      recipients: [{ address: 'fo@ext-pt.test' }],
+    });
+    await rewriteRow(foreign, 'rewritten', `org/999999/rewrite/2026/11/06/1/r0-x.eml`);
+    expect((await approveOnce(foreign, 'it-scan-rw03')).emlS3Key).toBe(foreign.emlObjectKey);
+
+    // No rewrite row at all: the original.
+    const none = await fx.message(org, {
+      state: 'scanned',
+      recipients: [{ address: 'no@ext-pt.test' }],
+    });
+    expect((await approveOnce(none, 'it-scan-rw04')).emlS3Key).toBe(none.emlObjectKey);
     await planner.stop();
   });
 

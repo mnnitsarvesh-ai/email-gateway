@@ -1,0 +1,165 @@
+# Isolated dynamic URL inspection (step 4.3 U15; ADR-0032; docs/runbooks/url-browser-worker.md):
+# headless Chromium (playwright-core chromium-headless-shell) consuming scan.url.inspect as
+# eg-url-browser and publishing inspection results. It holds no database, S3, Redis or token/cache
+# secret (the process refuses to start with any of them), reaches nothing but the egress proxy
+# and RabbitMQ, and runs with the Compose controls: non-root, read-only root, /tmp emptyDir
+# (Chromium's ephemeral profile), no capabilities, no privilege escalation, 1 CPU / 1 GiB.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: url-browser-worker
+  labels:
+    {
+      app.kubernetes.io/name: url-browser-worker,
+      app.kubernetes.io/component: dynamic-inspection,
+      app.kubernetes.io/part-of: email-gateway,
+    }
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels: { app.kubernetes.io/name: url-browser-worker }
+  strategy:
+    rollingUpdate: { maxUnavailable: 1, maxSurge: 1 }
+  template:
+    metadata:
+      labels:
+        {
+          app.kubernetes.io/name: url-browser-worker,
+          app.kubernetes.io/component: dynamic-inspection,
+          app.kubernetes.io/part-of: email-gateway,
+          email-gateway.io/egress-client: 'true',
+        }
+    spec:
+      serviceAccountName: url-browser-worker
+      automountServiceAccountToken: false
+      # gVisor (user-space kernel) when the cluster offers it (documented, not verified locally):
+      # runtimeClassName: gvisor
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: url-browser-worker
+          image: email-gateway/url-browser-worker:latest
+          ports:
+            - { name: http, containerPort: 3090 }
+          # Explicit environment, no shared ConfigMap (it carries S3_* and URL_TOKEN_* keys).
+          env:
+            - { name: NODE_ENV, value: production }
+            - { name: APP_ENV, value: production }
+            - { name: LOG_LEVEL, value: info }
+            - { name: HTTP_HOST, value: 0.0.0.0 }
+            - { name: URL_BROWSER_HTTP_PORT, value: '3090' }
+            - { name: URL_BROWSER_PROXY_URL, value: http://url-egress-proxy:3128 }
+            - { name: URL_BROWSER_CONCURRENCY, value: '1' }
+            - { name: URL_BROWSER_JOB_TIMEOUT_MS, value: '20000' }
+            - { name: URL_BROWSER_NAVIGATION_TIMEOUT_MS, value: '15000' }
+            - { name: URL_BROWSER_MAX_JOBS_PER_BROWSER, value: '50' }
+            - { name: URL_BROWSER_MAX_RSS_MB, value: '768' }
+            - { name: URL_PROTECTED_EXTRA_DOMAINS, value: '' }
+            - {
+                name: RABBITMQ_URL_BROWSER_URL_FILE,
+                value: /var/run/secrets/rabbitmq-url-browser/url,
+              }
+            - { name: URL_EGRESS_PROXY_TOKEN_FILE, value: /var/run/secrets/url-egress/token }
+          volumeMounts:
+            - {
+                name: rabbitmq-url-browser,
+                mountPath: /var/run/secrets/rabbitmq-url-browser,
+                readOnly: true,
+              }
+            - { name: url-egress, mountPath: /var/run/secrets/url-egress, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+          readinessProbe:
+            # rabbitmq + browser (details: chromiumSandbox, browserVersion).
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 15
+            failureThreshold: 3
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health/live, port: http }
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          startupProbe:
+            httpGet: { path: /health/live, port: http }
+            periodSeconds: 5
+            failureThreshold: 24
+          resources:
+            requests: { cpu: 500m, memory: 768Mi }
+            limits: { cpu: '1', memory: 1Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            privileged: false
+            capabilities: { drop: [ALL] }
+      volumes:
+        - name: rabbitmq-url-browser
+          secret: { secretName: email-gateway-rabbitmq-url-browser }
+        - name: url-egress
+          secret: { secretName: email-gateway-url-egress-token }
+        # Chromium's ephemeral profile and shared memory (--disable-dev-shm-usage); deleted with
+        # the pod. The process count limit is the kubelet's podPidsLimit (256 recommended).
+        - name: tmp
+          emptyDir: { medium: Memory, sizeLimit: 256Mi }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: url-browser-worker
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: url-browser-worker
+  labels: { app.kubernetes.io/name: url-browser-worker }
+spec:
+  selector: { app.kubernetes.io/name: url-browser-worker }
+  ports:
+    - { name: http, port: 3090, targetPort: http }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: url-browser-worker
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: url-browser-worker }
+---
+# Egress only to the egress proxy and RabbitMQ (plus cluster DNS for those two service names;
+# Chromium itself never resolves: --host-resolver-rules). Ingress: Prometheus on 3090 only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: url-browser-worker
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: url-browser-worker }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: observability }
+          podSelector:
+            matchLabels: { app.kubernetes.io/name: prometheus }
+      ports: [{ protocol: TCP, port: 3090 }]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: { app.kubernetes.io/name: url-egress-proxy }
+      ports: [{ protocol: TCP, port: 3128 }]
+    # RabbitMQ (Amazon MQ subnet; replace per environment).
+    - to: [{ ipBlock: { cidr: 10.0.64.0/20 } }]
+      ports: [{ protocol: TCP, port: 5671 }, { protocol: TCP, port: 5672 }]
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }]

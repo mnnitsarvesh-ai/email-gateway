@@ -97,6 +97,8 @@ A domain must have **exactly one** SPF record (a TXT value starting with `v=spf1
 - A key becomes **active** once its record is found and your ownership is verified.
 - Warnings: `dkim_public_key_mismatch` (the published key is different: re-copy the value), `dkim_key_revoked_in_dns` (the record has an empty `p=`), `dkim_testing_mode` (`t=y` asks receivers to treat failures leniently; remove it once things work).
 
+**Inbound mail and link protection.** The DKIM record above signs the mail _you send_ through the gateway. For mail you _receive_, the gateway rewrites links (step 4.3), which invalidates the sender's DKIM signature downstream; your mailbox platform must trust the gateway as its inbound gateway — see [Link protection rewrites messages](destination-servers.md#link-protection-rewrites-messages-trust-the-gateway).
+
 #### Rotating DKIM keys
 
 Rotate a key when your security policy requires it or if you suspect it was exposed (`POST /api/v1/domains/{id}/dkim/rotate`, permission `domain:dkim_rotate`):

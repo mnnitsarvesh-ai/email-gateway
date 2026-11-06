@@ -4,6 +4,9 @@ metadata:
   name: email-gateway-config
 data:
   NODE_ENV: production
+  # The shared base config schema defaults APP_ENV to `local`, which would allow local-only
+  # behaviour (TEST-ONLY URL seams, plaintext SMTP, http click host). Overlays set `staging`.
+  APP_ENV: production
   LOG_LEVEL: info
   HTTP_HOST: 0.0.0.0
   S3_REGION: ap-south-1
@@ -70,8 +73,9 @@ data:
   SCAN_RSPAMD_AUTH_FAILURE_VERDICT: reason_only
   # Attachment scanning (step 4.2 §5, A8): the platform attachment settings read by both the api
   # (tenant override bounds) and the email-worker scan replicas; the required engines of a round
-  # (SCAN_ENGINES) must be identical on every scan replica (A1).
-  SCAN_ENGINES: rspamd,attachment
+  # (SCAN_ENGINES) must be identical on every scan replica (A1). Step 4.3 U1 adds the required url
+  # engine (Deployment email-worker-url).
+  SCAN_ENGINES: rspamd,attachment,url
   ATTACHMENT_MAX_BYTES: '26214400'
   ATTACHMENT_ARCHIVE_MAX_DEPTH: '3'
   ATTACHMENT_ARCHIVE_MAX_ENTRIES: '1000'
@@ -85,3 +89,94 @@ data:
   ATTACHMENT_ENCRYPTED_VERDICT: suspicious
   ATTACHMENT_RESCAN_MAX_MESSAGES: '5000'
   ATTACHMENT_RESCAN_WINDOW_HOURS: '24'
+  # URL protection (step 4.3 §5; docs/deployment/url-protection.md). Shared, non-secret platform
+  # keys of the url engine (email-worker-url), the click-service and the api (bounds). Secrets
+  # (URL_TOKEN_KEY_*, URL_CACHE_HMAC_KEY, URL_EGRESS_PROXY_TOKEN, the click account) are separate
+  # Secrets. The browser worker and the egress proxy do NOT read this ConfigMap (they refuse S3_*
+  # and URL_TOKEN_* keys). TEST-ONLY keys (URL_FETCH_TEST_*, URL_FETCH_CA_FILE) are never set.
+  SCAN_URL_CONCURRENCY: '4'
+  SCAN_URL_TIMEOUT_MS: '120000'
+  SCAN_URL_MAX_ATTEMPTS: '6'
+  URL_MAX_PER_MESSAGE: '200'
+  URL_MAX_OCCURRENCES: '5000'
+  URL_MAX_LENGTH: '2048'
+  URL_MAX_PART_BYTES: '10485760'
+  URL_MAX_EXTRA_PARTS: '5'
+  URL_EXTRA_PART_MAX_BYTES: '2097152'
+  URL_EXTRACT_TIMEOUT_MS: '5000'
+  # Providers: local_feed always; add dnsbl (and the zones, e.g. Spamhaus DQS with the key in the
+  # zone name, SURBL, URIBL) and rdap per overlay. A misspelled DNSBL zone answers NXDOMAIN, which
+  # reads as `clear`: never enable dnsbl with placeholder zones.
+  URL_REPUTATION_PROVIDERS: local_feed
+  URL_DNSBL_DOMAIN_ZONES: ''
+  URL_DNSBL_IP_ZONES: ''
+  URL_DNSBL_ERROR_CODES: 127.255.255.252,127.255.255.254,127.255.255.255,127.0.1.255
+  URL_RDAP_BASE_URL: ''
+  URL_NEW_DOMAIN_DAYS: '30'
+  URL_PROVIDER_TIMEOUT_MS: '3000'
+  URL_PROVIDER_CONCURRENCY: '16'
+  URL_PROVIDER_BREAKER_THRESHOLD: '5'
+  URL_PROVIDER_BREAKER_RESET_MS: '30000'
+  # A recursive resolver that does not serve internal zones (deployment doc); empty = resolv.conf.
+  URL_DNS_SERVERS: ''
+  URL_DNS_TIMEOUT_MS: '2000'
+  URL_DNS_TRIES: '2'
+  URL_CACHE_ENABLED: 'true'
+  URL_CACHE_CLEAN_TTL_SECONDS: '900'
+  URL_CACHE_MALICIOUS_TTL_SECONDS: '86400'
+  URL_CACHE_OTHER_TTL_SECONDS: '300'
+  URL_CACHE_ERROR_TTL_SECONDS: '30'
+  URL_CACHE_TIMEOUT_MS: '200'
+  URL_SCAN_TIME_FETCH: suspicious
+  URL_FETCH_MAX_PER_MESSAGE: '10'
+  URL_FETCH_MAX_HOPS: '8'
+  URL_FETCH_SUSPICIOUS_HOPS: '4'
+  URL_FETCH_CONNECT_TIMEOUT_MS: '3000'
+  URL_FETCH_HEADER_TIMEOUT_MS: '5000'
+  URL_FETCH_TOTAL_TIMEOUT_MS: '10000'
+  URL_FETCH_MAX_BODY_BYTES: '262144'
+  URL_FETCH_MAX_HEADER_BYTES: '16384'
+  URL_FETCH_CONCURRENCY: '8'
+  URL_FETCH_ALLOWED_PORTS: 80,443
+  # The platform's own public ranges and names (replace per environment).
+  URL_FETCH_DENY_CIDRS: ''
+  URL_FETCH_DENY_HOSTS: ''
+  URL_FETCH_USER_AGENT: Mozilla/5.0 (compatible; EmailGatewayLinkScanner/1.0)
+  # Egress mode 2 (recommended): every fetcher through the egress proxy (url-egress-proxy.yaml);
+  # the pods need the label email-gateway.io/egress-client=true and the token Secret.
+  URL_FETCH_EGRESS_PROXY_URL: http://url-egress-proxy:3128
+  URL_SHORTENER_HOSTS_FILE: ''
+  URL_SHORTENER_EXTRA_HOSTS: ''
+  URL_PROTECTED_BRANDS_FILE: ''
+  URL_PROTECTED_EXTRA_DOMAINS: ''
+  URL_LOOKALIKE_MIN_LABEL: '5'
+  URL_LOOKALIKE_LONG_LABEL: '9'
+  URL_LOOKALIKE_MAX_DISTANCE_SHORT: '1'
+  URL_LOOKALIKE_MAX_DISTANCE_LONG: '2'
+  URL_LOOKALIKE_HIGH_SCORE: '0.85'
+  URL_REWRITE_ENABLED: 'true'
+  URL_REWRITE_DIRECTIONS: inbound
+  URL_REWRITE_DKIM_SIGNED: rewrite
+  URL_REWRITE_MAX_MESSAGE_BYTES: '26214400'
+  URL_REWRITE_MAX_PART_BYTES: '5242880'
+  URL_REWRITE_OBJECT_RETENTION_DAYS: '30'
+  # The click host (https required outside APP_ENV local/ci). Set per overlay.
+  URL_CLICK_BASE_URL: https://protect.replace-per-environment.invalid
+  URL_TOKEN_DEFAULT_EXPIRY_DAYS: '30'
+  URL_TOKEN_MAX_EXPIRY_DAYS: '90'
+  URL_DYNAMIC_INSPECTION: 'on'
+  URL_DYNAMIC_MAX_PER_MESSAGE: '3'
+  URL_DYNAMIC_PENDING_TTL_SECONDS: '3600'
+  URL_DYNAMIC_SWEEP_INTERVAL_MS: '60000'
+  # click-service (U14). CLICK_TRUST_PROXY = reverse-proxy hops in front of the pods (ingress
+  # controller; add one per CDN/WAF layer).
+  CLICK_DB_TX_TIMEOUT_MS: '120000'
+  CLICK_RATE_LIMIT_IP_PER_MINUTE: '120'
+  CLICK_RATE_LIMIT_TOKEN_PER_MINUTE: '30'
+  CLICK_RATE_LIMIT_INVALID_PER_MINUTE: '20'
+  CLICK_RECHECK_BUDGET_MS: '2500'
+  CLICK_EVENT_WRITE_WAIT_MS: '300'
+  CLICK_EVENT_MAX_PENDING: '1000'
+  CLICK_CONTINUE_TTL_SECONDS: '600'
+  CLICK_TRUST_PROXY: '1'
+  CLICK_STORE_CLIENT_NETWORK: 'true'

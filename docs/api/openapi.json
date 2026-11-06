@@ -18495,7 +18495,7 @@
                                       },
                                       "durationMs": {
                                         "nullable": true,
-                                        "description": "Attempt duration; null for the `attachment` engine (it would reveal cache hits)",
+                                        "description": "Attempt duration; null for the `attachment` and `url` engines (it would reveal cache hits)",
                                         "type": "integer",
                                         "minimum": 0,
                                         "maximum": 9007199254740991
@@ -18504,7 +18504,7 @@
                                         "type": "string",
                                         "format": "date-time",
                                         "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$",
-                                        "description": "When the attempt completed (whole seconds for the `attachment` engine, see durationMs)"
+                                        "description": "When the attempt completed (whole seconds for the `attachment` and `url` engines)"
                                       }
                                     },
                                     "required": [
@@ -19010,9 +19010,627 @@
                                     "additionalProperties": false
                                   }
                                 },
+                                "urls": {
+                                  "description": "Engine `url` only (step 4.3 U16): one result per URL of the round (≤ 200, by urlSeq); empty before the final result and for `skipped`",
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "urlSeq": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 65535
+                                      },
+                                      "url": {
+                                        "type": "string",
+                                        "minLength": 1,
+                                        "maxLength": 2048
+                                      },
+                                      "host": {
+                                        "type": "string",
+                                        "maxLength": 253,
+                                        "pattern": "^(?:(?=.{1,253}$)[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?(?:\\.[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?)*|\\[[0-9a-f:.]{2,45}\\])$"
+                                      },
+                                      "unicodeHost": {
+                                        "nullable": true,
+                                        "type": "string",
+                                        "minLength": 1,
+                                        "maxLength": 253
+                                      },
+                                      "registrableDomain": {
+                                        "nullable": true,
+                                        "type": "string",
+                                        "minLength": 1,
+                                        "maxLength": 253
+                                      },
+                                      "hostKind": {
+                                        "type": "string",
+                                        "enum": ["domain", "ipv4", "ipv6"]
+                                      },
+                                      "sources": {
+                                        "type": "object",
+                                        "additionalProperties": {
+                                          "type": "integer",
+                                          "minimum": 1,
+                                          "maximum": 65535
+                                        }
+                                      },
+                                      "flags": {
+                                        "maxItems": 32,
+                                        "type": "array",
+                                        "items": {
+                                          "type": "string",
+                                          "enum": [
+                                            "url.feed_malicious",
+                                            "url.dnsbl_phishing",
+                                            "url.dnsbl_malware",
+                                            "url.dnsbl_c2",
+                                            "url.phishing_high_confidence",
+                                            "url.tenant_blocked",
+                                            "url.dynamic_phishing",
+                                            "url.lookalike_homoglyph",
+                                            "url.lookalike_edit_distance",
+                                            "url.lookalike_combosquat",
+                                            "url.mixed_script",
+                                            "url.lookalike_tld_swap",
+                                            "url.new_domain",
+                                            "url.ip_host",
+                                            "url.redirect_to_ip",
+                                            "url.redirect_limit",
+                                            "url.many_redirects",
+                                            "url.redirect_blocked_internal",
+                                            "url.feed_suspicious",
+                                            "url.dnsbl_spam",
+                                            "url.userinfo",
+                                            "url.obfuscated_host",
+                                            "url.ip_obfuscated",
+                                            "url.entity_obfuscation",
+                                            "url.control_chars",
+                                            "url.text_mismatch",
+                                            "url.too_long",
+                                            "url.credential_form",
+                                            "url.credential_form_cross_origin",
+                                            "url.dynamic_download",
+                                            "url.dynamic_cross_origin_form",
+                                            "url.fetch_timeout",
+                                            "url.fetch_dns_error",
+                                            "url.fetch_tls_error",
+                                            "url.fetch_connection_error",
+                                            "url.fetch_http_error",
+                                            "url.fetch_too_large",
+                                            "url.fetch_blocked_port",
+                                            "url.fetch_not_performed",
+                                            "url.reputation_unavailable",
+                                            "url.dynamic_failed",
+                                            "url.shortened",
+                                            "url.redirected",
+                                            "url.meta_refresh",
+                                            "url.idn",
+                                            "url.brand_tld_variant",
+                                            "url.nonstandard_port",
+                                            "url.trailing_dot",
+                                            "url.in_attachment",
+                                            "url.allowlisted",
+                                            "url.charset_guess",
+                                            "url.fetch_skipped_limit",
+                                            "clean.no_findings",
+                                            "url.none",
+                                            "url.content_incomplete",
+                                            "url.script_scheme",
+                                            "url.data_uri",
+                                            "url.unsafe_scheme",
+                                            "limit.url_count",
+                                            "url.invalid"
+                                          ]
+                                        }
+                                      },
+                                      "verdict": {
+                                        "type": "string",
+                                        "enum": ["clean", "suspicious", "malicious", "unknown"]
+                                      },
+                                      "reasonCodes": {
+                                        "minItems": 1,
+                                        "maxItems": 32,
+                                        "type": "array",
+                                        "items": {
+                                          "type": "string",
+                                          "enum": [
+                                            "url.feed_malicious",
+                                            "url.dnsbl_phishing",
+                                            "url.dnsbl_malware",
+                                            "url.dnsbl_c2",
+                                            "url.phishing_high_confidence",
+                                            "url.tenant_blocked",
+                                            "url.dynamic_phishing",
+                                            "url.lookalike_homoglyph",
+                                            "url.lookalike_edit_distance",
+                                            "url.lookalike_combosquat",
+                                            "url.mixed_script",
+                                            "url.lookalike_tld_swap",
+                                            "url.new_domain",
+                                            "url.ip_host",
+                                            "url.redirect_to_ip",
+                                            "url.redirect_limit",
+                                            "url.many_redirects",
+                                            "url.redirect_blocked_internal",
+                                            "url.feed_suspicious",
+                                            "url.dnsbl_spam",
+                                            "url.userinfo",
+                                            "url.obfuscated_host",
+                                            "url.ip_obfuscated",
+                                            "url.entity_obfuscation",
+                                            "url.control_chars",
+                                            "url.text_mismatch",
+                                            "url.too_long",
+                                            "url.credential_form",
+                                            "url.credential_form_cross_origin",
+                                            "url.dynamic_download",
+                                            "url.dynamic_cross_origin_form",
+                                            "url.fetch_timeout",
+                                            "url.fetch_dns_error",
+                                            "url.fetch_tls_error",
+                                            "url.fetch_connection_error",
+                                            "url.fetch_http_error",
+                                            "url.fetch_too_large",
+                                            "url.fetch_blocked_port",
+                                            "url.fetch_not_performed",
+                                            "url.reputation_unavailable",
+                                            "url.dynamic_failed",
+                                            "url.shortened",
+                                            "url.redirected",
+                                            "url.meta_refresh",
+                                            "url.idn",
+                                            "url.brand_tld_variant",
+                                            "url.nonstandard_port",
+                                            "url.trailing_dot",
+                                            "url.in_attachment",
+                                            "url.allowlisted",
+                                            "url.charset_guess",
+                                            "url.fetch_skipped_limit",
+                                            "clean.no_findings",
+                                            "url.none",
+                                            "url.content_incomplete",
+                                            "url.script_scheme",
+                                            "url.data_uri",
+                                            "url.unsafe_scheme",
+                                            "limit.url_count",
+                                            "url.invalid"
+                                          ]
+                                        }
+                                      },
+                                      "landing": {
+                                        "nullable": true,
+                                        "type": "object",
+                                        "properties": {
+                                          "passwordFields": {
+                                            "type": "integer",
+                                            "minimum": 0,
+                                            "maximum": 1000
+                                          },
+                                          "forms": {
+                                            "type": "integer",
+                                            "minimum": 0,
+                                            "maximum": 1000
+                                          },
+                                          "crossOriginFormAction": { "type": "boolean" },
+                                          "titleBrandMatches": {
+                                            "maxItems": 5,
+                                            "type": "array",
+                                            "items": {
+                                              "type": "string",
+                                              "pattern": "^[a-z0-9][a-z0-9_-]{0,31}$"
+                                            }
+                                          }
+                                        },
+                                        "required": [
+                                          "passwordFields",
+                                          "forms",
+                                          "crossOriginFormAction",
+                                          "titleBrandMatches"
+                                        ],
+                                        "additionalProperties": false
+                                      },
+                                      "dynamic": {
+                                        "nullable": true,
+                                        "type": "object",
+                                        "properties": {
+                                          "status": {
+                                            "type": "string",
+                                            "enum": ["pending", "completed", "failed", "expired"]
+                                          },
+                                          "verdict": {
+                                            "nullable": true,
+                                            "type": "string",
+                                            "enum": ["clean", "suspicious", "malicious", "unknown"]
+                                          },
+                                          "reasonCodes": {
+                                            "maxItems": 16,
+                                            "type": "array",
+                                            "items": {
+                                              "type": "string",
+                                              "enum": [
+                                                "url.feed_malicious",
+                                                "url.dnsbl_phishing",
+                                                "url.dnsbl_malware",
+                                                "url.dnsbl_c2",
+                                                "url.phishing_high_confidence",
+                                                "url.tenant_blocked",
+                                                "url.dynamic_phishing",
+                                                "url.lookalike_homoglyph",
+                                                "url.lookalike_edit_distance",
+                                                "url.lookalike_combosquat",
+                                                "url.mixed_script",
+                                                "url.lookalike_tld_swap",
+                                                "url.new_domain",
+                                                "url.ip_host",
+                                                "url.redirect_to_ip",
+                                                "url.redirect_limit",
+                                                "url.many_redirects",
+                                                "url.redirect_blocked_internal",
+                                                "url.feed_suspicious",
+                                                "url.dnsbl_spam",
+                                                "url.userinfo",
+                                                "url.obfuscated_host",
+                                                "url.ip_obfuscated",
+                                                "url.entity_obfuscation",
+                                                "url.control_chars",
+                                                "url.text_mismatch",
+                                                "url.too_long",
+                                                "url.credential_form",
+                                                "url.credential_form_cross_origin",
+                                                "url.dynamic_download",
+                                                "url.dynamic_cross_origin_form",
+                                                "url.fetch_timeout",
+                                                "url.fetch_dns_error",
+                                                "url.fetch_tls_error",
+                                                "url.fetch_connection_error",
+                                                "url.fetch_http_error",
+                                                "url.fetch_too_large",
+                                                "url.fetch_blocked_port",
+                                                "url.fetch_not_performed",
+                                                "url.reputation_unavailable",
+                                                "url.dynamic_failed",
+                                                "url.shortened",
+                                                "url.redirected",
+                                                "url.meta_refresh",
+                                                "url.idn",
+                                                "url.brand_tld_variant",
+                                                "url.nonstandard_port",
+                                                "url.trailing_dot",
+                                                "url.in_attachment",
+                                                "url.allowlisted",
+                                                "url.charset_guess",
+                                                "url.fetch_skipped_limit",
+                                                "clean.no_findings",
+                                                "url.none",
+                                                "url.content_incomplete",
+                                                "url.script_scheme",
+                                                "url.data_uri",
+                                                "url.unsafe_scheme",
+                                                "limit.url_count",
+                                                "url.invalid"
+                                              ]
+                                            }
+                                          },
+                                          "signals": {
+                                            "nullable": true,
+                                            "type": "object",
+                                            "properties": {
+                                              "passwordFields": {
+                                                "type": "integer",
+                                                "minimum": 0,
+                                                "maximum": 1000
+                                              },
+                                              "forms": {
+                                                "type": "integer",
+                                                "minimum": 0,
+                                                "maximum": 1000
+                                              },
+                                              "crossOriginFormAction": { "type": "boolean" },
+                                              "formActionHosts": {
+                                                "maxItems": 5,
+                                                "type": "array",
+                                                "items": {
+                                                  "type": "string",
+                                                  "maxLength": 253,
+                                                  "pattern": "^(?:(?=.{1,253}$)[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?(?:\\.[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?)*|\\[[0-9a-f:.]{2,45}\\])$"
+                                                }
+                                              },
+                                              "downloadAttempted": { "type": "boolean" },
+                                              "blockedRequests": {
+                                                "type": "integer",
+                                                "minimum": 0,
+                                                "maximum": 100000
+                                              },
+                                              "requests": {
+                                                "type": "integer",
+                                                "minimum": 0,
+                                                "maximum": 100000
+                                              },
+                                              "bytes": {
+                                                "type": "integer",
+                                                "minimum": 0,
+                                                "maximum": 9007199254740991
+                                              },
+                                              "titleBrandMatches": {
+                                                "maxItems": 5,
+                                                "type": "array",
+                                                "items": {
+                                                  "type": "string",
+                                                  "pattern": "^[a-z0-9][a-z0-9_-]{0,31}$"
+                                                }
+                                              },
+                                              "jsRedirect": { "type": "boolean" },
+                                              "dialogs": {
+                                                "type": "integer",
+                                                "minimum": 0,
+                                                "maximum": 1000
+                                              }
+                                            },
+                                            "required": [
+                                              "passwordFields",
+                                              "forms",
+                                              "crossOriginFormAction",
+                                              "formActionHosts",
+                                              "downloadAttempted",
+                                              "blockedRequests",
+                                              "requests",
+                                              "bytes",
+                                              "titleBrandMatches",
+                                              "jsRedirect",
+                                              "dialogs"
+                                            ],
+                                            "additionalProperties": false
+                                          }
+                                        },
+                                        "required": ["status", "verdict", "reasonCodes", "signals"],
+                                        "additionalProperties": false
+                                      },
+                                      "rewritten": { "type": "boolean" },
+                                      "reputation": {
+                                        "type": "array",
+                                        "items": {
+                                          "type": "object",
+                                          "properties": {
+                                            "provider": {
+                                              "type": "string",
+                                              "description": "`local_feed` (platform feed), `dnsbl`, `rdap`, …"
+                                            },
+                                            "kind": {
+                                              "type": "string",
+                                              "enum": ["url", "domain", "ip"]
+                                            },
+                                            "status": {
+                                              "type": "string",
+                                              "enum": ["listed", "clear", "error"]
+                                            },
+                                            "category": {
+                                              "nullable": true,
+                                              "type": "string",
+                                              "enum": [
+                                                "phishing",
+                                                "malware",
+                                                "spam",
+                                                "scam",
+                                                "c2",
+                                                "other"
+                                              ]
+                                            }
+                                          },
+                                          "required": ["provider", "kind", "status", "category"],
+                                          "additionalProperties": false
+                                        },
+                                        "description": "Reputation answers (≤ 12; listed first); never the cache outcome"
+                                      },
+                                      "lookalike": {
+                                        "type": "array",
+                                        "items": {
+                                          "type": "object",
+                                          "properties": {
+                                            "rule": {
+                                              "type": "string",
+                                              "enum": ["L1", "L2", "L3", "L4", "L5", "L6"]
+                                            },
+                                            "targetKind": {
+                                              "nullable": true,
+                                              "type": "string",
+                                              "enum": ["brand", "tenant", "extra"]
+                                            },
+                                            "targetDomain": { "nullable": true, "type": "string" },
+                                            "score": { "type": "number" }
+                                          },
+                                          "required": [
+                                            "rule",
+                                            "targetKind",
+                                            "targetDomain",
+                                            "score"
+                                          ],
+                                          "additionalProperties": false
+                                        },
+                                        "description": "Lookalike findings (≤ 5); L4 mixed script and L6 IDN without a target"
+                                      },
+                                      "fetch": {
+                                        "nullable": true,
+                                        "description": "Scan-time fetch (redirect chain); null when the URL was not fetched",
+                                        "type": "object",
+                                        "properties": {
+                                          "status": {
+                                            "type": "string",
+                                            "enum": ["completed", "error", "blocked"]
+                                          },
+                                          "error": {
+                                            "nullable": true,
+                                            "description": "Fetch error code when status is error",
+                                            "type": "string"
+                                          },
+                                          "hops": {
+                                            "type": "integer",
+                                            "minimum": 0,
+                                            "maximum": 9007199254740991,
+                                            "description": "Redirects followed"
+                                          },
+                                          "chain": {
+                                            "type": "array",
+                                            "items": {
+                                              "type": "object",
+                                              "properties": {
+                                                "host": { "type": "string" },
+                                                "status": {
+                                                  "nullable": true,
+                                                  "type": "integer",
+                                                  "minimum": -9007199254740991,
+                                                  "maximum": 9007199254740991
+                                                },
+                                                "kind": {
+                                                  "type": "string",
+                                                  "enum": ["initial", "http", "meta"]
+                                                },
+                                                "blocked": {
+                                                  "nullable": true,
+                                                  "description": "SSRF guard reason when the hop was refused",
+                                                  "type": "string"
+                                                }
+                                              },
+                                              "required": ["host", "status", "kind", "blocked"],
+                                              "additionalProperties": false
+                                            },
+                                            "description": "Hosts of the redirect chain only (≤ 10; no paths or queries)"
+                                          },
+                                          "finalUrl": { "nullable": true, "type": "string" },
+                                          "finalStatus": {
+                                            "nullable": true,
+                                            "type": "integer",
+                                            "minimum": -9007199254740991,
+                                            "maximum": 9007199254740991
+                                          }
+                                        },
+                                        "required": [
+                                          "status",
+                                          "error",
+                                          "hops",
+                                          "chain",
+                                          "finalUrl",
+                                          "finalStatus"
+                                        ],
+                                        "additionalProperties": false
+                                      },
+                                      "clicks": {
+                                        "type": "object",
+                                        "properties": {
+                                          "total": {
+                                            "type": "integer",
+                                            "minimum": 0,
+                                            "maximum": 9007199254740991
+                                          },
+                                          "lastDecision": {
+                                            "nullable": true,
+                                            "type": "string",
+                                            "enum": [
+                                              "allowed",
+                                              "warned",
+                                              "blocked",
+                                              "continued",
+                                              "expired",
+                                              "not_found"
+                                            ]
+                                          },
+                                          "lastAt": {
+                                            "nullable": true,
+                                            "description": "Whole seconds",
+                                            "type": "string",
+                                            "format": "date-time",
+                                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                                          }
+                                        },
+                                        "required": ["total", "lastDecision", "lastAt"],
+                                        "additionalProperties": false,
+                                        "description": "Clicks on the rewritten link (all rounds of the message: one token per URL)"
+                                      }
+                                    },
+                                    "required": [
+                                      "urlSeq",
+                                      "url",
+                                      "host",
+                                      "unicodeHost",
+                                      "registrableDomain",
+                                      "hostKind",
+                                      "sources",
+                                      "flags",
+                                      "verdict",
+                                      "reasonCodes",
+                                      "landing",
+                                      "dynamic",
+                                      "rewritten",
+                                      "reputation",
+                                      "lookalike",
+                                      "fetch",
+                                      "clicks"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                },
+                                "rewrite": {
+                                  "description": "Engine `url` only: the round's link rewriting; null before the final result",
+                                  "nullable": true,
+                                  "type": "object",
+                                  "properties": {
+                                    "status": {
+                                      "type": "string",
+                                      "enum": ["rewritten", "skipped"]
+                                    },
+                                    "skipReason": {
+                                      "nullable": true,
+                                      "description": "Why the round was not rewritten (e.g. signed_smime, no_urls)",
+                                      "type": "string",
+                                      "enum": [
+                                        "disabled",
+                                        "direction",
+                                        "no_urls",
+                                        "parse_incomplete",
+                                        "too_large",
+                                        "signed_smime",
+                                        "signed_pgp",
+                                        "encrypted",
+                                        "dkim_policy",
+                                        "structure_mismatch",
+                                        "error"
+                                      ]
+                                    },
+                                    "linksRewritten": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 9007199254740991
+                                    },
+                                    "partsRewritten": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 9007199254740991
+                                    },
+                                    "dkimSigned": {
+                                      "type": "boolean",
+                                      "description": "The message carried a DKIM signature that no longer verifies downstream"
+                                    },
+                                    "expiresAt": {
+                                      "nullable": true,
+                                      "description": "When the click tokens expire (whole seconds)",
+                                      "type": "string",
+                                      "format": "date-time",
+                                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                                    }
+                                  },
+                                  "required": [
+                                    "status",
+                                    "skipReason",
+                                    "linksRewritten",
+                                    "partsRewritten",
+                                    "dkimSigned",
+                                    "expiresAt"
+                                  ],
+                                  "additionalProperties": false
+                                },
                                 "durationMs": {
                                   "nullable": true,
-                                  "description": "Engine duration of the final result; always null for the `attachment` engine, whose timing would reveal whether a file was in the cross-tenant content cache",
+                                  "description": "Engine duration of the final result; always null for the `attachment` and `url` engines, whose timing would reveal cross-tenant cache hits",
                                   "type": "integer",
                                   "minimum": 0,
                                   "maximum": 9007199254740991
@@ -19020,7 +19638,7 @@
                                 "settingsVersion": { "nullable": true, "type": "string" },
                                 "completedAt": {
                                   "nullable": true,
-                                  "description": "Final result time (whole seconds for the `attachment` engine)",
+                                  "description": "Final result time (whole seconds for the `attachment` and `url` engines)",
                                   "type": "string",
                                   "format": "date-time",
                                   "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
@@ -19266,7 +19884,7 @@
     },
     "/api/v1/platform/dead-letters/replay": {
       "post": {
-        "description": "Fetches up to `limit` dead letters of `sourceQueue` (a work queue: `email.received`, `scan.spam`, `scan.attachment`, `email.delivery.pending`; other queues are 400 `source_queue_not_replayable`) matching the optional filters, republishes each unchanged envelope to the source queue with fresh retry headers and a replay id, confirmed before the dead letter is removed. Non-matching and invalid messages stay in the queue. A replayed event that was already processed is a ledger duplicate, so replays are safe to repeat. `dryRun` changes nothing. One replay at a time platform-wide (409 `replay_in_progress`); audited as `platform.dead_letters_replayed`. 503 `dead_letter_replay_unavailable` without RABBITMQ_OPS_URL or when the broker fails (the audit row then says `partial`).",
+        "description": "Fetches up to `limit` dead letters of `sourceQueue` (a work queue: `email.received`, `scan.spam`, `scan.url`, `scan.url.inspect`, `scan.url.results`, `scan.attachment`, `email.delivery.pending`; other queues are 400 `source_queue_not_replayable`) matching the optional filters, republishes each unchanged envelope to the source queue with fresh retry headers and a replay id, confirmed before the dead letter is removed. Non-matching and invalid messages stay in the queue. A replayed event that was already processed is a ledger duplicate, so replays are safe to repeat. `dryRun` changes nothing. One replay at a time platform-wide (409 `replay_in_progress`); audited as `platform.dead_letters_replayed`. 503 `dead_letter_replay_unavailable` without RABBITMQ_OPS_URL or when the broker fails (the audit row then says `partial`).",
         "operationId": "DeadLettersController_replay_v1",
         "parameters": [],
         "requestBody": {
@@ -19277,7 +19895,7 @@
                 "type": "object",
                 "properties": {
                   "sourceQueue": {
-                    "description": "The work queue whose dead letters are replayed: email.received, scan.spam, scan.attachment, email.delivery.pending",
+                    "description": "The work queue whose dead letters are replayed: email.received, scan.spam, scan.url, scan.url.inspect, scan.url.results, scan.attachment, email.delivery.pending",
                     "type": "string"
                   },
                   "limit": {
@@ -20476,6 +21094,467 @@
                               "updatedAt"
                             ],
                             "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "engine": {
+                                "type": "string",
+                                "enum": ["url"],
+                                "description": "Engine name (ENGINE_CATALOG)"
+                              },
+                              "platform": {
+                                "type": "object",
+                                "properties": {
+                                  "scanTimeFetch": {
+                                    "type": "string",
+                                    "enum": ["off", "shorteners", "suspicious", "all"],
+                                    "description": "The most scan-time fetching a tenant may choose"
+                                  },
+                                  "rewrite": {
+                                    "type": "object",
+                                    "properties": {
+                                      "enabled": {
+                                        "type": "boolean",
+                                        "description": "Platform switch: false = no rewriting for any tenant"
+                                      },
+                                      "directions": {
+                                        "type": "array",
+                                        "items": {
+                                          "type": "string",
+                                          "enum": ["inbound", "outbound", "internal"]
+                                        },
+                                        "description": "Default directions"
+                                      },
+                                      "defaultExpiryDays": {
+                                        "type": "integer",
+                                        "minimum": -9007199254740991,
+                                        "maximum": 9007199254740991
+                                      },
+                                      "maxExpiryDays": {
+                                        "type": "integer",
+                                        "minimum": -9007199254740991,
+                                        "maximum": 9007199254740991
+                                      },
+                                      "dkimSignedPolicy": {
+                                        "type": "string",
+                                        "enum": ["rewrite", "skip"]
+                                      }
+                                    },
+                                    "required": [
+                                      "enabled",
+                                      "directions",
+                                      "defaultExpiryDays",
+                                      "maxExpiryDays",
+                                      "dkimSignedPolicy"
+                                    ],
+                                    "additionalProperties": false
+                                  },
+                                  "dynamicInspection": {
+                                    "type": "boolean",
+                                    "description": "Platform switch of the isolated browser inspection"
+                                  }
+                                },
+                                "required": ["scanTimeFetch", "rewrite", "dynamicInspection"],
+                                "additionalProperties": false,
+                                "description": "Platform settings (URL_*)"
+                              },
+                              "bounds": {
+                                "type": "object",
+                                "properties": {
+                                  "allowedDomains": {
+                                    "type": "object",
+                                    "properties": {
+                                      "maxItems": {
+                                        "type": "integer",
+                                        "minimum": -9007199254740991,
+                                        "maximum": 9007199254740991
+                                      }
+                                    },
+                                    "required": ["maxItems"],
+                                    "additionalProperties": false
+                                  },
+                                  "blockedDomains": {
+                                    "type": "object",
+                                    "properties": {
+                                      "maxItems": {
+                                        "type": "integer",
+                                        "minimum": -9007199254740991,
+                                        "maximum": 9007199254740991
+                                      }
+                                    },
+                                    "required": ["maxItems"],
+                                    "additionalProperties": false
+                                  },
+                                  "scanTimeFetch": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string",
+                                      "enum": ["off", "shorteners", "suspicious", "all"]
+                                    },
+                                    "description": "Modes up to the platform mode"
+                                  },
+                                  "lookalike": {
+                                    "type": "object",
+                                    "properties": {
+                                      "extraProtectedDomains": {
+                                        "type": "object",
+                                        "properties": {
+                                          "maxItems": {
+                                            "type": "integer",
+                                            "minimum": -9007199254740991,
+                                            "maximum": 9007199254740991
+                                          }
+                                        },
+                                        "required": ["maxItems"],
+                                        "additionalProperties": false
+                                      }
+                                    },
+                                    "required": ["extraProtectedDomains"],
+                                    "additionalProperties": false
+                                  },
+                                  "rewrite": {
+                                    "type": "object",
+                                    "properties": {
+                                      "enabled": {
+                                        "type": "array",
+                                        "items": { "type": "boolean" },
+                                        "description": "[false] when the platform disabled rewriting"
+                                      },
+                                      "directions": {
+                                        "type": "array",
+                                        "items": {
+                                          "type": "string",
+                                          "enum": ["inbound", "outbound", "internal"]
+                                        }
+                                      },
+                                      "expiryDays": {
+                                        "type": "object",
+                                        "properties": {
+                                          "min": {
+                                            "type": "integer",
+                                            "minimum": -9007199254740991,
+                                            "maximum": 9007199254740991
+                                          },
+                                          "max": {
+                                            "type": "integer",
+                                            "minimum": -9007199254740991,
+                                            "maximum": 9007199254740991
+                                          }
+                                        },
+                                        "required": ["min", "max"],
+                                        "additionalProperties": false
+                                      },
+                                      "excludedDomains": {
+                                        "type": "object",
+                                        "properties": {
+                                          "maxItems": {
+                                            "type": "integer",
+                                            "minimum": -9007199254740991,
+                                            "maximum": 9007199254740991
+                                          }
+                                        },
+                                        "required": ["maxItems"],
+                                        "additionalProperties": false
+                                      },
+                                      "dkimSignedPolicy": {
+                                        "type": "array",
+                                        "items": { "type": "string", "enum": ["rewrite", "skip"] }
+                                      }
+                                    },
+                                    "required": [
+                                      "enabled",
+                                      "directions",
+                                      "expiryDays",
+                                      "excludedDomains",
+                                      "dkimSignedPolicy"
+                                    ],
+                                    "additionalProperties": false
+                                  },
+                                  "click": {
+                                    "type": "object",
+                                    "properties": {
+                                      "suspicious": {
+                                        "type": "array",
+                                        "items": { "type": "string", "enum": ["warn", "block"] }
+                                      },
+                                      "unknown": {
+                                        "type": "array",
+                                        "items": {
+                                          "type": "string",
+                                          "enum": ["allow", "warn", "block"]
+                                        }
+                                      }
+                                    },
+                                    "required": ["suspicious", "unknown"],
+                                    "additionalProperties": false
+                                  },
+                                  "dynamicInspection": {
+                                    "type": "array",
+                                    "items": { "type": "boolean" },
+                                    "description": "[false] when the platform disabled dynamic inspection"
+                                  }
+                                },
+                                "required": [
+                                  "allowedDomains",
+                                  "blockedDomains",
+                                  "scanTimeFetch",
+                                  "lookalike",
+                                  "rewrite",
+                                  "click",
+                                  "dynamicInspection"
+                                ],
+                                "additionalProperties": false,
+                                "description": "What an override may choose"
+                              },
+                              "override": {
+                                "nullable": true,
+                                "description": "The organization override (domains normalized to ASCII); null for none",
+                                "type": "object",
+                                "properties": {
+                                  "allowedDomains": {
+                                    "description": "Suppresses lookalike/structure/landing rules and excludes from rewriting (never feed or DNSBL malicious findings)",
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string",
+                                      "description": "Lower-case ASCII domain or host (A-labels after IDNA)"
+                                    }
+                                  },
+                                  "blockedDomains": {
+                                    "description": "→ malicious (rule M4) for this organization",
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string",
+                                      "description": "Lower-case ASCII domain or host (A-labels after IDNA)"
+                                    }
+                                  },
+                                  "scanTimeFetch": {
+                                    "description": "At most the platform mode",
+                                    "type": "string",
+                                    "enum": ["off", "shorteners", "suspicious", "all"]
+                                  },
+                                  "lookalike": {
+                                    "description": "Further domains protected against lookalikes",
+                                    "type": "object",
+                                    "properties": {
+                                      "extraProtectedDomains": {
+                                        "type": "array",
+                                        "items": {
+                                          "type": "string",
+                                          "description": "Lower-case ASCII domain or host (A-labels after IDNA)"
+                                        }
+                                      }
+                                    },
+                                    "additionalProperties": false
+                                  },
+                                  "rewrite": {
+                                    "type": "object",
+                                    "properties": {
+                                      "enabled": { "type": "boolean" },
+                                      "directions": {
+                                        "type": "array",
+                                        "items": {
+                                          "type": "string",
+                                          "enum": ["inbound", "outbound", "internal"]
+                                        }
+                                      },
+                                      "expiryDays": {
+                                        "type": "integer",
+                                        "minimum": -9007199254740991,
+                                        "maximum": 9007199254740991
+                                      },
+                                      "excludedDomains": {
+                                        "type": "array",
+                                        "items": {
+                                          "type": "string",
+                                          "description": "Lower-case ASCII domain or host (A-labels after IDNA)"
+                                        }
+                                      },
+                                      "dkimSignedPolicy": {
+                                        "type": "string",
+                                        "enum": ["rewrite", "skip"]
+                                      },
+                                      "plainText": { "type": "boolean" }
+                                    },
+                                    "additionalProperties": false
+                                  },
+                                  "click": {
+                                    "description": "Time-of-click policy (clean is always allowed, malicious always blocked)",
+                                    "type": "object",
+                                    "properties": {
+                                      "suspicious": { "type": "string", "enum": ["warn", "block"] },
+                                      "unknown": {
+                                        "type": "string",
+                                        "enum": ["allow", "warn", "block"]
+                                      },
+                                      "allowContinue": { "type": "boolean" }
+                                    },
+                                    "additionalProperties": false
+                                  },
+                                  "dynamicInspection": { "type": "boolean" }
+                                },
+                                "additionalProperties": false
+                              },
+                              "effective": {
+                                "type": "object",
+                                "properties": {
+                                  "allowedDomains": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string",
+                                      "description": "Lower-case ASCII domain or host (A-labels after IDNA)"
+                                    }
+                                  },
+                                  "blockedDomains": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string",
+                                      "description": "Lower-case ASCII domain or host (A-labels after IDNA)"
+                                    }
+                                  },
+                                  "scanTimeFetch": {
+                                    "type": "string",
+                                    "enum": ["off", "shorteners", "suspicious", "all"]
+                                  },
+                                  "lookalike": {
+                                    "type": "object",
+                                    "properties": {
+                                      "extraProtectedDomains": {
+                                        "type": "array",
+                                        "items": {
+                                          "type": "string",
+                                          "description": "Lower-case ASCII domain or host (A-labels after IDNA)"
+                                        }
+                                      }
+                                    },
+                                    "required": ["extraProtectedDomains"],
+                                    "additionalProperties": false
+                                  },
+                                  "rewrite": {
+                                    "type": "object",
+                                    "properties": {
+                                      "enabled": { "type": "boolean" },
+                                      "directions": {
+                                        "type": "array",
+                                        "items": {
+                                          "type": "string",
+                                          "enum": ["inbound", "outbound", "internal"]
+                                        }
+                                      },
+                                      "expiryDays": {
+                                        "type": "integer",
+                                        "minimum": -9007199254740991,
+                                        "maximum": 9007199254740991
+                                      },
+                                      "excludedDomains": {
+                                        "type": "array",
+                                        "items": {
+                                          "type": "string",
+                                          "description": "Lower-case ASCII domain or host (A-labels after IDNA)"
+                                        }
+                                      },
+                                      "dkimSignedPolicy": {
+                                        "type": "string",
+                                        "enum": ["rewrite", "skip"]
+                                      },
+                                      "plainText": { "type": "boolean" }
+                                    },
+                                    "required": [
+                                      "enabled",
+                                      "directions",
+                                      "expiryDays",
+                                      "excludedDomains",
+                                      "dkimSignedPolicy",
+                                      "plainText"
+                                    ],
+                                    "additionalProperties": false
+                                  },
+                                  "click": {
+                                    "type": "object",
+                                    "properties": {
+                                      "suspicious": { "type": "string", "enum": ["warn", "block"] },
+                                      "unknown": {
+                                        "type": "string",
+                                        "enum": ["allow", "warn", "block"]
+                                      },
+                                      "allowContinue": { "type": "boolean" }
+                                    },
+                                    "required": ["suspicious", "unknown", "allowContinue"],
+                                    "additionalProperties": false
+                                  },
+                                  "dynamicInspection": { "type": "boolean" }
+                                },
+                                "required": [
+                                  "allowedDomains",
+                                  "blockedDomains",
+                                  "scanTimeFetch",
+                                  "lookalike",
+                                  "rewrite",
+                                  "click",
+                                  "dynamicInspection"
+                                ],
+                                "additionalProperties": false,
+                                "description": "What the URL engine (rewrite and scan settings) and the click-service (click policy and lists, read live) apply"
+                              },
+                              "required": {
+                                "type": "boolean",
+                                "description": "Required for every scan round"
+                              },
+                              "tenantMayDisable": { "type": "boolean" },
+                              "overrideApplied": {
+                                "type": "boolean",
+                                "description": "False when there is no override or it no longer fits the platform settings"
+                              },
+                              "violations": {
+                                "type": "array",
+                                "items": {
+                                  "type": "object",
+                                  "properties": {
+                                    "path": { "type": "string" },
+                                    "code": {
+                                      "type": "string",
+                                      "enum": [
+                                        "invalid",
+                                        "unknown_key",
+                                        "out_of_bounds",
+                                        "threshold_order",
+                                        "severity_lowered"
+                                      ]
+                                    },
+                                    "message": { "type": "string" }
+                                  },
+                                  "required": ["path", "code", "message"],
+                                  "additionalProperties": false
+                                },
+                                "description": "Why a stored override is ignored (platform settings tightened since it was saved)"
+                              },
+                              "version": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 4294967295,
+                                "description": "Version of the override row (0 = no row yet); +1 per change"
+                              },
+                              "updatedAt": {
+                                "nullable": true,
+                                "type": "string",
+                                "format": "date-time",
+                                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                              }
+                            },
+                            "required": [
+                              "engine",
+                              "platform",
+                              "bounds",
+                              "override",
+                              "effective",
+                              "required",
+                              "tenantMayDisable",
+                              "overrideApplied",
+                              "violations",
+                              "version",
+                              "updatedAt"
+                            ],
+                            "additionalProperties": false
                           }
                         ]
                       },
@@ -20551,7 +21630,7 @@
             "name": "engine",
             "required": true,
             "in": "path",
-            "description": "Scan engine name with tenant settings: `rspamd` (step 4.1), `attachment` (step 4.2)",
+            "description": "Scan engine name with tenant settings: `rspamd` (step 4.1), `attachment` (step 4.2), `url` (step 4.3)",
             "schema": { "type": "string" }
           }
         ],
@@ -20571,7 +21650,7 @@
                   "settings": {
                     "type": "object",
                     "additionalProperties": {},
-                    "description": "The override, all keys optional (rspamd: spamScore, suspiciousScore, phishingVerdict, dmarcRejectVerdict, authFailureVerdict; attachment: deniedTypes, allowedTypes, deniedTypeVerdict, typeMismatchVerdict, encryptedArchiveVerdict, maxAttachmentBytes); replaces the previous override. Unknown keys are refused (422)"
+                    "description": "The override, all keys optional (rspamd: spamScore, suspiciousScore, phishingVerdict, dmarcRejectVerdict, authFailureVerdict; attachment: deniedTypes, allowedTypes, deniedTypeVerdict, typeMismatchVerdict, encryptedArchiveVerdict, maxAttachmentBytes; url: allowedDomains, blockedDomains, scanTimeFetch, lookalike.extraProtectedDomains, rewrite.{enabled, directions, expiryDays, excludedDomains, dkimSignedPolicy, plainText}, click.{suspicious, unknown, allowContinue}, dynamicInspection); replaces the previous override. Unknown keys are refused (422)"
                   }
                 },
                 "required": ["expectedVersion", "settings"],
@@ -21485,6 +22564,463 @@
                         "note"
                       ],
                       "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "engine": {
+                          "type": "string",
+                          "enum": ["url"],
+                          "description": "Engine name (ENGINE_CATALOG)"
+                        },
+                        "platform": {
+                          "type": "object",
+                          "properties": {
+                            "scanTimeFetch": {
+                              "type": "string",
+                              "enum": ["off", "shorteners", "suspicious", "all"],
+                              "description": "The most scan-time fetching a tenant may choose"
+                            },
+                            "rewrite": {
+                              "type": "object",
+                              "properties": {
+                                "enabled": {
+                                  "type": "boolean",
+                                  "description": "Platform switch: false = no rewriting for any tenant"
+                                },
+                                "directions": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "enum": ["inbound", "outbound", "internal"]
+                                  },
+                                  "description": "Default directions"
+                                },
+                                "defaultExpiryDays": {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                },
+                                "maxExpiryDays": {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                },
+                                "dkimSignedPolicy": {
+                                  "type": "string",
+                                  "enum": ["rewrite", "skip"]
+                                }
+                              },
+                              "required": [
+                                "enabled",
+                                "directions",
+                                "defaultExpiryDays",
+                                "maxExpiryDays",
+                                "dkimSignedPolicy"
+                              ],
+                              "additionalProperties": false
+                            },
+                            "dynamicInspection": {
+                              "type": "boolean",
+                              "description": "Platform switch of the isolated browser inspection"
+                            }
+                          },
+                          "required": ["scanTimeFetch", "rewrite", "dynamicInspection"],
+                          "additionalProperties": false,
+                          "description": "Platform settings (URL_*)"
+                        },
+                        "bounds": {
+                          "type": "object",
+                          "properties": {
+                            "allowedDomains": {
+                              "type": "object",
+                              "properties": {
+                                "maxItems": {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                }
+                              },
+                              "required": ["maxItems"],
+                              "additionalProperties": false
+                            },
+                            "blockedDomains": {
+                              "type": "object",
+                              "properties": {
+                                "maxItems": {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                }
+                              },
+                              "required": ["maxItems"],
+                              "additionalProperties": false
+                            },
+                            "scanTimeFetch": {
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "enum": ["off", "shorteners", "suspicious", "all"]
+                              },
+                              "description": "Modes up to the platform mode"
+                            },
+                            "lookalike": {
+                              "type": "object",
+                              "properties": {
+                                "extraProtectedDomains": {
+                                  "type": "object",
+                                  "properties": {
+                                    "maxItems": {
+                                      "type": "integer",
+                                      "minimum": -9007199254740991,
+                                      "maximum": 9007199254740991
+                                    }
+                                  },
+                                  "required": ["maxItems"],
+                                  "additionalProperties": false
+                                }
+                              },
+                              "required": ["extraProtectedDomains"],
+                              "additionalProperties": false
+                            },
+                            "rewrite": {
+                              "type": "object",
+                              "properties": {
+                                "enabled": {
+                                  "type": "array",
+                                  "items": { "type": "boolean" },
+                                  "description": "[false] when the platform disabled rewriting"
+                                },
+                                "directions": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "enum": ["inbound", "outbound", "internal"]
+                                  }
+                                },
+                                "expiryDays": {
+                                  "type": "object",
+                                  "properties": {
+                                    "min": {
+                                      "type": "integer",
+                                      "minimum": -9007199254740991,
+                                      "maximum": 9007199254740991
+                                    },
+                                    "max": {
+                                      "type": "integer",
+                                      "minimum": -9007199254740991,
+                                      "maximum": 9007199254740991
+                                    }
+                                  },
+                                  "required": ["min", "max"],
+                                  "additionalProperties": false
+                                },
+                                "excludedDomains": {
+                                  "type": "object",
+                                  "properties": {
+                                    "maxItems": {
+                                      "type": "integer",
+                                      "minimum": -9007199254740991,
+                                      "maximum": 9007199254740991
+                                    }
+                                  },
+                                  "required": ["maxItems"],
+                                  "additionalProperties": false
+                                },
+                                "dkimSignedPolicy": {
+                                  "type": "array",
+                                  "items": { "type": "string", "enum": ["rewrite", "skip"] }
+                                }
+                              },
+                              "required": [
+                                "enabled",
+                                "directions",
+                                "expiryDays",
+                                "excludedDomains",
+                                "dkimSignedPolicy"
+                              ],
+                              "additionalProperties": false
+                            },
+                            "click": {
+                              "type": "object",
+                              "properties": {
+                                "suspicious": {
+                                  "type": "array",
+                                  "items": { "type": "string", "enum": ["warn", "block"] }
+                                },
+                                "unknown": {
+                                  "type": "array",
+                                  "items": { "type": "string", "enum": ["allow", "warn", "block"] }
+                                }
+                              },
+                              "required": ["suspicious", "unknown"],
+                              "additionalProperties": false
+                            },
+                            "dynamicInspection": {
+                              "type": "array",
+                              "items": { "type": "boolean" },
+                              "description": "[false] when the platform disabled dynamic inspection"
+                            }
+                          },
+                          "required": [
+                            "allowedDomains",
+                            "blockedDomains",
+                            "scanTimeFetch",
+                            "lookalike",
+                            "rewrite",
+                            "click",
+                            "dynamicInspection"
+                          ],
+                          "additionalProperties": false,
+                          "description": "What an override may choose"
+                        },
+                        "override": {
+                          "nullable": true,
+                          "description": "The organization override (domains normalized to ASCII); null for none",
+                          "type": "object",
+                          "properties": {
+                            "allowedDomains": {
+                              "description": "Suppresses lookalike/structure/landing rules and excludes from rewriting (never feed or DNSBL malicious findings)",
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "description": "Lower-case ASCII domain or host (A-labels after IDNA)"
+                              }
+                            },
+                            "blockedDomains": {
+                              "description": "→ malicious (rule M4) for this organization",
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "description": "Lower-case ASCII domain or host (A-labels after IDNA)"
+                              }
+                            },
+                            "scanTimeFetch": {
+                              "description": "At most the platform mode",
+                              "type": "string",
+                              "enum": ["off", "shorteners", "suspicious", "all"]
+                            },
+                            "lookalike": {
+                              "description": "Further domains protected against lookalikes",
+                              "type": "object",
+                              "properties": {
+                                "extraProtectedDomains": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "description": "Lower-case ASCII domain or host (A-labels after IDNA)"
+                                  }
+                                }
+                              },
+                              "additionalProperties": false
+                            },
+                            "rewrite": {
+                              "type": "object",
+                              "properties": {
+                                "enabled": { "type": "boolean" },
+                                "directions": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "enum": ["inbound", "outbound", "internal"]
+                                  }
+                                },
+                                "expiryDays": {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                },
+                                "excludedDomains": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "description": "Lower-case ASCII domain or host (A-labels after IDNA)"
+                                  }
+                                },
+                                "dkimSignedPolicy": {
+                                  "type": "string",
+                                  "enum": ["rewrite", "skip"]
+                                },
+                                "plainText": { "type": "boolean" }
+                              },
+                              "additionalProperties": false
+                            },
+                            "click": {
+                              "description": "Time-of-click policy (clean is always allowed, malicious always blocked)",
+                              "type": "object",
+                              "properties": {
+                                "suspicious": { "type": "string", "enum": ["warn", "block"] },
+                                "unknown": { "type": "string", "enum": ["allow", "warn", "block"] },
+                                "allowContinue": { "type": "boolean" }
+                              },
+                              "additionalProperties": false
+                            },
+                            "dynamicInspection": { "type": "boolean" }
+                          },
+                          "additionalProperties": false
+                        },
+                        "effective": {
+                          "type": "object",
+                          "properties": {
+                            "allowedDomains": {
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "description": "Lower-case ASCII domain or host (A-labels after IDNA)"
+                              }
+                            },
+                            "blockedDomains": {
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "description": "Lower-case ASCII domain or host (A-labels after IDNA)"
+                              }
+                            },
+                            "scanTimeFetch": {
+                              "type": "string",
+                              "enum": ["off", "shorteners", "suspicious", "all"]
+                            },
+                            "lookalike": {
+                              "type": "object",
+                              "properties": {
+                                "extraProtectedDomains": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "description": "Lower-case ASCII domain or host (A-labels after IDNA)"
+                                  }
+                                }
+                              },
+                              "required": ["extraProtectedDomains"],
+                              "additionalProperties": false
+                            },
+                            "rewrite": {
+                              "type": "object",
+                              "properties": {
+                                "enabled": { "type": "boolean" },
+                                "directions": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "enum": ["inbound", "outbound", "internal"]
+                                  }
+                                },
+                                "expiryDays": {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                },
+                                "excludedDomains": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "description": "Lower-case ASCII domain or host (A-labels after IDNA)"
+                                  }
+                                },
+                                "dkimSignedPolicy": {
+                                  "type": "string",
+                                  "enum": ["rewrite", "skip"]
+                                },
+                                "plainText": { "type": "boolean" }
+                              },
+                              "required": [
+                                "enabled",
+                                "directions",
+                                "expiryDays",
+                                "excludedDomains",
+                                "dkimSignedPolicy",
+                                "plainText"
+                              ],
+                              "additionalProperties": false
+                            },
+                            "click": {
+                              "type": "object",
+                              "properties": {
+                                "suspicious": { "type": "string", "enum": ["warn", "block"] },
+                                "unknown": { "type": "string", "enum": ["allow", "warn", "block"] },
+                                "allowContinue": { "type": "boolean" }
+                              },
+                              "required": ["suspicious", "unknown", "allowContinue"],
+                              "additionalProperties": false
+                            },
+                            "dynamicInspection": { "type": "boolean" }
+                          },
+                          "required": [
+                            "allowedDomains",
+                            "blockedDomains",
+                            "scanTimeFetch",
+                            "lookalike",
+                            "rewrite",
+                            "click",
+                            "dynamicInspection"
+                          ],
+                          "additionalProperties": false,
+                          "description": "What the URL engine (rewrite and scan settings) and the click-service (click policy and lists, read live) apply"
+                        },
+                        "required": {
+                          "type": "boolean",
+                          "description": "Required for every scan round"
+                        },
+                        "tenantMayDisable": { "type": "boolean" },
+                        "overrideApplied": {
+                          "type": "boolean",
+                          "description": "False when there is no override or it no longer fits the platform settings"
+                        },
+                        "violations": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "path": { "type": "string" },
+                              "code": {
+                                "type": "string",
+                                "enum": [
+                                  "invalid",
+                                  "unknown_key",
+                                  "out_of_bounds",
+                                  "threshold_order",
+                                  "severity_lowered"
+                                ]
+                              },
+                              "message": { "type": "string" }
+                            },
+                            "required": ["path", "code", "message"],
+                            "additionalProperties": false
+                          },
+                          "description": "Why a stored override is ignored (platform settings tightened since it was saved)"
+                        },
+                        "version": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 4294967295,
+                          "description": "Version of the override row (0 = no row yet); +1 per change"
+                        },
+                        "updatedAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                        },
+                        "note": {
+                          "type": "string",
+                          "description": "Scan workers cache the settings per organization and engine for up to SCAN_SETTINGS_CACHE_TTL_MS (default 30 seconds): a change applies to messages scanned after that; rounds already scanned keep their results."
+                        }
+                      },
+                      "required": [
+                        "engine",
+                        "platform",
+                        "bounds",
+                        "override",
+                        "effective",
+                        "required",
+                        "tenantMayDisable",
+                        "overrideApplied",
+                        "violations",
+                        "version",
+                        "updatedAt",
+                        "note"
+                      ],
+                      "additionalProperties": false
                     }
                   ]
                 }
@@ -21595,7 +23131,7 @@
             }
           },
           "422": {
-            "description": "The override breaks the platform settings: scores outside the bounds, suspiciousScore not below spamScore, a severity or verdict lowered below the platform value, maxAttachmentBytes outside [1 MiB, ATTACHMENT_MAX_BYTES], a platform-denied type on allowedTypes, an unknown file type or an unknown key",
+            "description": "The override breaks the platform settings: scores outside the bounds, suspiciousScore not below spamScore, a severity or verdict lowered below the platform value, maxAttachmentBytes outside [1 MiB, ATTACHMENT_MAX_BYTES], a platform-denied type on allowedTypes, an unknown file type, a URL domain that is not a registrable domain or host (IP literal, single label, public suffix), a domain both allowed and blocked, a fetch mode above the platform mode, an expiry outside [1, URL_TOKEN_MAX_EXPIRY_DAYS], rewriting or dynamic inspection switched on while the platform has it off, or an unknown key",
             "content": {
               "application/json": {
                 "schema": {
@@ -21646,7 +23182,7 @@
             "name": "engine",
             "required": true,
             "in": "path",
-            "description": "Scan engine name with tenant settings: `rspamd` (step 4.1), `attachment` (step 4.2)",
+            "description": "Scan engine name with tenant settings: `rspamd` (step 4.1), `attachment` (step 4.2), `url` (step 4.3)",
             "schema": { "type": "string" }
           },
           {
@@ -22501,6 +24037,463 @@
                           ],
                           "additionalProperties": false,
                           "description": "What the attachment engine applies"
+                        },
+                        "required": {
+                          "type": "boolean",
+                          "description": "Required for every scan round"
+                        },
+                        "tenantMayDisable": { "type": "boolean" },
+                        "overrideApplied": {
+                          "type": "boolean",
+                          "description": "False when there is no override or it no longer fits the platform settings"
+                        },
+                        "violations": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "path": { "type": "string" },
+                              "code": {
+                                "type": "string",
+                                "enum": [
+                                  "invalid",
+                                  "unknown_key",
+                                  "out_of_bounds",
+                                  "threshold_order",
+                                  "severity_lowered"
+                                ]
+                              },
+                              "message": { "type": "string" }
+                            },
+                            "required": ["path", "code", "message"],
+                            "additionalProperties": false
+                          },
+                          "description": "Why a stored override is ignored (platform settings tightened since it was saved)"
+                        },
+                        "version": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 4294967295,
+                          "description": "Version of the override row (0 = no row yet); +1 per change"
+                        },
+                        "updatedAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                        },
+                        "note": {
+                          "type": "string",
+                          "description": "Scan workers cache the settings per organization and engine for up to SCAN_SETTINGS_CACHE_TTL_MS (default 30 seconds): a change applies to messages scanned after that; rounds already scanned keep their results."
+                        }
+                      },
+                      "required": [
+                        "engine",
+                        "platform",
+                        "bounds",
+                        "override",
+                        "effective",
+                        "required",
+                        "tenantMayDisable",
+                        "overrideApplied",
+                        "violations",
+                        "version",
+                        "updatedAt",
+                        "note"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "engine": {
+                          "type": "string",
+                          "enum": ["url"],
+                          "description": "Engine name (ENGINE_CATALOG)"
+                        },
+                        "platform": {
+                          "type": "object",
+                          "properties": {
+                            "scanTimeFetch": {
+                              "type": "string",
+                              "enum": ["off", "shorteners", "suspicious", "all"],
+                              "description": "The most scan-time fetching a tenant may choose"
+                            },
+                            "rewrite": {
+                              "type": "object",
+                              "properties": {
+                                "enabled": {
+                                  "type": "boolean",
+                                  "description": "Platform switch: false = no rewriting for any tenant"
+                                },
+                                "directions": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "enum": ["inbound", "outbound", "internal"]
+                                  },
+                                  "description": "Default directions"
+                                },
+                                "defaultExpiryDays": {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                },
+                                "maxExpiryDays": {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                },
+                                "dkimSignedPolicy": {
+                                  "type": "string",
+                                  "enum": ["rewrite", "skip"]
+                                }
+                              },
+                              "required": [
+                                "enabled",
+                                "directions",
+                                "defaultExpiryDays",
+                                "maxExpiryDays",
+                                "dkimSignedPolicy"
+                              ],
+                              "additionalProperties": false
+                            },
+                            "dynamicInspection": {
+                              "type": "boolean",
+                              "description": "Platform switch of the isolated browser inspection"
+                            }
+                          },
+                          "required": ["scanTimeFetch", "rewrite", "dynamicInspection"],
+                          "additionalProperties": false,
+                          "description": "Platform settings (URL_*)"
+                        },
+                        "bounds": {
+                          "type": "object",
+                          "properties": {
+                            "allowedDomains": {
+                              "type": "object",
+                              "properties": {
+                                "maxItems": {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                }
+                              },
+                              "required": ["maxItems"],
+                              "additionalProperties": false
+                            },
+                            "blockedDomains": {
+                              "type": "object",
+                              "properties": {
+                                "maxItems": {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                }
+                              },
+                              "required": ["maxItems"],
+                              "additionalProperties": false
+                            },
+                            "scanTimeFetch": {
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "enum": ["off", "shorteners", "suspicious", "all"]
+                              },
+                              "description": "Modes up to the platform mode"
+                            },
+                            "lookalike": {
+                              "type": "object",
+                              "properties": {
+                                "extraProtectedDomains": {
+                                  "type": "object",
+                                  "properties": {
+                                    "maxItems": {
+                                      "type": "integer",
+                                      "minimum": -9007199254740991,
+                                      "maximum": 9007199254740991
+                                    }
+                                  },
+                                  "required": ["maxItems"],
+                                  "additionalProperties": false
+                                }
+                              },
+                              "required": ["extraProtectedDomains"],
+                              "additionalProperties": false
+                            },
+                            "rewrite": {
+                              "type": "object",
+                              "properties": {
+                                "enabled": {
+                                  "type": "array",
+                                  "items": { "type": "boolean" },
+                                  "description": "[false] when the platform disabled rewriting"
+                                },
+                                "directions": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "enum": ["inbound", "outbound", "internal"]
+                                  }
+                                },
+                                "expiryDays": {
+                                  "type": "object",
+                                  "properties": {
+                                    "min": {
+                                      "type": "integer",
+                                      "minimum": -9007199254740991,
+                                      "maximum": 9007199254740991
+                                    },
+                                    "max": {
+                                      "type": "integer",
+                                      "minimum": -9007199254740991,
+                                      "maximum": 9007199254740991
+                                    }
+                                  },
+                                  "required": ["min", "max"],
+                                  "additionalProperties": false
+                                },
+                                "excludedDomains": {
+                                  "type": "object",
+                                  "properties": {
+                                    "maxItems": {
+                                      "type": "integer",
+                                      "minimum": -9007199254740991,
+                                      "maximum": 9007199254740991
+                                    }
+                                  },
+                                  "required": ["maxItems"],
+                                  "additionalProperties": false
+                                },
+                                "dkimSignedPolicy": {
+                                  "type": "array",
+                                  "items": { "type": "string", "enum": ["rewrite", "skip"] }
+                                }
+                              },
+                              "required": [
+                                "enabled",
+                                "directions",
+                                "expiryDays",
+                                "excludedDomains",
+                                "dkimSignedPolicy"
+                              ],
+                              "additionalProperties": false
+                            },
+                            "click": {
+                              "type": "object",
+                              "properties": {
+                                "suspicious": {
+                                  "type": "array",
+                                  "items": { "type": "string", "enum": ["warn", "block"] }
+                                },
+                                "unknown": {
+                                  "type": "array",
+                                  "items": { "type": "string", "enum": ["allow", "warn", "block"] }
+                                }
+                              },
+                              "required": ["suspicious", "unknown"],
+                              "additionalProperties": false
+                            },
+                            "dynamicInspection": {
+                              "type": "array",
+                              "items": { "type": "boolean" },
+                              "description": "[false] when the platform disabled dynamic inspection"
+                            }
+                          },
+                          "required": [
+                            "allowedDomains",
+                            "blockedDomains",
+                            "scanTimeFetch",
+                            "lookalike",
+                            "rewrite",
+                            "click",
+                            "dynamicInspection"
+                          ],
+                          "additionalProperties": false,
+                          "description": "What an override may choose"
+                        },
+                        "override": {
+                          "nullable": true,
+                          "description": "The organization override (domains normalized to ASCII); null for none",
+                          "type": "object",
+                          "properties": {
+                            "allowedDomains": {
+                              "description": "Suppresses lookalike/structure/landing rules and excludes from rewriting (never feed or DNSBL malicious findings)",
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "description": "Lower-case ASCII domain or host (A-labels after IDNA)"
+                              }
+                            },
+                            "blockedDomains": {
+                              "description": "→ malicious (rule M4) for this organization",
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "description": "Lower-case ASCII domain or host (A-labels after IDNA)"
+                              }
+                            },
+                            "scanTimeFetch": {
+                              "description": "At most the platform mode",
+                              "type": "string",
+                              "enum": ["off", "shorteners", "suspicious", "all"]
+                            },
+                            "lookalike": {
+                              "description": "Further domains protected against lookalikes",
+                              "type": "object",
+                              "properties": {
+                                "extraProtectedDomains": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "description": "Lower-case ASCII domain or host (A-labels after IDNA)"
+                                  }
+                                }
+                              },
+                              "additionalProperties": false
+                            },
+                            "rewrite": {
+                              "type": "object",
+                              "properties": {
+                                "enabled": { "type": "boolean" },
+                                "directions": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "enum": ["inbound", "outbound", "internal"]
+                                  }
+                                },
+                                "expiryDays": {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                },
+                                "excludedDomains": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "description": "Lower-case ASCII domain or host (A-labels after IDNA)"
+                                  }
+                                },
+                                "dkimSignedPolicy": {
+                                  "type": "string",
+                                  "enum": ["rewrite", "skip"]
+                                },
+                                "plainText": { "type": "boolean" }
+                              },
+                              "additionalProperties": false
+                            },
+                            "click": {
+                              "description": "Time-of-click policy (clean is always allowed, malicious always blocked)",
+                              "type": "object",
+                              "properties": {
+                                "suspicious": { "type": "string", "enum": ["warn", "block"] },
+                                "unknown": { "type": "string", "enum": ["allow", "warn", "block"] },
+                                "allowContinue": { "type": "boolean" }
+                              },
+                              "additionalProperties": false
+                            },
+                            "dynamicInspection": { "type": "boolean" }
+                          },
+                          "additionalProperties": false
+                        },
+                        "effective": {
+                          "type": "object",
+                          "properties": {
+                            "allowedDomains": {
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "description": "Lower-case ASCII domain or host (A-labels after IDNA)"
+                              }
+                            },
+                            "blockedDomains": {
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "description": "Lower-case ASCII domain or host (A-labels after IDNA)"
+                              }
+                            },
+                            "scanTimeFetch": {
+                              "type": "string",
+                              "enum": ["off", "shorteners", "suspicious", "all"]
+                            },
+                            "lookalike": {
+                              "type": "object",
+                              "properties": {
+                                "extraProtectedDomains": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "description": "Lower-case ASCII domain or host (A-labels after IDNA)"
+                                  }
+                                }
+                              },
+                              "required": ["extraProtectedDomains"],
+                              "additionalProperties": false
+                            },
+                            "rewrite": {
+                              "type": "object",
+                              "properties": {
+                                "enabled": { "type": "boolean" },
+                                "directions": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "enum": ["inbound", "outbound", "internal"]
+                                  }
+                                },
+                                "expiryDays": {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                },
+                                "excludedDomains": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "description": "Lower-case ASCII domain or host (A-labels after IDNA)"
+                                  }
+                                },
+                                "dkimSignedPolicy": {
+                                  "type": "string",
+                                  "enum": ["rewrite", "skip"]
+                                },
+                                "plainText": { "type": "boolean" }
+                              },
+                              "required": [
+                                "enabled",
+                                "directions",
+                                "expiryDays",
+                                "excludedDomains",
+                                "dkimSignedPolicy",
+                                "plainText"
+                              ],
+                              "additionalProperties": false
+                            },
+                            "click": {
+                              "type": "object",
+                              "properties": {
+                                "suspicious": { "type": "string", "enum": ["warn", "block"] },
+                                "unknown": { "type": "string", "enum": ["allow", "warn", "block"] },
+                                "allowContinue": { "type": "boolean" }
+                              },
+                              "required": ["suspicious", "unknown", "allowContinue"],
+                              "additionalProperties": false
+                            },
+                            "dynamicInspection": { "type": "boolean" }
+                          },
+                          "required": [
+                            "allowedDomains",
+                            "blockedDomains",
+                            "scanTimeFetch",
+                            "lookalike",
+                            "rewrite",
+                            "click",
+                            "dynamicInspection"
+                          ],
+                          "additionalProperties": false,
+                          "description": "What the URL engine (rewrite and scan settings) and the click-service (click policy and lists, read live) apply"
                         },
                         "required": {
                           "type": "boolean",
@@ -23510,6 +25503,624 @@
         },
         "security": [{ "access-token": [] }],
         "summary": "Remove a known-threat file hash",
+        "tags": ["platform"]
+      }
+    },
+    "/api/v1/platform/threat-indicators": {
+      "get": {
+        "description": "The platform catalog the URL engine and the click-service consult on every scan and click (never cached), newest first, cursor-paginated, optionally one `type`, one `source` (`analyst`, `feed:<name>`) or one `value` (normalized like a new indicator; requires `type`). From the read replica: an indicator added a moment ago may not be listed yet. 60 calls per caller per minute (shared by the catalog routes).",
+        "operationId": "ThreatIndicatorsController_list_v1",
+        "parameters": [
+          {
+            "name": "limit",
+            "required": false,
+            "in": "query",
+            "schema": { "default": 25, "type": "integer", "minimum": 1, "maximum": 100 }
+          },
+          {
+            "name": "cursor",
+            "required": false,
+            "in": "query",
+            "schema": { "type": "string", "minLength": 1, "maxLength": 64 }
+          },
+          {
+            "name": "type",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "description": "Only indicators of this type",
+              "type": "string",
+              "enum": ["url", "domain", "ip"]
+            }
+          },
+          {
+            "name": "source",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "description": "Only indicators of this source",
+              "type": "string",
+              "pattern": "^(analyst|feed:[a-z0-9][a-z0-9_.-]{0,58})$"
+            }
+          },
+          {
+            "name": "value",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "description": "Only this value (normalized like a new indicator; requires `type`)",
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": { "type": "string", "description": "Indicator id (decimal)" },
+                          "type": { "type": "string", "enum": ["url", "domain", "ip"] },
+                          "value": { "type": "string", "description": "Normalized value" },
+                          "valueSha256": {
+                            "type": "string",
+                            "description": "SHA-256 (hex) of the normalized value"
+                          },
+                          "severity": {
+                            "type": "string",
+                            "enum": ["low", "medium", "high", "critical"]
+                          },
+                          "category": {
+                            "nullable": true,
+                            "type": "string",
+                            "enum": ["phishing", "malware", "spam", "scam", "c2", "other"]
+                          },
+                          "source": {
+                            "type": "string",
+                            "description": "`analyst` or `feed:<name>`"
+                          },
+                          "reason": { "nullable": true, "type": "string" },
+                          "expiresAt": {
+                            "nullable": true,
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "addedByUserId": {
+                            "nullable": true,
+                            "description": "Public id of the analyst; null for feeds",
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                          },
+                          "firstSeenAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "lastSeenAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "updatedAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "type",
+                          "value",
+                          "valueSha256",
+                          "severity",
+                          "category",
+                          "source",
+                          "reason",
+                          "expiresAt",
+                          "addedByUserId",
+                          "firstSeenAt",
+                          "lastSeenAt",
+                          "createdAt",
+                          "updatedAt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "description": "Newest first"
+                    },
+                    "nextCursor": { "nullable": true, "type": "string" }
+                  },
+                  "required": ["data", "nextCursor"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (`Retry-After` header when known)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "access-token": [] }],
+        "summary": "List the platform threat indicators (URLs, domains, IPs)",
+        "tags": ["platform"]
+      },
+      "post": {
+        "description": "Adds a URL, domain or IP address with its severity, category, the reason and an optional future `expiresAt`. The value is normalized by `@email-gateway/url-security`: a URL in its identity form (no userinfo, no fragment; matched exactly), a domain as lower-case ASCII (IDN as A-labels; matches the host and every subdomain; a public suffix is refused), an IP address canonical. `source` is `analyst`, the caller is recorded. Applies to the next scan and the next click of every organization: `high`/`critical` → `malicious` (`url.feed_malicious`), `low`/`medium` → `suspicious` (`url.feed_suspicious`). Audited as `threat_indicator.added`. `409 indicator_exists` when the normalized value is listed already.",
+        "operationId": "ThreatIndicatorsController_add_v1",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": ["url", "domain", "ip"],
+                    "description": "`url` (matched by its identity form), `domain` (matches the host and every subdomain), `ip` (a literal IP host)"
+                  },
+                  "value": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "description": "The URL, domain or IP address; normalized before storage (the response shows the stored value). A public suffix (`co.uk`, `github.io`) is refused"
+                  },
+                  "severity": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high", "critical"],
+                    "description": "`high`/`critical` → the URL is `malicious` (rule M1); `low`/`medium` → `suspicious` (S6)"
+                  },
+                  "category": {
+                    "type": "string",
+                    "enum": ["phishing", "malware", "spam", "scam", "c2", "other"],
+                    "description": "Threat category"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512,
+                    "description": "Why the indicator is added (audited)"
+                  },
+                  "expiresAt": {
+                    "description": "The lookup ignores the indicator after this instant (must be in the future)",
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                  }
+                },
+                "required": ["type", "value", "severity", "category", "reason"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": { "type": "string", "description": "Indicator id (decimal)" },
+                    "type": { "type": "string", "enum": ["url", "domain", "ip"] },
+                    "value": { "type": "string", "description": "Normalized value" },
+                    "valueSha256": {
+                      "type": "string",
+                      "description": "SHA-256 (hex) of the normalized value"
+                    },
+                    "severity": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+                    "category": {
+                      "nullable": true,
+                      "type": "string",
+                      "enum": ["phishing", "malware", "spam", "scam", "c2", "other"]
+                    },
+                    "source": { "type": "string", "description": "`analyst` or `feed:<name>`" },
+                    "reason": { "nullable": true, "type": "string" },
+                    "expiresAt": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "addedByUserId": {
+                      "nullable": true,
+                      "description": "Public id of the analyst; null for feeds",
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "firstSeenAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "lastSeenAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "updatedAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "type",
+                    "value",
+                    "valueSha256",
+                    "severity",
+                    "category",
+                    "source",
+                    "reason",
+                    "expiresAt",
+                    "addedByUserId",
+                    "firstSeenAt",
+                    "lastSeenAt",
+                    "createdAt",
+                    "updatedAt"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The normalized value is already a platform analyst indicator of that type; `id` names it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [409] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["indicator_exists"] },
+                    "message": { "type": "string" },
+                    "id": { "type": "string" },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (`Retry-After` header when known)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "access-token": [] }],
+        "summary": "Add a platform threat indicator",
+        "tags": ["platform"]
+      }
+    },
+    "/api/v1/platform/threat-indicators/{id}": {
+      "delete": {
+        "description": "Deletes the indicator (the next scan and click no longer match it). `reason` is required. Audited as `threat_indicator.removed` with the indicator as it was (before-image).",
+        "operationId": "ThreatIndicatorsController_remove_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "description": "Indicator id (decimal, from the list)",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "reason",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "description": "Why the indicator is removed (audited)"
+            }
+          }
+        ],
+        "responses": {
+          "204": { "description": "Removed" },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No platform threat indicator with that id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [404] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["threat_indicator_not_found"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (`Retry-After` header when known)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "access-token": [] }],
+        "summary": "Remove a platform threat indicator",
         "tags": ["platform"]
       }
     },

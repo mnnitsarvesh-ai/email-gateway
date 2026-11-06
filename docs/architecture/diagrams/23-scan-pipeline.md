@@ -12,10 +12,11 @@ flowchart LR
 
   P["mail.message.parsed.v1<br/>round 0, scan_kind initial"]:::impl
   R["mail.message.rescan_requested.v1<br/>round N ≥ 1 (api E19), scan_kind rescan"]:::impl
-  CAT["ENGINE_CATALOG (security-contracts, data)<br/>rspamd: antispam, scan.spam, required"]:::impl
-  REG["ENGINE_REGISTRY (email-worker)<br/>rspamdRegistration: consumer, adapter, settings"]:::impl
-  Q1["scan.spam → Rspamd engine consumer<br/>email-worker.scan.rspamd"]:::impl
-  Q2["scan.attachment / scan.url / scan.dlp<br/>engines PLANNED 4.2–4.5"]:::planned
+  CAT["ENGINE_CATALOG (security-contracts, data)<br/>rspamd (scan.spam), attachment (scan.attachment),<br/>url (scan.url): all required"]:::impl
+  REG["ENGINE_REGISTRY (email-worker)<br/>rspamd, attachment, url registrations:<br/>consumer, adapter, settings"]:::impl
+  Q1["scan.spam / scan.attachment / scan.url →<br/>email-worker.scan.rspamd / .attachment / .url"]:::impl
+  Q2["scan.dlp, BEC, sandbox consumer<br/>engines PLANNED 4.4–4.6"]:::planned
+  URL["url final txn (step 4.3): message_urls, url_scan_results,<br/>url_rewrites (rewritten copy in S3), url_dynamic_inspections<br/>+ inspection_requested.v1"]:::impl
   OPEN["open round (first engine wins)<br/>E3 persisted → scanning (round 0)<br/>email_scans row: required_engines snapshot,<br/>deadline_at = now + SCAN_ROUND_DEADLINE_SECONDS"]:::impl
   RES["scan_engine_results<br/>non-final attempts (timeout/error)<br/>one final row per (scan, engine)"]:::impl
   AUTH["email_auth_results<br/>SPF, DKIM, DMARC, ARC (rspamd)"]:::impl
@@ -23,7 +24,7 @@ flowchart LR
   OK["E6 scanned, email_scans completed<br/>scanned.v1 outcome scanned"]:::impl
   FAIL["E7 scan_failed (scan_error / scan_timeout / eml_unavailable)<br/>email_scans failed | timed_out, scanned.v1 outcome scan_failed"]:::impl
   SW["deadline sweeper (advisory lock scan:deadline)<br/>running rounds past deadline_at → final timeout rows"]:::impl
-  DP["dev pass-through (local/ci): E27 scanned → approved"]:::impl
+  DP["dev pass-through (local/ci): E27 scanned → approved<br/>emlS3Key = the round's rewritten copy, else the original (U20)"]:::impl
   PE["policy-engine via email.policy.evaluate<br/>PLANNED 5.2"]:::planned
 
   CAT --> REG
@@ -35,6 +36,7 @@ flowchart LR
   R -.-> Q2
   Q1 --> OPEN --> RES
   RES --> AUTH
+  RES --> URL
   RES --> DONE
   SW --> RES
   SW --> DONE
@@ -45,7 +47,7 @@ flowchart LR
   FAIL -.-> PE
 ```
 
-**Legend.** Green: IMPLEMENTED in step 4.1. Amber dashed: PLANNED (4.2–4.6 engines; policy 5.2). In 4.1 the registry holds only `rspamd`, so `required_engines = ["rspamd"]` and the Rspamd final result completes the round.
+**Legend.** Green: IMPLEMENTED (4.1 orchestrator and Rspamd; 4.2 attachment engine; 4.3 URL engine with its child rows and the rewritten copy, [11-url-protection.md](../../plan/steps/11-url-protection.md) U1, U3, U16, U20). Amber dashed: PLANNED (4.4–4.6 engines; policy 5.2). Since step 4.3 `required_engines = ["rspamd", "attachment", "url"]`: the round completes when all three have a final row; the URL engine's dynamic inspection never delays it (its result acts at click time). In 4.1 the registry held only `rspamd`.
 
 ## Aggregation (pure `aggregateRound`)
 
@@ -80,3 +82,4 @@ A non-required engine's failure is recorded but never fails the round. Reason co
 | Deadline sweeper                                    | IMPLEMENTED 4.1 | `deadline-sweeper.test.ts`; email-worker `scan-resilience`                                       |
 | Stack round flow through Postfix                    | IMPLEMENTED 4.1 | `tests/integration/scan-pipeline.test.ts`, `scan-resilience.test.ts`                             |
 | Further engines (second required engine in a round) | PLANNED 4.2–4.6 | The completion rule is engine-agnostic; it is exercised with one engine only in 4.1              |
+| URL engine child rows, rewritten copy, inspections  | IMPLEMENTED 4.3 | email-worker `url-*` integration suites; stack `url-smtp.test.ts`, `url-ssrf.test.ts`            |

@@ -10,6 +10,7 @@ import {
   attachmentSandboxRequestedV1,
   EventTypes,
   messageScannedV1,
+  urlInspectionRequestedV1,
 } from '@email-gateway/event-contracts';
 import {
   type LifecycleMetrics,
@@ -19,7 +20,7 @@ import {
   transitionMessage,
 } from '@email-gateway/message-lifecycle';
 import { aggregateRound, type FinalEngineResult } from './aggregate';
-import type { AttachmentResultInput, SandboxSubmissionInput } from './engine';
+import type { AttachmentResultInput, SandboxSubmissionInput, UrlChildRows } from './engine';
 import type { EngineSettingsRow } from './registry';
 import {
   type AttemptInput,
@@ -529,6 +530,172 @@ export class ScanRepository implements ScanStore {
     if (children?.sandbox && children.sandbox.length > 0) {
       if (!context) throw new NonRetryableError('sandbox_context_missing');
       await this.insertSandboxSubmissions(tx, scan, children.sandbox, context);
+    }
+    if (children?.urls) {
+      if (!context) throw new NonRetryableError('url_context_missing');
+      await this.insertUrlRows(tx, scan, children.urls, context);
+    }
+  }
+
+  /**
+   * The url engine's child rows (step 4.3 U16), in the final row's transaction, only when the
+   * final row was inserted: new `message_urls` rows (`createMany … skipDuplicates`: rows of
+   * earlier rounds keep their seq), then a read-back that every result's `url_seq` names the
+   * same URL hash (a seq taken by another URL is a retryable error, never a mislinked result),
+   * the `url_scan_results` rows, the round's `url_rewrites` row (object key under
+   * `org/<org>/rewrite/`), and one `url_dynamic_inspections` row (`pending`) plus one
+   * `mail.url.inspection_requested.v1` outbox row per inspection (payload validated by the event
+   * contract; a violation never commits half a finalization: the delivery is dead-lettered).
+   */
+  private async insertUrlRows(
+    tx: Prisma.TransactionClient,
+    scan: ScanRound,
+    rows: UrlChildRows,
+    context: ChildRowContext,
+  ): Promise<void> {
+    const scope = {
+      receivedAt: scan.receivedAt,
+      messageId: scan.messageId,
+      organizationId: scan.organizationId,
+    };
+    if (rows.messageUrls.length > 0) {
+      await tx.messageUrl.createMany({
+        data: rows.messageUrls.map((u) => ({
+          ...scope,
+          urlSeq: u.urlSeq,
+          url: u.url,
+          urlSha256: u.urlSha256,
+          scheme: u.scheme,
+          host: u.host,
+          unicodeHost: u.unicodeHost,
+          registrableDomain: u.registrableDomain,
+          hostKind: u.hostKind,
+          port: u.port,
+          truncated: u.truncated,
+          flags: json(u.flags),
+          sources: json(u.sources),
+          occurrences: Math.min(65_535, u.occurrences),
+          firstLifecycleRound: u.firstLifecycleRound,
+          extractorVersion: u.extractorVersion,
+        })),
+        skipDuplicates: true,
+      });
+    }
+    const seqs = [...new Set([...rows.results, ...rows.inspections].map((r) => r.urlSeq))];
+    if (seqs.length > 0) {
+      const stored = await tx.messageUrl.findMany({
+        where: { ...scope, urlSeq: { in: seqs } },
+        select: { messageId: true, organizationId: true, urlSeq: true, urlSha256: true },
+      });
+      const bySeq = new Map<number, string>();
+      for (const row of stored) {
+        if (row.messageId !== scan.messageId || row.organizationId !== scan.organizationId) {
+          throw new Error('message_urls read-back returned a row of another message');
+        }
+        bySeq.set(row.urlSeq, row.urlSha256);
+      }
+      for (const r of [...rows.results, ...rows.inspections]) {
+        if (bySeq.get(r.urlSeq) !== r.urlSha256) {
+          throw new Error('message_urls seq does not name the scanned URL');
+        }
+      }
+    }
+    if (rows.results.length > 0) {
+      await tx.urlScanResult.createMany({
+        data: rows.results.map((r) => ({
+          ...scope,
+          scanId: scan.scanId,
+          urlSeq: r.urlSeq,
+          urlSha256: r.urlSha256,
+          verdict: r.verdict,
+          reasonCodes: json(r.reasonCodes),
+          reputation: json(r.reputation),
+          ...(r.lookalike ? { lookalike: json(r.lookalike) } : {}),
+          fetchStatus: r.fetchStatus,
+          fetchError: r.fetchError,
+          hopCount: Math.min(255, Math.max(0, r.hopCount)),
+          ...(r.redirectChain ? { redirectChain: json(r.redirectChain) } : {}),
+          finalUrl: r.finalUrl,
+          finalUrlSha256: r.finalUrlSha256,
+          finalHost: r.finalHost,
+          finalStatus: r.finalStatus,
+          ...(r.landing ? { landing: json(r.landing) } : {}),
+          rewritten: r.rewritten,
+          dynamicRequested: r.dynamicRequested,
+          fetchCache: r.fetchCache,
+          durationMs: Math.max(0, Math.round(r.durationMs)),
+        })),
+        skipDuplicates: true,
+      });
+    }
+    const rewrite = rows.rewrite;
+    if (rewrite.status === 'rewritten') {
+      const prefix = `org/${scan.organizationId.toString()}/rewrite/`;
+      if (!rewrite.objectKey?.startsWith(prefix) || rewrite.objectKey.includes('..')) {
+        throw new NonRetryableError('url_rewrite_key_invalid');
+      }
+    }
+    await tx.urlRewrite.createMany({
+      data: [
+        {
+          ...scope,
+          scanId: scan.scanId,
+          lifecycleRound: scan.round,
+          status: rewrite.status,
+          skipReason: rewrite.skipReason,
+          objectKey: rewrite.objectKey,
+          objectSha256: rewrite.objectSha256,
+          objectSizeBytes: rewrite.objectSizeBytes,
+          linksRewritten: Math.min(65_535, rewrite.linksRewritten),
+          linksUnmapped: Math.min(65_535, rewrite.linksUnmapped),
+          partsRewritten: Math.min(255, rewrite.partsRewritten),
+          partsSkipped: Math.min(255, rewrite.partsSkipped),
+          dkimSigned: rewrite.dkimSigned,
+          tokenKid: rewrite.tokenKid,
+          expiresAt: rewrite.expiresAt,
+          settingsVersion: rewrite.settingsVersion,
+        },
+      ],
+      skipDuplicates: true,
+    });
+    for (const inspection of rows.inspections) {
+      const eventId = uuidv7(context.now.getTime());
+      const created = await tx.urlDynamicInspection.create({
+        data: {
+          ...scope,
+          scanId: scan.scanId,
+          urlSeq: inspection.urlSeq,
+          urlSha256: inspection.urlSha256,
+          status: 'pending',
+          requestedEventId: eventId,
+        },
+        select: { id: true },
+      });
+      const parsed = urlInspectionRequestedV1.safeParse({
+        inspectionId: created.id.toString(),
+        messageId: scan.messageId.toString(),
+        receivedAt: scan.receivedAt.toISOString(),
+        scanId: scan.scanId.toString(),
+        lifecycleRound: scan.round,
+        urlSeq: inspection.urlSeq,
+        url: inspection.url,
+        urlSha256: inspection.urlSha256,
+        requestedAt: inspection.requestedAt.toISOString(),
+        deadlineAt: inspection.deadlineAt.toISOString(),
+      });
+      if (!parsed.success) throw new NonRetryableError('url_inspection_payload_invalid');
+      await tx.messageOutbox.create({
+        data: {
+          eventId,
+          organizationId: scan.organizationId,
+          eventType: EventTypes.UrlInspectionRequested,
+          aggregateType: 'message',
+          aggregateId: scan.messageId.toString(),
+          correlationId: context.correlationId,
+          payload: parsed.data,
+        },
+        select: { id: true },
+      });
     }
   }
 

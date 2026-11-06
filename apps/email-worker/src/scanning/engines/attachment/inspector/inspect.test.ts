@@ -129,7 +129,7 @@ describe('attachment inspection (step 4.2 A4)', () => {
           c === 'limit.entry_size' || c === 'limit.compression_ratio' || c === 'archive.malformed',
       ),
     ).toBe(true);
-  });
+  }, 30_000); // inflates large generated archives: above 5 s under a repo-wide parallel run
 
   it('marks encrypted entries by every marker without inflating them', async () => {
     const classic = await inspect(corpus.encryptedZip());

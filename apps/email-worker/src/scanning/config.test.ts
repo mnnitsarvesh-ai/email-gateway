@@ -22,6 +22,9 @@ const base = {
   SCAN_RSPAMD_URL: 'http://127.0.0.1:11333',
   REDIS_URL: 'redis://localhost:6379',
   ATTACHMENT_CACHE_HMAC_KEY: 'test-content-cache-mac-key-0123456789',
+  URL_CACHE_HMAC_KEY: 'test-url-cache-mac-key-0123456789abcdef',
+  URL_TOKEN_KEY_CURRENT: '0123456789abcdef'.repeat(4),
+  URL_DNSBL_DOMAIN_ZONES: 'dbl.scan.test=127.0.1.2:spam,127.0.1.4:phishing',
   S3_REGION: 'ap-south-1',
   S3_BUCKET_MAIL: 'test-mail',
   S3_BUCKET_ARCHIVE: 'test-archive',
@@ -37,10 +40,10 @@ describe('email-worker scan config (step 4.1 §5, S5, S8, S10)', () => {
   it('applies the design defaults', () => {
     const config = load();
     expect(config.SCAN_ENABLED).toBe(true);
-    // Step 4.2 A1: the attachment engine is enabled (and required) by default.
-    expect(config.SCAN_ENGINES).toEqual(['rspamd', 'attachment']);
+    // Step 4.2 A1 / 4.3 U1: the attachment and url engines are enabled (and required) by default.
+    expect(config.SCAN_ENGINES).toEqual(['rspamd', 'attachment', 'url']);
     expect(config.SCAN_CONSUMERS).toEqual([]);
-    expect(consumerEngines(config)).toEqual(['rspamd', 'attachment']);
+    expect(consumerEngines(config)).toEqual(['rspamd', 'attachment', 'url']);
     expect(config.RABBITMQ_SCANNER_URL).toEqual([base.RABBITMQ_SCANNER_URL]);
     expect(config).toMatchObject({
       SCAN_RSPAMD_CONCURRENCY: 8,

@@ -52,9 +52,10 @@ const monthly = (
 });
 
 /**
- * The 22 partitioned tables: the 16 of D3, the two delivery tables of step 2.3 (§3), the parse
- * stage table of step 3.1 (§3), the authentication results table of step 4.1 (§3) and the
- * per-attachment results and sandbox submissions of step 4.2 (§3).
+ * The 27 partitioned tables: the 16 of D3, the two delivery tables of step 2.3 (§3), the parse
+ * stage table of step 3.1 (§3), the authentication results table of step 4.1 (§3), the
+ * per-attachment results and sandbox submissions of step 4.2 (§3) and the five URL tables of
+ * step 4.3 (§3).
  */
 export const PARTITION_REGISTRY: readonly PartitionSpec[] = Object.freeze([
   monthly('email_messages', 'received_at', 6, 'core'),
@@ -82,6 +83,15 @@ export const PARTITION_REGISTRY: readonly PartitionSpec[] = Object.freeze([
   // a scan round and the sandbox submissions it made live as long as the scan rounds.
   monthly('attachment_scan_results', 'received_at', 6, 'core'),
   monthly('sandbox_submissions', 'received_at', 6, 'core'),
+  // Step 4.3 (docs/plan/steps/11-url-protection.md §3): the URLs of a message, their per-round
+  // results, the rewritten copies and the dynamic inspections live as long as the message. The
+  // retention of message_urls (6 months) exceeds the maximum click-token expiry (90 days, U12).
+  monthly('message_urls', 'received_at', 6, 'core'),
+  monthly('url_scan_results', 'received_at', 6, 'core'),
+  monthly('url_rewrites', 'received_at', 6, 'core'),
+  monthly('url_dynamic_inspections', 'received_at', 6, 'core'),
+  // Clicks are partitioned by the click instant (a click can come months after the message).
+  monthly('url_click_events', 'clicked_at', 6, 'core'),
   // Legal hold and per-tenant archive retention are row-level (step 8.1).
   monthly('email_archives', 'received_at', null, 'compliance'),
   monthly('bounce_events', 'occurred_at', 6, 'core'),

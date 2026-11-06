@@ -1,0 +1,11 @@
+; Zone clean-site.test (TEST-ONLY, step 4.3 U19): the url-test clean corpus site. A zone file
+; instead of the hosts plugin for the wildcard: per-run hosts (r<run>.clean-site.test,
+; wp4-<id>.clean-site.test) of the stack and click-service suites must resolve, because the
+; click-service re-resolves every clicked URL at time of click.
+$ORIGIN clean-site.test.
+$TTL 60
+@       IN SOA  ns.sink.test. hostmaster.sink.test. ( 2026110601 3600 600 86400 60 )
+@       IN NS   ns.sink.test.
+@       IN A    203.0.113.10
+www     IN A    203.0.113.10
+*       IN A    203.0.113.10

@@ -1,0 +1,8 @@
+; Zone mapped-v6.test (TEST-ONLY, step 4.3 U19): an AAAA record in IPv4-mapped form
+; (::ffff:127.0.0.1). A zone file instead of the hosts plugin, because Go parses a mapped address
+; in a hosts file as IPv4 and would serve it as an A record.
+$ORIGIN mapped-v6.test.
+$TTL 60
+@       IN SOA  ns.sink.test. hostmaster.sink.test. ( 2026110601 3600 600 86400 60 )
+@       IN NS   ns.sink.test.
+@       IN AAAA ::ffff:127.0.0.1

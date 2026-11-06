@@ -33,6 +33,7 @@ import {
   scanStackGate,
   sendToMx,
   waitForRoundComplete,
+  URL_LEDGER,
 } from './support/scan-stack';
 import { SmtpFixtures, type FixtureDomain } from './support/smtp-fixtures';
 import { assertStackReady } from './support/smtp-stack';
@@ -146,7 +147,8 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
     expect(round.reasonCodes).toContain('clean.below_threshold');
 
     const results = await engineResultsOf(fx.prisma, message);
-    expect(results).toHaveLength(2);
+    // One final per required engine (rspamd, attachment, url since step 4.3).
+    expect(results).toHaveLength(REQUIRED_ENGINES.length);
     const final = results.find((r) => r.engine === 'rspamd');
     expect(final).toMatchObject({
       scanId: round.id,
@@ -214,9 +216,11 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
     expect([...payload.engines].sort((a, b) => a.engine.localeCompare(b.engine))).toEqual([
       { engine: 'attachment', required: true, outcome: 'skipped', attempts: 1 },
       { engine: 'rspamd', required: true, outcome: 'clean', attempts: 1 },
+      // Step 4.3: the URL engine (the clean message has no link: rule U0).
+      { engine: 'url', required: true, outcome: 'skipped', attempts: 1 },
     ]);
     expect(JSON.stringify(scanned[0]!.payload)).not.toContain('clean.scan.test');
-    for (const consumer of [RSPAMD_LEDGER, ATTACHMENT_LEDGER]) {
+    for (const consumer of [RSPAMD_LEDGER, ATTACHMENT_LEDGER, URL_LEDGER]) {
       expect(
         await fx.prisma.messageIdempotency.count({
           where: { consumer, eventId: parsed.eventId },
@@ -269,7 +273,14 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
         round: number;
         verdict: string;
         auth: { spf: string; dkim: string; dmarc: string };
-        engines: { engine: string; final: boolean; outcome: string; symbols: { name: string }[] }[];
+        engines: {
+          engine: string;
+          final: boolean;
+          outcome: string;
+          symbols: { name: string }[];
+          urls?: unknown[];
+          rewrite?: unknown;
+        }[];
       }[];
     };
     expect(page.data[0]).toMatchObject({
@@ -279,6 +290,16 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
       engines: [
         { engine: 'rspamd', final: true, outcome: 'clean' },
         { engine: 'attachment', final: true, outcome: 'skipped', reasonCodes: ['attachment.none'] },
+        // Step 4.3: no link in the clean message (rule U0), no URL rows, rewrite skipped.
+        {
+          engine: 'url',
+          final: true,
+          outcome: 'skipped',
+          reasonCodes: ['url.none'],
+          durationMs: null,
+          urls: [],
+          rewrite: { status: 'skipped', skipReason: 'no_urls' },
+        },
       ],
     });
     expect(page.data[0]!.engines[0]!.symbols.map((s) => s.name)).toContain('R_SPF_ALLOW');
@@ -454,9 +475,9 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
     }
   });
 
-  it('runs topology v4: scan.spam and scan.attachment consumed by the scanner user, scan.auth without event bindings', async () => {
+  it('runs topology v5: scan.spam, scan.attachment, scan.url and scan.url.results consumed by the scanner user, scan.auth without event bindings', async () => {
     const scanner = process.env.RABBITMQ_SCANNER_USER || 'eg-scanner';
-    for (const queue of ['scan.spam', 'scan.attachment']) {
+    for (const queue of ['scan.spam', 'scan.attachment', 'scan.url', 'scan.url.results']) {
       const details = await mgmt.get<{
         consumers?: number;
         consumer_details?: { channel_details?: { user?: string } }[];
