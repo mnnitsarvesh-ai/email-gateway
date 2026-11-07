@@ -18,8 +18,18 @@ import {
   type UrlReasonCode,
 } from '@email-gateway/security-contracts';
 import { z } from 'zod';
+import {
+  appliedAssessmentsOf,
+  type BecIdMaps,
+  inputsOf,
+  NO_ID_MAPS,
+  rulesOf,
+  shadowAssessmentsOf,
+  thresholdsOf,
+} from '../../bec/domain/bec-result';
 import type {
   AttachmentScanView,
+  BecScanView,
   ScanAttempt,
   ScanAuthView,
   ScanEngineResultView,
@@ -32,6 +42,8 @@ import type {
   AttachmentPartRow,
   AttachmentResultRow,
   AuthResultRow,
+  BecFeedbackRefRow,
+  BecResultRow,
   EngineResultRow,
   MessageUrlRow,
   SandboxSubmissionRow,
@@ -151,11 +163,14 @@ export function engineOf(engine: string, rows: readonly EngineResultRow[]): Scan
 export const ATTACHMENT_ENGINE = 'attachment';
 /** The URL engine's name (step 4.3 U1). */
 export const URL_ENGINE = 'url';
+/** The phishing/BEC engine's name (step 4.4 B1). */
+export const BEC_ENGINE = 'bec';
 /**
  * Engines whose durations are withheld and times rounded to the second: their caches are shared
- * across organizations (attachment content cache A10; URL reputation/chain/dynamic caches U6).
+ * across organizations (attachment content cache A10; URL reputation/chain/dynamic caches U6),
+ * or their timing reveals the AI layer's behaviour (BEC, B15).
  */
-const COARSE_ENGINES: ReadonlySet<string> = new Set([ATTACHMENT_ENGINE, URL_ENGINE]);
+const COARSE_ENGINES: ReadonlySet<string> = new Set([ATTACHMENT_ENGINE, URL_ENGINE, BEC_ENGINE]);
 
 /** The per-attachment rows of a page with the display metadata they are joined with. */
 export interface AttachmentInputs {
@@ -446,6 +461,52 @@ export function rewriteOf(scanId: bigint, inputs: UrlInputs): UrlRewriteView | n
   };
 }
 
+/** The BEC rows of a page (step 4.4 B15). */
+export interface BecInputs {
+  results: readonly BecResultRow[];
+  feedback: readonly BecFeedbackRefRow[];
+  /** Internal → public ids of the profiles etc. referenced by stored evidence. */
+  ids: BecIdMaps;
+}
+
+export const NO_BEC: BecInputs = Object.freeze({ results: [], feedback: [], ids: NO_ID_MAPS });
+
+/** The feedback references kept per result (BEC_MAX_FEEDBACK_REFS). */
+const MAX_FEEDBACK_REFS = 50;
+
+/**
+ * The `bec` section of one round (B15), or null when the engine wrote no result (before the
+ * final result, a failure). Stored JSON is validated with the security-contracts sub-schemas;
+ * invalid entries are dropped. The thresholds come from the bec final row (`thresholdsOf`).
+ */
+export function becOf(
+  scanId: bigint,
+  final: EngineResultRow | null,
+  inputs: BecInputs,
+): BecScanView | null {
+  const row = inputs.results.find((r) => r.scanId === scanId);
+  if (!row) return null;
+  return {
+    rulesVersion: row.rulesVersion,
+    engineVersion: row.engineVersion,
+    settingsVersion: row.settingsVersion,
+    lexiconVersion: row.lexiconVersion,
+    verdict: row.verdict,
+    deterministicVerdict: row.deterministicVerdict,
+    score: row.score,
+    deterministicScore: row.deterministicScore,
+    thresholds: thresholdsOf(final?.evidence ?? null, final ? decimal(final.requiredScore) : null),
+    inputs: inputsOf(row.inputs),
+    rules: rulesOf(row.rules, inputs.ids),
+    ai: appliedAssessmentsOf(row.ai),
+    aiShadow: shadowAssessmentsOf(row.aiShadow),
+    feedback: inputs.feedback
+      .filter((f) => f.scanId === scanId)
+      .slice(0, MAX_FEEDBACK_REFS)
+      .map((f) => ({ id: f.publicId, kind: f.kind, createdAt: toSecond(f.createdAt) })),
+  };
+}
+
 const catalogRank = (engine: string): number => {
   const index = ENGINE_CATALOG.findIndex((entry) => entry.name === engine);
   return index === -1 ? ENGINE_CATALOG.length : index;
@@ -455,8 +516,9 @@ const byCatalog = (a: string, b: string): number =>
 
 /**
  * A round with its engines (catalog order), the first engine's authentication results, on the
- * `attachment` engine entry its per-attachment results (step 4.2 A16) and on the `url` engine
- * entry its per-URL results and rewrite (step 4.3 U16).
+ * `attachment` engine entry its per-attachment results (step 4.2 A16), on the `url` engine
+ * entry its per-URL results and rewrite (step 4.3 U16) and on the `bec` engine entry its
+ * explainable verdict (step 4.4 B15).
  */
 export function roundOf(
   scan: ScanRoundRow,
@@ -464,6 +526,7 @@ export function roundOf(
   authRows: readonly AuthResultRow[],
   attachments: AttachmentInputs = NO_ATTACHMENTS,
   urls: UrlInputs = NO_URLS,
+  bec: BecInputs = NO_BEC,
 ): ScanRoundView {
   const byEngine = new Map<string, EngineResultRow[]>();
   for (const row of engineRows) {
@@ -476,6 +539,7 @@ export function roundOf(
     .filter((row) => row.scanId === scan.id)
     .sort((a, b) => byCatalog(a.engine, b.engine))[0];
   return {
+    scanId: scan.id.toString(),
     round: scan.lifecycleRound,
     scanKind: scan.scanKind,
     status: scan.status,
@@ -493,6 +557,10 @@ export function roundOf(
       }
       if (engine === URL_ENGINE) {
         return { ...view, urls: urlsOf(scan.id, urls), rewrite: rewriteOf(scan.id, urls) };
+      }
+      if (engine === BEC_ENGINE) {
+        const final = byEngine.get(engine)!.find((row) => row.isFinal) ?? null;
+        return { ...view, bec: becOf(scan.id, final, bec) };
       }
       return view;
     }),

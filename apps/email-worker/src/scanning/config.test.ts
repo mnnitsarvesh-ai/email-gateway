@@ -23,6 +23,7 @@ const base = {
   REDIS_URL: 'redis://localhost:6379',
   ATTACHMENT_CACHE_HMAC_KEY: 'test-content-cache-mac-key-0123456789',
   URL_CACHE_HMAC_KEY: 'test-url-cache-mac-key-0123456789abcdef',
+  BEC_CONTEXT_HMAC_KEY: 'test-bec-context-hmac-key-0123456789abcdef',
   URL_TOKEN_KEY_CURRENT: '0123456789abcdef'.repeat(4),
   URL_DNSBL_DOMAIN_ZONES: 'dbl.scan.test=127.0.1.2:spam,127.0.1.4:phishing',
   S3_REGION: 'ap-south-1',
@@ -40,10 +41,10 @@ describe('email-worker scan config (step 4.1 §5, S5, S8, S10)', () => {
   it('applies the design defaults', () => {
     const config = load();
     expect(config.SCAN_ENABLED).toBe(true);
-    // Step 4.2 A1 / 4.3 U1: the attachment and url engines are enabled (and required) by default.
-    expect(config.SCAN_ENGINES).toEqual(['rspamd', 'attachment', 'url']);
+    // Step 4.2 A1 / 4.3 U1 / 4.4 B1: attachment, url and bec are enabled (and required) by default.
+    expect(config.SCAN_ENGINES).toEqual(['rspamd', 'attachment', 'url', 'bec']);
     expect(config.SCAN_CONSUMERS).toEqual([]);
-    expect(consumerEngines(config)).toEqual(['rspamd', 'attachment', 'url']);
+    expect(consumerEngines(config)).toEqual(['rspamd', 'attachment', 'url', 'bec']);
     expect(config.RABBITMQ_SCANNER_URL).toEqual([base.RABBITMQ_SCANNER_URL]);
     expect(config).toMatchObject({
       SCAN_RSPAMD_CONCURRENCY: 8,
@@ -67,9 +68,10 @@ describe('email-worker scan config (step 4.1 §5, S5, S8, S10)', () => {
       SCAN_ENGINE_VERSION_TTL_MS: 300_000,
     });
     expect(rspamdPlatformFromConfig(config)).toEqual(RSPAMD_PLATFORM_DEFAULTS);
-    // The default deadline covers every engine's attempt budget (step 4.2 A12): rspamd
-    // 6 x (20 s + 60 s) = 480 s, attachment 6 x (180 s + 60 s) = 1 440 s ≤ 1 800 s.
-    expect(minimumRoundDeadlineSeconds(config)).toBe(1_440);
+    // The default deadline covers every engine's attempt budget (step 4.2 A12, 4.4 B2): stage 1
+    // max(rspamd 6 x (20 s + 60 s) = 480 s, attachment 6 x (180 s + 60 s) = 1 440 s, url
+    // 6 x 180 s = 1 080 s) + stage 2 bec 3 x (45 s + 60 s) = 315 s = 1 755 s ≤ 1 800 s.
+    expect(minimumRoundDeadlineSeconds(config)).toBe(1_755);
     expect(minimumRoundDeadlineSeconds(load({ SCAN_ENGINES: 'rspamd' }))).toBe(480);
   });
 
@@ -185,10 +187,14 @@ describe('email-worker scan config (step 4.1 §5, S5, S8, S10)', () => {
   });
 
   it('generalizes the deadline to the maximum over the enabled engines (step 4.2 A12)', () => {
-    refusal({ SCAN_ROUND_DEADLINE_SECONDS: '1439' }, 'SCAN_ROUND_DEADLINE_SECONDS');
-    expect(load({ SCAN_ROUND_DEADLINE_SECONDS: '1440' }).SCAN_ROUND_DEADLINE_SECONDS).toBe(1440);
+    const stage1 = { SCAN_ENGINES: 'rspamd,attachment,url' };
+    refusal({ ...stage1, SCAN_ROUND_DEADLINE_SECONDS: '1439' }, 'SCAN_ROUND_DEADLINE_SECONDS');
+    expect(
+      load({ ...stage1, SCAN_ROUND_DEADLINE_SECONDS: '1440' }).SCAN_ROUND_DEADLINE_SECONDS,
+    ).toBe(1440);
     // A longer Rspamd budget dominates: 9 x (100 s + 60 s) = 1 440 s with attachment 2 x 240.
     const tuned = load({
+      ...stage1,
       SCAN_RSPAMD_MAX_ATTEMPTS: '9',
       SCAN_RSPAMD_TIMEOUT_MS: '100000',
       SCAN_ATTACHMENT_MAX_ATTEMPTS: '2',

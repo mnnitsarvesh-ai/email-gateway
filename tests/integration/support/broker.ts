@@ -245,6 +245,44 @@ export class ManagementApi {
 }
 
 /**
+ * The event ids of the messages in a queue WITHOUT a consumer (dormant), inspected without losing
+ * any: the management API's `get` with `reject_requeue_true` returns up to `count` distinct
+ * messages and requeues each one (order may change; nothing is acked). Inspects the queue's
+ * current depth plus a margin for messages that arrive meanwhile, at most `max`. Used by the
+ * timing-sensitive suites (step 4.4 §9) to assert on THEIR OWN event ids while late traffic of
+ * earlier suites may still be arriving. Never call it on a consumed queue (a consumer would race
+ * the requeue).
+ */
+export async function eventIdsInQueue(
+  api: ManagementApi,
+  vhost: string,
+  name: string,
+  max = 5_000,
+): Promise<string[]> {
+  const depth = (await api.queue(vhost, name)).messages;
+  if (depth === 0) return [];
+  const messages = await api.peek(vhost, name, Math.min(max, depth + 200));
+  return messages.map((m) => {
+    try {
+      const id = (JSON.parse(m.payload) as { eventId?: unknown }).eventId;
+      return typeof id === 'string' ? id : '';
+    } catch {
+      return '';
+    }
+  });
+}
+
+/** How many messages of `eventId` the (dormant) queue holds (see `eventIdsInQueue`). */
+export async function copiesOfEvent(
+  api: ManagementApi,
+  vhost: string,
+  name: string,
+  eventId: string,
+): Promise<number> {
+  return (await eventIdsInQueue(api, vhost, name)).filter((id) => id === eventId).length;
+}
+
+/**
  * The queues without a consumer until their stage exists (step 3.2 topology role `dormant`, plus
  * the analytics feed): every stack run that sends mail fills them up to their `max-length`.
  * Step 3.3 L16: suites that send mail purge them in `afterAll`. Work, delay and dead-letter

@@ -16,6 +16,8 @@ import { buildMessage } from './support/messages';
 import { record } from './support/messaging-stack';
 import { MAIL_SINK_HOST, organizationRef, sleep } from './support/routing';
 import {
+  becResultsOf,
+  becRuleCodes,
   engineResultsOf as allEngineResultsOf,
   ensureRspamdRunning,
   messagePublicId,
@@ -55,6 +57,12 @@ import { reply } from './support/smtp-tools';
  * attachments, so its final is `skipped` (`attachment.none`, rule A0) at the first attempt and
  * the assertions on attempts below are about the Rspamd rows. The ClamAV outage is
  * attachment-resilience.test.ts.
+ *
+ * Step 4.4 (B2, §2.0-1): the stage-2 `bec` engine is triggered by the round's rspamd and url
+ * finals, whatever their outcome. While Rspamd only failed attempts, bec waits (no trigger);
+ * once Rspamd recovers, bec reads the real auth row; when Rspamd's final is `error`, bec still
+ * runs, records its `auth` input as `failed` (`bec.input_unavailable.auth`) and is never clean —
+ * the `scan_failed` payload lists all four required engines.
  */
 const gate = await scanStackGate();
 const fx = new SmtpFixtures();
@@ -186,6 +194,16 @@ describe.skipIf(gate.skip)('scan stack: Rspamd outage', { timeout: 600_000 }, ()
       expect(round.scanVerdict).toBe(finals[0]!.outcome);
       expect(round.requiredEngines).toEqual([...REQUIRED_ENGINES]);
       await expectAttachmentSkipped(message, 1);
+      // Step 4.4: bec ran only after the real Rspamd final (one bec final, auth available).
+      const becFinals = (await allEngineResultsOf(fx.prisma, message)).filter(
+        (r) => r.engine === 'bec' && r.isFinal,
+      );
+      expect(becFinals).toHaveLength(1);
+      expect(becFinals[0]!.completedAt.getTime()).toBeGreaterThanOrEqual(
+        finals[0]!.completedAt.getTime(),
+      );
+      const [becRow] = await becResultsOf(fx.prisma, message);
+      expect(becRow).toMatchObject({ scanId: round.id, inputs: { auth: 'available' } });
       const [scanned] = await scannedEventsOf(fx.prisma, org, message);
       const recovered = messageScannedV1.parse(scanned!.payload);
       expect(recovered.outcome).toBe('scanned');
@@ -193,6 +211,7 @@ describe.skipIf(gate.skip)('scan stack: Rspamd outage', { timeout: 600_000 }, ()
         expect.arrayContaining([
           expect.objectContaining({ engine: 'rspamd', attempts: attempts.length + 1 }),
           expect.objectContaining({ engine: 'attachment', outcome: 'skipped', attempts: 1 }),
+          expect.objectContaining({ engine: 'bec', outcome: becFinals[0]!.outcome, attempts: 1 }),
         ]),
       );
 
@@ -248,9 +267,23 @@ describe.skipIf(gate.skip)('scan stack: Rspamd outage', { timeout: 600_000 }, ()
           { engine: 'rspamd', required: true, outcome: 'error', attempts: maxAttempts },
           { engine: 'attachment', required: true, outcome: 'skipped', attempts: 1 },
           expect.objectContaining({ engine: 'url', required: true }),
+          // Step 4.4: triggered by the rspamd `error` final; auth input failed → never clean.
+          { engine: 'bec', required: true, outcome: 'unknown', attempts: 1 },
         ]),
       );
       expect(failedPayload.engines).toHaveLength(REQUIRED_ENGINES.length);
+      const [becRow] = await becResultsOf(fx.prisma, message);
+      expect(becRow).toMatchObject({
+        scanId: round.id,
+        verdict: 'unknown',
+        deterministicVerdict: 'unknown',
+        inputs: { auth: 'failed' },
+      });
+      const becFinal = (await allEngineResultsOf(fx.prisma, message)).find(
+        (r) => r.engine === 'bec' && r.isFinal,
+      );
+      expect(becFinal!.reasonCodes as string[]).toContain('bec.input_unavailable.auth');
+      expect(becRuleCodes(becRow!.rules)).not.toContain('bec.auth.dmarc_fail');
 
       // The pass-through skips it: no approval, no delivery, the state stays scan_failed.
       await waitFor(
@@ -318,6 +351,14 @@ describe.skipIf(gate.skip)('scan stack: Rspamd outage', { timeout: 600_000 }, ()
     });
     expect(['error', 'timeout']).not.toContain(round1.scanVerdict);
     await expectAttachmentSkipped(message, 2);
+    // Step 4.4: round 1 has its own bec result (new scan id) with the real auth row; round 0's
+    // bec row (auth failed) is unchanged.
+    const becRows = await becResultsOf(fx.prisma, message);
+    expect(becRows.map((r) => [r.lifecycleRound, r.inputs])).toEqual([
+      [0, expect.objectContaining({ auth: 'failed' })],
+      [1, expect.objectContaining({ auth: 'available' })],
+    ]);
+    expect(becRows[1]!.scanId).toBe(round1.id);
     const all = await engineResultsOf(fx.prisma, message);
     const round1Rows = all.filter((r) => r.scanId === round1.id);
     expect(round1Rows.filter((r) => r.isFinal)).toHaveLength(1);

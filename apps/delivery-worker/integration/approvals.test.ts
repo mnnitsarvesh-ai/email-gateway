@@ -602,6 +602,130 @@ describe('development pass-through after scanning (R5, step 4.1 S15) end to end'
     await pt.stop();
   });
 
+  it('holds a deterministic suspicious or malicious bec result (or a missing row) and approves clean/unknown/skipped and AI-only raises (step 4.4 B17, ADR-0034)', async () => {
+    const ptConsumer = fx.consumer('dev-passthrough-bec');
+    const pt = poller<MessageScannedV1>(ptConsumer, EventTypes.MessageScanned, messageScannedV1, 0);
+    const approver = new DevPassThroughApprover(
+      pt,
+      fx.prisma,
+      RECORDER_TX_TIMEOUT_MS,
+      silentLogger,
+      worker.metrics,
+    );
+    const ptHandler = ours<MessageScannedV1>(
+      ptConsumer,
+      async (event, tx) => {
+        await approver.approve(event, tx);
+      },
+      RECORDER_TX_TIMEOUT_MS,
+    );
+    await pt.pollOnce(ptHandler);
+    const skipped = async () =>
+      (await worker.metrics.approvalsSkipped.get()).values.find(
+        (v) => v.labels.reason === 'bec_verdict',
+      )?.value ?? 0;
+    const withBec = (message: MessageFixture, bec: string): MessageScannedV1 =>
+      messageScannedV1.parse({
+        ...scannedPayload(message),
+        // One scan per message: the bec_scan_results row is unique per (scan_id, received_at).
+        scanId: message.messageId.toString(),
+        verdict: 'suspicious',
+        engines: [
+          { engine: 'rspamd', required: true, outcome: 'clean', attempts: 1 },
+          { engine: 'url', required: true, outcome: 'suspicious', attempts: 1 },
+          { engine: 'bec', required: true, outcome: bec, attempts: 1 },
+        ],
+      });
+
+    // The round's bec_scan_results row as the email-worker writes it with the bec final.
+    const becResult = (message: MessageFixture, deterministic: string, verdict: string) =>
+      fx.prisma.becScanResult.create({
+        data: {
+          receivedAt: message.receivedAt,
+          messageId: message.messageId,
+          organizationId: message.organizationId,
+          scanId: message.messageId,
+          lifecycleRound: 0,
+          engineVersion: 'bec/1;lex=2876a3ab;fm=35f13669;br=fb362bf9',
+          rulesVersion: 'bec-map/1',
+          settingsVersion: 'bec-map/1;p=0123456789ab;t=none',
+          lexiconVersion: '2876a3ab',
+          textVersion: 'bec-text/1',
+          deterministicScore: deterministic === 'clean' ? 10 : 60,
+          score: deterministic === 'clean' ? 10 : 60,
+          deterministicVerdict: deterministic as 'clean',
+          verdict: verdict as 'clean',
+          inputs: { auth: 'available', url: 'available', text: 'complete', history: 'disabled' },
+          rules: [],
+          durationMs: 5,
+        },
+      });
+
+    const before = await skipped();
+    const aiOnlyBefore = (await worker.metrics.becAiOnlyNotHeld.get()).values[0]?.value ?? 0;
+    const held: Array<{ message: MessageFixture; eventId: string }> = [];
+    for (const [i, bec] of (['suspicious', 'malicious'] as const).entries()) {
+      const message = await fx.message(org, {
+        state: 'scanned',
+        recipients: [{ address: `bec-held-${i}@ext-pt.test` }],
+      });
+      await becResult(message, bec, bec);
+      const eventId = await outboxScanned(message, withBec(message, bec), `it-bec-h${i}`);
+      held.push({ message, eventId });
+    }
+    // No result row for a held outcome: held (fail-safe).
+    const noRow = await fx.message(org, {
+      state: 'scanned',
+      recipients: [{ address: 'bec-held-norow@ext-pt.test' }],
+    });
+    held.push({
+      message: noRow,
+      eventId: await outboxScanned(noRow, withBec(noRow, 'suspicious'), 'it-bec-hn'),
+    });
+    const approved: MessageFixture[] = [];
+    for (const [i, bec] of (['clean', 'unknown', 'skipped'] as const).entries()) {
+      const message = await fx.message(org, {
+        state: 'scanned',
+        recipients: [{ address: `bec-ok-${i}@ext-pt.test` }],
+      });
+      await outboxScanned(message, withBec(message, bec), `it-bec-a${i}`);
+      approved.push(message);
+    }
+    // ADR-0034: raised to suspicious by the LLM alone (deterministic clean) → not held.
+    const aiOnly = await fx.message(org, {
+      state: 'scanned',
+      recipients: [{ address: 'bec-ok-ai@ext-pt.test' }],
+    });
+    await becResult(aiOnly, 'clean', 'suspicious');
+    await outboxScanned(aiOnly, withBec(aiOnly, 'suspicious'), 'it-bec-ai');
+    approved.push(aiOnly);
+    await eventually(
+      async () => {
+        await pt.pollOnce(ptHandler);
+        const counts = await Promise.all(approved.map(async (m) => (await approvalRows(m)).length));
+        return counts.every((count) => count === 1);
+      },
+      15_000,
+      'approvals of the clean/unknown/skipped bec results',
+    );
+    for (const { message, eventId } of held) {
+      // Ledger row (handled once), no approval, the message stays scanned.
+      expect(await approvalRows(message)).toHaveLength(0);
+      expect(await fx.lifecycle(message)).toMatchObject({ status: 'scanned', version: 3 });
+      expect(
+        await fx.prisma.messageIdempotency.count({ where: { consumer: ptConsumer, eventId } }),
+      ).toBe(1);
+    }
+    for (const message of approved) {
+      expect(await fx.lifecycle(message)).toMatchObject({ status: 'approved' });
+    }
+    expect(await skipped()).toBe(before + 3);
+    expect((await worker.metrics.becAiOnlyNotHeld.get()).values[0]?.value ?? 0).toBe(
+      aiOnlyBefore + 1,
+    );
+    await pt.stop();
+  });
+
   it('approves nothing for a message that is not scanned (ignored, counted, no approval)', async () => {
     const approver = new DevPassThroughApprover(
       { start: () => undefined, stop: () => Promise.resolve() },

@@ -882,6 +882,73 @@ export const urlClickedV1 = z
   });
 export type UrlClickedV1 = z.infer<typeof urlClickedV1>;
 
+/**
+ * The second-stage trigger of a scan round (step 4.4 B2, ADR-0033): every dependency of the
+ * stage-2 engine `engine` that is in the round's required set has its final row (definite or
+ * failure). Written by the email-worker scan stage through `message_outbox`
+ * (`aggregate_type = 'message'`) exactly once per (round, engine), in the `ScanRepository.complete()`
+ * transaction that inserts the last dependency final (both locks held). Published to
+ * `email.security` (`org.<id>.mail.message.scan_stage_ready.v1`) and bound only to the stage-2
+ * engine's queue (topology v6: `scan.bec`); also reaches the `email.analytics` firehose.
+ *
+ * Consumers check `lifecycleRound` and `scanId` against the writer rows (the round's
+ * `email_scans` row must exist with this id; a stage trigger never opens a round) and ignore a
+ * trigger whose `engine` is not theirs. Ids, codes, the S3 key and times only (content guard):
+ * strict object, dependency engines unique and never the triggered engine itself.
+ */
+export const messageScanStageReadyV1 = z
+  .strictObject({
+    messageId: decimalIdSchema,
+    receivedAt: z.iso.datetime(),
+    direction,
+    emlS3Key: s3Key,
+    lifecycleRound: z.number().int().min(0).max(65_535),
+    /** `email_scans.id` of the round. */
+    scanId: decimalIdSchema,
+    scanKind: z.enum(['initial', 'rescan']),
+    /** The stage-2 engine to run (an engine name, `scan_engine_results.engine`). */
+    engine: z.string().regex(/^[a-z][a-z0-9_]{0,31}$/, 'Expected an engine name'),
+    /** The dependency finals that made the stage ready: engine and final outcome. */
+    dependencies: z
+      .array(
+        z.strictObject({
+          engine: z.string().regex(/^[a-z][a-z0-9_]{0,31}$/, 'Expected an engine name'),
+          outcome: engineOutcome,
+        }),
+      )
+      .min(1)
+      .max(8),
+    readyAt: z.iso.datetime(),
+  })
+  .superRefine((payload, ctx) => {
+    const names = payload.dependencies.map((d) => d.engine);
+    if (new Set(names).size !== names.length) {
+      ctx.addIssue({ code: 'custom', path: ['dependencies'], message: 'Duplicate engine' });
+    }
+    if (names.includes(payload.engine)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['dependencies'],
+        message: 'An engine is never its own dependency',
+      });
+    }
+    if (payload.scanKind === 'initial' && payload.lifecycleRound !== 0) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['scanKind'],
+        message: 'initial scans are round 0; rescans are rounds >= 1',
+      });
+    }
+    if (payload.scanKind === 'rescan' && payload.lifecycleRound === 0) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['scanKind'],
+        message: 'initial scans are round 0; rescans are rounds >= 1',
+      });
+    }
+  });
+export type MessageScanStageReadyV1 = z.infer<typeof messageScanStageReadyV1>;
+
 export const EventTypes = {
   MessageReceived: 'mail.message.received.v1',
   MessageScanned: 'mail.message.scanned.v1',
@@ -898,4 +965,5 @@ export const EventTypes = {
   UrlInspectionRequested: 'mail.url.inspection_requested.v1',
   UrlInspectionCompleted: 'mail.url.inspection_completed.v1',
   UrlClicked: 'mail.url.clicked.v1',
+  MessageScanStageReady: 'mail.message.scan_stage_ready.v1',
 } as const;

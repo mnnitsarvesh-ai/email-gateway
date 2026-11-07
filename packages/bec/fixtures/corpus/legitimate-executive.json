@@ -1,0 +1,47 @@
+{
+  "id": "legitimate-executive",
+  "description": "Executive from the known address, DKIM-aligned and DMARC pass, ordinary text: clean.",
+  "label": "benign",
+  "input": {
+    "headers": {
+      "From": ["Anita Sharma <anita.sharma@acmecorp.test>"],
+      "Subject": ["Quarterly review"]
+    },
+    "envelope": {
+      "envelopeFrom": "anita.sharma@acmecorp.test"
+    },
+    "auth": {
+      "state": "available",
+      "row": {
+        "spf": "pass",
+        "spfDomain": "acmecorp.test",
+        "dkim": "pass",
+        "dkimSignatures": [
+          {
+            "domain": "acmecorp.test",
+            "result": "pass",
+            "selector": "s1"
+          }
+        ],
+        "dmarc": "pass",
+        "dmarcPolicy": "reject",
+        "dmarcDomain": "acmecorp.test",
+        "arc": null
+      }
+    },
+    "url": {
+      "state": "available",
+      "rows": []
+    },
+    "text": {
+      "subject": "Quarterly review",
+      "text": "Team, the quarterly review meeting moves to Thursday at 3 pm. Please bring your updated plans.",
+      "html": null
+    }
+  },
+  "expected": {
+    "verdict": "clean",
+    "requiredCodes": ["clean.below_threshold"],
+    "forbiddenCodes": ["bec.impersonation.executive_name", "bec.auth.tenant_domain_spoof"]
+  }
+}

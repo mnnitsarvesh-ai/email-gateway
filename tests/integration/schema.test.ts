@@ -59,6 +59,8 @@ const PARTITIONED: Record<string, string> = {
   url_rewrites: 'received_at',
   url_dynamic_inspections: 'received_at',
   url_click_events: 'clicked_at',
+  // Step 4.4 §3: the BEC result of a scan round.
+  bec_scan_results: 'received_at',
 };
 
 /** Tables with no `organization_id`: platform catalogs, the root, a join table, the ledger and
@@ -139,6 +141,14 @@ const TENANT_OWNED = [
   'url_rewrites',
   'url_dynamic_inspections',
   'url_click_events',
+  // Step 4.4 §3.
+  'bec_scan_results',
+  'bec_executive_profiles',
+  'bec_vendor_profiles',
+  'bec_trusted_senders',
+  'bec_feedback',
+  'bec_suppression_rules',
+  'bec_contact_history',
   'threat_indicators',
   'yara_rules',
   'email_policies',
@@ -171,17 +181,17 @@ const TENANT_OWNED = [
 const ALL_TABLES = [...NOT_TENANT_OWNED, ...TENANT_OWNED];
 
 describe('MySQL schema', () => {
-  it('has exactly the 84 data-model tables plus _prisma_migrations', async () => {
+  it('has exactly the 91 data-model tables plus _prisma_migrations', async () => {
     const rows = await prisma.$queryRaw<{ name: string }[]>`
       SELECT TABLE_NAME AS name FROM information_schema.TABLES
       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'`;
-    expect(ALL_TABLES).toHaveLength(84);
-    expect(new Set(ALL_TABLES).size).toBe(84);
+    expect(ALL_TABLES).toHaveLength(91);
+    expect(new Set(ALL_TABLES).size).toBe(91);
     expect(rows.map((r) => r.name).sort()).toEqual([...ALL_TABLES, '_prisma_migrations'].sort());
   });
 
-  it('partitions the 27 high-volume tables by RANGE COLUMNS with a pmax partition', async () => {
-    expect(Object.keys(PARTITIONED)).toHaveLength(27);
+  it('partitions the 28 high-volume tables by RANGE COLUMNS with a pmax partition', async () => {
+    expect(Object.keys(PARTITIONED)).toHaveLength(28);
     const rows = await prisma.$queryRaw<
       { tableName: string; method: string; expression: string; partitionName: string }[]
     >`
@@ -2262,6 +2272,253 @@ describe('URL protection schema (step 4.3, docs/plan/steps/11-url-protection.md 
       });
     } finally {
       await prisma.urlDynamicInspection.deleteMany({ where: { scanId } });
+    }
+  });
+});
+
+describe('phishing and BEC schema (step 4.4, docs/plan/steps/12-phishing-bec.md §3)', () => {
+  const uniqueSets = async (table: string) =>
+    [...(await indexes(table)).values()]
+      .filter((i) => i.unique)
+      .map((i) => i.columns.join(','))
+      .sort();
+  const indexSets = async (table: string) =>
+    [...(await indexes(table)).values()].map((i) => i.columns.join(','));
+  const foreignKeys = async (table: string) =>
+    prisma.$queryRaw<{ columnName: string; referenced: string; onDelete: string }[]>`
+      SELECT k.COLUMN_NAME AS columnName, k.REFERENCED_TABLE_NAME AS referenced,
+             r.DELETE_RULE AS onDelete
+      FROM information_schema.KEY_COLUMN_USAGE k
+      JOIN information_schema.REFERENTIAL_CONSTRAINTS r
+        ON r.CONSTRAINT_SCHEMA = k.TABLE_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+      WHERE k.TABLE_SCHEMA = DATABASE() AND k.TABLE_NAME = ${table}
+        AND k.REFERENCED_TABLE_NAME IS NOT NULL
+      ORDER BY k.COLUMN_NAME`;
+  const BEC_VERDICT_ENUM = "enum('clean','suspicious','malicious','unknown','skipped')";
+  const CONTENT_COLUMNS = ['body', 'content', 'html', 'text', 'excerpt', 'subject', 'span_text'];
+  const TENANT_TABLES = [
+    'bec_executive_profiles',
+    'bec_vendor_profiles',
+    'bec_trusted_senders',
+    'bec_feedback',
+    'bec_suppression_rules',
+    'bec_contact_history',
+  ];
+  const uniqueId = () => BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000));
+
+  it('has bec_scan_results: one row per scan, versions, scores, verdicts and JSON evidence (B14)', async () => {
+    const cols = await columns(['bec_scan_results']);
+    expect(cols.get('bec_scan_results.scan_id')?.columnType).toBe('bigint unsigned');
+    expect(cols.get('bec_scan_results.lifecycle_round')?.columnType).toBe('smallint unsigned');
+    expect(cols.get('bec_scan_results.engine_version')?.columnType).toBe('varchar(64)');
+    expect(cols.get('bec_scan_results.rules_version')?.columnType).toBe('varchar(16)');
+    expect(cols.get('bec_scan_results.settings_version')?.columnType).toBe('varchar(96)');
+    expect(cols.get('bec_scan_results.lexicon_version')?.columnType).toBe('varchar(16)');
+    expect(cols.get('bec_scan_results.text_version')?.columnType).toBe('varchar(16)');
+    for (const score of ['deterministic_score', 'score']) {
+      expect(cols.get(`bec_scan_results.${score}`)?.columnType, score).toBe('tinyint unsigned');
+    }
+    for (const verdict of ['deterministic_verdict', 'verdict']) {
+      expect(cols.get(`bec_scan_results.${verdict}`), verdict).toMatchObject({
+        columnType: BEC_VERDICT_ENUM,
+        nullable: 'NO',
+      });
+    }
+    for (const json of ['inputs', 'rules']) {
+      expect(cols.get(`bec_scan_results.${json}`), json).toMatchObject({
+        columnType: 'json',
+        nullable: 'NO',
+      });
+    }
+    for (const json of ['features', 'identity', 'ai', 'ai_shadow']) {
+      expect(cols.get(`bec_scan_results.${json}`), json).toMatchObject({
+        columnType: 'json',
+        nullable: 'YES',
+      });
+    }
+    const names = [...cols.keys()].map((k) => k.split('.')[1]!);
+    for (const forbidden of CONTENT_COLUMNS) expect(names, forbidden).not.toContain(forbidden);
+    expect(await uniqueSets('bec_scan_results')).toEqual(
+      ['id,received_at', 'scan_id,received_at'].sort(),
+    );
+    expect(await indexSets('bec_scan_results')).toEqual(
+      expect.arrayContaining(['message_id,received_at', 'organization_id,received_at']),
+    );
+    expect(await foreignKeys('bec_scan_results')).toEqual([]);
+  });
+
+  it('has the tenant profile, trust, feedback and suppression tables with their unique keys', async () => {
+    const cols = await columns(TENANT_TABLES);
+    for (const table of TENANT_TABLES) {
+      expect(cols.get(`${table}.organization_id`), table).toMatchObject({
+        columnType: 'bigint unsigned',
+        nullable: 'NO',
+      });
+      if (table !== 'bec_contact_history') {
+        expect(cols.get(`${table}.public_id`)?.columnType, table).toBe('char(36)');
+        expect(await uniqueSets(table), table).toContain('public_id');
+      }
+    }
+    expect(cols.get('bec_executive_profiles.normalized_name')?.columnType).toBe('varchar(160)');
+    expect(cols.get('bec_executive_profiles.enabled')).toMatchObject({ columnDefault: '1' });
+    expect(cols.get('bec_executive_profiles.version')).toMatchObject({
+      columnType: 'int unsigned',
+      columnDefault: '1',
+    });
+    expect(await uniqueSets('bec_executive_profiles')).toContain('organization_id,normalized_name');
+    expect(await indexSets('bec_executive_profiles')).toContain('organization_id,enabled');
+    expect(cols.get('bec_vendor_profiles.payment_change_sensitive')).toMatchObject({
+      columnDefault: '1',
+    });
+    expect(await uniqueSets('bec_vendor_profiles')).toContain('organization_id,normalized_name');
+    expect(cols.get('bec_trusted_senders.kind')?.columnType).toBe("enum('address','domain')");
+    expect(cols.get('bec_trusted_senders.value')?.columnType).toBe('varchar(320)');
+    expect(cols.get('bec_trusted_senders.expires_at')).toMatchObject({ nullable: 'YES' });
+    expect(await uniqueSets('bec_trusted_senders')).toContain('organization_id,kind,value');
+    expect(await indexSets('bec_trusted_senders')).toContain('organization_id,expires_at');
+    expect(cols.get('bec_feedback.kind')?.columnType).toBe(
+      "enum('false_positive','false_negative')",
+    );
+    expect(cols.get('bec_feedback.note')).toMatchObject({
+      columnType: 'varchar(500)',
+      nullable: 'YES',
+    });
+    expect(await uniqueSets('bec_feedback')).toContain('scan_id,created_by_user_id,kind');
+    expect(await indexSets('bec_feedback')).toContain('organization_id,created_at');
+    expect(cols.get('bec_suppression_rules.sender_scope')?.columnType).toBe(
+      "enum('address','domain')",
+    );
+    expect(cols.get('bec_suppression_rules.expires_at')).toMatchObject({ nullable: 'NO' });
+    expect(await uniqueSets('bec_suppression_rules')).toContain(
+      'organization_id,reason_code,sender_scope,sender_value',
+    );
+    expect(await indexSets('bec_suppression_rules')).toContain('organization_id,expires_at');
+  });
+
+  it('keeps bec_contact_history to keyed hashes and aggregate counts (B12, ADR-0035)', async () => {
+    const cols = await columns(['bec_contact_history']);
+    expect([...cols.keys()].map((k) => k.split('.')[1]!).sort()).toEqual(
+      [
+        'id',
+        'organization_id',
+        'scope',
+        'key_hash',
+        'message_count',
+        'inbound_count',
+        'outbound_count',
+        'infra',
+        'first_seen_at',
+        'last_seen_at',
+        'created_at',
+        'updated_at',
+      ].sort(),
+    );
+    expect(cols.get('bec_contact_history.scope')?.columnType).toBe("enum('sender','pair')");
+    expect(cols.get('bec_contact_history.key_hash')?.columnType).toBe('char(64)');
+    expect(await uniqueSets('bec_contact_history')).toContain('organization_id,scope,key_hash');
+    expect(await indexSets('bec_contact_history')).toContain('organization_id,last_seen_at');
+  });
+
+  it('references organizations (RESTRICT, no cascade) and users (SET NULL) only', async () => {
+    const userColumns: Record<string, string[]> = {
+      bec_executive_profiles: ['created_by_user_id', 'updated_by_user_id'],
+      bec_vendor_profiles: ['created_by_user_id', 'updated_by_user_id'],
+      bec_trusted_senders: ['created_by_user_id'],
+      bec_feedback: ['created_by_user_id'],
+      bec_suppression_rules: ['created_by_user_id'],
+      bec_contact_history: [],
+    };
+    for (const table of TENANT_TABLES) {
+      expect(await foreignKeys(table), table).toEqual(
+        [
+          { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+          ...userColumns[table]!.map((columnName) => ({
+            columnName,
+            referenced: 'users',
+            onDelete: 'SET NULL',
+          })),
+        ].sort((a, b) => (a.columnName < b.columnName ? -1 : 1)),
+      );
+    }
+  });
+
+  it('rejects a second bec_scan_results row for the same scan', async () => {
+    const scanId = uniqueId();
+    const row = {
+      receivedAt: new Date(),
+      messageId: 1n,
+      organizationId: 1n,
+      scanId,
+      lifecycleRound: 0,
+      engineVersion: 'bec/1;lex=00000000;fm=00000000;br=00000000',
+      rulesVersion: 'bec-map/1',
+      settingsVersion: 'bec-map/1;p=000000000000;t=none',
+      lexiconVersion: '00000000',
+      textVersion: 'bec-text/1',
+      deterministicScore: 0,
+      score: 0,
+      deterministicVerdict: 'clean' as const,
+      verdict: 'clean' as const,
+      inputs: { auth: 'available', url: 'available', text: 'complete', history: 'disabled' },
+      rules: [],
+      durationMs: 3,
+    };
+    try {
+      await prisma.becScanResult.create({ data: row });
+      await expect(prisma.becScanResult.create({ data: row })).rejects.toMatchObject({
+        code: 'P2002',
+      });
+    } finally {
+      await prisma.becScanResult.deleteMany({ where: { scanId } });
+    }
+  });
+
+  it('refuses to delete an organization that still has BEC tenant rows (no cascade)', async () => {
+    const suffix = randomUUID().slice(0, 8);
+    const plan = await prisma.organizationPlan.create({
+      data: {
+        code: `it-bec-${suffix}`,
+        name: 'BEC schema test',
+        defaultLimits: {},
+        defaultFeatures: {},
+      },
+    });
+    const organization = await prisma.organization.create({
+      data: {
+        slug: `it-bec-${suffix}`,
+        name: 'BEC schema test',
+        planId: plan.id,
+        dataRegion: 'ap-south-1',
+      },
+    });
+    try {
+      await prisma.becTrustedSender.create({
+        data: {
+          publicId: randomUUID(),
+          organizationId: organization.id,
+          kind: 'domain',
+          value: 'vendor.example',
+          reason: 'schema test',
+        },
+      });
+      await expect(
+        prisma.becTrustedSender.create({
+          data: {
+            publicId: randomUUID(),
+            organizationId: organization.id,
+            kind: 'domain',
+            value: 'vendor.example',
+            reason: 'duplicate',
+          },
+        }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+      await expect(
+        prisma.organization.delete({ where: { id: organization.id } }),
+      ).rejects.toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+    } finally {
+      await prisma.becTrustedSender.deleteMany({ where: { organizationId: organization.id } });
+      await prisma.organization.deleteMany({ where: { id: organization.id } });
+      await prisma.organizationPlan.deleteMany({ where: { id: plan.id } });
     }
   });
 });

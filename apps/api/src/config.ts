@@ -15,6 +15,9 @@ import {
   ATTACHMENT_PLATFORM_ENV_KEYS,
   type AttachmentPlatformSettings,
   attachmentPlatformSettingsFromEnv,
+  BEC_PLATFORM_ENV_KEYS,
+  type BecPlatformSettings,
+  becPlatformSettingsFromEnv,
   RSPAMD_PLATFORM_DEFAULTS,
   RSPAMD_PLATFORM_ENV_KEYS,
   type RspamdPlatformSettings,
@@ -543,6 +546,59 @@ function validateUrlConfig(cfg: UrlConfigKeys, ctx: z.RefinementCtx): void {
   }
 }
 
+/**
+ * Phishing and BEC detection (step 4.4 B13, B18): the platform BEC settings tenants may override
+ * (the same `BEC_*` keys the email-worker reads, parsed by `becPlatformSettingsFromEnv`: unset or
+ * empty → default) and the per-tenant caps of the BEC tenant data routes. The api holds no BEC
+ * secret (`BEC_CONTEXT_HMAC_KEY`, `BEC_LLM_API_KEY` are worker-only).
+ */
+const becConfigShape = {
+  ...(Object.fromEntries(
+    Object.values(BEC_PLATFORM_ENV_KEYS).map((key) => [key, z.string().optional()]),
+  ) as Record<
+    (typeof BEC_PLATFORM_ENV_KEYS)[keyof BecPlatformSettings],
+    z.ZodOptional<z.ZodString>
+  >),
+  /** Executive profiles per organization (B18). */
+  BEC_MAX_EXECUTIVES: int(1, 100_000).default(500),
+  /** Vendor profiles per organization (B18). */
+  BEC_MAX_VENDORS: int(1, 100_000).default(2000),
+  /** Trusted senders per organization (B18). */
+  BEC_MAX_TRUSTED_SENDERS: int(1, 100_000).default(1000),
+  /** Active (unexpired) feedback suppression rules per organization (B11). */
+  BEC_SUPPRESSIONS_MAX_PER_TENANT: int(1, 100_000).default(200),
+};
+
+export type BecConfigKeys = Partial<
+  Record<(typeof BEC_PLATFORM_ENV_KEYS)[keyof BecPlatformSettings], string>
+>;
+
+/** The validated BEC platform settings of the api config (B13). */
+export function becPlatformSettingsOf(cfg: BecConfigKeys): BecPlatformSettings {
+  return becPlatformSettingsFromEnv(cfg);
+}
+
+/** Refuses invalid BEC platform settings at start, naming the environment key. */
+export function validateBecConfig(cfg: BecConfigKeys, ctx: z.RefinementCtx): void {
+  try {
+    becPlatformSettingsFromEnv(cfg);
+  } catch (err) {
+    if (!(err instanceof z.ZodError)) throw err;
+    for (const issue of err.issues) {
+      const setting = issue.path[0] as keyof BecPlatformSettings | undefined;
+      ctx.addIssue({
+        code: 'custom',
+        path: [
+          setting !== undefined && setting in BEC_PLATFORM_ENV_KEYS
+            ? BEC_PLATFORM_ENV_KEYS[setting]
+            : BEC_PLATFORM_ENV_KEYS.suspiciousScore,
+        ],
+        message: issue.message,
+      });
+    }
+  }
+}
+
 /** The validated Rspamd platform settings of the api config (S8). */
 export function rspamdPlatformSettingsOf(
   cfg: Pick<ScanConfigKeys, (typeof RSPAMD_PLATFORM_ENV_KEYS)[keyof RspamdPlatformSettings]>,
@@ -597,6 +653,7 @@ export const apiConfigSchema = baseConfigSchema
   .extend(scanConfigShape)
   .extend(attachmentConfigShape)
   .extend(urlConfigShape)
+  .extend(becConfigShape)
   .extend({
     /** Comma-separated allow-list of admin portal origins. */
     CORS_ORIGINS: z
@@ -615,6 +672,7 @@ export const apiConfigSchema = baseConfigSchema
     validateScanConfig(cfg, ctx);
     validateAttachmentConfig(cfg, ctx);
     validateUrlConfig(cfg, ctx);
+    validateBecConfig(cfg, ctx);
     if (cfg.AUTH_SESSION_MAX_AGE_SECONDS < cfg.AUTH_REFRESH_TOKEN_TTL_SECONDS) {
       ctx.addIssue({
         code: 'custom',

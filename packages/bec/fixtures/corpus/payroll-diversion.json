@@ -1,0 +1,46 @@
+{
+  "id": "payroll-diversion",
+  "description": "Employee-style payroll diversion from free-mail: C6.",
+  "label": "bec",
+  "input": {
+    "headers": {
+      "From": ["Ravi Kumar <ravi.kumar.1990@gmail.com>"],
+      "Subject": ["Salary account"]
+    },
+    "envelope": {
+      "envelopeFrom": "ravi.kumar.1990@gmail.com"
+    },
+    "auth": {
+      "state": "available",
+      "row": {
+        "spf": "pass",
+        "spfDomain": "gmail.com",
+        "dkim": "pass",
+        "dkimSignatures": [
+          {
+            "domain": "gmail.com",
+            "result": "pass",
+            "selector": "s1"
+          }
+        ],
+        "dmarc": "pass",
+        "dmarcPolicy": "reject",
+        "dmarcDomain": "gmail.com",
+        "arc": null
+      }
+    },
+    "url": {
+      "state": "available",
+      "rows": []
+    },
+    "text": {
+      "subject": "Salary account",
+      "text": "Hi HR, I have changed my bank. Please update my direct deposit to the new salary account before the next payroll. Thanks, Ravi",
+      "html": null
+    }
+  },
+  "expected": {
+    "verdictIn": ["clean", "suspicious"],
+    "requiredCodes": ["bec.content.payroll_diversion"]
+  }
+}

@@ -23,11 +23,14 @@ import { MIME_CONSUMER } from './mime-ingestion/mime-ingestion.service';
 import { classifyScanFailure } from './scanning/engine-consumer';
 import { ATTACHMENT_CONSUMER } from './scanning/engines/attachment/registration';
 import { RSPAMD_CONSUMER } from './scanning/engines/rspamd/registration';
+import { BEC_CONSUMER } from './scanning/engines/bec/registration';
 import { URL_CONSUMER } from './scanning/engines/url/registration';
 import { URL_RESULTS_CONSUMER } from './scanning/engines/url/url-results';
 import {
   ATTACHMENT_JOBS,
   type AttachmentJobs,
+  BEC_JOBS,
+  type BecJobs,
   URL_JOBS,
   type UrlJobs,
   type EngineRuntime,
@@ -45,6 +48,7 @@ const env = {
   REDIS_URL: 'redis://localhost:6379',
   ATTACHMENT_CACHE_HMAC_KEY: 'test-content-cache-mac-key-0123456789',
   URL_CACHE_HMAC_KEY: 'test-url-cache-mac-key-0123456789abcdef',
+  BEC_CONTEXT_HMAC_KEY: 'test-bec-context-hmac-key-0123456789abcdef',
   URL_TOKEN_KEY_CURRENT: '0123456789abcdef'.repeat(4),
   URL_DNSBL_DOMAIN_ZONES: 'dbl.scan.test=127.0.1.2:spam,127.0.1.4:phishing',
   S3_REGION: 'ap-south-1',
@@ -502,6 +506,87 @@ describe('AppModule wiring', () => {
       await moduleRef.close();
     }
     const jobs = moduleRef.get<UrlJobs | null>(URL_JOBS, { strict: false });
+    expect(jobs?.sweeper.running).toBe(false);
+  });
+
+  it('wires the bec stage-2 consumer, its history sweeper and readiness check (step 4.4 B1, B2, B12, B16)', async () => {
+    const { RABBITMQ_EMAIL_WORKER_URL: _omitted, ...scanOnlyEnv } = env;
+    const config = loadWorkerConfig({
+      ...scanOnlyEnv,
+      MIME_INGESTION_ENABLED: 'false',
+      SCAN_ENGINES: 'rspamd,url,bec',
+      SCAN_CONSUMERS: 'bec',
+    });
+    const scanner = idleAmqp();
+    const locks = idleLocks();
+    const moduleRef = await Test.createTestingModule({ imports: [AppModule.forRoot(config)] })
+      .overrideProvider(PrismaService)
+      .useValue(stub('mysql'))
+      .overrideProvider(SCANNER_AMQP_CONNECTION)
+      .useValue(scanner.connection)
+      .overrideProvider(SCAN_LOCKS)
+      .useValue(locks.locks)
+      .overrideProvider(RedisService)
+      .useValue(stub('redis', { client: {} }))
+      .overrideProvider(S3Service)
+      .useValue(stub('s3', { client: {}, mailBucket: 'test-mail' }))
+      .compile();
+    await moduleRef.init();
+    try {
+      const engines = moduleRef.get<EngineRuntime[]>(SCAN_ENGINES, { strict: false });
+      expect(engines.map((e) => e.registration.catalog.name)).toEqual(['bec']);
+      const feed = engines[0]!.consumer;
+      expect(feed.queue).toBe('scan.bec');
+      expect(feed.consumerName).toBe(BEC_CONSUMER);
+      expect(feed.retryPolicy.maxAttempts).toBe(10);
+      const options = (feed as unknown as { options: { prefetch: number; eventTypes: string[] } })
+        .options;
+      expect(options.prefetch).toBe(8);
+      // B2: a stage-2 queue consumes the stage trigger only.
+      expect(options.eventTypes).toEqual([EventTypes.MessageScanStageReady]);
+      expect(scanner.calls.topology).toContainEqual({
+        exchanges: ['email.security', 'email.events'],
+        queues: ['scan.bec'],
+      });
+      const jobs = moduleRef.get<BecJobs | null>(BEC_JOBS, { strict: false });
+      expect(jobs?.sweeper.running).toBe(true);
+      expect(jobs?.sweeper.lockName).toBe('scan:bec-history');
+      const report = await moduleRef.get(HealthService).readiness();
+      expect(report.checks.map((c) => c.name)).toEqual([
+        'mysql',
+        'rabbitmq-scanner',
+        'bec-engine',
+        'redis',
+        's3',
+      ]);
+      expect(report.checks.find((c) => c.name === 'bec-engine')).toMatchObject({
+        status: 'ok',
+        details: { localModel: expect.stringMatching(/^bec-lr\/1@/), llmMode: 'off' },
+      });
+      const metrics = await moduleRef.get(MetricsService).metrics();
+      for (const name of [
+        'scan_stage_triggers_total',
+        'scan_bec_results_total',
+        'scan_bec_rules_total',
+        'scan_bec_inputs_total',
+        'scan_bec_ai_total',
+        'bec_llm_request_duration_seconds',
+        'bec_llm_tokens_total',
+        'bec_llm_budget_total',
+        'bec_llm_breaker_state',
+        'bec_model_info',
+        'scan_bec_inconsistent_reads_total',
+        'bec_history_updates_total',
+        'bec_history_rows_deleted_total',
+      ]) {
+        expect(metrics).toContain(`# TYPE ${name} `);
+      }
+      expect(metrics).toMatch(/scan_stage_triggers_total\{engine="bec"[^}]*\} 0/);
+      expect(metrics).toMatch(/scan_engine_info\{engine="bec",version="bec\/1;lex=/);
+    } finally {
+      await moduleRef.close();
+    }
+    const jobs = moduleRef.get<BecJobs | null>(BEC_JOBS, { strict: false });
     expect(jobs?.sweeper.running).toBe(false);
   });
 });

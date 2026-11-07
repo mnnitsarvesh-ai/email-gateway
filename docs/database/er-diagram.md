@@ -41,8 +41,13 @@ flowchart LR
     url_rewrites[(url_rewrites P)]
     url_dynamic_inspections[(url_dynamic_inspections P)]
     url_click_events[(url_click_events P)]
+    bec_scan_results[(bec_scan_results P)]
     scan_engine_settings
     attachment_rescan_jobs
+    bec_profiles[bec_executive_profiles, bec_vendor_profiles, bec_trusted_senders]
+    bec_feedback
+    bec_suppression_rules
+    bec_contact_history
   end
   subgraph policy[Policy]
     email_policies
@@ -84,6 +89,12 @@ flowchart LR
   message_urls -.-> url_click_events
   organizations --> scan_engine_settings
   organizations --> attachment_rescan_jobs
+  email_scans -.-> bec_scan_results
+  organizations --> bec_profiles
+  organizations --> bec_feedback
+  organizations --> bec_suppression_rules
+  organizations --> bec_contact_history
+  bec_scan_results -.-> bec_feedback
   email_messages -.-> email_deliveries
   delivery_reinjections -.-> email_deliveries
   email_deliveries -.-> delivery_status_events
@@ -444,6 +455,20 @@ erDiagram
   email_scans ||..o| url_rewrites : "scan_id + received_at, one per round"
   email_scans ||..o{ url_dynamic_inspections : "scan_id + received_at, one per inspected URL"
   message_urls ||..o{ url_click_events : "message_id + message_received_at + url_seq"
+  email_scans ||..o| bec_scan_results : "scan_id + received_at, one per round"
+  organizations ||--o{ bec_executive_profiles : "RESTRICT"
+  organizations ||--o{ bec_vendor_profiles : "RESTRICT"
+  organizations ||--o{ bec_trusted_senders : "RESTRICT"
+  organizations ||--o{ bec_feedback : "RESTRICT"
+  organizations ||--o{ bec_suppression_rules : "RESTRICT"
+  organizations ||--o{ bec_contact_history : "RESTRICT"
+  users |o--o{ bec_executive_profiles : "created_by, updated_by, SET NULL"
+  users |o--o{ bec_vendor_profiles : "created_by, updated_by, SET NULL"
+  users |o--o{ bec_trusted_senders : "created_by, SET NULL"
+  users |o--o{ bec_feedback : "created_by, SET NULL"
+  users |o--o{ bec_suppression_rules : "created_by, SET NULL"
+  bec_scan_results ||..o{ bec_feedback : "bec_result_id + message_received_at"
+  bec_feedback ||..o{ bec_suppression_rules : "feedback_id (logical)"
   organizations |o--o{ yara_rules : "NULL = platform rule"
   users |o--o{ yara_rules : "updated_by"
   email_scans {
@@ -540,6 +565,64 @@ erDiagram
     enum decision
     varchar client_network "truncated, nullable"
   }
+  bec_scan_results {
+    bigint id PK
+    datetime received_at PK "PARTITIONED month"
+    bigint scan_id "UK with received_at"
+    smallint lifecycle_round
+    tinyint deterministic_score
+    tinyint score
+    enum deterministic_verdict
+    enum verdict
+    json inputs "auth, url, text, history states"
+    json rules "codes, weights, offsets, no text"
+    json ai "assessments, no text"
+  }
+  bec_executive_profiles {
+    bigint id PK
+    char public_id UK
+    bigint organization_id FK "UK with normalized_name"
+    varchar normalized_name
+    json known_addresses
+  }
+  bec_vendor_profiles {
+    bigint id PK
+    char public_id UK
+    bigint organization_id FK "UK with normalized_name"
+    varchar normalized_name
+    json domains
+  }
+  bec_trusted_senders {
+    bigint id PK
+    char public_id UK
+    bigint organization_id FK "UK with kind, value"
+    enum kind "address, domain"
+    varchar value
+    datetime expires_at "nullable"
+  }
+  bec_feedback {
+    bigint id PK
+    char public_id UK
+    bigint organization_id FK
+    bigint scan_id "UK with created_by_user_id, kind"
+    bigint bec_result_id
+    enum kind "false_positive, false_negative"
+  }
+  bec_suppression_rules {
+    bigint id PK
+    char public_id UK
+    bigint organization_id FK "UK with reason_code, sender_scope, sender_value"
+    varchar reason_code
+    datetime expires_at "at most 90 days"
+  }
+  bec_contact_history {
+    bigint id PK
+    bigint organization_id FK "UK with scope, key_hash"
+    enum scope "sender, pair"
+    char key_hash "HMAC-SHA256, no plaintext"
+    int message_count
+    datetime last_seen_at
+  }
   ip_reputation {
     bigint id PK
     varchar ip_address UK
@@ -606,6 +689,8 @@ Step 4.1 ([§3](../plan/steps/09-rspamd.md#3-data-model-one-forward-migration-sc
 Step 4.2 ([§3](../plan/steps/10-attachment-scanning.md#3-data-model-one-forward-migration-attachment_scanning-wp1)): the attachment engine writes, in the finalize transaction of its final `scan_engine_results` row, one `attachment_scan_results` row per attachment (logical reference to `email_attachments.id`) and one `sandbox_submissions` row per attachment submitted to the sandbox; both are partitioned and copy the message's `received_at`. Archive entries are findings inside their attachment's row (index paths), not rows. `attachment_rescan_jobs` and `scan_signature_versions` are not partitioned.
 
 Step 4.3 ([§3](../plan/steps/11-url-protection.md#3-data-model-one-forward-migration-url_protection-wp1)): the URL engine writes, in the finalize transaction of its final `scan_engine_results` row, the message's new `message_urls` rows (one per unique URL; a rescan keeps the seqs already stored), one `url_scan_results` row per URL, one `url_rewrites` row and one `url_dynamic_inspections` row per URL sent to the browser worker; all four copy the message's `received_at`. The click-service writes one `url_click_events` row per decided click, partitioned by `clicked_at` and pointing to its URL by `(message_id, message_received_at, url_seq)`. No foreign keys (all five are partitioned); `threat_indicators` gains the analyst who added a platform indicator (`SET NULL`).
+
+Step 4.4 ([§3](../plan/steps/12-phishing-bec.md#3-data-model-one-forward-migration-bec_detection-wp1)): the BEC engine (a stage-2 engine that runs after `rspamd` and `url` finalized) writes, in the finalize transaction of its final `scan_engine_results` row, one `bec_scan_results` row per round (partitioned, copies the message's `received_at`, no foreign keys) and, in round 0 only and when the tenant opted in, its `bec_contact_history` upserts. The six tenant tables are not partitioned and reference `organizations` (`RESTRICT`, deleted explicitly by organization deletion) and `users` (`SET NULL`); `bec_feedback` points to its result by `(bec_result_id, message_received_at)` and `bec_suppression_rules` to its feedback by `feedback_id`, both logical references without a foreign key.
 
 ```mermaid
 erDiagram

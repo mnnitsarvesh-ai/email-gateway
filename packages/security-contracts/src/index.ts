@@ -5,7 +5,9 @@
  * verdicts and reason codes, the engine registry catalog, normalized engine and authentication
  * results, the Rspamd platform/tenant settings with their pure resolver, the attachment engine's
  * file-type vocabulary, reason codes, settings and per-attachment result, and the URL engine's
- * verdicts, reason codes, click decisions, rewrite skip reasons, settings and per-URL result.
+ * verdicts, reason codes, click decisions, rewrite skip reasons, settings and per-URL result, and
+ * (step 4.4 docs/plan/steps/12-phishing-bec.md B6, B9, B13, B15, ADR-0033–0035) the BEC engine's
+ * rule ids, reason codes, AI vocabularies, settings and read-view sub-schemas.
  *
  * Engines classify, policy decides (§2.0 invariant 8): nothing here rejects, quarantines or
  * delivers. The adapter interface itself lives with the adapters (email-worker
@@ -18,3 +20,4 @@ export * from './settings';
 export * from './file-types';
 export * from './attachment';
 export * from './url';
+export * from './bec';

@@ -1,0 +1,40 @@
+{
+  "id": "dmarc-fail-executive-no-intent",
+  "description": "Executive name, DMARC fail, no intent cue: suspicious (no intent evidence).",
+  "label": "bec",
+  "input": {
+    "headers": {
+      "From": ["Anita Sharma <anita.sharma@acmecorp.test>"],
+      "Subject": ["Hello"]
+    },
+    "envelope": {
+      "envelopeFrom": "anita.sharma@acmecorp.test"
+    },
+    "auth": {
+      "state": "available",
+      "row": {
+        "spf": "fail",
+        "spfDomain": "acmecorp.test",
+        "dkim": "none",
+        "dkimSignatures": [],
+        "dmarc": "fail",
+        "dmarcPolicy": "quarantine",
+        "dmarcDomain": "acmecorp.test",
+        "arc": null
+      }
+    },
+    "url": {
+      "state": "available",
+      "rows": []
+    },
+    "text": {
+      "subject": "Hello",
+      "text": "Hi, are you in the office this week? Let me know.",
+      "html": null
+    }
+  },
+  "expected": {
+    "verdict": "suspicious",
+    "requiredCodes": ["bec.auth.dmarc_fail", "bec.impersonation.executive_name"]
+  }
+}

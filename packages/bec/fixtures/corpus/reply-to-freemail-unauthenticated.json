@@ -1,0 +1,46 @@
+{
+  "id": "reply-to-freemail-unauthenticated",
+  "description": "Same Reply-To redirection without authentication: + I3 + A4 → suspicious.",
+  "label": "bec",
+  "input": {
+    "headers": {
+      "From": ["John Miller <john.miller@partnerco.test>"],
+      "Reply-To": ["john.miller.partnerco@gmail.com"],
+      "Subject": ["Proposal"]
+    },
+    "envelope": {
+      "envelopeFrom": "john.miller@partnerco.test"
+    },
+    "auth": {
+      "state": "available",
+      "row": {
+        "spf": "none",
+        "spfDomain": null,
+        "dkim": "none",
+        "dkimSignatures": [],
+        "dmarc": "none",
+        "dmarcPolicy": null,
+        "dmarcDomain": "partnerco.test",
+        "arc": null
+      }
+    },
+    "url": {
+      "state": "available",
+      "rows": []
+    },
+    "text": {
+      "subject": "Proposal",
+      "text": "Hello,\nplease see the proposal we discussed last week and reply with your comments.\nBest, John",
+      "html": null
+    }
+  },
+  "expected": {
+    "verdict": "suspicious",
+    "requiredCodes": [
+      "bec.reply_to.domain_mismatch",
+      "bec.reply_to.freemail",
+      "bec.sender.not_authenticated",
+      "bec.auth.none"
+    ]
+  }
+}

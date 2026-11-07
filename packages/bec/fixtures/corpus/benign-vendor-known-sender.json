@@ -1,0 +1,46 @@
+{
+  "id": "benign-vendor-known-sender",
+  "description": "Known vendor sender, authenticated, order confirmation without payment changes.",
+  "label": "benign",
+  "input": {
+    "headers": {
+      "From": ["Globex Supplies <accounts@globexsupplies.test>"],
+      "Subject": ["Order confirmation"]
+    },
+    "envelope": {
+      "envelopeFrom": "accounts@globexsupplies.test"
+    },
+    "auth": {
+      "state": "available",
+      "row": {
+        "spf": "pass",
+        "spfDomain": "globexsupplies.test",
+        "dkim": "pass",
+        "dkimSignatures": [
+          {
+            "domain": "globexsupplies.test",
+            "result": "pass",
+            "selector": "s1"
+          }
+        ],
+        "dmarc": "pass",
+        "dmarcPolicy": "reject",
+        "dmarcDomain": "globexsupplies.test",
+        "arc": null
+      }
+    },
+    "url": {
+      "state": "available",
+      "rows": []
+    },
+    "text": {
+      "subject": "Order confirmation",
+      "text": "We confirm your order of 40 units. Delivery is planned for next week.",
+      "html": null
+    }
+  },
+  "expected": {
+    "verdict": "clean",
+    "forbiddenCodes": ["bec.vendor.unknown_sender", "bec.impersonation.vendor_name"]
+  }
+}

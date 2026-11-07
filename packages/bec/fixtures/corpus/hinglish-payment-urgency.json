@@ -1,0 +1,47 @@
+{
+  "id": "hinglish-payment-urgency",
+  "description": "Hinglish payment urgency with secrecy.",
+  "label": "bec",
+  "input": {
+    "headers": {
+      "From": ["Accounts <accounts.desk.2024@gmail.com>"],
+      "Subject": ["urgent"]
+    },
+    "envelope": {
+      "envelopeFrom": "accounts.desk.2024@gmail.com"
+    },
+    "auth": {
+      "state": "available",
+      "row": {
+        "spf": "pass",
+        "spfDomain": "gmail.com",
+        "dkim": "pass",
+        "dkimSignatures": [
+          {
+            "domain": "gmail.com",
+            "result": "pass",
+            "selector": "s1"
+          }
+        ],
+        "dmarc": "pass",
+        "dmarcPolicy": "reject",
+        "dmarcDomain": "gmail.com",
+        "arc": null
+      }
+    },
+    "url": {
+      "state": "available",
+      "rows": []
+    },
+    "text": {
+      "subject": "urgent",
+      "text": "boss ne bola hai turant paise transfer karo, kisi ko mat batana",
+      "html": null
+    }
+  },
+  "expected": {
+    "verdictIn": ["clean", "suspicious"],
+    "requiredCodes": ["bec.content.urgency", "bec.content.secrecy"],
+    "requiredAnyCodes": ["bec.content.payment_request", "bec.content.wire_transfer"]
+  }
+}

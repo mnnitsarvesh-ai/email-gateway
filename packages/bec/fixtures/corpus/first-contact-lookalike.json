@@ -1,0 +1,55 @@
+{
+  "id": "first-contact-lookalike",
+  "description": "First contact from a homoglyph lookalike of the tenant domain with a password reset request (history enabled).",
+  "label": "bec",
+  "input": {
+    "headers": {
+      "From": ["IT Support <it-support@acmec0rp.test>"],
+      "Subject": ["Password expiry"]
+    },
+    "envelope": {
+      "envelopeFrom": "it-support@acmec0rp.test"
+    },
+    "auth": {
+      "state": "available",
+      "row": {
+        "spf": "pass",
+        "spfDomain": "acmec0rp.test",
+        "dkim": "pass",
+        "dkimSignatures": [
+          {
+            "domain": "acmec0rp.test",
+            "result": "pass",
+            "selector": "s1"
+          }
+        ],
+        "dmarc": "pass",
+        "dmarcPolicy": "reject",
+        "dmarcDomain": "acmec0rp.test",
+        "arc": null
+      }
+    },
+    "url": {
+      "state": "available",
+      "rows": []
+    },
+    "text": {
+      "subject": "Password expiry",
+      "text": "Your password expires today. Reset your password using the portal to keep access.",
+      "html": null
+    },
+    "history": {
+      "sender": null,
+      "pairs": [null],
+      "fingerprintHash": "aaaaaaaaaaaaaaaa"
+    }
+  },
+  "expected": {
+    "verdict": "malicious",
+    "requiredCodes": [
+      "bec.lookalike.sender_tenant",
+      "bec.history.first_contact",
+      "bec.history.first_contact_lookalike"
+    ]
+  }
+}

@@ -374,6 +374,7 @@ describe('url settings through /scan-settings/url (U13)', () => {
       'rspamd',
       'attachment',
       'url',
+      'bec',
     ]);
     const path = '/api/v1/scan-settings/url';
     const invalid = await ctx.http

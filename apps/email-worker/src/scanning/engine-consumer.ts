@@ -10,6 +10,7 @@ import {
 } from '@email-gateway/common';
 import { EventTypes, type QueueName } from '@email-gateway/event-contracts';
 import type { Logger } from '@email-gateway/logger';
+import { type EngineCatalogEntry, isStage2Engine } from '@email-gateway/security-contracts';
 import type { WorkerConfig } from '../config';
 import { EML_MISSING, S3EmlSource } from '../mime-ingestion/eml-source';
 import { isTransientFailure } from '../mime-ingestion/error-fields';
@@ -17,8 +18,20 @@ import { EmlUnavailableError, EngineAttemptFailedError } from './engine';
 import type { ScanEngineRegistration } from './registry';
 import type { EmlOpener, ScanTriggerPayload } from './round-service';
 
-/** The trigger events of every engine queue (S2): parse results and administrative rescans. */
+/** The trigger events of a stage-1 engine queue (S2): parse results and administrative rescans. */
 export const SCAN_EVENT_TYPES = [EventTypes.MessageParsed, EventTypes.MessageRescanRequested];
+
+/** The trigger event of a stage-2 engine queue (step 4.4 B2). */
+export const STAGE_EVENT_TYPES = [EventTypes.MessageScanStageReady];
+
+/**
+ * The event types an engine's consumer accepts, from its catalog entry (B2): an engine with
+ * `dependsOn` (stage 2) consumes only `scan_stage_ready.v1`, every other engine `parsed.v1` and
+ * `rescan_requested.v1`. Never names an engine.
+ */
+export function scanEventTypes(entry: Pick<EngineCatalogEntry, 'dependsOn'>): string[] {
+  return isStage2Engine(entry) ? [...STAGE_EVENT_TYPES] : [...SCAN_EVENT_TYPES];
+}
 
 /**
  * How an engine consumer treats a failed delivery (S5): the stage's own
@@ -35,7 +48,8 @@ export function classifyScanFailure(error: unknown): FailureClass {
 }
 
 /**
- * The `QueueConsumer` of one registered engine (S5): its catalog queue, both trigger types,
+ * The `QueueConsumer` of one registered engine (S5): its catalog queue, its trigger types
+ * (`scanEventTypes`),
  * prefetch = the engine's concurrency, `hold` retries with SCAN_RETRY_BASE_MS / SCAN_RETRY_MAX_MS,
  * `classifyScanFailure` and the progress recorder (the outbox reconciler re-drives `scan.spam`).
  */
@@ -55,7 +69,7 @@ export function createEngineConsumer(options: {
     publisher: options.publisher,
     queue: registration.catalog.queue as QueueName,
     consumer: options.consumer ?? registration.consumerName,
-    eventTypes: [...SCAN_EVENT_TYPES],
+    eventTypes: scanEventTypes(registration.catalog),
     prefetch: registration.budget(config).concurrency,
     retry: { baseDelayMs: config.SCAN_RETRY_BASE_MS, maxDelayMs: config.SCAN_RETRY_MAX_MS },
     classify: classifyScanFailure,

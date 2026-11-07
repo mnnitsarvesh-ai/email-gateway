@@ -293,6 +293,7 @@ describe('attachment settings through /scan-settings/attachment (A8)', () => {
       'rspamd',
       'attachment',
       'url',
+      'bec',
     ]);
     const url = '/api/v1/scan-settings/attachment';
     const invalid = await ctx.http

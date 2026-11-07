@@ -31,6 +31,10 @@ export interface EngineScanContext {
   messageId: bigint;
   receivedAt: Date;
   round: number;
+  /** `email_scans.id` of the round (step 4.4: stage-2 engines read the round's other results). */
+  scanId: bigint;
+  /** `email_scans.scan_kind` of the round. */
+  scanKind: 'initial' | 'rescan';
   direction: MessageDirectionValue;
   envelope: EngineEnvelope;
   eml: {
@@ -182,19 +186,80 @@ export interface UrlChildRows {
   inspections: UrlInspectionInput[];
 }
 
+/** The bec verdict values (`bec_scan_results.verdict` / `deterministic_verdict`). */
+export type BecVerdictValue = 'clean' | 'suspicious' | 'malicious' | 'unknown' | 'skipped';
+
+/**
+ * The `bec_scan_results` row of a definite bec final (step 4.4 B14). Bounded JSON only: codes,
+ * weights, scores, span offsets, profile public ids, parsed header identities (the tenant's own
+ * metadata), model ids/versions and hashes; never body text, span text or excerpts.
+ */
+export interface BecResultInput {
+  lifecycleRound: number;
+  engineVersion: string;
+  rulesVersion: string;
+  settingsVersion: string;
+  lexiconVersion: string;
+  textVersion: string;
+  deterministicScore: number;
+  score: number;
+  deterministicVerdict: BecVerdictValue;
+  verdict: BecVerdictValue;
+  /** `{ auth, url, text, history }` input states (B2). */
+  inputs: Record<string, string>;
+  /** ≤ 32 fired rule entries (B14). */
+  rules: Array<Record<string, unknown>>;
+  /** The AI feature vector (AI_FEATURE_NAMES), null for a skipped result. */
+  features: Record<string, number | boolean> | null;
+  identity: Record<string, unknown> | null;
+  /** Applied assessments (≤ 2), null when none ran. */
+  ai: Array<Record<string, unknown>> | null;
+  /** Shadow assessments (≤ 3), null when none ran. */
+  aiShadow: Array<Record<string, unknown>> | null;
+  durationMs: number;
+}
+
+/** One `bec_contact_history` upsert (B12): keyed hashes and counts only. */
+export interface BecHistoryUpdateInput {
+  scope: 'sender' | 'pair';
+  /** HMAC-SHA256 hex (64). */
+  keyHash: string;
+  inbound: 0 | 1;
+  outbound: 0 | 1;
+  /** The message's `received_at` (first/last seen). */
+  receivedAt: Date;
+  /** Sender scope: the 16-hex fingerprint hash to add to `infra`, else null. */
+  fingerprintHash: string | null;
+}
+
+/** The bec engine's child rows (B14), written in the final row's transaction. */
+export interface BecChildRows {
+  result: BecResultInput;
+  /** Round 0 of an initial scan only (B12); empty otherwise. */
+  history: BecHistoryUpdateInput[];
+}
+
 /** Engine-specific child rows written in the finalize transaction of the final row (A12). */
 export interface EngineChildRows {
   attachments?: AttachmentResultInput[];
   sandbox?: SandboxSubmissionInput[];
   urls?: UrlChildRows;
+  bec?: BecChildRows;
 }
 
 /** A definite result (S9); `evidence` adds engine flags to `scan_engine_results.evidence`. */
 export interface EngineDefinite {
   kind: 'definite';
   result: NormalizedEngineResult | SkippedEngineResult;
-  /** Extra bounded flags, e.g. `{ rcptTruncated: true }` (never content). */
-  evidence?: { rcptTruncated?: boolean };
+  /**
+   * Extra bounded flags, e.g. `{ rcptTruncated: true }`, or the effective verdict thresholds of
+   * a scored engine (step 4.4 bec: `{ thresholds: { suspicious, malicious } }`, read by the scans
+   * read API). Never content.
+   */
+  evidence?: {
+    rcptTruncated?: boolean;
+    thresholds?: { suspicious: number; malicious: number };
+  };
   /**
    * Child rows (step 4.2 A12): inserted after the final row in the same transaction, only when
    * the final row was inserted (a duplicate finalizer writes nothing).

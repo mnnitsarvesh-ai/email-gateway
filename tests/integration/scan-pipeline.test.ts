@@ -25,13 +25,20 @@ import {
   gatewayAuthservId,
   headerFieldsOf,
   ATTACHMENT_LEDGER,
+  BEC_LEDGER,
+  becResultsOf,
+  becRuleCodes,
   messagePublicId,
+  PASSTHROUGH_CONSUMER,
   REQUIRED_ENGINES,
   RSPAMD_LEDGER,
   scannedEventsOf,
   scanRoundsOf,
+  SCAN_CONSUMED_QUEUES,
   scanStackGate,
   sendToMx,
+  STAGE1_ENGINES,
+  stageReadyEventsOf,
   waitForRoundComplete,
   URL_LEDGER,
 } from './support/scan-stack';
@@ -58,8 +65,15 @@ import { reply } from './support/smtp-tools';
  *   (same event id, published as the relay does) are ledger duplicates, and a re-emission with a
  *   new event id is skipped by the lifecycle check; no second round, result, transition,
  *   `scanned.v1`, approval or delivery, and no dead letter.
- * - Topology v4: `scan.spam` and `scan.attachment` consumed by the scanner role user, `scan.auth`
- *   without event bindings.
+ * - Topology v6: `scan.spam`, `scan.attachment`, `scan.url`, `scan.url.results` and `scan.bec`
+ *   consumed by the scanner role user, `scan.auth` without event bindings.
+ *
+ * Since step 4.4 every round also requires the `bec` engine (B1), a stage-2 engine (B2): the
+ * transaction that inserts the last of the rspamd/url finals writes one
+ * `mail.message.scan_stage_ready.v1`, which the relay routes to `scan.bec`. The clean message
+ * ends with a `clean` bec final (authenticated as From, no cue); the spoofed one (DMARC fail,
+ * "urgent wire transfer") with a bec verdict ≥ suspicious, which the dev pass-through holds
+ * (B17): it stays `scanned` instead of being delivered.
  *
  * Since step 4.2 every round also requires the `attachment` engine (A1): the messages of this
  * suite have no attachments, so its final is `skipped` with `attachment.none` (rule A0), which
@@ -147,7 +161,7 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
     expect(round.reasonCodes).toContain('clean.below_threshold');
 
     const results = await engineResultsOf(fx.prisma, message);
-    // One final per required engine (rspamd, attachment, url since step 4.3).
+    // One final per required engine (rspamd, attachment, url since step 4.3, bec since 4.4).
     expect(results).toHaveLength(REQUIRED_ENGINES.length);
     const final = results.find((r) => r.engine === 'rspamd');
     expect(final).toMatchObject({
@@ -215,6 +229,8 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
     });
     expect([...payload.engines].sort((a, b) => a.engine.localeCompare(b.engine))).toEqual([
       { engine: 'attachment', required: true, outcome: 'skipped', attempts: 1 },
+      // Step 4.4: the BEC engine (stage 2): authenticated as From, no cue → clean (C0).
+      { engine: 'bec', required: true, outcome: 'clean', attempts: 1 },
       { engine: 'rspamd', required: true, outcome: 'clean', attempts: 1 },
       // Step 4.3: the URL engine (the clean message has no link: rule U0).
       { engine: 'url', required: true, outcome: 'skipped', attempts: 1 },
@@ -227,6 +243,43 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
         }),
       ).toBe(1);
     }
+    // Step 4.4 B2: exactly one stage trigger for the round (rspamd + url finalized), consumed
+    // once by the bec consumer; the bec consumer never saw the parsed event.
+    const stage = await stageReadyEventsOf(fx.prisma, org, message);
+    expect(stage).toHaveLength(1);
+    expect(stage[0]!.payload).toMatchObject({
+      messageId: message.id.toString(),
+      lifecycleRound: 0,
+      scanId: round.id.toString(),
+      scanKind: 'initial',
+      engine: 'bec',
+    });
+    expect(
+      [...(stage[0]!.payload as { dependencies: { engine: string }[] }).dependencies]
+        .map((d) => d.engine)
+        .sort(),
+    ).toEqual(['rspamd', 'url']);
+    expect(
+      await fx.prisma.messageIdempotency.count({
+        where: { consumer: BEC_LEDGER, eventId: stage[0]!.eventId },
+      }),
+    ).toBe(1);
+    expect(
+      await fx.prisma.messageIdempotency.count({
+        where: { consumer: BEC_LEDGER, eventId: parsed.eventId },
+      }),
+    ).toBe(0);
+    const [bec, ...moreBec] = await becResultsOf(fx.prisma, message);
+    expect(moreBec).toEqual([]);
+    expect(bec).toMatchObject({
+      scanId: round.id,
+      lifecycleRound: 0,
+      rulesVersion: 'bec-map/1',
+      verdict: 'clean',
+      deterministicVerdict: 'clean',
+      inputs: { auth: 'available', url: 'available', text: 'complete', history: 'disabled' },
+    });
+    expect(becRuleCodes(bec!.rules)).toEqual([]);
 
     // Approved by the pass-through only after the scan (E27), then delivered.
     const [delivery] = await waitForAllDeliveries(fx.prisma, org, message.id, ['delivered'], 1);
@@ -241,11 +294,16 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
       ['scanned', 'scanner', 'email-worker'],
       ['approved', 'dev_passthrough', 'delivery-worker'],
     ]);
-    // Causation (`event_id`): the parsed event opens and completes the round; the scanned
-    // event causes the approval.
+    // Causation (`event_id`): the parsed event opens the round; the trigger of the final that
+    // completed the round causes `scanned` — since step 4.4 normally the bec final (stage 2,
+    // after rspamd and url), so its stage trigger; a stage-1 final only if it was the last one;
+    // the scanned event causes the approval.
+    const lastFinal = [...results].sort(
+      (a, b) => a.completedAt.getTime() - b.completedAt.getTime() || Number(a.id - b.id),
+    )[results.length - 1]!;
     expect(history.slice(2, 5).map((h) => h.eventId)).toEqual([
       parsed.eventId,
-      parsed.eventId,
+      lastFinal.engine === 'bec' ? stage[0]!.eventId : parsed.eventId,
       scanned[0]!.eventId,
     ]);
     await expectConsistentHistory(fx.prisma, message);
@@ -300,6 +358,25 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
           urls: [],
           rewrite: { status: 'skipped', skipReason: 'no_urls' },
         },
+        // Step 4.4 B15: the explainable bec verdict (no rule fired, every input available).
+        {
+          engine: 'bec',
+          final: true,
+          outcome: 'clean',
+          reasonCodes: ['clean.below_threshold'],
+          durationMs: null,
+          bec: {
+            rulesVersion: 'bec-map/1',
+            verdict: 'clean',
+            deterministicVerdict: 'clean',
+            score: 0,
+            deterministicScore: 0,
+            thresholds: { suspicious: 40, malicious: 80 },
+            inputs: { auth: 'available', url: 'available', text: 'complete', history: 'disabled' },
+            rules: [],
+            ai: [],
+          },
+        },
       ],
     });
     expect(page.data[0]!.engines[0]!.symbols.map((s) => s.name)).toContain('R_SPF_ALLOW');
@@ -313,7 +390,7 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
     });
   });
 
-  it('accepts a spoofed message at SMTP time and scans it with auth.spf_fail and auth.dmarc_reject', async () => {
+  it('accepts a spoofed message at SMTP time, scans it with auth.spf_fail and auth.dmarc_reject, and the pass-through holds its bec verdict', async () => {
     const rcpt = `spoofed@${domain.name}`;
     const text = [
       // A forged pass under our authserv-id: removed at SMTP time, never trusted post-queue.
@@ -341,10 +418,13 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
 
     const round = await waitForRoundComplete(fx.prisma, message, 0);
     expect(round).toMatchObject({ status: 'completed', scanKind: 'initial' });
-    expect(['suspicious', 'spam']).toContain(round.scanVerdict);
+    // The round verdict is the most severe engine verdict: Rspamd's suspicious/spam, or since
+    // step 4.4 the bec engine's (≥ suspicious for this message, see below).
+    expect(['suspicious', 'spam', 'malicious']).toContain(round.scanVerdict);
     const final = (await engineResultsOf(fx.prisma, message)).find(
       (r) => r.isFinal && r.engine === 'rspamd',
     );
+    expect(['suspicious', 'spam']).toContain(final!.outcome);
     expect(final!.reasonCodes).toEqual(
       expect.arrayContaining(['auth.spf_fail', 'auth.dmarc_reject']),
     );
@@ -374,16 +454,50 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
     expect(ar[0]!.value).toMatch(/spf=fail/);
     expect(ar[0]!.value).toMatch(/dmarc=fail/);
 
-    // The development pass-through approves every scanned verdict (it stands in for a "deliver
-    // everything scanned" policy, S15): delivered, with the scan in the path.
-    await waitForLifecycle(fx.prisma, message, 'delivered', 'delivery_complete');
-    expect(await pathOf(fx.prisma, message)).toEqual(
-      DELIVERED_PATH('delivered', 'delivery_complete'),
+    // Step 4.4: the bec engine sees the real auth row of this round (DMARC fail on the From
+    // domain, A1) and never cleans it; its verdict is at least suspicious.
+    const becFinal = (await engineResultsOf(fx.prisma, message)).find(
+      (r) => r.isFinal && r.engine === 'bec',
     );
+    expect(['suspicious', 'malicious']).toContain(becFinal!.outcome);
+    const [bec] = await becResultsOf(fx.prisma, message);
+    expect(bec).toMatchObject({ scanId: round.id, inputs: { auth: 'available' } });
+    expect(becRuleCodes(bec!.rules)).toEqual(
+      expect.arrayContaining(['bec.auth.dmarc_fail', 'bec.auth.spf_fail']),
+    );
+
+    // The development pass-through approves every scanned verdict (it stands in for a "deliver
+    // everything scanned" policy, S15) except a malicious round and, since step 4.4 B17, a bec
+    // result of suspicious or malicious: this message stays `scanned` (policy 5.2 decides).
+    const held = await waitFor(
+      'the pass-through ledger row of the scanned event (held, not approved)',
+      async () =>
+        (await fx.prisma.messageIdempotency.findFirst({
+          where: { consumer: PASSTHROUGH_CONSUMER, eventId: scanned[0]!.eventId },
+        })) ?? undefined,
+      { timeoutMs: 60_000, intervalMs: 500 },
+    );
+    expect(held).toBeTruthy();
+    await sleep(3_000);
+    const state = await fx.prisma.emailMessage.findFirstOrThrow({
+      where: { id: message.id, receivedAt: message.receivedAt },
+      select: { status: true },
+    });
+    expect(state.status).toBe('scanned');
+    expect(
+      await fx.prisma.messageOutbox.count({
+        where: {
+          organizationId: org,
+          aggregateId: message.id.toString(),
+          eventType: 'mail.delivery.approved.v1',
+        },
+      }),
+    ).toBe(0);
     record('scan-pipeline', {
       spoofed_verdict: round.scanVerdict,
       spoofed_score: Number(final!.score),
       spoofed_reasons: (final!.reasonCodes as string[]).join(','),
+      spoofed_bec: `${becFinal!.outcome}:${bec!.score}`,
     });
   });
 
@@ -414,15 +528,21 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
         where: { organizationId: org, eventType: 'mail.delivery.approved.v1' },
       }),
       sinkFiles: (await sinkFiles(cleanMessage!.rcpt)).length,
+      // Step 4.4: no second stage trigger and no second bec result.
+      stage: (await stageReadyEventsOf(fx.prisma, org, message)).length,
+      bec: (await becResultsOf(fx.prisma, message)).length,
     });
     const before = await snapshot();
     expect(before.rounds).toHaveLength(1);
     expect(before.scanned).toHaveLength(1);
 
-    // Both engine consumers (scan.spam and scan.attachment, step 4.2) get every copy.
+    // Every stage-1 engine consumer (scan.spam, scan.attachment, scan.url) gets every copy;
+    // the stage-2 bec consumer never sees parsed.v1 (step 4.4 B2).
+    expect(before.stage).toBe(1);
+    expect(before.bec).toBe(1);
     const skippedOf = (reason: string) =>
       Promise.all(
-        REQUIRED_ENGINES.map((engine) =>
+        STAGE1_ENGINES.map((engine) =>
           metricValue('email-worker', 'scan_events_skipped_total', { engine, reason }),
         ),
       );
@@ -452,6 +572,8 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
       expect(await snapshot()).toEqual(before);
       expect(await broker.depth('scan.spam')).toBe(0);
       expect(await broker.depth('scan.attachment')).toBe(0);
+      expect(await broker.depth('scan.url')).toBe(0);
+      expect(await broker.depth('scan.bec')).toBe(0);
       expect(await broker.depth(QUEUES.deadLetter)).toBe(deadLetters);
       // One ledger row per consumer and event id: the original and the re-emission (handled,
       // no effect).
@@ -475,9 +597,9 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
     }
   });
 
-  it('runs topology v5: scan.spam, scan.attachment, scan.url and scan.url.results consumed by the scanner user, scan.auth without event bindings', async () => {
+  it('runs topology v6: scan.spam, scan.attachment, scan.url, scan.url.results and scan.bec consumed by the scanner user, scan.auth without event bindings', async () => {
     const scanner = process.env.RABBITMQ_SCANNER_USER || 'eg-scanner';
-    for (const queue of ['scan.spam', 'scan.attachment', 'scan.url', 'scan.url.results']) {
+    for (const queue of SCAN_CONSUMED_QUEUES) {
       const details = await mgmt.get<{
         consumers?: number;
         consumer_details?: { channel_details?: { user?: string } }[];

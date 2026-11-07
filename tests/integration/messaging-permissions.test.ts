@@ -10,7 +10,8 @@ import { stack } from './support/env';
  * step 4.1 scanner user and the ops replay of scan.spam, docs/plan/steps/09-rspamd.md S2; step 4.2
  * A2 extends both to scan.attachment, docs/plan/steps/10-attachment-scanning.md; step 4.3 U2
  * (topology v5) extends them to scan.url and scan.url.results and adds the url-browser user of the
- * isolated browser worker, docs/plan/steps/11-url-protection.md). Probes
+ * isolated browser worker, docs/plan/steps/11-url-protection.md; step 4.4 B3 (topology v6)
+ * extends the scanner and the ops replay to scan.bec, docs/plan/steps/12-phishing-bec.md). Probes
  * never leave a message in a real queue: every publish probe is one the broker refuses (a
  * refused publish routes nothing), and the allowed read is a passive checkQueue. Topic
  * permissions restrict the routing keys each user may publish: an allowed key always matches a
@@ -37,7 +38,7 @@ function roleUrls(): Record<Role, string> {
   return { ...stack.rabbitmqRoleUrls(), urlBrowser };
 }
 
-/** Message counts of the 16 real queues (administrator, passive declares). */
+/** Message counts of the 17 real queues (administrator, passive declares). */
 async function queueCounts(): Promise<number[]> {
   const url = new URL(stack.rabbitmqUrl());
   url.pathname = `/${encodeURIComponent(stack.rabbitmqVhost())}`;
@@ -126,16 +127,17 @@ const EXPECTED_TOPICS: Record<Role, TopicPermission[]> = {
   ],
   // Step 4.1 S2: the scan role publishes only the retry and dead-letter hops of its queues;
   // step 4.2 A2 (topology v4) adds scan.attachment, step 4.3 U2 (v5) scan.url and
-  // scan.url.results, anchored on `.org.` so that `url` never covers scan.url.inspect.
+  // scan.url.results, anchored on `.org.` so that `url` never covers scan.url.inspect; step 4.4
+  // B3 (v6) scan.bec.
   scanner: [
     {
       exchange: 'email.security',
-      write: '^retry\\.scan\\.(spam|attachment|url|url\\.results)\\.org\\.',
+      write: '^retry\\.scan\\.(spam|attachment|url|url\\.results|bec)\\.org\\.',
       read: '^$',
     },
     {
       exchange: 'email.events',
-      write: '^dead-letter\\.scan\\.(spam|attachment|url|url\\.results)(\\.org\\.|$)',
+      write: '^dead-letter\\.scan\\.(spam|attachment|url|url\\.results|bec)(\\.org\\.|$)',
       read: '^$',
     },
   ],
@@ -168,11 +170,12 @@ const EXPECTED_TOPICS: Record<Role, TopicPermission[]> = {
   ops: [
     { exchange: 'email.ingestion', write: '^retry\\.email\\.received\\.', read: '^$' },
     { exchange: 'email.delivery', write: '^retry\\.email\\.delivery\\.pending\\.', read: '^$' },
-    // Step 4.1 S2 / 4.2 A2 / 4.3 U2: replay of the work queues scan.spam, scan.attachment,
-    // scan.url, scan.url.inspect and scan.url.results (home exchange email.security).
+    // Step 4.1 S2 / 4.2 A2 / 4.3 U2 / 4.4 B3: replay of the work queues scan.spam,
+    // scan.attachment, scan.url, scan.url.inspect, scan.url.results and scan.bec (home exchange
+    // email.security).
     {
       exchange: 'email.security',
-      write: '^retry\\.scan\\.(spam|attachment|url|url\\.inspect|url\\.results)\\.',
+      write: '^retry\\.scan\\.(spam|attachment|url|url\\.inspect|url\\.results|bec)\\.',
       read: '^$',
     },
   ],
@@ -296,8 +299,8 @@ describe('RabbitMQ role permissions on the real vhost', () => {
     for (const exchange of ['email.security', 'email.policy', 'email.archive', 'email.events']) {
       expect(await publishRefused('ops', exchange), exchange).toBe(ACCESS_REFUSED);
     }
-    // Dormant scan queues are not replayable (v5: only the work queues scan.spam,
-    // scan.attachment, scan.url, scan.url.inspect and scan.url.results are).
+    // Dormant scan queues are not replayable (v6: only the work queues scan.spam,
+    // scan.attachment, scan.url, scan.url.inspect, scan.url.results and scan.bec are).
     expect(
       await publishKeyRefused(
         'ops',
@@ -323,9 +326,15 @@ describe('RabbitMQ role permissions on the real vhost', () => {
     ).toBe(ACCESS_REFUSED);
   });
 
-  it('scanner (steps 4.1–4.3) reads scan.spam, scan.attachment, scan.url and scan.url.results (passive) and nothing else', async () => {
+  it('scanner (steps 4.1–4.4) reads scan.spam, scan.attachment, scan.url, scan.url.results and scan.bec (passive) and nothing else', async () => {
     const channel = await model('scanner').createChannel();
-    for (const queue of ['scan.spam', 'scan.attachment', 'scan.url', 'scan.url.results']) {
+    for (const queue of [
+      'scan.spam',
+      'scan.attachment',
+      'scan.url',
+      'scan.url.results',
+      'scan.bec',
+    ]) {
       await expect(channel.checkQueue(queue), queue).resolves.toMatchObject({ queue });
     }
     await channel.close();
@@ -372,6 +381,8 @@ describe('RabbitMQ role permissions on the real vhost', () => {
       'org.1.mail.url.clicked.v1',
       'retry.scan.url.inspect.org.1.mail.url.inspection_requested.v1',
       'retry.scan.dlp.org.1.mail.message.parsed.v1',
+      // v6: the stage trigger goes through the outbox and the relay, never from the worker.
+      'org.1.mail.message.scan_stage_ready.v1',
     ]) {
       expect(await publishKeyRefused('scanner', 'email.security', key), key).toBe(ACCESS_REFUSED);
     }

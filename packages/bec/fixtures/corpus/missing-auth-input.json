@@ -1,0 +1,31 @@
+{
+  "id": "missing-auth-input",
+  "description": "Rspamd final failed: auth input unavailable → unknown, never clean.",
+  "label": null,
+  "input": {
+    "headers": {
+      "From": ["John Miller <john.miller@partnerco.test>"],
+      "Subject": ["Agenda"]
+    },
+    "envelope": {
+      "envelopeFrom": "john.miller@partnerco.test"
+    },
+    "auth": {
+      "state": "failed"
+    },
+    "url": {
+      "state": "available",
+      "rows": []
+    },
+    "text": {
+      "subject": "Agenda",
+      "text": "Attached is the agenda for tomorrow.",
+      "html": null
+    }
+  },
+  "expected": {
+    "verdict": "unknown",
+    "requiredCodes": ["bec.input_unavailable.auth"],
+    "forbiddenCodes": ["clean.below_threshold"]
+  }
+}

@@ -1,10 +1,14 @@
 import {
   type AttachmentPlatformSettings,
   attachmentSettingsBounds,
+  type BecPlatformSettings,
+  becSettingsBounds,
+  becTenantSettingsSchema,
   attachmentTenantSettingsSchema,
   type EngineCatalogEntry,
   ENGINE_CATALOG,
   resolveAttachmentSettings,
+  resolveBecSettings,
   resolveRspamdSettings,
   type RspamdPlatformSettings,
   rspamdSettingsBounds,
@@ -19,8 +23,8 @@ import { normalizeDomainInput } from '@email-gateway/url-security';
 import type { EngineSettingsView } from '../dto/scan-settings.schemas';
 
 /**
- * Tenant settings per registered engine (step 4.1 S8, S16; step 4.2 A8; step 4.3 U13), pure:
- * `rspamd`, `attachment` and `url`. An engine of the catalog without a settings definition has no
+ * Tenant settings per registered engine (step 4.1 S8, S16; step 4.2 A8; step 4.3 U13; step 4.4
+ * B13), pure: `rspamd`, `attachment`, `url` and `bec`. An engine of the catalog without a settings definition has no
  * settings routes (404).
  */
 
@@ -46,6 +50,7 @@ export interface PlatformEngineSettings {
   rspamd: RspamdPlatformSettings;
   attachment: AttachmentPlatformSettings;
   url: UrlPlatformSettings;
+  bec: BecPlatformSettings;
 }
 
 /** The parsed override without undefined keys (what is stored). */
@@ -302,6 +307,100 @@ function stripUndefined(value: unknown): unknown {
   );
 }
 
+/**
+ * Normalizes `freemailExtraDomains` of a BEC override through `@email-gateway/url-security`
+ * (B13): IDNA to ASCII A-labels, lower case; IP literals, single labels and public suffixes are
+ * refused (`invalid`, path `freemailExtraDomains.<index>`). Returns a copy.
+ */
+export function normalizeBecOverrideDomains(override: unknown): {
+  override: unknown;
+  violations: SettingsViolation[];
+} {
+  if (!isRecord(override) || !Array.isArray(override.freemailExtraDomains)) {
+    return { override, violations: [] };
+  }
+  const violations: SettingsViolation[] = [];
+  const list = override.freemailExtraDomains.map((entry: unknown, index) => {
+    if (typeof entry !== 'string') return entry;
+    const normalized = normalizeDomainInput(entry);
+    if (normalized.ok) return normalized.domain;
+    violations.push({
+      path: `freemailExtraDomains.${index}`,
+      code: 'invalid',
+      message: DOMAIN_INPUT_MESSAGES[normalized.code] ?? 'Not a valid domain',
+    });
+    return entry;
+  });
+  return { override: { ...override, freemailExtraDomains: list }, violations };
+}
+
+function becDefinition(
+  catalog: EngineCatalogEntry,
+  platform: BecPlatformSettings,
+): EngineSettingsDefinition {
+  const check = (raw: unknown): OverrideCheck => {
+    const normalized = normalizeBecOverrideDomains(raw);
+    if (normalized.violations.length > 0) return { ok: false, violations: normalized.violations };
+    const resolution = resolveBecSettings(platform, normalized.override);
+    if (!resolution.ok) return { ok: false, violations: resolution.violations };
+    return {
+      ok: true,
+      settings: definedKeys(
+        stripUndefined(becTenantSettingsSchema.parse(normalized.override)) as Record<
+          string,
+          unknown
+        >,
+      ),
+    };
+  };
+  const bounds = becSettingsBounds(platform);
+  const platformEffective = resolveBecSettings(platform, null);
+  if (!platformEffective.ok) throw new Error('The platform BEC settings do not resolve');
+  return {
+    catalog,
+    check,
+    view(stored) {
+      const override = holdsOverride(stored) ? stored.settings : null;
+      const resolution = resolveBecSettings(platform, override);
+      // An override that no longer fits the platform settings is ignored, as the worker does.
+      const effective = resolution.ok ? resolution.settings : platformEffective.settings;
+      return {
+        engine: 'bec',
+        required: catalog.requiredByDefault,
+        tenantMayDisable: catalog.tenantMayDisable,
+        platform: { ...platform },
+        bounds: {
+          suspiciousScore: { ...bounds.suspiciousScore },
+          maliciousScore: { ...bounds.maliciousScore },
+          freemailExtraDomains: { ...bounds.freemailExtraDomains },
+          history: {
+            enabled: [...bounds.history.enabled],
+            retentionDays: { ...bounds.history.retentionDays },
+          },
+          ai: {
+            localModel: [...bounds.ai.localModel],
+            llm: [...bounds.ai.llm],
+            llmDailyCallLimit: { ...bounds.ai.llmDailyCallLimit },
+            raiseConfidence: { ...bounds.ai.raiseConfidence },
+          },
+        },
+        override: override as Extract<EngineSettingsView, { engine: 'bec' }>['override'],
+        effective: {
+          suspiciousScore: effective.suspiciousScore,
+          maliciousScore: effective.maliciousScore,
+          freemailExtraDomains: [...effective.freemailExtraDomains],
+          history: { ...effective.history },
+          ai: { ...effective.ai },
+        },
+        overrideApplied: override !== null && resolution.ok,
+        violations: resolution.ok ? [] : resolution.violations,
+        version: stored?.version ?? 0,
+        updatedAt: stored ? stored.updatedAt.toISOString() : null,
+      };
+    },
+  };
+}
+
 /** The settings definitions of every catalog engine that has tenant settings (catalog order). */
 export function engineSettingsDefinitions(
   platform: PlatformEngineSettings,
@@ -313,6 +412,7 @@ export function engineSettingsDefinitions(
       out.set(entry.name, attachmentDefinition(entry, platform.attachment));
     }
     if (entry.name === 'url') out.set(entry.name, urlDefinition(entry, platform.url));
+    if (entry.name === 'bec') out.set(entry.name, becDefinition(entry, platform.bec));
   }
   return out;
 }

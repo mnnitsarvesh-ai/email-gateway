@@ -1,0 +1,51 @@
+{
+  "id": "reply-to-freemail",
+  "description": "Authenticated external sender with a Reply-To on free-mail and neutral text: R1 + R2 = 35, below the threshold.",
+  "label": "benign",
+  "input": {
+    "headers": {
+      "From": ["John Miller <john.miller@partnerco.test>"],
+      "Reply-To": ["John Miller <john.miller.partnerco@gmail.com>"],
+      "Subject": ["Proposal"]
+    },
+    "envelope": {
+      "envelopeFrom": "john.miller@partnerco.test"
+    },
+    "auth": {
+      "state": "available",
+      "row": {
+        "spf": "pass",
+        "spfDomain": "partnerco.test",
+        "dkim": "pass",
+        "dkimSignatures": [
+          {
+            "domain": "partnerco.test",
+            "result": "pass",
+            "selector": "s1"
+          }
+        ],
+        "dmarc": "pass",
+        "dmarcPolicy": "reject",
+        "dmarcDomain": "partnerco.test",
+        "arc": null
+      }
+    },
+    "url": {
+      "state": "available",
+      "rows": []
+    },
+    "text": {
+      "subject": "Proposal",
+      "text": "Hello,\nplease see the proposal we discussed last week and reply with your comments.\nBest, John",
+      "html": null
+    }
+  },
+  "expected": {
+    "verdict": "clean",
+    "requiredCodes": [
+      "bec.reply_to.domain_mismatch",
+      "bec.reply_to.freemail",
+      "clean.below_threshold"
+    ]
+  }
+}

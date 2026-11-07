@@ -1,0 +1,46 @@
+{
+  "id": "benign-partner-meeting",
+  "description": "Partner scheduling mail with a reply thread, aligned authentication.",
+  "label": "benign",
+  "input": {
+    "headers": {
+      "From": ["Priya Nair <priya.nair@partnerco.test>"],
+      "Subject": ["Re: Next steps"],
+      "In-Reply-To": ["<abc123@partnerco.test>"]
+    },
+    "envelope": {
+      "envelopeFrom": "priya.nair@partnerco.test"
+    },
+    "auth": {
+      "state": "available",
+      "row": {
+        "spf": "pass",
+        "spfDomain": "partnerco.test",
+        "dkim": "pass",
+        "dkimSignatures": [
+          {
+            "domain": "partnerco.test",
+            "result": "pass",
+            "selector": "s1"
+          }
+        ],
+        "dmarc": "pass",
+        "dmarcPolicy": "reject",
+        "dmarcDomain": "partnerco.test",
+        "arc": null
+      }
+    },
+    "url": {
+      "state": "available",
+      "rows": []
+    },
+    "text": {
+      "subject": "Re: Next steps",
+      "text": "Thanks for the call. Tuesday 11 am works for us; I will send the minutes afterwards.",
+      "html": null
+    }
+  },
+  "expected": {
+    "verdict": "clean"
+  }
+}

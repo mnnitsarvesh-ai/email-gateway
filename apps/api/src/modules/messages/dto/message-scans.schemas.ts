@@ -1,6 +1,18 @@
 import {
   attachmentResultSchema,
   AUTH_OUTCOMES,
+  BEC_MAX_AI_ASSESSMENTS,
+  BEC_MAX_AI_SHADOW_ASSESSMENTS,
+  BEC_MAX_EVIDENCE_ITEMS,
+  BEC_MAX_FEEDBACK_REFS,
+  BEC_MAX_RULES,
+  becAiAssessmentViewSchema,
+  becAiShadowAssessmentViewSchema,
+  becFeedbackRefSchema,
+  becInputsSchema,
+  becRuleEntrySchema,
+  becRuleEvidenceSchema,
+  becVerdictSchema,
   CLICK_DECISIONS,
   DMARC_POLICIES,
   REWRITE_SKIP_REASONS,
@@ -20,7 +32,11 @@ import { z } from 'zod';
  * and codes, never file content or archive entry names). Step 4.3 U16: the `url` engine entry also
  * lists its per-URL results (`message_urls` + `url_scan_results`, the latest dynamic inspection,
  * a click summary from `url_click_events`) and the round's rewrite (`url_rewrites`); normalized
- * URLs, hosts, codes and counts, never page content, anchor text or titles.
+ * URLs, hosts, codes and counts, never page content, anchor text or titles. Step 4.4 B15: the
+ * `bec` engine entry carries its explainable verdict (`bec_scan_results`: versions, scores,
+ * thresholds, input states, fired rules with structured evidence, AI assessments, feedback
+ * references); never body text, span text, excerpts, response hashes, AI durations or history
+ * hashes.
  */
 
 /** Rounds per page (S16: at most 20). */
@@ -200,6 +216,55 @@ export const UrlRewriteViewSchema = z.object({
 });
 export type UrlRewriteView = z.output<typeof UrlRewriteViewSchema>;
 
+const BecScore = z.number().int().min(0).max(100);
+
+/** One fired rule (B15) with its evidence entries (≤ 5; B6 allows several per rule). */
+export const BecRuleViewSchema = z.object({
+  id: becRuleEntrySchema.shape.id,
+  code: becRuleEntrySchema.shape.code,
+  category: becRuleEntrySchema.shape.category,
+  severity: becRuleEntrySchema.shape.severity,
+  weight: becRuleEntrySchema.shape.weight.describe('bec-map/1 weight (0 effect when suppressed)'),
+  suppressed: becRuleEntrySchema.shape.suppressed.describe(
+    '`trust` (authenticated trusted sender) or `feedback` (a suppression rule); null = counted',
+  ),
+  evidence: z
+    .array(becRuleEvidenceSchema)
+    .max(BEC_MAX_EVIDENCE_ITEMS)
+    .describe(
+      'Structured evidence: header, parsed address/display name/domain, profile (public id), ' +
+        'lookalike, authentication, lexicon ids and span offsets (never text), URL seqs, ' +
+        'history buckets, trusted sender / suppression ids',
+    ),
+});
+
+/** The `bec` section of the `bec` engine entry (step 4.4 B15). */
+export const BecScanViewSchema = z.object({
+  rulesVersion: z.string(),
+  engineVersion: z.string(),
+  settingsVersion: z.string(),
+  lexiconVersion: z.string(),
+  verdict: becVerdictSchema.describe('Final verdict (after the AI layer)'),
+  deterministicVerdict: becVerdictSchema.describe('Verdict of the deterministic rules'),
+  score: BecScore,
+  deterministicScore: BecScore,
+  thresholds: z
+    .object({ suspicious: BecScore.nullable(), malicious: BecScore.nullable() })
+    .describe('The thresholds applied; null when the engine did not record them'),
+  inputs: becInputsSchema.nullable().describe('auth, url, text and history input states'),
+  rules: z.array(BecRuleViewSchema).max(BEC_MAX_RULES),
+  ai: z
+    .array(becAiAssessmentViewSchema)
+    .max(BEC_MAX_AI_ASSESSMENTS)
+    .describe('Applied assessments'),
+  aiShadow: z
+    .array(becAiShadowAssessmentViewSchema)
+    .max(BEC_MAX_AI_SHADOW_ASSESSMENTS)
+    .describe('Shadow assessments (never change the verdict)'),
+  feedback: z.array(becFeedbackRefSchema).max(BEC_MAX_FEEDBACK_REFS).describe('Newest first'),
+});
+export type BecScanView = z.output<typeof BecScanViewSchema>;
+
 export const ScanEngineResultSchema = z.object({
   engine: z.string(),
   final: z
@@ -230,18 +295,24 @@ export const ScanEngineResultSchema = z.object({
   rewrite: UrlRewriteViewSchema.nullable()
     .optional()
     .describe("Engine `url` only: the round's link rewriting; null before the final result"),
+  bec: BecScanViewSchema.nullable()
+    .optional()
+    .describe(
+      'Engine `bec` only (step 4.4 B15): the explainable verdict; null before the final ' +
+        'result and for failures',
+    ),
   durationMs: z
     .number()
     .int()
     .min(0)
     .nullable()
     .describe(
-      'Engine duration of the final result; always null for the `attachment` and `url` ' +
-        'engines, whose timing would reveal cross-tenant cache hits',
+      'Engine duration of the final result; always null for the `attachment`, `url` and ' +
+        '`bec` engines (cross-tenant cache hits; the AI layer’s timing)',
     ),
   settingsVersion: z.string().nullable(),
   completedAt: IsoDate.nullable().describe(
-    'Final result time (whole seconds for the `attachment` and `url` engines)',
+    'Final result time (whole seconds for the `attachment`, `url` and `bec` engines)',
   ),
 });
 export type ScanEngineResultView = z.output<typeof ScanEngineResultSchema>;
@@ -265,6 +336,9 @@ export const ScanAuthSchema = z.object({
 export type ScanAuthView = z.output<typeof ScanAuthSchema>;
 
 export const ScanRoundSchema = z.object({
+  scanId: z
+    .string()
+    .describe('Decimal id of the round (`{scanId}` of the BEC feedback route, step 4.4)'),
   round: z.number().int().min(0).describe('Lifecycle round the scan belongs to (0 = initial)'),
   scanKind: z.enum(['initial', 'rescan', 'release_revalidation', 'retro']),
   status: z.enum(['pending', 'running', 'completed', 'failed', 'timed_out']),

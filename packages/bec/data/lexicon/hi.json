@@ -1,0 +1,161 @@
+{
+  "language": "hi",
+  "version": 1,
+  "entries": [
+    {
+      "id": "hi.payment_request.001",
+      "category": "payment_request",
+      "phrase": "भुगतान कर दो"
+    },
+    {
+      "id": "hi.payment_request.002",
+      "category": "payment_request",
+      "phrase": "भुगतान कर दें"
+    },
+    {
+      "id": "hi.payment_request.003",
+      "category": "payment_request",
+      "phrase": "भुगतान करना है"
+    },
+    {
+      "id": "hi.payment_request.004",
+      "category": "payment_request",
+      "phrase": "पेमेंट कर दो"
+    },
+    {
+      "id": "hi.payment_request.005",
+      "category": "payment_request",
+      "phrase": "पैसे भेज दो"
+    },
+    {
+      "id": "hi.payment_request.006",
+      "category": "payment_request",
+      "phrase": "राशि भेज दें"
+    },
+    {
+      "id": "hi.bank_change.001",
+      "category": "bank_change",
+      "phrase": "बैंक खाता बदल"
+    },
+    {
+      "id": "hi.bank_change.002",
+      "category": "bank_change",
+      "phrase": "नया बैंक खाता"
+    },
+    {
+      "id": "hi.bank_change.003",
+      "category": "bank_change",
+      "phrase": "खाता संख्या बदल"
+    },
+    {
+      "id": "hi.bank_change.004",
+      "category": "bank_change",
+      "phrase": "नया खाता नंबर"
+    },
+    {
+      "id": "hi.bank_change.005",
+      "category": "bank_change",
+      "phrase": "बैंक विवरण बदल"
+    },
+    {
+      "id": "hi.gift_card.001",
+      "category": "gift_card",
+      "phrase": "गिफ्ट कार्ड"
+    },
+    {
+      "id": "hi.gift_card.002",
+      "category": "gift_card",
+      "phrase": "उपहार कार्ड"
+    },
+    {
+      "id": "hi.gift_card.003",
+      "category": "gift_card",
+      "phrase": "गिफ्ट कार्ड खरीद"
+    },
+    {
+      "id": "hi.gift_card.004",
+      "category": "gift_card",
+      "phrase": "कार्ड का कोड भेज"
+    },
+    {
+      "id": "hi.gift_card.005",
+      "category": "gift_card",
+      "phrase": "गिफ्ट वाउचर"
+    },
+    {
+      "id": "hi.wire_transfer.001",
+      "category": "wire_transfer",
+      "phrase": "पैसे ट्रांसफर"
+    },
+    {
+      "id": "hi.wire_transfer.002",
+      "category": "wire_transfer",
+      "phrase": "ट्रांसफर कर दो"
+    },
+    {
+      "id": "hi.wire_transfer.003",
+      "category": "wire_transfer",
+      "phrase": "राशि ट्रांसफर"
+    },
+    {
+      "id": "hi.wire_transfer.004",
+      "category": "wire_transfer",
+      "phrase": "बैंक ट्रांसफर"
+    },
+    {
+      "id": "hi.wire_transfer.005",
+      "category": "wire_transfer",
+      "phrase": "फंड ट्रांसफर"
+    },
+    {
+      "id": "hi.urgency.001",
+      "category": "urgency",
+      "phrase": "तुरंत"
+    },
+    {
+      "id": "hi.urgency.002",
+      "category": "urgency",
+      "phrase": "अभी"
+    },
+    {
+      "id": "hi.urgency.003",
+      "category": "urgency",
+      "phrase": "जल्दी"
+    },
+    {
+      "id": "hi.urgency.004",
+      "category": "urgency",
+      "phrase": "फौरन"
+    },
+    {
+      "id": "hi.urgency.005",
+      "category": "urgency",
+      "phrase": "आज ही"
+    },
+    {
+      "id": "hi.secrecy.001",
+      "category": "secrecy",
+      "phrase": "किसी को मत बताना"
+    },
+    {
+      "id": "hi.secrecy.002",
+      "category": "secrecy",
+      "phrase": "गोपनीय"
+    },
+    {
+      "id": "hi.secrecy.003",
+      "category": "secrecy",
+      "phrase": "किसी को न बताएं"
+    },
+    {
+      "id": "hi.secrecy.004",
+      "category": "secrecy",
+      "phrase": "यह बात हमारे बीच"
+    },
+    {
+      "id": "hi.secrecy.005",
+      "category": "secrecy",
+      "phrase": "चुपचाप"
+    }
+  ]
+}

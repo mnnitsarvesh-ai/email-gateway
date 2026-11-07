@@ -1,0 +1,51 @@
+{
+  "id": "vendor-name-freemail-bank-change",
+  "description": "Vendor name from free-mail announcing changed bank details.",
+  "label": "bec",
+  "input": {
+    "headers": {
+      "From": ["Globex Supplies <globex.supplies.billing@gmail.com>"],
+      "Subject": ["Change of bank details"]
+    },
+    "envelope": {
+      "envelopeFrom": "globex.supplies.billing@gmail.com"
+    },
+    "auth": {
+      "state": "available",
+      "row": {
+        "spf": "pass",
+        "spfDomain": "gmail.com",
+        "dkim": "pass",
+        "dkimSignatures": [
+          {
+            "domain": "gmail.com",
+            "result": "pass",
+            "selector": "s1"
+          }
+        ],
+        "dmarc": "pass",
+        "dmarcPolicy": "reject",
+        "dmarcDomain": "gmail.com",
+        "arc": null
+      }
+    },
+    "url": {
+      "state": "available",
+      "rows": []
+    },
+    "text": {
+      "subject": "Change of bank details",
+      "text": "Please note our new bank account details for all future payments. Use the new account from today, the old account is closed. Account number 123456789012, IFSC HDFC0001234.",
+      "html": null
+    }
+  },
+  "expected": {
+    "verdict": "suspicious",
+    "requiredCodes": [
+      "bec.impersonation.vendor_name",
+      "bec.content.bank_detail_change",
+      "bec.vendor.payment_change",
+      "bec.content.financial_identifiers"
+    ]
+  }
+}

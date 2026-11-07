@@ -1,0 +1,114 @@
+# Phishing/BEC engine alerts (step 4.4 B19, docs/plan/steps/12-phishing-bec.md). Series: the
+# email-worker's bec engine (scan_bec_*, bec_llm_*, bec_model_info, bec_history_*; labels verdict,
+# deterministic_verdict, code, input, state, layer, mode, status, effect, result, read, bounded
+# enums only, never an address, a domain, a name or an id), the generic scan series with
+# engine="bec" (scan_engine_results_total, scan_deadline_finalized_total, scan_stage_triggers_total)
+# and the topology vhost's queue series of job `rabbitmq-detailed`. Every alert links its section
+# of docs/runbooks/bec-detection.md. Validate with `promtool check rules` and
+# `promtool test rules tests/bec-scanning.rules.test.yml`.
+groups:
+  - name: bec-scanning
+    rules:
+      - alert: BecEngineFailuresHigh
+        # Final results only: an attempt that was retried successfully is not counted.
+        expr: >-
+          sum(rate(scan_engine_results_total{engine="bec",final="true",outcome=~"timeout|error"}[10m]))
+          / sum(rate(scan_engine_results_total{engine="bec",final="true"}[10m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: bec engine final failures above 5 %
+          description: >-
+            More than 5 % of the final bec engine results of the last 10 minutes are timeout or
+            error (text part reads, MySQL, inconsistent reads, text time budget). Their rounds end
+            scan_failed (never clean); rescan them after the cause is fixed. AI problems are never
+            engine failures.
+          runbook_url: docs/runbooks/bec-detection.md#becenginefailureshigh
+      - alert: BecScanQueueBacklog
+        expr: >-
+          max(rabbitmq_detailed_queue_messages_ready{vhost="email-gateway",queue="scan.bec"}) > 1000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: bec scan queue backlog
+          description: >-
+            scan.bec has had more than 1000 ready stage triggers for 10 minutes. Scale
+            email-worker-bec or check MySQL / S3 latency and the LLM layer (gated calls are bounded
+            by BEC_LLM_TIMEOUT_MS and BEC_LLM_CONCURRENCY).
+          runbook_url: docs/runbooks/bec-detection.md#becscanqueuebacklog
+      - alert: BecStageTriggerStall
+        # The deadline sweeper finalized a bec result as timeout/deadline_exceeded: the stage
+        # trigger was lost or nobody consumes scan.bec.
+        expr: sum(increase(scan_deadline_finalized_total{engine="bec"}[15m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: bec results finalized by the round deadline
+          description: >-
+            In the last 15 minutes the round deadline sweeper finalized at least one bec result as
+            timeout (deadline_exceeded): its scan_stage_ready.v1 trigger was not written, not
+            relayed, or not consumed (no email-worker-bec consumer on scan.bec). The rounds ended
+            scan_failed.
+          runbook_url: docs/runbooks/bec-detection.md#becstagetriggerstall
+      - alert: BecInputsUnavailableHigh
+        # Unavailable states per input: auth failed|missing|not_in_round, url failed|not_in_round,
+        # text incomplete, history error. history="disabled" is a tenant choice and text="absent"
+        # a message without text: neither counts.
+        expr: >-
+          sum by (input) (rate(scan_bec_inputs_total{state=~"failed|missing|not_in_round|incomplete|error"}[30m]))
+          / sum by (input) (rate(scan_bec_inputs_total{state!="disabled"}[30m])) > 0.10
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: bec input {{ $labels.input }} unavailable for more than 10 % of messages
+          description: >-
+            More than 10 % of the bec results of the last 30 minutes had input
+            {{ $labels.input }} unavailable. Those verdicts are at least unknown (never clean),
+            which raises the share of unknown results. Check the dependency engine (rspamd / url
+            failures or not required), the MIME limits (text incomplete) or MySQL (history).
+          runbook_url: docs/runbooks/bec-detection.md#becinputsunavailablehigh
+      - alert: BecLlmErrorsHigh
+        expr: >-
+          sum(rate(scan_bec_ai_total{layer="llm",status=~"error|timeout|invalid_output"}[15m]))
+          / sum(rate(scan_bec_ai_total{layer="llm",status!="gated"}[15m])) > 0.20
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: bec LLM assessments failing above 20 %
+          description: >-
+            More than 20 % of the LLM assessments of the last 15 minutes ended error, timeout or
+            invalid_output. Verdicts are unaffected (the AI layer never changes a verdict when it
+            fails, B9 P6) but the LLM adds nothing. Check the provider status, the API key, the
+            breaker (bec_llm_breaker_state) and BEC_LLM_TIMEOUT_MS.
+          runbook_url: docs/runbooks/bec-detection.md#becllmerrorshigh
+      - alert: BecLlmBudgetExhausted
+        expr: >-
+          sum by (result) (increase(bec_llm_budget_total{result=~"tenant_exhausted|platform_exhausted"}[15m])) > 0
+        labels:
+          severity: info
+        annotations:
+          summary: bec LLM budget exhausted ({{ $labels.result }})
+          description: >-
+            LLM calls were refused by the {{ $labels.result }} budget in the last 15 minutes
+            (per-tenant daily or platform per-minute window). Those assessments are
+            budget_exceeded; verdicts are the deterministic ones.
+          runbook_url: docs/runbooks/bec-detection.md#becllmbudgetexhausted
+      - alert: BecMaliciousRateSpike
+        expr: >-
+          sum(rate(scan_bec_results_total{verdict="malicious"}[1h]))
+          > 3 * sum(rate(scan_bec_results_total{verdict="malicious"}[1d]))
+          and sum(increase(scan_bec_results_total{verdict="malicious"}[1h])) > 10
+        for: 15m
+        labels:
+          severity: info
+        annotations:
+          summary: bec malicious verdicts above 3x the daily average
+          description: >-
+            The hourly rate of malicious bec verdicts is more than three times the 1-day average
+            (and above 10 in the hour): a campaign, or a rule / profile / model change producing
+            false positives. Compare scan_bec_rules_total by code.
+          runbook_url: docs/runbooks/bec-detection.md#becmaliciousratespike

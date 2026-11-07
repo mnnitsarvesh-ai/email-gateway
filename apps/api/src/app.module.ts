@@ -17,6 +17,7 @@ import type { ApiConfig } from './config';
 import { MetaModule } from './meta/meta.module';
 import { ApiKeysModule } from './modules/api-keys/api-keys.module';
 import { AuthModule } from './modules/auth/auth.module';
+import { BecModule } from './modules/bec/bec.module';
 import { DeadLettersModule } from './modules/dead-letters/dead-letters.module';
 import { DeliveriesModule } from './modules/deliveries/deliveries.module';
 import { DomainDestinationsModule } from './modules/domain-destinations/domain-destinations.module';
@@ -77,6 +78,8 @@ export class AppModule {
         DeadLettersModule,
         // Step 4.1 S8, S13, S16: scan settings (tenant) and classifier training (platform).
         ScansModule,
+        // Step 4.4 B18: BEC profiles, trusted senders, feedback, export and history purge.
+        BecModule,
       ],
       providers: [{ provide: API_CONFIG, useValue: config }],
       exports: [API_CONFIG],

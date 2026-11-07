@@ -9,6 +9,7 @@ import { type Prisma, processOnce, type PrismaClient } from '@email-gateway/data
 import {
   attachmentSandboxRequestedV1,
   EventTypes,
+  messageScanStageReadyV1,
   messageScannedV1,
   urlInspectionRequestedV1,
 } from '@email-gateway/event-contracts';
@@ -20,7 +21,12 @@ import {
   transitionMessage,
 } from '@email-gateway/message-lifecycle';
 import { aggregateRound, type FinalEngineResult } from './aggregate';
-import type { AttachmentResultInput, SandboxSubmissionInput, UrlChildRows } from './engine';
+import type {
+  AttachmentResultInput,
+  BecChildRows,
+  SandboxSubmissionInput,
+  UrlChildRows,
+} from './engine';
 import type { EngineSettingsRow } from './registry';
 import {
   type AttemptInput,
@@ -36,6 +42,7 @@ import {
   type ScanMessageRecord,
   type ScanRound,
   type ScanStore,
+  stageTriggersFor,
   type SweepCandidate,
   type SweepResult,
 } from './scan-store';
@@ -54,6 +61,17 @@ export const SCANNER_ACTOR: TransitionActor = {
 const MAX_ENVELOPE_RECIPIENTS = 1_000;
 
 const json = (value: unknown): Prisma.InputJsonValue => value as Prisma.InputJsonValue;
+
+/** Most `infra` fingerprints kept per sender history row (B12, LRU by `lastSeenAt`). */
+export const BEC_HISTORY_MAX_INFRA = 8;
+/** `bec_contact_history` counters saturate at 2^32 - 1 (INT UNSIGNED). */
+const UINT32_MAX = 4_294_967_295;
+
+/** Optional observers of child-row writes (metrics; never content). */
+export interface ScanRepositoryHooks {
+  /** One `bec_contact_history` upsert: `inserted` (new row) or `updated`. */
+  becHistory?(result: 'inserted' | 'updated'): void;
+}
 
 /** What the child rows of a final need beyond the round (sandbox events, step 4.2 A11). */
 interface ChildRowContext {
@@ -113,6 +131,7 @@ export class ScanRepository implements ScanStore {
     /** SCAN_DB_TIMEOUT_MS: timeout and maxWait of every writer transaction. */
     txTimeoutMs: number,
     private readonly lifecycleMetrics?: LifecycleMetrics,
+    private readonly hooks: ScanRepositoryHooks = {},
   ) {
     this.txPrisma = withTransactionDefaults(prisma, { timeoutMs: txTimeoutMs });
   }
@@ -184,6 +203,23 @@ export class ScanRepository implements ScanStore {
       if (!snapshot) return { kind: 'skip', reason: 'message_not_found' };
       const decision = decideOpen(snapshot, input.round, input.trigger);
       if (decision.action === 'skip') return { kind: 'skip', reason: decision.reason };
+
+      if (input.trigger === 'stage' && decision.action === 'open') {
+        // B2: a stage trigger joins the round stage-1 engines opened, never creates one; the
+        // round must exist with the scan id the trigger names.
+        const scan = await this.findScan(tx, message, input.round);
+        if (!scan || input.scanId === undefined || scan.scanId !== input.scanId) {
+          return { kind: 'skip', reason: 'stage_round_missing' };
+        }
+        const rows = await this.engineRows(tx, scan, input.engine);
+        return {
+          kind: 'open',
+          round: scan,
+          finalExists: rows.finalExists,
+          attempts: rows.attempts,
+          opened: false,
+        };
+      }
 
       if (decision.action === 'check_final') {
         // A completed round of this engine: a duplicate (its final row exists); otherwise the
@@ -295,10 +331,18 @@ export class ScanRepository implements ScanStore {
           inserted = true;
         }
       }
+      const stageTriggers: string[] = [];
       const completion = scan
-        ? await this.complete(tx, scan, snapshot, input.completion)
+        ? await this.complete(
+            tx,
+            scan,
+            snapshot,
+            input.completion,
+            inserted && input.final ? input.final.engine : null,
+            stageTriggers,
+          )
         : ({ kind: 'already_completed' } as const);
-      return { inserted, completion };
+      return { inserted, completion, stageTriggers };
     });
     return result.status === 'duplicate'
       ? { kind: 'duplicate' }
@@ -535,6 +579,123 @@ export class ScanRepository implements ScanStore {
       if (!context) throw new NonRetryableError('url_context_missing');
       await this.insertUrlRows(tx, scan, children.urls, context);
     }
+    if (children?.bec) await this.insertBecRows(tx, scan, children.bec);
+  }
+
+  /**
+   * The bec engine's child rows (step 4.4 B14), in the final row's transaction, only when the
+   * final row was inserted: the `bec_scan_results` row (unique per scan) and, for round 0 of an
+   * initial scan only (B12), the history upserts — `INSERT … ON DUPLICATE KEY UPDATE` in sorted
+   * key order (deadlock-free), at most 51 rows, counters saturating at 2^32 − 1, first/last seen
+   * as LEAST/GREATEST of the message's `received_at`; the sender row's `infra` JSON is a
+   * read-modify-write under `SELECT … FOR UPDATE` (bounded to 8 fingerprints, LRU). No plaintext
+   * address reaches these rows: keys are the engine's HMACs.
+   */
+  private async insertBecRows(
+    tx: Prisma.TransactionClient,
+    scan: ScanRound,
+    rows: BecChildRows,
+  ): Promise<void> {
+    const { result } = rows;
+    if (result.lifecycleRound !== scan.round) throw new NonRetryableError('bec_round_mismatch');
+    await tx.becScanResult.createMany({
+      data: [
+        {
+          receivedAt: scan.receivedAt,
+          messageId: scan.messageId,
+          organizationId: scan.organizationId,
+          scanId: scan.scanId,
+          lifecycleRound: scan.round,
+          engineVersion: result.engineVersion,
+          rulesVersion: result.rulesVersion,
+          settingsVersion: result.settingsVersion,
+          lexiconVersion: result.lexiconVersion,
+          textVersion: result.textVersion,
+          deterministicScore: Math.min(100, Math.max(0, Math.round(result.deterministicScore))),
+          score: Math.min(100, Math.max(0, Math.round(result.score))),
+          deterministicVerdict: result.deterministicVerdict,
+          verdict: result.verdict,
+          inputs: json(result.inputs),
+          rules: json(result.rules),
+          ...(result.features ? { features: json(result.features) } : {}),
+          ...(result.identity ? { identity: json(result.identity) } : {}),
+          ...(result.ai ? { ai: json(result.ai) } : {}),
+          ...(result.aiShadow ? { aiShadow: json(result.aiShadow) } : {}),
+          durationMs: Math.max(0, Math.round(result.durationMs)),
+        },
+      ],
+      skipDuplicates: true,
+    });
+    if (rows.history.length === 0 || scan.round !== 0 || scan.scanKind !== 'initial') return;
+    const updates = [...rows.history]
+      .sort((a, b) =>
+        a.scope === b.scope
+          ? a.keyHash < b.keyHash
+            ? -1
+            : a.keyHash > b.keyHash
+              ? 1
+              : 0
+          : a.scope < b.scope
+            ? -1
+            : 1,
+      )
+      .slice(0, 51);
+    for (const update of updates) {
+      if (!/^[0-9a-f]{64}$/.test(update.keyHash)) throw new NonRetryableError('bec_history_key');
+      const affected = await tx.$executeRaw`
+        INSERT INTO bec_contact_history
+          (organization_id, scope, key_hash, message_count, inbound_count, outbound_count,
+           first_seen_at, last_seen_at, created_at, updated_at)
+        VALUES
+          (${scan.organizationId}, ${update.scope}, ${update.keyHash}, 1, ${update.inbound},
+           ${update.outbound}, ${update.receivedAt}, ${update.receivedAt}, NOW(3), NOW(3))
+          AS fresh
+        ON DUPLICATE KEY UPDATE
+          message_count = LEAST(bec_contact_history.message_count + 1, ${UINT32_MAX}),
+          inbound_count = LEAST(bec_contact_history.inbound_count + fresh.inbound_count, ${UINT32_MAX}),
+          outbound_count = LEAST(bec_contact_history.outbound_count + fresh.outbound_count, ${UINT32_MAX}),
+          first_seen_at = LEAST(bec_contact_history.first_seen_at, fresh.first_seen_at),
+          last_seen_at = GREATEST(bec_contact_history.last_seen_at, fresh.last_seen_at),
+          updated_at = NOW(3)`;
+      // MySQL: 1 = inserted, 2 = updated (0 = updated to identical values).
+      this.hooks.becHistory?.(affected === 1 ? 'inserted' : 'updated');
+      if (update.scope === 'sender' && update.fingerprintHash !== null) {
+        await this.updateInfra(tx, scan.organizationId, update.keyHash, {
+          fp: update.fingerprintHash,
+          seenAt: update.receivedAt,
+        });
+      }
+    }
+  }
+
+  /** B12: the sender row's `infra` fingerprints, read and rewritten under its row lock. */
+  private async updateInfra(
+    tx: Prisma.TransactionClient,
+    organizationId: bigint,
+    keyHash: string,
+    entry: { fp: string; seenAt: Date },
+  ): Promise<void> {
+    const found = await tx.$queryRaw<
+      Array<{ organization_id: bigint; scope: string; key_hash: string; infra: unknown }>
+    >`
+      SELECT organization_id, scope, key_hash, infra FROM bec_contact_history
+      WHERE organization_id = ${organizationId} AND scope = 'sender' AND key_hash = ${keyHash}
+      FOR UPDATE`;
+    const row = found[0];
+    if (
+      !row ||
+      found.length !== 1 ||
+      BigInt(row.organization_id) !== organizationId ||
+      row.scope !== 'sender' ||
+      row.key_hash !== keyHash
+    ) {
+      // The upsert above created or updated this row in the same transaction.
+      throw new Error('inconsistent bec_contact_history read-back');
+    }
+    const infra = mergeInfra(row.infra, entry);
+    await tx.$executeRaw`
+      UPDATE bec_contact_history SET infra = ${JSON.stringify(infra)}, updated_at = NOW(3)
+      WHERE organization_id = ${organizationId} AND scope = 'sender' AND key_hash = ${keyHash}`;
   }
 
   /**
@@ -818,6 +979,8 @@ export class ScanRepository implements ScanStore {
     scan: ScanRound,
     snapshot: LifecycleSnapshot | null,
     ctx: CompletionContext,
+    insertedEngine: string | null = null,
+    stageTriggers: string[] = [],
   ): Promise<CompletionResult> {
     const row = await this.lockScanRow(tx, scan.scanId, scan.receivedAt);
     if (!row || row.status !== 'running') return { kind: 'already_completed' };
@@ -827,6 +990,17 @@ export class ScanRepository implements ScanStore {
       select: { engine: true, outcome: true, errorCode: true, reasonCodes: true, attempt: true },
     });
     const required = round.requiredEngines;
+    // Step 4.4 B2: before the "not complete" return, trigger the stage-2 engines whose last
+    // dependency final this transaction inserted (both locks held, finals read after them).
+    // A message whose row is gone (deleted while its round was open: an organization purge, a
+    // test's cleanup) has nothing left to scan: no trigger is written (its payload would lack
+    // the direction and EML key and dead-letter a valid delivery), as the scanned transition
+    // below is not applied either (step 4.4 §12 WP5).
+    const triggers = snapshot ? stageTriggersFor(required, finals, insertedEngine) : [];
+    for (const trigger of triggers) {
+      await this.writeStageTrigger(tx, round, snapshot, ctx, trigger);
+      stageTriggers.push(trigger.engine);
+    }
     if (!required.every((engine) => finals.some((f) => f.engine === engine))) {
       return { kind: 'not_complete' };
     }
@@ -916,4 +1090,90 @@ export class ScanRepository implements ScanStore {
     });
     return { kind: 'completed', aggregate, round, transition: 'applied', scannedEventId };
   }
+
+  /**
+   * One `mail.message.scan_stage_ready.v1` outbox row (B2): ids, codes and keys only, validated
+   * by the event contract (a violation never commits half a finalization: the delivery is
+   * dead-lettered, as `scanned_payload_invalid`).
+   */
+  private async writeStageTrigger(
+    tx: Prisma.TransactionClient,
+    round: ScanRound,
+    snapshot: LifecycleSnapshot | null,
+    ctx: CompletionContext,
+    trigger: { engine: string; dependencies: Array<{ engine: string; outcome: string }> },
+  ): Promise<void> {
+    const parsed = messageScanStageReadyV1.safeParse({
+      messageId: round.messageId.toString(),
+      receivedAt: round.receivedAt.toISOString(),
+      direction: snapshot?.direction,
+      emlS3Key: snapshot?.emlObjectKey,
+      lifecycleRound: round.round,
+      scanId: round.scanId.toString(),
+      scanKind: round.scanKind,
+      engine: trigger.engine,
+      dependencies: trigger.dependencies,
+      readyAt: ctx.now.toISOString(),
+    });
+    if (!parsed.success) throw new NonRetryableError('stage_ready_payload_invalid');
+    await tx.messageOutbox.create({
+      data: {
+        eventId: uuidv7(ctx.now.getTime()),
+        organizationId: round.organizationId,
+        eventType: EventTypes.MessageScanStageReady,
+        aggregateType: 'message',
+        aggregateId: round.messageId.toString(),
+        correlationId: ctx.correlationId,
+        payload: parsed.data,
+      },
+      select: { id: true },
+    });
+  }
+}
+
+/** One `infra` entry of a sender history row (B12). */
+interface InfraEntry {
+  fp: string;
+  count: number;
+  lastSeenAt: string;
+}
+
+/**
+ * Adds or refreshes one fingerprint in a sender row's `infra` JSON (B12): count + 1 (saturating),
+ * `lastSeenAt` = the later of the stored and this message's time; at most 8 entries, the least
+ * recently seen dropped. Malformed stored entries are dropped. Pure.
+ */
+export function mergeInfra(stored: unknown, entry: { fp: string; seenAt: Date }): InfraEntry[] {
+  let parsed: unknown = stored;
+  if (typeof stored === 'string') {
+    try {
+      parsed = JSON.parse(stored);
+    } catch {
+      parsed = null;
+    }
+  }
+  const list: InfraEntry[] = [];
+  if (Array.isArray(parsed)) {
+    for (const item of parsed.slice(0, 64)) {
+      if (typeof item !== 'object' || item === null) continue;
+      const { fp, count, lastSeenAt } = item as Record<string, unknown>;
+      if (typeof fp !== 'string' || !/^[0-9a-f]{16}$/.test(fp)) continue;
+      if (typeof count !== 'number' || !Number.isFinite(count) || count < 0) continue;
+      if (typeof lastSeenAt !== 'string' || Number.isNaN(Date.parse(lastSeenAt))) continue;
+      if (list.some((e) => e.fp === fp)) continue;
+      list.push({ fp, count: Math.floor(count), lastSeenAt });
+    }
+  }
+  const existing = list.find((e) => e.fp === entry.fp);
+  if (existing) {
+    existing.count = Math.min(UINT32_MAX, existing.count + 1);
+    if (Date.parse(existing.lastSeenAt) < entry.seenAt.getTime()) {
+      existing.lastSeenAt = entry.seenAt.toISOString();
+    }
+  } else {
+    list.push({ fp: entry.fp, count: 1, lastSeenAt: entry.seenAt.toISOString() });
+  }
+  return list
+    .sort((a, b) => Date.parse(b.lastSeenAt) - Date.parse(a.lastSeenAt) || (a.fp < b.fp ? -1 : 1))
+    .slice(0, BEC_HISTORY_MAX_INFRA);
 }

@@ -180,8 +180,38 @@ const MAX_MESSAGE_URLS = 1_000;
 /** Most per-URL result / inspection rows one page reads: ≤ 20 rounds × 200 URLs. */
 const MAX_URL_RESULT_ROWS = 4_000;
 
+const becResultSelect = {
+  scanId: true,
+  engineVersion: true,
+  rulesVersion: true,
+  settingsVersion: true,
+  lexiconVersion: true,
+  deterministicScore: true,
+  score: true,
+  deterministicVerdict: true,
+  verdict: true,
+  inputs: true,
+  rules: true,
+  ai: true,
+  aiShadow: true,
+  // Not `identity` / `features` / `duration_ms` / `text_version`: B15 shows the evidence of the
+  // rules only; the AI layer's durations are never shown.
+} satisfies Prisma.BecScanResultSelect;
+
+export type BecResultRow = Prisma.BecScanResultGetPayload<{ select: typeof becResultSelect }>;
+
+export interface BecFeedbackRefRow {
+  scanId: bigint;
+  publicId: string;
+  kind: 'false_positive' | 'false_negative';
+  createdAt: Date;
+}
+
+/** Most feedback references one page reads: ≤ 20 rounds × BEC_MAX_FEEDBACK_REFS (50). */
+const MAX_BEC_FEEDBACK_ROWS = 1_000;
+
 /**
- * Read-only, tenant-scoped scan reads (step 4.1 S16; 4.2 attachments; 4.3 URLs) on the replica (`PrismaReadService`, with
+ * Read-only, tenant-scoped scan reads (step 4.1 S16; 4.2 attachments; 4.3 URLs; 4.4 BEC) on the replica (`PrismaReadService`, with
  * the writer fallback above the lag threshold; ADR-0014, §2.0 invariant 6). Every query matches
  * the organization of the caller's scope and the message's `(message_id, received_at)`, so the
  * partitioned tables are pruned and another tenant's rows are never read.
@@ -373,6 +403,90 @@ export class MessageScansReadRepository {
       select: urlInspectionSelect,
       take: MAX_URL_RESULT_ROWS,
     });
+  }
+
+  /** The BEC results of the given scans (`bec_scan_results`, one per scan, step 4.4 B15). */
+  becResults(
+    scope: TenantScope,
+    message: LifecycleMessageRow,
+    scanIds: readonly bigint[],
+  ): Promise<BecResultRow[]> {
+    if (scanIds.length === 0) return Promise.resolve([]);
+    return this.db.becScanResult.findMany({
+      where: tenantWhere(scope, {
+        messageId: message.id,
+        receivedAt: message.receivedAt,
+        scanId: { in: [...scanIds] },
+      }),
+      select: becResultSelect,
+      orderBy: { scanId: 'desc' },
+      take: scanIds.length,
+    });
+  }
+
+  /** The feedback references of the given scans (`bec_feedback`), newest first. */
+  becFeedback(
+    scope: TenantScope,
+    message: LifecycleMessageRow,
+    scanIds: readonly bigint[],
+  ): Promise<BecFeedbackRefRow[]> {
+    if (scanIds.length === 0) return Promise.resolve([]);
+    return this.db.becFeedback.findMany({
+      where: tenantWhere(scope, { messageId: message.id, scanId: { in: [...scanIds] } }),
+      select: { scanId: true, publicId: true, kind: true, createdAt: true },
+      orderBy: { id: 'desc' },
+      take: MAX_BEC_FEEDBACK_ROWS,
+    });
+  }
+
+  /**
+   * Public ids of the organization's BEC profiles, trusted senders and suppressions referenced
+   * by internal id in stored evidence (only queried when a result references internal ids).
+   */
+  async becPublicIds(
+    scope: TenantScope,
+    ids: { executive: bigint[]; vendor: bigint[]; trusted: bigint[]; suppression: bigint[] },
+  ): Promise<{
+    executive: Map<string, string>;
+    vendor: Map<string, string>;
+    trusted: Map<string, string>;
+    suppression: Map<string, string>;
+  }> {
+    const select = { id: true, publicId: true } as const;
+    const toMap = (rows: Array<{ id: bigint; publicId: string }>) =>
+      new Map(rows.map((row) => [row.id.toString(), row.publicId]));
+    const [executive, vendor, trusted, suppression] = await Promise.all([
+      ids.executive.length === 0
+        ? []
+        : this.db.becExecutiveProfile.findMany({
+            where: tenantWhere(scope, { id: { in: ids.executive } }),
+            select,
+          }),
+      ids.vendor.length === 0
+        ? []
+        : this.db.becVendorProfile.findMany({
+            where: tenantWhere(scope, { id: { in: ids.vendor } }),
+            select,
+          }),
+      ids.trusted.length === 0
+        ? []
+        : this.db.becTrustedSender.findMany({
+            where: tenantWhere(scope, { id: { in: ids.trusted } }),
+            select,
+          }),
+      ids.suppression.length === 0
+        ? []
+        : this.db.becSuppressionRule.findMany({
+            where: tenantWhere(scope, { id: { in: ids.suppression } }),
+            select,
+          }),
+    ]);
+    return {
+      executive: toMap(executive),
+      vendor: toMap(vendor),
+      trusted: toMap(trusted),
+      suppression: toMap(suppression),
+    };
   }
 
   /**

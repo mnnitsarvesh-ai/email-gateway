@@ -50,6 +50,7 @@ export class DeliveryMetrics {
   readonly outboxInvalid: Counter<'consumer'>;
   readonly inconsistentReads: Counter<'read'>;
   readonly contextMissing: Counter<'result'>;
+  readonly becAiOnlyNotHeld: Counter;
 
   constructor(metrics: MetricsService) {
     this.approvals = metrics.counter(
@@ -59,7 +60,7 @@ export class DeliveryMetrics {
     );
     this.approvalsSkipped = metrics.counter(
       'delivery_approvals_skipped_total',
-      'Scanned messages the dev pass-through did not approve: scan_failed (a required engine failed), malicious_verdict (held in scanned, step 4.2 A15) or the lifecycle refused the approval (lifecycle_<result>)',
+      'Scanned messages the dev pass-through did not approve: scan_failed (a required engine failed), malicious_verdict (held in scanned, step 4.2 A15), bec_verdict (a suspicious or malicious bec engine result, held in scanned, step 4.4 B17) or the lifecycle refused the approval (lifecycle_<result>)',
       ['reason'],
     );
     this.approvalsRejected = metrics.counter(
@@ -139,8 +140,12 @@ export class DeliveryMetrics {
     );
     this.inconsistentReads = metrics.counter(
       'delivery_inconsistent_reads_total',
-      'Writer reads of the reinjector whose identifying columns did not echo the request (message, deliveries, recipients, approval); the row is rescheduled with the attempt refunded (step 4.2 §6.2)',
+      'Writer reads whose identifying columns did not echo the request: the reinjector (message, deliveries, recipients, approval; the row is rescheduled with the attempt refunded, step 4.2 §6.2) and the dev pass-through (url_rewrite, bec_result; the event is redelivered)',
       ['read'],
+    );
+    this.becAiOnlyNotHeld = metrics.counter(
+      'delivery_bec_ai_only_not_held_total',
+      'Dev pass-through: scanned messages whose bec result was raised to suspicious by the AI layer alone (deterministic verdict clean or unknown) and therefore not held (step 4.4 B17, ADR-0034)',
     );
     this.contextMissing = metrics.counter(
       'delivery_reinjection_context_missing_total',

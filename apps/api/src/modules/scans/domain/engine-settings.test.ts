@@ -1,5 +1,6 @@
 import {
   ATTACHMENT_PLATFORM_DEFAULTS,
+  BEC_PLATFORM_DEFAULTS,
   RSPAMD_PLATFORM_DEFAULTS,
   type RspamdPlatformSettings,
   URL_PLATFORM_DEFAULTS,
@@ -10,6 +11,7 @@ import {
   type EngineSettingsDefinition,
   engineSettingsDefinitions,
   holdsOverride,
+  normalizeBecOverrideDomains,
   normalizeUrlOverrideDomains,
   type PlatformEngineSettings,
 } from './engine-settings';
@@ -21,16 +23,18 @@ const platforms = (
   rspamd: { ...RSPAMD_PLATFORM_DEFAULTS, ...rspamd },
   attachment: ATTACHMENT_PLATFORM_DEFAULTS,
   url,
+  bec: BEC_PLATFORM_DEFAULTS,
 });
 const rspamd = engineSettingsDefinitions(platforms()).get('rspamd')!;
 const updatedAt = new Date('2026-11-05T09:00:00Z');
 
 describe('engine settings (step 4.1 S8, S16)', () => {
-  it('defines settings for the catalog engines rspamd, attachment and url (catalog order)', () => {
+  it('defines settings for the catalog engines rspamd, attachment, url and bec (catalog order)', () => {
     expect([...engineSettingsDefinitions(platforms()).keys()]).toEqual([
       'rspamd',
       'attachment',
       'url',
+      'bec',
     ]);
   });
 
@@ -347,5 +351,102 @@ describe('url engine settings (step 4.3 U13)', () => {
       rewrite: { excludedDomains: ['b.example'] },
     });
     expect(normalizeUrlOverrideDomains('x')).toEqual({ override: 'x', violations: [] });
+  });
+});
+
+describe('bec engine settings (step 4.4 B13)', () => {
+  const bec = engineSettingsDefinitions(platforms()).get('bec')!;
+
+  it('views the platform settings, bounds and defaults without an override', () => {
+    const view = bec.view(null);
+    expect(view).toMatchObject({
+      engine: 'bec',
+      required: true,
+      tenantMayDisable: false,
+      platform: { suspiciousScore: 40, maliciousScore: 80, llmMode: 'off' },
+      bounds: {
+        suspiciousScore: { min: 25, max: 60 },
+        maliciousScore: { min: 60, max: 95 },
+        freemailExtraDomains: { maxItems: 100 },
+        history: { enabled: [false, true], retentionDays: { min: 30, max: 730 } },
+        ai: {
+          localModel: ['off', 'shadow'],
+          llm: ['off'],
+          llmDailyCallLimit: { min: 1, max: 1000 },
+          raiseConfidence: { min: 0.6, max: 0.99 },
+        },
+      },
+      override: null,
+      effective: {
+        suspiciousScore: 40,
+        maliciousScore: 80,
+        freemailExtraDomains: [],
+        history: { enabled: false, retentionDays: 365 },
+        ai: { localModel: 'shadow', llm: 'off', maliciousBand: 10 },
+      },
+      overrideApplied: false,
+      version: 0,
+    });
+  });
+
+  it('normalizes free-mail domains and refuses public suffixes and IP literals', () => {
+    const ok = bec.check({ freemailExtraDomains: ['Mail.Example', 'bücher.example'] });
+    expect(ok).toEqual({
+      ok: true,
+      settings: { freemailExtraDomains: ['mail.example', 'xn--bcher-kva.example'] },
+    });
+    expect(bec.check({ freemailExtraDomains: ['co.uk', '10.0.0.1'] })).toMatchObject({
+      ok: false,
+      violations: [
+        { path: 'freemailExtraDomains.0', code: 'invalid' },
+        { path: 'freemailExtraDomains.1', code: 'invalid' },
+      ],
+    });
+    const input = { freemailExtraDomains: ['A.Example'] };
+    expect(normalizeBecOverrideDomains(input).override).toEqual({
+      freemailExtraDomains: ['a.example'],
+    });
+    expect(input.freemailExtraDomains).toEqual(['A.Example']);
+  });
+
+  it('enforces bounds, the threshold order, mode caps and unknown keys', () => {
+    const codes = (override: unknown) => {
+      const r = bec.check(override);
+      return r.ok ? [] : r.violations.map((v) => `${v.path}:${v.code}`);
+    };
+    expect(codes({ suspiciousScore: 20 })).toEqual(['suspiciousScore:out_of_bounds']);
+    expect(codes({ maliciousScore: 96 })).toEqual(['maliciousScore:out_of_bounds']);
+    expect(codes({ suspiciousScore: 60, maliciousScore: 60 })).toEqual([
+      'suspiciousScore:threshold_order',
+    ]);
+    expect(codes({ ai: { llm: 'shadow' } })).toEqual(['ai.llm:out_of_bounds']);
+    expect(codes({ ai: { localModel: 'active' } })).toEqual(['ai.localModel:out_of_bounds']);
+    expect(codes({ ai: { llmDailyCallLimit: 1001 } })).toEqual([
+      'ai.llmDailyCallLimit:out_of_bounds',
+    ]);
+    expect(codes({ history: { retentionDays: 731 } })).toEqual([
+      'history.retentionDays:out_of_bounds',
+    ]);
+    expect(codes({ aiMaliciousBand: 5 })).toEqual(['aiMaliciousBand:unknown_key']);
+    expect(
+      bec.check({ suspiciousScore: 30, history: { enabled: true, retentionDays: 90 } }),
+    ).toEqual({
+      ok: true,
+      settings: { suspiciousScore: 30, history: { enabled: true, retentionDays: 90 } },
+    });
+  });
+
+  it('lets a raised platform cap allow the LLM and ignores an override above a lowered cap', () => {
+    const raised = engineSettingsDefinitions({
+      ...platforms(),
+      bec: { ...BEC_PLATFORM_DEFAULTS, llmMode: 'active' },
+    }).get('bec')!;
+    expect(raised.check({ ai: { llm: 'active' } }).ok).toBe(true);
+    const view = bec.view({ settings: { ai: { llm: 'active' } }, version: 2, updatedAt });
+    expect(view.overrideApplied).toBe(false);
+    expect(view).toMatchObject({ effective: { ai: { llm: 'off' } }, version: 2 });
+    expect(view.violations).toEqual([
+      expect.objectContaining({ path: 'ai.llm', code: 'out_of_bounds' }),
+    ]);
   });
 });

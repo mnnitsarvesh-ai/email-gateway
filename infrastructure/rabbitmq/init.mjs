@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-// RabbitMQ provisioning for topology v5 (step 3.2 Q5, Q10, ADR-0024; v2: step 3.3 L7; v3: step
-// 4.1 S2, ADR-0026; v4: step 4.2 A2, ADR-0028; v5: step 4.3 U2, ADR-0029). The only code that
-// declares broker objects: services verify passively and their users cannot configure.
+// RabbitMQ provisioning for topology v6 (step 3.2 Q5, Q10, ADR-0024; v2: step 3.3 L7; v3: step
+// 4.1 S2, ADR-0026; v4: step 4.2 A2, ADR-0028; v5: step 4.3 U2, ADR-0029; v6: step 4.4 B3,
+// ADR-0033). The only code that declares broker objects: services verify passively and their
+// users cannot configure.
 //
 //   node init.mjs [--vhost <name>] [--mgmt-url <url>] [--definitions <path>]
 //                 [--users] [--cleanup-legacy] [--legacy-vhost <name>]
@@ -25,7 +26,7 @@
 //   6. --cleanup-legacy: delete the ADR-0005 objects on vhost "/" only when empty (queues with
 //      no messages and no consumers; RabbitMQ 4.x refuses `if-empty` deletes of quorum queues,
 //      so emptiness is checked first); --legacy-vhost points it at another vhost (tests only);
-//   7. verify: exactly the 6 exchanges and 16 quorum queues, exactly the bindings of the
+//   7. verify: exactly the 6 exchanges and 17 quorum queues, exactly the bindings of the
 //      definitions (no missing and no extra binding), every policy applied, and (--users) each
 //      role user's permissions and topic permissions exactly.
 // Exits non-zero on any failure. Logs object names and counts only: never a password, never a
@@ -63,8 +64,15 @@ const topic = (exchange, write) => ({ exchange, write, read: '^$' });
  * publishes only its own result event key (`mail.url.inspection_completed.v1`, direct publish with
  * confirms) and its queue's retry/dead-letter hops; it configures nothing. ops may replay the
  * three new work queues. The click-service has no broker user (its events go through the outbox).
+ *
+ * Topology v6 (step 4.4 B3) extends the scanner to the phishing/BEC engine's work queue scan.bec
+ * (same user and image; the stage-2 trigger mail.message.scan_stage_ready.v1 is written to the
+ * outbox and published by the relay, which already publishes `org.` keys to email.security) and
+ * gives ops the retry hops of scan.bec. The scanner's retry/dead-letter keys keep the `.org.`
+ * anchoring of v5 (`bec` is no dot-prefix of another queue, so it needs none, but one pattern
+ * serves every scanner queue).
  */
-const SCANNER_QUEUES = '(spam|attachment|url|url\\.results)';
+const SCANNER_QUEUES = '(spam|attachment|url|url\\.results|bec)';
 const ROLE_USERS = [
   {
     role: 'relay',
@@ -89,7 +97,8 @@ const ROLE_USERS = [
   },
   {
     // Step 4.1 S1/S2: the email-worker scan role has its own broker user (least privilege).
-    // Step 4.2 A2 (v4): the same user consumes scan.attachment (the attachment engine).
+    // Step 4.2 A2 (v4): the same user consumes scan.attachment (the attachment engine); step 4.3
+    // (v5) scan.url and scan.url.results; step 4.4 B3 (v6) scan.bec (the BEC engine).
     role: 'scanner',
     userKey: 'RABBITMQ_SCANNER_USER',
     passwordKey: 'RABBITMQ_SCANNER_PASSWORD',
@@ -136,14 +145,17 @@ const ROLE_USERS = [
     passwordKey: 'RABBITMQ_OPS_PASSWORD',
     configure: '^$',
     // Replay republishes only to the home exchanges of the replayable work queues (Q9); v3 adds
-    // scan.spam, v4 scan.attachment, v5 scan.url, scan.url.inspect and scan.url.results (home
-    // exchange email.security).
+    // scan.spam, v4 scan.attachment, v5 scan.url, scan.url.inspect and scan.url.results, v6
+    // scan.bec (home exchange email.security).
     write: '^email\\.(ingestion|delivery|security)$',
     read: '^email\\.dead-letter$',
     topics: [
       topic('email.ingestion', '^retry\\.email\\.received\\.'),
       topic('email.delivery', '^retry\\.email\\.delivery\\.pending\\.'),
-      topic('email.security', '^retry\\.scan\\.(spam|attachment|url|url\\.inspect|url\\.results)\\.'),
+      topic(
+        'email.security',
+        '^retry\\.scan\\.(spam|attachment|url|url\\.inspect|url\\.results|bec)\\.',
+      ),
     ],
   },
 ];

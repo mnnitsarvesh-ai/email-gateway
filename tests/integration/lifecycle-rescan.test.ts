@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { apiSession, type ApiSession } from './support/api-client';
-import { eventually, ManagementApi, purgeDormantQueues } from './support/broker';
+import { copiesOfEvent, eventually, ManagementApi, purgeDormantQueues } from './support/broker';
 import { stack } from './support/env';
 import {
   expectConsistentHistory,
@@ -13,10 +13,14 @@ import {
 import { MessagingScenario } from './support/messaging-scenario';
 import {
   ATTACHMENT_LEDGER,
+  BEC_LEDGER,
+  becResultsOf,
   engineResultsOf,
   REQUIRED_ENGINES,
   RSPAMD_LEDGER,
   scanRoundsOf,
+  stageReadyEventsOf,
+  URL_LEDGER,
   waitForRoundComplete,
 } from './support/scan-stack';
 import { messagingStackGate, record } from './support/messaging-stack';
@@ -38,8 +42,21 @@ import { assertStackReady } from './support/smtp-stack';
  * `skipped`, `url.none`: the fixture has no stored body) and completes it (`scanned`), after which
  * the dev pass-through approves round 1 and the message is delivered. `scan.auth` lost its event
  * bindings in v3 and receives nothing.
+ *
+ * Step 4.4 (B2, B3): round 1 also requires the stage-2 `bec` engine; `scan.bec` binds only
+ * `scan_stage_ready.v1`, so it gets NO copy of the rescan request: the transaction that inserts
+ * the last of round 1's rspamd/url finals writes the round's stage trigger, and the bec consumer
+ * finalizes round 1 with a new `bec_scan_results` row.
+ *
+ * Timing (step 4.4 §9, 4.3 §13.10): the dormant queues are shared with every other suite, whose
+ * late traffic may still arrive after a purge. The suite therefore never asserts a queue depth:
+ * it inspects the queues without losing messages (management `get` with requeue) and asserts
+ * exactly one message with THIS run's rescan event id in each dormant scan queue, none with that
+ * id in any other dormant queue, and that its own message is gone after the purge.
  */
 const DORMANT_SCAN_QUEUES = ['scan.dlp'];
+/** Dormant queues that must never receive the rescan request (v3+: scan.auth unbound). */
+const NOT_BOUND_QUEUES = ['scan.auth', 'scan.sandbox', 'email.quarantine', 'email.policy.evaluate'];
 const gate = await messagingStackGate();
 const fx = new SmtpFixtures();
 const scenario = new MessagingScenario('lifecycle-rescan', fx);
@@ -72,7 +89,8 @@ describe.skipIf(gate.skip)('lifecycle stack: administrative rescan', { timeout: 
       recipients: [`scan@${scenario.domain.name}`],
       subject: 'Lifecycle rescan',
     });
-    // Nothing else of this run is in the dormant queues.
+    // Older traffic out of the way (not required for the assertions below, which only count
+    // this run's event id; late copies of other suites may still arrive).
     await purgeDormantQueues(mgmt, vhost);
 
     const res = await session!.post(
@@ -105,12 +123,14 @@ describe.skipIf(gate.skip)('lifecycle stack: administrative rescan', { timeout: 
     // The relay publishes the request; one copy per dormant scan queue, none elsewhere.
     await eventually(
       async () => {
-        const depths = await Promise.all(DORMANT_SCAN_QUEUES.map((q) => mgmt.queue(vhost, q)));
-        return depths.every((d) => d.messages === 1);
+        const copies = await Promise.all(
+          DORMANT_SCAN_QUEUES.map((q) => copiesOfEvent(mgmt, vhost, q, rescanEventId)),
+        );
+        return copies.every((n) => n >= 1);
       },
       30_000,
-      'one rescan request in each dormant scan queue',
-      250,
+      'the rescan request in each dormant scan queue',
+      500,
     );
     // The relay marks the row after the broker confirm, so the copies can be visible first.
     await eventually(
@@ -130,7 +150,13 @@ describe.skipIf(gate.skip)('lifecycle stack: administrative rescan', { timeout: 
     expect(outbox.eventType).toBe('mail.message.rescan_requested.v1');
     expect(outbox.publishedAt).not.toBeNull();
     for (const queue of DORMANT_SCAN_QUEUES) {
-      const [copy] = await mgmt.peek(vhost, queue, 1);
+      // Exactly one copy of this run's request, whatever else the queue holds.
+      const depth = (await mgmt.queue(vhost, queue)).messages;
+      const ours = (await mgmt.peek(vhost, queue, depth + 200)).filter(
+        (m) => (JSON.parse(m.payload) as { eventId?: string }).eventId === rescanEventId,
+      );
+      expect(ours, queue).toHaveLength(1);
+      const copy = ours[0];
       expect(copy!.routingKey).toBe(
         `org.${scenario.org.toString()}.mail.message.rescan_requested.v1`,
       );
@@ -150,18 +176,14 @@ describe.skipIf(gate.skip)('lifecycle stack: administrative rescan', { timeout: 
         },
       });
       // Peeking requeued it: still exactly one.
-      expect((await mgmt.queue(vhost, queue)).messages).toBe(1);
+      expect(await copiesOfEvent(mgmt, vhost, queue, rescanEventId), queue).toBe(1);
     }
-    // Not bound to scan.auth (v3), the sandbox, quarantine or policy queues. The dormant
-    // `email.policy.evaluate` (bound to `scanned.v1` for step 5.2) may already hold the
-    // `scanned.v1` of round 1 below, but never the rescan request itself.
-    for (const queue of ['scan.auth', 'scan.sandbox', 'email.quarantine']) {
-      expect((await mgmt.queue(vhost, queue)).messages, queue).toBe(0);
+    // Not bound to scan.auth (v3), the sandbox, quarantine or policy queues (the dormant
+    // `email.policy.evaluate` is bound to `scanned.v1` for step 5.2 and may hold round 1's
+    // `scanned.v1`, but never the rescan request itself).
+    for (const queue of NOT_BOUND_QUEUES) {
+      expect(await copiesOfEvent(mgmt, vhost, queue, rescanEventId), queue).toBe(0);
     }
-    const policy = await mgmt.peek(vhost, 'email.policy.evaluate', 20);
-    expect(policy.map((m) => m.routingKey)).not.toContain(
-      `org.${scenario.org.toString()}.mail.message.rescan_requested.v1`,
-    );
 
     // scan.spam and scan.attachment: the scan role consumed both copies (one ledger row per
     // engine consumer for the rescan event), opened
@@ -175,7 +197,7 @@ describe.skipIf(gate.skip)('lifecycle stack: administrative rescan', { timeout: 
       requiredEngines: [...REQUIRED_ENGINES],
     });
     expect(await scanRoundsOf(fx.prisma, message)).toHaveLength(1);
-    for (const consumer of [RSPAMD_LEDGER, ATTACHMENT_LEDGER]) {
+    for (const consumer of [RSPAMD_LEDGER, ATTACHMENT_LEDGER, URL_LEDGER]) {
       expect(
         await fx.prisma.messageIdempotency.count({
           where: { consumer, eventId: rescanEventId },
@@ -183,8 +205,30 @@ describe.skipIf(gate.skip)('lifecycle stack: administrative rescan', { timeout: 
         consumer,
       ).toBe(1);
     }
+    // Step 4.4: scan.bec got no copy of the request (no ledger row of the bec consumer for it);
+    // round 1's own stage trigger reached it exactly once and bec finalized round 1.
+    expect(
+      await fx.prisma.messageIdempotency.count({
+        where: { consumer: BEC_LEDGER, eventId: rescanEventId },
+      }),
+    ).toBe(0);
+    const stage = await stageReadyEventsOf(fx.prisma, scenario.org, message);
+    expect(stage).toHaveLength(1);
+    expect(stage[0]!.payload).toMatchObject({
+      lifecycleRound: 1,
+      scanId: round.id.toString(),
+      scanKind: 'rescan',
+      engine: 'bec',
+    });
+    expect(
+      await fx.prisma.messageIdempotency.count({
+        where: { consumer: BEC_LEDGER, eventId: stage[0]!.eventId },
+      }),
+    ).toBe(1);
+    const becRows = await becResultsOf(fx.prisma, message);
+    expect(becRows.map((r) => [r.lifecycleRound, r.scanId])).toEqual([[1, round.id]]);
     const finals = (await engineResultsOf(fx.prisma, message)).filter((r) => r.isFinal);
-    expect(finals.map((r) => r.engine).sort()).toEqual(['attachment', 'rspamd', 'url']);
+    expect(finals.map((r) => r.engine).sort()).toEqual(['attachment', 'bec', 'rspamd', 'url']);
     expect(finals.find((r) => r.engine === 'attachment')).toMatchObject({
       outcome: 'skipped',
       reasonCodes: ['attachment.none'],
@@ -193,7 +237,7 @@ describe.skipIf(gate.skip)('lifecycle stack: administrative rescan', { timeout: 
       outcome: 'skipped',
       reasonCodes: ['url.none'],
     });
-    for (const queue of ['scan.spam', 'scan.attachment', 'scan.url']) {
+    for (const queue of ['scan.spam', 'scan.attachment', 'scan.url', 'scan.bec']) {
       expect((await mgmt.queue(vhost, queue)).messages, queue).toBe(0);
     }
     await waitForLifecycle(fx.prisma, message, 'delivered', 'delivery_complete');
@@ -212,18 +256,16 @@ describe.skipIf(gate.skip)('lifecycle stack: administrative rescan', { timeout: 
     ]);
     await expectConsistentHistory(fx.prisma, message);
 
+    // Just before the purge, still exactly one copy of this run's request per dormant queue.
+    for (const queue of DORMANT_SCAN_QUEUES) {
+      expect(await copiesOfEvent(mgmt, vhost, queue, rescanEventId), queue).toBe(1);
+    }
     const depths = await purgeDormantQueues(mgmt, vhost);
-    for (const queue of DORMANT_SCAN_QUEUES) expect(depths[queue]).toBe(1);
-    // Queue statistics refresh every few seconds: wait for the purge to show.
-    await eventually(
-      async () =>
-        (await Promise.all(DORMANT_SCAN_QUEUES.map((q) => mgmt.queue(vhost, q)))).every(
-          (d) => d.messages === 0,
-        ),
-      20_000,
-      'the scan queues empty after the purge',
-      500,
-    );
+    for (const queue of DORMANT_SCAN_QUEUES) expect(depths[queue]).toBeGreaterThanOrEqual(1);
+    // The run's own request is gone after the purge (other suites' late copies may arrive).
+    for (const queue of [...DORMANT_SCAN_QUEUES, ...NOT_BOUND_QUEUES]) {
+      expect(await copiesOfEvent(mgmt, vhost, queue, rescanEventId), queue).toBe(0);
+    }
 
     // A second rescan with a stale version is refused without a second request.
     const stale = await session!.post(

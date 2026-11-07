@@ -521,6 +521,7 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
         nextCursor: null,
         data: [
           {
+            scanId: '900',
             round: 0,
             scanKind: 'initial',
             status: 'completed',
@@ -750,6 +751,14 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
           effective: expect.objectContaining({
             click: { suspicious: 'warn', unknown: 'warn', allowContinue: true },
           }),
+        }),
+        expect.objectContaining({
+          engine: 'bec',
+          required: true,
+          tenantMayDisable: false,
+          override: null,
+          platform: expect.objectContaining({ suspiciousScore: 40, maliciousScore: 80 }),
+          effective: expect.objectContaining({ history: { enabled: false, retentionDays: 365 } }),
         }),
       ]);
       expect(res.body.note).toContain('SCAN_SETTINGS_CACHE_TTL_MS');

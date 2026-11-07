@@ -14,6 +14,7 @@ const config = loadWorkerConfig({
   REDIS_URL: 'redis://localhost:6379',
   ATTACHMENT_CACHE_HMAC_KEY: 'test-content-cache-mac-key-0123456789',
   URL_CACHE_HMAC_KEY: 'test-url-cache-mac-key-0123456789abcdef',
+  BEC_CONTEXT_HMAC_KEY: 'test-bec-context-hmac-key-0123456789abcdef',
   URL_TOKEN_KEY_CURRENT: '0123456789abcdef'.repeat(4),
   URL_DNSBL_DOMAIN_ZONES: 'dbl.scan.test=127.0.1.2:spam,127.0.1.4:phishing',
   S3_REGION: 'ap-south-1',

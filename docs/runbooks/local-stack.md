@@ -72,6 +72,7 @@ docker compose exec mysql sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot e
 
 - With the dev pass-through a message goes `received → persisted → scanning → scanned → approved → delivery_pending → delivered`; a `scan_failed` message is never approved (rescan it after fixing Rspamd: `POST /api/v1/messages/<id>/rescan`).
 - Mail through `postfix` from smtp-tools: address `172.31.250.10` (the mailtest address) so the client is in `clean.scan.test`'s SPF; the service name `postfix` resolves to its default-network address.
+- Since step 4.4 every round also needs the stage-2 `bec` engine ([runbook](bec-detection.md)): the email-worker readiness reports `bec-engine`, `scan.bec` has one consumer, and with the dev pass-through a message whose bec result is `suspicious`/`malicious` stays `scanned` (`delivery_approvals_skipped_total{reason="bec_verdict"}`) — e.g. a display name of a configured executive from a free-mail address. Locally the LLM layer is off (`BEC_LLM_MODE=off`, empty `BEC_LLM_API_KEY`); integration runs use `BEC_LLM_PROVIDER=fake` and never call a real LLM. Inspect a result: `SELECT verdict, deterministic_verdict, score, inputs, rules FROM bec_scan_results WHERE message_id = <id>;` or the `bec` section of `GET /api/v1/messages/<public id>/scans`.
 - After an Rspamd restart the first start compiles the Hyperscan cache into the `rspamd-data` volume (later starts take a few seconds).
 
 ## Message lifecycle (step 3.3)

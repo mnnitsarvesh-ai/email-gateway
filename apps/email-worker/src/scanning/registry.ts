@@ -5,6 +5,7 @@ import { type EngineCatalogEntry, engineCatalogEntry } from '@email-gateway/secu
 import type { WorkerConfig } from '../config';
 import type { ScanEngineAdapter } from './engine';
 import { attachmentRegistration } from './engines/attachment/registration';
+import { becRegistration } from './engines/bec/registration';
 import { rspamdRegistration } from './engines/rspamd/registration';
 import { urlRegistration } from './engines/url/registration';
 import type { ScanMetrics } from './scan-metrics';
@@ -69,11 +70,15 @@ export interface ScanEngineRegistration {
   ): EngineSettingsResolution;
 }
 
-/** Every engine with an adapter in this worker (4.1: Rspamd; 4.2: attachment; 4.3: url). */
+/**
+ * Every engine with an adapter in this worker (4.1: Rspamd; 4.2: attachment; 4.3: url; 4.4: bec,
+ * a stage-2 engine triggered by its dependencies' finals, B2).
+ */
 export const ENGINE_REGISTRY: readonly ScanEngineRegistration[] = Object.freeze([
   rspamdRegistration,
   attachmentRegistration,
   urlRegistration,
+  becRegistration,
 ]);
 
 /** The registrations of the platform-enabled engines (`SCAN_ENGINES`), in catalog order. */

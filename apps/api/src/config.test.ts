@@ -1,9 +1,17 @@
 import { randomBytes } from 'node:crypto';
 import { ConfigValidationError } from '@email-gateway/config';
-import { ATTACHMENT_PLATFORM_DEFAULTS } from '@email-gateway/security-contracts';
+import {
+  ATTACHMENT_PLATFORM_DEFAULTS,
+  BEC_PLATFORM_DEFAULTS,
+} from '@email-gateway/security-contracts';
 import { describe, expect, it } from 'vitest';
 import { TEST_DOMAIN_ENV } from '../test/support/test-env';
-import { attachmentPlatformSettingsOf, loadApiConfig, rspamdPlatformSettingsOf } from './config';
+import {
+  attachmentPlatformSettingsOf,
+  becPlatformSettingsOf,
+  loadApiConfig,
+  rspamdPlatformSettingsOf,
+} from './config';
 
 const hex64 = () => randomBytes(32).toString('hex');
 
@@ -693,6 +701,46 @@ describe('loadApiConfig: attachment scanning (step 4.2 A8, A13)', () => {
     ],
     [{ ATTACHMENT_RESCAN_MAX_MESSAGES: '50001' }, 'ATTACHMENT_RESCAN_MAX_MESSAGES'],
   ])('refuses %j, naming the key', (env, key) => {
+    expect(rejection({ ...valid, ...env })).toContain(key);
+  });
+});
+
+describe('loadApiConfig: phishing and BEC (step 4.4 B13, B18)', () => {
+  it('defaults the BEC platform settings and the per-tenant caps', () => {
+    const cfg = loadApiConfig(valid);
+    expect(becPlatformSettingsOf(cfg)).toEqual(BEC_PLATFORM_DEFAULTS);
+    expect(cfg).toMatchObject({
+      BEC_MAX_EXECUTIVES: 500,
+      BEC_MAX_VENDORS: 2000,
+      BEC_MAX_TRUSTED_SENDERS: 1000,
+      BEC_SUPPRESSIONS_MAX_PER_TENANT: 200,
+    });
+  });
+
+  it('reads the BEC_* keys as the email-worker does', () => {
+    const cfg = loadApiConfig({
+      ...valid,
+      BEC_SUSPICIOUS_SCORE: '35',
+      BEC_MALICIOUS_SCORE: '75',
+      BEC_LLM_MODE: 'shadow',
+      BEC_MAX_EXECUTIVES: '20',
+    });
+    expect(becPlatformSettingsOf(cfg)).toMatchObject({
+      suspiciousScore: 35,
+      maliciousScore: 75,
+      llmMode: 'shadow',
+    });
+    expect(cfg.BEC_MAX_EXECUTIVES).toBe(20);
+  });
+
+  it.each([
+    [{ BEC_SUSPICIOUS_SCORE: '10' }, 'BEC_SUSPICIOUS_SCORE'],
+    [{ BEC_MALICIOUS_SCORE: '99' }, 'BEC_MALICIOUS_SCORE'],
+    [{ BEC_LLM_MODE: 'always' }, 'BEC_LLM_MODE'],
+    [{ BEC_AI_MALICIOUS_BAND: '20' }, 'BEC_AI_MALICIOUS_BAND'],
+    [{ BEC_HISTORY_MAX_RETENTION_DAYS: '1000' }, 'BEC_HISTORY_MAX_RETENTION_DAYS'],
+    [{ BEC_MAX_VENDORS: '0' }, 'BEC_MAX_VENDORS'],
+  ])('refuses %o naming %s', (env, key) => {
     expect(rejection({ ...valid, ...env })).toContain(key);
   });
 });

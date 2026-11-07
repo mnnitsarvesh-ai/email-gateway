@@ -23,6 +23,7 @@ postlogd appends every delivery attempt to `maillog_file` (`/var/log/postfix-out
 
 - delivery-worker logs: `warn`/`error` lines from the tailer (file not readable, identity changed, cursor ahead of the file), from the reconciler (`status_signal_missing`).
 - The cursor itself: `SELECT name, file_id, file_offset, last_event_at, updated_at FROM stream_cursors WHERE name LIKE 'postfix-log:%';`
+- **A cursor that no longer advances holds back every expired reinjection lease.** The reconciler releases an `in_progress` reinjection without a queue id only when the log horizon — the oldest `last_event_at` over **all** `postfix-log:*` cursors — has passed the session (R12); otherwise the lease waits for `DELIVERY_REINJECT_MAX_AGE_SECONDS`. A source that was decommissioned (or, on a development stack, a fixture cursor `postfix-log:it-*` left by an interrupted integration run) must be deleted: `DELETE FROM stream_cursors WHERE name = 'postfix-log:<old source id>';` (seen in step 4.4 §12 WP5 deviation 10: 8 leases released within seconds after removing such rows).
 
 ## Impact
 

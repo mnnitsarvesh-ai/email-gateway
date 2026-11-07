@@ -18,9 +18,11 @@ const EXPECTED_CHECKS: Record<string, string[]> = {
   // Step 4.1 S1: MIME role (`rabbitmq`) and scan role (`rabbitmq-scanner`, user eg-scanner).
   // Step 4.2 A12: the attachment consumer adds `clamav` (clamd PING) and `attachment-inspector`
   // (ready inspector children). Step 4.3: the URL consumer adds `url-engine` (Redis PING of the
-  // URL cache; DNS reachability and egress mode as details).
+  // URL cache; DNS reachability and egress mode as details). Step 4.4 B4: the BEC consumer adds
+  // `bec-engine` (static data, local models and LLM layer loaded; model versions as details).
   'email-worker': [
     'attachment-inspector',
+    'bec-engine',
     'clamav',
     'mysql',
     'rabbitmq',

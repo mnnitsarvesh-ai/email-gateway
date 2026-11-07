@@ -35,12 +35,21 @@ export interface EngineCatalogEntry {
   readonly requiredByDefault: boolean;
   /** Whether a tenant may switch the engine off; required engines never are (4.1, 4.2). */
   readonly tenantMayDisable: boolean;
+  /**
+   * Engines whose final results of the same round this engine reads (step 4.4 B2, ADR-0033).
+   * Absent or empty: a stage-1 engine, triggered by `mail.message.parsed.v1` /
+   * `mail.message.rescan_requested.v1`. Non-empty: a stage-2 engine, triggered by
+   * `mail.message.scan_stage_ready.v1` once every dependency in the round's required set has its
+   * final row. Depth 1 only: a dependency never has dependencies itself (`validateCatalog`).
+   */
+  readonly dependsOn?: readonly EngineName[];
   readonly description: string;
 }
 
 /**
  * The registered engines (step 4.1: Rspamd; step 4.2: the attachment engine, A1; step 4.3: the URL
- * engine, U1).
+ * engine, U1; step 4.4: the phishing/BEC engine, B1, a stage-2 engine depending on `rspamd` and
+ * `url`).
  */
 export const ENGINE_CATALOG: readonly EngineCatalogEntry[] = Object.freeze([
   Object.freeze({
@@ -70,6 +79,16 @@ export const ENGINE_CATALOG: readonly EngineCatalogEntry[] = Object.freeze([
     description:
       'URLs: extraction, normalization, reputation, lookalikes, redirect chains, rewriting (step 4.3)',
   } as const),
+  Object.freeze({
+    name: 'bec',
+    stage: 'bec',
+    queue: 'scan.bec',
+    requiredByDefault: true,
+    tenantMayDisable: false,
+    dependsOn: Object.freeze(['rspamd', 'url'] as const),
+    description:
+      'Phishing and BEC: sender identity, impersonation, lookalikes, payment/urgency cues, credential links, communication history; optional AI layer (step 4.4)',
+  } as const),
 ]);
 
 export const isEngineName = (value: string): value is EngineName =>
@@ -80,9 +99,57 @@ export function engineCatalogEntry(name: string): EngineCatalogEntry | undefined
   return ENGINE_CATALOG.find((entry) => entry.name === name);
 }
 
+/** Whether `entry` is a stage-2 engine (step 4.4 B2): it declares at least one dependency. */
+export function isStage2Engine(entry: Pick<EngineCatalogEntry, 'dependsOn'>): boolean {
+  return (entry.dependsOn?.length ?? 0) > 0;
+}
+
+/** Names of the stage-2 engines of `catalog` (default `ENGINE_CATALOG`), in catalog order. */
+export function stage2Engines(
+  catalog: readonly EngineCatalogEntry[] = ENGINE_CATALOG,
+): EngineName[] {
+  return catalog.filter(isStage2Engine).map((entry) => entry.name);
+}
+
+/**
+ * Validates the engine dependencies of `catalog` (step 4.4 B2): every dependency is an engine of
+ * the catalog, no engine depends on itself or lists a dependency twice, and the depth is 1 (a
+ * dependency declares no dependencies itself, so a stage-2 engine is triggered by stage-1
+ * engines only). Throws an `Error` naming the engine; returns nothing for a valid catalog. The
+ * email-worker calls it at start and a unit test calls it on `ENGINE_CATALOG`.
+ */
+export function validateCatalog(catalog: readonly EngineCatalogEntry[] = ENGINE_CATALOG): void {
+  const byName = new Map<string, EngineCatalogEntry>();
+  for (const entry of catalog) {
+    if (byName.has(entry.name))
+      throw new Error(`Engine listed twice in the catalog: ${entry.name}`);
+    byName.set(entry.name, entry);
+  }
+  for (const entry of catalog) {
+    const deps = entry.dependsOn ?? [];
+    if (new Set(deps).size !== deps.length) {
+      throw new Error(`Engine ${entry.name} lists a dependency twice`);
+    }
+    for (const dependency of deps) {
+      if (dependency === entry.name) throw new Error(`Engine ${entry.name} depends on itself`);
+      const target = byName.get(dependency);
+      if (!target) {
+        throw new Error(
+          `Engine ${entry.name} depends on ${dependency}, which is not in the catalog`,
+        );
+      }
+      if (isStage2Engine(target)) {
+        throw new Error(
+          `Engine ${entry.name} depends on ${dependency}, which has dependencies itself (depth > 1)`,
+        );
+      }
+    }
+  }
+}
+
 /**
  * Parses the platform's enabled engines (`SCAN_ENGINES`, a comma-separated list, default
- * `rspamd,attachment,url` from step 4.3). Throws on an empty list, a duplicate or a name that is
+ * `rspamd,attachment,url,bec` from step 4.4). Throws on an empty list, a duplicate or a name that is
  * not in the catalog, so a misconfigured worker refuses to start instead of scanning with fewer
  * engines.
  */

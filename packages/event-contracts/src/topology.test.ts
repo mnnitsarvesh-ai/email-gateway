@@ -42,13 +42,13 @@ const mutableQueue = (topology: { queues: QueueDefinition[] }, name: QueueName) 
   return queue;
 };
 
-describe('TOPOLOGY v5', () => {
+describe('TOPOLOGY v6', () => {
   it('satisfies every invariant of design §3', () => {
     expect(validateTopology(TOPOLOGY)).toEqual([]);
   });
 
-  it('declares exactly the six exchanges and sixteen queues (v5)', () => {
-    expect(TOPOLOGY_VERSION).toBe(5);
+  it('declares exactly the six exchanges and seventeen queues (v6)', () => {
+    expect(TOPOLOGY_VERSION).toBe(6);
     expect(DEFAULT_VHOST).toBe('email-gateway');
     expect([...TOPOLOGY.exchanges]).toEqual([
       'email.ingestion',
@@ -59,13 +59,15 @@ describe('TOPOLOGY v5', () => {
       'email.events',
     ]);
     expect(EXCHANGE_NAMES).toHaveLength(6);
-    expect(QUEUE_NAMES).toHaveLength(16);
+    expect(QUEUE_NAMES).toHaveLength(17);
     expect(TOPOLOGY.queues.map((q) => q.name)).toEqual([...QUEUE_NAMES]);
-    expect(new Set(QUEUE_NAMES).size).toBe(16);
-    expect(QUEUE_NAMES).toEqual(expect.arrayContaining(['scan.url.inspect', 'scan.url.results']));
+    expect(new Set(QUEUE_NAMES).size).toBe(17);
+    expect(QUEUE_NAMES).toEqual(
+      expect.arrayContaining(['scan.url.inspect', 'scan.url.results', 'scan.bec']),
+    );
   });
 
-  it('assigns roles: seven work queues, one delay, one dead-letter, seven dormant (v5)', () => {
+  it('assigns roles: eight work queues, one delay, one dead-letter, seven dormant (v6)', () => {
     const byRole = (role: string) =>
       TOPOLOGY.queues.filter((q) => q.role === role).map((q) => q.name);
     expect(byRole('work')).toEqual([
@@ -75,6 +77,7 @@ describe('TOPOLOGY v5', () => {
       'scan.url.inspect',
       'scan.url.results',
       'scan.attachment',
+      'scan.bec',
       'email.delivery.pending',
     ]);
     expect(byRole('delay')).toEqual(['email.delivery.retry']);
@@ -129,6 +132,12 @@ describe('TOPOLOGY v5', () => {
         'email.ingestion org.*.mail.message.parsed.v1',
         'email.security org.*.mail.message.rescan_requested.v1',
         'email.security retry.scan.attachment.#',
+      ],
+      // v6 (step 4.4 B3): the stage-2 engine queue binds only the stage-ready event.
+      'scan.bec': [
+        'email.security',
+        'email.security org.*.mail.message.scan_stage_ready.v1',
+        'email.security retry.scan.bec.#',
       ],
       'scan.dlp': [
         'email.security',
@@ -230,6 +239,23 @@ describe('TOPOLOGY v5', () => {
       service: 'url-browser-worker',
       reason: 'no database; results are deduplicated by inspectionId in scan.url.results',
     });
+    // v6 (step 4.4 B1, B3): the phishing/BEC engine of the email-worker scan role.
+    expect(queueDefinition('scan.bec').consumer).toEqual({
+      kind: 'ledger',
+      ledgerName: 'email-worker.scan.bec',
+      service: 'email-worker',
+    });
+    expect(queueDefinition('scan.bec').description).toBe(
+      'Phishing and BEC (step 4.4): stage 2, triggered when rspamd and url finalized',
+    );
+    expect(queueDefinition('scan.bec').policy).toEqual({
+      'delivery-limit': 20,
+      'dead-letter-exchange': 'email.events',
+      'dead-letter-routing-key': 'dead-letter.scan.bec',
+      'dead-letter-strategy': 'at-least-once',
+      overflow: 'reject-publish',
+      'max-length': 1_000_000,
+    });
     expect(
       TOPOLOGY.queues.filter((q) => q.consumer.kind === 'stateless').map((q) => q.name),
     ).toEqual(['scan.url.inspect']);
@@ -277,7 +303,7 @@ describe('policies (Q4)', () => {
       'max-length': 10_000,
     });
     expect(LOSSY_WORK_QUEUE_MAX_LENGTH).toBe(10_000);
-    for (const name of ['scan.url', 'scan.url.results'] as const) {
+    for (const name of ['scan.url', 'scan.url.results', 'scan.bec'] as const) {
       expect(queueDefinition(name).policy, name).toEqual(policyFor('work', name));
     }
     expect(queueDefinition('email.received').policy).toEqual({
@@ -363,6 +389,14 @@ describe('retry policies (Q8)', () => {
     // v5 (step 4.3 U2, U17): as scan.spam; SCAN_URL_MAX_ATTEMPTS (6) < 10 finalizes first.
     expect(queueDefinition('scan.url').retry).toEqual(queueDefinition('scan.spam').retry);
     expect(queueDefinition('scan.url.results').retry).toEqual(queueDefinition('scan.spam').retry);
+    // v6 (step 4.4 B3): as scan.spam; SCAN_BEC_MAX_ATTEMPTS (3) < 10 finalizes first.
+    expect(queueDefinition('scan.bec').retry).toEqual({
+      strategy: 'hold',
+      maxAttempts: 10,
+      baseDelayMs: 2000,
+      maxDelayMs: 60_000,
+      maxRetryAgeMs: 86_400_000,
+    });
     expect(queueDefinition('scan.url.inspect').retry).toEqual({
       strategy: 'hold',
       maxAttempts: 3,
@@ -593,6 +627,11 @@ describe('routing (topic semantics)', () => {
       'scan.url.results',
     ]);
     expect(route('mail.url.clicked.v1')).toEqual(['email.analytics']);
+    // Topology v6 (step 4.4 B3): the stage trigger reaches only scan.bec and the firehose; the
+    // stage-1 events never reach scan.bec.
+    expect(route('mail.message.scan_stage_ready.v1')).toEqual(['email.analytics', 'scan.bec']);
+    expect(route('mail.message.parsed.v1')).not.toContain('scan.bec');
+    expect(route('mail.message.rescan_requested.v1')).not.toContain('scan.bec');
   });
 
   it('keeps the retry hops of dot-prefixed queue names apart (v5 scan.url, scan.url.*)', () => {
@@ -600,6 +639,7 @@ describe('routing (topic semantics)', () => {
     expect(retryBindingKey('scan.url.inspect')).toBe('retry.scan.url.inspect.#');
     expect(retryBindingKey('scan.url.results')).toBe('retry.scan.url.results.#');
     expect(retryBindingKey('scan.spam')).toBe('retry.scan.spam.#');
+    expect(retryBindingKey('scan.bec')).toBe('retry.scan.bec.#');
     // Every retry key of every work/dormant queue and every event type reaches exactly that queue.
     const types = [...Object.keys(EVENT_REGISTRY), ...Object.keys(RESERVED_EVENT_TYPES)];
     for (const queue of TOPOLOGY.queues.filter((q) => q.role === 'work' || q.role === 'dormant')) {
@@ -681,6 +721,7 @@ describe('routing (topic semantics)', () => {
     }
     expect(eventTypesBoundTo('scan.url.inspect')).toEqual(['mail.url.inspection_requested.v1']);
     expect(eventTypesBoundTo('scan.url.results')).toEqual(['mail.url.inspection_completed.v1']);
+    expect(eventTypesBoundTo('scan.bec')).toEqual(['mail.message.scan_stage_ready.v1']);
     expect(eventTypesBoundTo('scan.auth')).toEqual([]);
     expect(eventTypesBoundTo('email.analytics')).toEqual(
       [...Object.keys(EVENT_REGISTRY), ...Object.keys(RESERVED_EVENT_TYPES)].sort(),
@@ -866,7 +907,7 @@ describe('toRabbitDefinitions (Q5)', () => {
   const definitions = toRabbitDefinitions(TOPOLOGY, { vhost: DEFAULT_VHOST });
 
   it('declares topic exchanges and quorum queues with no other argument', () => {
-    expect(definitions.topology_version).toBe(5);
+    expect(definitions.topology_version).toBe(6);
     expect(definitions.exchanges).toHaveLength(6);
     for (const exchange of definitions.exchanges) {
       expect(exchange).toEqual({
@@ -879,7 +920,7 @@ describe('toRabbitDefinitions (Q5)', () => {
         arguments: {},
       });
     }
-    expect(definitions.queues).toHaveLength(16);
+    expect(definitions.queues).toHaveLength(17);
     for (const queue of definitions.queues) {
       expect(queue).toEqual({
         name: queue.name,
@@ -925,7 +966,7 @@ describe('toRabbitDefinitions (Q5)', () => {
   });
 
   it('generates one anchored policy per queue', () => {
-    expect(definitions.policies).toHaveLength(16);
+    expect(definitions.policies).toHaveLength(17);
     for (const policy of definitions.policies) {
       const queue = policy.name.slice('eg.'.length);
       expect(policy).toEqual({

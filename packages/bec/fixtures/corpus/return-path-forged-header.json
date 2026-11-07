@@ -1,0 +1,41 @@
+{
+  "id": "return-path-forged-header",
+  "description": "A Return-Path header supplied by the sender that differs from the envelope sender: P1 + P2.",
+  "label": "bec",
+  "input": {
+    "headers": {
+      "From": ["Billing <billing@partnerco.test>"],
+      "Return-Path": ["<billing@partnerco.test>"],
+      "Subject": ["Statement"]
+    },
+    "envelope": {
+      "envelopeFrom": "bounce@mailer-partner.test"
+    },
+    "auth": {
+      "state": "available",
+      "row": {
+        "spf": "pass",
+        "spfDomain": "mailer-partner.test",
+        "dkim": "none",
+        "dkimSignatures": [],
+        "dmarc": "none",
+        "dmarcPolicy": null,
+        "dmarcDomain": "partnerco.test",
+        "arc": null
+      }
+    },
+    "url": {
+      "state": "available",
+      "rows": []
+    },
+    "text": {
+      "subject": "Statement",
+      "text": "Your monthly account statement is available in the portal.",
+      "html": null
+    }
+  },
+  "expected": {
+    "verdictIn": ["clean", "suspicious"],
+    "requiredCodes": ["bec.return_path.domain_mismatch", "bec.return_path.forged_header"]
+  }
+}

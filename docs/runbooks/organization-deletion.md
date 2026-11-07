@@ -81,6 +81,20 @@ The future job (a scheduled worker, one instance at a time under a lock) must ap
 2. **Skip while any legal hold is active** (`archive_legal_holds.status = 'active'`), even one created after confirmation, and alert compliance.
 3. **Keep archives under retention:** skip (or keep) any `email_archives` row with `legal_hold = true` or `retain_until > now`, and the S3 objects they reference; S3 Object Lock retention in production enforces the same independently.
 4. Delete S3 objects first (mail EMLs, attachments, quarantine copies, exports) by the keys recorded in the database, in batches, idempotently (a missing object is success), then the tenant's database rows in foreign-key-safe order, in batches, partition-aware for the partitioned tables (`email_messages` and friends are pruned by `received_at`; dropping partitions is not possible per tenant).
+   **Phishing and BEC tables (step 4.4).** The six non-partitioned BEC tables reference `organizations` with `ON DELETE RESTRICT` (no cascade), so the organization row cannot be deleted while they hold rows. The purge deletes them with `BecTenantDataRepository.purgeOrganization(systemScope(<organization id>))` (`apps/api/src/modules/tenant-data/bec-tenant-data.repository.ts`), which runs batched autocommit statements (`DELETE … WHERE organization_id = ? ORDER BY id LIMIT 5000`, resumable, idempotent) in this order: `bec_suppression_rules` (they name feedback ids), `bec_feedback` (it names result ids), `bec_trusted_senders`, `bec_vendor_profiles`, `bec_executive_profiles`, `bec_contact_history` (keyed hashes and counts, ADR-0035), then the partitioned `bec_scan_results` (no foreign keys; matched on its `(organization_id, received_at)` index, before or together with the other message-graph tables). It returns the deleted count per table for the `organization.purged` audit row. `bec_feedback` is training data with its own 24-month retention, but it never outlives its organization. Verify with:
+
+   ```sql
+   SELECT 'bec_suppression_rules' t, COUNT(*) FROM bec_suppression_rules WHERE organization_id = ?
+   UNION ALL SELECT 'bec_feedback', COUNT(*) FROM bec_feedback WHERE organization_id = ?
+   UNION ALL SELECT 'bec_trusted_senders', COUNT(*) FROM bec_trusted_senders WHERE organization_id = ?
+   UNION ALL SELECT 'bec_vendor_profiles', COUNT(*) FROM bec_vendor_profiles WHERE organization_id = ?
+   UNION ALL SELECT 'bec_executive_profiles', COUNT(*) FROM bec_executive_profiles WHERE organization_id = ?
+   UNION ALL SELECT 'bec_contact_history', COUNT(*) FROM bec_contact_history WHERE organization_id = ?
+   UNION ALL SELECT 'bec_scan_results', COUNT(*) FROM bec_scan_results WHERE organization_id = ?;
+   ```
+
+   A tenant can also remove its communication history at any time without deleting the organization (`DELETE /api/v1/bec/history`, MFA, audited `bec_history.purged`).
+
 5. **Free verified domain names:** deleting the organization's `domains` rows releases `domains.verified_name` (the generated unique column), so the domain can be verified by another organization. This must happen only in the purge, never at confirmation, so a cancelled deletion keeps its domains.
 6. Keep `audit_logs` (append-only, retained by policy) and `login_audit_logs` until their own retention ends; write `organization.purged` with counts, then hard-delete or tombstone the `organizations` row (keep the slug reserved for a period to avoid confusion).
 7. Make every step resumable: a crash mid-purge must leave the organization `deleted` and be safe to re-run.

@@ -1,0 +1,46 @@
+{
+  "id": "hindi-payment-urgency",
+  "description": "Devanagari Hindi payment urgency with secrecy.",
+  "label": "bec",
+  "input": {
+    "headers": {
+      "From": ["Sharma Ji <sharmaji.accounts@gmail.com>"],
+      "Subject": ["ज़रूरी"]
+    },
+    "envelope": {
+      "envelopeFrom": "sharmaji.accounts@gmail.com"
+    },
+    "auth": {
+      "state": "available",
+      "row": {
+        "spf": "pass",
+        "spfDomain": "gmail.com",
+        "dkim": "pass",
+        "dkimSignatures": [
+          {
+            "domain": "gmail.com",
+            "result": "pass",
+            "selector": "s1"
+          }
+        ],
+        "dmarc": "pass",
+        "dmarcPolicy": "reject",
+        "dmarcDomain": "gmail.com",
+        "arc": null
+      }
+    },
+    "url": {
+      "state": "available",
+      "rows": []
+    },
+    "text": {
+      "subject": "ज़रूरी",
+      "text": "नमस्ते, तुरंत भुगतान कर दो, किसी को मत बताना। धन्यवाद",
+      "html": null
+    }
+  },
+  "expected": {
+    "verdictIn": ["clean", "suspicious"],
+    "requiredCodes": ["bec.content.payment_request", "bec.content.urgency", "bec.content.secrecy"]
+  }
+}

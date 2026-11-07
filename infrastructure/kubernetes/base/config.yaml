@@ -74,8 +74,9 @@ data:
   # Attachment scanning (step 4.2 §5, A8): the platform attachment settings read by both the api
   # (tenant override bounds) and the email-worker scan replicas; the required engines of a round
   # (SCAN_ENGINES) must be identical on every scan replica (A1). Step 4.3 U1 adds the required url
-  # engine (Deployment email-worker-url).
-  SCAN_ENGINES: rspamd,attachment,url
+  # engine (Deployment email-worker-url); step 4.4 B1 the required stage-2 bec engine (Deployment
+  # email-worker-bec, triggered by the rspamd and url finals of the round).
+  SCAN_ENGINES: rspamd,attachment,url,bec
   ATTACHMENT_MAX_BYTES: '26214400'
   ATTACHMENT_ARCHIVE_MAX_DEPTH: '3'
   ATTACHMENT_ARCHIVE_MAX_ENTRIES: '1000'
@@ -168,6 +169,27 @@ data:
   URL_DYNAMIC_MAX_PER_MESSAGE: '3'
   URL_DYNAMIC_PENDING_TTL_SECONDS: '3600'
   URL_DYNAMIC_SWEEP_INTERVAL_MS: '60000'
+  # Phishing and BEC detection (step 4.4 §5, B13; docs/deployment/bec-detection.md). Platform
+  # settings and tenant bounds read by both the api (/api/v1/scan-settings/bec, the BEC routes)
+  # and email-worker-bec; they must agree. The engine-only keys are set in email-worker-bec.yaml;
+  # the secrets (BEC_CONTEXT_HMAC_KEY, BEC_LLM_API_KEY) are separate Secrets mounted only there.
+  # BEC_LLM_MODE is the platform cap of the LLM layer (off until the deployment doc's checklist is
+  # done); tenants opt in within it.
+  BEC_SUSPICIOUS_SCORE: '40'
+  BEC_MALICIOUS_SCORE: '80'
+  BEC_AI_RAISE_CONFIDENCE: '0.8'
+  BEC_AI_CORROBORATE_CONFIDENCE: '0.9'
+  BEC_AI_MALICIOUS_BAND: '10'
+  BEC_LOCAL_MODEL_MODE: shadow
+  BEC_LLM_MODE: 'off'
+  BEC_LLM_MAX_CALLS_PER_TENANT_PER_DAY: '1000'
+  BEC_HISTORY_DEFAULT_RETENTION_DAYS: '365'
+  BEC_HISTORY_MAX_RETENTION_DAYS: '730'
+  BEC_SUPPRESSIONS_MAX_PER_TENANT: '200'
+  BEC_SUPPRESSION_MAX_WEIGHT: '40'
+  BEC_MAX_EXECUTIVES: '500'
+  BEC_MAX_VENDORS: '2000'
+  BEC_MAX_TRUSTED_SENDERS: '1000'
   # click-service (U14). CLICK_TRUST_PROXY = reverse-proxy hops in front of the pods (ingress
   # controller; add one per CDN/WAF layer).
   CLICK_DB_TX_TIMEOUT_MS: '120000'

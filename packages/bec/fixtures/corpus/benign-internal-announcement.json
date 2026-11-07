@@ -1,0 +1,45 @@
+{
+  "id": "benign-internal-announcement",
+  "description": "HR announcement from the tenant domain, authenticated.",
+  "label": "benign",
+  "input": {
+    "headers": {
+      "From": ["HR Team <hr@acmecorp.test>"],
+      "Subject": ["Holiday calendar"]
+    },
+    "envelope": {
+      "envelopeFrom": "hr@acmecorp.test"
+    },
+    "auth": {
+      "state": "available",
+      "row": {
+        "spf": "pass",
+        "spfDomain": "acmecorp.test",
+        "dkim": "pass",
+        "dkimSignatures": [
+          {
+            "domain": "acmecorp.test",
+            "result": "pass",
+            "selector": "s1"
+          }
+        ],
+        "dmarc": "pass",
+        "dmarcPolicy": "reject",
+        "dmarcDomain": "acmecorp.test",
+        "arc": null
+      }
+    },
+    "url": {
+      "state": "available",
+      "rows": []
+    },
+    "text": {
+      "subject": "Holiday calendar",
+      "text": "Please find the holiday calendar for next year on the intranet. Enjoy the festive season.",
+      "html": null
+    }
+  },
+  "expected": {
+    "verdict": "clean"
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "id": "missing-url-input",
+  "description": "URL engine not in the round → unknown, never clean.",
+  "label": null,
+  "input": {
+    "headers": {
+      "From": ["John Miller <john.miller@partnerco.test>"],
+      "Subject": ["Agenda"]
+    },
+    "envelope": {
+      "envelopeFrom": "john.miller@partnerco.test"
+    },
+    "auth": {
+      "state": "available",
+      "row": {
+        "spf": "pass",
+        "spfDomain": "partnerco.test",
+        "dkim": "pass",
+        "dkimSignatures": [
+          {
+            "domain": "partnerco.test",
+            "result": "pass",
+            "selector": "s1"
+          }
+        ],
+        "dmarc": "pass",
+        "dmarcPolicy": "reject",
+        "dmarcDomain": "partnerco.test",
+        "arc": null
+      }
+    },
+    "url": {
+      "state": "not_in_round"
+    },
+    "text": {
+      "subject": "Agenda",
+      "text": "Attached is the agenda for tomorrow.",
+      "html": null
+    }
+  },
+  "expected": {
+    "verdict": "unknown",
+    "requiredCodes": ["bec.input_unavailable.url"],
+    "forbiddenCodes": ["clean.below_threshold"]
+  }
+}

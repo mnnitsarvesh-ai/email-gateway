@@ -1,0 +1,926 @@
+{
+  "language": "en",
+  "version": 1,
+  "entries": [
+    {
+      "id": "en.payment_request.001",
+      "category": "payment_request",
+      "phrase": "make a payment"
+    },
+    {
+      "id": "en.payment_request.002",
+      "category": "payment_request",
+      "phrase": "make the payment"
+    },
+    {
+      "id": "en.payment_request.003",
+      "category": "payment_request",
+      "phrase": "process a payment"
+    },
+    {
+      "id": "en.payment_request.004",
+      "category": "payment_request",
+      "phrase": "process the payment"
+    },
+    {
+      "id": "en.payment_request.005",
+      "category": "payment_request",
+      "phrase": "release the payment"
+    },
+    {
+      "id": "en.payment_request.006",
+      "category": "payment_request",
+      "phrase": "send the payment"
+    },
+    {
+      "id": "en.payment_request.007",
+      "category": "payment_request",
+      "phrase": "payment needs to be made"
+    },
+    {
+      "id": "en.payment_request.008",
+      "category": "payment_request",
+      "phrase": "need you to pay"
+    },
+    {
+      "id": "en.payment_request.009",
+      "category": "payment_request",
+      "phrase": "please pay"
+    },
+    {
+      "id": "en.payment_request.010",
+      "category": "payment_request",
+      "phrase": "settle the invoice"
+    },
+    {
+      "id": "en.payment_request.011",
+      "category": "payment_request",
+      "phrase": "settle this invoice"
+    },
+    {
+      "id": "en.payment_request.012",
+      "category": "payment_request",
+      "phrase": "clear the outstanding"
+    },
+    {
+      "id": "en.payment_request.013",
+      "category": "payment_request",
+      "phrase": "pay the outstanding"
+    },
+    {
+      "id": "en.payment_request.014",
+      "category": "payment_request",
+      "phrase": "remit the amount"
+    },
+    {
+      "id": "en.payment_request.015",
+      "category": "payment_request",
+      "phrase": "arrange the payment"
+    },
+    {
+      "id": "en.payment_request.016",
+      "category": "payment_request",
+      "phrase": "arrange a payment"
+    },
+    {
+      "id": "en.payment_request.017",
+      "category": "payment_request",
+      "phrase": "approve the payment"
+    },
+    {
+      "id": "en.payment_request.018",
+      "category": "payment_request",
+      "phrase": "complete the payment"
+    },
+    {
+      "id": "en.payment_request.019",
+      "category": "payment_request",
+      "phrase": "payment to be processed"
+    },
+    {
+      "id": "en.payment_request.020",
+      "category": "payment_request",
+      "phrase": "pay this vendor"
+    },
+    {
+      "id": "en.bank_change.001",
+      "category": "bank_change",
+      "phrase": "changed our bank"
+    },
+    {
+      "id": "en.bank_change.002",
+      "category": "bank_change",
+      "phrase": "change of bank details"
+    },
+    {
+      "id": "en.bank_change.003",
+      "category": "bank_change",
+      "phrase": "changed bank details"
+    },
+    {
+      "id": "en.bank_change.004",
+      "category": "bank_change",
+      "phrase": "new bank details"
+    },
+    {
+      "id": "en.bank_change.005",
+      "category": "bank_change",
+      "phrase": "updated bank details"
+    },
+    {
+      "id": "en.bank_change.006",
+      "category": "bank_change",
+      "phrase": "new bank account"
+    },
+    {
+      "id": "en.bank_change.007",
+      "category": "bank_change",
+      "phrase": "new account details"
+    },
+    {
+      "id": "en.bank_change.008",
+      "category": "bank_change",
+      "phrase": "updated account details"
+    },
+    {
+      "id": "en.bank_change.009",
+      "category": "bank_change",
+      "phrase": "updated banking information"
+    },
+    {
+      "id": "en.bank_change.010",
+      "category": "bank_change",
+      "phrase": "our account has changed"
+    },
+    {
+      "id": "en.bank_change.011",
+      "category": "bank_change",
+      "phrase": "account number has changed"
+    },
+    {
+      "id": "en.bank_change.012",
+      "category": "bank_change",
+      "phrase": "use the new account"
+    },
+    {
+      "id": "en.bank_change.013",
+      "category": "bank_change",
+      "phrase": "updated iban"
+    },
+    {
+      "id": "en.bank_change.014",
+      "category": "bank_change",
+      "phrase": "new iban"
+    },
+    {
+      "id": "en.bank_change.015",
+      "category": "bank_change",
+      "phrase": "new ifsc"
+    },
+    {
+      "id": "en.bank_change.016",
+      "category": "bank_change",
+      "phrase": "updated ifsc"
+    },
+    {
+      "id": "en.bank_change.017",
+      "category": "bank_change",
+      "phrase": "bank details have been updated"
+    },
+    {
+      "id": "en.bank_change.018",
+      "category": "bank_change",
+      "phrase": "change in banking details"
+    },
+    {
+      "id": "en.bank_change.019",
+      "category": "bank_change",
+      "phrase": "remittance details have changed"
+    },
+    {
+      "id": "en.bank_change.020",
+      "category": "bank_change",
+      "phrase": "do not use the old account"
+    },
+    {
+      "id": "en.gift_card.001",
+      "category": "gift_card",
+      "phrase": "gift card"
+    },
+    {
+      "id": "en.gift_card.002",
+      "category": "gift_card",
+      "phrase": "gift cards"
+    },
+    {
+      "id": "en.gift_card.003",
+      "category": "gift_card",
+      "phrase": "buy gift cards"
+    },
+    {
+      "id": "en.gift_card.004",
+      "category": "gift_card",
+      "phrase": "purchase gift cards"
+    },
+    {
+      "id": "en.gift_card.005",
+      "category": "gift_card",
+      "phrase": "itunes card"
+    },
+    {
+      "id": "en.gift_card.006",
+      "category": "gift_card",
+      "phrase": "itunes cards"
+    },
+    {
+      "id": "en.gift_card.007",
+      "category": "gift_card",
+      "phrase": "google play card"
+    },
+    {
+      "id": "en.gift_card.008",
+      "category": "gift_card",
+      "phrase": "google play cards"
+    },
+    {
+      "id": "en.gift_card.009",
+      "category": "gift_card",
+      "phrase": "amazon gift card"
+    },
+    {
+      "id": "en.gift_card.010",
+      "category": "gift_card",
+      "phrase": "steam card"
+    },
+    {
+      "id": "en.gift_card.011",
+      "category": "gift_card",
+      "phrase": "steam wallet card"
+    },
+    {
+      "id": "en.gift_card.012",
+      "category": "gift_card",
+      "phrase": "scratch the back"
+    },
+    {
+      "id": "en.gift_card.013",
+      "category": "gift_card",
+      "phrase": "scratch off the code"
+    },
+    {
+      "id": "en.gift_card.014",
+      "category": "gift_card",
+      "phrase": "send me the codes"
+    },
+    {
+      "id": "en.gift_card.015",
+      "category": "gift_card",
+      "phrase": "send the card codes"
+    },
+    {
+      "id": "en.gift_card.016",
+      "category": "gift_card",
+      "phrase": "pictures of the cards"
+    },
+    {
+      "id": "en.gift_card.017",
+      "category": "gift_card",
+      "phrase": "redemption codes"
+    },
+    {
+      "id": "en.gift_card.018",
+      "category": "gift_card",
+      "phrase": "prepaid cards"
+    },
+    {
+      "id": "en.wire_transfer.001",
+      "category": "wire_transfer",
+      "phrase": "wire transfer"
+    },
+    {
+      "id": "en.wire_transfer.002",
+      "category": "wire_transfer",
+      "phrase": "wire the funds"
+    },
+    {
+      "id": "en.wire_transfer.003",
+      "category": "wire_transfer",
+      "phrase": "wire the money"
+    },
+    {
+      "id": "en.wire_transfer.004",
+      "category": "wire_transfer",
+      "phrase": "bank transfer"
+    },
+    {
+      "id": "en.wire_transfer.005",
+      "category": "wire_transfer",
+      "phrase": "swift transfer"
+    },
+    {
+      "id": "en.wire_transfer.006",
+      "category": "wire_transfer",
+      "phrase": "telegraphic transfer"
+    },
+    {
+      "id": "en.wire_transfer.007",
+      "category": "wire_transfer",
+      "phrase": "rtgs"
+    },
+    {
+      "id": "en.wire_transfer.008",
+      "category": "wire_transfer",
+      "phrase": "neft"
+    },
+    {
+      "id": "en.wire_transfer.009",
+      "category": "wire_transfer",
+      "phrase": "imps"
+    },
+    {
+      "id": "en.wire_transfer.010",
+      "category": "wire_transfer",
+      "phrase": "process the transfer"
+    },
+    {
+      "id": "en.wire_transfer.011",
+      "category": "wire_transfer",
+      "phrase": "initiate the transfer"
+    },
+    {
+      "id": "en.wire_transfer.012",
+      "category": "wire_transfer",
+      "phrase": "initiate a transfer"
+    },
+    {
+      "id": "en.wire_transfer.013",
+      "category": "wire_transfer",
+      "phrase": "transfer the funds"
+    },
+    {
+      "id": "en.wire_transfer.014",
+      "category": "wire_transfer",
+      "phrase": "transfer the amount"
+    },
+    {
+      "id": "en.wire_transfer.015",
+      "category": "wire_transfer",
+      "phrase": "make a transfer"
+    },
+    {
+      "id": "en.wire_transfer.016",
+      "category": "wire_transfer",
+      "phrase": "international transfer"
+    },
+    {
+      "id": "en.wire_transfer.017",
+      "category": "wire_transfer",
+      "phrase": "same day transfer"
+    },
+    {
+      "id": "en.wire_transfer.018",
+      "category": "wire_transfer",
+      "phrase": "send the funds"
+    },
+    {
+      "id": "en.invoice_change.001",
+      "category": "invoice_change",
+      "phrase": "updated invoice"
+    },
+    {
+      "id": "en.invoice_change.002",
+      "category": "invoice_change",
+      "phrase": "revised invoice"
+    },
+    {
+      "id": "en.invoice_change.003",
+      "category": "invoice_change",
+      "phrase": "invoice with new bank details"
+    },
+    {
+      "id": "en.invoice_change.004",
+      "category": "invoice_change",
+      "phrase": "pay this invoice to"
+    },
+    {
+      "id": "en.invoice_change.005",
+      "category": "invoice_change",
+      "phrase": "overdue invoice"
+    },
+    {
+      "id": "en.invoice_change.006",
+      "category": "invoice_change",
+      "phrase": "outstanding invoice"
+    },
+    {
+      "id": "en.invoice_change.007",
+      "category": "invoice_change",
+      "phrase": "invoice is overdue"
+    },
+    {
+      "id": "en.invoice_change.008",
+      "category": "invoice_change",
+      "phrase": "pay to the new account"
+    },
+    {
+      "id": "en.invoice_change.009",
+      "category": "invoice_change",
+      "phrase": "remit to the new account"
+    },
+    {
+      "id": "en.invoice_change.010",
+      "category": "invoice_change",
+      "phrase": "changed remittance"
+    },
+    {
+      "id": "en.invoice_change.011",
+      "category": "invoice_change",
+      "phrase": "new remittance details"
+    },
+    {
+      "id": "en.invoice_change.012",
+      "category": "invoice_change",
+      "phrase": "updated remittance"
+    },
+    {
+      "id": "en.invoice_change.013",
+      "category": "invoice_change",
+      "phrase": "payment instructions have changed"
+    },
+    {
+      "id": "en.invoice_change.014",
+      "category": "invoice_change",
+      "phrase": "new payment instructions"
+    },
+    {
+      "id": "en.invoice_change.015",
+      "category": "invoice_change",
+      "phrase": "updated payment instructions"
+    },
+    {
+      "id": "en.invoice_change.016",
+      "category": "invoice_change",
+      "phrase": "remit payment to our new"
+    },
+    {
+      "id": "en.invoice_change.017",
+      "category": "invoice_change",
+      "phrase": "account for this invoice has changed"
+    },
+    {
+      "id": "en.invoice_change.018",
+      "category": "invoice_change",
+      "phrase": "final reminder invoice"
+    },
+    {
+      "id": "en.payroll_change.001",
+      "category": "payroll_change",
+      "phrase": "direct deposit"
+    },
+    {
+      "id": "en.payroll_change.002",
+      "category": "payroll_change",
+      "phrase": "change my direct deposit"
+    },
+    {
+      "id": "en.payroll_change.003",
+      "category": "payroll_change",
+      "phrase": "update my direct deposit"
+    },
+    {
+      "id": "en.payroll_change.004",
+      "category": "payroll_change",
+      "phrase": "salary account"
+    },
+    {
+      "id": "en.payroll_change.005",
+      "category": "payroll_change",
+      "phrase": "change my salary account"
+    },
+    {
+      "id": "en.payroll_change.006",
+      "category": "payroll_change",
+      "phrase": "update my salary account"
+    },
+    {
+      "id": "en.payroll_change.007",
+      "category": "payroll_change",
+      "phrase": "payroll details"
+    },
+    {
+      "id": "en.payroll_change.008",
+      "category": "payroll_change",
+      "phrase": "update my payroll"
+    },
+    {
+      "id": "en.payroll_change.009",
+      "category": "payroll_change",
+      "phrase": "change my payroll"
+    },
+    {
+      "id": "en.payroll_change.010",
+      "category": "payroll_change",
+      "phrase": "new salary account"
+    },
+    {
+      "id": "en.payroll_change.011",
+      "category": "payroll_change",
+      "phrase": "paycheck deposit"
+    },
+    {
+      "id": "en.payroll_change.012",
+      "category": "payroll_change",
+      "phrase": "payroll change"
+    },
+    {
+      "id": "en.payroll_change.013",
+      "category": "payroll_change",
+      "phrase": "bank for my salary"
+    },
+    {
+      "id": "en.payroll_change.014",
+      "category": "payroll_change",
+      "phrase": "deposit my salary"
+    },
+    {
+      "id": "en.payroll_change.015",
+      "category": "payroll_change",
+      "phrase": "salary credited to"
+    },
+    {
+      "id": "en.payroll_change.016",
+      "category": "payroll_change",
+      "phrase": "before the next payroll"
+    },
+    {
+      "id": "en.urgency.001",
+      "category": "urgency",
+      "phrase": "urgent"
+    },
+    {
+      "id": "en.urgency.002",
+      "category": "urgency",
+      "phrase": "urgently"
+    },
+    {
+      "id": "en.urgency.003",
+      "category": "urgency",
+      "phrase": "immediately"
+    },
+    {
+      "id": "en.urgency.004",
+      "category": "urgency",
+      "phrase": "asap"
+    },
+    {
+      "id": "en.urgency.005",
+      "category": "urgency",
+      "phrase": "as soon as possible"
+    },
+    {
+      "id": "en.urgency.006",
+      "category": "urgency",
+      "phrase": "right away"
+    },
+    {
+      "id": "en.urgency.007",
+      "category": "urgency",
+      "phrase": "right now"
+    },
+    {
+      "id": "en.urgency.008",
+      "category": "urgency",
+      "phrase": "today itself"
+    },
+    {
+      "id": "en.urgency.009",
+      "category": "urgency",
+      "phrase": "before end of day"
+    },
+    {
+      "id": "en.urgency.010",
+      "category": "urgency",
+      "phrase": "by end of day"
+    },
+    {
+      "id": "en.urgency.011",
+      "category": "urgency",
+      "phrase": "by eod"
+    },
+    {
+      "id": "en.urgency.012",
+      "category": "urgency",
+      "phrase": "before eod"
+    },
+    {
+      "id": "en.urgency.013",
+      "category": "urgency",
+      "phrase": "time sensitive"
+    },
+    {
+      "id": "en.urgency.014",
+      "category": "urgency",
+      "phrase": "within the hour"
+    },
+    {
+      "id": "en.urgency.015",
+      "category": "urgency",
+      "phrase": "without delay"
+    },
+    {
+      "id": "en.urgency.016",
+      "category": "urgency",
+      "phrase": "top priority"
+    },
+    {
+      "id": "en.urgency.017",
+      "category": "urgency",
+      "phrase": "at the earliest"
+    },
+    {
+      "id": "en.urgency.018",
+      "category": "urgency",
+      "phrase": "need this done today"
+    },
+    {
+      "id": "en.urgency.019",
+      "category": "urgency",
+      "phrase": "quick favour"
+    },
+    {
+      "id": "en.urgency.020",
+      "category": "urgency",
+      "phrase": "quick favor"
+    },
+    {
+      "id": "en.secrecy.001",
+      "category": "secrecy",
+      "phrase": "confidential"
+    },
+    {
+      "id": "en.secrecy.002",
+      "category": "secrecy",
+      "phrase": "strictly confidential"
+    },
+    {
+      "id": "en.secrecy.003",
+      "category": "secrecy",
+      "phrase": "keep this confidential"
+    },
+    {
+      "id": "en.secrecy.004",
+      "category": "secrecy",
+      "phrase": "keep this between us"
+    },
+    {
+      "id": "en.secrecy.005",
+      "category": "secrecy",
+      "phrase": "between you and me"
+    },
+    {
+      "id": "en.secrecy.006",
+      "category": "secrecy",
+      "phrase": "do not tell anyone"
+    },
+    {
+      "id": "en.secrecy.007",
+      "category": "secrecy",
+      "phrase": "don't tell anyone"
+    },
+    {
+      "id": "en.secrecy.008",
+      "category": "secrecy",
+      "phrase": "do not discuss"
+    },
+    {
+      "id": "en.secrecy.009",
+      "category": "secrecy",
+      "phrase": "do not share this"
+    },
+    {
+      "id": "en.secrecy.010",
+      "category": "secrecy",
+      "phrase": "do not mention this"
+    },
+    {
+      "id": "en.secrecy.011",
+      "category": "secrecy",
+      "phrase": "keep it quiet"
+    },
+    {
+      "id": "en.secrecy.012",
+      "category": "secrecy",
+      "phrase": "keep this private"
+    },
+    {
+      "id": "en.secrecy.013",
+      "category": "secrecy",
+      "phrase": "discreet"
+    },
+    {
+      "id": "en.secrecy.014",
+      "category": "secrecy",
+      "phrase": "be discreet"
+    },
+    {
+      "id": "en.secrecy.015",
+      "category": "secrecy",
+      "phrase": "surprise for the staff"
+    },
+    {
+      "id": "en.secrecy.016",
+      "category": "secrecy",
+      "phrase": "not to be discussed"
+    },
+    {
+      "id": "en.secrecy.017",
+      "category": "secrecy",
+      "phrase": "don't call me"
+    },
+    {
+      "id": "en.secrecy.018",
+      "category": "secrecy",
+      "phrase": "do not call me"
+    },
+    {
+      "id": "en.secrecy.019",
+      "category": "secrecy",
+      "phrase": "i am in a meeting"
+    },
+    {
+      "id": "en.secrecy.020",
+      "category": "secrecy",
+      "phrase": "i cannot talk now"
+    },
+    {
+      "id": "en.credential_request.001",
+      "category": "credential_request",
+      "phrase": "verify your account"
+    },
+    {
+      "id": "en.credential_request.002",
+      "category": "credential_request",
+      "phrase": "confirm your password"
+    },
+    {
+      "id": "en.credential_request.003",
+      "category": "credential_request",
+      "phrase": "confirm your credentials"
+    },
+    {
+      "id": "en.credential_request.004",
+      "category": "credential_request",
+      "phrase": "update your password"
+    },
+    {
+      "id": "en.credential_request.005",
+      "category": "credential_request",
+      "phrase": "reset your password"
+    },
+    {
+      "id": "en.credential_request.006",
+      "category": "credential_request",
+      "phrase": "sign in to avoid"
+    },
+    {
+      "id": "en.credential_request.007",
+      "category": "credential_request",
+      "phrase": "log in to avoid"
+    },
+    {
+      "id": "en.credential_request.008",
+      "category": "credential_request",
+      "phrase": "avoid suspension"
+    },
+    {
+      "id": "en.credential_request.009",
+      "category": "credential_request",
+      "phrase": "account will be suspended"
+    },
+    {
+      "id": "en.credential_request.010",
+      "category": "credential_request",
+      "phrase": "account will be locked"
+    },
+    {
+      "id": "en.credential_request.011",
+      "category": "credential_request",
+      "phrase": "validate your mailbox"
+    },
+    {
+      "id": "en.credential_request.012",
+      "category": "credential_request",
+      "phrase": "mailbox is full"
+    },
+    {
+      "id": "en.credential_request.013",
+      "category": "credential_request",
+      "phrase": "re enter your password"
+    },
+    {
+      "id": "en.credential_request.014",
+      "category": "credential_request",
+      "phrase": "verify your identity"
+    },
+    {
+      "id": "en.credential_request.015",
+      "category": "credential_request",
+      "phrase": "confirm your login"
+    },
+    {
+      "id": "en.credential_request.016",
+      "category": "credential_request",
+      "phrase": "unusual sign in activity"
+    },
+    {
+      "id": "en.credential_request.017",
+      "category": "credential_request",
+      "phrase": "your password expires"
+    },
+    {
+      "id": "en.credential_request.018",
+      "category": "credential_request",
+      "phrase": "password will expire"
+    },
+    {
+      "id": "en.credential_request.019",
+      "category": "credential_request",
+      "phrase": "click here to verify"
+    },
+    {
+      "id": "en.authority.001",
+      "category": "authority",
+      "phrase": "ceo"
+    },
+    {
+      "id": "en.authority.002",
+      "category": "authority",
+      "phrase": "cfo"
+    },
+    {
+      "id": "en.authority.003",
+      "category": "authority",
+      "phrase": "managing director"
+    },
+    {
+      "id": "en.authority.004",
+      "category": "authority",
+      "phrase": "chairman"
+    },
+    {
+      "id": "en.authority.005",
+      "category": "authority",
+      "phrase": "director"
+    },
+    {
+      "id": "en.authority.006",
+      "category": "authority",
+      "phrase": "the boss"
+    },
+    {
+      "id": "en.authority.007",
+      "category": "authority",
+      "phrase": "your boss"
+    },
+    {
+      "id": "en.authority.008",
+      "category": "authority",
+      "phrase": "from the ceo"
+    },
+    {
+      "id": "en.authority.009",
+      "category": "authority",
+      "phrase": "on behalf of the ceo"
+    },
+    {
+      "id": "en.authority.010",
+      "category": "authority",
+      "phrase": "md sir"
+    },
+    {
+      "id": "en.authority.011",
+      "category": "authority",
+      "phrase": "president"
+    },
+    {
+      "id": "en.authority.012",
+      "category": "authority",
+      "phrase": "board member"
+    },
+    {
+      "id": "en.authority.013",
+      "category": "authority",
+      "phrase": "founder"
+    },
+    {
+      "id": "en.authority.014",
+      "category": "authority",
+      "phrase": "head of finance"
+    },
+    {
+      "id": "en.authority.015",
+      "category": "authority",
+      "phrase": "finance director"
+    }
+  ]
+}

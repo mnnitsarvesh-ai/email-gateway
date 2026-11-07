@@ -1,0 +1,52 @@
+{
+  "id": "ceo-fraud-freemail",
+  "description": "Executive display name from a free-mail address asking for gift cards, secrecy, urgency (B6 worked expectation).",
+  "label": "bec",
+  "input": {
+    "headers": {
+      "From": ["Anita Sharma <anita.sharma.office@gmail.com>"],
+      "Subject": ["Quick favour"]
+    },
+    "envelope": {
+      "envelopeFrom": "anita.sharma.office@gmail.com"
+    },
+    "auth": {
+      "state": "available",
+      "row": {
+        "spf": "pass",
+        "spfDomain": "gmail.com",
+        "dkim": "pass",
+        "dkimSignatures": [
+          {
+            "domain": "gmail.com",
+            "result": "pass",
+            "selector": "s1"
+          }
+        ],
+        "dmarc": "pass",
+        "dmarcPolicy": "reject",
+        "dmarcDomain": "gmail.com",
+        "arc": null
+      }
+    },
+    "url": {
+      "state": "available",
+      "rows": []
+    },
+    "text": {
+      "subject": "Quick favour",
+      "text": "Hi, are you at your desk? I need you to buy gift cards for a client presentation today. Keep this confidential, I am in a meeting and cannot talk now. It is urgent, send me the codes as soon as possible.\nAnita",
+      "html": null
+    }
+  },
+  "expected": {
+    "verdict": "malicious",
+    "requiredCodes": [
+      "bec.impersonation.executive_name",
+      "bec.impersonation.executive_freemail",
+      "bec.content.gift_card",
+      "bec.content.secrecy",
+      "bec.content.urgency"
+    ]
+  }
+}

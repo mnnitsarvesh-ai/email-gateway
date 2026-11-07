@@ -228,6 +228,8 @@ const ctx = (): EngineScanContext => ({
   messageId: 55n,
   receivedAt: new Date('2026-11-05T10:00:00Z'),
   round: 0,
+  scanId: 1n,
+  scanKind: 'initial',
   direction: 'inbound',
   envelope: {
     clientIp: null,

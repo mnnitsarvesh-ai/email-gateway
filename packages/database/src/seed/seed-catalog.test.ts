@@ -71,7 +71,7 @@ describe('seed catalog', () => {
   const sorted = (list: readonly string[]) => [...list].sort();
   const role = (key: string) => SYSTEM_ROLES.find((r) => r.key === key)!.permissions;
 
-  it('contains the 41 permissions of D7, D8, steps 2.1 D14, 2.2, 2.3, 3.2, 3.3, 4.1 and 4.2, without duplicates', () => {
+  it('contains the 45 permissions of D7, D8, steps 2.1 D14, 2.2, 2.3, 3.2, 3.3, 4.1, 4.2 and 4.4, without duplicates', () => {
     expect(new Set(keys).size).toBe(keys.length);
     expect(sorted(keys)).toEqual(
       sorted([
@@ -116,14 +116,18 @@ describe('seed catalog', () => {
         'platform:scan_training',
         'platform:threat_intel_manage',
         'platform:scan_rescan',
+        'bec:read',
+        'bec:manage',
+        'bec:feedback',
+        'bec:feedback_export',
       ]),
     );
-    expect(keys).toHaveLength(41);
+    expect(keys).toHaveLength(45);
     // Step 3.3 placed message:rescan next to the other message permissions (design §3.3); the
     // seed upserts by key, so on an existing database it simply gets the next id.
     expect(keys.indexOf('message:rescan')).toBe(keys.indexOf('message:read_content') + 1);
     // Otherwise appended in catalog order (permission ids follow it on a fresh database).
-    expect(keys.slice(-9)).toEqual([
+    expect(keys.slice(-13)).toEqual([
       'connector:read',
       'connector:manage',
       'domain:routing_manage',
@@ -133,6 +137,10 @@ describe('seed catalog', () => {
       'platform:scan_training',
       'platform:threat_intel_manage',
       'platform:scan_rescan',
+      'bec:read',
+      'bec:manage',
+      'bec:feedback',
+      'bec:feedback_export',
     ]);
     for (const key of keys) expect(key).toMatch(/^[a-z]+:[a-z_]+$/);
     for (const p of PERMISSIONS) expect(p.description.length, p.key).toBeGreaterThan(0);
@@ -254,6 +262,9 @@ describe('seed catalog', () => {
         'report:read',
         'archive:read',
         'audit:read',
+        'bec:read',
+        'bec:manage',
+        'bec:feedback',
       ],
       quarantine_reviewer: [
         'organization:read',
@@ -265,12 +276,31 @@ describe('seed catalog', () => {
         'quarantine:request_release',
         'report:read',
       ],
-      compliance_auditor: [...read, 'audit:read', 'archive:export'],
+      compliance_auditor: [...read, 'audit:read', 'archive:export', 'bec:read'],
       read_only_user: read,
     };
     expect(Object.keys(expected)).toEqual([...SYSTEM_ROLE_KEYS]);
     for (const [key, permissions] of Object.entries(expected)) {
       expect(sorted(role(key)), key).toEqual(sorted(permissions));
+    }
+    // Step 4.4 (B18): the BEC permissions are tenant permissions with these holders.
+    const bec = (key: string) =>
+      SYSTEM_ROLES.filter((r) => (r.permissions as readonly string[]).includes(key)).map(
+        (r) => r.key,
+      );
+    expect(bec('bec:read')).toEqual([
+      'super_admin',
+      'organization_admin',
+      'security_analyst',
+      'compliance_auditor',
+    ]);
+    for (const key of ['bec:manage', 'bec:feedback']) {
+      expect(bec(key), key).toEqual(['super_admin', 'organization_admin', 'security_analyst']);
+    }
+    expect(bec('bec:feedback_export')).toEqual(['super_admin', 'organization_admin']);
+    for (const key of ['bec:read', 'bec:manage', 'bec:feedback', 'bec:feedback_export']) {
+      expect(TENANT_PERMISSIONS, key).toContain(key);
+      expect(TENANT_READ_PERMISSIONS, key).not.toContain(key);
     }
     // DKIM rotation (step 2.1 D14): domain admin, organization admin and super admin only.
     const rotators = SYSTEM_ROLES.filter((r) =>

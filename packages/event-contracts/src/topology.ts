@@ -7,9 +7,10 @@ import {
 } from './registry';
 
 /**
- * RabbitMQ topology v5 as data (step 3.2 §3, ADR-0024; v2: step 3.3 L7, ADR-0025; v3: step 4.1
- * S2, ADR-0026; v4: step 4.2 A2, ADR-0028; v5: step 4.3 U2, ADR-0029): exactly six topic
- * exchanges and sixteen quorum queues in the vhost `email-gateway`. v2 added the bindings of `mail.message.rescan_requested.v1`
+ * RabbitMQ topology v6 as data (step 3.2 §3, ADR-0024; v2: step 3.3 L7, ADR-0025; v3: step 4.1
+ * S2, ADR-0026; v4: step 4.2 A2, ADR-0028; v5: step 4.3 U2, ADR-0029; v6: step 4.4 B3,
+ * ADR-0033): exactly six topic exchanges and seventeen quorum queues in the vhost
+ * `email-gateway`. v2 added the bindings of `mail.message.rescan_requested.v1`
  * (`email.security`) to the five scan queues, and `mail.message.state_changed.v1`
  * (`email.events`) reaches only the `email.analytics` firehose. v3 makes `scan.spam` a work queue
  * (the Rspamd engine of the email-worker scan role, ledger consumer `email-worker.scan.rspamd`)
@@ -27,6 +28,14 @@ import {
  * two new queue names, its retry binding is the qualified `retry.scan.url.org.#` (every retry key
  * is `retry.<queue>.org.<id>.<type>`), so it never captures their retry hops
  * (`retryBindingKey`). The exchanges and the other queues are unchanged.
+ *
+ * v6 adds `scan.bec`, the work queue of the phishing/BEC engine (email-worker scan role, ledger
+ * consumer `email-worker.scan.bec`), the first **stage-2** engine queue: it binds only
+ * `mail.message.scan_stage_ready.v1` (registered by v6), which the scan stage writes when every
+ * dependency of the engine (`rspamd`, `url`) in the round's required set has its final result,
+ * and never `parsed.v1` / `rescan_requested.v1`. `scan.bec` is no dot-prefix of another queue, so
+ * its retry binding is the plain `retry.scan.bec.#`. `scan.auth` stays reserved (its reason is
+ * unchanged); the exchanges and the other queues are unchanged.
  * `infrastructure/rabbitmq/definitions.json` is
  * generated from `TOPOLOGY` (`pnpm --filter @email-gateway/event-contracts topology:export`) and
  * imported by `infrastructure/rabbitmq/init.mjs`; services never declare, they verify passively.
@@ -35,7 +44,7 @@ import {
  * target, overflow, length limits) is a per-queue policy `eg.<queue>` (Q4), so it changes without
  * re-declaring a queue.
  */
-export const TOPOLOGY_VERSION = 5;
+export const TOPOLOGY_VERSION = 6;
 export const DEFAULT_VHOST = 'email-gateway';
 
 /** The six exchanges of the topology (ADR-0024): all topic, durable, not internal. */
@@ -57,6 +66,7 @@ export const QUEUE_NAMES = [
   'scan.url.inspect',
   'scan.url.results',
   'scan.attachment',
+  'scan.bec',
   'scan.dlp',
   'scan.sandbox',
   'email.policy.evaluate',
@@ -480,6 +490,27 @@ export const TOPOLOGY: Topology = {
       },
       policy: policyFor('work', 'scan.attachment'),
       description: 'Attachments: file type, known hashes, ClamAV, YARA, archive limits (step 4.2)',
+    },
+    {
+      // v6 (step 4.4 B1, B3): the phishing/BEC engine of the email-worker scan role, a stage-2
+      // engine triggered only by the stage-ready event of its dependencies (rspamd, url).
+      name: 'scan.bec',
+      role: 'work',
+      homeExchange: 'email.security',
+      bindings: [
+        eventBinding('email.security', 'mail.message.scan_stage_ready.v1'),
+        retryBinding('email.security', 'scan.bec'),
+      ],
+      consumer: { kind: 'ledger', ledgerName: 'email-worker.scan.bec', service: 'email-worker' },
+      retry: {
+        strategy: 'hold',
+        maxAttempts: 10,
+        baseDelayMs: 2 * SECOND,
+        maxDelayMs: MINUTE,
+        maxRetryAgeMs: 24 * HOUR,
+      },
+      policy: policyFor('work', 'scan.bec'),
+      description: 'Phishing and BEC (step 4.4): stage 2, triggered when rspamd and url finalized',
     },
     dormant(
       'scan.dlp',

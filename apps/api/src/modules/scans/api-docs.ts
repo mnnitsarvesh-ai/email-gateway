@@ -32,7 +32,7 @@ export const ApiEngineParam = (): MethodDecorator =>
     name: 'engine',
     description:
       'Scan engine name with tenant settings: `rspamd` (step 4.1), `attachment` (step 4.2), ' +
-      '`url` (step 4.3)',
+      '`url` (step 4.3), `bec` (step 4.4)',
   });
 
 export const ApiScanEngineNotFound = (): MethodDecorator =>
@@ -55,8 +55,9 @@ export const ApiScanSettingsInvalid = (): MethodDecorator =>
       'allowedTypes, an unknown file type, a URL domain that is not a registrable domain or ' +
       'host (IP literal, single label, public suffix), a domain both allowed and blocked, a ' +
       'fetch mode above the platform mode, an expiry outside [1, URL_TOKEN_MAX_EXPIRY_DAYS], ' +
-      'rewriting or dynamic inspection switched on while the platform has it off, or an ' +
-      'unknown key',
+      'rewriting or dynamic inspection switched on while the platform has it off, BEC ' +
+      'thresholds or AI modes outside their bounds or caps, a BEC free-mail domain that is a ' +
+      'public suffix, or an unknown key',
     [SCAN_SETTINGS_INVALID],
     {
       violations: {

@@ -26,6 +26,8 @@ function ctx(overrides: Partial<EngineScanContext> = {}, open?: EngineScanContex
     messageId: 7n,
     receivedAt: new Date(),
     round: 1,
+    scanId: 9n,
+    scanKind: 'rescan',
     direction: 'inbound',
     envelope: {
       clientIp: '192.0.2.10',

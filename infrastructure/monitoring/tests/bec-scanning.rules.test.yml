@@ -1,0 +1,185 @@
+# promtool unit tests of rules/bec-scanning.rules.yml (step 4.4 B19):
+#   docker run --rm -v "$PWD/infrastructure/monitoring:/m:ro" --entrypoint promtool \
+#     prom/prometheus:v3.6.0 test rules /m/tests/bec-scanning.rules.test.yml
+rule_files:
+  - ../rules/bec-scanning.rules.yml
+evaluation_interval: 1m
+tests:
+  - name: failures, backlog, stage stall, inputs, LLM errors and budgets
+    interval: 1m
+    input_series:
+      # 10 clean finals per minute; 1 error final per minute from minute 10 (9 %).
+      - series: 'scan_engine_results_total{job="email-worker",instance="a",engine="bec",outcome="clean",final="true"}'
+        values: '0+10x80'
+      - series: 'scan_engine_results_total{job="email-worker",instance="a",engine="bec",outcome="error",final="true"}'
+        values: '0x10 1+1x70'
+      # Retried attempts and other engines never count.
+      - series: 'scan_engine_results_total{job="email-worker",instance="a",engine="bec",outcome="error",final="false"}'
+        values: '0+50x80'
+      - series: 'scan_engine_results_total{job="email-worker",instance="a",engine="url",outcome="error",final="true"}'
+        values: '0+50x80'
+      # scan.bec backlog from minute 10; scan.url never alerts here.
+      - series: 'rabbitmq_detailed_queue_messages_ready{job="rabbitmq-detailed",vhost="email-gateway",queue="scan.bec"}'
+        values: '0x10 2000x70'
+      - series: 'rabbitmq_detailed_queue_messages_ready{job="rabbitmq-detailed",vhost="email-gateway",queue="scan.url"}'
+        values: '5000x80'
+      # One bec deadline finalization at minute 20; url finalizations never count.
+      - series: 'scan_deadline_finalized_total{job="email-worker",instance="a",engine="bec"}'
+        values: '0x20 1x60'
+      - series: 'scan_deadline_finalized_total{job="email-worker",instance="a",engine="url"}'
+        values: '0+5x80'
+      # auth: 10 available + 2 failed per minute (17 %: alerts); url: 12 available + 1 not in
+      # round (8 %: below); text: 10 complete + 10 absent (absent never counts); history:
+      # 20 enabled + 1 error (5 %: below) + 100 disabled (excluded from the denominator).
+      - series: 'scan_bec_inputs_total{job="email-worker",instance="a",input="auth",state="available"}'
+        values: '0+10x80'
+      - series: 'scan_bec_inputs_total{job="email-worker",instance="a",input="auth",state="failed"}'
+        values: '0+2x80'
+      - series: 'scan_bec_inputs_total{job="email-worker",instance="a",input="url",state="available"}'
+        values: '0+12x80'
+      - series: 'scan_bec_inputs_total{job="email-worker",instance="a",input="url",state="not_in_round"}'
+        values: '0+1x80'
+      - series: 'scan_bec_inputs_total{job="email-worker",instance="a",input="text",state="complete"}'
+        values: '0+10x80'
+      - series: 'scan_bec_inputs_total{job="email-worker",instance="a",input="text",state="absent"}'
+        values: '0+10x80'
+      - series: 'scan_bec_inputs_total{job="email-worker",instance="a",input="history",state="disabled"}'
+        values: '0+100x80'
+      - series: 'scan_bec_inputs_total{job="email-worker",instance="a",input="history",state="enabled"}'
+        values: '0+20x80'
+      - series: 'scan_bec_inputs_total{job="email-worker",instance="a",input="history",state="error"}'
+        values: '0+1x80'
+      # LLM: 6 ok and 4 errors per minute from minute 0 (40 %); gated never counts.
+      - series: 'scan_bec_ai_total{job="email-worker",instance="a",layer="llm",mode="active",status="ok",effect="none"}'
+        values: '0+6x80'
+      - series: 'scan_bec_ai_total{job="email-worker",instance="a",layer="llm",mode="active",status="error",effect="none"}'
+        values: '0+4x80'
+      - series: 'scan_bec_ai_total{job="email-worker",instance="a",layer="llm",mode="active",status="gated",effect="none"}'
+        values: '0+1000x80'
+      # Local model errors never count for the LLM alert.
+      - series: 'scan_bec_ai_total{job="email-worker",instance="a",layer="local",mode="shadow",status="error",effect="none"}'
+        values: '0+1000x80'
+      # The tenant budget is exhausted at minute 30; allowed checks never alert.
+      - series: 'bec_llm_budget_total{job="email-worker",instance="a",result="tenant_exhausted"}'
+        values: '0x30 3x50'
+      - series: 'bec_llm_budget_total{job="email-worker",instance="a",result="allowed"}'
+        values: '0+10x80'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: BecEngineFailuresHigh
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: BecEngineFailuresHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: bec engine final failures above 5 %
+              description: >-
+                More than 5 % of the final bec engine results of the last 10 minutes are timeout
+                or error (text part reads, MySQL, inconsistent reads, text time budget). Their
+                rounds end scan_failed (never clean); rescan them after the cause is fixed. AI
+                problems are never engine failures.
+              runbook_url: docs/runbooks/bec-detection.md#becenginefailureshigh
+      - eval_time: 15m
+        alertname: BecScanQueueBacklog
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: BecScanQueueBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: bec scan queue backlog
+              description: >-
+                scan.bec has had more than 1000 ready stage triggers for 10 minutes. Scale
+                email-worker-bec or check MySQL / S3 latency and the LLM layer (gated calls are
+                bounded by BEC_LLM_TIMEOUT_MS and BEC_LLM_CONCURRENCY).
+              runbook_url: docs/runbooks/bec-detection.md#becscanqueuebacklog
+      - eval_time: 15m
+        alertname: BecStageTriggerStall
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: BecStageTriggerStall
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: bec results finalized by the round deadline
+              description: >-
+                In the last 15 minutes the round deadline sweeper finalized at least one bec
+                result as timeout (deadline_exceeded): its scan_stage_ready.v1 trigger was not
+                written, not relayed, or not consumed (no email-worker-bec consumer on scan.bec).
+                The rounds ended scan_failed.
+              runbook_url: docs/runbooks/bec-detection.md#becstagetriggerstall
+      - eval_time: 40m
+        alertname: BecStageTriggerStall
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: BecInputsUnavailableHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              input: auth
+            exp_annotations:
+              summary: bec input auth unavailable for more than 10 % of messages
+              description: >-
+                More than 10 % of the bec results of the last 30 minutes had input auth
+                unavailable. Those verdicts are at least unknown (never clean), which raises the
+                share of unknown results. Check the dependency engine (rspamd / url failures or
+                not required), the MIME limits (text incomplete) or MySQL (history).
+              runbook_url: docs/runbooks/bec-detection.md#becinputsunavailablehigh
+      - eval_time: 50m
+        alertname: BecLlmErrorsHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: bec LLM assessments failing above 20 %
+              description: >-
+                More than 20 % of the LLM assessments of the last 15 minutes ended error, timeout
+                or invalid_output. Verdicts are unaffected (the AI layer never changes a verdict
+                when it fails, B9 P6) but the LLM adds nothing. Check the provider status, the
+                API key, the breaker (bec_llm_breaker_state) and BEC_LLM_TIMEOUT_MS.
+              runbook_url: docs/runbooks/bec-detection.md#becllmerrorshigh
+      - eval_time: 25m
+        alertname: BecLlmBudgetExhausted
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: BecLlmBudgetExhausted
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              result: tenant_exhausted
+            exp_annotations:
+              summary: bec LLM budget exhausted (tenant_exhausted)
+              description: >-
+                LLM calls were refused by the tenant_exhausted budget in the last 15 minutes
+                (per-tenant daily or platform per-minute window). Those assessments are
+                budget_exceeded; verdicts are the deterministic ones.
+              runbook_url: docs/runbooks/bec-detection.md#becllmbudgetexhausted
+
+  - name: malicious spike over the daily average
+    interval: 5m
+    input_series:
+      # 1 malicious per 5 minutes for a day, then 20 per 5 minutes.
+      - series: 'scan_bec_results_total{job="email-worker",instance="a",verdict="malicious",deterministic_verdict="malicious"}'
+        values: '0+1x288 308+20x30'
+      - series: 'scan_bec_results_total{job="email-worker",instance="a",verdict="clean",deterministic_verdict="clean"}'
+        values: '0+100x318'
+    alert_rule_test:
+      - eval_time: 23h
+        alertname: BecMaliciousRateSpike
+        exp_alerts: []
+      - eval_time: 26h
+        alertname: BecMaliciousRateSpike
+        exp_alerts:
+          - exp_labels:
+              severity: info
+            exp_annotations:
+              summary: bec malicious verdicts above 3x the daily average
+              description: >-
+                The hourly rate of malicious bec verdicts is more than three times the 1-day
+                average (and above 10 in the hour): a campaign, or a rule / profile / model
+                change producing false positives. Compare scan_bec_rules_total by code.
+              runbook_url: docs/runbooks/bec-detection.md#becmaliciousratespike

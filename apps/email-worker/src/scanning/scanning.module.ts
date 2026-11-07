@@ -24,17 +24,21 @@ import {
 } from '@email-gateway/common';
 import type { PrismaClient } from '@email-gateway/database';
 import type { Logger } from '@email-gateway/logger';
-import { requiredEngines } from '@email-gateway/security-contracts';
+import { requiredEngines, stage2Engines } from '@email-gateway/security-contracts';
 import type { HealthDetails } from '@email-gateway/shared-types';
 import type { WorkerConfig } from '../config';
 import { errorFields } from '../mime-ingestion/error-fields';
 import { CircuitBreaker } from './circuit-breaker';
+import { becPlatformFromConfig } from './bec-config';
 import {
   attachmentScalingWarnings,
   consumerEngines,
   runsAttachmentConsumer,
+  runsBecConsumer,
   runsUrlConsumer,
 } from './config';
+import { BecMetrics } from './engines/bec/bec-metrics';
+import { BecHistorySweeper } from './engines/bec/history-sweeper';
 import type { EngineHealthCheck, ScanEngineAdapter } from './engine';
 import { AttachmentEngine } from './engines/attachment/attachment.engine';
 import { AttachmentMetrics } from './engines/attachment/attachment-metrics';
@@ -85,6 +89,13 @@ export interface UrlJobs {
   results: UrlResultsService;
   consumer: QueueConsumer<UrlInspectionCompletedV1>;
   sweeper: InspectionSweeper;
+}
+
+/** The bec engine's history retention sweeper (B12), or null on replicas without its consumer. */
+export const BEC_JOBS = Symbol('BEC_JOBS');
+
+export interface BecJobs {
+  sweeper: BecHistorySweeper;
 }
 
 /** `amqp_connection_up{connection}` of the scan role. */
@@ -223,6 +234,47 @@ export class UrlEngineHealth implements HealthIndicator {
   }
 }
 
+/** Readiness `bec-engine` (model manifest and lexicons loaded; the LLM is not required; B16). */
+@Injectable()
+export class BecEngineHealth implements HealthIndicator {
+  readonly healthName = 'bec-engine';
+  constructor(@Inject(SCAN_ENGINES) private readonly engines: EngineRuntime[]) {}
+
+  async checkHealth(): Promise<void | HealthDetails> {
+    const check = engineHealthCheck(this.engines, this.healthName);
+    if (!check) throw new Error('the bec engine does not run in this worker');
+    return (await check.check()) as void | HealthDetails;
+  }
+}
+
+/** The communication-history retention sweeper of the bec engine (B12). */
+export function createBecJobs(options: {
+  config: Readonly<WorkerConfig>;
+  prisma: PrismaClient;
+  locks: LeaderLock;
+  registry: MetricsService;
+  logger: Logger;
+  lockName?: string;
+  organizationIds?: readonly bigint[];
+  now?: () => Date;
+}): BecJobs {
+  const { config } = options;
+  return {
+    sweeper: new BecHistorySweeper({
+      prisma: options.prisma,
+      locks: options.locks,
+      metrics: BecMetrics.for(options.registry),
+      logger: options.logger,
+      platform: becPlatformFromConfig(config),
+      intervalMs: config.BEC_HISTORY_SWEEP_INTERVAL_MS,
+      txTimeoutMs: config.SCAN_DB_TIMEOUT_MS,
+      ...(options.lockName ? { lockName: options.lockName } : {}),
+      ...(options.organizationIds ? { organizationIds: options.organizationIds } : {}),
+      ...(options.now ? { now: options.now } : {}),
+    }),
+  };
+}
+
 /** The results consumer and the sweeper of the url engine (U15), on the scan role's connection. */
 export function createUrlJobs(options: {
   config: Readonly<WorkerConfig>;
@@ -319,9 +371,21 @@ export function createScanInfrastructure(options: {
   s3: Pick<S3Service, 'client' | 'mailBucket'>;
   metrics: ScanMetrics;
   logger: Logger;
+  /** The worker's registry (child-row metrics: `bec_history_updates_total`). */
+  registry?: MetricsService;
 }): { store: ScanRepository; settings: SettingsResolver; openEml: EmlOpener } {
   const { config, metrics, logger } = options;
-  const store = new ScanRepository(options.prisma, config.SCAN_DB_TIMEOUT_MS, metrics.lifecycle);
+  // Stage-2 engines are triggered by any replica's stage-1 finals: zero series everywhere.
+  for (const engine of stage2Engines()) {
+    if (config.SCAN_ENGINES.includes(engine)) metrics.stageTriggers.inc({ engine }, 0);
+  }
+  const registry = options.registry;
+  const store = new ScanRepository(
+    options.prisma,
+    config.SCAN_DB_TIMEOUT_MS,
+    metrics.lifecycle,
+    registry ? { becHistory: (result) => BecMetrics.for(registry).historyUpdate(result) } : {},
+  );
   const settings = new SettingsResolver({
     source: store,
     config,
@@ -364,6 +428,7 @@ export class ScanningRuntime implements OnModuleInit, OnApplicationBootstrap, On
     @Inject(SCAN_LOGGER) private readonly logger: Logger,
     @Inject(ATTACHMENT_JOBS) private readonly jobs: AttachmentJobs | null,
     @Inject(URL_JOBS) private readonly urlJobs: UrlJobs | null,
+    @Inject(BEC_JOBS) private readonly becJobs: BecJobs | null,
   ) {}
 
   get running(): boolean {
@@ -398,6 +463,7 @@ export class ScanningRuntime implements OnModuleInit, OnApplicationBootstrap, On
       this.urlJobs.consumer.start((event) => results.handle(event));
       this.urlJobs.sweeper.start();
     }
+    this.becJobs?.sweeper.start();
     this.started = true;
     this.logger.info(
       {
@@ -434,6 +500,11 @@ export class ScanningRuntime implements OnModuleInit, OnApplicationBootstrap, On
         await this.urlJobs.sweeper
           .stop()
           .catch(() => this.logger.warn('url inspection sweeper stop failed'));
+      }
+      if (this.becJobs) {
+        await this.becJobs.sweeper
+          .stop()
+          .catch(() => this.logger.warn('bec history sweeper stop failed'));
       }
     }
     // Kills the inspector children (graceful shutdown) after the consumers stopped.
@@ -524,6 +595,7 @@ export class ScanningModule {
               s3,
               metrics,
               logger: scanLogger,
+              registry,
             });
             const progress = new PrismaConsumerProgress(prisma);
             for (const warning of runsAttachmentConsumer(config)
@@ -635,10 +707,23 @@ export class ScanningModule {
             SCANNER_MESSAGING_METRICS,
           ],
         },
+        {
+          provide: BEC_JOBS,
+          useFactory: (
+            prisma: PrismaService,
+            locks: LeaderLock,
+            registry: MetricsService,
+          ): BecJobs | null => {
+            if (!runsBecConsumer(config)) return null;
+            return createBecJobs({ config, prisma, locks, registry, logger: scanLogger });
+          },
+          inject: [PrismaService, SCAN_LOCKS, MetricsService],
+        },
         ScannerBrokerHealth,
         ClamavHealth,
         InspectorHealth,
         UrlEngineHealth,
+        BecEngineHealth,
         ScanningRuntime,
       ],
       exports: [
@@ -648,6 +733,7 @@ export class ScanningModule {
         ClamavHealth,
         InspectorHealth,
         UrlEngineHealth,
+        BecEngineHealth,
       ],
     };
   }

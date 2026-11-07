@@ -1,0 +1,54 @@
+{
+  "id": "newsletter",
+  "description": "Bulk newsletter: ESP return path, DKIM-aligned, promotional text: clean.",
+  "label": "benign",
+  "input": {
+    "headers": {
+      "From": ["ShopMart Deals <news@deals.shopmart.test>"],
+      "Subject": ["This week only"]
+    },
+    "envelope": {
+      "envelopeFrom": "bounce-8812@esp-mailer.test"
+    },
+    "auth": {
+      "state": "available",
+      "row": {
+        "spf": "pass",
+        "spfDomain": "esp-mailer.test",
+        "dkim": "pass",
+        "dkimSignatures": [
+          {
+            "domain": "shopmart.test",
+            "result": "pass",
+            "selector": "esp"
+          }
+        ],
+        "dmarc": "pass",
+        "dmarcPolicy": "none",
+        "dmarcDomain": "shopmart.test",
+        "arc": null
+      }
+    },
+    "url": {
+      "state": "available",
+      "rows": [
+        {
+          "urlSeq": 1,
+          "verdict": "clean",
+          "reasonCodes": ["clean.no_findings"],
+          "host": "shopmart.test",
+          "registrableDomain": "shopmart.test"
+        }
+      ]
+    },
+    "text": {
+      "subject": "This week only",
+      "text": null,
+      "html": "<html><head><style>p{color:red}</style></head><body><h1>Limited time offer</h1><p>Save 20% on electronics this week. <a href=\"https://shopmart.test/sale\">Shop now</a></p><p>Unsubscribe any time.</p></body></html>"
+    }
+  },
+  "expected": {
+    "verdict": "clean",
+    "forbiddenCodes": ["bec.return_path.domain_mismatch"]
+  }
+}

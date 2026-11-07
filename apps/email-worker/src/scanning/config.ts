@@ -12,6 +12,7 @@ import {
   DMARC_REJECT_VERDICTS,
   type EngineName,
   engineCatalogEntry,
+  isStage2Engine,
   parseEnabledEngines,
   PHISHING_VERDICTS,
   RSPAMD_PLATFORM_DEFAULTS,
@@ -19,8 +20,10 @@ import {
   type RspamdPlatformSettings,
 } from '@email-gateway/security-contracts';
 import { z } from 'zod';
+import { becConfigShape, validateBecConfig } from './bec-config';
 import { urlConfigShape, validateUrlConfig } from './url-config';
 
+export { becPlatformFromConfig } from './bec-config';
 export { urlPlatformFromConfig, urlProductionLike } from './url-config';
 
 const int = z.coerce.number().int();
@@ -167,10 +170,13 @@ function attachmentConfigShape() {
 export const scanConfigShape = {
   /** Role flag (S1): the scan role of the worker. */
   SCAN_ENABLED: flag.default(true),
-  /** Platform-enabled engines (S4), comma-separated, validated against ENGINE_CATALOG. */
+  /**
+   * Platform-enabled engines (S4), comma-separated, validated against ENGINE_CATALOG; step 4.4
+   * adds `bec` (a stage-2 engine, B1/B2).
+   */
   SCAN_ENGINES: z
     .string()
-    .default('rspamd,attachment,url')
+    .default('rspamd,attachment,url,bec')
     .transform((value, ctx): EngineName[] => {
       try {
         return parseEnabledEngines(value);
@@ -257,6 +263,7 @@ export const scanConfigShape = {
 
   ...attachmentConfigShape(),
   ...urlConfigShape(),
+  ...becConfigShape(),
 };
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars -- only its type is used
@@ -317,6 +324,12 @@ export function engineBudgetFromConfig(
         timeoutMs: cfg.SCAN_URL_TIMEOUT_MS,
         maxAttempts: cfg.SCAN_URL_MAX_ATTEMPTS,
       };
+    case 'bec':
+      return {
+        concurrency: cfg.SCAN_BEC_CONCURRENCY,
+        timeoutMs: cfg.SCAN_BEC_TIMEOUT_MS,
+        maxAttempts: cfg.SCAN_BEC_MAX_ATTEMPTS,
+      };
     default:
       return null;
   }
@@ -325,22 +338,52 @@ export function engineBudgetFromConfig(
 /** The key prefix of an engine's budget keys (`SCAN_RSPAMD`, `SCAN_ATTACHMENT`). */
 const budgetPrefix = (engine: EngineName): string => `SCAN_${engine.toUpperCase()}`;
 
+/** `maxAttempts x (timeoutMs + SCAN_RETRY_MAX_MS) / 1000` of one engine (S10, A12). */
+const engineBudgetSeconds = (cfg: ScanShapeConfig, budget: EngineBudgetKeys): number =>
+  Math.ceil((budget.maxAttempts * (budget.timeoutMs + cfg.SCAN_RETRY_MAX_MS)) / 1000);
+
 /**
  * Smallest round deadline that lets every enabled engine use its whole attempt budget (S10,
- * generalized by step 4.2 A12): the maximum over SCAN_ENGINES of
- * `maxAttempts x (timeoutMs + SCAN_RETRY_MAX_MS) / 1000`.
+ * generalized by step 4.2 A12 and step 4.4 B2): stage-1 engines run in parallel and a stage-2
+ * engine starts after its dependencies finalized, so the minimum is the maximum over the
+ * enabled stage-1 engines of `maxAttempts x (timeoutMs + SCAN_RETRY_MAX_MS) / 1000` plus the
+ * same maximum over the enabled stage-2 engines.
  */
 export function minimumRoundDeadlineSeconds(cfg: ScanShapeConfig): number {
-  let minimum = 0;
+  let stage1 = 0;
+  let stage2 = 0;
   for (const engine of cfg.SCAN_ENGINES) {
     const budget = engineBudgetFromConfig(cfg, engine);
-    if (!budget) continue;
-    minimum = Math.max(
-      minimum,
-      Math.ceil((budget.maxAttempts * (budget.timeoutMs + cfg.SCAN_RETRY_MAX_MS)) / 1000),
+    const entry = engineCatalogEntry(engine);
+    if (!budget || !entry) continue;
+    if (isStage2Engine(entry)) stage2 = Math.max(stage2, engineBudgetSeconds(cfg, budget));
+    else stage1 = Math.max(stage1, engineBudgetSeconds(cfg, budget));
+  }
+  return stage1 + stage2;
+}
+
+/**
+ * Step 4.4 B2: every enabled stage-2 engine needs at least one of its dependencies enabled (else
+ * nothing ever triggers it), and at least one stage-1 engine must be enabled (else nobody opens
+ * rounds). Messages name the keys; returns the violations.
+ */
+export function stageDependencyViolations(engines: readonly EngineName[]): string[] {
+  const violations: string[] = [];
+  const entries = engines.map((e) => engineCatalogEntry(e)).filter((e) => e !== undefined);
+  if (!entries.some((entry) => !isStage2Engine(entry))) {
+    violations.push(
+      'must enable at least one stage-1 engine (an engine without dependsOn) to open rounds',
     );
   }
-  return minimum;
+  for (const entry of entries) {
+    const deps = entry.dependsOn ?? [];
+    if (deps.length > 0 && !deps.some((d) => engines.includes(d))) {
+      violations.push(
+        `enables ${entry.name}, which depends on ${deps.join('|')}: enable at least one of them`,
+      );
+    }
+  }
+  return violations;
 }
 
 /** The engines whose consumers this replica runs (A1): SCAN_CONSUMERS, or every enabled engine. */
@@ -351,6 +394,10 @@ export function consumerEngines(cfg: ScanShapeConfig): EngineName[] {
 /** True when this replica runs the attachment engine's consumer. */
 export const runsAttachmentConsumer = (cfg: ScanShapeConfig): boolean =>
   cfg.SCAN_ENABLED && consumerEngines(cfg).includes('attachment');
+
+/** True when this replica runs the bec engine's consumer (and the history sweeper, B12). */
+export const runsBecConsumer = (cfg: ScanShapeConfig): boolean =>
+  cfg.SCAN_ENABLED && cfg.SCAN_ENGINES.includes('bec') && consumerEngines(cfg).includes('bec');
 
 /** True when this replica runs the url engine's consumer (and its results consumer, U1). */
 export const runsUrlConsumer = (cfg: ScanShapeConfig): boolean =>
@@ -505,14 +552,24 @@ export function validateScanConfig(
         '(the engine must finalize its result before the consumer dead-letters)',
     );
   }
+  for (const violation of stageDependencyViolations(cfg.SCAN_ENGINES)) {
+    refuse('SCAN_ENGINES', violation);
+  }
   const minimum = minimumRoundDeadlineSeconds(cfg);
   if (cfg.SCAN_ROUND_DEADLINE_SECONDS < minimum) {
     const engines = cfg.SCAN_ENGINES.filter((e) => engineBudgetFromConfig(cfg, e) !== null);
+    const stage1 = engines.filter((e) => !isStage2Engine(engineCatalogEntry(e)!));
+    const stage2 = engines.filter((e) => isStage2Engine(engineCatalogEntry(e)!));
+    const keys = (list: EngineName[]): string =>
+      `${list.map(budgetPrefix).join('|')}_MAX_ATTEMPTS x (_TIMEOUT_MS + SCAN_RETRY_MAX_MS) / 1000`;
     refuse(
       'SCAN_ROUND_DEADLINE_SECONDS',
-      `must be at least the maximum over SCAN_ENGINES (${engines.join(', ')}) of ` +
-        `${engines.map(budgetPrefix).join('|')}_MAX_ATTEMPTS x (_TIMEOUT_MS + SCAN_RETRY_MAX_MS) ` +
-        `/ 1000 = ${String(minimum)} (every attempt must fit before the deadline sweeper finalizes)`,
+      `must be at least the maximum over the stage-1 engines of SCAN_ENGINES (${stage1.join(', ')}) of ` +
+        `${keys(stage1)}` +
+        (stage2.length > 0
+          ? ` plus the maximum over the stage-2 engines (${stage2.join(', ')}) of ${keys(stage2)}`
+          : '') +
+        ` = ${String(minimum)} (every attempt must fit before the deadline sweeper finalizes)`,
     );
   }
   for (const engine of cfg.SCAN_CONSUMERS) {
@@ -523,6 +580,9 @@ export function validateScanConfig(
   if (cfg.SCAN_ENGINES.includes('attachment')) validateAttachmentConfig(cfg, refuse);
   if (cfg.SCAN_ENGINES.includes('url')) {
     validateUrlConfig(cfg, runsUrlConsumer(cfg), engineQueueMaxAttempts('url'), refuse);
+  }
+  if (cfg.SCAN_ENGINES.includes('bec')) {
+    validateBecConfig(cfg, runsBecConsumer(cfg), engineQueueMaxAttempts('bec'), refuse);
   }
   if (!cfg.SCAN_ENABLED) return;
   if (

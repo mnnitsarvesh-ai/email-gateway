@@ -1,0 +1,46 @@
+{
+  "id": "urgent-wire-transfer",
+  "description": "Urgent wire instruction: C4 + C7.",
+  "label": "bec",
+  "input": {
+    "headers": {
+      "From": ["Treasury Desk <treasury@finance-partners.test>"],
+      "Subject": ["Transfer required"]
+    },
+    "envelope": {
+      "envelopeFrom": "treasury@finance-partners.test"
+    },
+    "auth": {
+      "state": "available",
+      "row": {
+        "spf": "pass",
+        "spfDomain": "finance-partners.test",
+        "dkim": "pass",
+        "dkimSignatures": [
+          {
+            "domain": "finance-partners.test",
+            "result": "pass",
+            "selector": "s1"
+          }
+        ],
+        "dmarc": "pass",
+        "dmarcPolicy": "reject",
+        "dmarcDomain": "finance-partners.test",
+        "arc": null
+      }
+    },
+    "url": {
+      "state": "available",
+      "rows": []
+    },
+    "text": {
+      "subject": "Transfer required",
+      "text": "Please initiate the transfer via RTGS immediately, the beneficiary must receive the funds before end of day.",
+      "html": null
+    }
+  },
+  "expected": {
+    "verdictIn": ["clean", "suspicious"],
+    "requiredCodes": ["bec.content.wire_transfer", "bec.content.urgency"]
+  }
+}

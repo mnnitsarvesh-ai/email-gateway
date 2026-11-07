@@ -1,6 +1,7 @@
 import {
   ATTACHMENT_RULE_VERDICTS,
   AUTH_FAILURE_VERDICTS,
+  BEC_AI_MODES,
   CLICK_SUSPICIOUS_ACTIONS,
   CLICK_UNKNOWN_ACTIONS,
   DKIM_SIGNED_POLICIES,
@@ -17,7 +18,9 @@ import { z } from 'zod';
  * `GET /scan-settings`, `PUT /scan-settings/{engine}`, `DELETE /scan-settings/{engine}`.
  * Engines with tenant settings: `rspamd` (thresholds and severities), `attachment` (type
  * rules, raise-only verdicts, a tighter size limit) and `url` (step 4.3 U13: domain lists,
- * fetch mode, rewriting, click policy, dynamic inspection); one view shape per engine.
+ * fetch mode, rewriting, click policy, dynamic inspection) and `bec` (step 4.4 B13: score
+ * thresholds, extra free-mail domains, history opt-in and retention, AI layer modes within the
+ * platform caps); one view shape per engine.
  */
 
 const Version = z
@@ -40,7 +43,9 @@ export const ScanSettingsPutSchema = z.strictObject({
         'maxAttachmentBytes; url: allowedDomains, blockedDomains, scanTimeFetch, ' +
         'lookalike.extraProtectedDomains, rewrite.{enabled, directions, expiryDays, ' +
         'excludedDomains, dkimSignedPolicy, plainText}, click.{suspicious, unknown, ' +
-        'allowContinue}, dynamicInspection); replaces the previous override. Unknown keys are ' +
+        'allowContinue}, dynamicInspection; bec: suspiciousScore, maliciousScore, ' +
+        'freemailExtraDomains, history.{enabled, retentionDays}, ai.{localModel, llm, ' +
+        'llmDailyCallLimit, raiseConfidence}); replaces the previous override. Unknown keys are ' +
         'refused (422)',
     ),
 });
@@ -286,11 +291,86 @@ export const UrlSettingsViewSchema = z.object({
   ...viewCommon,
 });
 
+const AiMode = z.enum(BEC_AI_MODES);
+const IntRange = z.object({ min: z.number().int(), max: z.number().int() });
+
+/** BEC platform settings (`BEC_*`, step 4.4 B13); the modes and limits are tenant caps. */
+export const BecPlatformSettingsDoc = z.object({
+  suspiciousScore: z.number().int(),
+  maliciousScore: z.number().int(),
+  aiRaiseConfidence: z.number(),
+  aiCorroborateConfidence: z.number().describe('Platform only'),
+  aiMaliciousBand: z.number().int().describe('Platform only'),
+  localModelMode: AiMode.describe('Cap of the tenant local-model mode'),
+  llmMode: AiMode.describe('Cap of the tenant LLM mode'),
+  llmMaxCallsPerTenantPerDay: z.number().int(),
+  historyDefaultRetentionDays: z.number().int(),
+  historyMaxRetentionDays: z.number().int(),
+});
+
+export const BecOverrideDoc = z.object({
+  suspiciousScore: z.number().int().optional(),
+  maliciousScore: z.number().int().optional(),
+  freemailExtraDomains: DomainList.optional().describe(
+    'Further free-mail domains (normalized to ASCII; public suffixes refused)',
+  ),
+  history: z
+    .object({ enabled: z.boolean().optional(), retentionDays: z.number().int().optional() })
+    .optional()
+    .describe('Historical communication context (opt-in, keyed hashes only, ADR-0035)'),
+  ai: z
+    .object({
+      localModel: AiMode.optional(),
+      llm: AiMode.optional(),
+      llmDailyCallLimit: z.number().int().optional(),
+      raiseConfidence: z.number().optional(),
+    })
+    .optional(),
+});
+
+export const BecEffectiveSettingsDoc = z.object({
+  suspiciousScore: z.number().int(),
+  maliciousScore: z.number().int(),
+  freemailExtraDomains: DomainList,
+  history: z.object({ enabled: z.boolean(), retentionDays: z.number().int() }),
+  ai: z.object({
+    localModel: AiMode,
+    llm: AiMode,
+    llmDailyCallLimit: z.number().int(),
+    raiseConfidence: z.number(),
+    corroborateConfidence: z.number(),
+    maliciousBand: z.number().int(),
+  }),
+});
+
+export const BecBoundsDoc = z.object({
+  suspiciousScore: IntRange.describe('Also below the effective maliciousScore'),
+  maliciousScore: IntRange,
+  freemailExtraDomains: MaxItems,
+  history: z.object({ enabled: z.array(z.boolean()), retentionDays: IntRange }),
+  ai: z.object({
+    localModel: z.array(AiMode).describe('Modes up to the platform cap'),
+    llm: z.array(AiMode).describe('Modes up to the platform cap'),
+    llmDailyCallLimit: IntRange,
+    raiseConfidence: z.object({ min: z.number(), max: z.number() }),
+  }),
+});
+
+export const BecSettingsViewSchema = z.object({
+  engine: z.literal('bec').describe('Engine name (ENGINE_CATALOG)'),
+  platform: BecPlatformSettingsDoc.describe('Platform settings (BEC_*)'),
+  bounds: BecBoundsDoc.describe('What an override may choose'),
+  override: BecOverrideDoc.nullable().describe('The organization override; null for none'),
+  effective: BecEffectiveSettingsDoc.describe('What the BEC engine applies'),
+  ...viewCommon,
+});
+
 /** The settings of one engine, by `engine`. */
 export const EngineSettingsViewSchema = z.discriminatedUnion('engine', [
   RspamdSettingsViewSchema,
   AttachmentSettingsViewSchema,
   UrlSettingsViewSchema,
+  BecSettingsViewSchema,
 ]);
 export type EngineSettingsView = z.output<typeof EngineSettingsViewSchema>;
 
@@ -311,5 +391,6 @@ export const ScanSettingsResponseSchema = z.discriminatedUnion('engine', [
   RspamdSettingsViewSchema.extend({ note: Note }),
   AttachmentSettingsViewSchema.extend({ note: Note }),
   UrlSettingsViewSchema.extend({ note: Note }),
+  BecSettingsViewSchema.extend({ note: Note }),
 ]);
 export type ScanSettingsResponse = z.output<typeof ScanSettingsResponseSchema>;

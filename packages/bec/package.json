@@ -1,0 +1,35 @@
+{
+  "name": "@email-gateway/bec",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "data",
+    "models",
+    "prompts",
+    "training"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src scripts",
+    "test": "vitest run",
+    "test:integration": "echo 'no infrastructure suites in @email-gateway/bec (unit + corpus + model:check run in test)'",
+    "model:generate": "tsx scripts/model.ts generate",
+    "model:train": "tsx scripts/model.ts train",
+    "model:check": "tsx scripts/model.ts check"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "1.1.0",
+    "@email-gateway/url-security": "workspace:*",
+    "parse5": "7.3.0",
+    "tldts": "7.4.18",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "tsx": "4.23.15",
+    "prettier": "^3.6.2"
+  }
+}

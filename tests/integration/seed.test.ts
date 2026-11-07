@@ -16,7 +16,7 @@ import { stack } from './support/env';
 
 /**
  * db:seed (step 1.1 D7, step 1.2/1.3 D8 and D10) against the dev schema, with the DML account:
- * the catalog (41 permissions since step 4.2, the 8 system roles, the platform organization, the step 2.3
+ * the catalog (45 permissions since step 4.4, the 8 system roles, the platform organization, the step 2.3
  * destination provider presets), the retired
  * role-key remap, and idempotency (running it twice leaves the same row counts). The seeded
  * rows are dev data and are deliberately left in place.
@@ -96,7 +96,7 @@ describe('db:seed', () => {
     expect(await counts()).toEqual(afterFirst);
 
     expect(afterFirst).toMatchObject({
-      permissions: 41,
+      permissions: 45,
       systemRoles: 8,
       destinationPresets: 2,
       plans: expect.any(Number) as unknown,
@@ -247,7 +247,7 @@ describe('db:seed', () => {
     await prisma.domain.update({ where: { id: domain.id }, data: { nextCheckAt: new Date() } });
   });
 
-  it('seeds exactly the 41 permissions and the 8 system roles of D8, with their permissions', async () => {
+  it('seeds exactly the 45 permissions and the 8 system roles of D8, with their permissions', async () => {
     expect(seed().status).toBe(0);
     const permissions = await prisma.permission.findMany({ select: { key: true } });
     expect(permissions.map((p) => p.key).sort()).toEqual(PERMISSIONS.map((p) => p.key).sort());
@@ -327,6 +327,17 @@ describe('db:seed', () => {
     // Step 4.2 (A13, A16, A17): the known-threat hash catalog and bulk attachment rescans.
     expect(holders('platform:threat_intel_manage')).toEqual(['platform_admin', 'super_admin']);
     expect(holders('platform:scan_rescan')).toEqual(['platform_admin', 'super_admin']);
+    // Step 4.4 (B18): the BEC tenant permissions.
+    expect(holders('bec:read')).toEqual([
+      'compliance_auditor',
+      'organization_admin',
+      'security_analyst',
+      'super_admin',
+    ]);
+    for (const key of ['bec:manage', 'bec:feedback']) {
+      expect(holders(key), key).toEqual(['organization_admin', 'security_analyst', 'super_admin']);
+    }
+    expect(holders('bec:feedback_export')).toEqual(['organization_admin', 'super_admin']);
   });
 
   it('seeds the platform organization with mandatory MFA and the demo users', async () => {

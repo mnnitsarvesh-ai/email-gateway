@@ -58,6 +58,10 @@ The `permissions` table is seeded from `PERMISSIONS` in `packages/database/src/s
 | `platform:scan_training`       | Train the shared spam classifiers (Bayes, fuzzy) from a message (step 4.1)                               |
 | `platform:threat_intel_manage` | Manage the platform's known-threat file hashes (step 4.2) and URL/domain/IP threat indicators (step 4.3) |
 | `platform:scan_rescan`         | Start and cancel bulk attachment rescans (step 4.2)                                                      |
+| `bec:read`                     | View BEC executive/vendor profiles, trusted senders, suppressions and feedback (step 4.4)                |
+| `bec:manage`                   | Manage BEC profiles, trusted senders, suppressions and communication history (step 4.4)                  |
+| `bec:feedback`                 | Record false-positive/false-negative feedback on BEC verdicts (step 4.4)                                 |
+| `bec:feedback_export`          | Export BEC feedback features for model retraining (step 4.4)                                             |
 
 `GET /permissions` lists `platform:*` keys only to users of the platform organization who are not under an override; customer users and API keys see the tenant permissions only.
 
@@ -122,6 +126,10 @@ Generated from the seed catalog (`SYSTEM_ROLES`); if the catalog changes, regene
 | `platform:scan_training`       |  ✓  |  ✓  |     |     |     |     |     |     |
 | `platform:threat_intel_manage` |  ✓  |  ✓  |     |     |     |     |     |     |
 | `platform:scan_rescan`         |  ✓  |  ✓  |     |     |     |     |     |     |
+| `bec:read`                     |  ✓  |     |  ✓  |     |  ✓  |     |  ✓  |     |
+| `bec:manage`                   |  ✓  |     |  ✓  |     |  ✓  |     |     |     |
+| `bec:feedback`                 |  ✓  |     |  ✓  |     |  ✓  |     |     |     |
+| `bec:feedback_export`          |  ✓  |     |  ✓  |     |     |     |     |     |
 
 **Platform roles** are the roles that hold any `platform:*` permission: `super_admin` and `platform_admin` (`PLATFORM_ROLE_KEYS`). They can be assigned only to users of the platform organization (`kind = platform`); assigning one in a customer organization is `400`. Customer organizations never see platform roles in `GET /roles` or `GET /roles/{key}` (`404`). Domain Admin is organization-wide; per-domain scoping of roles is out of scope for now.
 
@@ -190,7 +198,7 @@ Catalog 36 → 41 (seed data only, `pnpm db:seed`): `message:rescan` (step 3.3, 
 | `message:read`                 | `GET /messages/{messageId}/scans` (existing key)                                                                                                                                                                             | every system role                                 |
 | `message:rescan`               | `POST /messages/{messageId}/rescan`                                                                                                                                                                                          | super admin, organization admin, security analyst |
 | `policy:read`                  | `GET /scan-settings` (existing key)                                                                                                                                                                                          | as above                                          |
-| `scan:settings_manage`         | `PUT /scan-settings/{engine}`, `DELETE /scan-settings/{engine}` (`rspamd`, `attachment`)                                                                                                                                     | super admin, organization admin, security analyst |
+| `scan:settings_manage`         | `PUT /scan-settings/{engine}`, `DELETE /scan-settings/{engine}` (`rspamd`, `attachment`; `url` step 4.3; `bec` step 4.4)                                                                                                     | super admin, organization admin, security analyst |
 | `platform:scan_training`       | `POST /platform/organizations/{organizationId}/messages/{messageId}/scan-training` (`@UserOnly()`, `@RequireMfa()`, 60/min)                                                                                                  | super admin, platform admin                       |
 | `platform:threat_intel_manage` | `GET`/`POST /platform/threat-hashes`, `DELETE /platform/threat-hashes/{sha256}`; step 4.3: `GET`/`POST /platform/threat-indicators`, `DELETE /platform/threat-indicators/{id}` (`@UserOnly()`, `@RequireMfa()`, 60/min each) | super admin, platform admin                       |
 | `platform:scan_rescan`         | `POST`/`GET /platform/attachment-rescans`, `GET /platform/attachment-rescans/{jobId}`, `POST /platform/attachment-rescans/{jobId}/cancel` (`@UserOnly()`, `@RequireMfa()`, 10/min)                                           | super admin, platform admin                       |
@@ -199,6 +207,22 @@ Catalog 36 → 41 (seed data only, `pnpm db:seed`): `message:rescan` (step 3.3, 
 - The three `platform:` scan keys act on **shared** state: the Bayes/fuzzy stores (training one tenant's message changes every tenant's scores), the known-threat hash catalog (a hash changes every tenant's verdicts at once) and bulk rescans (they select messages of every organization unless one is named). They are therefore platform permissions, users only (no API keys or override tokens), MFA-authenticated, rate limited and audited (`scan_training.learn_*`, `threat_hash.added` / `threat_hash.removed` with the before-image, `attachment_rescan.requested` / `.cancelled`).
 - The bulk-rescan api only writes the job row; the email-worker's rescan runner executes it as lifecycle role `scanner` (edge E19, reason `signature_rescan`), never as the requesting user.
 - What tenants see of attachment results (`GET /messages/{messageId}/scans`) excludes the content-cache outcome and the attachment engine's durations: the cache is shared across organizations, so these would reveal another organization's mail (step 4.2 A16).
+
+## BEC permissions (step 4.4)
+
+Catalog 41 → 45 (seed data only, `pnpm db:seed`; [design](../plan/steps/12-phishing-bec.md) B11, B12, B18). All four are **tenant** permissions; every route takes the organization from the authenticated scope only, and another organization's id is a `404`.
+
+| Permission            | Routes                                                                                                                                                                   | System roles                                                          |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------- |
+| `bec:read`            | `GET /bec/executives`, `GET /bec/executives/{id}`, `GET /bec/vendors`, `GET /bec/vendors/{id}`, `GET /bec/trusted-senders`, `GET /bec/feedback`, `GET /bec/suppressions` | super admin, organization admin, security analyst, compliance auditor |
+| `bec:manage`          | `POST`/`PATCH`/`DELETE` of executives, vendors and trusted senders, `DELETE /bec/suppressions/{id}`, `DELETE /bec/history` (`@RequireMfa()`)                             | super admin, organization admin, security analyst                     |
+| `bec:feedback`        | `POST /messages/{messageId}/scans/{scanId}/bec-feedback` (`@UserOnly()`: one feedback per scan, user and kind)                                                           | super admin, organization admin, security analyst                     |
+| `bec:feedback_export` | `GET /bec/feedback/export` (NDJSON, `@RequireMfa()`, 10 per caller per minute)                                                                                           | super admin, organization admin                                       |
+
+- `platform_admin` holds none of them: its tenant reads are `TENANT_READ_PERMISSIONS`, and adding `bec:read` there would also give it to `read_only_user`, which B18 does not list. Platform operators act through an audited override when needed.
+- API keys may hold `bec:read` and `bec:manage` (profiles, trusted senders and suppressions are integration data); feedback needs a user (the idempotency key is the user) and the export and the history purge need an MFA-authenticated user, so API keys are refused there (`403`).
+- The `bec` scan settings use the existing keys: `policy:read` (`GET /scan-settings`) and `scan:settings_manage` (`PUT`/`DELETE /scan-settings/bec`).
+- Suppressions are a bounded lever: only suppressible codes (never authentication, lookalike, executive impersonation, credential-link or engine codes), ≤ 90 days, never a free-mail domain, at most `BEC_SUPPRESSIONS_MAX_PER_TENANT` active rules, all audited, so a compromised analyst account cannot silence the engine.
 
 ## Custom roles
 

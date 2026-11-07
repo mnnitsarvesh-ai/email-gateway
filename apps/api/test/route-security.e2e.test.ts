@@ -20,7 +20,12 @@ import { createLogger } from '@email-gateway/logger';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { AppModule } from '../src/app.module';
-import { AUTHZ_KEY, IS_PUBLIC_KEY } from '../src/auth-contracts/decorators';
+import {
+  AUTHZ_KEY,
+  IS_PUBLIC_KEY,
+  REQUIRE_MFA_KEY,
+  USER_ONLY_KEY,
+} from '../src/auth-contracts/decorators';
 import { loadApiConfig } from '../src/config';
 import { EmailSender } from '../src/email/email-sender';
 import { API_GLOBAL_PREFIX, configureApiApp } from '../src/http/configure-api-app';
@@ -55,6 +60,8 @@ interface DiscoveredRoute {
   isPublic: boolean;
   hasRequirement: boolean;
   requirement: unknown;
+  requireMfa: boolean;
+  userOnly: boolean;
 }
 
 const asArray = (value: unknown): string[] =>
@@ -96,6 +103,11 @@ function discoverRoutes(app: INestApplication): DiscoveredRoute[] {
             hasRequirement:
               reflector.getAllAndOverride<unknown>(AUTHZ_KEY, [handler, controller]) !== undefined,
             requirement: reflector.getAllAndOverride<unknown>(AUTHZ_KEY, [handler, controller]),
+            requireMfa: !!reflector.getAllAndOverride<boolean>(REQUIRE_MFA_KEY, [
+              handler,
+              controller,
+            ]),
+            userOnly: !!reflector.getAllAndOverride<boolean>(USER_ONLY_KEY, [handler, controller]),
           });
         }
       }
@@ -262,6 +274,47 @@ describe('route security (e2e, dependencies stubbed)', () => {
       const route = routes.find((r) => `${r.method} ${r.path}` === key);
       expect(route?.isPublic, key).toBe(false);
       expect(route?.requirement, key).toEqual({ mode: 'all', permissions: [permission] });
+    }
+  });
+
+  it('the step 4.4 BEC routes require exactly their permission, MFA and users where B18 says (B18)', () => {
+    const expected: Record<string, [string, { mfa?: boolean; userOnly?: boolean }?]> = {
+      'get /api/v1/bec/executives': ['bec:read'],
+      'get /api/v1/bec/executives/:id': ['bec:read'],
+      'post /api/v1/bec/executives': ['bec:manage'],
+      'patch /api/v1/bec/executives/:id': ['bec:manage'],
+      'delete /api/v1/bec/executives/:id': ['bec:manage'],
+      'get /api/v1/bec/vendors': ['bec:read'],
+      'get /api/v1/bec/vendors/:id': ['bec:read'],
+      'post /api/v1/bec/vendors': ['bec:manage'],
+      'patch /api/v1/bec/vendors/:id': ['bec:manage'],
+      'delete /api/v1/bec/vendors/:id': ['bec:manage'],
+      'get /api/v1/bec/trusted-senders': ['bec:read'],
+      'post /api/v1/bec/trusted-senders': ['bec:manage'],
+      'patch /api/v1/bec/trusted-senders/:id': ['bec:manage'],
+      'delete /api/v1/bec/trusted-senders/:id': ['bec:manage'],
+      'post /api/v1/messages/:messageId/scans/:scanId/bec-feedback': [
+        'bec:feedback',
+        { userOnly: true },
+      ],
+      'get /api/v1/bec/feedback': ['bec:read'],
+      'get /api/v1/bec/feedback/export': ['bec:feedback_export', { mfa: true }],
+      'get /api/v1/bec/suppressions': ['bec:read'],
+      'delete /api/v1/bec/suppressions/:id': ['bec:manage'],
+      'delete /api/v1/bec/history': ['bec:manage', { mfa: true }],
+    };
+    const becRoutes = routes.filter(
+      (r) => r.path.includes('/api/v1/bec/') || r.path.endsWith('/bec-feedback'),
+    );
+    expect(becRoutes.map((r) => `${r.method} ${r.path}`).sort()).toEqual(
+      Object.keys(expected).sort(),
+    );
+    for (const [key, [permission, flags]] of Object.entries(expected)) {
+      const route = routes.find((r) => `${r.method} ${r.path}` === key);
+      expect(route?.isPublic, key).toBe(false);
+      expect(route?.requirement, key).toEqual({ mode: 'all', permissions: [permission] });
+      expect(route?.requireMfa, key).toBe(flags?.mfa ?? false);
+      expect(route?.userOnly, key).toBe(flags?.userOnly ?? false);
     }
   });
 

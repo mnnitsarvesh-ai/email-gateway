@@ -1,0 +1,289 @@
+# The phishing/BEC engine (step 4.4 B1, B2, B10, B12, B16, B20; docs/plan/steps/12-phishing-bec.md,
+# docs/deployment/bec-detection.md): the scan role of the email-worker image with only the bec
+# consumer (scan.bec, a stage-2 queue that binds only mail.message.scan_stage_ready.v1) plus the
+# communication-history retention sweeper (one leader through the MySQL advisory lock
+# scan:bec-history), as role user eg-scanner. It reads the round's Rspamd and url results, the
+# stored headers and text/HTML parts (S3, at most BEC_TEXT_MAX_BYTES each), the tenant's BEC
+# profiles, trusted senders and suppressions, and — for opted-in tenants — the keyed-hash history.
+# It is the ONLY Deployment that holds the context HMAC key and the LLM API key.
+#
+# Keys this Deployment needs:
+#   From config.yaml `email-gateway-config` (platform-wide; the api reads the same bound keys):
+#     SCAN_ENGINES (must contain bec and at least one of rspamd/url; identical on every scan
+#     replica), BEC_SUSPICIOUS_SCORE, BEC_MALICIOUS_SCORE, BEC_AI_RAISE_CONFIDENCE,
+#     BEC_AI_CORROBORATE_CONFIDENCE, BEC_AI_MALICIOUS_BAND, BEC_LOCAL_MODEL_MODE, BEC_LLM_MODE,
+#     BEC_LLM_MAX_CALLS_PER_TENANT_PER_DAY, BEC_HISTORY_DEFAULT_RETENTION_DAYS,
+#     BEC_HISTORY_MAX_RETENTION_DAYS, BEC_MAX_EXECUTIVES, BEC_MAX_VENDORS, BEC_MAX_TRUSTED_SENDERS,
+#     BEC_SUPPRESSIONS_MAX_PER_TENANT, BEC_SUPPRESSION_MAX_WEIGHT, the URL_PROTECTED_* and
+#     URL_LOOKALIKE_* keys (shared lookalike detection), NODE_ENV=production, APP_ENV=production.
+#   Set below (engine budgets and per-replica bounds): SCAN_CONSUMERS=bec,
+#     MIME_INGESTION_ENABLED=false, SCAN_BEC_*, BEC_TEXT_*, BEC_LOCAL_MODEL(_SHADOW),
+#     BEC_LLM_PROVIDER (anthropic; `fake` is refused with NODE_ENV=production), BEC_LLM_MODEL,
+#     BEC_LLM_SHADOW_MODEL, BEC_LLM_REFUSAL_FALLBACK, BEC_LLM_TIMEOUT_MS,
+#     BEC_LLM_MAX_OUTPUT_TOKENS, BEC_LLM_MAX_EXCERPT_CHARS, BEC_LLM_MIN_SCORE,
+#     BEC_LLM_CONCURRENCY, BEC_LLM_MAX_CALLS_PER_MINUTE, BEC_LLM_BREAKER_*,
+#     BEC_HISTORY_MIN_MESSAGES, BEC_HISTORY_MAX_RECIPIENTS, BEC_HISTORY_SWEEP_INTERVAL_MS,
+#     BEC_TENANT_DATA_CACHE_TTL_MS.
+#   Secrets (External Secrets): BEC_CONTEXT_HMAC_KEY (file) from email-gateway-bec-context-key
+#     (key `hmac-key`, >= 32 random bytes; rotating it restarts history, docs/runbooks/
+#     bec-detection.md); BEC_LLM_API_KEY (optional env, key `api-key`) from email-gateway-bec-llm —
+#     absent or empty means no LLM calls, and the worker refuses to start when BEC_LLM_MODE is not
+#     off without it; DATABASE_URL, RABBITMQ_SCANNER_URL, REDIS_URL (LLM budget windows) and the
+#     S3 credentials from email-gateway-secrets.
+#
+# Sizing: SCAN_BEC_CONCURRENCY messages in flight, each with at most 2 x BEC_TEXT_MAX_BYTES of
+# text and BEC_TEXT_MAX_CHARS analysed; the lexicons, the free-mail list, the brand list and the
+# local model are loaded once (a few MB). LLM calls are bounded per process by
+# BEC_LLM_CONCURRENCY and BEC_LLM_TIMEOUT_MS, platform-wide by the Redis budgets.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: email-worker-bec
+  labels:
+    {
+      app.kubernetes.io/name: email-worker-bec,
+      app.kubernetes.io/component: scan-bec,
+      app.kubernetes.io/part-of: email-gateway,
+    }
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels: { app.kubernetes.io/name: email-worker-bec }
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  template:
+    metadata:
+      labels:
+        {
+          app.kubernetes.io/name: email-worker-bec,
+          app.kubernetes.io/component: scan-bec,
+          app.kubernetes.io/part-of: email-gateway,
+        }
+    spec:
+      serviceAccountName: email-worker-bec
+      automountServiceAccountToken: false
+      # In-flight scans are not awaited (held retries are requeued); the history sweeper stops
+      # with the consumer.
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app.kubernetes.io/name: email-worker-bec }
+      containers:
+        - name: email-worker
+          image: email-gateway/email-worker:latest
+          ports:
+            - { name: http, containerPort: 3020 }
+          envFrom:
+            - configMapRef: { name: email-gateway-config }
+          env:
+            - { name: HTTP_PORT, value: '3020' }
+            - { name: APP_ENV, value: production }
+            - { name: MIME_INGESTION_ENABLED, value: 'false' }
+            - { name: SCAN_ENABLED, value: 'true' }
+            - { name: SCAN_CONSUMERS, value: bec }
+            # The engine's budgets (B2 deadline rule): stage 1 max(attachment 6 x 240 s) + bec
+            # 3 x (45 + 60) s = 1 755 s <= SCAN_ROUND_DEADLINE_SECONDS.
+            - { name: SCAN_BEC_CONCURRENCY, value: '8' }
+            - { name: SCAN_BEC_TIMEOUT_MS, value: '45000' }
+            - { name: SCAN_BEC_MAX_ATTEMPTS, value: '3' }
+            - { name: SCAN_RETRY_BASE_MS, value: '2000' }
+            - { name: SCAN_RETRY_MAX_MS, value: '60000' }
+            - { name: SCAN_S3_TIMEOUT_MS, value: '30000' }
+            - { name: SCAN_DB_TIMEOUT_MS, value: '120000' }
+            - { name: SCAN_ROUND_DEADLINE_SECONDS, value: '1800' }
+            - { name: SCAN_SETTINGS_CACHE_TTL_MS, value: '30000' }
+            - { name: SCAN_BREAKER_FAILURE_THRESHOLD, value: '5' }
+            - { name: SCAN_BREAKER_FAILURE_RATIO, value: '0.5' }
+            - { name: SCAN_BREAKER_WINDOW, value: '20' }
+            - { name: SCAN_BREAKER_OPEN_MS, value: '15000' }
+            - { name: SCAN_BREAKER_HALF_OPEN_PROBES, value: '1' }
+            # Text analysis (B8).
+            - { name: BEC_TEXT_MAX_BYTES, value: '65536' }
+            - { name: BEC_TEXT_MAX_CHARS, value: '40000' }
+            - { name: BEC_TEXT_TIMEOUT_MS, value: '2000' }
+            # Local models (B16): versions of packages/bec/models/manifest.json (start refused
+            # when missing or when the file hash differs). Model rollout: runbook.
+            - { name: BEC_LOCAL_MODEL, value: bec-lr/1 }
+            - { name: BEC_LOCAL_MODEL_SHADOW, value: '' }
+            # LLM (B10): only redacted excerpts and derived features leave this pod.
+            - { name: BEC_LLM_PROVIDER, value: anthropic }
+            - { name: BEC_LLM_MODEL, value: claude-opus-5-5 }
+            - { name: BEC_LLM_SHADOW_MODEL, value: '' }
+            - { name: BEC_LLM_REFUSAL_FALLBACK, value: default }
+            - { name: BEC_LLM_TIMEOUT_MS, value: '20000' }
+            - { name: BEC_LLM_MAX_OUTPUT_TOKENS, value: '4096' }
+            - { name: BEC_LLM_MAX_EXCERPT_CHARS, value: '1500' }
+            - { name: BEC_LLM_MIN_SCORE, value: '15' }
+            - { name: BEC_LLM_CONCURRENCY, value: '4' }
+            - { name: BEC_LLM_MAX_CALLS_PER_MINUTE, value: '120' }
+            - { name: BEC_LLM_BREAKER_THRESHOLD, value: '5' }
+            - { name: BEC_LLM_BREAKER_RESET_MS, value: '60000' }
+            # Communication history (B12) and tenant data cache (B4).
+            - { name: BEC_HISTORY_MIN_MESSAGES, value: '3' }
+            - { name: BEC_HISTORY_MAX_RECIPIENTS, value: '50' }
+            - { name: BEC_HISTORY_SWEEP_INTERVAL_MS, value: '3600000' }
+            - { name: BEC_TENANT_DATA_CACHE_TTL_MS, value: '30000' }
+            # Secrets are mounted as files by External Secrets and read via the <KEY>_FILE convention.
+            - { name: DATABASE_URL_FILE, value: /var/run/secrets/gateway/database-url }
+            - {
+                name: RABBITMQ_SCANNER_URL_FILE,
+                value: /var/run/secrets/gateway/rabbitmq-scanner-url,
+              }
+            - { name: REDIS_URL_FILE, value: /var/run/secrets/gateway/redis-url }
+            # The history HMAC key (B12): its own Secret, mounted only here.
+            - { name: BEC_CONTEXT_HMAC_KEY_FILE, value: /var/run/secrets/bec-context/hmac-key }
+            # The LLM API key is optional (no Secret = no LLM): an env reference with optional,
+            # because a *_FILE path that does not exist is refused at start.
+            - name: BEC_LLM_API_KEY
+              valueFrom:
+                secretKeyRef: { name: email-gateway-bec-llm, key: api-key, optional: true }
+          volumeMounts:
+            - { name: secrets, mountPath: /var/run/secrets/gateway, readOnly: true }
+            - { name: context-key, mountPath: /var/run/secrets/bec-context, readOnly: true }
+            # Nothing is written to disk (bodies are buffers); /tmp only for the runtime.
+            - { name: tmp, mountPath: /tmp }
+          readinessProbe:
+            # Includes `bec-engine` (packaged model manifest and lexicons loaded; the LLM is never
+            # required for readiness).
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /health/live, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          startupProbe:
+            httpGet: { path: /health/live, port: http }
+            periodSeconds: 5
+            failureThreshold: 24
+          resources:
+            requests: { cpu: 250m, memory: 256Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+      volumes:
+        - name: secrets
+          secret: { secretName: email-gateway-secrets }
+        - name: context-key
+          secret:
+            secretName: email-gateway-bec-context-key
+            items: [{ key: hmac-key, path: hmac-key }]
+        - name: tmp
+          emptyDir: { sizeLimit: 64Mi }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: email-worker-bec
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: email-worker-bec
+  labels: { app.kubernetes.io/name: email-worker-bec }
+spec:
+  selector: { app.kubernetes.io/name: email-worker-bec }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+---
+# CPU-based base HPA. Production adds the queue signal with KEDA (docs/deployment/
+# bec-detection.md): a ScaledObject on rabbitmq_queue_messages_ready of scan.bec (vhost
+# email-gateway), target 200 ready messages per replica, replacing this HPA.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: email-worker-bec
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: email-worker-bec }
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 65 }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: email-worker-bec
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: email-worker-bec }
+---
+# Egress of the bec engine (B20). Internal data stores by subnet (replace the CIDRs per
+# environment, as click-service.yaml / url-browser-worker.yaml), cluster DNS, OTLP, and TCP 443 to
+# public addresses for the S3 endpoint (when no VPC endpoint is used) and the Anthropic API
+# (api.anthropic.com). A Kubernetes NetworkPolicy cannot name an FQDN: where the cluster has an
+# FQDN-aware egress solution (Cilium / Calico Enterprise DNS policies, an egress gateway, or an
+# HTTPS proxy), replace the public 443 rule with `api.anthropic.com` and the S3 endpoint only
+# (docs/deployment/bec-detection.md). With BEC_LLM_MODE=off the 443 rule is needed for S3 only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: email-worker-bec
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: email-worker-bec }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # Metrics and probes only (Prometheus; the kubelet's probes are not subject to policies).
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: observability }
+          podSelector:
+            matchLabels: { app.kubernetes.io/name: prometheus }
+      ports: [{ protocol: TCP, port: 3020 }]
+  egress:
+    # MySQL writer (RDS/Aurora subnet).
+    - to: [{ ipBlock: { cidr: 10.0.32.0/20 } }]
+      ports: [{ protocol: TCP, port: 3306 }]
+    # Redis (ElastiCache subnet): LLM budget windows.
+    - to: [{ ipBlock: { cidr: 10.0.48.0/20 } }]
+      ports: [{ protocol: TCP, port: 6379 }]
+    # RabbitMQ (Amazon MQ subnet).
+    - to: [{ ipBlock: { cidr: 10.0.64.0/20 } }]
+      ports: [{ protocol: TCP, port: 5671 }, { protocol: TCP, port: 5672 }]
+    # Cluster DNS.
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }]
+    # OTLP traces / logs to the collector.
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: observability }
+      ports: [{ protocol: TCP, port: 4318 }]
+    # S3 (public endpoint) and the Anthropic API: HTTPS to public addresses only.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 0.0.0.0/8
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.0.0.0/24
+              - 192.168.0.0/16
+              - 198.18.0.0/15
+              - 224.0.0.0/4
+              - 240.0.0.0/4
+      ports: [{ protocol: TCP, port: 443 }]

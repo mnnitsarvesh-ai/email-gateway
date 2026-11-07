@@ -1,0 +1,51 @@
+{
+  "id": "vendor-invoice-lookalike",
+  "description": "Vendor invoice change from a lookalike of the vendor domain with new bank details.",
+  "label": "bec",
+  "input": {
+    "headers": {
+      "From": ["Globex Supplies Accounts <accounts@globexsuppiles.test>"],
+      "Subject": ["Updated invoice and bank details"]
+    },
+    "envelope": {
+      "envelopeFrom": "accounts@globexsuppiles.test"
+    },
+    "auth": {
+      "state": "available",
+      "row": {
+        "spf": "pass",
+        "spfDomain": "globexsuppiles.test",
+        "dkim": "pass",
+        "dkimSignatures": [
+          {
+            "domain": "globexsuppiles.test",
+            "result": "pass",
+            "selector": "s1"
+          }
+        ],
+        "dmarc": "pass",
+        "dmarcPolicy": "reject",
+        "dmarcDomain": "globexsuppiles.test",
+        "arc": null
+      }
+    },
+    "url": {
+      "state": "available",
+      "rows": []
+    },
+    "text": {
+      "subject": "Updated invoice and bank details",
+      "text": "Dear customer,\nPlease find the updated invoice for October. Our bank details have been updated, kindly remit to the new account below from now on.\nIBAN: DE89 3704 0044 0532 0130 00\nRegards, Accounts team",
+      "html": null
+    }
+  },
+  "expected": {
+    "verdict": "malicious",
+    "requiredCodes": [
+      "bec.lookalike.sender_vendor",
+      "bec.content.invoice_change",
+      "bec.content.bank_detail_change",
+      "bec.vendor.payment_change"
+    ]
+  }
+}

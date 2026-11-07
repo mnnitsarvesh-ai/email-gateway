@@ -14,11 +14,19 @@ export type PartRead =
   /** More bytes than the row says, or another SHA-256: not retryable (`part_integrity`). */
   | { kind: 'integrity' };
 
+/** A bounded read of the first bytes of a part (step 4.4 B4 step 4): no hash check. */
+export type PartPrefixRead = { kind: 'ok'; bytes: Buffer } | { kind: 'missing' };
+
 export interface PartSource {
   read(key: string, sizeBytes: number, sha256: string, signal: AbortSignal): Promise<PartRead>;
 }
 
-export class S3PartReader implements PartSource {
+/** Parts read up to a cap (the bec engine's stored text bodies above BEC_TEXT_MAX_BYTES). */
+export interface PartPrefixSource {
+  readPrefix(key: string, maxBytes: number, signal: AbortSignal): Promise<PartPrefixRead>;
+}
+
+export class S3PartReader implements PartSource, PartPrefixSource {
   private readonly source: S3EmlSource;
 
   constructor(client: S3Client, bucket: string, timeoutMs: number) {
@@ -50,5 +58,29 @@ export class S3PartReader implements PartSource {
     }
     if (total !== sizeBytes || hash.digest('hex') !== sha256) return { kind: 'integrity' };
     return { kind: 'ok', bytes: chunks.length === 1 ? chunks[0]! : Buffer.concat(chunks, total) };
+  }
+
+  /**
+   * The first `maxBytes` bytes of `key` (step 4.4 B4 step 4: a stored body larger than
+   * BEC_TEXT_MAX_BYTES is read as a prefix and the text is `incomplete`). The stream is destroyed
+   * as soon as the cap is reached; a partial read cannot be checked against the row's SHA-256
+   * (recorded in §12). `NoSuchKey` → `missing`; other S3 failures are thrown (transient).
+   */
+  async readPrefix(key: string, maxBytes: number, signal: AbortSignal): Promise<PartPrefixRead> {
+    const opened = await this.source.open(key, signal);
+    if (opened === EML_MISSING) return { kind: 'missing' };
+    const chunks: Buffer[] = [];
+    let total = 0;
+    try {
+      for await (const chunk of opened as AsyncIterable<Buffer>) {
+        const take = Math.min(chunk.length, maxBytes - total);
+        if (take > 0) chunks.push(take === chunk.length ? chunk : chunk.subarray(0, take));
+        total += take;
+        if (total >= maxBytes) break;
+      }
+    } finally {
+      if (!opened.destroyed) opened.destroy();
+    }
+    return { kind: 'ok', bytes: Buffer.concat(chunks, total) };
   }
 }

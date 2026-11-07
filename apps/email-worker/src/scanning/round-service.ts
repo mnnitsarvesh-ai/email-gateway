@@ -6,6 +6,7 @@ import {
   EventTypes,
   type MessageParsedV1,
   type MessageRescanRequestedV1,
+  type MessageScanStageReadyV1,
 } from '@email-gateway/event-contracts';
 import type { Logger } from '@email-gateway/logger';
 import { errorFields } from '../mime-ingestion/error-fields';
@@ -28,10 +29,15 @@ import type {
   ScanMessageRecord,
   ScanRound,
   ScanStore,
+  ScanTrigger,
 } from './scan-store';
 
-/** The events an engine queue consumes (S2). */
-export type ScanTriggerPayload = MessageParsedV1 | MessageRescanRequestedV1;
+/**
+ * The events an engine queue consumes (S2): parse results and rescans for stage-1 engines, the
+ * stage trigger for stage-2 engines (step 4.4 B2).
+ */
+export type ScanTriggerPayload =
+  MessageParsedV1 | MessageRescanRequestedV1 | MessageScanStageReadyV1;
 export type ScanTriggerEvent = EventEnvelope<ScanTriggerPayload>;
 
 export interface SettingsLookup {
@@ -112,6 +118,13 @@ export function reportCompletion(
  * transaction. A transient failure (MySQL, S3, network) is thrown unchanged: no row, the
  * consumer retries it without consuming an attempt.
  *
+ * Step 4.4 B2 (stage-2 engines): a `scan_stage_ready.v1` delivery runs in the round its payload
+ * names (`lifecycleRound`); a trigger for another engine is a ledger no-op
+ * (`other_stage_engine`); the round is never opened by it — it must exist with the payload's
+ * `scanId` (else a ledger no-op `stage_round_missing`, warned). Everything after the open is the
+ * same for both stages. The completion check of the transaction that inserts the last dependency
+ * final writes the stage triggers (`ScanStore.finalize` → `stageTriggers`).
+ *
  * Logs carry ids, codes, counts and durations only (never symbols, options or addresses).
  */
 export class ScanRoundService {
@@ -135,9 +148,18 @@ export class ScanRoundService {
     if (Number.isFinite(occurred)) {
       metrics.eventLag.observe({ engine }, Math.max(0, (startedAt.getTime() - occurred) / 1000));
     }
-    const trigger = event.eventType === EventTypes.MessageRescanRequested ? 'rescan' : 'parsed';
+    const trigger: ScanTrigger =
+      event.eventType === EventTypes.MessageRescanRequested
+        ? 'rescan'
+        : event.eventType === EventTypes.MessageScanStageReady
+          ? 'stage'
+          : 'parsed';
     const payload = event.payload;
-    const round = trigger === 'rescan' ? (payload as MessageRescanRequestedV1).lifecycleRound : 0;
+    const stage = trigger === 'stage' ? (payload as MessageScanStageReadyV1) : null;
+    const round =
+      trigger === 'parsed'
+        ? 0
+        : (payload as MessageRescanRequestedV1 | MessageScanStageReadyV1).lifecycleRound;
     const ids = {
       eventId: event.eventId,
       messageId: payload.messageId,
@@ -149,6 +171,17 @@ export class ScanRoundService {
     if (await store.isProcessed(this.consumer, event.eventId)) {
       metrics.skip(engine, 'duplicate');
       return 'duplicate';
+    }
+
+    // A stage trigger names the engine it is for (B2); another engine's trigger is a no-op.
+    if (stage && stage.engine !== engine) {
+      const outcome = await store.recordNoop(this.consumer, event.eventId);
+      metrics.skip(engine, 'other_stage_engine');
+      this.logger.warn(
+        { ...ids, stageEngine: stage.engine },
+        'stage trigger for another engine; skipped',
+      );
+      return outcome;
     }
 
     // 2. The writer row of the envelope's organization (tenant from trusted context only).
@@ -172,7 +205,7 @@ export class ScanRoundService {
     const opened = await store.openRound({
       message,
       round,
-      scanKind: trigger === 'rescan' ? 'rescan' : 'initial',
+      scanKind: stage ? stage.scanKind : trigger === 'rescan' ? 'rescan' : 'initial',
       trigger,
       engine,
       eventId: event.eventId,
@@ -180,11 +213,19 @@ export class ScanRoundService {
       requiredEngines: [...this.options.requiredEngines],
       deadlineSeconds: this.options.deadlineSeconds,
       now: startedAt,
+      ...(stage ? { scanId: BigInt(stage.scanId) } : {}),
     });
     if (opened.kind === 'skip') {
       const outcome = await store.recordNoop(this.consumer, event.eventId);
       metrics.skip(engine, opened.reason);
-      this.logger.info({ ...ids, reason: opened.reason }, 'scan trigger skipped');
+      if (opened.reason === 'stage_round_missing') {
+        this.logger.warn(
+          { ...ids, scanId: stage?.scanId },
+          'stage trigger names a round that does not exist with its scan id; skipped',
+        );
+      } else {
+        this.logger.info({ ...ids, reason: opened.reason }, 'scan trigger skipped');
+      }
       return opened.reason === 'already_final' ? 'duplicate' : outcome;
     }
     const scan = opened.round;
@@ -269,6 +310,13 @@ export class ScanRoundService {
       metrics.skip(this.engine, 'duplicate');
       return 'duplicate';
     }
+    for (const triggered of result.stageTriggers) {
+      metrics.stageTriggered(triggered);
+      this.logger.info(
+        { ...ids, scanId: scan.scanId.toString(), stageEngine: triggered },
+        'stage-2 engine triggered',
+      );
+    }
     if (final && result.inserted) {
       metrics.result(
         this.engine,
@@ -305,6 +353,8 @@ export class ScanRoundService {
       messageId: message.id,
       receivedAt: message.receivedAt,
       round: scan.round,
+      scanId: scan.scanId,
+      scanKind: scan.scanKind,
       direction: message.direction,
       envelope: {
         clientIp: message.clientIp,

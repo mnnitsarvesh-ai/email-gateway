@@ -108,6 +108,28 @@ export const PERMISSIONS = Object.freeze([
     key: 'platform:scan_rescan',
     description: 'Start and cancel bulk attachment rescans',
   },
+  // Step 4.4 (docs/plan/steps/12-phishing-bec.md B18): tenant permissions of the BEC module.
+  // organization_admin and super_admin hold them through TENANT_PERMISSIONS / ALL_PERMISSIONS;
+  // security_analyst gets read, manage and feedback, compliance_auditor read, explicitly. The
+  // feedback export (training features) is separate from feedback recording.
+  {
+    key: 'bec:read',
+    description:
+      'View BEC executive/vendor profiles, trusted senders, suppressions and feedback (step 4.4)',
+  },
+  {
+    key: 'bec:manage',
+    description:
+      'Manage BEC profiles, trusted senders, suppressions and communication history (step 4.4)',
+  },
+  {
+    key: 'bec:feedback',
+    description: 'Record false-positive/false-negative feedback on BEC verdicts (step 4.4)',
+  },
+  {
+    key: 'bec:feedback_export',
+    description: 'Export BEC feedback features for model retraining (step 4.4)',
+  },
 ] as const satisfies readonly PermissionDef[]);
 
 /** Every permission key of the catalog. */
@@ -257,6 +279,9 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'report:read',
       'archive:read',
       'audit:read',
+      'bec:read',
+      'bec:manage',
+      'bec:feedback',
     ],
   },
   {
@@ -278,7 +303,7 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
     key: 'compliance_auditor',
     name: 'Compliance Auditor',
     description: 'Read-only access plus the audit log and archive export',
-    permissions: [...TENANT_READ_PERMISSIONS, 'audit:read', 'archive:export'],
+    permissions: [...TENANT_READ_PERMISSIONS, 'audit:read', 'archive:export', 'bec:read'],
   },
   {
     key: 'read_only_user',

@@ -22,6 +22,9 @@ import {
   DEV_PASSTHROUGH_CONSUMER,
   DEV_PASSTHROUGH_WARNING,
   DevPassThroughApprover,
+  becHoldDecision,
+  heldBecOutcome,
+  InconsistentBecResultReadError,
   InconsistentRewriteReadError,
   isRewriteKeyOf,
 } from './dev-passthrough.approver';
@@ -98,16 +101,35 @@ const scanFailedEvent: EventEnvelope<MessageScannedV1> = {
   }),
 };
 
+/** The round's `bec_scan_results` verdicts as the email-worker writes them (echo columns). */
+const becRow = (deterministicVerdict: string, overrides: Record<string, unknown> = {}) => ({
+  scanId: 900n,
+  receivedAt: new Date('2026-11-03T11:59:00.000Z'),
+  messageId: 100n,
+  organizationId: 7n,
+  lifecycleRound: 0,
+  deterministicVerdict,
+  verdict: 'suspicious',
+  ...overrides,
+});
+
 function fakeTx(options: {
   recipients?: number;
   maxDeliverySeq?: number | null;
   rewrite?: Record<string, unknown> | null;
+  /** Default: a deterministic `suspicious` row of the round. */
+  bec?: Record<string, unknown> | null;
 }) {
   const outbox: { data: Record<string, unknown> }[] = [];
   const events: { data: Record<string, unknown> }[] = [];
   const tx = {
     urlRewrite: {
       findFirst: vi.fn((_args: unknown) => Promise.resolve(options.rewrite ?? null)),
+    },
+    becScanResult: {
+      findFirst: vi.fn((_args: unknown) =>
+        Promise.resolve(options.bec === undefined ? becRow('suspicious') : options.bec),
+      ),
     },
     emailDelivery: {
       aggregate: vi.fn(() =>
@@ -517,6 +539,208 @@ describe('DevPassThroughApprover (R5, step 4.1 S15, development only)', () => {
     expect(DEV_PASSTHROUGH_CONSUMER).toBe('delivery-worker.dev-passthrough-scanned');
     expect(DEV_PASSTHROUGH_WARNING).toContain('delivered after scanning without policy');
     expect(DEV_PASSTHROUGH_WARNING).toContain('malicious verdicts are held in scanned');
+    expect(DEV_PASSTHROUGH_WARNING).toContain('suspicious or malicious BEC results');
+  });
+});
+
+describe('DevPassThroughApprover: BEC verdicts (step 4.4 B17)', () => {
+  const engines = (bec: 'clean' | 'suspicious' | 'malicious' | 'unknown' | 'skipped') => [
+    { engine: 'rspamd', required: true, outcome: 'clean' as const, attempts: 1 },
+    { engine: 'url', required: true, outcome: 'suspicious' as const, attempts: 1 },
+    { engine: 'bec', required: true, outcome: bec, attempts: 1 },
+  ];
+  const becEvent = (
+    bec: 'clean' | 'suspicious' | 'malicious' | 'unknown' | 'skipped',
+    verdict: MessageScannedV1['verdict'] = 'suspicious',
+  ): EventEnvelope<MessageScannedV1> => ({
+    ...event,
+    payload: scannedPayload({ verdict, engines: engines(bec), reasonCodes: [] }),
+  });
+
+  it('heldBecOutcome is the bec outcome when suspicious or malicious, else null', () => {
+    expect(heldBecOutcome(scannedPayload({ engines: engines('suspicious') }))).toBe('suspicious');
+    expect(heldBecOutcome(scannedPayload({ engines: engines('malicious') }))).toBe('malicious');
+    for (const outcome of ['clean', 'unknown', 'skipped'] as const) {
+      expect(heldBecOutcome(scannedPayload({ engines: engines(outcome) }))).toBeNull();
+    }
+    expect(heldBecOutcome(scannedPayload())).toBeNull();
+  });
+
+  it.each(['suspicious', 'malicious'] as const)(
+    'holds a %s bec result: no transition, no approval, counted bec_verdict, logged with ids',
+    async (bec) => {
+      const service = metricsService();
+      const info = vi.fn();
+      const logger = { child: () => ({ warn: vi.fn(), info }) } as unknown as Logger;
+      const approver = new DevPassThroughApprover(
+        feed(),
+        noWriter,
+        RECORDER_TX_TIMEOUT_MS,
+        logger,
+        newMetrics(service),
+        () => NOW,
+      );
+      const t = fakeTx({ recipients: 2 });
+      const held = becEvent(bec);
+      expect(await approver.approve(held, t.tx as never)).toEqual({ approvals: [], recipients: 0 });
+      expect(transition).not.toHaveBeenCalled();
+      expect(t.outbox).toHaveLength(0);
+      expect(t.events).toHaveLength(0);
+      expect(t.tx.emailRecipient.findMany).not.toHaveBeenCalled();
+      expect(t.tx.urlRewrite.findFirst).not.toHaveBeenCalled();
+      expect(await service.metrics()).toContain(
+        'delivery_approvals_skipped_total{reason="bec_verdict",service="t"} 1',
+      );
+      expect(info).toHaveBeenCalledWith(
+        {
+          eventId: held.eventId,
+          messageId: held.payload.messageId,
+          scanId: held.payload.scanId,
+          round: held.payload.lifecycleRound,
+          outcome: 'scanned',
+          verdict: 'suspicious',
+          becOutcome: bec,
+        },
+        expect.stringContaining('BEC result'),
+      );
+    },
+  );
+
+  it.each(['clean', 'unknown', 'skipped'] as const)(
+    'approves a %s bec result even when the url engine is suspicious',
+    async (bec) => {
+      const approver = new DevPassThroughApprover(
+        feed(),
+        noWriter,
+        RECORDER_TX_TIMEOUT_MS,
+        createLogger({ service: 't', level: 'silent' }),
+        newMetrics(),
+        () => NOW,
+      );
+      const t = fakeTx({ recipients: 1 });
+      const result = await approver.approve(becEvent(bec), t.tx as never);
+      expect(result.approvals).toHaveLength(1);
+      expect(transition).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('a malicious verdict is still counted as malicious_verdict; a failed scan as scan_failed', async () => {
+    const service = metricsService();
+    const approver = new DevPassThroughApprover(
+      feed(),
+      noWriter,
+      RECORDER_TX_TIMEOUT_MS,
+      createLogger({ service: 't', level: 'silent' }),
+      newMetrics(service),
+      () => NOW,
+    );
+    await approver.approve(becEvent('malicious', 'malicious'), fakeTx({}).tx as never);
+    await approver.approve(scanFailedEvent, fakeTx({}).tx as never);
+    const text = await service.metrics();
+    expect(text).toContain(
+      'delivery_approvals_skipped_total{reason="malicious_verdict",service="t"} 1',
+    );
+    expect(text).toContain('delivery_approvals_skipped_total{reason="scan_failed",service="t"} 1');
+    expect(text).not.toContain('reason="bec_verdict"');
+  });
+
+  it('becHoldDecision: held only for a deterministic suspicious/malicious verdict; missing is held', () => {
+    expect(becHoldDecision(null)).toBe('missing');
+    expect(becHoldDecision({ deterministicVerdict: 'suspicious', verdict: 'suspicious' })).toBe(
+      'held',
+    );
+    expect(becHoldDecision({ deterministicVerdict: 'suspicious', verdict: 'malicious' })).toBe(
+      'held',
+    );
+    expect(becHoldDecision({ deterministicVerdict: 'malicious', verdict: 'malicious' })).toBe(
+      'held',
+    );
+    for (const deterministicVerdict of ['clean', 'unknown']) {
+      expect(becHoldDecision({ deterministicVerdict, verdict: 'suspicious' })).toBe('ai_only');
+    }
+  });
+
+  it.each(['clean', 'unknown'] as const)(
+    'approves a bec result raised to suspicious by the AI layer alone (deterministic %s; ADR-0034)',
+    async (deterministic) => {
+      const service = metricsService();
+      const approver = new DevPassThroughApprover(
+        feed(),
+        noWriter,
+        RECORDER_TX_TIMEOUT_MS,
+        createLogger({ service: 't', level: 'silent' }),
+        newMetrics(service),
+        () => NOW,
+      );
+      const t = fakeTx({ recipients: 1, bec: becRow(deterministic) });
+      const result = await approver.approve(becEvent('suspicious'), t.tx as never);
+      expect(result.approvals).toHaveLength(1);
+      expect(transition).toHaveBeenCalledTimes(1);
+      expect(t.tx.becScanResult.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            scanId: 900n,
+            receivedAt: new Date('2026-11-03T11:59:00.000Z'),
+            messageId: 100n,
+            organizationId: 7n,
+            lifecycleRound: 0,
+          },
+        }),
+      );
+      const text = await service.metrics();
+      expect(text).toContain('delivery_bec_ai_only_not_held_total{service="t"} 1');
+      expect(text).not.toContain('reason="bec_verdict"');
+    },
+  );
+
+  it('holds when the bec result row is missing (fail-safe); a shifted read is inconsistent', async () => {
+    const service = metricsService();
+    const warn = vi.fn();
+    const logger = { child: () => ({ warn, info: vi.fn() }) } as unknown as Logger;
+    const approver = new DevPassThroughApprover(
+      feed(),
+      noWriter,
+      RECORDER_TX_TIMEOUT_MS,
+      logger,
+      newMetrics(service),
+      () => NOW,
+    );
+    const missing = fakeTx({ bec: null });
+    expect(await approver.approve(becEvent('suspicious'), missing.tx as never)).toEqual({
+      approvals: [],
+      recipients: 0,
+    });
+    expect(transition).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ becOutcome: 'suspicious' }),
+      expect.stringContaining('fail-safe'),
+    );
+    const shifted = fakeTx({ bec: becRow('clean', { organizationId: 8n }) });
+    await expect(approver.approve(becEvent('suspicious'), shifted.tx as never)).rejects.toThrow(
+      InconsistentBecResultReadError,
+    );
+    expect(transition).not.toHaveBeenCalled();
+    expect(await service.metrics()).toContain(
+      'delivery_inconsistent_reads_total{read="bec_result",service="t"} 1',
+    );
+  });
+
+  it('commits the ledger row of a held bec result (handled once, never approved)', async () => {
+    const { tx, outbox } = fakeTx({});
+    const writer = fakeWriter(tx);
+    const f = feed();
+    new DevPassThroughApprover(
+      f,
+      writer.prisma,
+      RECORDER_TX_TIMEOUT_MS,
+      createLogger({ service: 't', level: 'silent' }),
+      newMetrics(),
+      () => NOW,
+    ).start();
+    const held = becEvent('suspicious');
+    expect(await f.handler!(held)).toBe('handled');
+    expect(writer.ledger).toEqual([{ consumer: DEV_PASSTHROUGH_CONSUMER, eventId: held.eventId }]);
+    expect(outbox).toHaveLength(0);
   });
 });
 

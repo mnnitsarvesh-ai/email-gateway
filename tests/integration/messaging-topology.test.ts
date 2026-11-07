@@ -19,12 +19,12 @@ import { stack } from './support/env';
 
 /**
  * The provisioned vhost `email-gateway` matches the topology exactly (step 3.2 Q1, Q4, §3; v2:
- * step 3.3 L7; v3: step 4.1 S2; v4: step 4.2 A2; v5: step 4.3 U2): checks through the management
+ * step 3.3 L7; v3: step 4.1 S2; v4: step 4.2 A2; v5: step 4.3 U2; v6: step 4.4 B3): checks through the management
  * API. The prune case adds one stray binding to the dormant `scan.auth` and lets `init.mjs` remove
  * it again.
  */
-/** Bindings of topology v5 (queue and exchange destinations), besides the default exchange's. */
-const TOPOLOGY_BINDINGS = 39;
+/** Bindings of topology v6 (queue and exchange destinations), besides the default exchange's. */
+const TOPOLOGY_BINDINGS = 41;
 const api = new ManagementApi();
 const vhost = stack.rabbitmqVhost();
 
@@ -56,8 +56,8 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
     }
   });
 
-  it('has exactly the sixteen durable quorum queues, each under its policy eg.<queue>', () => {
-    expect(QUEUE_NAMES).toHaveLength(16);
+  it('has exactly the seventeen durable quorum queues, each under its policy eg.<queue>', () => {
+    expect(QUEUE_NAMES).toHaveLength(17);
     expect(queues.map((q) => q.name).sort()).toEqual([...QUEUE_NAMES].sort());
     for (const queue of queues) {
       expect(queue.type, queue.name).toBe('quorum');
@@ -125,10 +125,10 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
     expect(bindings.filter((b) => b.destination_type === 'exchange')).toHaveLength(5);
   });
 
-  it('is topology v5: the vhost description and the rescan bindings (steps 4.1 S2, 4.2 A2, 4.3 U2)', async () => {
-    expect(TOPOLOGY_VERSION).toBe(5);
+  it('is topology v6: the vhost description and the rescan bindings (steps 4.1 S2, 4.2 A2, 4.3 U2, 4.4 B3)', async () => {
+    expect(TOPOLOGY_VERSION).toBe(6);
     const info = await api.get<{ description?: string }>(`/vhosts/${encodeURIComponent(vhost)}`);
-    expect(info.description).toBe('email-gateway topology v5');
+    expect(info.description).toBe('email-gateway topology v6');
     const rescan = bindings
       .filter(
         (b) =>
@@ -138,7 +138,8 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
       .map((b) => `${b.destination_type}:${b.destination}`)
       .sort();
     // v2 bound five scan queues; v3 removed scan.auth's event bindings (authentication results
-    // come from the rspamd engine on scan.spam, ADR-0026).
+    // come from the rspamd engine on scan.spam, ADR-0026); v6's scan.bec is a stage-2 queue and
+    // gets no rescan binding (a rescan round triggers it through scan_stage_ready.v1).
     expect(rescan).toEqual(
       ['scan.attachment', 'scan.dlp', 'scan.spam', 'scan.url'].map((q) => `queue:${q}`),
     );
@@ -249,6 +250,35 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
     const scanner = process.env.RABBITMQ_SCANNER_USER || 'eg-scanner';
     const users = await consumerUsers('scan.url');
     expect(users.length, 'consumers on scan.url').toBeGreaterThanOrEqual(1);
+    for (const user of users) expect(user).toBe(scanner);
+  });
+
+  it('scan.bec is a stage-2 work queue (v6) bound only to scan_stage_ready.v1, for eg-scanner only', async () => {
+    expect(queueDefinition('scan.bec')).toMatchObject({
+      role: 'work',
+      consumer: { kind: 'ledger', ledgerName: 'email-worker.scan.bec', service: 'email-worker' },
+    });
+    expect(bindingsOf('scan.bec')).toEqual(
+      [
+        'email.security [org.*.mail.message.scan_stage_ready.v1]',
+        'email.security [retry.scan.bec.#]',
+      ].sort(),
+    );
+    expect(policies.find((p) => p.name === 'eg.scan.bec')?.definition).toEqual(
+      policyFor('work', 'scan.bec'),
+    );
+    // The stage trigger reaches no other queue than scan.bec (and the firehose through
+    // email.events); parsed.v1 / rescan_requested.v1 never reach scan.bec.
+    const stage = bindings
+      .filter((b) => b.source !== '' && b.routing_key === 'org.*.mail.message.scan_stage_ready.v1')
+      .map((b) => `${b.destination_type}:${b.destination}`);
+    expect(stage).toEqual(['queue:scan.bec']);
+    // The BEC engine (step 4.4 WP3, SCAN_CONSUMERS containing bec) consumes it: at least one
+    // consumer, every one the scanner. This assertion needs the WP3 email-worker running; before
+    // WP3 the queue has no consumer and this case fails by design (as scan.url's did in 4.3).
+    const scanner = process.env.RABBITMQ_SCANNER_USER || 'eg-scanner';
+    const users = await consumerUsers('scan.bec');
+    expect(users.length, 'consumers on scan.bec').toBeGreaterThanOrEqual(1);
     for (const user of users) expect(user).toBe(scanner);
   });
 

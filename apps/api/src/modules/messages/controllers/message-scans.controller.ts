@@ -49,7 +49,11 @@ export class MessageScansController {
       'findings (by entry index path, never names), a known-hash hit and the sandbox ' +
       'submission. The content cache is shared across organizations, so its hit/miss ' +
       'outcome is never shown, and the `attachment` engine reports no durations and ' +
-      'second-granular times. From the read replica: a round that just completed ' +
+      'second-granular times. The `bec` engine entry (step 4.4) carries its explainable ' +
+      'verdict: versions, deterministic and final verdict and score, thresholds, input states, ' +
+      'the fired rules with structured evidence (span offsets, never text), applied and shadow ' +
+      'AI assessments (no response hashes or durations) and feedback references; `scanId` of ' +
+      'a round is the id the BEC feedback route takes. From the read replica: a round that just completed ' +
       'may still show as running. Symbol options can contain addresses or URLs of the ' +
       'message; filenames are attacker-controlled text.',
   })

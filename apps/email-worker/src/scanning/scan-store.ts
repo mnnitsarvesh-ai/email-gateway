@@ -1,6 +1,10 @@
 import type { HandleOutcome } from '@email-gateway/common';
 import type { MessageState } from '@email-gateway/message-lifecycle';
-import type { AuthResults, EngineOutcome } from '@email-gateway/security-contracts';
+import {
+  type AuthResults,
+  engineCatalogEntry,
+  type EngineOutcome,
+} from '@email-gateway/security-contracts';
 import type { RoundAggregate } from './aggregate';
 import type { EngineChildRows, MessageDirectionValue } from './engine';
 import type { EngineSettingsSource } from './settings-resolver';
@@ -24,7 +28,12 @@ export interface ScanMessageRecord {
 }
 
 export type ScanKindValue = 'initial' | 'rescan';
-export type ScanTrigger = 'parsed' | 'rescan';
+/**
+ * What triggered a delivery: `parsed` / `rescan` open (or join) a round as stage-1 engines;
+ * `stage` (step 4.4 B2, `mail.message.scan_stage_ready.v1`) runs a stage-2 engine in a round that
+ * stage-1 engines opened.
+ */
+export type ScanTrigger = 'parsed' | 'rescan' | 'stage';
 
 /** One `email_scans` row (a round, S3). */
 export interface ScanRound {
@@ -51,6 +60,11 @@ export interface OpenRoundInput {
   requiredEngines: string[];
   deadlineSeconds: number;
   now: Date;
+  /**
+   * Trigger `stage` only (B2): the `email_scans.id` the stage event names. The round is never
+   * created for a stage trigger; it must exist with this id.
+   */
+  scanId?: bigint;
 }
 
 export type OpenRoundResult =
@@ -134,7 +148,18 @@ export interface FinalizeInput {
 }
 
 export type FinalizeResult =
-  { kind: 'duplicate' } | { kind: 'handled'; inserted: boolean; completion: CompletionResult };
+  | { kind: 'duplicate' }
+  | {
+      kind: 'handled';
+      inserted: boolean;
+      completion: CompletionResult;
+      /**
+       * Stage-2 engines whose `scan_stage_ready.v1` outbox row this transaction wrote (B2):
+       * at most one per engine and round, written by the transaction that inserted the last
+       * dependency final.
+       */
+      stageTriggers: string[];
+    };
 
 /** A running round past its deadline (S10). */
 export interface SweepCandidate {
@@ -190,6 +215,8 @@ export function decideOpen(
 ): OpenDecision {
   if (current.round > round) return { action: 'skip', reason: 'older_round' };
   if (current.round < round) return { action: 'skip', reason: `lifecycle_${current.state}` };
+  // Only a parse result opens round 0 (E3). A stage trigger (B2) never opens a round: stage-1
+  // engines opened it, so a `persisted` message has no round to run a stage-2 engine in.
   if (current.state === 'persisted' && round === 0 && trigger === 'parsed') {
     return { action: 'open_e3' };
   }
@@ -198,4 +225,50 @@ export function decideOpen(
     return { action: 'check_final' };
   }
   return { action: 'skip', reason: `lifecycle_${current.state}` };
+}
+
+/** A dependency final as `stageTriggersFor` needs it. */
+export interface StageFinal {
+  engine: string;
+  outcome: string;
+}
+
+/** One `mail.message.scan_stage_ready.v1` to write (B2). */
+export interface StageTrigger {
+  engine: string;
+  dependencies: Array<{ engine: string; outcome: string }>;
+}
+
+/**
+ * The stage-2 engines a completion check must trigger (step 4.4 B2), pure and generic over the
+ * catalog (it never names an engine): every engine `E` of the round's required set that declares
+ * `dependsOn`, has no final row yet, and whose dependencies **within the required set** all have
+ * final rows — but only when the final inserted by this transaction (`insertedEngine`) is one of
+ * those dependencies. Finals of one round are serialized by the message row lock and read after
+ * it, so exactly one transaction (the one inserting the last dependency final) gets a trigger.
+ * `insertedEngine` is null for a completion re-check and for the deadline sweeper (never a
+ * trigger). Dependencies outside the required set are ignored (the engine records them as
+ * `not_in_round`); an engine none of whose dependencies is required is never triggered (the
+ * configuration refuses that set-up).
+ */
+export function stageTriggersFor(
+  requiredEngines: readonly string[],
+  finals: readonly StageFinal[],
+  insertedEngine: string | null,
+): StageTrigger[] {
+  if (insertedEngine === null) return [];
+  const triggers: StageTrigger[] = [];
+  for (const engine of requiredEngines) {
+    const entry = engineCatalogEntry(engine);
+    const deps = (entry?.dependsOn ?? []).filter((d) => requiredEngines.includes(d));
+    if (deps.length === 0 || !deps.includes(insertedEngine as never)) continue;
+    if (finals.some((f) => f.engine === engine)) continue;
+    const dependencyFinals = deps.map((d) => finals.find((f) => f.engine === d));
+    if (dependencyFinals.some((f) => f === undefined)) continue;
+    triggers.push({
+      engine,
+      dependencies: dependencyFinals.map((f) => ({ engine: f!.engine, outcome: f!.outcome })),
+    });
+  }
+  return triggers;
 }

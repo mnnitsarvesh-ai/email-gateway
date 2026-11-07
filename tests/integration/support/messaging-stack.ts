@@ -28,11 +28,13 @@ export const SCAN_LEDGER = 'email-worker.scan.rspamd';
 export const ATTACHMENT_SCAN_LEDGER = 'email-worker.scan.attachment';
 /** Step 4.3: the URL engine's ledger consumer (scan.url). */
 export const URL_SCAN_LEDGER = 'email-worker.scan.url';
+/** Step 4.4: the BEC engine's ledger consumer (scan.bec, stage-2: `scan_stage_ready.v1`). */
+export const BEC_SCAN_LEDGER = 'email-worker.scan.bec';
 /**
- * Step 4.2 A1, step 4.3 U1: every round requires Rspamd, the attachment engine and the URL
- * engine (`SCAN_ENGINES=rspamd,attachment,url`).
+ * Step 4.2 A1, step 4.3 U1, step 4.4 B1: every round requires Rspamd, the attachment engine,
+ * the URL engine and the BEC engine (`SCAN_ENGINES=rspamd,attachment,url,bec`).
  */
-export const REQUIRED_ENGINE_COUNT = 3;
+export const REQUIRED_ENGINE_COUNT = 4;
 export const PLANNER_LEDGER = 'delivery-worker.planner';
 export const QUEUES = {
   received: 'email.received',
@@ -215,6 +217,12 @@ export interface PipelineCounts {
   attachmentLedger: number;
   /** Step 4.3: `message_idempotency` rows of `email-worker.scan.url` (parsed events). */
   urlLedger: number;
+  /** Step 4.4: `mail.message.scan_stage_ready.v1` outbox rows (one per round, B2). */
+  stageEvents: number;
+  /** Step 4.4: `message_idempotency` rows of `email-worker.scan.bec` (stage events). */
+  becLedger: number;
+  /** Step 4.4: `bec_scan_results` rows (one per round by a unique key). */
+  becResults: number;
   /** `mail.message.scanned.v1` outbox rows (one per completed round). */
   scannedEvents: number;
   approvals: number;
@@ -258,6 +266,10 @@ export async function pipelineCounts(
     where: { ...where, eventType: EventTypes.MessageParsed },
     select: { eventId: true },
   });
+  const stage = await prisma.messageOutbox.findMany({
+    where: { ...where, eventType: EventTypes.MessageScanStageReady },
+    select: { eventId: true },
+  });
   const perRecipient = await prisma.emailDelivery.groupBy({
     by: ['recipientId', 'deliverySeq'],
     where,
@@ -299,6 +311,13 @@ export async function pipelineCounts(
       URL_SCAN_LEDGER,
       parsed.map((p) => p.eventId),
     ),
+    stageEvents: stage.length,
+    becLedger: await ledgerCount(
+      prisma,
+      BEC_SCAN_LEDGER,
+      stage.map((e) => e.eventId),
+    ),
+    becResults: await prisma.becScanResult.count({ where }),
     scannedEvents: await prisma.messageOutbox.count({
       where: { ...where, eventType: EventTypes.MessageScanned },
     }),
@@ -361,8 +380,9 @@ export async function waitForPipeline(
 /**
  * The exactly-once assertions of every chaos suite for `n` single-recipient messages: one parse
  * row, one MIME ledger row and one parse event per message; one scan round, one final result per
- * required engine (Rspamd, step 4.1, and the attachment engine, step 4.2), one ledger row per
- * engine consumer and one `scanned.v1` per message; one approval, one
+ * required engine (Rspamd, step 4.1, the attachment engine, step 4.2, the URL engine, step 4.3,
+ * and the BEC engine, step 4.4), one ledger row per engine consumer, one stage trigger, one bec
+ * result and one `scanned.v1` per message; one approval, one
  * planner ledger row, one delivery and one reinjection group per message; nothing unpublished.
  */
 export function exactlyOnceProblems(c: PipelineCounts, n: number): string[] {
@@ -379,6 +399,9 @@ export function exactlyOnceProblems(c: PipelineCounts, n: number): string[] {
     ['scanLedger', n],
     ['attachmentLedger', n],
     ['urlLedger', n],
+    ['stageEvents', n],
+    ['becLedger', n],
+    ['becResults', n],
     ['scannedEvents', n],
     ['approvals', n],
     ['plannerLedger', n],

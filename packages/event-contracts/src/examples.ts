@@ -203,6 +203,21 @@ export const EXAMPLE_EVENT_PAYLOADS: Readonly<Record<RegisteredEventType, unknow
     reasonCodes: ['url.feed_malicious', 'url.shortened'],
     clickedAt: '2026-11-02T08:30:00.000Z',
   },
+  'mail.message.scan_stage_ready.v1': {
+    messageId,
+    receivedAt,
+    direction: 'inbound',
+    emlS3Key,
+    lifecycleRound: 0,
+    scanId: '11',
+    scanKind: 'initial',
+    engine: 'bec',
+    dependencies: [
+      { engine: 'rspamd', outcome: 'clean' },
+      { engine: 'url', outcome: 'suspicious' },
+    ],
+    readyAt: '2026-11-01T10:15:31.300Z',
+  },
   'domain.routing.changed.v1': {
     domainId: '77',
     domainPublicId: '01890a5d-ac96-774b-bcce-b302099a8057',

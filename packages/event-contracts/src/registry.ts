@@ -11,6 +11,7 @@ import {
   messageReceivedV1,
   messageRescanRequestedV1,
   messageScannedV1,
+  messageScanStageReadyV1,
   messageStateChangedV1,
   policyDecidedV1,
   urlClickedV1,
@@ -160,6 +161,14 @@ export const EVENT_REGISTRY = {
   ),
   // Step 4.3 U2: producer click-service through the outbox; no queue binding (analytics only).
   [EventTypes.UrlClicked]: define(EventTypes.UrlClicked, 'email.security', urlClickedV1, 'message'),
+  // Step 4.4 B2: producer email-worker (scan stage) through the outbox; bound to the stage-2
+  // engine queue scan.bec (topology v6).
+  [EventTypes.MessageScanStageReady]: define(
+    EventTypes.MessageScanStageReady,
+    'email.security',
+    messageScanStageReadyV1,
+    'message',
+  ),
 } as const satisfies Record<string, EventDefinition>;
 
 export type RegisteredEventType = keyof typeof EVENT_REGISTRY;

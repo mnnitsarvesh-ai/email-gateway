@@ -52,10 +52,10 @@ const monthly = (
 });
 
 /**
- * The 27 partitioned tables: the 16 of D3, the two delivery tables of step 2.3 (§3), the parse
+ * The 28 partitioned tables: the 16 of D3, the two delivery tables of step 2.3 (§3), the parse
  * stage table of step 3.1 (§3), the authentication results table of step 4.1 (§3), the
- * per-attachment results and sandbox submissions of step 4.2 (§3) and the five URL tables of
- * step 4.3 (§3).
+ * per-attachment results and sandbox submissions of step 4.2 (§3), the five URL tables of
+ * step 4.3 (§3) and the BEC results table of step 4.4 (§3).
  */
 export const PARTITION_REGISTRY: readonly PartitionSpec[] = Object.freeze([
   monthly('email_messages', 'received_at', 6, 'core'),
@@ -92,6 +92,10 @@ export const PARTITION_REGISTRY: readonly PartitionSpec[] = Object.freeze([
   monthly('url_dynamic_inspections', 'received_at', 6, 'core'),
   // Clicks are partitioned by the click instant (a click can come months after the message).
   monthly('url_click_events', 'clicked_at', 6, 'core'),
+  // Step 4.4 (docs/plan/steps/12-phishing-bec.md §3, B14): the BEC result of a scan round lives
+  // as long as the scan rounds (email_scans). The non-partitioned BEC tenant tables are swept
+  // by row (bec_contact_history: per tenant retention; bec_feedback: 24 months, retention.md).
+  monthly('bec_scan_results', 'received_at', 6, 'core'),
   // Legal hold and per-tenant archive retention are row-level (step 8.1).
   monthly('email_archives', 'received_at', null, 'compliance'),
   monthly('bounce_events', 'occurred_at', 6, 'core'),

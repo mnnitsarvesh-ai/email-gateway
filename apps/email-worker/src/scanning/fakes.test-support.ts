@@ -17,6 +17,7 @@ import {
   type ScanMessageRecord,
   type ScanRound,
   type ScanStore,
+  stageTriggersFor,
   type SweepCandidate,
   type SweepResult,
 } from './scan-store';
@@ -55,6 +56,13 @@ export class FakeScanStore implements ScanStore {
   readonly rows = new Map<bigint, FakeRow[]>();
   readonly transitions: Array<{ key: string; to: string; reason: string; round: number }> = [];
   readonly outbox: Array<{ outcome: string; verdict: string; round: number }> = [];
+  /** `scan_stage_ready.v1` rows written by finalize (B2). */
+  readonly stageOutbox: Array<{
+    engine: string;
+    scanId: bigint;
+    round: number;
+    dependencies: Array<{ engine: string; outcome: string }>;
+  }> = [];
   readonly settings = new Map<string, EngineSettingsRow>();
   settingsLoads = 0;
   failNext: { op: 'loadMessage' | 'openRound' | 'finalize'; error: Error } | null = null;
@@ -117,6 +125,19 @@ export class FakeScanStore implements ScanStore {
     const existing = this.scans.find(
       (s) => s.messageId === input.message.id && s.round === input.round,
     );
+    if (input.trigger === 'stage' && decision.action === 'open') {
+      if (!existing || existing.scanId !== input.scanId) {
+        return Promise.resolve({ kind: 'skip', reason: 'stage_round_missing' });
+      }
+      const own = this.rowsOf(existing.scanId).filter((r) => r.engine === input.engine);
+      return Promise.resolve({
+        kind: 'open',
+        round: { ...existing },
+        finalExists: own.some((r) => r.isFinal),
+        attempts: own.filter((r) => !r.isFinal).length,
+        opened: false,
+      });
+    }
     if (decision.action === 'check_final') {
       const final =
         existing &&
@@ -202,10 +223,23 @@ export class FakeScanStore implements ScanStore {
       }
       this.rows.set(scan.scanId, list);
     }
+    const stageTriggers: string[] = [];
+    // As the repository: a message whose row is gone gets no stage trigger.
+    if (scan && scan.status === 'running' && this.messages.has(scan.messageId.toString())) {
+      const triggers = stageTriggersFor(
+        scan.requiredEngines,
+        this.rowsOf(scan.scanId).filter((r) => r.isFinal),
+        inserted && input.final ? input.final.engine : null,
+      );
+      for (const trigger of triggers) {
+        this.stageOutbox.push({ ...trigger, scanId: scan.scanId, round: scan.round });
+        stageTriggers.push(trigger.engine);
+      }
+    }
     const completion = scan
       ? this.complete(scan, input.completion)
       : { kind: 'already_completed' as const };
-    return Promise.resolve({ kind: 'handled', inserted, completion });
+    return Promise.resolve({ kind: 'handled', inserted, completion, stageTriggers });
   }
 
   sweepCandidates(now: Date, lookbackHours: number, limit: number): Promise<SweepCandidate[]> {

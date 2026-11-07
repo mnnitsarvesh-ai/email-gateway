@@ -1,0 +1,57 @@
+{
+  "id": "trusted-vendor-invoice",
+  "description": "Trusted vendor domain, DMARC pass, a real invoice reminder: T1 neutralizes C5/V4.",
+  "label": "benign",
+  "input": {
+    "headers": {
+      "From": ["Globex Supplies <billing@globexsupplies.test>"],
+      "Subject": ["Invoice reminder"]
+    },
+    "envelope": {
+      "envelopeFrom": "billing@globexsupplies.test"
+    },
+    "auth": {
+      "state": "available",
+      "row": {
+        "spf": "pass",
+        "spfDomain": "globexsupplies.test",
+        "dkim": "pass",
+        "dkimSignatures": [
+          {
+            "domain": "globexsupplies.test",
+            "result": "pass",
+            "selector": "s1"
+          }
+        ],
+        "dmarc": "pass",
+        "dmarcPolicy": "reject",
+        "dmarcDomain": "globexsupplies.test",
+        "arc": null
+      }
+    },
+    "url": {
+      "state": "available",
+      "rows": []
+    },
+    "text": {
+      "subject": "Invoice reminder",
+      "text": "Hello, this is a reminder that the overdue invoice for October is due. Please pay this invoice to our account as usual. Thank you.",
+      "html": null
+    },
+    "tenant": {
+      "trustedSenders": [
+        {
+          "publicId": "0193a000-0000-7000-8000-000000000101",
+          "kind": "domain",
+          "value": "globexsupplies.test",
+          "expiresAt": null
+        }
+      ]
+    }
+  },
+  "expected": {
+    "verdict": "clean",
+    "requiredCodes": ["bec.trusted_sender", "clean.below_threshold"],
+    "forbiddenCodes": ["bec.content.invoice_change", "bec.vendor.payment_change"]
+  }
+}

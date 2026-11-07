@@ -1,0 +1,45 @@
+{
+  "id": "dmarc-fail-executive-intent",
+  "description": "Executive name on the tenant domain, DMARC fail, wire request with urgency: malicious.",
+  "label": "bec",
+  "input": {
+    "headers": {
+      "From": ["Anita Sharma <anita.sharma@acmecorp.test>"],
+      "Subject": ["Wire today"]
+    },
+    "envelope": {
+      "envelopeFrom": "anita.sharma@acmecorp.test"
+    },
+    "auth": {
+      "state": "available",
+      "row": {
+        "spf": "fail",
+        "spfDomain": "acmecorp.test",
+        "dkim": "none",
+        "dkimSignatures": [],
+        "dmarc": "fail",
+        "dmarcPolicy": "quarantine",
+        "dmarcDomain": "acmecorp.test",
+        "arc": null
+      }
+    },
+    "url": {
+      "state": "available",
+      "rows": []
+    },
+    "text": {
+      "subject": "Wire today",
+      "text": "Please process the transfer of $48,500 to the supplier today. This is urgent, I will explain later.",
+      "html": null
+    }
+  },
+  "expected": {
+    "verdict": "malicious",
+    "requiredCodes": [
+      "bec.auth.dmarc_fail",
+      "bec.impersonation.executive_name",
+      "bec.auth.tenant_domain_spoof",
+      "bec.content.wire_transfer"
+    ]
+  }
+}

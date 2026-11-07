@@ -1,0 +1,45 @@
+{
+  "id": "benign-receipt",
+  "description": "Transactional receipt from a SaaS provider.",
+  "label": "benign",
+  "input": {
+    "headers": {
+      "From": ["CloudDocs Billing <billing@clouddocs.test>"],
+      "Subject": ["Receipt for your subscription"]
+    },
+    "envelope": {
+      "envelopeFrom": "mailer@clouddocs.test"
+    },
+    "auth": {
+      "state": "available",
+      "row": {
+        "spf": "pass",
+        "spfDomain": "clouddocs.test",
+        "dkim": "pass",
+        "dkimSignatures": [
+          {
+            "domain": "clouddocs.test",
+            "result": "pass",
+            "selector": "s1"
+          }
+        ],
+        "dmarc": "pass",
+        "dmarcPolicy": "reject",
+        "dmarcDomain": "clouddocs.test",
+        "arc": null
+      }
+    },
+    "url": {
+      "state": "available",
+      "rows": []
+    },
+    "text": {
+      "subject": "Receipt for your subscription",
+      "text": "Thank you for your payment of USD 49.00 for the Team plan. No action is needed.",
+      "html": null
+    }
+  },
+  "expected": {
+    "verdict": "clean"
+  }
+}

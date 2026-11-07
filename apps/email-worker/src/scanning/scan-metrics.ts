@@ -1,5 +1,6 @@
 import type { Counter, Gauge, Histogram, MetricsService } from '@email-gateway/common';
 import type { LifecycleMetrics } from '@email-gateway/message-lifecycle';
+import { engineCatalogEntry, isStage2Engine } from '@email-gateway/security-contracts';
 import { CIRCUIT_STATE_VALUE, type CircuitState } from './circuit-breaker';
 import type { FailureMetricReason } from './engine';
 
@@ -9,7 +10,15 @@ const LAG_BUCKETS = [0.05, 0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 900, 3600];
 
 /** `scan_events_skipped_total{reason}`: bounded codes (S5 steps 2, 3). */
 export type SkipReason =
-  'message_not_found' | 'older_round' | 'already_final' | 'duplicate' | `lifecycle_${string}`;
+  | 'message_not_found'
+  | 'older_round'
+  | 'already_final'
+  | 'duplicate'
+  /** Step 4.4 B2: a stage event for another stage-2 engine (never expected on a queue). */
+  | 'other_stage_engine'
+  /** Step 4.4 B2: the stage event names a round that does not exist with its scan id. */
+  | 'stage_round_missing'
+  | `lifecycle_${string}`;
 
 /**
  * The scan stage series of step 4.1 S17 (a contract for
@@ -34,6 +43,7 @@ export class ScanMetrics {
   readonly settingsInvalid: Counter<'engine'>;
   readonly engineInfo: Gauge<'engine' | 'version'>;
   readonly sweeperErrors: Counter;
+  readonly stageTriggers: Counter<'engine'>;
   // The transition service's series (step 3.3 L5.5), shared names with the other writers.
   readonly transitionsTotal: Counter<'from' | 'to' | 'result'>;
   readonly ignoredTotal: Counter<'reason'>;
@@ -87,7 +97,7 @@ export class ScanMetrics {
     );
     this.skipped = metrics.counter(
       'scan_events_skipped_total',
-      'Scan deliveries that did nothing, by engine and reason (message_not_found, older_round, lifecycle_<state>, already_final, duplicate)',
+      'Scan deliveries that did nothing, by engine and reason (message_not_found, older_round, lifecycle_<state>, already_final, duplicate, other_stage_engine, stage_round_missing)',
       ['engine', 'reason'],
     );
     this.superseded = metrics.counter(
@@ -118,6 +128,11 @@ export class ScanMetrics {
     this.sweeperErrors = metrics.counter(
       'scan_deadline_sweeper_errors_total',
       'Database errors of the round deadline sweeper (it backs off and continues)',
+    );
+    this.stageTriggers = metrics.counter(
+      'scan_stage_triggers_total',
+      'Stage-2 engine triggers (mail.message.scan_stage_ready.v1 outbox rows) written when the last dependency final of a round was inserted, by triggered engine (step 4.4 B2)',
+      ['engine'],
     );
     this.transitionsTotal = metrics.counter(
       'lifecycle_transitions_total',
@@ -156,6 +171,12 @@ export class ScanMetrics {
     this.failures.inc({ engine, reason: 'timeout' }, 0);
     this.failures.inc({ engine, reason: 'error' }, 0);
     this.deadlineFinalized.inc({ engine }, 0);
+    const entry = engineCatalogEntry(engine);
+    if (entry && isStage2Engine(entry)) this.stageTriggers.inc({ engine }, 0);
+  }
+
+  stageTriggered(engine: string): void {
+    this.stageTriggers.inc({ engine });
   }
 
   result(engine: string, outcome: string, final: boolean, seconds: number | null): void {

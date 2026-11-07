@@ -14,7 +14,7 @@
 // - Timestamps are DATETIME(3) UTC. Append-only tables have no `updated_at`.
 // - snake_case table and column names via @@map / @map. Enum values are only ever appended.
 // - No email bodies or attachment content: only S3 object keys, sizes and hashes.
-// - Partitioned tables (20, marked PARTITIONED below) use a composite primary key
+// - Partitioned tables (28, marked PARTITIONED below) use a composite primary key
 //   (id, <partition column>), have no foreign keys in either direction, and every unique key
 //   ends with the partition column. The PARTITION BY clause is hand-written in the migration
 //   SQL; Prisma does not model partitions. Child rows of a message copy the message's
@@ -464,6 +464,40 @@ enum UrlClickDecision {
   not_found
 }
 
+/// Verdict of a `bec` engine result (step 4.4 B6; BEC_VERDICTS of security-contracts). `skipped`
+/// = not inbound (B1); `clean` only by rule C0 with every input available.
+enum BecVerdict {
+  clean
+  suspicious
+  malicious
+  unknown
+  skipped
+}
+
+/// Kind of a BEC trusted sender entry (step 4.4 B7).
+enum BecTrustedSenderKind {
+  address
+  domain
+}
+
+/// Kind of an analyst's BEC feedback (step 4.4 B11).
+enum BecFeedbackKind {
+  false_positive
+  false_negative
+}
+
+/// Sender scope of a BEC suppression rule (step 4.4 B11).
+enum BecSuppressionScope {
+  address
+  domain
+}
+
+/// Scope of a BEC communication-history row (step 4.4 B12, ADR-0035).
+enum BecContactScope {
+  sender
+  pair
+}
+
 enum PolicyDirection {
   inbound
   outbound
@@ -766,6 +800,12 @@ model Organization {
   webhookSubscriptions     WebhookSubscription[]
   scanEngineSettings       ScanEngineSetting[]
   attachmentRescanJobs     AttachmentRescanJob[]
+  becExecutiveProfiles     BecExecutiveProfile[]
+  becVendorProfiles        BecVendorProfile[]
+  becTrustedSenders        BecTrustedSender[]
+  becFeedback              BecFeedback[]
+  becSuppressionRules      BecSuppressionRule[]
+  becContactHistory        BecContactHistory[]
 
   @@index([status])
   @@index([status, purgeAfter])
@@ -907,6 +947,13 @@ model User {
   addedMalwareSignatures     MalwareSignature[]
   requestedAttachmentRescans AttachmentRescanJob[]
   addedThreatIndicators      ThreatIndicator[]
+  createdBecExecutives       BecExecutiveProfile[]    @relation("BecExecutiveCreatedBy")
+  updatedBecExecutives       BecExecutiveProfile[]    @relation("BecExecutiveUpdatedBy")
+  createdBecVendors          BecVendorProfile[]       @relation("BecVendorCreatedBy")
+  updatedBecVendors          BecVendorProfile[]       @relation("BecVendorUpdatedBy")
+  createdBecTrustedSenders   BecTrustedSender[]       @relation("BecTrustedSenderCreatedBy")
+  createdBecFeedback         BecFeedback[]            @relation("BecFeedbackCreatedBy")
+  createdBecSuppressions     BecSuppressionRule[]     @relation("BecSuppressionCreatedBy")
 
   @@unique([organizationId, email])
   @@index([organizationId, status])
@@ -1518,7 +1565,9 @@ model EmailRecipient {
 }
 
 /// PARTITIONED by RANGE COLUMNS(received_at), monthly. Allow-list of security-relevant headers
-/// only (values truncated); the full header block stays in the EML in S3. No foreign keys.
+/// only (values truncated); the full header block stays in the EML in S3. Values are stored
+/// decoded and unparsed; the bec engine (step 4.4 B5) parses From, Sender, Reply-To,
+/// Return-Path, In-Reply-To and References from them. No foreign keys.
 model EmailHeader {
   id             BigInt   @default(autoincrement()) @db.UnsignedBigInt
   receivedAt     DateTime @map("received_at") @db.DateTime(3)
@@ -1770,7 +1819,8 @@ model ScanEngineResult {
   organizationId  BigInt        @map("organization_id") @db.UnsignedBigInt
   /// ENGINE_NAMES of @email-gateway/security-contracts: rspamd, attachment, url, bec, dlp,
   /// sandbox (step 4.2 A1: ClamAV and YARA are components of the `attachment` engine; step 4.3
-  /// U1: `url` is written by the URL engine on scan.url).
+  /// U1: `url` is written by the URL engine on scan.url; step 4.4 B1: `bec` is written by the
+  /// phishing/BEC engine on scan.bec, a stage-2 engine that runs after `rspamd` and `url`).
   engine          String        @db.VarChar(32)
   engineVersion   String?       @map("engine_version") @db.VarChar(64)
   outcome         EngineOutcome
@@ -2204,6 +2254,235 @@ model UrlClickEvent {
   @@index([messageId, messageReceivedAt])
   @@index([publicId])
   @@map("url_click_events")
+}
+
+/// PARTITIONED by RANGE COLUMNS(received_at), monthly (6 months, core; step 4.4 §3, B14). One row
+/// per scan round with a definite final result of the `bec` engine, written in that final row's
+/// finalize transaction (unique per scan). Codes, weights, scores, versions, input states, span
+/// offsets and the parsed sender identity (the tenant's own header metadata, already in
+/// `email_headers`) only: never body text, span text, excerpts or LLM output text. No foreign keys.
+model BecScanResult {
+  id                   BigInt     @default(autoincrement()) @db.UnsignedBigInt
+  receivedAt           DateTime   @map("received_at") @db.DateTime(3)
+  messageId            BigInt     @map("message_id") @db.UnsignedBigInt
+  organizationId       BigInt     @map("organization_id") @db.UnsignedBigInt
+  /// email_scans.id of the round.
+  scanId               BigInt     @map("scan_id") @db.UnsignedBigInt
+  lifecycleRound       Int        @map("lifecycle_round") @db.UnsignedSmallInt
+  /// `bec/1;lex=<8 hex>;fm=<8 hex>;br=<8 hex>` (B16).
+  engineVersion        String     @map("engine_version") @db.VarChar(64)
+  /// `bec-map/1` (B6).
+  rulesVersion         String     @map("rules_version") @db.VarChar(16)
+  /// `bec-map/1;p=<12 hex>;t=<row version | none>` (B13).
+  settingsVersion      String     @map("settings_version") @db.VarChar(96)
+  lexiconVersion       String     @map("lexicon_version") @db.VarChar(16)
+  /// `bec-text/1` (B8).
+  textVersion          String     @map("text_version") @db.VarChar(16)
+  /// 0–100, before the AI layer (B9).
+  deterministicScore   Int        @map("deterministic_score") @db.UnsignedTinyInt
+  /// 0–100, after the AI layer (equal to deterministic_score unless B9 rule 2 or 4 applied).
+  score                Int        @db.UnsignedTinyInt
+  deterministicVerdict BecVerdict @map("deterministic_verdict")
+  verdict              BecVerdict
+  /// `{ auth, url, text, history }` input states (B2).
+  inputs               Json
+  /// JSON array (≤ 32) of `{ id, code, category, severity, weight, suppressed, evidence }` (B14).
+  rules                Json
+  /// The AI feature vector (AI_FEATURE_NAMES → number | boolean), for the retraining export.
+  features             Json?
+  /// Parsed From / Reply-To / Sender / envelope summary (addresses ≤ 320, display name ≤ 128).
+  identity             Json?
+  /// Applied AI assessments (≤ 2): labels, confidence, indicators, cited features, span offsets,
+  /// model ids/versions, response hash; never text.
+  ai                   Json?
+  /// Shadow AI assessments (≤ 3), never applied (B9 P5).
+  aiShadow             Json?      @map("ai_shadow")
+  durationMs           Int        @map("duration_ms") @db.UnsignedInt
+  createdAt            DateTime   @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@id([id, receivedAt])
+  @@unique([scanId, receivedAt])
+  @@index([messageId, receivedAt])
+  @@index([organizationId, receivedAt])
+  @@map("bec_scan_results")
+}
+
+/// A tenant's executive profile for impersonation detection (step 4.4 B5, B6 X1–X3, B18).
+/// `normalized_name` is the B5 normalization of `display_name` (unique per tenant). Deleted
+/// explicitly by organization deletion (no cascade).
+model BecExecutiveProfile {
+  id              BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  /// UUIDv7; the only id the API exposes.
+  publicId        String   @unique @map("public_id") @db.Char(36)
+  organizationId  BigInt   @map("organization_id") @db.UnsignedBigInt
+  displayName     String   @map("display_name") @db.VarChar(128)
+  normalizedName  String   @map("normalized_name") @db.VarChar(160)
+  /// JSON array (≤ 10) of alias display names.
+  aliases         Json
+  /// JSON array (≤ 20) of normalized e-mail addresses the executive really uses.
+  knownAddresses  Json     @map("known_addresses")
+  title           String?  @db.VarChar(128)
+  enabled         Boolean  @default(true)
+  /// Compare-and-set counter of the API.
+  version         Int      @default(1) @db.UnsignedInt
+  createdByUserId BigInt?  @map("created_by_user_id") @db.UnsignedBigInt
+  updatedByUserId BigInt?  @map("updated_by_user_id") @db.UnsignedBigInt
+  createdAt       DateTime @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  createdBy    User?        @relation("BecExecutiveCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  updatedBy    User?        @relation("BecExecutiveUpdatedBy", fields: [updatedByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([organizationId, normalizedName])
+  @@index([organizationId, enabled])
+  @@map("bec_executive_profiles")
+}
+
+/// A tenant's vendor profile for vendor impersonation and payment-change detection (step 4.4 B5,
+/// B6 V1–V4, L2, B18). Deleted explicitly by organization deletion (no cascade).
+model BecVendorProfile {
+  id                     BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  /// UUIDv7; the only id the API exposes.
+  publicId               String   @unique @map("public_id") @db.Char(36)
+  organizationId         BigInt   @map("organization_id") @db.UnsignedBigInt
+  name                   String   @db.VarChar(128)
+  normalizedName         String   @map("normalized_name") @db.VarChar(160)
+  /// JSON array (≤ 10) of alias names.
+  aliases                Json
+  /// JSON array (1–20) of ASCII registrable domains (never a public suffix or a free-mail domain).
+  domains                Json
+  /// JSON array (≤ 50) of normalized e-mail addresses.
+  knownSenders           Json     @map("known_senders")
+  paymentChangeSensitive Boolean  @default(true) @map("payment_change_sensitive")
+  enabled                Boolean  @default(true)
+  version                Int      @default(1) @db.UnsignedInt
+  createdByUserId        BigInt?  @map("created_by_user_id") @db.UnsignedBigInt
+  updatedByUserId        BigInt?  @map("updated_by_user_id") @db.UnsignedBigInt
+  createdAt              DateTime @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt              DateTime @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  createdBy    User?        @relation("BecVendorCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  updatedBy    User?        @relation("BecVendorUpdatedBy", fields: [updatedByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([organizationId, normalizedName])
+  @@map("bec_vendor_profiles")
+}
+
+/// A tenant's trusted sender (step 4.4 B7): an exact lower-case address or a registrable domain.
+/// Trust applies only when the message authenticates as From. Deleted explicitly by
+/// organization deletion (no cascade).
+model BecTrustedSender {
+  id              BigInt               @id @default(autoincrement()) @db.UnsignedBigInt
+  /// UUIDv7; the only id the API exposes.
+  publicId        String               @unique @map("public_id") @db.Char(36)
+  organizationId  BigInt               @map("organization_id") @db.UnsignedBigInt
+  kind            BecTrustedSenderKind
+  /// Normalized lower-case address or ASCII registrable domain.
+  value           String               @db.VarChar(320)
+  reason          String               @db.VarChar(512)
+  /// At most 365 days ahead (validated by the api); NULL = no expiry.
+  expiresAt       DateTime?            @map("expires_at") @db.DateTime(3)
+  version         Int                  @default(1) @db.UnsignedInt
+  createdByUserId BigInt?              @map("created_by_user_id") @db.UnsignedBigInt
+  createdAt       DateTime             @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt       DateTime             @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  createdBy    User?        @relation("BecTrustedSenderCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([organizationId, kind, value])
+  @@index([organizationId, expiresAt])
+  @@map("bec_trusted_senders")
+}
+
+/// An analyst's false-positive / false-negative feedback on a `bec` result (step 4.4 B11).
+/// Retention 24 months (training data; docs/database/retention.md). `message_id`, `scan_id` and
+/// `bec_result_id` reference partitioned tables, so they carry no foreign keys. `note` is analyst
+/// input (≤ 500 characters, never exported); never message content.
+model BecFeedback {
+  id                BigInt          @id @default(autoincrement()) @db.UnsignedBigInt
+  /// UUIDv7; the only id the API exposes.
+  publicId          String          @unique @map("public_id") @db.Char(36)
+  organizationId    BigInt          @map("organization_id") @db.UnsignedBigInt
+  messageId         BigInt          @map("message_id") @db.UnsignedBigInt
+  /// received_at of the message (partition key of bec_scan_results).
+  messageReceivedAt DateTime        @map("message_received_at") @db.DateTime(3)
+  /// email_scans.id of the round.
+  scanId            BigInt          @map("scan_id") @db.UnsignedBigInt
+  /// bec_scan_results.id of the result.
+  becResultId       BigInt          @map("bec_result_id") @db.UnsignedBigInt
+  kind              BecFeedbackKind
+  /// JSON array of disputed BEC_REASON_CODES (false positives: a subset of the result's codes).
+  reasonCodes       Json?           @map("reason_codes")
+  note              String?         @db.VarChar(500)
+  createdByUserId   BigInt?         @map("created_by_user_id") @db.UnsignedBigInt
+  createdAt         DateTime        @default(now()) @map("created_at") @db.DateTime(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  createdBy    User?        @relation("BecFeedbackCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([scanId, createdByUserId, kind])
+  @@index([organizationId, createdAt])
+  @@map("bec_feedback")
+}
+
+/// A bounded, expiring suppression of one suppressible BEC reason code for one sender, created
+/// only from a false-positive feedback (step 4.4 B11). `feedback_id` is the bec_feedback.id it
+/// came from (no foreign key: feedback is swept after 24 months, suppressions expire within 90
+/// days). Deleted explicitly by organization deletion (no cascade).
+model BecSuppressionRule {
+  id              BigInt              @id @default(autoincrement()) @db.UnsignedBigInt
+  /// UUIDv7; the only id the API exposes.
+  publicId        String              @unique @map("public_id") @db.Char(36)
+  organizationId  BigInt              @map("organization_id") @db.UnsignedBigInt
+  /// One of BEC_SUPPRESSIBLE_CODES.
+  reasonCode      String              @map("reason_code") @db.VarChar(64)
+  senderScope     BecSuppressionScope @map("sender_scope")
+  /// The From address or registrable domain of the scanned message (never a free-mail domain).
+  senderValue     String              @map("sender_value") @db.VarChar(320)
+  feedbackId      BigInt?             @map("feedback_id") @db.UnsignedBigInt
+  /// At most 90 days after creation (no permanent suppression).
+  expiresAt       DateTime            @map("expires_at") @db.DateTime(3)
+  createdByUserId BigInt?             @map("created_by_user_id") @db.UnsignedBigInt
+  createdAt       DateTime            @default(now()) @map("created_at") @db.DateTime(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  createdBy    User?        @relation("BecSuppressionCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([organizationId, reasonCode, senderScope, senderValue])
+  @@index([organizationId, expiresAt])
+  @@map("bec_suppression_rules")
+}
+
+/// Opt-in historical communication context (step 4.4 B12, ADR-0035): aggregate counts per keyed
+/// hash. `key_hash` = HMAC-SHA256(BEC_CONTEXT_HMAC_KEY, "eg-bec-ctx/v1\0" ‖ organization ‖ scope ‖
+/// canonical key), hex; no plaintext address, domain, IP or name. Retention per tenant
+/// (`history.retentionDays`) by the email-worker sweeper; purge through the api. Deleted
+/// explicitly by organization deletion (no cascade).
+model BecContactHistory {
+  id             BigInt          @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId BigInt          @map("organization_id") @db.UnsignedBigInt
+  scope          BecContactScope
+  keyHash        String          @map("key_hash") @db.Char(64)
+  /// Saturating at 2^32 − 1.
+  messageCount   Int             @map("message_count") @db.UnsignedInt
+  inboundCount   Int             @default(0) @map("inbound_count") @db.UnsignedInt
+  outboundCount  Int             @default(0) @map("outbound_count") @db.UnsignedInt
+  /// Sender scope only: ≤ 8 `{ fp, count, lastSeenAt }` (fp = first 16 hex of an HMAC).
+  infra          Json?
+  /// Message received_at of the first and last message counted.
+  firstSeenAt    DateTime        @map("first_seen_at") @db.DateTime(3)
+  lastSeenAt     DateTime        @map("last_seen_at") @db.DateTime(3)
+  createdAt      DateTime        @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt      DateTime        @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  @@unique([organizationId, scope, keyHash])
+  @@index([organizationId, lastSeenAt])
+  @@map("bec_contact_history")
 }
 
 /// `organization_id` NULL = platform-wide intelligence. Step 4.3 (U6, U16) writes platform rows

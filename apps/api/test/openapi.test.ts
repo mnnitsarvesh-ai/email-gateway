@@ -338,7 +338,8 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
       (op) =>
         op.key.includes(' /api/v1/messages') &&
         !op.key.includes('/deliveries') &&
-        !op.key.endsWith('/scans'),
+        !op.key.endsWith('/scans') &&
+        !op.key.endsWith('/bec-feedback'),
     );
     expect(messageOps.map((op) => op.key).sort()).toEqual([...expected].sort());
 
@@ -430,6 +431,68 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
       'registered scan engine',
     );
     expect(op('/api/v1/platform/dead-letters/replay', 'post').description).toContain('scan.spam');
+  });
+
+  it('documents the step 4.4 BEC endpoints (B18) with their security, errors and the export', () => {
+    const byKey = new Map(operations(doc).map((op) => [op.key, op]));
+    const expected = [
+      'GET /api/v1/bec/executives',
+      'POST /api/v1/bec/executives',
+      'GET /api/v1/bec/executives/{id}',
+      'PATCH /api/v1/bec/executives/{id}',
+      'DELETE /api/v1/bec/executives/{id}',
+      'GET /api/v1/bec/vendors',
+      'POST /api/v1/bec/vendors',
+      'GET /api/v1/bec/vendors/{id}',
+      'PATCH /api/v1/bec/vendors/{id}',
+      'DELETE /api/v1/bec/vendors/{id}',
+      'GET /api/v1/bec/trusted-senders',
+      'POST /api/v1/bec/trusted-senders',
+      'PATCH /api/v1/bec/trusted-senders/{id}',
+      'DELETE /api/v1/bec/trusted-senders/{id}',
+      'POST /api/v1/messages/{messageId}/scans/{scanId}/bec-feedback',
+      'GET /api/v1/bec/feedback',
+      'GET /api/v1/bec/feedback/export',
+      'GET /api/v1/bec/suppressions',
+      'DELETE /api/v1/bec/suppressions/{id}',
+      'DELETE /api/v1/bec/history',
+    ];
+    const becOps = operations(doc).filter((op) => op.tags.includes('bec'));
+    expect(becOps.map((op) => op.key).sort()).toEqual([...expected].sort());
+    for (const key of expected) {
+      const op = byKey.get(key);
+      expect(op?.tags, key).toEqual(['bec']);
+      expect(op!.security.length, key).toBeGreaterThan(0);
+    }
+    type Op = { responses: Record<string, unknown>; description?: string };
+    const op = (path: string, method: string) => (doc.paths[path] as Record<string, Op>)[method]!;
+    const create = op('/api/v1/bec/executives', 'post');
+    for (const code of ['executive_exists', 'version_conflict', 'bec_limit_reached']) {
+      expect(JSON.stringify(create.responses)).toContain(code);
+    }
+    const feedback = op('/api/v1/messages/{messageId}/scans/{scanId}/bec-feedback', 'post');
+    for (const code of [
+      'message_not_found',
+      'scan_not_found',
+      'bec_result_not_found',
+      'feedback_exists',
+      'suppression_not_allowed',
+      'inconsistent_read',
+    ]) {
+      expect(JSON.stringify(feedback.responses)).toContain(code);
+    }
+    const exported = op('/api/v1/bec/feedback/export', 'get');
+    expect(JSON.stringify(exported.responses['200'])).toContain('application/x-ndjson');
+    expect(Object.keys(exported.responses)).toContain('429');
+    expect(Object.keys(op('/api/v1/bec/history', 'delete').responses)).toContain('202');
+    // The bec section of the scans read API and the bec engine settings (B13, B15).
+    const scans = JSON.stringify(op('/api/v1/messages/{messageId}/scans', 'get').responses);
+    for (const key of ['deterministicVerdict', 'thresholds', 'aiShadow', 'scanId']) {
+      expect(scans).toContain(key);
+    }
+    expect(JSON.stringify(op('/api/v1/scan-settings', 'get').responses)).toContain(
+      'freemailExtraDomains',
+    );
   });
 
   it('matches the committed snapshot docs/api/openapi.json', async () => {

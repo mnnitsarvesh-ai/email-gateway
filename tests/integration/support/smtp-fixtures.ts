@@ -480,6 +480,8 @@ export class SmtpFixtures {
         await this.prisma.scanEngineSetting.deleteMany({ where });
         // Step 4.2: attachment rescan jobs scoped to a fixture organization (Restrict).
         await this.prisma.attachmentRescanJob.deleteMany({ where });
+        // Step 4.4: the BEC tenant tables (foreign keys to organizations, Restrict).
+        await this.deleteBecTenantRows(ids);
         await this.prisma.bounceEvent.deleteMany({ where });
         await this.prisma.deliverySuppression.deleteMany({ where });
         await this.prisma.organizationLimit.deleteMany({ where });
@@ -561,11 +563,30 @@ export class SmtpFixtures {
     await this.prisma.urlRewrite.deleteMany({ where });
     await this.prisma.urlScanResult.deleteMany({ where });
     await this.prisma.messageUrl.deleteMany({ where });
+    // Step 4.4 (docs/plan/steps/12-phishing-bec.md §3): the bec engine's result rows (no
+    // foreign keys) and feedback recorded against them.
+    await this.prisma.becFeedback.deleteMany({ where });
+    await this.prisma.becScanResult.deleteMany({ where });
     await this.prisma.emailAuthResult.deleteMany({ where });
     await this.prisma.scanEngineResult.deleteMany({ where });
     await this.prisma.emailScan.deleteMany({ where });
     await this.prisma.messageOutbox.deleteMany({ where });
     await this.prisma.emailEvent.deleteMany({ where });
+  }
+
+  /**
+   * Step 4.4 tenant rows (docs/plan/steps/12-phishing-bec.md §3, B18): suppressions → feedback →
+   * trusted senders → vendor and executive profiles → communication history (the order of the
+   * api's organization purge; every table references `organizations` with `RESTRICT`).
+   */
+  private async deleteBecTenantRows(ids: readonly bigint[]): Promise<void> {
+    const where = { organizationId: { in: [...ids] } };
+    await this.prisma.becSuppressionRule.deleteMany({ where });
+    await this.prisma.becFeedback.deleteMany({ where });
+    await this.prisma.becTrustedSender.deleteMany({ where });
+    await this.prisma.becVendorProfile.deleteMany({ where });
+    await this.prisma.becExecutiveProfile.deleteMany({ where });
+    await this.prisma.becContactHistory.deleteMany({ where });
   }
 
   /**

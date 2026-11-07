@@ -1,0 +1,70 @@
+# Phishing and BEC detection deployment (step 4.4)
+
+Design: [12-phishing-bec.md](../plan/steps/12-phishing-bec.md) (B1, B2, B10, B12, B16, B19, B20), [ADR-0033](../architecture/adr/0033-bec-engine-and-stage-dependencies.md), [ADR-0034](../architecture/adr/0034-bec-ai-layer-invariant.md), [ADR-0035](../architecture/adr/0035-bec-communication-context-privacy.md). Operations: [runbook](../runbooks/bec-detection.md).
+
+## Topology
+
+- **`email-worker-bec`** (`infrastructure/kubernetes/base/email-worker-bec.yaml`): the email-worker image with `SCAN_CONSUMERS=bec`, `MIME_INGESTION_ENABLED=false`, broker user `eg-scanner`. Consumes `scan.bec` (topology v6, a stage-2 queue: binds only `org.*.mail.message.scan_stage_ready.v1` and its retry key); runs the communication-history retention sweeper (MySQL advisory lock `scan:bec-history`, one leader across replicas). Readiness `bec-engine` (packaged model manifest + hash and lexicons loaded; the LLM is never a readiness dependency). HPA on CPU (KEDA on `scan.bec` ready messages in production, target 200 per replica), PDB `minAvailable: 1`, small resources (250m / 256 Mi requests, 500m / 512 Mi limits: 8 messages in flight × ≤ 2 × 64 KiB of text, plus the in-memory lexicons, free-mail list, brand list and local model).
+- **Every scan replica** has `SCAN_ENGINES=rspamd,attachment,url,bec` (`email-gateway-config`): rounds require `bec`, and the replicas that insert the last of the `rspamd`/`url` finals write the stage trigger. Only `email-worker-bec` consumes `scan.bec`; the other replicas need no BEC secret.
+- **event-relay** publishes the trigger rows from the outbox like every other event. Add `scan.bec` to its `RECONCILE_QUEUES` so lost triggers are re-driven (the reconciler derives the event types from the binding).
+- **Deadline:** `SCAN_ROUND_DEADLINE_SECONDS` must cover stage 1 plus stage 2: max over the stage-1 engines of `maxAttempts × (timeoutMs + SCAN_RETRY_MAX_MS)` (attachment 6 × 240 s = 1 440 s) + the bec budget (3 × 105 s = 315 s) = 1 755 s ≤ 1 800 s (the worker refuses a shorter deadline, naming the keys).
+
+## Rollout order (upgrading from step 4.3)
+
+The stage trigger of a round is written by whichever replica inserts the **last** `rspamd`/`url` final, and only code from step 4.4 writes it; the required engines are fixed by the replica that **opens** the round. During a rolling upgrade a new replica can therefore open a round that requires `bec` while a not-yet-upgraded replica inserts the last dependency final and writes no trigger: no outbox row exists, the event-relay reconciler has nothing to re-drive, and the deadline sweeper finalizes `bec` as `timeout` (the round ends `scan_failed`). Roll out in **two phases**:
+
+1. Deploy the step 4.4 image to **every** scan replica (and `email-worker-bec`, the api, the delivery-worker, the event-relay) with `SCAN_ENGINES` unchanged (`rspamd,attachment,url`); run `pnpm db:migrate` and `pnpm rabbitmq:init` (topology v6) first. Wait until no pod of the previous image is left (`kubectl rollout status` for every email-worker Deployment).
+2. Only then set `SCAN_ENGINES=rspamd,attachment,url,bec` in `email-gateway-config` and restart the scan replicas. Rounds opened before the switch do not require `bec`; rounds opened after it are completed only by new code.
+
+Rolling back reverses the order: first remove `bec` from `SCAN_ENGINES` everywhere, then roll back the image. The order is procedural (the worker cannot see the versions of other replicas); after each phase check that no round is stuck with the query in the [runbook](../runbooks/bec-detection.md#becstagetriggerstall) (running rounds that require `bec`, have both dependency finals, no `bec` final and no trigger row). Rounds hit during a wrong-order rollout are `scan_failed` (`timeout` of `bec`) and are rescanned through the api once the rollout is complete.
+
+## Secrets
+
+| Secret                          | Key        | Mounted in                         | Notes                                                                                                                                                                                        |
+| ------------------------------- | ---------- | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `email-gateway-bec-context-key` | `hmac-key` | `email-worker-bec` only (file)     | `BEC_CONTEXT_HMAC_KEY`, ≥ 32 random bytes (`openssl rand -base64 32`). Keys every history hash (B12). Required wherever the bec engine consumes. Rotation restarts history (runbook).        |
+| `email-gateway-bec-llm`         | `api-key`  | `email-worker-bec` only (optional) | `BEC_LLM_API_KEY`, the operator's Anthropic API key. Absent or empty = no LLM calls; the worker refuses to start with `BEC_LLM_MODE` ≠ `off` and no key. Never in Git, never in a ConfigMap. |
+
+`DATABASE_URL`, `RABBITMQ_SCANNER_URL`, `REDIS_URL` (LLM budget windows) and the S3 credentials come from `email-gateway-secrets` as for the other scan replicas. Local Compose: `.env` (`BEC_CONTEXT_HMAC_KEY` generated by `scripts/init-env.mjs`, `BEC_LLM_API_KEY` empty); only the `email-worker` service receives the two secrets.
+
+## Configuration
+
+Platform keys shared with the api (it validates tenant overrides against them) are in `email-gateway-config` (`config.yaml`): `BEC_SUSPICIOUS_SCORE`, `BEC_MALICIOUS_SCORE`, `BEC_AI_RAISE_CONFIDENCE`, `BEC_AI_CORROBORATE_CONFIDENCE`, `BEC_AI_MALICIOUS_BAND`, `BEC_LOCAL_MODEL_MODE` (default `shadow`), `BEC_LLM_MODE` (default `off`), `BEC_LLM_MAX_CALLS_PER_TENANT_PER_DAY`, `BEC_HISTORY_DEFAULT_RETENTION_DAYS`, `BEC_HISTORY_MAX_RETENTION_DAYS`, `BEC_SUPPRESSIONS_MAX_PER_TENANT`, `BEC_SUPPRESSION_MAX_WEIGHT`, `BEC_MAX_EXECUTIVES`, `BEC_MAX_VENDORS`, `BEC_MAX_TRUSTED_SENDERS`. The engine-only keys (budgets, text bounds, models, LLM provider/model/timeouts/concurrency/per-minute budget/breaker, history bounds, tenant cache TTL) are set in `email-worker-bec.yaml`; every key, default and bound is in `.env.example` (section "Phishing and BEC detection (step 4.4)"). The worker refuses to start with: platform thresholds/bands outside their bounds, `SCAN_BEC_MAX_ATTEMPTS` ≥ 10 (the queue's attempt limit), `BEC_LLM_TIMEOUT_MS` / `BEC_TEXT_TIMEOUT_MS` / `SCAN_S3_TIMEOUT_MS` not below `SCAN_BEC_TIMEOUT_MS`, a stage-2 engine without an enabled dependency, no stage-1 engine, a deadline below the B2 minimum, `BEC_LLM_PROVIDER=fake` with `NODE_ENV=production`, a local model not in the manifest or with another file hash, and (on the bec replica) no context key or an LLM mode without a key.
+
+## Egress
+
+`email-worker-bec.yaml` carries a NetworkPolicy: MySQL, Redis, RabbitMQ (subnets, replace per environment), cluster DNS, OTLP, and **TCP 443 to public addresses** for the S3 endpoint (when no VPC endpoint is used) and `api.anthropic.com`. A Kubernetes NetworkPolicy cannot name an FQDN: with an FQDN-aware egress solution (Cilium `toFQDNs`, Calico Enterprise DNS policy, an egress gateway or an HTTPS forward proxy) restrict the 443 rule to `api.anthropic.com` and the S3 endpoint only. With `BEC_LLM_MODE=off` the pod needs no internet egress except S3 (use an S3 VPC endpoint and drop the public 443 rule entirely). No other Deployment may reach the Anthropic API; only this one holds the key.
+
+## LLM enablement
+
+Checklist before setting `BEC_LLM_MODE` above `off`:
+
+1. **Contract and data-processing terms** with Anthropic for the platform's tenants (sub-processor listing, DPA). Decide whether the account uses **zero data retention** (ZDR, arranged with Anthropic for eligible accounts); without it, the API inputs and outputs are retained by the provider for the period of its commercial terms (abuse monitoring). Record the decision in the tenant-facing documentation; ZDR contracting is outside this step (§10).
+2. **Tenant communication:** the LLM is opt-in per tenant (`ai.llm` in the `bec` scan settings, default `off`, never above the platform cap); tell tenants what is sent (below) before they opt in.
+3. **Key:** create a dedicated API key for this platform/environment, store it in the Secret `email-gateway-bec-llm` (`api-key`), restrict who can read the Secret (RBAC), set a spend limit at the provider.
+4. **Egress:** allow `api.anthropic.com:443` from `email-worker-bec` only (see above).
+5. **Budgets:** set `BEC_LLM_MAX_CALLS_PER_TENANT_PER_DAY` and `BEC_LLM_MAX_CALLS_PER_MINUTE` from the expected volume (only gated messages are sent: borderline scores or intent cues, never malicious or empty messages) and the provider's rate limits.
+6. **Shadow first:** `BEC_LLM_MODE=shadow`, opt in pilot tenants with `ai.llm: shadow`, compare `ai_shadow` against the verdicts and feedback for at least a week, then raise the cap to `active` for tenants that opt in.
+
+Request details (B10): `@anthropic-ai/sdk` 1.1.0, model `BEC_LLM_MODEL` (default `claude-opus-5-5`; the model that answered is recorded), `output_config` with effort `low` and a strict JSON Schema (labels, enumerated indicators, cited feature names, span offsets — no free text), the server-side refusal fallback beta (`BEC_LLM_REFUSAL_FALLBACK=default`; `off` uses the plain endpoint), timeout `BEC_LLM_TIMEOUT_MS`, no SDK retries, SDK telemetry and logging off. Prompt template `bec-llm-prompt/1` (packaged; its SHA-256 is recorded). Breaker `BEC_LLM_BREAKER_THRESHOLD` / `BEC_LLM_BREAKER_RESET_MS`, concurrency `BEC_LLM_CONCURRENCY` per process.
+
+## Data handling and retention
+
+| Data                               | Where                         | Content                                                                                                                                                                                                                                                     | Retention                                                                                       |
+| ---------------------------------- | ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| Bec result                         | `bec_scan_results` (MySQL)    | versions, scores, verdicts, input states, fired rules with evidence (codes, weights, the tenant's own header identities, profile public ids, span offsets), AI assessments (labels, indicators, cited features, offsets, model ids/versions, response hash) | 6 months (monthly partitions, `pnpm db:partitions`)                                             |
+| Communication history              | `bec_contact_history` (MySQL) | keyed HMAC hashes, counts, first/last seen, ≤ 8 fingerprint HMACs; **no plaintext address, domain, IP or name**; opt-in per tenant                                                                                                                          | tenant `history.retentionDays` (30..730, default 365), swept hourly; purge API; org deletion    |
+| Feedback                           | `bec_feedback` (MySQL)        | kind, disputed codes, optional analyst note (never exported)                                                                                                                                                                                                | 24 months (manual batched delete until a sweeper exists, `docs/database/retention.md`)          |
+| Suppressions                       | `bec_suppression_rules`       | code, sender scope and value (the tenant's own correspondent)                                                                                                                                                                                               | ≤ 90 days (expiry), deletable                                                                   |
+| LLM request (only with the LLM on) | Anthropic API                 | redacted excerpt (≤ 3 windows, ≤ `BEC_LLM_MAX_EXCERPT_CHARS`; addresses, URLs, domain-like tokens, digit runs, phones, executive/vendor names and tenant domain labels replaced), subject (≤ 200, redacted), the feature vector, categorical identity facts | the provider's terms (ZDR if contracted); nothing of the response text is stored by the gateway |
+| LLM budget counters                | Redis `eg:bec:llm:*`          | organization id + UTC day / epoch minute, a count                                                                                                                                                                                                           | 2 days / 2 minutes (TTL)                                                                        |
+
+Never stored or sent: message bodies (beyond the redacted excerpt sent to the LLM), attachments, span text, excerpts (not stored), header addresses or display names to the LLM, organization or message ids to the LLM, secrets. Logs and metrics carry ids, codes, counts and durations only.
+
+## Models
+
+Local models ship in the image (`packages/bec/models`); `BEC_LOCAL_MODEL` / `BEC_LOCAL_MODEL_SHADOW` select them (refused at start when not in the manifest or the file hash differs). Rollout via shadow, then active, rollback by version — [runbook](../runbooks/bec-detection.md#model-rollout).
+
+## Local (Compose)
+
+`docker compose --profile apps up -d email-worker` runs every engine in one process (`SCAN_ENGINES=rspamd,attachment,url,bec`, `SCAN_CONSUMERS` empty). For LLM experiments without a key use `BEC_LLM_PROVIDER=fake` with `BEC_LLM_MODE=shadow|active` in `.env` (never in production). Integration suites: `pnpm --filter @email-gateway/email-worker test:integration` (`integration/bec-*.test.ts`: real Rspamd, url engine on dns-sink/url-test, MinIO, Redis, MySQL writer, fake LLM).

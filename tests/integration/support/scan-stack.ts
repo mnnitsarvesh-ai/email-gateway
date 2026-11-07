@@ -10,12 +10,17 @@ import { swaks, type SwaksResult } from './smtp-tools';
 
 export {
   ATTACHMENT_LEDGER,
+  BEC_LEDGER,
   PASSTHROUGH_CONSUMER,
   REQUIRED_ENGINES,
   RSPAMD_LEDGER,
+  SCAN_CONSUMED_QUEUES,
   scanStageProblems,
   URL_LEDGER,
 } from './scan-stage';
+
+/** The stage-1 engines of the stack (consume `parsed.v1`/`rescan_requested.v1`, step 4.4 B2). */
+export const STAGE1_ENGINES = ['rspamd', 'attachment', 'url'] as const;
 
 async function ready(service: 'event-relay' | 'api'): Promise<boolean> {
   try {
@@ -134,6 +139,43 @@ export function sandboxSubmissionsOf(prisma: PrismaClient, message: MessageKey) 
     where: { messageId: message.id, receivedAt: message.receivedAt },
     orderBy: [{ scanId: 'asc' }, { partIndex: 'asc' }],
   });
+}
+
+/** `bec_scan_results` rows of a message (step 4.4 B14), oldest round first. */
+export function becResultsOf(prisma: PrismaClient, message: MessageKey) {
+  return prisma.becScanResult.findMany({
+    where: { messageId: message.id, receivedAt: message.receivedAt },
+    orderBy: { scanId: 'asc' },
+  });
+}
+
+/**
+ * `mail.message.scan_stage_ready.v1` outbox rows of a message (step 4.4 B2: the trigger of a
+ * stage-2 engine, written once per round by the transaction that inserts the last dependency
+ * final), oldest first.
+ */
+export function stageReadyEventsOf(
+  prisma: PrismaClient,
+  organizationId: bigint,
+  message: MessageKey,
+) {
+  return prisma.messageOutbox.findMany({
+    where: {
+      organizationId,
+      aggregateId: message.id.toString(),
+      eventType: 'mail.message.scan_stage_ready.v1',
+    },
+    orderBy: { id: 'asc' },
+  });
+}
+
+/** The fired rule codes of a stored `bec_scan_results.rules` JSON (never evidence content). */
+export function becRuleCodes(rules: unknown): string[] {
+  return Array.isArray(rules)
+    ? rules
+        .map((r) => (r && typeof r === 'object' ? (r as { code?: unknown }).code : undefined))
+        .filter((c): c is string => typeof c === 'string')
+    : [];
 }
 
 // --- Engine container control (Rspamd, ClamAV) --------------------------------------------------

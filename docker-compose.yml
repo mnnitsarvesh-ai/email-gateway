@@ -161,6 +161,26 @@ x-url-platform-env: &url-platform-env
   URL_TOKEN_KEY_PREVIOUS: ${URL_TOKEN_KEY_PREVIOUS:-}
   URL_TOKEN_KEY_PREVIOUS_ID: ${URL_TOKEN_KEY_PREVIOUS_ID:-}
 
+# Phishing and BEC platform values shared by the email-worker (bec engine) and the api (scan
+# settings bounds, tenant limits; step 4.4 §5). No secret here: BEC_CONTEXT_HMAC_KEY and
+# BEC_LLM_API_KEY are set on the email-worker only.
+x-bec-env: &bec-env
+  BEC_SUSPICIOUS_SCORE: ${BEC_SUSPICIOUS_SCORE:-40}
+  BEC_MALICIOUS_SCORE: ${BEC_MALICIOUS_SCORE:-80}
+  BEC_AI_RAISE_CONFIDENCE: ${BEC_AI_RAISE_CONFIDENCE:-0.8}
+  BEC_AI_CORROBORATE_CONFIDENCE: ${BEC_AI_CORROBORATE_CONFIDENCE:-0.9}
+  BEC_AI_MALICIOUS_BAND: ${BEC_AI_MALICIOUS_BAND:-10}
+  BEC_LOCAL_MODEL_MODE: ${BEC_LOCAL_MODEL_MODE:-shadow}
+  BEC_LLM_MODE: ${BEC_LLM_MODE:-off}
+  BEC_LLM_MAX_CALLS_PER_TENANT_PER_DAY: ${BEC_LLM_MAX_CALLS_PER_TENANT_PER_DAY:-1000}
+  BEC_HISTORY_DEFAULT_RETENTION_DAYS: ${BEC_HISTORY_DEFAULT_RETENTION_DAYS:-365}
+  BEC_HISTORY_MAX_RETENTION_DAYS: ${BEC_HISTORY_MAX_RETENTION_DAYS:-730}
+  BEC_SUPPRESSIONS_MAX_PER_TENANT: ${BEC_SUPPRESSIONS_MAX_PER_TENANT:-200}
+  BEC_SUPPRESSION_MAX_WEIGHT: ${BEC_SUPPRESSION_MAX_WEIGHT:-40}
+  BEC_MAX_EXECUTIVES: ${BEC_MAX_EXECUTIVES:-500}
+  BEC_MAX_VENDORS: ${BEC_MAX_VENDORS:-2000}
+  BEC_MAX_TRUSTED_SENDERS: ${BEC_MAX_TRUSTED_SENDERS:-1000}
+
 x-rabbitmq-cluster-node: &rabbitmq-cluster-node
   image: rabbitmq:4.1-management-alpine
   profiles: [rabbitmq-cluster]
@@ -901,7 +921,7 @@ services:
       mysql-replica-setup: { condition: service_completed_successfully }
       redis-dkim: { condition: service_healthy }
     environment:
-      <<: [*node-env, *scan-platform-env]
+      <<: [*node-env, *scan-platform-env, *bec-env]
       HTTP_PORT: 3000
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3001}
       # Dead-letter replay and queue stats (step 3.2 Q9): role user eg-ops.
@@ -916,6 +936,8 @@ services:
       URL_TOKEN_DEFAULT_EXPIRY_DAYS: ${URL_TOKEN_DEFAULT_EXPIRY_DAYS:-30}
       URL_TOKEN_MAX_EXPIRY_DAYS: ${URL_TOKEN_MAX_EXPIRY_DAYS:-90}
       URL_DYNAMIC_INSPECTION: ${URL_DYNAMIC_INSPECTION:-on}
+      # Phishing and BEC detection (step 4.4 §5): the platform values the bec settings, profile,
+      # suppression and history routes validate against (x-bec-env). No BEC secret.
       # Only the api reads from the replica (control-plane reads). Data-plane services are writer-only.
       DATABASE_READ_URL: mysql://${MYSQL_READER_USER:?}:${MYSQL_READER_PASSWORD:?}@mysql-replica:3306/${MYSQL_DATABASE:?}
       DATABASE_READ_MAX_LAG_SECONDS: ${DATABASE_READ_MAX_LAG_SECONDS:-10}
@@ -1096,7 +1118,7 @@ services:
       rspamd: { condition: service_healthy }
       clamav: { condition: service_healthy }
     environment:
-      <<: [*node-env, *scan-platform-env, *url-platform-env]
+      <<: [*node-env, *scan-platform-env, *url-platform-env, *bec-env]
       HTTP_PORT: 3020
       # Consumes email.received (step 3.2): role user eg-email-worker.
       RABBITMQ_EMAIL_WORKER_URL: amqp://${RABBITMQ_EMAIL_WORKER_USER:-eg-email-worker}:${RABBITMQ_EMAIL_WORKER_PASSWORD:?append the RabbitMQ keys from .env.example}@rabbitmq:5672/${RABBITMQ_VHOST:-email-gateway}
@@ -1105,7 +1127,7 @@ services:
       # the engine version).
       RABBITMQ_SCANNER_URL: amqp://${RABBITMQ_SCANNER_USER:-eg-scanner}:${RABBITMQ_SCANNER_PASSWORD:?append the security scanning keys from .env.example}@rabbitmq:5672/${RABBITMQ_VHOST:-email-gateway}
       SCAN_ENABLED: ${SCAN_ENABLED:-true}
-      SCAN_ENGINES: ${SCAN_ENGINES:-rspamd,attachment,url}
+      SCAN_ENGINES: ${SCAN_ENGINES:-rspamd,attachment,url,bec}
       # Engine consumers of this replica (subset of SCAN_ENGINES; empty = every enabled engine).
       SCAN_CONSUMERS: ${SCAN_CONSUMERS:-}
       SCAN_RSPAMD_URL: http://rspamd:11333
@@ -1238,6 +1260,37 @@ services:
       URL_DYNAMIC_MAX_PER_MESSAGE: ${URL_DYNAMIC_MAX_PER_MESSAGE:-3}
       URL_DYNAMIC_PENDING_TTL_SECONDS: ${URL_DYNAMIC_PENDING_TTL_SECONDS:-3600}
       URL_DYNAMIC_SWEEP_INTERVAL_MS: ${URL_DYNAMIC_SWEEP_INTERVAL_MS:-60000}
+      # Phishing and BEC detection (step 4.4, docs/plan/steps/12-phishing-bec.md §5): the bec
+      # engine (scan.bec, stage 2), the history sweeper and the optional AI layer. Secrets
+      # BEC_CONTEXT_HMAC_KEY and BEC_LLM_API_KEY reach only this service (B20). The thresholds,
+      # AI caps/bands, history retention and tenant limits are shared with the api (x-bec-env).
+      SCAN_BEC_CONCURRENCY: ${SCAN_BEC_CONCURRENCY:-8}
+      SCAN_BEC_TIMEOUT_MS: ${SCAN_BEC_TIMEOUT_MS:-45000}
+      SCAN_BEC_MAX_ATTEMPTS: ${SCAN_BEC_MAX_ATTEMPTS:-3}
+      BEC_TEXT_MAX_BYTES: ${BEC_TEXT_MAX_BYTES:-65536}
+      BEC_TEXT_MAX_CHARS: ${BEC_TEXT_MAX_CHARS:-40000}
+      BEC_TEXT_TIMEOUT_MS: ${BEC_TEXT_TIMEOUT_MS:-2000}
+      BEC_LOCAL_MODEL: ${BEC_LOCAL_MODEL:-bec-lr/1}
+      BEC_LOCAL_MODEL_SHADOW: ${BEC_LOCAL_MODEL_SHADOW:-}
+      BEC_LLM_PROVIDER: ${BEC_LLM_PROVIDER:-anthropic}
+      BEC_LLM_MODEL: ${BEC_LLM_MODEL:-claude-opus-5-5}
+      BEC_LLM_SHADOW_MODEL: ${BEC_LLM_SHADOW_MODEL:-}
+      BEC_LLM_REFUSAL_FALLBACK: ${BEC_LLM_REFUSAL_FALLBACK:-default}
+      # Operator-supplied external credential (empty: no LLM calls).
+      BEC_LLM_API_KEY: ${BEC_LLM_API_KEY:-}
+      BEC_LLM_TIMEOUT_MS: ${BEC_LLM_TIMEOUT_MS:-20000}
+      BEC_LLM_MAX_OUTPUT_TOKENS: ${BEC_LLM_MAX_OUTPUT_TOKENS:-4096}
+      BEC_LLM_MAX_EXCERPT_CHARS: ${BEC_LLM_MAX_EXCERPT_CHARS:-1500}
+      BEC_LLM_MIN_SCORE: ${BEC_LLM_MIN_SCORE:-15}
+      BEC_LLM_CONCURRENCY: ${BEC_LLM_CONCURRENCY:-4}
+      BEC_LLM_MAX_CALLS_PER_MINUTE: ${BEC_LLM_MAX_CALLS_PER_MINUTE:-120}
+      BEC_LLM_BREAKER_THRESHOLD: ${BEC_LLM_BREAKER_THRESHOLD:-5}
+      BEC_LLM_BREAKER_RESET_MS: ${BEC_LLM_BREAKER_RESET_MS:-60000}
+      BEC_CONTEXT_HMAC_KEY: ${BEC_CONTEXT_HMAC_KEY:?append the BEC detection keys from .env.example}
+      BEC_HISTORY_MIN_MESSAGES: ${BEC_HISTORY_MIN_MESSAGES:-3}
+      BEC_HISTORY_MAX_RECIPIENTS: ${BEC_HISTORY_MAX_RECIPIENTS:-50}
+      BEC_HISTORY_SWEEP_INTERVAL_MS: ${BEC_HISTORY_SWEEP_INTERVAL_MS:-3600000}
+      BEC_TENANT_DATA_CACHE_TTL_MS: ${BEC_TENANT_DATA_CACHE_TTL_MS:-30000}
     networks:
       default: {}
       mailtest: {}
@@ -1386,7 +1439,7 @@ services:
       RECONCILE_MAX_REDRIVES: ${RECONCILE_MAX_REDRIVES:-3}
       RECONCILE_LOOKBACK_HOURS: ${RECONCILE_LOOKBACK_HOURS:-72}
       RECONCILE_BATCH_SIZE: ${RECONCILE_BATCH_SIZE:-1000}
-      RECONCILE_QUEUES: ${RECONCILE_QUEUES:-email.received,email.delivery.pending,scan.spam,scan.attachment,scan.url}
+      RECONCILE_QUEUES: ${RECONCILE_QUEUES:-email.received,email.delivery.pending,scan.spam,scan.attachment,scan.url,scan.bec}
       RECONCILE_START_POSITION: ${RECONCILE_START_POSITION:-oldest}
       # Message lifecycle jobs (step 3.3 L13, L14; docs/plan/steps/08-message-lifecycle.md §5).
       LIFECYCLE_EXPIRY_ENABLED: ${LIFECYCLE_EXPIRY_ENABLED:-true}

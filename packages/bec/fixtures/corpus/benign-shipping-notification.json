@@ -1,0 +1,53 @@
+{
+  "id": "benign-shipping-notification",
+  "description": "Official carrier notification, aligned authentication.",
+  "label": "benign",
+  "input": {
+    "headers": {
+      "From": ["DHL Express <noreply@dhl.com>"],
+      "Subject": ["Your shipment is on the way"]
+    },
+    "envelope": {
+      "envelopeFrom": "bounces@dhl.com"
+    },
+    "auth": {
+      "state": "available",
+      "row": {
+        "spf": "pass",
+        "spfDomain": "dhl.com",
+        "dkim": "pass",
+        "dkimSignatures": [
+          {
+            "domain": "dhl.com",
+            "result": "pass",
+            "selector": "s1"
+          }
+        ],
+        "dmarc": "pass",
+        "dmarcPolicy": "reject",
+        "dmarcDomain": "dhl.com",
+        "arc": null
+      }
+    },
+    "url": {
+      "state": "available",
+      "rows": [
+        {
+          "urlSeq": 1,
+          "verdict": "clean",
+          "reasonCodes": ["clean.no_findings"],
+          "host": "dhl.com",
+          "registrableDomain": "dhl.com"
+        }
+      ]
+    },
+    "text": {
+      "subject": "Your shipment is on the way",
+      "text": "Your parcel has left the facility and will be delivered on Friday. Track it at https://dhl.com/track",
+      "html": null
+    }
+  },
+  "expected": {
+    "verdict": "clean"
+  }
+}

@@ -282,7 +282,7 @@ describe('ScanSettingsService (step 4.1 S8, S16)', () => {
       updatedAt: new Date('2026-11-05T09:00:00Z'),
     });
     const list = await service.list(scope);
-    expect(list.data.map((view) => view.engine)).toEqual(['rspamd', 'attachment', 'url']);
+    expect(list.data.map((view) => view.engine)).toEqual(['rspamd', 'attachment', 'url', 'bec']);
     expect(list.data[0]).toMatchObject({
       engine: 'rspamd',
       version: 2,

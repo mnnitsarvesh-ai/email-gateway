@@ -1,0 +1,41 @@
+{
+  "description": "Defaults merged into every corpus fixture (tenant shallow-merged; envelope direction/recipients/clientIp/receivedAt; history disabled).",
+  "tenant": {
+    "tenantDomains": ["acmecorp.test"],
+    "executives": [
+      {
+        "publicId": "0193a000-0000-7000-8000-000000000001",
+        "name": "Anita Sharma",
+        "aliases": ["Anita S Sharma"],
+        "knownAddresses": ["anita.sharma@acmecorp.test"]
+      },
+      {
+        "publicId": "0193a000-0000-7000-8000-000000000002",
+        "name": "Rajesh Iyer",
+        "aliases": [],
+        "knownAddresses": ["rajesh.iyer@acmecorp.test"]
+      }
+    ],
+    "vendors": [
+      {
+        "publicId": "0193a000-0000-7000-8000-000000000010",
+        "name": "Globex Supplies",
+        "aliases": ["Globex"],
+        "domains": ["globexsupplies.test"],
+        "knownSenders": ["billing@globexsupplies.test", "accounts@globexsupplies.test"],
+        "paymentChangeSensitive": true
+      }
+    ],
+    "trustedSenders": [],
+    "suppressions": [],
+    "freemailExtraDomains": [],
+    "extraProtectedDomains": []
+  },
+  "envelope": {
+    "direction": "inbound",
+    "recipients": ["finance@acmecorp.test"],
+    "clientIp": "198.51.100.23",
+    "receivedAt": "2026-11-02T09:15:00.000Z"
+  },
+  "history": "disabled"
+}

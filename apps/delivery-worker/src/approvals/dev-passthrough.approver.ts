@@ -21,7 +21,48 @@ import type { ApprovalFeed } from './approval-feed';
 export const DEV_PASSTHROUGH_CONSUMER = 'delivery-worker.dev-passthrough-scanned';
 
 export const DEV_PASSTHROUGH_WARNING =
-  'DEV PASS-THROUGH ENABLED: mail is delivered after scanning without policy; malicious verdicts are held in scanned (not production behaviour)';
+  'DEV PASS-THROUGH ENABLED: mail is delivered after scanning without policy; malicious verdicts are held in scanned, and so are suspicious or malicious BEC results (not production behaviour)';
+
+/** The phishing/BEC engine (step 4.4 B1); its result is held by the pass-through (B17). */
+export const BEC_ENGINE = 'bec';
+/** BEC outcomes the pass-through never approves (step 4.4 B17). */
+const HELD_BEC_OUTCOMES: ReadonlySet<string> = new Set(['suspicious', 'malicious']);
+
+/** The outcome of the `bec` engine in a `scanned.v1` payload when it is held, else null. */
+export function heldBecOutcome(payload: Pick<MessageScannedV1, 'engines'>): string | null {
+  const bec = payload.engines.find((entry) => entry.engine === BEC_ENGINE);
+  return bec !== undefined && HELD_BEC_OUTCOMES.has(bec.outcome) ? bec.outcome : null;
+}
+
+/**
+ * A writer read of `bec_scan_results` returned a row other than the one asked for (Prisma 6
+ * wrong read, step 4.2 §6). Thrown inside the ledger transaction: nothing is approved, the event
+ * is redelivered.
+ */
+export class InconsistentBecResultReadError extends Error {
+  constructor() {
+    super('inconsistent read of bec_scan_results');
+    this.name = 'InconsistentBecResultReadError';
+  }
+}
+
+/** The deterministic and final verdicts of the round's `bec_scan_results` row (B14). */
+export interface BecRoundVerdicts {
+  deterministicVerdict: string;
+  verdict: string;
+}
+
+/**
+ * Whether a held bec outcome stays held (step 4.4 B17 with ADR-0034 "an LLM never alone
+ * authorizes or rejects delivery", review round 1): held when the round's **deterministic**
+ * verdict is `suspicious` or `malicious`, and fail-safe when the result row is missing. A
+ * result raised to `suspicious` by the AI layer alone (deterministic `clean` or `unknown`) is
+ * not held: the AI assessment is evidence for policy (5.2), never the reason mail is held.
+ */
+export function becHoldDecision(row: BecRoundVerdicts | null): 'held' | 'ai_only' | 'missing' {
+  if (row === null) return 'missing';
+  return HELD_BEC_OUTCOMES.has(row.deterministicVerdict) ? 'held' : 'ai_only';
+}
 
 /**
  * A writer read of `url_rewrites` returned a row other than the one asked for (Prisma 6 wrong
@@ -80,6 +121,15 @@ export interface PassThroughResult {
  *   the verdict. The message stays `scanned` until policy (5.2) or the `scanned` lifecycle
  *   deadline (`LIFECYCLE_DEADLINE_SCANNED_HOURS`, then `expired`). Quarantine is a policy action
  *   (5.3); the pass-through does not invent one, but it never delivers malware either;
+ * - `outcome = scanned` whose `engines` entry for `bec` has outcome `suspicious` or `malicious`
+ *   **and** whose round's `bec_scan_results.deterministic_verdict` is `suspicious` or
+ *   `malicious` (step 4.4 B17), or whose result row is missing (fail-safe): ledger row only,
+ *   `delivery_approvals_skipped_total{reason="bec_verdict"}`, an info log with the ids and the
+ *   bec outcome; held in `scanned` like a malicious verdict. A result raised to `suspicious` by
+ *   the AI layer alone (deterministic `clean`/`unknown`) is **not** held (ADR-0034: an LLM never
+ *   alone authorizes or rejects delivery): approved, `delivery_bec_ai_only_not_held_total`. A
+ *   `suspicious` URL or Rspamd result, and a bec `clean`, `unknown` or `skipped` result, are
+ *   still approved (policy, 5.2, must treat the bec result explicitly);
  * - a message that is not `scanned` in that round (another stage or an operator moved it, a
  *   rescan superseded the round) or that does not exist for the envelope's organization
  *   (`delivery_approvals_skipped_total{reason="lifecycle_<result>"}`);
@@ -164,6 +214,50 @@ export class DevPassThroughApprover {
           'policy or its deadline)',
       );
       return { approvals: [], recipients: 0 };
+    }
+    const becOutcome = heldBecOutcome(payload);
+    if (becOutcome !== null) {
+      const becRow = await this.becVerdicts(tx, {
+        messageId,
+        receivedAt,
+        organizationId,
+        round,
+        scanId: BigInt(payload.scanId),
+      });
+      const decision = becHoldDecision(becRow);
+      if (decision === 'ai_only') {
+        // ADR-0034: the AI layer alone never holds (or releases) mail; approved and counted.
+        this.metrics.becAiOnlyNotHeld.inc();
+        this.logger.info(
+          {
+            ...ids,
+            outcome: payload.outcome,
+            verdict: payload.verdict,
+            becOutcome,
+            deterministicVerdict: becRow!.deterministicVerdict,
+          },
+          'BEC result raised by the AI layer only; not held by the dev pass-through (the ' +
+            'deterministic verdict is below suspicious)',
+        );
+      } else {
+        // Step 4.4 B17: a deterministic suspicious or malicious BEC result is held like a
+        // malicious verdict; a missing result row is held too (fail-safe).
+        this.metrics.approvalsSkipped.inc({ reason: 'bec_verdict' });
+        const log = { ...ids, outcome: payload.outcome, verdict: payload.verdict, becOutcome };
+        if (decision === 'missing') {
+          this.logger.warn(
+            log,
+            'BEC result row of the round not found; held by the dev pass-through (fail-safe)',
+          );
+        } else {
+          this.logger.info(
+            log,
+            'suspicious or malicious BEC result; the dev pass-through does not approve it (held ' +
+              'in scanned until policy or its deadline)',
+          );
+        }
+        return { approvals: [], recipients: 0 };
+      }
     }
     // E27 first, in the same transaction as the approvals: they exist iff the message is approved.
     const lifecycle = await transitionMessage(
@@ -345,6 +439,52 @@ export class DevPassThroughApprover {
       return { key: input.original, object: 'original' };
     }
     return { key: row.objectKey, object: 'rewritten' };
+  }
+
+  /**
+   * The round's `bec_scan_results` verdicts (written in the same transaction as the bec final),
+   * or null. Echo-checked writer read in the ledger transaction (step 4.2 §6).
+   */
+  private async becVerdicts(
+    tx: Prisma.TransactionClient,
+    input: {
+      messageId: bigint;
+      receivedAt: Date;
+      organizationId: bigint;
+      round: number;
+      scanId: bigint;
+    },
+  ): Promise<BecRoundVerdicts | null> {
+    const row = await tx.becScanResult.findFirst({
+      where: {
+        scanId: input.scanId,
+        receivedAt: input.receivedAt,
+        messageId: input.messageId,
+        organizationId: input.organizationId,
+        lifecycleRound: input.round,
+      },
+      select: {
+        scanId: true,
+        receivedAt: true,
+        messageId: true,
+        organizationId: true,
+        lifecycleRound: true,
+        deterministicVerdict: true,
+        verdict: true,
+      },
+    });
+    if (row === null) return null;
+    if (
+      row.scanId !== input.scanId ||
+      row.messageId !== input.messageId ||
+      row.organizationId !== input.organizationId ||
+      row.receivedAt.getTime() !== input.receivedAt.getTime() ||
+      row.lifecycleRound !== input.round
+    ) {
+      this.metrics.inconsistentReads.inc({ read: 'bec_result' });
+      throw new InconsistentBecResultReadError();
+    }
+    return { deterministicVerdict: row.deterministicVerdict, verdict: row.verdict };
   }
 
   private async nextDeliverySeq(

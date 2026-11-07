@@ -19,6 +19,9 @@ resources:
   - click-service.yaml
   - url-egress-proxy.yaml
   - url-browser-worker.yaml
+  # Phishing and BEC detection (step 4.4 B1, B20): the stage-2 bec engine, the only holder of the
+  # context HMAC key and the LLM API key.
+  - email-worker-bec.yaml
   - policy-engine.yaml
   - delivery-worker.yaml
   - notification-worker.yaml

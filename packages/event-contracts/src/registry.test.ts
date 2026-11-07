@@ -46,6 +46,8 @@ describe('EVENT_REGISTRY', () => {
       'mail.url.inspection_requested.v1': ['email.security', 'message'],
       'mail.url.inspection_completed.v1': ['email.security', 'message'],
       'mail.url.clicked.v1': ['email.security', 'message'],
+      // Step 4.4 B2: the second-stage trigger of a scan round.
+      'mail.message.scan_stage_ready.v1': ['email.security', 'message'],
     });
     for (const definition of Object.values(EVENT_REGISTRY)) {
       expect(EXCHANGE_NAMES).toContain(definition.exchange);

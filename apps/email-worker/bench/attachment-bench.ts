@@ -317,6 +317,8 @@ async function main(): Promise<void> {
                 messageId,
                 receivedAt: new Date(),
                 round: 0,
+                scanId: 1n,
+                scanKind: 'initial',
                 direction: 'inbound',
                 envelope: {
                   clientIp: null,

@@ -212,6 +212,9 @@ export async function cleanupProbeMessages(
   // 3. Rows of the message graph (partitioned tables, no foreign keys).
   const byMessage = { messageId: { in: ids } };
   // Scan rows of the live scan role (steps 4.1–4.3): the probe is scanned like any message.
+  // Step 4.4: the BEC result rows and any analyst feedback of the probe messages.
+  await prisma.becFeedback.deleteMany({ where: { messageId: { in: ids } } });
+  await prisma.becScanResult.deleteMany({ where: byMessage });
   await prisma.urlClickEvent.deleteMany({ where: byMessage });
   await prisma.urlDynamicInspection.deleteMany({ where: byMessage });
   await prisma.urlRewrite.deleteMany({ where: byMessage });

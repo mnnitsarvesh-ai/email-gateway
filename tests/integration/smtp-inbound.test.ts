@@ -172,6 +172,8 @@ describe.skipIf(gate.skip)('SMTP stack: inbound delivery (suite 1)', { timeout: 
                 'mail.message.state_changed.v1',
                 // Step 4.1: the scan role's round completion.
                 'mail.message.scanned.v1',
+                // Step 4.4: the stage-2 trigger of the bec engine (once per round).
+                'mail.message.scan_stage_ready.v1',
               ],
             },
           },

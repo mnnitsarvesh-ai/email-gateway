@@ -1,0 +1,161 @@
+{
+  "language": "hi-Latn",
+  "version": 1,
+  "entries": [
+    {
+      "id": "hi-Latn.payment_request.001",
+      "category": "payment_request",
+      "phrase": "payment kar do"
+    },
+    {
+      "id": "hi-Latn.payment_request.002",
+      "category": "payment_request",
+      "phrase": "payment karna hai"
+    },
+    {
+      "id": "hi-Latn.payment_request.003",
+      "category": "payment_request",
+      "phrase": "paise bhej do"
+    },
+    {
+      "id": "hi-Latn.payment_request.004",
+      "category": "payment_request",
+      "phrase": "paisa bhej do"
+    },
+    {
+      "id": "hi-Latn.payment_request.005",
+      "category": "payment_request",
+      "phrase": "amount bhej do"
+    },
+    {
+      "id": "hi-Latn.payment_request.006",
+      "category": "payment_request",
+      "phrase": "bhugtan kar do"
+    },
+    {
+      "id": "hi-Latn.bank_change.001",
+      "category": "bank_change",
+      "phrase": "account number badal gaya"
+    },
+    {
+      "id": "hi-Latn.bank_change.002",
+      "category": "bank_change",
+      "phrase": "naya account"
+    },
+    {
+      "id": "hi-Latn.bank_change.003",
+      "category": "bank_change",
+      "phrase": "bank account badal"
+    },
+    {
+      "id": "hi-Latn.bank_change.004",
+      "category": "bank_change",
+      "phrase": "naya bank account"
+    },
+    {
+      "id": "hi-Latn.bank_change.005",
+      "category": "bank_change",
+      "phrase": "account details badal gaye"
+    },
+    {
+      "id": "hi-Latn.gift_card.001",
+      "category": "gift_card",
+      "phrase": "gift card bhejo"
+    },
+    {
+      "id": "hi-Latn.gift_card.002",
+      "category": "gift_card",
+      "phrase": "gift card kharido"
+    },
+    {
+      "id": "hi-Latn.gift_card.003",
+      "category": "gift_card",
+      "phrase": "gift card le lo"
+    },
+    {
+      "id": "hi-Latn.gift_card.004",
+      "category": "gift_card",
+      "phrase": "card ka code bhejo"
+    },
+    {
+      "id": "hi-Latn.gift_card.005",
+      "category": "gift_card",
+      "phrase": "gift voucher bhejo"
+    },
+    {
+      "id": "hi-Latn.wire_transfer.001",
+      "category": "wire_transfer",
+      "phrase": "paise transfer karo"
+    },
+    {
+      "id": "hi-Latn.wire_transfer.002",
+      "category": "wire_transfer",
+      "phrase": "paisa transfer karo"
+    },
+    {
+      "id": "hi-Latn.wire_transfer.003",
+      "category": "wire_transfer",
+      "phrase": "transfer kar do"
+    },
+    {
+      "id": "hi-Latn.wire_transfer.004",
+      "category": "wire_transfer",
+      "phrase": "amount transfer karo"
+    },
+    {
+      "id": "hi-Latn.wire_transfer.005",
+      "category": "wire_transfer",
+      "phrase": "fund transfer karo"
+    },
+    {
+      "id": "hi-Latn.urgency.001",
+      "category": "urgency",
+      "phrase": "turant"
+    },
+    {
+      "id": "hi-Latn.urgency.002",
+      "category": "urgency",
+      "phrase": "jaldi karo"
+    },
+    {
+      "id": "hi-Latn.urgency.003",
+      "category": "urgency",
+      "phrase": "abhi ke abhi"
+    },
+    {
+      "id": "hi-Latn.urgency.004",
+      "category": "urgency",
+      "phrase": "aaj hi"
+    },
+    {
+      "id": "hi-Latn.urgency.005",
+      "category": "urgency",
+      "phrase": "fauran"
+    },
+    {
+      "id": "hi-Latn.secrecy.001",
+      "category": "secrecy",
+      "phrase": "kisi ko mat batana"
+    },
+    {
+      "id": "hi-Latn.secrecy.002",
+      "category": "secrecy",
+      "phrase": "kisi ko mat bolna"
+    },
+    {
+      "id": "hi-Latn.secrecy.003",
+      "category": "secrecy",
+      "phrase": "gupt rakhna"
+    },
+    {
+      "id": "hi-Latn.secrecy.004",
+      "category": "secrecy",
+      "phrase": "hamare beech"
+    },
+    {
+      "id": "hi-Latn.secrecy.005",
+      "category": "secrecy",
+      "phrase": "chupchap"
+    }
+  ]
+}

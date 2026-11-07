@@ -313,6 +313,61 @@ package integration `integration/url-*.test.ts` against the real writer, MinIO, 
 dns-sink and url-test (host-run with `URL_FETCH_TEST_DIAL_MAP`; `docker compose --profile smtp-test
 up -d test-pki dns-sink url-test`).
 
+## BEC engine and stage-2 engines (step 4.4)
+
+Design [12-phishing-bec.md](../../docs/plan/steps/12-phishing-bec.md) (decision ids B*n*),
+runbook [bec-detection.md](../../docs/runbooks/bec-detection.md), deployment
+[bec-detection.md](../../docs/deployment/bec-detection.md). Rules, text analysis, identity, history
+keys and the AI layer live in [`@email-gateway/bec`](../../packages/bec); this worker wires them.
+Code: `src/scanning/engines/bec/`, `src/scanning/bec-config.ts`.
+
+**Generic stage-2 capability (B2; the orchestrator never names an engine).** An engine whose
+catalog entry declares `dependsOn` is a stage-2 engine: its consumer takes only
+`mail.message.scan_stage_ready.v1` (`scanEventTypes(entry)`), stage-1 consumers `parsed.v1` +
+`rescan_requested.v1`. `ScanRepository.complete()` (both locks held, finals read after them) writes
+one validated `scan_stage_ready.v1` outbox row per stage-2 engine whose required dependencies all
+have finals, when the final inserted by this transaction is one of them (`stageTriggersFor`, pure;
+exactly once per round; never by the deadline sweeper; `scan_stage_triggers_total{engine}`). The
+round service handles trigger `stage`: round = `payload.lifecycleRound`; another engine's trigger
+→ ledger no-op `other_stage_engine`; `decideOpen(…, 'stage')` never applies E3; the round must
+exist with `payload.scanId` (else ledger no-op `stage_round_missing`, warned). The engine context
+now carries `scanId` and `scanKind`. Config: every enabled stage-2 engine needs an enabled
+dependency and some stage-1 engine must be enabled; the minimum round deadline is the maximum over
+the stage-1 engines plus the maximum over the stage-2 engines of `maxAttempts × (timeoutMs +
+SCAN_RETRY_MAX_MS)` (default 1 440 + 315 = 1 755 s).
+
+| File                 | Content                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `registration.ts`    | `becRegistration` (consumer `email-worker.scan.bec`, budget `SCAN_BEC_*`, `settingsFor` = `resolveBecSettings` with the platform settings of the env, invalid row → platform), `createBecEngine` (static data, local models from the manifest with hash check, LLM providers per mode — `anthropic` or `fake`, breaker, Redis budgets, engine version and model info metrics)                                                                                                                                                                          |
+| `bec.engine.ts`      | The adapter (B4): echo-checked writer reads, dependency input states, text parts (`S3PartReader`; prefix read above `BEC_TEXT_MAX_BYTES`, no hash check on a partial read), an incomplete header set (`stored_headers_truncated` or > 200 rows) → `bec.content_incomplete`, history reads, `evaluateBecRules`, the AI layer, `bec_scan_results` + history child rows (inbound rows only for an authenticated From with a final verdict `clean`/`unknown`); outbound/internal → `skipped` (`bec.not_inbound`) with pair updates; readiness `bec-engine` |
+| `bec-store.ts`       | `PrismaBecStore`: round row, dependency finals, auth row, URL results joined with `message_urls`, headers (≤ 200, read as 201 to detect truncation), parse row (incl. `defects`), subject, tenant data (LRU ≤ 1 000 organizations, `BEC_TENANT_DATA_CACHE_TTL_MS`), history rows; every read echo-checked (`InconsistentBecReadError` → `inconsistent_read`)                                                                                                                                                                                           |
+| `ai-layer.ts`        | `BecAiLayer`: modes per layer (tenant choice within the platform cap), LLM gating, breaker, per-process concurrency, budget check before every call, timeout; `combineVerdict` with the invariant; ≤ 2 applied, ≤ 3 shadow assessments; never throws                                                                                                                                                                                                                                                                                                   |
+| `llm-budget.ts`      | `RedisLlmBudget`: one Lua script over `eg:bec:llm:t:<org>:<yyyymmdd>` and `eg:bec:llm:m:<epochMinute>` (check both, increment both only when both have room); Redis error / timeout → `unavailable` (no call)                                                                                                                                                                                                                                                                                                                                          |
+| `history-sweeper.ts` | `BecHistorySweeper` (B12): leader lock `scan:bec-history`, per organization rows older than its retention deleted in batches of 1 000 (`SCAN_DB_TIMEOUT_MS` transactions)                                                                                                                                                                                                                                                                                                                                                                              |
+| `bec-metrics.ts`     | The B19 email-worker series (bounded labels)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+
+`EngineChildRows.bec { result, history }`: `ScanRepository.insertFinal` writes the
+`bec_scan_results` row (unique per scan) and — round 0 of an initial scan only — the history
+upserts (`INSERT … ON DUPLICATE KEY UPDATE` via `$executeRaw`, sorted keys, saturating counters,
+`infra` JSON read-modify-write under `SELECT … FOR UPDATE`, ≤ 51 rows) in the final row's
+transaction, only when the final row was inserted.
+
+**Configuration** (`.env.example` section "Phishing and BEC detection (step 4.4)"; validated by
+`scanning/bec-config.ts`): `SCAN_ENGINES` default `rspamd,attachment,url,bec`, `SCAN_BEC_*`
+(attempts < 10), `BEC_TEXT_*`, the platform settings `BEC_SUSPICIOUS_SCORE` … `BEC_HISTORY_*_RETENTION_DAYS`
+(through `becPlatformSettingsSchema`, errors name the env key), `BEC_LOCAL_MODEL(_SHADOW)` (in
+the packaged manifest with the file hash, else the worker refuses to start), `BEC_LLM_*`
+(`fake` refused with NODE_ENV=production; a mode other than `off` with `anthropic` requires
+`BEC_LLM_API_KEY` where bec consumes), `BEC_CONTEXT_HMAC_KEY` (≥ 32 characters, required where bec
+consumes), `BEC_HISTORY_*`, `BEC_TENANT_DATA_CACHE_TTL_MS`, `BEC_SUPPRESSION*`, `BEC_MAX_*`.
+
+**Tests:** unit tests in `src/scanning/stage-trigger.test.ts`, `src/scanning/bec-config.test.ts`,
+`src/scanning/engines/bec/*.test.ts` (including the shared-list contract with
+`@email-gateway/security-contracts`); package integration `integration/bec-scan.test.ts` (real
+Rspamd auth results through dns-sink, url engine on url-test, fake LLM, history, suppressions,
+trust, budgets, wrong-read guard) and `integration/bec-stage.test.ts` (the trigger end to end on a
+throwaway vhost).
+
 ## Message lifecycle (step 3.3 L8.2)
 
 The MIME stage **does not change the message lifecycle state** (the scan stage does, through

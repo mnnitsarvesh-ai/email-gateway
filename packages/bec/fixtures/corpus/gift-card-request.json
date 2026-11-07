@@ -1,0 +1,46 @@
+{
+  "id": "gift-card-request",
+  "description": "Gift card request from an unknown authenticated sender: C3.",
+  "label": "bec",
+  "input": {
+    "headers": {
+      "From": ["Mark T <mark.t@outlook.com>"],
+      "Subject": ["Request"]
+    },
+    "envelope": {
+      "envelopeFrom": "mark.t@outlook.com"
+    },
+    "auth": {
+      "state": "available",
+      "row": {
+        "spf": "pass",
+        "spfDomain": "outlook.com",
+        "dkim": "pass",
+        "dkimSignatures": [
+          {
+            "domain": "outlook.com",
+            "result": "pass",
+            "selector": "s1"
+          }
+        ],
+        "dmarc": "pass",
+        "dmarcPolicy": "reject",
+        "dmarcDomain": "outlook.com",
+        "arc": null
+      }
+    },
+    "url": {
+      "state": "available",
+      "rows": []
+    },
+    "text": {
+      "subject": "Request",
+      "text": "Can you purchase gift cards for the team event? I will reimburse you. Scratch the back and send me the codes.",
+      "html": null
+    }
+  },
+  "expected": {
+    "verdictIn": ["clean", "suspicious"],
+    "requiredCodes": ["bec.content.gift_card"]
+  }
+}

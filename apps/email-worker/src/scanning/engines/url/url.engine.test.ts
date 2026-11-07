@@ -311,6 +311,8 @@ function ctx(
     messageId: MESSAGE,
     receivedAt: AT,
     round: 0,
+    scanId: 1n,
+    scanKind: 'initial',
     direction: 'inbound',
     envelope: {
       clientIp: null,
