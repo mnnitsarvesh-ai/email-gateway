@@ -51,6 +51,8 @@ export class DeliveryMetrics {
   readonly inconsistentReads: Counter<'read'>;
   readonly contextMissing: Counter<'result'>;
   readonly becAiOnlyNotHeld: Counter;
+  readonly dlpHolds: Counter<'action'>;
+  readonly dlpAlertsApproved: Counter;
 
   constructor(metrics: MetricsService) {
     this.approvals = metrics.counter(
@@ -60,7 +62,7 @@ export class DeliveryMetrics {
     );
     this.approvalsSkipped = metrics.counter(
       'delivery_approvals_skipped_total',
-      'Scanned messages the dev pass-through did not approve: scan_failed (a required engine failed), malicious_verdict (held in scanned, step 4.2 A15), bec_verdict (a suspicious or malicious bec engine result, held in scanned, step 4.4 B17) or the lifecycle refused the approval (lifecycle_<result>)',
+      'Scanned messages the dev pass-through did not approve: scan_failed (a required engine failed), malicious_verdict (held in scanned, step 4.2 A15), bec_verdict (a suspicious or malicious bec engine result, held in scanned, step 4.4 B17), dlp_action (the round DLP action is require_approval, quarantine or block, or its dlp_scan_results row is missing; held in scanned, step 4.5 D13) or the lifecycle refused the approval (lifecycle_<result>)',
       ['reason'],
     );
     this.approvalsRejected = metrics.counter(
@@ -140,12 +142,21 @@ export class DeliveryMetrics {
     );
     this.inconsistentReads = metrics.counter(
       'delivery_inconsistent_reads_total',
-      'Writer reads whose identifying columns did not echo the request: the reinjector (message, deliveries, recipients, approval; the row is rescheduled with the attempt refunded, step 4.2 §6.2) and the dev pass-through (url_rewrite, bec_result; the event is redelivered)',
+      'Writer reads whose identifying columns did not echo the request: the reinjector (message, deliveries, recipients, approval; the row is rescheduled with the attempt refunded, step 4.2 §6.2) and the dev pass-through (url_rewrite, bec_result, dlp_result; the event is redelivered)',
       ['read'],
     );
     this.becAiOnlyNotHeld = metrics.counter(
       'delivery_bec_ai_only_not_held_total',
       'Dev pass-through: scanned messages whose bec result was raised to suspicious by the AI layer alone (deterministic verdict clean or unknown) and therefore not held (step 4.4 B17, ADR-0034)',
+    );
+    this.dlpHolds = metrics.counter(
+      'delivery_dlp_holds_total',
+      'Dev pass-through: scanned messages not approved because of the round DLP action (require_approval, quarantine, block; missing = no dlp_scan_results row, held fail-safe), step 4.5 D13',
+      ['action'],
+    );
+    this.dlpAlertsApproved = metrics.counter(
+      'delivery_dlp_alerts_approved_total',
+      'Dev pass-through: scanned messages approved although their round DLP action is alert (the incident exists; step 4.5 D13)',
     );
     this.contextMissing = metrics.counter(
       'delivery_reinjection_context_missing_total',

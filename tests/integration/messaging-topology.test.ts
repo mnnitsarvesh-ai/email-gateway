@@ -6,6 +6,7 @@ import {
   queueDefinition,
   TOPOLOGY,
   TOPOLOGY_VERSION,
+  topicMatches,
 } from '@email-gateway/event-contracts';
 import { beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -19,11 +20,15 @@ import { stack } from './support/env';
 
 /**
  * The provisioned vhost `email-gateway` matches the topology exactly (step 3.2 Q1, Q4, §3; v2:
- * step 3.3 L7; v3: step 4.1 S2; v4: step 4.2 A2; v5: step 4.3 U2; v6: step 4.4 B3): checks through the management
- * API. The prune case adds one stray binding to the dormant `scan.auth` and lets `init.mjs` remove
- * it again.
+ * step 3.3 L7; v3: step 4.1 S2; v4: step 4.2 A2; v5: step 4.3 U2; v6: step 4.4 B3; v7: step 4.5
+ * D2): checks through the management API. The prune case adds one stray binding to the dormant
+ * `scan.auth` and lets `init.mjs` remove it again.
  */
-/** Bindings of topology v6 (queue and exchange destinations), besides the default exchange's. */
+/**
+ * Bindings of topology v7 (queue and exchange destinations), besides the default exchange's. v7
+ * turned the dormant scan.dlp into a work queue with the same three bindings (it always had its
+ * retry binding), so the count is v6's 41 (docs/plan/steps/13-dlp.md §12, WP1 deviation 1).
+ */
 const TOPOLOGY_BINDINGS = 41;
 const api = new ManagementApi();
 const vhost = stack.rabbitmqVhost();
@@ -125,10 +130,10 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
     expect(bindings.filter((b) => b.destination_type === 'exchange')).toHaveLength(5);
   });
 
-  it('is topology v6: the vhost description and the rescan bindings (steps 4.1 S2, 4.2 A2, 4.3 U2, 4.4 B3)', async () => {
-    expect(TOPOLOGY_VERSION).toBe(6);
+  it('is topology v7: the vhost description and the rescan bindings (steps 4.1 S2, 4.2 A2, 4.3 U2, 4.4 B3, 4.5 D2)', async () => {
+    expect(TOPOLOGY_VERSION).toBe(7);
     const info = await api.get<{ description?: string }>(`/vhosts/${encodeURIComponent(vhost)}`);
-    expect(info.description).toBe('email-gateway topology v6');
+    expect(info.description).toBe('email-gateway topology v7');
     const rescan = bindings
       .filter(
         (b) =>
@@ -280,6 +285,75 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
     const users = await consumerUsers('scan.bec');
     expect(users.length, 'consumers on scan.bec').toBeGreaterThanOrEqual(1);
     for (const user of users) expect(user).toBe(scanner);
+  });
+
+  it('scan.dlp is a stage-1 work queue (v7) bound to parsed.v1 and rescan_requested.v1, for eg-scanner only', async () => {
+    expect(queueDefinition('scan.dlp')).toMatchObject({
+      role: 'work',
+      homeExchange: 'email.security',
+      consumer: { kind: 'ledger', ledgerName: 'email-worker.scan.dlp', service: 'email-worker' },
+      retry: {
+        strategy: 'hold',
+        maxAttempts: 10,
+        baseDelayMs: 2_000,
+        maxDelayMs: 60_000,
+        maxRetryAgeMs: 86_400_000,
+      },
+    });
+    expect(queueDefinition('scan.dlp').role).not.toBe('dormant');
+    expect(bindingsOf('scan.dlp')).toEqual(
+      [
+        'email.ingestion [org.*.mail.message.parsed.v1]',
+        'email.security [org.*.mail.message.rescan_requested.v1]',
+        'email.security [retry.scan.dlp.#]',
+      ].sort(),
+    );
+    // The applied policy is the work policy (dead-letters to email.dead-letter, reject-publish),
+    // no longer the dormant drop-head buffer.
+    const policy = policies.find((p) => p.name === 'eg.scan.dlp');
+    expect(policy?.definition).toEqual(policyFor('work', 'scan.dlp'));
+    expect(policy?.definition).toMatchObject({
+      overflow: 'reject-publish',
+      'dead-letter-routing-key': 'dead-letter.scan.dlp',
+    });
+    expect(queues.find((q) => q.name === 'scan.dlp')?.effective_policy_definition).toMatchObject({
+      overflow: 'reject-publish',
+    });
+    // The stage trigger never reaches the stage-1 queue.
+    expect(
+      bindings.some(
+        (b) =>
+          b.destination === 'scan.dlp' &&
+          b.routing_key === 'org.*.mail.message.scan_stage_ready.v1',
+      ),
+    ).toBe(false);
+    // The DLP engine (step 4.5 WP3, SCAN_CONSUMERS containing dlp) consumes it: at least one
+    // consumer, every one the scanner. This assertion needs the WP3 email-worker running; before
+    // WP3 the queue has no consumer and this case fails by design (as scan.bec's did in 4.4).
+    const scanner = process.env.RABBITMQ_SCANNER_USER || 'eg-scanner';
+    const users = await consumerUsers('scan.dlp');
+    expect(users.length, 'consumers on scan.dlp').toBeGreaterThanOrEqual(1);
+    for (const user of users) expect(user).toBe(scanner);
+  });
+
+  it('mail.message.dlp_incident.v1 (v7) reaches no work queue: only the email.events firehose', () => {
+    const type = 'mail.message.dlp_incident.v1';
+    // No queue binding names the incident (the notification-worker binds it in step 6.2).
+    const direct = bindings.filter((b) => b.source !== '' && b.routing_key === `org.*.${type}`);
+    expect(direct).toEqual([]);
+    // What the live bindings route an incident key to: from email.security only the exchange
+    // binding to email.events (org.#), and from email.events only the dormant firehose.
+    const key = `org.42.${type}`;
+    const matches = (pattern: string) => topicMatches(pattern, key);
+    const fromSecurity = bindings
+      .filter((b) => b.source === 'email.security' && matches(b.routing_key))
+      .map((b) => `${b.destination_type}:${b.destination}`);
+    expect(fromSecurity).toEqual(['exchange:email.events']);
+    const fromEvents = bindings
+      .filter((b) => b.source === 'email.events' && matches(b.routing_key))
+      .map((b) => `${b.destination_type}:${b.destination}`);
+    expect(fromEvents).toEqual(['queue:email.analytics']);
+    expect(queueDefinition('email.analytics').role).toBe('dormant');
   });
 
   it('scan.url.inspect is a lossy work queue (v5) for the stateless browser worker', async () => {

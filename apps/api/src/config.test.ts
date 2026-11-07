@@ -3,12 +3,14 @@ import { ConfigValidationError } from '@email-gateway/config';
 import {
   ATTACHMENT_PLATFORM_DEFAULTS,
   BEC_PLATFORM_DEFAULTS,
+  DLP_PLATFORM_DEFAULTS,
 } from '@email-gateway/security-contracts';
 import { describe, expect, it } from 'vitest';
 import { TEST_DOMAIN_ENV } from '../test/support/test-env';
 import {
   attachmentPlatformSettingsOf,
   becPlatformSettingsOf,
+  dlpPlatformSettingsOf,
   loadApiConfig,
   rspamdPlatformSettingsOf,
 } from './config';
@@ -740,6 +742,76 @@ describe('loadApiConfig: phishing and BEC (step 4.4 B13, B18)', () => {
     [{ BEC_AI_MALICIOUS_BAND: '20' }, 'BEC_AI_MALICIOUS_BAND'],
     [{ BEC_HISTORY_MAX_RETENTION_DAYS: '1000' }, 'BEC_HISTORY_MAX_RETENTION_DAYS'],
     [{ BEC_MAX_VENDORS: '0' }, 'BEC_MAX_VENDORS'],
+  ])('refuses %o naming %s', (env, key) => {
+    expect(rejection({ ...valid, ...env })).toContain(key);
+  });
+});
+
+describe('loadApiConfig: data loss prevention (step 4.5 D16, D18, D21)', () => {
+  it('defaults the DLP platform settings, pattern limits and per-tenant caps', () => {
+    const cfg = loadApiConfig(valid);
+    expect(dlpPlatformSettingsOf(cfg)).toEqual(DLP_PLATFORM_DEFAULTS);
+    expect(cfg).toMatchObject({
+      DLP_CUSTOM_PATTERN_MAX_LENGTH: 256,
+      DLP_CUSTOM_PATTERN_PROBE_MAX_MS: 50,
+      DLP_CUSTOM_SCAN_MAX_CHARS: 1_000_000,
+      DLP_CUSTOM_PATTERNS_MAX_PER_TENANT: 50,
+      DLP_DICTIONARIES_MAX_PER_TENANT: 20,
+      DLP_DICTIONARY_MAX_TERMS: 1000,
+      DLP_POLICIES_MAX_PER_TENANT: 20,
+      DLP_RULES_MAX_PER_POLICY: 50,
+      DLP_EXCEPTIONS_MAX_PER_TENANT: 500,
+      DLP_EXCEPTION_MAX_DAYS: 365,
+    });
+    expect(cfg.DLP_EVIDENCE_KEY_PREVIOUS).toBeUndefined();
+  });
+
+  it('reads the DLP_* keys as the email-worker does', () => {
+    const cfg = loadApiConfig({
+      ...valid,
+      DLP_CONFIDENCE_THRESHOLD: '0.7',
+      DLP_DEFAULT_POLICY: 'allow',
+      DLP_EVIDENCE_ENABLED: 'false',
+      DLP_EVIDENCE_MAX_RETENTION_DAYS: '90',
+      DLP_POLICIES_MAX_PER_TENANT: '5',
+      DLP_EVIDENCE_KEY_PREVIOUS: hex64(),
+    });
+    expect(dlpPlatformSettingsOf(cfg)).toMatchObject({
+      confidenceThreshold: 0.7,
+      defaultPolicy: 'allow',
+      evidenceEnabled: false,
+      evidenceMaxRetentionDays: 90,
+    });
+    expect(cfg.DLP_POLICIES_MAX_PER_TENANT).toBe(5);
+  });
+
+  it('requires the evidence key and names it without printing the value', () => {
+    const { DLP_EVIDENCE_KEY: _omit, ...withoutKey } = valid as Record<string, string>;
+    expect(rejection(withoutKey)).toContain('DLP_EVIDENCE_KEY');
+    const bad = 'not-a-key-XYZ-marker';
+    const message = rejection({ ...valid, DLP_EVIDENCE_KEY: bad });
+    expect(message).toContain('DLP_EVIDENCE_KEY');
+    expect(message).not.toContain(bad);
+    const same = hex64();
+    const reused = rejection({ ...valid, DLP_EVIDENCE_KEY: same, DLP_EVIDENCE_KEY_PREVIOUS: same });
+    expect(reused).toContain('DLP_EVIDENCE_KEY_PREVIOUS');
+    expect(reused).not.toContain(same);
+  });
+
+  it.each([
+    [{ DLP_CONFIDENCE_THRESHOLD: '0.3' }, 'DLP_CONFIDENCE_THRESHOLD'],
+    [{ DLP_DEFAULT_POLICY: 'block' }, 'DLP_DEFAULT_POLICY'],
+    [{ DLP_EVIDENCE_ENABLED: 'yes' }, 'DLP_EVIDENCE_ENABLED'],
+    [{ DLP_EVIDENCE_MAX_RETENTION_DAYS: '365' }, 'DLP_EVIDENCE_MAX_RETENTION_DAYS'],
+    [
+      { DLP_EVIDENCE_DEFAULT_RETENTION_DAYS: '100', DLP_EVIDENCE_MAX_RETENTION_DAYS: '60' },
+      'DLP_EVIDENCE_DEFAULT_RETENTION_DAYS',
+    ],
+    [{ DLP_CONTEXT_WINDOW_CHARS: '4' }, 'DLP_CONTEXT_WINDOW_CHARS'],
+    [{ DLP_CUSTOM_PATTERN_MAX_LENGTH: '1000' }, 'DLP_CUSTOM_PATTERN_MAX_LENGTH'],
+    [{ DLP_RULES_MAX_PER_POLICY: '0' }, 'DLP_RULES_MAX_PER_POLICY'],
+    [{ DLP_EXCEPTION_MAX_DAYS: '0' }, 'DLP_EXCEPTION_MAX_DAYS'],
+    [{ DLP_EVIDENCE_KEY_PREVIOUS: 'abc' }, 'DLP_EVIDENCE_KEY_PREVIOUS'],
   ])('refuses %o naming %s', (env, key) => {
     expect(rejection({ ...valid, ...env })).toContain(key);
   });

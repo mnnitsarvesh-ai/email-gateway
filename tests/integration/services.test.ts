@@ -20,10 +20,14 @@ const EXPECTED_CHECKS: Record<string, string[]> = {
   // (ready inspector children). Step 4.3: the URL consumer adds `url-engine` (Redis PING of the
   // URL cache; DNS reachability and egress mode as details). Step 4.4 B4: the BEC consumer adds
   // `bec-engine` (static data, local models and LLM layer loaded; model versions as details).
+  // Step 4.5 (WP3): the DLP consumer adds `dlp-engine` (static data and evidence key loaded) and
+  // `dlp-extractor` (ready extractor children of the second pool).
   'email-worker': [
     'attachment-inspector',
     'bec-engine',
     'clamav',
+    'dlp-engine',
+    'dlp-extractor',
     'mysql',
     'rabbitmq',
     'rabbitmq-scanner',

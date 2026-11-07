@@ -482,6 +482,8 @@ export class SmtpFixtures {
         await this.prisma.attachmentRescanJob.deleteMany({ where });
         // Step 4.4: the BEC tenant tables (foreign keys to organizations, Restrict).
         await this.deleteBecTenantRows(ids);
+        // Step 4.5: the DLP tenant tables (foreign keys to organizations, Restrict).
+        await this.deleteDlpTenantRows(ids);
         await this.prisma.bounceEvent.deleteMany({ where });
         await this.prisma.deliverySuppression.deleteMany({ where });
         await this.prisma.organizationLimit.deleteMany({ where });
@@ -567,6 +569,11 @@ export class SmtpFixtures {
     // foreign keys) and feedback recorded against them.
     await this.prisma.becFeedback.deleteMany({ where });
     await this.prisma.becScanResult.deleteMany({ where });
+    // Step 4.5 (docs/plan/steps/13-dlp.md §3, D19): the dlp engine's result and evidence rows (no
+    // foreign keys; the encrypted evidence objects under `org/<id>/dlp-evidence/` go with the
+    // org prefix in S3).
+    await this.prisma.dlpEvidence.deleteMany({ where });
+    await this.prisma.dlpScanResult.deleteMany({ where });
     await this.prisma.emailAuthResult.deleteMany({ where });
     await this.prisma.scanEngineResult.deleteMany({ where });
     await this.prisma.emailScan.deleteMany({ where });
@@ -587,6 +594,24 @@ export class SmtpFixtures {
     await this.prisma.becVendorProfile.deleteMany({ where });
     await this.prisma.becExecutiveProfile.deleteMany({ where });
     await this.prisma.becContactHistory.deleteMany({ where });
+  }
+
+  /**
+   * Step 4.5 tenant rows (docs/plan/steps/13-dlp.md §3, D21): exceptions → rules → policies →
+   * custom patterns → dictionaries → the compliance row (the order of the api's organization
+   * purge; exceptions reference policies and rules, rules reference policies, every table
+   * references `organizations` with `RESTRICT`). The evidence and result rows are scan rows.
+   */
+  private async deleteDlpTenantRows(ids: readonly bigint[]): Promise<void> {
+    const where = { organizationId: { in: [...ids] } };
+    await this.prisma.dlpEvidence.deleteMany({ where });
+    await this.prisma.dlpScanResult.deleteMany({ where });
+    await this.prisma.dlpException.deleteMany({ where });
+    await this.prisma.dlpPolicyRule.deleteMany({ where });
+    await this.prisma.dlpPolicy.deleteMany({ where });
+    await this.prisma.dlpCustomPattern.deleteMany({ where });
+    await this.prisma.dlpKeywordDictionary.deleteMany({ where });
+    await this.prisma.dlpComplianceSettings.deleteMany({ where });
   }
 
   /**

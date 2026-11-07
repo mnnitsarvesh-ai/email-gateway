@@ -6,6 +6,7 @@ settings:
 
 overrides:
   tldts>tldts-core: 7.4.18
+  pdfjs-dist>@napi-rs/canvas: '-'
 
 importers:
 
@@ -99,6 +100,9 @@ importers:
       '@email-gateway/database':
         specifier: workspace:*
         version: link:../../packages/database
+      '@email-gateway/dlp':
+        specifier: workspace:*
+        version: link:../../packages/dlp
       '@email-gateway/event-contracts':
         specifier: workspace:*
         version: link:../../packages/event-contracts
@@ -412,6 +416,9 @@ importers:
       '@email-gateway/database':
         specifier: workspace:*
         version: link:../../packages/database
+      '@email-gateway/dlp':
+        specifier: workspace:*
+        version: link:../../packages/dlp
       '@email-gateway/event-contracts':
         specifier: workspace:*
         version: link:../../packages/event-contracts
@@ -940,6 +947,40 @@ importers:
         specifier: ^4.1.5
         version: 4.6.7
 
+  packages/dlp:
+    dependencies:
+      '@email-gateway/bec':
+        specifier: workspace:*
+        version: link:../bec
+      '@email-gateway/security-contracts':
+        specifier: workspace:*
+        version: link:../security-contracts
+      '@email-gateway/url-security':
+        specifier: workspace:*
+        version: link:../url-security
+      pdfjs-dist:
+        specifier: 4.10.38
+        version: 4.10.38
+      re2js:
+        specifier: 2.9.0
+        version: 2.9.0
+      yazl:
+        specifier: 3.3.1
+        version: 3.3.1
+      zod:
+        specifier: ^4.1.5
+        version: 4.6.7
+    devDependencies:
+      '@types/yazl':
+        specifier: 3.3.1
+        version: 3.3.1
+      prettier:
+        specifier: ^3.6.2
+        version: 3.9.10
+      tsx:
+        specifier: 4.23.15
+        version: 4.23.15
+
   packages/event-contracts:
     dependencies:
       '@email-gateway/shared-types':
@@ -1134,6 +1175,9 @@ importers:
       '@email-gateway/attachment-corpus':
         specifier: workspace:*
         version: link:fixtures/attachment-corpus
+      '@email-gateway/dlp':
+        specifier: workspace:*
+        version: link:../packages/dlp
       '@types/amqplib':
         specifier: ^0.10.7
         version: 0.10.8
@@ -4797,6 +4841,10 @@ packages:
     resolution: {integrity: sha512-//nshmD55c46FuFw26xV/xFAaB5HF9Xdap7HJBBnrKdAd6/GxDBaNA1870O79+9ueg61cZLSVc+OaFlfmObYVQ==}
     engines: {node: '>= 14.16'}
 
+  pdfjs-dist@4.10.38:
+    resolution: {integrity: sha512-/Y3fcFrXEAsMjJXeL9J8+ZG9U01LbuWaYypvDW2ycW1jL269L3js3DVBjDJ0Up9Np1uqDXsDrRihHANhZOlwdQ==}
+    engines: {node: '>=20'}
+
   peberminta@0.10.0:
     resolution: {integrity: sha512-80B2AsU+I4Qdb0ZAPSfe9UwvGzwkM37IKIFEvdS3D/3Ndgv2bsuJ0bfG1+iEYO+l7Gfd4EUJmuRyq7efLgRMzQ==}
 
@@ -4947,6 +4995,10 @@ packages:
 
   rc9@2.1.2:
     resolution: {integrity: sha512-btXCnMmRIBINM2LDZoEmOogIZU7Qe7zn4BpomSKZ/ykbLObuBdvG+mFq11DL6fjH1DRwHhrlgtYWG96bJiC7Cg==}
+
+  re2js@2.9.0:
+    resolution: {integrity: sha512-rZpqkd4ETP3GrQ5mDLzADr14OleeKdb/40lG84WE8absRfsVLJpWt2ifjtYYeoPqeouIkcxhTlurxIXfR5kR5Q==}
+    engines: {node: '>=20.0.0'}
 
   react-dom@19.3.1:
     resolution: {integrity: sha512-Y0bARz53lhEC1NMCASs0/j+faB/zqt3R8hpvg1e8+61ZVJ4UL0UdC4cBbXfZMcIuhrfgeILTLe+ZeBCavQPtKQ==}
@@ -9464,6 +9516,8 @@ snapshots:
 
   pathval@2.0.1: {}
 
+  pdfjs-dist@4.10.38: {}
+
   peberminta@0.10.0: {}
 
   pend@1.2.0: {}
@@ -9613,6 +9667,8 @@ snapshots:
     dependencies:
       defu: 6.1.7
       destr: 2.0.5
+
+  re2js@2.9.0: {}
 
   react-dom@19.3.1(react@19.3.1):
     dependencies:

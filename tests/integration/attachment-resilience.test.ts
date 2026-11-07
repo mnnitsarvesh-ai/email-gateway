@@ -308,6 +308,7 @@ describe.skipIf(gate.skip)('attachment stack: ClamAV outage', { timeout: 900_000
     expect(round1Finals.map((r) => r.engine).sort()).toEqual([
       'attachment',
       'bec',
+      'dlp',
       'rspamd',
       'url',
     ]);

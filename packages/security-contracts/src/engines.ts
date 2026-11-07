@@ -49,7 +49,7 @@ export interface EngineCatalogEntry {
 /**
  * The registered engines (step 4.1: Rspamd; step 4.2: the attachment engine, A1; step 4.3: the URL
  * engine, U1; step 4.4: the phishing/BEC engine, B1, a stage-2 engine depending on `rspamd` and
- * `url`).
+ * `url`; step 4.5: the DLP engine, D1, a stage-1 engine without dependencies).
  */
 export const ENGINE_CATALOG: readonly EngineCatalogEntry[] = Object.freeze([
   Object.freeze({
@@ -88,6 +88,15 @@ export const ENGINE_CATALOG: readonly EngineCatalogEntry[] = Object.freeze([
     dependsOn: Object.freeze(['rspamd', 'url'] as const),
     description:
       'Phishing and BEC: sender identity, impersonation, lookalikes, payment/urgency cues, credential links, communication history; optional AI layer (step 4.4)',
+  } as const),
+  Object.freeze({
+    name: 'dlp',
+    stage: 'dlp',
+    queue: 'scan.dlp',
+    requiredByDefault: true,
+    tenantMayDisable: false,
+    description:
+      'Data loss prevention: card, bank, national id, passport, personal, confidential, source code, credential, financial and tenant patterns; attachment text extraction; outbound policy actions (step 4.5)',
   } as const),
 ]);
 
@@ -149,9 +158,9 @@ export function validateCatalog(catalog: readonly EngineCatalogEntry[] = ENGINE_
 
 /**
  * Parses the platform's enabled engines (`SCAN_ENGINES`, a comma-separated list, default
- * `rspamd,attachment,url,bec` from step 4.4). Throws on an empty list, a duplicate or a name that is
- * not in the catalog, so a misconfigured worker refuses to start instead of scanning with fewer
- * engines.
+ * `rspamd,attachment,url,bec,dlp` from step 4.5). Throws on an empty list, a duplicate or a name
+ * that is not in the catalog, so a misconfigured worker refuses to start instead of scanning with
+ * fewer engines.
  */
 export function parseEnabledEngines(value: string): EngineName[] {
   const names = value

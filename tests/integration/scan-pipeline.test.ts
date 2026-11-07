@@ -28,6 +28,8 @@ import {
   BEC_LEDGER,
   becResultsOf,
   becRuleCodes,
+  DLP_LEDGER,
+  dlpResultsOf,
   messagePublicId,
   PASSTHROUGH_CONSUMER,
   REQUIRED_ENGINES,
@@ -65,8 +67,13 @@ import { reply } from './support/smtp-tools';
  *   (same event id, published as the relay does) are ledger duplicates, and a re-emission with a
  *   new event id is skipped by the lifecycle check; no second round, result, transition,
  *   `scanned.v1`, approval or delivery, and no dead letter.
- * - Topology v6: `scan.spam`, `scan.attachment`, `scan.url`, `scan.url.results` and `scan.bec`
- *   consumed by the scanner role user, `scan.auth` without event bindings.
+ * - Topology v7: `scan.spam`, `scan.attachment`, `scan.url`, `scan.url.results`, `scan.bec` and
+ *   `scan.dlp` consumed by the scanner role user, `scan.auth` without event bindings.
+ *
+ * Since step 4.5 every round also requires the `dlp` engine (D1), a stage-1 engine: the messages
+ * of this suite are inbound, so its final is `skipped` with `dlp.not_inbound` (the tenant does
+ * not scan inbound mail by default) and a `dlp_scan_results` row with action `allow`; it never
+ * decides the verdict. DLP through the outbound path is dlp-smtp.test.ts.
  *
  * Since step 4.4 every round also requires the `bec` engine (B1), a stage-2 engine (B2): the
  * transaction that inserts the last of the rspamd/url finals writes one
@@ -161,7 +168,8 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
     expect(round.reasonCodes).toContain('clean.below_threshold');
 
     const results = await engineResultsOf(fx.prisma, message);
-    // One final per required engine (rspamd, attachment, url since step 4.3, bec since 4.4).
+    // One final per required engine (rspamd, attachment, url since step 4.3, bec since 4.4, dlp
+    // since 4.5).
     expect(results).toHaveLength(REQUIRED_ENGINES.length);
     const final = results.find((r) => r.engine === 'rspamd');
     expect(final).toMatchObject({
@@ -231,18 +239,52 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
       { engine: 'attachment', required: true, outcome: 'skipped', attempts: 1 },
       // Step 4.4: the BEC engine (stage 2): authenticated as From, no cue → clean (C0).
       { engine: 'bec', required: true, outcome: 'clean', attempts: 1 },
+      // Step 4.5 D1: the DLP engine (stage 1) skips inbound mail by default (dlp.not_inbound).
+      { engine: 'dlp', required: true, outcome: 'skipped', attempts: 1 },
       { engine: 'rspamd', required: true, outcome: 'clean', attempts: 1 },
       // Step 4.3: the URL engine (the clean message has no link: rule U0).
       { engine: 'url', required: true, outcome: 'skipped', attempts: 1 },
     ]);
     expect(JSON.stringify(scanned[0]!.payload)).not.toContain('clean.scan.test');
-    for (const consumer of [RSPAMD_LEDGER, ATTACHMENT_LEDGER, URL_LEDGER]) {
+    for (const consumer of [RSPAMD_LEDGER, ATTACHMENT_LEDGER, URL_LEDGER, DLP_LEDGER]) {
       expect(
         await fx.prisma.messageIdempotency.count({
           where: { consumer, eventId: parsed.eventId },
         }),
       ).toBe(1);
     }
+    // Step 4.5 D1/D19: the dlp final is `skipped` (inbound) with one result row, action allow,
+    // no evidence and no incident.
+    expect(results.find((r) => r.engine === 'dlp')).toMatchObject({
+      scanId: round.id,
+      isFinal: true,
+      attempt: 1,
+      outcome: 'skipped',
+      errorCode: null,
+      reasonCodes: ['dlp.not_inbound'],
+    });
+    const [dlpRow, ...moreDlp] = await dlpResultsOf(fx.prisma, message);
+    expect(moreDlp).toEqual([]);
+    expect(dlpRow).toMatchObject({
+      scanId: round.id,
+      lifecycleRound: 0,
+      direction: 'inbound',
+      rulesVersion: 'dlp-map/1',
+      verdict: 'skipped',
+      action: 'allow',
+      actionSource: 'none',
+      findingCount: 0,
+      evidenceStatus: 'none',
+    });
+    expect(
+      await fx.prisma.messageOutbox.count({
+        where: {
+          organizationId: org,
+          aggregateId: message.id.toString(),
+          eventType: 'mail.message.dlp_incident.v1',
+        },
+      }),
+    ).toBe(0);
     // Step 4.4 B2: exactly one stage trigger for the round (rspamd + url finalized), consumed
     // once by the bec consumer; the bec consumer never saw the parsed event.
     const stage = await stageReadyEventsOf(fx.prisma, org, message);
@@ -375,6 +417,23 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
             inputs: { auth: 'available', url: 'available', text: 'complete', history: 'disabled' },
             rules: [],
             ai: [],
+          },
+        },
+        // Step 4.5 D20: the masked dlp section (the security_analyst holds dlp:read): skipped.
+        {
+          engine: 'dlp',
+          final: true,
+          outcome: 'skipped',
+          reasonCodes: ['dlp.not_inbound'],
+          durationMs: null,
+          symbols: [],
+          dlp: {
+            rulesVersion: 'dlp-map/1',
+            verdict: 'skipped',
+            action: 'allow',
+            actionSource: 'none',
+            findings: [],
+            evidence: { status: 'none', purged: false },
           },
         },
       ],
@@ -531,15 +590,18 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
       // Step 4.4: no second stage trigger and no second bec result.
       stage: (await stageReadyEventsOf(fx.prisma, org, message)).length,
       bec: (await becResultsOf(fx.prisma, message)).length,
+      // Step 4.5: no second dlp result.
+      dlp: (await dlpResultsOf(fx.prisma, message)).length,
     });
     const before = await snapshot();
     expect(before.rounds).toHaveLength(1);
     expect(before.scanned).toHaveLength(1);
 
-    // Every stage-1 engine consumer (scan.spam, scan.attachment, scan.url) gets every copy;
+    // Every stage-1 engine consumer (scan.spam, scan.attachment, scan.url, scan.dlp) gets every copy;
     // the stage-2 bec consumer never sees parsed.v1 (step 4.4 B2).
     expect(before.stage).toBe(1);
     expect(before.bec).toBe(1);
+    expect(before.dlp).toBe(1);
     const skippedOf = (reason: string) =>
       Promise.all(
         STAGE1_ENGINES.map((engine) =>
@@ -574,10 +636,11 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
       expect(await broker.depth('scan.attachment')).toBe(0);
       expect(await broker.depth('scan.url')).toBe(0);
       expect(await broker.depth('scan.bec')).toBe(0);
+      expect(await broker.depth('scan.dlp')).toBe(0);
       expect(await broker.depth(QUEUES.deadLetter)).toBe(deadLetters);
       // One ledger row per consumer and event id: the original and the re-emission (handled,
       // no effect).
-      for (const consumer of [RSPAMD_LEDGER, ATTACHMENT_LEDGER]) {
+      for (const consumer of [RSPAMD_LEDGER, ATTACHMENT_LEDGER, DLP_LEDGER]) {
         expect(
           await fx.prisma.messageIdempotency.count({
             where: { consumer, eventId: { in: [exact.eventId, reEmitted.eventId] } },
@@ -597,7 +660,7 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
     }
   });
 
-  it('runs topology v6: scan.spam, scan.attachment, scan.url, scan.url.results and scan.bec consumed by the scanner user, scan.auth without event bindings', async () => {
+  it('runs topology v7: scan.spam, scan.attachment, scan.url, scan.url.results, scan.bec and scan.dlp consumed by the scanner user, scan.auth without event bindings', async () => {
     const scanner = process.env.RABBITMQ_SCANNER_USER || 'eg-scanner';
     for (const queue of SCAN_CONSUMED_QUEUES) {
       const details = await mgmt.get<{

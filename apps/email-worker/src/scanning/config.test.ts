@@ -24,6 +24,8 @@ const base = {
   ATTACHMENT_CACHE_HMAC_KEY: 'test-content-cache-mac-key-0123456789',
   URL_CACHE_HMAC_KEY: 'test-url-cache-mac-key-0123456789abcdef',
   BEC_CONTEXT_HMAC_KEY: 'test-bec-context-hmac-key-0123456789abcdef',
+  // Step 4.5: dlp is a default engine (D1); a synthetic evidence key for its consumer.
+  DLP_EVIDENCE_KEY: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
   URL_TOKEN_KEY_CURRENT: '0123456789abcdef'.repeat(4),
   URL_DNSBL_DOMAIN_ZONES: 'dbl.scan.test=127.0.1.2:spam,127.0.1.4:phishing',
   S3_REGION: 'ap-south-1',
@@ -42,9 +44,9 @@ describe('email-worker scan config (step 4.1 §5, S5, S8, S10)', () => {
     const config = load();
     expect(config.SCAN_ENABLED).toBe(true);
     // Step 4.2 A1 / 4.3 U1 / 4.4 B1: attachment, url and bec are enabled (and required) by default.
-    expect(config.SCAN_ENGINES).toEqual(['rspamd', 'attachment', 'url', 'bec']);
+    expect(config.SCAN_ENGINES).toEqual(['rspamd', 'attachment', 'url', 'bec', 'dlp']);
     expect(config.SCAN_CONSUMERS).toEqual([]);
-    expect(consumerEngines(config)).toEqual(['rspamd', 'attachment', 'url', 'bec']);
+    expect(consumerEngines(config)).toEqual(['rspamd', 'attachment', 'url', 'bec', 'dlp']);
     expect(config.RABBITMQ_SCANNER_URL).toEqual([base.RABBITMQ_SCANNER_URL]);
     expect(config).toMatchObject({
       SCAN_RSPAMD_CONCURRENCY: 8,

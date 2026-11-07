@@ -71,7 +71,7 @@ describe('seed catalog', () => {
   const sorted = (list: readonly string[]) => [...list].sort();
   const role = (key: string) => SYSTEM_ROLES.find((r) => r.key === key)!.permissions;
 
-  it('contains the 45 permissions of D7, D8, steps 2.1 D14, 2.2, 2.3, 3.2, 3.3, 4.1, 4.2 and 4.4, without duplicates', () => {
+  it('contains the 49 permissions of D7, D8, steps 2.1 D14, 2.2, 2.3, 3.2, 3.3, 4.1, 4.2, 4.4 and 4.5, without duplicates', () => {
     expect(new Set(keys).size).toBe(keys.length);
     expect(sorted(keys)).toEqual(
       sorted([
@@ -120,14 +120,18 @@ describe('seed catalog', () => {
         'bec:manage',
         'bec:feedback',
         'bec:feedback_export',
+        'dlp:read',
+        'dlp:manage',
+        'dlp:evidence_read',
+        'dlp:compliance_manage',
       ]),
     );
-    expect(keys).toHaveLength(45);
+    expect(keys).toHaveLength(49);
     // Step 3.3 placed message:rescan next to the other message permissions (design §3.3); the
     // seed upserts by key, so on an existing database it simply gets the next id.
     expect(keys.indexOf('message:rescan')).toBe(keys.indexOf('message:read_content') + 1);
     // Otherwise appended in catalog order (permission ids follow it on a fresh database).
-    expect(keys.slice(-13)).toEqual([
+    expect(keys.slice(-17)).toEqual([
       'connector:read',
       'connector:manage',
       'domain:routing_manage',
@@ -141,6 +145,10 @@ describe('seed catalog', () => {
       'bec:manage',
       'bec:feedback',
       'bec:feedback_export',
+      'dlp:read',
+      'dlp:manage',
+      'dlp:evidence_read',
+      'dlp:compliance_manage',
     ]);
     for (const key of keys) expect(key).toMatch(/^[a-z]+:[a-z_]+$/);
     for (const p of PERMISSIONS) expect(p.description.length, p.key).toBeGreaterThan(0);
@@ -265,6 +273,9 @@ describe('seed catalog', () => {
         'bec:read',
         'bec:manage',
         'bec:feedback',
+        'dlp:read',
+        'dlp:manage',
+        'dlp:evidence_read',
       ],
       quarantine_reviewer: [
         'organization:read',
@@ -276,7 +287,14 @@ describe('seed catalog', () => {
         'quarantine:request_release',
         'report:read',
       ],
-      compliance_auditor: [...read, 'audit:read', 'archive:export', 'bec:read'],
+      compliance_auditor: [
+        ...read,
+        'audit:read',
+        'archive:export',
+        'bec:read',
+        'dlp:read',
+        'dlp:evidence_read',
+      ],
       read_only_user: read,
     };
     expect(Object.keys(expected)).toEqual([...SYSTEM_ROLE_KEYS]);
@@ -301,6 +319,31 @@ describe('seed catalog', () => {
     for (const key of ['bec:read', 'bec:manage', 'bec:feedback', 'bec:feedback_export']) {
       expect(TENANT_PERMISSIONS, key).toContain(key);
       expect(TENANT_READ_PERMISSIONS, key).not.toContain(key);
+    }
+    // Step 4.5 (D21): the DLP permissions are tenant permissions with these holders; never in
+    // TENANT_READ_PERMISSIONS, so read_only_user and platform_admin hold none of them.
+    expect(bec('dlp:read')).toEqual([
+      'super_admin',
+      'organization_admin',
+      'security_analyst',
+      'compliance_auditor',
+    ]);
+    expect(bec('dlp:manage')).toEqual(['super_admin', 'organization_admin', 'security_analyst']);
+    expect(bec('dlp:evidence_read')).toEqual([
+      'super_admin',
+      'organization_admin',
+      'security_analyst',
+      'compliance_auditor',
+    ]);
+    expect(bec('dlp:compliance_manage')).toEqual(['super_admin', 'organization_admin']);
+    for (const key of ['dlp:read', 'dlp:manage', 'dlp:evidence_read', 'dlp:compliance_manage']) {
+      expect(TENANT_PERMISSIONS, key).toContain(key);
+      expect(PLATFORM_PERMISSIONS, key).not.toContain(key);
+      expect(TENANT_READ_PERMISSIONS, key).not.toContain(key);
+      expect(role('read_only_user'), key).not.toContain(key);
+      expect(role('platform_admin'), key).not.toContain(key);
+      expect(role('quarantine_reviewer'), key).not.toContain(key);
+      expect(role('domain_admin'), key).not.toContain(key);
     }
     // DKIM rotation (step 2.1 D14): domain admin, organization admin and super admin only.
     const rotators = SYSTEM_ROLES.filter((r) =>

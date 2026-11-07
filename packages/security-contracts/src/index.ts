@@ -7,7 +7,9 @@
  * file-type vocabulary, reason codes, settings and per-attachment result, and the URL engine's
  * verdicts, reason codes, click decisions, rewrite skip reasons, settings and per-URL result, and
  * (step 4.4 docs/plan/steps/12-phishing-bec.md B6, B9, B13, B15, ADR-0033–0035) the BEC engine's
- * rule ids, reason codes, AI vocabularies, settings and read-view sub-schemas.
+ * rule ids, reason codes, AI vocabularies, settings and read-view sub-schemas, and (step 4.5
+ * docs/plan/steps/13-dlp.md, ADR-0036..0038) the DLP detector vocabulary, reason codes,
+ * policy and rule-condition contracts, settings, read-view and evidence-document schemas.
  *
  * Engines classify, policy decides (§2.0 invariant 8): nothing here rejects, quarantines or
  * delivers. The adapter interface itself lives with the adapters (email-worker
@@ -21,3 +23,4 @@ export * from './file-types';
 export * from './attachment';
 export * from './url';
 export * from './bec';
+export * from './dlp';

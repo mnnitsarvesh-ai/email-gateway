@@ -339,7 +339,8 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
         op.key.includes(' /api/v1/messages') &&
         !op.key.includes('/deliveries') &&
         !op.key.endsWith('/scans') &&
-        !op.key.endsWith('/bec-feedback'),
+        !op.key.endsWith('/bec-feedback') &&
+        !op.key.endsWith('/dlp-evidence'),
     );
     expect(messageOps.map((op) => op.key).sort()).toEqual([...expected].sort());
 

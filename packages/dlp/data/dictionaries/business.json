@@ -1,0 +1,131 @@
+{
+  "version": 1,
+  "dictionary": "business",
+  "description": "Business-confidential keywords (CF2, step 4.5 D5, D8).",
+  "entries": [
+    {
+      "id": "en.business.001",
+      "phrase": "merger agreement"
+    },
+    {
+      "id": "en.business.002",
+      "phrase": "acquisition target"
+    },
+    {
+      "id": "en.business.003",
+      "phrase": "term sheet"
+    },
+    {
+      "id": "en.business.004",
+      "phrase": "board minutes"
+    },
+    {
+      "id": "en.business.005",
+      "phrase": "board meeting minutes"
+    },
+    {
+      "id": "en.business.006",
+      "phrase": "due diligence report"
+    },
+    {
+      "id": "en.business.007",
+      "phrase": "customer list"
+    },
+    {
+      "id": "en.business.008",
+      "phrase": "client list"
+    },
+    {
+      "id": "en.business.009",
+      "phrase": "price list"
+    },
+    {
+      "id": "en.business.010",
+      "phrase": "pricing sheet"
+    },
+    {
+      "id": "en.business.011",
+      "phrase": "product roadmap"
+    },
+    {
+      "id": "en.business.012",
+      "phrase": "roadmap"
+    },
+    {
+      "id": "en.business.013",
+      "phrase": "trade secret"
+    },
+    {
+      "id": "en.business.014",
+      "phrase": "source code escrow"
+    },
+    {
+      "id": "en.business.015",
+      "phrase": "cap table"
+    },
+    {
+      "id": "en.business.016",
+      "phrase": "investor presentation"
+    },
+    {
+      "id": "en.business.017",
+      "phrase": "non-disclosure agreement"
+    },
+    {
+      "id": "en.business.018",
+      "phrase": "confidential information memorandum"
+    },
+    {
+      "id": "en.business.019",
+      "phrase": "acquisition proposal"
+    },
+    {
+      "id": "en.business.020",
+      "phrase": "layoff plan"
+    },
+    {
+      "id": "hi.business.001",
+      "phrase": "विलय समझौता"
+    },
+    {
+      "id": "hi.business.002",
+      "phrase": "ग्राहक सूची"
+    },
+    {
+      "id": "hi.business.003",
+      "phrase": "मूल्य सूची"
+    },
+    {
+      "id": "hi.business.004",
+      "phrase": "बोर्ड बैठक का कार्यवृत्त"
+    },
+    {
+      "id": "hi.business.005",
+      "phrase": "व्यापार रहस्य"
+    },
+    {
+      "id": "hi-Latn.business.001",
+      "phrase": "vilay samjhauta"
+    },
+    {
+      "id": "hi-Latn.business.002",
+      "phrase": "grahak suchi"
+    },
+    {
+      "id": "hi-Latn.business.003",
+      "phrase": "grahak soochi"
+    },
+    {
+      "id": "hi-Latn.business.004",
+      "phrase": "mulya suchi"
+    },
+    {
+      "id": "hi-Latn.business.005",
+      "phrase": "vyapar rahasya"
+    },
+    {
+      "id": "hi-Latn.business.006",
+      "phrase": "board meeting ka karyavrit"
+    }
+  ]
+}

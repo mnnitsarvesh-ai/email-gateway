@@ -1,6 +1,7 @@
 import {
   ATTACHMENT_PLATFORM_DEFAULTS,
   BEC_PLATFORM_DEFAULTS,
+  DLP_PLATFORM_DEFAULTS,
   RSPAMD_PLATFORM_DEFAULTS,
   type RspamdPlatformSettings,
   URL_PLATFORM_DEFAULTS,
@@ -24,17 +25,19 @@ const platforms = (
   attachment: ATTACHMENT_PLATFORM_DEFAULTS,
   url,
   bec: BEC_PLATFORM_DEFAULTS,
+  dlp: DLP_PLATFORM_DEFAULTS,
 });
 const rspamd = engineSettingsDefinitions(platforms()).get('rspamd')!;
 const updatedAt = new Date('2026-11-05T09:00:00Z');
 
 describe('engine settings (step 4.1 S8, S16)', () => {
-  it('defines settings for the catalog engines rspamd, attachment, url and bec (catalog order)', () => {
+  it('defines settings for the catalog engines rspamd, attachment, url, bec and dlp (catalog order)', () => {
     expect([...engineSettingsDefinitions(platforms()).keys()]).toEqual([
       'rspamd',
       'attachment',
       'url',
       'bec',
+      'dlp',
     ]);
   });
 
@@ -447,6 +450,117 @@ describe('bec engine settings (step 4.4 B13)', () => {
     expect(view).toMatchObject({ effective: { ai: { llm: 'off' } }, version: 2 });
     expect(view.violations).toEqual([
       expect.objectContaining({ path: 'ai.llm', code: 'out_of_bounds' }),
+    ]);
+  });
+});
+
+describe('dlp engine settings (step 4.5 D18)', () => {
+  const dlp = engineSettingsDefinitions(platforms()).get('dlp')!;
+  const codes = (definition: EngineSettingsDefinition, override: unknown) => {
+    const r = definition.check(override);
+    return r.ok ? [] : r.violations.map((v) => `${v.path}:${v.code}`);
+  };
+
+  it('views the platform settings, bounds and defaults without an override', () => {
+    const view = dlp.view(null);
+    expect(view).toMatchObject({
+      engine: 'dlp',
+      required: true,
+      tenantMayDisable: false,
+      platform: { ...DLP_PLATFORM_DEFAULTS },
+      bounds: {
+        inboundEnabled: [false, true],
+        thresholds: { min: 0.5, max: 0.95 },
+        disabledDetectors: ['PI1', 'PI2', 'BA3', 'SC1', 'CF2'],
+        defaultPolicy: ['alert', 'allow'],
+        evidence: { enabled: [false, true], retentionDays: { min: 1, max: 180 } },
+      },
+      override: null,
+      effective: {
+        inboundEnabled: false,
+        disabledDetectors: [],
+        defaultPolicy: 'alert',
+        evidence: { enabled: true, retentionDays: 30 },
+        contextWindowChars: 64,
+        bulkMinDistinct: 5,
+      },
+      overrideApplied: false,
+      version: 0,
+    });
+    if (view.engine !== 'dlp') throw new Error('expected the dlp view');
+    expect(Object.values(view.effective.thresholds)).toEqual(Array(10).fill(0.6));
+    expect(view.bounds.thresholds.categories).toHaveLength(10);
+  });
+
+  it('accepts bounded overrides and stores only the given keys', () => {
+    expect(
+      dlp.check({
+        inboundEnabled: true,
+        thresholds: { payment_card: 0.75 },
+        disabledDetectors: ['PI1', 'SC1'],
+        defaultPolicy: 'allow',
+        evidence: { retentionDays: 90 },
+      }),
+    ).toEqual({
+      ok: true,
+      settings: {
+        inboundEnabled: true,
+        thresholds: { payment_card: 0.75 },
+        disabledDetectors: ['PI1', 'SC1'],
+        defaultPolicy: 'allow',
+        evidence: { retentionDays: 90 },
+      },
+    });
+    const view = dlp.view({
+      settings: { thresholds: { credential: 0.9 }, evidence: { enabled: false } },
+      version: 3,
+      updatedAt,
+    });
+    expect(view).toMatchObject({
+      overrideApplied: true,
+      version: 3,
+      effective: {
+        thresholds: { credential: 0.9, payment_card: 0.6 },
+        evidence: { enabled: false },
+      },
+    });
+  });
+
+  it('refuses out-of-bounds thresholds, non-disableable detectors, retention and unknown keys', () => {
+    expect(codes(dlp, { thresholds: { payment_card: 0.4 } })).toEqual([
+      'thresholds.payment_card:out_of_bounds',
+    ]);
+    expect(codes(dlp, { thresholds: { payment_card: 0.96 } })).toEqual([
+      'thresholds.payment_card:out_of_bounds',
+    ]);
+    expect(codes(dlp, { thresholds: { payment_card: 0.655 } })).toEqual([
+      'thresholds.payment_card:invalid',
+    ]);
+    expect(codes(dlp, { disabledDetectors: ['PC1'] })).toEqual(['disabledDetectors.0:invalid']);
+    expect(codes(dlp, { evidence: { retentionDays: 181 } })).toEqual([
+      'evidence.retentionDays:out_of_bounds',
+    ]);
+    expect(codes(dlp, { evidence: { retentionDays: 0 } })).toEqual([
+      'evidence.retentionDays:out_of_bounds',
+    ]);
+    expect(codes(dlp, { defaultPolicy: 'block' })).toEqual(['defaultPolicy:invalid']);
+    expect(codes(dlp, { contextWindowChars: 32 })).toEqual(['contextWindowChars:unknown_key']);
+  });
+
+  it('never lets evidence exceed a disabled platform cap; ignores such a stored override', () => {
+    const capped = engineSettingsDefinitions({
+      ...platforms(),
+      dlp: { ...DLP_PLATFORM_DEFAULTS, evidenceEnabled: false },
+    }).get('dlp')!;
+    expect(codes(capped, { evidence: { enabled: true } })).toEqual([
+      'evidence.enabled:out_of_bounds',
+    ]);
+    expect(capped.check({ evidence: { enabled: false } }).ok).toBe(true);
+    const view = capped.view({ settings: { evidence: { enabled: true } }, version: 2, updatedAt });
+    expect(view.overrideApplied).toBe(false);
+    expect(view).toMatchObject({ effective: { evidence: { enabled: false } }, version: 2 });
+    expect(view.violations).toEqual([
+      expect.objectContaining({ path: 'evidence.enabled', code: 'out_of_bounds' }),
     ]);
   });
 });

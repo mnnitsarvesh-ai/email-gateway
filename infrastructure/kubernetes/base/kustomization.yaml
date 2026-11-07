@@ -22,6 +22,9 @@ resources:
   # Phishing and BEC detection (step 4.4 B1, B20): the stage-2 bec engine, the only holder of the
   # context HMAC key and the LLM API key.
   - email-worker-bec.yaml
+  # Data loss prevention (step 4.5 D1, D24): the stage-1 dlp engine with its extractor children
+  # and the evidence sweeper, the only email-worker Deployment holding the evidence key.
+  - email-worker-dlp.yaml
   - policy-engine.yaml
   - delivery-worker.yaml
   - notification-worker.yaml

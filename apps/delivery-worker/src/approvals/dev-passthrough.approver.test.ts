@@ -24,7 +24,10 @@ import {
   DevPassThroughApprover,
   becHoldDecision,
   heldBecOutcome,
+  dlpHoldDecision,
+  dlpResultApplies,
   InconsistentBecResultReadError,
+  InconsistentDlpResultReadError,
   InconsistentRewriteReadError,
   isRewriteKeyOf,
 } from './dev-passthrough.approver';
@@ -113,12 +116,25 @@ const becRow = (deterministicVerdict: string, overrides: Record<string, unknown>
   ...overrides,
 });
 
+/** The round's `dlp_scan_results` action as the email-worker writes it (echo columns). */
+const dlpRow = (action: string, overrides: Record<string, unknown> = {}) => ({
+  scanId: 900n,
+  receivedAt: new Date('2026-11-03T11:59:00.000Z'),
+  messageId: 100n,
+  organizationId: 7n,
+  lifecycleRound: 0,
+  action,
+  ...overrides,
+});
+
 function fakeTx(options: {
   recipients?: number;
   maxDeliverySeq?: number | null;
   rewrite?: Record<string, unknown> | null;
   /** Default: a deterministic `suspicious` row of the round. */
   bec?: Record<string, unknown> | null;
+  /** Default: an `allow` row of the round. */
+  dlp?: Record<string, unknown> | null;
 }) {
   const outbox: { data: Record<string, unknown> }[] = [];
   const events: { data: Record<string, unknown> }[] = [];
@@ -129,6 +145,11 @@ function fakeTx(options: {
     becScanResult: {
       findFirst: vi.fn((_args: unknown) =>
         Promise.resolve(options.bec === undefined ? becRow('suspicious') : options.bec),
+      ),
+    },
+    dlpScanResult: {
+      findFirst: vi.fn((_args: unknown) =>
+        Promise.resolve(options.dlp === undefined ? dlpRow('allow') : options.dlp),
       ),
     },
     emailDelivery: {
@@ -540,6 +561,7 @@ describe('DevPassThroughApprover (R5, step 4.1 S15, development only)', () => {
     expect(DEV_PASSTHROUGH_WARNING).toContain('delivered after scanning without policy');
     expect(DEV_PASSTHROUGH_WARNING).toContain('malicious verdicts are held in scanned');
     expect(DEV_PASSTHROUGH_WARNING).toContain('suspicious or malicious BEC results');
+    expect(DEV_PASSTHROUGH_WARNING).toContain('DLP actions require_approval, quarantine and block');
   });
 });
 
@@ -738,6 +760,204 @@ describe('DevPassThroughApprover: BEC verdicts (step 4.4 B17)', () => {
       () => NOW,
     ).start();
     const held = becEvent('suspicious');
+    expect(await f.handler!(held)).toBe('handled');
+    expect(writer.ledger).toEqual([{ consumer: DEV_PASSTHROUGH_CONSUMER, eventId: held.eventId }]);
+    expect(outbox).toHaveLength(0);
+  });
+});
+
+describe('DevPassThroughApprover: DLP actions (step 4.5 D13)', () => {
+  type DlpOutcome = 'clean' | 'suspicious' | 'unknown' | 'skipped';
+  const engines = (dlp: DlpOutcome, bec: 'clean' | 'suspicious' = 'clean') => [
+    { engine: 'rspamd', required: true, outcome: 'clean' as const, attempts: 1 },
+    { engine: 'bec', required: true, outcome: bec, attempts: 1 },
+    { engine: 'dlp', required: true, outcome: dlp, attempts: 1 },
+  ];
+  const dlpEvent = (
+    dlp: DlpOutcome,
+    verdict: MessageScannedV1['verdict'] = 'suspicious',
+    bec: 'clean' | 'suspicious' = 'clean',
+  ): EventEnvelope<MessageScannedV1> => ({
+    ...event,
+    payload: scannedPayload({ verdict, engines: engines(dlp, bec), reasonCodes: [] }),
+  });
+  const approverWith = (service: MetricsService, logger?: Logger) =>
+    new DevPassThroughApprover(
+      feed(),
+      noWriter,
+      RECORDER_TX_TIMEOUT_MS,
+      logger ?? createLogger({ service: 't', level: 'silent' }),
+      newMetrics(service),
+      () => NOW,
+    );
+  const where = {
+    scanId: 900n,
+    receivedAt: new Date('2026-11-03T11:59:00.000Z'),
+    messageId: 100n,
+    organizationId: 7n,
+    lifecycleRound: 0,
+  };
+
+  it('dlpResultApplies: a definite dlp outcome other than skipped; absent entry ignored', () => {
+    for (const outcome of ['clean', 'suspicious', 'unknown'] as const) {
+      expect(dlpResultApplies(scannedPayload({ engines: engines(outcome) }))).toBe(true);
+    }
+    expect(dlpResultApplies(scannedPayload({ engines: engines('skipped') }))).toBe(false);
+    expect(dlpResultApplies(scannedPayload())).toBe(false);
+  });
+
+  it('dlpHoldDecision: allow/alert approve, require_approval/quarantine/block hold, missing holds', () => {
+    expect(dlpHoldDecision('allow')).toBe('approve');
+    expect(dlpHoldDecision('alert')).toBe('alert');
+    for (const action of ['require_approval', 'quarantine', 'block']) {
+      expect(dlpHoldDecision(action)).toBe('held');
+    }
+    expect(dlpHoldDecision(null)).toBe('missing');
+  });
+
+  it.each(['require_approval', 'quarantine', 'block'] as const)(
+    'holds a %s action: no transition, no approval, counted dlp_action and by action, logged',
+    async (action) => {
+      const service = metricsService();
+      const info = vi.fn();
+      const logger = { child: () => ({ warn: vi.fn(), info }) } as unknown as Logger;
+      const t = fakeTx({ recipients: 2, dlp: dlpRow(action) });
+      const held = dlpEvent('suspicious');
+      expect(await approverWith(service, logger).approve(held, t.tx as never)).toEqual({
+        approvals: [],
+        recipients: 0,
+      });
+      expect(transition).not.toHaveBeenCalled();
+      expect(t.outbox).toHaveLength(0);
+      expect(t.events).toHaveLength(0);
+      expect(t.tx.emailRecipient.findMany).not.toHaveBeenCalled();
+      expect(t.tx.dlpScanResult.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where }));
+      const text = await service.metrics();
+      expect(text).toContain('delivery_approvals_skipped_total{reason="dlp_action",service="t"} 1');
+      expect(text).toContain(`delivery_dlp_holds_total{action="${action}",service="t"} 1`);
+      expect(info).toHaveBeenCalledWith(
+        {
+          eventId: held.eventId,
+          messageId: held.payload.messageId,
+          scanId: held.payload.scanId,
+          round: held.payload.lifecycleRound,
+          outcome: 'scanned',
+          verdict: 'suspicious',
+          dlpAction: action,
+        },
+        expect.stringContaining('DLP action holds'),
+      );
+    },
+  );
+
+  it('approves allow; approves alert and counts it with an info log of the ids and action', async () => {
+    const service = metricsService();
+    const info = vi.fn();
+    const logger = {
+      child: () => ({ warn: vi.fn(), info }),
+    } as unknown as Logger;
+    const allow = fakeTx({ recipients: 1, dlp: dlpRow('allow') });
+    expect(
+      (await approverWith(service, logger).approve(dlpEvent('clean', 'clean'), allow.tx as never))
+        .approvals,
+    ).toHaveLength(1);
+    const alert = fakeTx({ recipients: 1, dlp: dlpRow('alert') });
+    const alerted = dlpEvent('suspicious');
+    expect(
+      (await approverWith(service, logger).approve(alerted, alert.tx as never)).approvals,
+    ).toHaveLength(1);
+    expect(transition).toHaveBeenCalledTimes(2);
+    const text = await service.metrics();
+    expect(text).toContain('delivery_dlp_alerts_approved_total{service="t"} 1');
+    expect(text).not.toContain('reason="dlp_action"');
+    expect(info).toHaveBeenCalledWith(
+      expect.objectContaining({ messageId: '100', scanId: '900', dlpAction: 'alert' }),
+      expect.stringContaining('DLP alert'),
+    );
+  });
+
+  it('holds when the dlp result row is missing (fail-safe, warn); a shifted read throws', async () => {
+    const service = metricsService();
+    const warn = vi.fn();
+    const logger = { child: () => ({ warn, info: vi.fn() }) } as unknown as Logger;
+    const approver = approverWith(service, logger);
+    const missing = fakeTx({ dlp: null });
+    expect(await approver.approve(dlpEvent('unknown', 'unknown'), missing.tx as never)).toEqual({
+      approvals: [],
+      recipients: 0,
+    });
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ messageId: '100' }),
+      expect.stringContaining('fail-safe'),
+    );
+    for (const shift of [
+      { organizationId: 8n },
+      { messageId: 101n },
+      { scanId: 901n },
+      { lifecycleRound: 1 },
+      { receivedAt: new Date('2026-11-03T11:59:00.001Z') },
+    ]) {
+      const shifted = fakeTx({ dlp: dlpRow('allow', shift) });
+      await expect(
+        approver.approve(dlpEvent('clean', 'clean'), shifted.tx as never),
+      ).rejects.toThrow(InconsistentDlpResultReadError);
+    }
+    expect(transition).not.toHaveBeenCalled();
+    const text = await service.metrics();
+    expect(text).toContain('delivery_dlp_holds_total{action="missing",service="t"} 1');
+    expect(text).toContain('delivery_approvals_skipped_total{reason="dlp_action",service="t"} 1');
+    expect(text).toContain('delivery_inconsistent_reads_total{read="dlp_result",service="t"} 5');
+  });
+
+  it('ignores a skipped dlp entry and rounds without dlp (no read)', async () => {
+    const t = fakeTx({ recipients: 1, dlp: dlpRow('block') });
+    const result = await approverWith(metricsService()).approve(
+      dlpEvent('skipped', 'clean'),
+      t.tx as never,
+    );
+    expect(result.approvals).toHaveLength(1);
+    expect(t.tx.dlpScanResult.findFirst).not.toHaveBeenCalled();
+    const plain = fakeTx({ recipients: 1, dlp: dlpRow('block') });
+    expect(
+      (await approverWith(metricsService()).approve(event, plain.tx as never)).approvals,
+    ).toHaveLength(1);
+    expect(plain.tx.dlpScanResult.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('keeps the order: scan_failed, malicious and BEC holds keep their reasons and skip the DLP read', async () => {
+    const service = metricsService();
+    const approver = approverWith(service);
+    const failed = fakeTx({ dlp: dlpRow('block') });
+    await approver.approve(scanFailedEvent, failed.tx as never);
+    const malicious = fakeTx({ dlp: dlpRow('block') });
+    await approver.approve(dlpEvent('suspicious', 'malicious'), malicious.tx as never);
+    const bec = fakeTx({ dlp: dlpRow('block') });
+    await approver.approve(dlpEvent('suspicious', 'suspicious', 'suspicious'), bec.tx as never);
+    for (const t of [failed, malicious, bec]) {
+      expect(t.tx.dlpScanResult.findFirst).not.toHaveBeenCalled();
+    }
+    const text = await service.metrics();
+    expect(text).toContain('delivery_approvals_skipped_total{reason="scan_failed",service="t"} 1');
+    expect(text).toContain(
+      'delivery_approvals_skipped_total{reason="malicious_verdict",service="t"} 1',
+    );
+    expect(text).toContain('delivery_approvals_skipped_total{reason="bec_verdict",service="t"} 1');
+    expect(text).not.toContain('reason="dlp_action"');
+  });
+
+  it('commits the ledger row of a DLP hold (handled once, never approved)', async () => {
+    const { tx, outbox } = fakeTx({ dlp: dlpRow('quarantine') });
+    const writer = fakeWriter(tx);
+    const f = feed();
+    new DevPassThroughApprover(
+      f,
+      writer.prisma,
+      RECORDER_TX_TIMEOUT_MS,
+      createLogger({ service: 't', level: 'silent' }),
+      newMetrics(),
+      () => NOW,
+    ).start();
+    const held = dlpEvent('suspicious');
     expect(await f.handler!(held)).toBe('handled');
     expect(writer.ledger).toEqual([{ consumer: DEV_PASSTHROUGH_CONSUMER, eventId: held.eventId }]);
     expect(outbox).toHaveLength(0);

@@ -15,8 +15,8 @@ import {
 } from './index';
 
 describe('engine catalog (S4)', () => {
-  it('registers rspamd (4.1), attachment (4.2), url (4.3) and bec (4.4), required and not disableable', () => {
-    expect(ENGINE_CATALOG).toHaveLength(4);
+  it('registers rspamd (4.1), attachment (4.2), url (4.3), bec (4.4) and dlp (4.5), required and not disableable', () => {
+    expect(ENGINE_CATALOG).toHaveLength(5);
     expect(ENGINE_CATALOG[0]).toMatchObject({
       name: 'rspamd',
       stage: 'antispam',
@@ -54,7 +54,20 @@ describe('engine catalog (S4)', () => {
         'Phishing and BEC: sender identity, impersonation, lookalikes, payment/urgency cues, credential links, communication history; optional AI layer (step 4.4)',
     });
     expect(Object.isFrozen(ENGINE_CATALOG[3]!.dependsOn)).toBe(true);
-    for (const entry of ENGINE_CATALOG.slice(0, 3)) expect(entry.dependsOn).toBeUndefined();
+    // Step 4.5 D1: a stage-1 engine (no dependsOn) on its own queue, required for every tenant.
+    expect(ENGINE_CATALOG[4]).toEqual({
+      name: 'dlp',
+      stage: 'dlp',
+      queue: 'scan.dlp',
+      requiredByDefault: true,
+      tenantMayDisable: false,
+      description:
+        'Data loss prevention: card, bank, national id, passport, personal, confidential, source code, credential, financial and tenant patterns; attachment text extraction; outbound policy actions (step 4.5)',
+    });
+    expect(isStage2Engine(ENGINE_CATALOG[4]!)).toBe(false);
+    for (const name of ['rspamd', 'attachment', 'url', 'dlp']) {
+      expect(engineCatalogEntry(name)?.dependsOn, name).toBeUndefined();
+    }
     for (const entry of ENGINE_CATALOG) {
       expect(entry.description.length).toBeGreaterThan(0);
       expect(Object.isFrozen(entry)).toBe(true);
@@ -88,7 +101,8 @@ describe('engine catalog (S4)', () => {
     expect(engineCatalogEntry('attachment')?.queue).toBe('scan.attachment');
     expect(engineCatalogEntry('url')?.queue).toBe('scan.url');
     expect(engineCatalogEntry('bec')?.queue).toBe('scan.bec');
-    expect(engineCatalogEntry('dlp')).toBeUndefined();
+    expect(engineCatalogEntry('dlp')?.queue).toBe('scan.dlp');
+    expect(engineCatalogEntry('sandbox')).toBeUndefined();
     expect(engineCatalogEntry('clamav')).toBeUndefined();
     expect(isEngineName('url')).toBe(true);
     expect(isEngineName('clamav')).toBe(false);
@@ -111,7 +125,15 @@ describe('engine catalog (S4)', () => {
       'url',
       'bec',
     ]);
-    expect(() => parseEnabledEngines('rspamd,dlp')).toThrow(/not in the catalog: dlp/);
+    expect(parseEnabledEngines('rspamd,attachment,url,bec,dlp')).toEqual([
+      'rspamd',
+      'attachment',
+      'url',
+      'bec',
+      'dlp',
+    ]);
+    expect(parseEnabledEngines('rspamd,dlp')).toEqual(['rspamd', 'dlp']);
+    expect(() => parseEnabledEngines('rspamd,sandbox')).toThrow(/not in the catalog: sandbox/);
   });
 
   it('snapshots the required engines; a tenant cannot drop an engine it may not disable', () => {
@@ -137,6 +159,15 @@ describe('engine catalog (S4)', () => {
       'url',
       'bec',
     ]);
+    // Step 4.5 D1: dlp is required for every tenant (every direction) and cannot be disabled.
+    expect(requiredEngines(['dlp', 'bec', 'url', 'attachment', 'rspamd'], ['dlp', 'bec'])).toEqual([
+      'rspamd',
+      'attachment',
+      'url',
+      'bec',
+      'dlp',
+    ]);
+    expect(requiredEngines(['rspamd', 'attachment', 'url', 'bec'])).not.toContain('dlp');
   });
 });
 
@@ -154,7 +185,7 @@ describe('engine dependencies (step 4.4 B2)', () => {
     description: name,
   });
 
-  it('validates the registered catalog: bec is the only stage-2 engine', () => {
+  it('validates the registered catalog (with dlp, stage 1): bec is the only stage-2 engine', () => {
     expect(() => validateCatalog()).not.toThrow();
     expect(() => validateCatalog(ENGINE_CATALOG)).not.toThrow();
     expect(stage2Engines()).toEqual(['bec']);
@@ -162,6 +193,7 @@ describe('engine dependencies (step 4.4 B2)', () => {
       'rspamd',
       'attachment',
       'url',
+      'dlp',
     ]);
     expect(isStage2Engine({})).toBe(false);
     expect(isStage2Engine({ dependsOn: [] })).toBe(false);

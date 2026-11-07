@@ -1,0 +1,34 @@
+{
+  "name": "@email-gateway/dlp",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "data",
+    "extract.js",
+    "extract.d.ts"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src scripts",
+    "test": "vitest run",
+    "test:integration": "echo 'no infrastructure suites in @email-gateway/dlp'"
+  },
+  "dependencies": {
+    "@email-gateway/bec": "workspace:*",
+    "@email-gateway/security-contracts": "workspace:*",
+    "@email-gateway/url-security": "workspace:*",
+    "pdfjs-dist": "4.10.38",
+    "re2js": "2.9.0",
+    "yazl": "3.3.1",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "@types/yazl": "3.3.1",
+    "prettier": "^3.6.2",
+    "tsx": "4.23.15"
+  }
+}

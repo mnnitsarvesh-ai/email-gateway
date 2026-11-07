@@ -14,6 +14,7 @@ import {
   becRuleEvidenceSchema,
   becVerdictSchema,
   CLICK_DECISIONS,
+  dlpResultViewSchema,
   DMARC_POLICIES,
   REWRITE_SKIP_REASONS,
   SCAN_VERDICTS,
@@ -36,7 +37,10 @@ import { z } from 'zod';
  * `bec` engine entry carries its explainable verdict (`bec_scan_results`: versions, scores,
  * thresholds, input states, fired rules with structured evidence, AI assessments, feedback
  * references); never body text, span text, excerpts, response hashes, AI durations or history
- * hashes.
+ * hashes. Step 4.5 D20: the `dlp` engine entry carries its masked result (versions, verdict,
+ * action, coverage detail, category aggregates, findings with masked samples, the policy match
+ * with public ids, the evidence state) for callers holding `dlp:read`, else `dlp: null`; never
+ * raw values, context text, offsets, dictionary terms, pattern text or durations.
  */
 
 /** Rounds per page (S16: at most 20). */
@@ -301,18 +305,25 @@ export const ScanEngineResultSchema = z.object({
       'Engine `bec` only (step 4.4 B15): the explainable verdict; null before the final ' +
         'result and for failures',
     ),
+  dlp: dlpResultViewSchema
+    .nullable()
+    .optional()
+    .describe(
+      'Engine `dlp` only (step 4.5 D20): the masked DLP result; null before the final result, ' +
+        'for failures, and for callers without `dlp:read`',
+    ),
   durationMs: z
     .number()
     .int()
     .min(0)
     .nullable()
     .describe(
-      'Engine duration of the final result; always null for the `attachment`, `url` and ' +
-        '`bec` engines (cross-tenant cache hits; the AI layer’s timing)',
+      'Engine duration of the final result; always null for the `attachment`, `url`, `bec` ' +
+        'and `dlp` engines (cross-tenant cache hits; the AI layer’s and extraction timing)',
     ),
   settingsVersion: z.string().nullable(),
   completedAt: IsoDate.nullable().describe(
-    'Final result time (whole seconds for the `attachment`, `url` and `bec` engines)',
+    'Final result time (whole seconds for the `attachment`, `url`, `bec` and `dlp` engines)',
   ),
 });
 export type ScanEngineResultView = z.output<typeof ScanEngineResultSchema>;

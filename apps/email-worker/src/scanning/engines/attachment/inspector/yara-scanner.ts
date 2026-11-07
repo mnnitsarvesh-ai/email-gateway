@@ -1,20 +1,11 @@
 import { compile } from '@litko/yara-x';
-import type { YaraMatch, YaraSeverity } from '@email-gateway/security-contracts';
+import type { YaraSeverity } from '@email-gateway/security-contracts';
 import { bundleId, bundleSource, loadBundle, yaraXVersion } from './bundle';
+import type { YaraEngine, YaraScanResult } from './yara-engine';
 
-/** Result of one YARA scan of one buffer (rule names and severities only). */
-export interface YaraScanResult {
-  matches: Array<{ rule: string; severity: YaraSeverity }>;
-  timedOut: boolean;
-}
-
-/** The subset of the YARA-X binding the inspector uses (a fake in unit tests). */
-export interface YaraEngine {
-  readonly bundleId: string;
-  readonly ruleCount: number;
-  readonly yaraXVersion: string;
-  scan(bytes: Buffer): YaraScanResult;
-}
+// The pure YARA engine types and helpers live in yara-engine.ts (no native binding: the DLP
+// extractor child walks archives without YARA, step 4.5 D4); re-exported for 4.2 callers.
+export { addMatches, NOOP_YARA_ENGINE, type YaraEngine, type YaraScanResult } from './yara-engine';
 
 const SEVERITIES: ReadonlySet<string> = new Set(['high', 'medium', 'low']);
 
@@ -76,19 +67,5 @@ export class YaraXScanner implements YaraEngine {
       }
       throw error;
     }
-  }
-}
-
-/** Deduplicated, bounded YARA matches with their scope (A4: ≤ 32). */
-export function addMatches(
-  target: YaraMatch[],
-  scope: string,
-  result: YaraScanResult,
-  max: number,
-): void {
-  for (const match of result.matches) {
-    if (target.length >= max) return;
-    if (target.some((m) => m.rule === match.rule && m.scope === scope)) continue;
-    target.push({ rule: match.rule, severity: match.severity, scope });
   }
 }

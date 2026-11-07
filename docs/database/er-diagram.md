@@ -48,6 +48,11 @@ flowchart LR
     bec_feedback
     bec_suppression_rules
     bec_contact_history
+    dlp_scan_results[(dlp_scan_results P)]
+    dlp_evidence[(dlp_evidence P)]
+    dlp_policies[dlp_policies, dlp_policy_rules]
+    dlp_exceptions
+    dlp_config[dlp_custom_patterns, dlp_keyword_dictionaries, dlp_compliance_settings]
   end
   subgraph policy[Policy]
     email_policies
@@ -95,6 +100,12 @@ flowchart LR
   organizations --> bec_suppression_rules
   organizations --> bec_contact_history
   bec_scan_results -.-> bec_feedback
+  email_scans -.-> dlp_scan_results
+  email_scans -.-> dlp_evidence
+  organizations --> dlp_policies
+  organizations --> dlp_exceptions
+  organizations --> dlp_config
+  dlp_policies --> dlp_exceptions
   email_messages -.-> email_deliveries
   delivery_reinjections -.-> email_deliveries
   email_deliveries -.-> delivery_status_events
@@ -469,6 +480,25 @@ erDiagram
   users |o--o{ bec_suppression_rules : "created_by, SET NULL"
   bec_scan_results ||..o{ bec_feedback : "bec_result_id + message_received_at"
   bec_feedback ||..o{ bec_suppression_rules : "feedback_id (logical)"
+  email_scans ||..o| dlp_scan_results : "scan_id + received_at, one per round"
+  email_scans ||..o| dlp_evidence : "scan_id + received_at, at most one per round"
+  dlp_policies |o..o{ dlp_scan_results : "matched_policy_id (logical)"
+  dlp_policy_rules |o..o{ dlp_scan_results : "matched_rule_id (logical)"
+  organizations ||--o{ dlp_policies : "RESTRICT"
+  organizations ||--o{ dlp_policy_rules : "RESTRICT"
+  organizations ||--o{ dlp_exceptions : "RESTRICT"
+  organizations ||--o{ dlp_custom_patterns : "RESTRICT"
+  organizations ||--o{ dlp_keyword_dictionaries : "RESTRICT"
+  organizations ||--o| dlp_compliance_settings : "RESTRICT, one per organization"
+  dlp_policies ||--o{ dlp_policy_rules : "RESTRICT"
+  dlp_policies |o--o{ dlp_exceptions : "policy target, RESTRICT"
+  dlp_policy_rules |o--o{ dlp_exceptions : "rule target, RESTRICT"
+  users |o--o{ dlp_policies : "created_by, updated_by, SET NULL"
+  users |o--o{ dlp_policy_rules : "created_by, updated_by, SET NULL"
+  users |o--o{ dlp_exceptions : "created_by, updated_by, SET NULL"
+  users |o--o{ dlp_custom_patterns : "created_by, updated_by, SET NULL"
+  users |o--o{ dlp_keyword_dictionaries : "created_by, updated_by, SET NULL"
+  users |o--o{ dlp_compliance_settings : "aadhaar_recorded_by, SET NULL"
   organizations |o--o{ yara_rules : "NULL = platform rule"
   users |o--o{ yara_rules : "updated_by"
   email_scans {
@@ -623,6 +653,76 @@ erDiagram
     int message_count
     datetime last_seen_at
   }
+  dlp_scan_results {
+    bigint id PK
+    datetime received_at PK "PARTITIONED month"
+    bigint scan_id "UK with received_at"
+    smallint lifecycle_round
+    enum verdict
+    enum action "allow .. block"
+    enum action_source
+    bigint matched_policy_id "nullable, no FK"
+    bigint matched_rule_id "nullable, no FK"
+    enum coverage
+    json findings "masked samples only"
+  }
+  dlp_evidence {
+    bigint id PK
+    datetime received_at PK "PARTITIONED month"
+    bigint scan_id "UK with received_at"
+    varchar object_key "S3 ciphertext, NULL after delete"
+    varchar wrapped_key "NULL = crypto-shredded"
+    datetime expires_at
+    datetime purged_at "nullable"
+  }
+  dlp_policies {
+    bigint id PK
+    char public_id UK
+    bigint organization_id FK "UK with name"
+    enum mode "enforce, monitor"
+    smallint priority
+  }
+  dlp_policy_rules {
+    bigint id PK
+    char public_id UK
+    bigint organization_id FK
+    bigint policy_id FK "UK with name"
+    json conditions
+    enum action
+  }
+  dlp_exceptions {
+    bigint id PK
+    char public_id UK
+    bigint organization_id FK "UK with scope, value, target_key"
+    enum scope
+    varchar value
+    bigint policy_id FK "nullable"
+    bigint rule_id FK "nullable"
+    varchar target_key "all, policy:id, rule:id"
+    datetime expires_at
+  }
+  dlp_custom_patterns {
+    bigint id PK
+    char public_id UK
+    bigint organization_id FK "UK with name"
+    varchar pattern "RE2"
+    enum validator
+  }
+  dlp_keyword_dictionaries {
+    bigint id PK
+    char public_id UK
+    bigint organization_id FK "UK with name"
+    enum category
+    json terms
+  }
+  dlp_compliance_settings {
+    bigint id PK
+    bigint organization_id FK "UK"
+    boolean aadhaar_enabled
+    enum aadhaar_basis "nullable"
+    bigint aadhaar_recorded_by_user_id FK "nullable"
+    datetime aadhaar_review_due_at "nullable"
+  }
   ip_reputation {
     bigint id PK
     varchar ip_address UK
@@ -691,6 +791,8 @@ Step 4.2 ([§3](../plan/steps/10-attachment-scanning.md#3-data-model-one-forward
 Step 4.3 ([§3](../plan/steps/11-url-protection.md#3-data-model-one-forward-migration-url_protection-wp1)): the URL engine writes, in the finalize transaction of its final `scan_engine_results` row, the message's new `message_urls` rows (one per unique URL; a rescan keeps the seqs already stored), one `url_scan_results` row per URL, one `url_rewrites` row and one `url_dynamic_inspections` row per URL sent to the browser worker; all four copy the message's `received_at`. The click-service writes one `url_click_events` row per decided click, partitioned by `clicked_at` and pointing to its URL by `(message_id, message_received_at, url_seq)`. No foreign keys (all five are partitioned); `threat_indicators` gains the analyst who added a platform indicator (`SET NULL`).
 
 Step 4.4 ([§3](../plan/steps/12-phishing-bec.md#3-data-model-one-forward-migration-bec_detection-wp1)): the BEC engine (a stage-2 engine that runs after `rspamd` and `url` finalized) writes, in the finalize transaction of its final `scan_engine_results` row, one `bec_scan_results` row per round (partitioned, copies the message's `received_at`, no foreign keys) and, in round 0 only and when the tenant opted in, its `bec_contact_history` upserts. The six tenant tables are not partitioned and reference `organizations` (`RESTRICT`, deleted explicitly by organization deletion) and `users` (`SET NULL`); `bec_feedback` points to its result by `(bec_result_id, message_received_at)` and `bec_suppression_rules` to its feedback by `feedback_id`, both logical references without a foreign key.
+
+Step 4.5 ([§3](../plan/steps/13-dlp.md#3-data-model-one-forward-migration-dlp_engine-wp1)): the DLP engine (a stage-1 engine on `scan.dlp`) writes, in the finalize transaction of its final `scan_engine_results` row, one `dlp_scan_results` row per round and, when a reportable finding was sealed into an encrypted S3 evidence object, one `dlp_evidence` row (both partitioned, copy the message's `received_at`, no foreign keys; `matched_policy_id` / `matched_rule_id` are logical references). The six tenant tables are not partitioned and reference `organizations` (`RESTRICT`, deleted explicitly by organization deletion) and `users` (`SET NULL`); rules reference their policy and exceptions their target policy or rule (`RESTRICT`).
 
 ```mermaid
 erDiagram

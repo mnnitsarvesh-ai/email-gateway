@@ -42,13 +42,13 @@ const mutableQueue = (topology: { queues: QueueDefinition[] }, name: QueueName) 
   return queue;
 };
 
-describe('TOPOLOGY v6', () => {
+describe('TOPOLOGY v7', () => {
   it('satisfies every invariant of design §3', () => {
     expect(validateTopology(TOPOLOGY)).toEqual([]);
   });
 
-  it('declares exactly the six exchanges and seventeen queues (v6)', () => {
-    expect(TOPOLOGY_VERSION).toBe(6);
+  it('declares exactly the six exchanges and seventeen queues (v7)', () => {
+    expect(TOPOLOGY_VERSION).toBe(7);
     expect(DEFAULT_VHOST).toBe('email-gateway');
     expect([...TOPOLOGY.exchanges]).toEqual([
       'email.ingestion',
@@ -67,7 +67,7 @@ describe('TOPOLOGY v6', () => {
     );
   });
 
-  it('assigns roles: eight work queues, one delay, one dead-letter, seven dormant (v6)', () => {
+  it('assigns roles: nine work queues, one delay, one dead-letter, six dormant (v7)', () => {
     const byRole = (role: string) =>
       TOPOLOGY.queues.filter((q) => q.role === role).map((q) => q.name);
     expect(byRole('work')).toEqual([
@@ -78,12 +78,15 @@ describe('TOPOLOGY v6', () => {
       'scan.url.results',
       'scan.attachment',
       'scan.bec',
+      'scan.dlp',
       'email.delivery.pending',
     ]);
     expect(byRole('delay')).toEqual(['email.delivery.retry']);
     expect(byRole('dead-letter')).toEqual(['email.dead-letter']);
-    expect(byRole('dormant')).toHaveLength(7);
+    expect(byRole('dormant')).toHaveLength(6);
     expect(byRole('dormant')).not.toContain('scan.url');
+    // v7 (step 4.5 D2): scan.dlp is no longer dormant.
+    expect(byRole('dormant')).not.toContain('scan.dlp');
     expect(byRole('dormant')).toContain('scan.sandbox');
     expect(byRole('dormant')).toContain('scan.auth');
   });
@@ -139,6 +142,7 @@ describe('TOPOLOGY v6', () => {
         'email.security org.*.mail.message.scan_stage_ready.v1',
         'email.security retry.scan.bec.#',
       ],
+      // v7 (step 4.5 D2): the stage-1 DLP engine queue keeps the bindings of the dormant queue.
       'scan.dlp': [
         'email.security',
         'email.ingestion org.*.mail.message.parsed.v1',
@@ -256,6 +260,23 @@ describe('TOPOLOGY v6', () => {
       overflow: 'reject-publish',
       'max-length': 1_000_000,
     });
+    // v7 (step 4.5 D1, D2): the data loss prevention engine of the email-worker scan role.
+    expect(queueDefinition('scan.dlp').consumer).toEqual({
+      kind: 'ledger',
+      ledgerName: 'email-worker.scan.dlp',
+      service: 'email-worker',
+    });
+    expect(queueDefinition('scan.dlp').description).toBe(
+      'Data loss prevention (step 4.5): stage 1',
+    );
+    expect(queueDefinition('scan.dlp').policy).toEqual({
+      'delivery-limit': 20,
+      'dead-letter-exchange': 'email.events',
+      'dead-letter-routing-key': 'dead-letter.scan.dlp',
+      'dead-letter-strategy': 'at-least-once',
+      overflow: 'reject-publish',
+      'max-length': 1_000_000,
+    });
     expect(
       TOPOLOGY.queues.filter((q) => q.consumer.kind === 'stateless').map((q) => q.name),
     ).toEqual(['scan.url.inspect']);
@@ -272,7 +293,6 @@ describe('TOPOLOGY v6', () => {
         .map((q) => [q.name, q.consumer.kind === 'planned' ? q.consumer.plannedStep : '']),
     );
     expect(planned).toEqual({
-      'scan.dlp': '4.5',
       'scan.sandbox': '4.6',
       'email.policy.evaluate': '5.1/5.2',
       'email.quarantine': '5.3',
@@ -303,7 +323,7 @@ describe('policies (Q4)', () => {
       'max-length': 10_000,
     });
     expect(LOSSY_WORK_QUEUE_MAX_LENGTH).toBe(10_000);
-    for (const name of ['scan.url', 'scan.url.results', 'scan.bec'] as const) {
+    for (const name of ['scan.url', 'scan.url.results', 'scan.bec', 'scan.dlp'] as const) {
       expect(queueDefinition(name).policy, name).toEqual(policyFor('work', name));
     }
     expect(queueDefinition('email.received').policy).toEqual({
@@ -323,7 +343,7 @@ describe('policies (Q4)', () => {
       'max-length': 1_000_000,
     });
     expect(queueDefinition('scan.auth').policy).toEqual(policyFor('dormant', 'scan.auth'));
-    expect(queueDefinition('scan.dlp').policy).toEqual({
+    expect(queueDefinition('scan.sandbox').policy).toEqual({
       'delivery-limit': -1,
       'max-length': 10_000,
       overflow: 'drop-head',
@@ -391,6 +411,14 @@ describe('retry policies (Q8)', () => {
     expect(queueDefinition('scan.url.results').retry).toEqual(queueDefinition('scan.spam').retry);
     // v6 (step 4.4 B3): as scan.spam; SCAN_BEC_MAX_ATTEMPTS (3) < 10 finalizes first.
     expect(queueDefinition('scan.bec').retry).toEqual({
+      strategy: 'hold',
+      maxAttempts: 10,
+      baseDelayMs: 2000,
+      maxDelayMs: 60_000,
+      maxRetryAgeMs: 86_400_000,
+    });
+    // v7 (step 4.5 D2): as scan.spam; SCAN_DLP_MAX_ATTEMPTS (3) < 10 finalizes first.
+    expect(queueDefinition('scan.dlp').retry).toEqual({
       strategy: 'hold',
       maxAttempts: 10,
       baseDelayMs: 2000,
@@ -632,6 +660,10 @@ describe('routing (topic semantics)', () => {
     expect(route('mail.message.scan_stage_ready.v1')).toEqual(['email.analytics', 'scan.bec']);
     expect(route('mail.message.parsed.v1')).not.toContain('scan.bec');
     expect(route('mail.message.rescan_requested.v1')).not.toContain('scan.bec');
+    // Topology v7 (step 4.5 D2, D14): the DLP incident reaches no queue but the firehose (the
+    // notification-worker binds it in step 6.2); scan.dlp is a stage-1 engine queue.
+    expect(route('mail.message.dlp_incident.v1')).toEqual(['email.analytics']);
+    expect(route('mail.message.scan_stage_ready.v1')).not.toContain('scan.dlp');
   });
 
   it('keeps the retry hops of dot-prefixed queue names apart (v5 scan.url, scan.url.*)', () => {
@@ -640,6 +672,7 @@ describe('routing (topic semantics)', () => {
     expect(retryBindingKey('scan.url.results')).toBe('retry.scan.url.results.#');
     expect(retryBindingKey('scan.spam')).toBe('retry.scan.spam.#');
     expect(retryBindingKey('scan.bec')).toBe('retry.scan.bec.#');
+    expect(retryBindingKey('scan.dlp')).toBe('retry.scan.dlp.#');
     // Every retry key of every work/dormant queue and every event type reaches exactly that queue.
     const types = [...Object.keys(EVENT_REGISTRY), ...Object.keys(RESERVED_EVENT_TYPES)];
     for (const queue of TOPOLOGY.queues.filter((q) => q.role === 'work' || q.role === 'dormant')) {
@@ -734,7 +767,7 @@ describe('routing (topic semantics)', () => {
 describe('validateTopology (negative cases)', () => {
   it('detects a missing or extra queue and exchange', () => {
     const t = clone();
-    t.queues = t.queues.filter((q) => q.name !== 'scan.dlp');
+    t.queues = t.queues.filter((q) => q.name !== 'scan.sandbox');
     expect(validateTopology(t).some((v) => v.startsWith('queues must be exactly'))).toBe(true);
     const e = clone();
     e.exchanges = [...EXCHANGE_NAMES, 'email.extra' as never];
@@ -835,18 +868,18 @@ describe('validateTopology (negative cases)', () => {
 
   it('allows the stateless consumer kind and the lossy policy on work queues only (v5)', () => {
     const t = clone();
-    mutableQueue(t, 'scan.dlp').consumer = {
+    mutableQueue(t, 'scan.sandbox').consumer = {
       kind: 'stateless',
       service: 'x',
       reason: 'y',
     };
     expect(validateTopology(t)).toContain(
-      'scan.dlp: a dormant queue must have consumer kind planned or none',
+      'scan.sandbox: a dormant queue must have consumer kind planned or none',
     );
     const u = clone();
-    const dlp = mutableQueue(u, 'scan.dlp');
-    dlp.lossy = true;
-    expect(validateTopology(u)).toContain('scan.dlp: only a work queue can be lossy');
+    const sandbox = mutableQueue(u, 'scan.sandbox');
+    sandbox.lossy = true;
+    expect(validateTopology(u)).toContain('scan.sandbox: only a work queue can be lossy');
     const w = clone();
     mutableQueue(w, 'scan.url.inspect').policy = policyFor('work', 'scan.url.inspect');
     expect(validateTopology(w)).toContain(
@@ -872,10 +905,10 @@ describe('validateTopology (negative cases)', () => {
     });
     expect(validateTopology(t)).toContain('scan.auth: a reserved queue has no event binding');
     const u = clone();
-    mutableQueue(u, 'scan.dlp').bindings = [
-      { exchange: 'email.security', routingKey: 'retry.scan.dlp.#' },
+    mutableQueue(u, 'scan.sandbox').bindings = [
+      { exchange: 'email.security', routingKey: 'retry.scan.sandbox.#' },
     ];
-    expect(validateTopology(u)).toContain('scan.dlp: has no event binding');
+    expect(validateTopology(u)).toContain('scan.sandbox: has no event binding');
     const w = clone();
     mutableQueue(w, 'scan.auth').consumer = {
       kind: 'ledger',
@@ -907,7 +940,7 @@ describe('toRabbitDefinitions (Q5)', () => {
   const definitions = toRabbitDefinitions(TOPOLOGY, { vhost: DEFAULT_VHOST });
 
   it('declares topic exchanges and quorum queues with no other argument', () => {
-    expect(definitions.topology_version).toBe(6);
+    expect(definitions.topology_version).toBe(7);
     expect(definitions.exchanges).toHaveLength(6);
     for (const exchange of definitions.exchanges) {
       expect(exchange).toEqual({
@@ -939,6 +972,9 @@ describe('toRabbitDefinitions (Q5)', () => {
     const expected =
       TOPOLOGY.exchangeBindings.length + TOPOLOGY.queues.reduce((n, q) => n + q.bindings.length, 0);
     expect(definitions.bindings).toHaveLength(expected);
+    // v7 (step 4.5 D2): scan.dlp turned from dormant into a work queue with the same three
+    // bindings, so the count is the v6 count (36 queue + 5 exchange bindings).
+    expect(definitions.bindings).toHaveLength(41);
     const keys = definitions.bindings.map(
       (b) => `${b.source}|${b.destination_type}|${b.destination}|${b.routing_key}`,
     );

@@ -35,8 +35,12 @@ import {
   consumerEngines,
   runsAttachmentConsumer,
   runsBecConsumer,
+  runsDlpConsumer,
   runsUrlConsumer,
 } from './config';
+import { DlpMetrics } from './engines/dlp/dlp-metrics';
+import { deleteUncommittedEvidence, S3EvidenceObjects } from './engines/dlp/evidence-objects';
+import { DlpEvidenceSweeper } from './engines/dlp/evidence-sweeper';
 import { BecMetrics } from './engines/bec/bec-metrics';
 import { BecHistorySweeper } from './engines/bec/history-sweeper';
 import type { EngineHealthCheck, ScanEngineAdapter } from './engine';
@@ -96,6 +100,13 @@ export const BEC_JOBS = Symbol('BEC_JOBS');
 
 export interface BecJobs {
   sweeper: BecHistorySweeper;
+}
+
+/** The dlp engine's evidence sweeper (D16), or null on replicas without its consumer. */
+export const DLP_JOBS = Symbol('DLP_JOBS');
+
+export interface DlpJobs {
+  sweeper: DlpEvidenceSweeper;
 }
 
 /** `amqp_connection_up{connection}` of the scan role. */
@@ -247,6 +258,65 @@ export class BecEngineHealth implements HealthIndicator {
   }
 }
 
+/** Readiness `dlp-engine` (versions, evidence mode) on replicas running the dlp engine (D22). */
+@Injectable()
+export class DlpEngineHealth implements HealthIndicator {
+  readonly healthName = 'dlp-engine';
+  constructor(@Inject(SCAN_ENGINES) private readonly engines: EngineRuntime[]) {}
+
+  async checkHealth(): Promise<void | HealthDetails> {
+    const check = engineHealthCheck(this.engines, this.healthName);
+    if (!check) throw new Error('the dlp engine does not run in this worker');
+    return (await check.check()) as void | HealthDetails;
+  }
+}
+
+/** Readiness `dlp-extractor` (extractor children ready, rlimit and permission mode; D4). */
+@Injectable()
+export class DlpExtractorHealth implements HealthIndicator {
+  readonly healthName = 'dlp-extractor';
+  constructor(@Inject(SCAN_ENGINES) private readonly engines: EngineRuntime[]) {}
+
+  async checkHealth(): Promise<void | HealthDetails> {
+    const check = engineHealthCheck(this.engines, this.healthName);
+    if (!check) throw new Error('the dlp engine does not run in this worker');
+    return (await check.check()) as void | HealthDetails;
+  }
+}
+
+/** The evidence retention sweeper of the dlp engine (D16). */
+export function createDlpJobs(options: {
+  config: Readonly<WorkerConfig>;
+  prisma: PrismaClient;
+  s3: Pick<S3Service, 'client' | 'mailBucket'>;
+  locks: LeaderLock;
+  registry: MetricsService;
+  logger: Logger;
+  lockName?: string;
+  organizationIds?: readonly bigint[];
+  now?: () => Date;
+}): DlpJobs {
+  const { config } = options;
+  return {
+    sweeper: new DlpEvidenceSweeper({
+      prisma: options.prisma,
+      objects: new S3EvidenceObjects(
+        options.s3.client,
+        options.s3.mailBucket,
+        config.SCAN_S3_TIMEOUT_MS,
+      ),
+      locks: options.locks,
+      metrics: DlpMetrics.for(options.registry),
+      logger: options.logger,
+      intervalMs: config.DLP_EVIDENCE_SWEEP_INTERVAL_MS,
+      txTimeoutMs: config.SCAN_DB_TIMEOUT_MS,
+      ...(options.lockName ? { lockName: options.lockName } : {}),
+      ...(options.organizationIds ? { organizationIds: options.organizationIds } : {}),
+      ...(options.now ? { now: options.now } : {}),
+    }),
+  };
+}
+
 /** The communication-history retention sweeper of the bec engine (B12). */
 export function createBecJobs(options: {
   config: Readonly<WorkerConfig>;
@@ -380,12 +450,31 @@ export function createScanInfrastructure(options: {
     if (config.SCAN_ENGINES.includes(engine)) metrics.stageTriggers.inc({ engine }, 0);
   }
   const registry = options.registry;
-  const store = new ScanRepository(
-    options.prisma,
-    config.SCAN_DB_TIMEOUT_MS,
-    metrics.lifecycle,
-    registry ? { becHistory: (result) => BecMetrics.for(registry).historyUpdate(result) } : {},
+  // Step 4.5 D3 step 9: the evidence object of a dlp final whose row was not committed is
+  // deleted (best effort; undecryptable either way).
+  const evidenceObjects = new S3EvidenceObjects(
+    options.s3.client,
+    options.s3.mailBucket,
+    config.SCAN_S3_TIMEOUT_MS,
   );
+  const store = new ScanRepository(options.prisma, config.SCAN_DB_TIMEOUT_MS, metrics.lifecycle, {
+    ...(registry ? { becHistory: (result) => BecMetrics.for(registry).historyUpdate(result) } : {}),
+    dlpEvidenceUncommitted: async (key, organizationId) => {
+      const deleted = await deleteUncommittedEvidence(
+        evidenceObjects,
+        (result) => (registry ? DlpMetrics.for(registry).evidence(result) : undefined),
+        key,
+        organizationId,
+      );
+      if (!deleted) {
+        logger.warn(
+          { organizationId: organizationId.toString() },
+          'dlp evidence object without a committed row was left (undecryptable)',
+        );
+      }
+    },
+    dlpIncidentSkipped: () => logger.warn('dlp incident not written: the message row is gone'),
+  });
   const settings = new SettingsResolver({
     source: store,
     config,
@@ -429,6 +518,7 @@ export class ScanningRuntime implements OnModuleInit, OnApplicationBootstrap, On
     @Inject(ATTACHMENT_JOBS) private readonly jobs: AttachmentJobs | null,
     @Inject(URL_JOBS) private readonly urlJobs: UrlJobs | null,
     @Inject(BEC_JOBS) private readonly becJobs: BecJobs | null,
+    @Inject(DLP_JOBS) private readonly dlpJobs: DlpJobs | null,
   ) {}
 
   get running(): boolean {
@@ -464,6 +554,7 @@ export class ScanningRuntime implements OnModuleInit, OnApplicationBootstrap, On
       this.urlJobs.sweeper.start();
     }
     this.becJobs?.sweeper.start();
+    this.dlpJobs?.sweeper.start();
     this.started = true;
     this.logger.info(
       {
@@ -505,6 +596,11 @@ export class ScanningRuntime implements OnModuleInit, OnApplicationBootstrap, On
         await this.becJobs.sweeper
           .stop()
           .catch(() => this.logger.warn('bec history sweeper stop failed'));
+      }
+      if (this.dlpJobs) {
+        await this.dlpJobs.sweeper
+          .stop()
+          .catch(() => this.logger.warn('dlp evidence sweeper stop failed'));
       }
     }
     // Kills the inspector children (graceful shutdown) after the consumers stopped.
@@ -719,11 +815,26 @@ export class ScanningModule {
           },
           inject: [PrismaService, SCAN_LOCKS, MetricsService],
         },
+        {
+          provide: DLP_JOBS,
+          useFactory: (
+            prisma: PrismaService,
+            s3: S3Service,
+            locks: LeaderLock,
+            registry: MetricsService,
+          ): DlpJobs | null => {
+            if (!runsDlpConsumer(config)) return null;
+            return createDlpJobs({ config, prisma, s3, locks, registry, logger: scanLogger });
+          },
+          inject: [PrismaService, S3Service, SCAN_LOCKS, MetricsService],
+        },
         ScannerBrokerHealth,
         ClamavHealth,
         InspectorHealth,
         UrlEngineHealth,
         BecEngineHealth,
+        DlpEngineHealth,
+        DlpExtractorHealth,
         ScanningRuntime,
       ],
       exports: [
@@ -734,6 +845,8 @@ export class ScanningModule {
         InspectorHealth,
         UrlEngineHealth,
         BecEngineHealth,
+        DlpEngineHealth,
+        DlpExtractorHealth,
       ],
     };
   }

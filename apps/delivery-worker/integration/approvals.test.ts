@@ -726,6 +726,220 @@ describe('development pass-through after scanning (R5, step 4.1 S15) end to end'
     await pt.stop();
   });
 
+  it('applies the round DLP action: allow/alert approved, require_approval/quarantine/block and a missing row held, skipped ignored, order kept, a shifted read redelivered (step 4.5 D13)', async () => {
+    const ptConsumer = fx.consumer('dev-passthrough-dlp');
+    const pt = poller<MessageScannedV1>(ptConsumer, EventTypes.MessageScanned, messageScannedV1, 0);
+    const approver = new DevPassThroughApprover(
+      pt,
+      fx.prisma,
+      RECORDER_TX_TIMEOUT_MS,
+      silentLogger,
+      worker.metrics,
+    );
+    const ptHandler = ours<MessageScannedV1>(
+      ptConsumer,
+      async (event, tx) => {
+        await approver.approve(event, tx);
+      },
+      RECORDER_TX_TIMEOUT_MS,
+    );
+    await pt.pollOnce(ptHandler);
+    const valueOf = async (
+      counterOf: { get(): Promise<{ values: Array<{ value: number; labels: object }> }> },
+      labels: Record<string, string> = {},
+    ) =>
+      (await counterOf.get()).values.find((v) =>
+        Object.entries(labels).every(
+          ([k, want]) => (v.labels as Record<string, string>)[k] === want,
+        ),
+      )?.value ?? 0;
+    const m = worker.metrics;
+    const withDlp = (
+      message: MessageFixture,
+      dlp: string,
+      overrides: Partial<MessageScannedV1> = {},
+      bec = 'clean',
+    ): MessageScannedV1 =>
+      messageScannedV1.parse({
+        ...scannedPayload(message),
+        // One scan per message: dlp_scan_results is unique per (scan_id, received_at).
+        scanId: message.messageId.toString(),
+        verdict: 'suspicious',
+        engines: [
+          { engine: 'rspamd', required: true, outcome: 'clean', attempts: 1 },
+          { engine: 'bec', required: true, outcome: bec, attempts: 1 },
+          { engine: 'dlp', required: true, outcome: dlp, attempts: 1 },
+        ],
+        ...overrides,
+      });
+    // The round's dlp_scan_results row as the email-worker writes it with the dlp final.
+    const dlpResult = (message: MessageFixture, action: string, lifecycleRound = 0) =>
+      fx.prisma.dlpScanResult.create({
+        data: {
+          receivedAt: message.receivedAt,
+          messageId: message.messageId,
+          organizationId: message.organizationId,
+          scanId: message.messageId,
+          lifecycleRound,
+          direction: 'outbound',
+          engineVersion: 'dlp/1;dict=0123abcd;data=4567ef01;ext=dlp-extract/1',
+          rulesVersion: 'dlp-map/1',
+          settingsVersion: 'dlp-map/1;p=0123456789ab;t=none',
+          policyVersion: 'pol/1;h=0123456789ab',
+          extractorVersion: 'dlp-extract/1',
+          verdict: action === 'allow' ? 'clean' : 'suspicious',
+          action: action as 'allow',
+          actionSource: action === 'allow' ? 'none' : 'default_policy',
+          coverage: 'complete',
+          coverageDetail: [],
+          categories: [],
+          findings: [],
+          policy: { winner: null, matched: [], exceptionsApplied: [] },
+          findingCount: action === 'allow' ? 0 : 1,
+          evidenceStatus: 'none',
+          durationMs: 3,
+        },
+      });
+    const newMessage = (tag: string) =>
+      fx.message(org, { state: 'scanned', recipients: [{ address: `dlp-${tag}@ext-pt.test` }] });
+
+    const before = {
+      dlpAction: await valueOf(m.approvalsSkipped, { reason: 'dlp_action' }),
+      becVerdict: await valueOf(m.approvalsSkipped, { reason: 'bec_verdict' }),
+      malicious: await valueOf(m.approvalsSkipped, { reason: 'malicious_verdict' }),
+      alerts: await valueOf(m.dlpAlertsApproved),
+      missing: await valueOf(m.dlpHolds, { action: 'missing' }),
+      inconsistent: await valueOf(m.inconsistentReads, { read: 'dlp_result' }),
+      holds: {} as Record<string, number>,
+    };
+    const heldActions = ['require_approval', 'quarantine', 'block'] as const;
+    for (const action of heldActions) before.holds[action] = await valueOf(m.dlpHolds, { action });
+
+    const held: Array<{ message: MessageFixture; eventId: string }> = [];
+    for (const [i, action] of heldActions.entries()) {
+      const message = await newMessage(`held-${i}`);
+      await dlpResult(message, action);
+      held.push({
+        message,
+        eventId: await outboxScanned(message, withDlp(message, 'suspicious'), `it-dlp-h${i}`),
+      });
+    }
+    // A definite dlp final without its result row: held (fail-safe).
+    const noRow = await newMessage('norow');
+    held.push({
+      message: noRow,
+      eventId: await outboxScanned(noRow, withDlp(noRow, 'unknown'), 'it-dlp-hn'),
+    });
+    // Order: malicious and BEC holds keep their reasons although the dlp action is block.
+    const malicious = await newMessage('malicious');
+    await dlpResult(malicious, 'block');
+    held.push({
+      message: malicious,
+      eventId: await outboxScanned(
+        malicious,
+        withDlp(malicious, 'suspicious', { verdict: 'malicious' }),
+        'it-dlp-om',
+      ),
+    });
+    const becHeld = await newMessage('bec');
+    await dlpResult(becHeld, 'block');
+    held.push({
+      message: becHeld,
+      eventId: await outboxScanned(
+        becHeld,
+        withDlp(becHeld, 'suspicious', {}, 'suspicious'),
+        'it-dlp-ob',
+      ),
+    });
+
+    const approved: MessageFixture[] = [];
+    for (const [i, action] of (['allow', 'alert'] as const).entries()) {
+      const message = await newMessage(`ok-${i}`);
+      await dlpResult(message, action);
+      await outboxScanned(
+        message,
+        withDlp(message, action === 'allow' ? 'clean' : 'suspicious'),
+        `it-dlp-a${i}`,
+      );
+      approved.push(message);
+    }
+    // A skipped dlp final (inbound not scanned) is not read, even with a block row present.
+    const skippedDlp = await newMessage('skipped');
+    await dlpResult(skippedDlp, 'block');
+    await outboxScanned(skippedDlp, withDlp(skippedDlp, 'skipped'), 'it-dlp-sk');
+    approved.push(skippedDlp);
+
+    await eventually(
+      async () => {
+        await pt.pollOnce(ptHandler);
+        const counts = await Promise.all(approved.map(async (x) => (await approvalRows(x)).length));
+        return counts.every((count) => count === 1);
+      },
+      15_000,
+      'approvals of the allow/alert/skipped dlp results',
+    );
+    for (const { message, eventId } of held) {
+      expect(await approvalRows(message)).toHaveLength(0);
+      expect(await fx.lifecycle(message)).toMatchObject({ status: 'scanned', version: 3 });
+      expect(
+        await fx.prisma.messageIdempotency.count({ where: { consumer: ptConsumer, eventId } }),
+      ).toBe(1);
+    }
+    for (const message of approved) {
+      expect(await fx.lifecycle(message)).toMatchObject({ status: 'approved' });
+    }
+    expect(await valueOf(m.approvalsSkipped, { reason: 'dlp_action' })).toBe(before.dlpAction + 4);
+    for (const action of heldActions) {
+      expect(await valueOf(m.dlpHolds, { action })).toBe(before.holds[action]! + 1);
+    }
+    expect(await valueOf(m.dlpHolds, { action: 'missing' })).toBe(before.missing + 1);
+    expect(await valueOf(m.dlpAlertsApproved)).toBe(before.alerts + 1);
+    expect(await valueOf(m.approvalsSkipped, { reason: 'malicious_verdict' })).toBe(
+      before.malicious + 1,
+    );
+    expect(await valueOf(m.approvalsSkipped, { reason: 'bec_verdict' })).toBe(
+      before.becVerdict + 1,
+    );
+
+    // A row of another round under the event's scan id does not echo: inconsistent read, the
+    // ledger transaction rolls back (no ledger row, no approval) and the event is redelivered.
+    const shifted = await newMessage('shifted');
+    await dlpResult(shifted, 'allow', 1);
+    const shiftedPayload = withDlp(shifted, 'clean');
+    const envelope: EventEnvelope<MessageScannedV1> = {
+      eventId: uuidv7(),
+      eventType: EventTypes.MessageScanned,
+      occurredAt: new Date().toISOString(),
+      correlationId: 'it-dlp-shift',
+      organizationId: org.toString(),
+      payload: shiftedPayload,
+    };
+    // The where clause filters on the round, so the wrong read is forced through a transaction
+    // proxy whose findFirst hands back the other round's row (what the echo check exists for).
+    const forged = await fx.prisma.dlpScanResult.findFirstOrThrow({
+      where: { messageId: shifted.messageId, receivedAt: shifted.receivedAt },
+    });
+    await expect(
+      fx.prisma.$transaction(async (tx) => {
+        const proxy = new Proxy(tx, {
+          get(target, prop, receiver) {
+            if (prop === 'dlpScanResult') {
+              return { findFirst: () => Promise.resolve(forged) };
+            }
+            return Reflect.get(target, prop, receiver) as unknown;
+          },
+        });
+        await approver.approve(envelope, proxy);
+      }),
+    ).rejects.toThrow('inconsistent read of dlp_scan_results');
+    expect(await approvalRows(shifted)).toHaveLength(0);
+    expect(await fx.lifecycle(shifted)).toMatchObject({ status: 'scanned', version: 3 });
+    expect(await valueOf(m.inconsistentReads, { read: 'dlp_result' })).toBe(
+      before.inconsistent + 1,
+    );
+    await pt.stop();
+  });
+
   it('approves nothing for a message that is not scanned (ignored, counted, no approval)', async () => {
     const approver = new DevPassThroughApprover(
       { start: () => undefined, stop: () => Promise.resolve() },

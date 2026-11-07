@@ -36,9 +36,9 @@ const daily = (...names: string[]): ExistingPartition[] => [
 const utc = (iso: string) => new Date(iso);
 
 describe('registry', () => {
-  it('lists the 28 partitioned tables (D3, steps 2.3, 3.1, 4.1, 4.2, 4.3 and 4.4) with their retention', () => {
-    expect(PARTITION_REGISTRY).toHaveLength(28);
-    expect(new Set(PARTITION_REGISTRY.map((s) => s.table)).size).toBe(28);
+  it('lists the 30 partitioned tables (D3, steps 2.3, 3.1, 4.1, 4.2, 4.3, 4.4 and 4.5) with their retention', () => {
+    expect(PARTITION_REGISTRY).toHaveLength(30);
+    expect(new Set(PARTITION_REGISTRY.map((s) => s.table)).size).toBe(30);
     const byTable = Object.fromEntries(PARTITION_REGISTRY.map((s) => [s.table, s]));
     expect(byTable.email_messages).toMatchObject({
       column: 'received_at',
@@ -127,6 +127,25 @@ describe('registry', () => {
     });
     expect(byTable.bec_scan_results!.retention).toBe(byTable.email_scans!.retention);
     expect(byTable.bec_scan_results!.guard).toBeUndefined();
+    // Step 4.5: the DLP result lives as long as the scan rounds; evidence metadata one month
+    // longer than the maximum tenant evidence retention (180 days) allows to expire.
+    expect(byTable.dlp_scan_results).toMatchObject({
+      column: 'received_at',
+      granularity: 'month',
+      retention: 6,
+      drop: true,
+      tier: 'core',
+    });
+    expect(byTable.dlp_scan_results!.retention).toBe(byTable.email_scans!.retention);
+    expect(byTable.dlp_evidence).toMatchObject({
+      column: 'received_at',
+      granularity: 'month',
+      retention: 7,
+      drop: true,
+      tier: 'core',
+    });
+    expect(byTable.dlp_evidence!.retention! * 30).toBeGreaterThan(180);
+    expect(byTable.dlp_evidence!.guard).toBeUndefined();
     expect(byTable.audit_logs).toMatchObject({
       column: 'created_at',
       retention: null,

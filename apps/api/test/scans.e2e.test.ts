@@ -760,6 +760,17 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
           platform: expect.objectContaining({ suspiciousScore: 40, maliciousScore: 80 }),
           effective: expect.objectContaining({ history: { enabled: false, retentionDays: 365 } }),
         }),
+        expect.objectContaining({
+          engine: 'dlp',
+          required: true,
+          tenantMayDisable: false,
+          override: null,
+          platform: expect.objectContaining({ confidenceThreshold: 0.6, defaultPolicy: 'alert' }),
+          effective: expect.objectContaining({
+            inboundEnabled: false,
+            evidence: { enabled: true, retentionDays: 30 },
+          }),
+        }),
       ]);
       expect(res.body.note).toContain('SCAN_SETTINGS_CACHE_TTL_MS');
     });

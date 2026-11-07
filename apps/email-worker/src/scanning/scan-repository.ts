@@ -9,6 +9,7 @@ import { type Prisma, processOnce, type PrismaClient } from '@email-gateway/data
 import {
   attachmentSandboxRequestedV1,
   EventTypes,
+  messageDlpIncidentV1,
   messageScanStageReadyV1,
   messageScannedV1,
   urlInspectionRequestedV1,
@@ -24,6 +25,7 @@ import { aggregateRound, type FinalEngineResult } from './aggregate';
 import type {
   AttachmentResultInput,
   BecChildRows,
+  DlpChildRows,
   SandboxSubmissionInput,
   UrlChildRows,
 } from './engine';
@@ -71,11 +73,21 @@ const UINT32_MAX = 4_294_967_295;
 export interface ScanRepositoryHooks {
   /** One `bec_contact_history` upsert: `inserted` (new row) or `updated`. */
   becHistory?(result: 'inserted' | 'updated'): void;
+  /**
+   * A dlp final carried an evidence object whose row was not committed (a duplicate finalizer, a
+   * ledger duplicate, or a transaction that threw): the object is undecryptable (its data key
+   * existed only in the row) and the owner deletes it best effort (step 4.5 D3 step 9).
+   */
+  dlpEvidenceUncommitted?(objectKey: string, organizationId: bigint): Promise<void>;
+  /** A dlp incident was not written because the message row is gone (step 4.4 WP5 fix 6). */
+  dlpIncidentSkipped?(reason: 'message_gone'): void;
 }
 
 /** What the child rows of a final need beyond the round (sandbox events, step 4.2 A11). */
 interface ChildRowContext {
   direction: 'inbound' | 'outbound' | 'internal' | null;
+  /** The message row was locked (absent: deleted while its round was open). */
+  messagePresent?: boolean;
   correlationId: string;
   now: Date;
 }
@@ -316,6 +328,22 @@ export class ScanRepository implements ScanStore {
   }
 
   async finalize(input: FinalizeInput): Promise<FinalizeResult> {
+    const evidenceKey = input.final?.childRows?.dlp?.evidence?.objectKey ?? null;
+    if (evidenceKey === null) return this.finalizeOnce(input);
+    let result: FinalizeResult;
+    try {
+      result = await this.finalizeOnce(input);
+    } catch (error) {
+      await this.hooks.dlpEvidenceUncommitted?.(evidenceKey, input.round.organizationId);
+      throw error;
+    }
+    if (result.kind === 'duplicate' || !result.inserted) {
+      await this.hooks.dlpEvidenceUncommitted?.(evidenceKey, input.round.organizationId);
+    }
+    return result;
+  }
+
+  private async finalizeOnce(input: FinalizeInput): Promise<FinalizeResult> {
     const result = await processOnce(this.txPrisma, input.consumer, input.eventId, async (tx) => {
       const snapshot = await this.lockMessage(tx, input.round);
       const scan = await this.lockScan(tx, input.round);
@@ -325,6 +353,7 @@ export class ScanRepository implements ScanStore {
         if (!existing.finalExists) {
           await this.insertFinal(tx, scan, input.final, {
             direction: snapshot?.direction ?? null,
+            messagePresent: snapshot !== null,
             correlationId: input.completion.correlationId,
             now: input.completion.now,
           });
@@ -580,6 +609,110 @@ export class ScanRepository implements ScanStore {
       await this.insertUrlRows(tx, scan, children.urls, context);
     }
     if (children?.bec) await this.insertBecRows(tx, scan, children.bec);
+    if (children?.dlp) {
+      if (!context) throw new NonRetryableError('dlp_context_missing');
+      await this.insertDlpRows(tx, scan, children.dlp, context);
+    }
+  }
+
+  /**
+   * The dlp engine's child rows (step 4.5 D19), in the final row's transaction, only when the
+   * final row was inserted: the `dlp_scan_results` row (unique per scan), the `dlp_evidence` row
+   * (object key under `org/<org>/dlp-evidence/`, else `dlp_evidence_key_invalid`) and the
+   * `mail.message.dlp_incident.v1` outbox row (payload validated by the event contract, else
+   * `dlp_incident_payload_invalid`; a violation never commits half a finalization: the delivery is
+   * dead-lettered). A message whose row is gone writes no incident (as step 4.4 WP5 fix 6).
+   */
+  private async insertDlpRows(
+    tx: Prisma.TransactionClient,
+    scan: ScanRound,
+    rows: DlpChildRows,
+    context: ChildRowContext,
+  ): Promise<void> {
+    const { result, evidence, incident } = rows;
+    if (result.lifecycleRound !== scan.round) throw new NonRetryableError('dlp_round_mismatch');
+    const scope = {
+      receivedAt: scan.receivedAt,
+      messageId: scan.messageId,
+      organizationId: scan.organizationId,
+      scanId: scan.scanId,
+    };
+    await tx.dlpScanResult.createMany({
+      data: [
+        {
+          ...scope,
+          lifecycleRound: scan.round,
+          direction: result.direction,
+          engineVersion: result.engineVersion,
+          rulesVersion: result.rulesVersion,
+          settingsVersion: result.settingsVersion,
+          policyVersion: result.policyVersion,
+          extractorVersion: result.extractorVersion,
+          verdict: result.verdict,
+          action: result.action,
+          actionSource: result.actionSource,
+          matchedPolicyId: result.matchedPolicyId,
+          matchedRuleId: result.matchedRuleId,
+          coverage: result.coverage,
+          coverageDetail: json(result.coverageDetail),
+          categories: json(result.categories),
+          findings: json(result.findings),
+          policy: json(result.policy),
+          findingCount: Math.max(0, Math.round(result.findingCount)),
+          evidenceStatus: result.evidenceStatus,
+          durationMs: Math.max(0, Math.round(result.durationMs)),
+        },
+      ],
+      skipDuplicates: true,
+    });
+    if (evidence) {
+      const prefix = `org/${scan.organizationId.toString()}/dlp-evidence/`;
+      if (!evidence.objectKey.startsWith(prefix) || evidence.objectKey.includes('..')) {
+        throw new NonRetryableError('dlp_evidence_key_invalid');
+      }
+      await tx.dlpEvidence.createMany({
+        data: [
+          {
+            ...scope,
+            objectKey: evidence.objectKey,
+            objectSha256: evidence.objectSha256,
+            objectSizeBytes: evidence.objectSizeBytes,
+            wrappedKey: evidence.wrappedKey,
+            keyId: evidence.keyId,
+            algorithm: evidence.algorithm,
+            matchCount: Math.min(65_535, Math.max(0, evidence.matchCount)),
+            expiresAt: evidence.expiresAt,
+          },
+        ],
+        skipDuplicates: true,
+      });
+    }
+    if (!incident) return;
+    if (context.messagePresent === false) {
+      this.hooks.dlpIncidentSkipped?.('message_gone');
+      return;
+    }
+    const parsed = messageDlpIncidentV1.safeParse(incident.payload);
+    if (
+      !parsed.success ||
+      parsed.data.messageId !== scan.messageId.toString() ||
+      parsed.data.scanId !== scan.scanId.toString() ||
+      parsed.data.lifecycleRound !== scan.round
+    ) {
+      throw new NonRetryableError('dlp_incident_payload_invalid');
+    }
+    await tx.messageOutbox.create({
+      data: {
+        eventId: uuidv7(context.now.getTime()),
+        organizationId: scan.organizationId,
+        eventType: EventTypes.MessageDlpIncident,
+        aggregateType: 'message',
+        aggregateId: scan.messageId.toString(),
+        correlationId: context.correlationId,
+        payload: parsed.data,
+      },
+      select: { id: true },
+    });
   }
 
   /**

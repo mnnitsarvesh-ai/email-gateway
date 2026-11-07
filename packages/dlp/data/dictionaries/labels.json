@@ -1,0 +1,103 @@
+{
+  "version": 1,
+  "dictionary": "labels",
+  "description": "Classification labels (CF1, step 4.5 D5, D8).",
+  "entries": [
+    {
+      "id": "en.labels.001",
+      "phrase": "confidential"
+    },
+    {
+      "id": "en.labels.002",
+      "phrase": "strictly confidential"
+    },
+    {
+      "id": "en.labels.003",
+      "phrase": "highly confidential"
+    },
+    {
+      "id": "en.labels.004",
+      "phrase": "company confidential"
+    },
+    {
+      "id": "en.labels.005",
+      "phrase": "restricted"
+    },
+    {
+      "id": "en.labels.006",
+      "phrase": "internal only"
+    },
+    {
+      "id": "en.labels.007",
+      "phrase": "for internal use only"
+    },
+    {
+      "id": "en.labels.008",
+      "phrase": "internal use only"
+    },
+    {
+      "id": "en.labels.009",
+      "phrase": "secret"
+    },
+    {
+      "id": "en.labels.010",
+      "phrase": "top secret"
+    },
+    {
+      "id": "en.labels.011",
+      "phrase": "not for distribution"
+    },
+    {
+      "id": "en.labels.012",
+      "phrase": "do not distribute"
+    },
+    {
+      "id": "en.labels.013",
+      "phrase": "privileged and confidential"
+    },
+    {
+      "id": "en.labels.014",
+      "phrase": "attorney client privileged"
+    },
+    {
+      "id": "en.labels.015",
+      "phrase": "attorney-client privileged communication"
+    },
+    {
+      "id": "en.labels.016",
+      "phrase": "proprietary and confidential"
+    },
+    {
+      "id": "hi.labels.001",
+      "phrase": "गोपनीय"
+    },
+    {
+      "id": "hi.labels.002",
+      "phrase": "अति गोपनीय"
+    },
+    {
+      "id": "hi.labels.003",
+      "phrase": "केवल आंतरिक उपयोग के लिए"
+    },
+    {
+      "id": "hi.labels.004",
+      "phrase": "प्रतिबंधित"
+    },
+    {
+      "id": "hi-Latn.labels.001",
+      "phrase": "gopniya"
+    },
+    {
+      "id": "hi-Latn.labels.002",
+      "phrase": "gopneeya"
+    },
+    {
+      "id": "hi-Latn.labels.003",
+      "phrase": "ati gopniya"
+    },
+    {
+      "id": "hi-Latn.labels.004",
+      "phrase": "sirf andaruni upyog ke liye"
+    }
+  ]
+}

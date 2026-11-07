@@ -1,0 +1,392 @@
+{
+  "version": 1,
+  "dictionary": "context",
+  "description": "Positive context terms per detector family (step 4.5 D5, D7).",
+  "entries": [
+    {
+      "id": "en.context.001",
+      "phrase": "card",
+      "group": "card"
+    },
+    {
+      "id": "en.context.002",
+      "phrase": "credit card",
+      "group": "card"
+    },
+    {
+      "id": "en.context.003",
+      "phrase": "debit card",
+      "group": "card"
+    },
+    {
+      "id": "en.context.004",
+      "phrase": "credit",
+      "group": "card"
+    },
+    {
+      "id": "en.context.005",
+      "phrase": "debit",
+      "group": "card"
+    },
+    {
+      "id": "en.context.006",
+      "phrase": "visa",
+      "group": "card"
+    },
+    {
+      "id": "en.context.007",
+      "phrase": "mastercard",
+      "group": "card"
+    },
+    {
+      "id": "en.context.008",
+      "phrase": "amex",
+      "group": "card"
+    },
+    {
+      "id": "en.context.009",
+      "phrase": "american express",
+      "group": "card"
+    },
+    {
+      "id": "en.context.010",
+      "phrase": "rupay",
+      "group": "card"
+    },
+    {
+      "id": "en.context.011",
+      "phrase": "cvv",
+      "group": "card"
+    },
+    {
+      "id": "en.context.012",
+      "phrase": "cvc",
+      "group": "card"
+    },
+    {
+      "id": "en.context.013",
+      "phrase": "expiry",
+      "group": "card"
+    },
+    {
+      "id": "en.context.014",
+      "phrase": "exp",
+      "group": "card"
+    },
+    {
+      "id": "en.context.015",
+      "phrase": "valid thru",
+      "group": "card"
+    },
+    {
+      "id": "en.context.016",
+      "phrase": "valid through",
+      "group": "card"
+    },
+    {
+      "id": "en.context.017",
+      "phrase": "card no",
+      "group": "card"
+    },
+    {
+      "id": "en.context.018",
+      "phrase": "card number",
+      "group": "card"
+    },
+    {
+      "id": "en.context.019",
+      "phrase": "iban",
+      "group": "iban"
+    },
+    {
+      "id": "en.context.020",
+      "phrase": "account",
+      "group": "iban"
+    },
+    {
+      "id": "en.context.021",
+      "phrase": "bank",
+      "group": "iban"
+    },
+    {
+      "id": "en.context.022",
+      "phrase": "beneficiary",
+      "group": "iban"
+    },
+    {
+      "id": "en.context.023",
+      "phrase": "a/c",
+      "group": "bank_account"
+    },
+    {
+      "id": "en.context.024",
+      "phrase": "account",
+      "group": "bank_account"
+    },
+    {
+      "id": "en.context.025",
+      "phrase": "acct",
+      "group": "bank_account"
+    },
+    {
+      "id": "en.context.026",
+      "phrase": "account no",
+      "group": "bank_account"
+    },
+    {
+      "id": "en.context.027",
+      "phrase": "account number",
+      "group": "bank_account"
+    },
+    {
+      "id": "en.context.028",
+      "phrase": "bank",
+      "group": "bank_account"
+    },
+    {
+      "id": "en.context.029",
+      "phrase": "ifsc",
+      "group": "bank_account"
+    },
+    {
+      "id": "en.context.030",
+      "phrase": "khata",
+      "group": "bank_account"
+    },
+    {
+      "id": "en.context.031",
+      "phrase": "swift",
+      "group": "swift"
+    },
+    {
+      "id": "en.context.032",
+      "phrase": "bic",
+      "group": "swift"
+    },
+    {
+      "id": "en.context.033",
+      "phrase": "swift code",
+      "group": "swift"
+    },
+    {
+      "id": "en.context.034",
+      "phrase": "pan",
+      "group": "pan"
+    },
+    {
+      "id": "en.context.035",
+      "phrase": "pan no",
+      "group": "pan"
+    },
+    {
+      "id": "en.context.036",
+      "phrase": "pan card",
+      "group": "pan"
+    },
+    {
+      "id": "en.context.037",
+      "phrase": "permanent account number",
+      "group": "pan"
+    },
+    {
+      "id": "en.context.038",
+      "phrase": "income tax",
+      "group": "pan"
+    },
+    {
+      "id": "en.context.039",
+      "phrase": "aadhaar",
+      "group": "aadhaar"
+    },
+    {
+      "id": "en.context.040",
+      "phrase": "aadhar",
+      "group": "aadhaar"
+    },
+    {
+      "id": "en.context.041",
+      "phrase": "uid",
+      "group": "aadhaar"
+    },
+    {
+      "id": "en.context.042",
+      "phrase": "uidai",
+      "group": "aadhaar"
+    },
+    {
+      "id": "en.context.043",
+      "phrase": "enrolment",
+      "group": "aadhaar"
+    },
+    {
+      "id": "en.context.044",
+      "phrase": "enrollment",
+      "group": "aadhaar"
+    },
+    {
+      "id": "en.context.045",
+      "phrase": "passport",
+      "group": "passport"
+    },
+    {
+      "id": "en.context.046",
+      "phrase": "passport no",
+      "group": "passport"
+    },
+    {
+      "id": "en.context.047",
+      "phrase": "passport number",
+      "group": "passport"
+    },
+    {
+      "id": "en.context.048",
+      "phrase": "mobile",
+      "group": "mobile"
+    },
+    {
+      "id": "en.context.049",
+      "phrase": "mob",
+      "group": "mobile"
+    },
+    {
+      "id": "en.context.050",
+      "phrase": "phone",
+      "group": "mobile"
+    },
+    {
+      "id": "en.context.051",
+      "phrase": "contact",
+      "group": "mobile"
+    },
+    {
+      "id": "en.context.052",
+      "phrase": "whatsapp",
+      "group": "mobile"
+    },
+    {
+      "id": "en.context.053",
+      "phrase": "cell",
+      "group": "mobile"
+    },
+    {
+      "id": "en.context.054",
+      "phrase": "dob",
+      "group": "dob"
+    },
+    {
+      "id": "en.context.055",
+      "phrase": "date of birth",
+      "group": "dob"
+    },
+    {
+      "id": "en.context.056",
+      "phrase": "birth date",
+      "group": "dob"
+    },
+    {
+      "id": "en.context.057",
+      "phrase": "born on",
+      "group": "dob"
+    },
+    {
+      "id": "en.context.058",
+      "phrase": "aws secret access key",
+      "group": "aws_secret"
+    },
+    {
+      "id": "en.context.059",
+      "phrase": "secret access key",
+      "group": "aws_secret"
+    },
+    {
+      "id": "en.context.060",
+      "phrase": "aws secret",
+      "group": "aws_secret"
+    },
+    {
+      "id": "hi.context.001",
+      "phrase": "कार्ड",
+      "group": "card"
+    },
+    {
+      "id": "hi.context.002",
+      "phrase": "खाता",
+      "group": "bank_account"
+    },
+    {
+      "id": "hi.context.003",
+      "phrase": "बैंक",
+      "group": "bank_account"
+    },
+    {
+      "id": "hi.context.004",
+      "phrase": "बैंक",
+      "group": "iban"
+    },
+    {
+      "id": "hi.context.005",
+      "phrase": "पैन",
+      "group": "pan"
+    },
+    {
+      "id": "hi.context.006",
+      "phrase": "आधार",
+      "group": "aadhaar"
+    },
+    {
+      "id": "hi.context.007",
+      "phrase": "पासपोर्ट",
+      "group": "passport"
+    },
+    {
+      "id": "hi.context.008",
+      "phrase": "फ़ोन",
+      "group": "mobile"
+    },
+    {
+      "id": "hi.context.009",
+      "phrase": "फोन",
+      "group": "mobile"
+    },
+    {
+      "id": "hi.context.010",
+      "phrase": "मोबाइल",
+      "group": "mobile"
+    },
+    {
+      "id": "hi.context.011",
+      "phrase": "जन्म तिथि",
+      "group": "dob"
+    },
+    {
+      "id": "hi-Latn.context.001",
+      "phrase": "khata number",
+      "group": "bank_account"
+    },
+    {
+      "id": "hi-Latn.context.002",
+      "phrase": "bank khata",
+      "group": "bank_account"
+    },
+    {
+      "id": "hi-Latn.context.003",
+      "phrase": "aadhaar card",
+      "group": "aadhaar"
+    },
+    {
+      "id": "hi-Latn.context.004",
+      "phrase": "aadhar card",
+      "group": "aadhaar"
+    },
+    {
+      "id": "hi-Latn.context.005",
+      "phrase": "janm tithi",
+      "group": "dob"
+    },
+    {
+      "id": "hi-Latn.context.006",
+      "phrase": "janam tithi",
+      "group": "dob"
+    }
+  ]
+}

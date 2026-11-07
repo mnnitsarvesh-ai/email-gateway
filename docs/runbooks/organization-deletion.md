@@ -95,6 +95,27 @@ The future job (a scheduled worker, one instance at a time under a lock) must ap
 
    A tenant can also remove its communication history at any time without deleting the organization (`DELETE /api/v1/bec/history`, MFA, audited `bec_history.purged`).
 
+   **Data loss prevention tables and evidence objects (step 4.5).** The six non-partitioned DLP tables (`dlp_policies`, `dlp_policy_rules`, `dlp_exceptions`, `dlp_custom_patterns`, `dlp_keyword_dictionaries`, `dlp_compliance_settings`) reference `organizations` with `ON DELETE RESTRICT`, rules reference policies and exceptions reference policies and rules (`RESTRICT`), and the evidence rows (`dlp_evidence`, partitioned, no foreign keys) point at encrypted objects in the mail bucket under `org/<org>/dlp-evidence/`. The purge deletes them with `DlpTenantDataRepository.purgeOrganization(systemScope(<organization id>))` (`apps/api/src/modules/tenant-data/dlp-tenant-data.repository.ts`), batched (500 rows per statement), resumable and idempotent, in this order:
+
+   1. `dlp_evidence`, per batch ordered by id: **crypto-shred** (`wrapped_key = NULL`, `purged_at`, `purge_reason = organization_deleted`; the data key exists only in the row, so the object and any noncurrent version of it are undecryptable from that moment), then delete each object (only keys under `org/<org>/dlp-evidence/`; a missing object is success; any other S3 error aborts the run, which is simply re-run), then delete the rows;
+   2. `dlp_scan_results` (partitioned, no foreign keys; matched on its `(organization_id, received_at)` index);
+   3. `dlp_exceptions` (before the rules and policies they target), `dlp_policy_rules` (before their policies), `dlp_policies`, `dlp_custom_patterns`, `dlp_keyword_dictionaries`, `dlp_compliance_settings`.
+
+   It returns the deleted count per table plus `evidenceObjects` for the `organization.purged` audit row. Objects of attempts that crashed before their row was committed (orphans) are undecryptable by construction (no wrapped key anywhere) but have no row: the purge job must also list and delete the `org/<org>/dlp-evidence/` prefix (the repository deletes only keys recorded in rows). Verify with:
+
+   ```sql
+   SELECT 'dlp_evidence' t, COUNT(*) FROM dlp_evidence WHERE organization_id = ?
+   UNION ALL SELECT 'dlp_scan_results', COUNT(*) FROM dlp_scan_results WHERE organization_id = ?
+   UNION ALL SELECT 'dlp_exceptions', COUNT(*) FROM dlp_exceptions WHERE organization_id = ?
+   UNION ALL SELECT 'dlp_policy_rules', COUNT(*) FROM dlp_policy_rules WHERE organization_id = ?
+   UNION ALL SELECT 'dlp_policies', COUNT(*) FROM dlp_policies WHERE organization_id = ?
+   UNION ALL SELECT 'dlp_custom_patterns', COUNT(*) FROM dlp_custom_patterns WHERE organization_id = ?
+   UNION ALL SELECT 'dlp_keyword_dictionaries', COUNT(*) FROM dlp_keyword_dictionaries WHERE organization_id = ?
+   UNION ALL SELECT 'dlp_compliance_settings', COUNT(*) FROM dlp_compliance_settings WHERE organization_id = ?;
+   ```
+
+   and list `org/<org>/dlp-evidence/` in the mail bucket (expected empty). A tenant can purge its DLP evidence at any time without deleting the organization (`DELETE /api/v1/dlp/evidence`, `dlp:manage` + MFA, audited `dlp_evidence.purged`); evidence also expires by the tenant's retention (≤ 180 days, swept by the email-worker).
+
 5. **Free verified domain names:** deleting the organization's `domains` rows releases `domains.verified_name` (the generated unique column), so the domain can be verified by another organization. This must happen only in the purge, never at confirmation, so a cancelled deletion keeps its domains.
 6. Keep `audit_logs` (append-only, retained by policy) and `login_audit_logs` until their own retention ends; write `organization.purged` with counts, then hard-delete or tombstone the `organizations` row (keep the slug reserved for a period to avoid confusion).
 7. Make every step resumable: a crash mid-purge must leave the organization `deleted` and be safe to re-run.

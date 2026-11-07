@@ -7,10 +7,10 @@ import {
 } from './registry';
 
 /**
- * RabbitMQ topology v6 as data (step 3.2 §3, ADR-0024; v2: step 3.3 L7, ADR-0025; v3: step 4.1
+ * RabbitMQ topology v7 as data (step 3.2 §3, ADR-0024; v2: step 3.3 L7, ADR-0025; v3: step 4.1
  * S2, ADR-0026; v4: step 4.2 A2, ADR-0028; v5: step 4.3 U2, ADR-0029; v6: step 4.4 B3,
- * ADR-0033): exactly six topic exchanges and seventeen quorum queues in the vhost
- * `email-gateway`. v2 added the bindings of `mail.message.rescan_requested.v1`
+ * ADR-0033; v7: step 4.5 D2, ADR-0036): exactly six topic exchanges and seventeen quorum queues
+ * in the vhost `email-gateway`. v2 added the bindings of `mail.message.rescan_requested.v1`
  * (`email.security`) to the five scan queues, and `mail.message.state_changed.v1`
  * (`email.events`) reaches only the `email.analytics` firehose. v3 makes `scan.spam` a work queue
  * (the Rspamd engine of the email-worker scan role, ledger consumer `email-worker.scan.rspamd`)
@@ -36,6 +36,15 @@ import {
  * and never `parsed.v1` / `rescan_requested.v1`. `scan.bec` is no dot-prefix of another queue, so
  * its retry binding is the plain `retry.scan.bec.#`. `scan.auth` stays reserved (its reason is
  * unchanged); the exchanges and the other queues are unchanged.
+ *
+ * v7 makes `scan.dlp` a work queue: the data loss prevention engine of the email-worker scan role
+ * (ledger consumer `email-worker.scan.dlp`), a **stage-1** engine like rspamd, url and
+ * attachment, so its event bindings (`parsed.v1`, `rescan_requested.v1`) and its plain retry
+ * binding `retry.scan.dlp.#` (no dot-prefix of another queue) are the ones the dormant queue
+ * already had: only its role, consumer, retry policy and queue policy change, and the binding
+ * count is unchanged. v7 registers `mail.message.dlp_incident.v1` on `email.security`, which no
+ * queue binds in this step (it reaches only the `email.analytics` firehose; the notification
+ * worker binds it in step 6.2). The exchanges and the other queues are unchanged.
  * `infrastructure/rabbitmq/definitions.json` is
  * generated from `TOPOLOGY` (`pnpm --filter @email-gateway/event-contracts topology:export`) and
  * imported by `infrastructure/rabbitmq/init.mjs`; services never declare, they verify passively.
@@ -44,7 +53,7 @@ import {
  * target, overflow, length limits) is a per-queue policy `eg.<queue>` (Q4), so it changes without
  * re-declaring a queue.
  */
-export const TOPOLOGY_VERSION = 6;
+export const TOPOLOGY_VERSION = 7;
 export const DEFAULT_VHOST = 'email-gateway';
 
 /** The six exchanges of the topology (ADR-0024): all topic, durable, not internal. */
@@ -512,14 +521,24 @@ export const TOPOLOGY: Topology = {
       policy: policyFor('work', 'scan.bec'),
       description: 'Phishing and BEC (step 4.4): stage 2, triggered when rspamd and url finalized',
     },
-    dormant(
-      'scan.dlp',
-      'email.security',
-      [parsed(), rescan()],
-      '4.5',
-      'email-worker',
-      'Data loss prevention',
-    ),
+    {
+      // v7 (step 4.5 D1, D2): the data loss prevention engine of the email-worker scan role, a
+      // stage-1 engine (bindings unchanged from the dormant v1–v6 queue).
+      name: 'scan.dlp',
+      role: 'work',
+      homeExchange: 'email.security',
+      bindings: [parsed(), rescan(), retryBinding('email.security', 'scan.dlp')],
+      consumer: { kind: 'ledger', ledgerName: 'email-worker.scan.dlp', service: 'email-worker' },
+      retry: {
+        strategy: 'hold',
+        maxAttempts: 10,
+        baseDelayMs: 2 * SECOND,
+        maxDelayMs: MINUTE,
+        maxRetryAgeMs: 24 * HOUR,
+      },
+      policy: policyFor('work', 'scan.dlp'),
+      description: 'Data loss prevention (step 4.5): stage 1',
+    },
     dormant(
       'scan.sandbox',
       'email.security',

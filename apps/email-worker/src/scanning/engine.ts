@@ -1,6 +1,11 @@
 import type { Readable } from 'node:stream';
 import type {
   AttachmentResult,
+  DlpAction,
+  DlpActionSource,
+  DlpCoverage,
+  DlpEvidenceStatus,
+  DlpVerdict,
   EngineName,
   NormalizedEngineResult,
 } from '@email-gateway/security-contracts';
@@ -239,12 +244,73 @@ export interface BecChildRows {
   history: BecHistoryUpdateInput[];
 }
 
+/**
+ * The `dlp_scan_results` row of a definite dlp final (step 4.5 D19). Bounded JSON with masked
+ * values only (validated with the security-contracts view schemas before it gets here): ids,
+ * codes, counts, masked samples, public ids of the tenant's policies, rules, exceptions,
+ * patterns and dictionaries; never a matched value, context text or a dictionary term.
+ */
+export interface DlpResultInput {
+  lifecycleRound: number;
+  direction: MessageDirectionValue;
+  engineVersion: string;
+  rulesVersion: string;
+  settingsVersion: string;
+  policyVersion: string;
+  extractorVersion: string;
+  verdict: DlpVerdict;
+  action: DlpAction;
+  actionSource: DlpActionSource;
+  /** Internal ids of the winning policy / rule (`dlp_policies.id`, `dlp_policy_rules.id`). */
+  matchedPolicyId: bigint | null;
+  matchedRuleId: bigint | null;
+  coverage: DlpCoverage;
+  /** `{ aadhaar: 'enabled' | 'disabled', sources: DlpCoverageEntry[] (≤ 64) }`. */
+  coverageDetail: Record<string, unknown>;
+  /** ≤ 10 `{ category, count, maxSeverity, maxConfidence }`. */
+  categories: Array<Record<string, unknown>>;
+  /** ≤ 64 findings in the `dlpFindingViewSchema` shape (masked samples only). */
+  findings: Array<Record<string, unknown>>;
+  /** `{ winner, matched, matchedTruncated, defaultPolicyMatched, exceptionsApplied }` (public ids). */
+  policy: Record<string, unknown>;
+  findingCount: number;
+  evidenceStatus: DlpEvidenceStatus;
+  durationMs: number;
+}
+
+/** The `dlp_evidence` row of a stored evidence object (D16): never content. */
+export interface DlpEvidenceInput {
+  /** `org/<org>/dlp-evidence/<yyyy>/<mm>/<scanId>-<uuidv7>.bin` (checked in the transaction). */
+  objectKey: string;
+  objectSha256: string;
+  objectSizeBytes: number;
+  /** `v1.<kid>.<iv>.<tag>.<ct>`: the data key wrapped under DLP_EVIDENCE_KEY. */
+  wrappedKey: string;
+  keyId: string;
+  algorithm: string;
+  matchCount: number;
+  expiresAt: Date;
+}
+
+/** The `mail.message.dlp_incident.v1` outbox row (D14): validated with the event schema. */
+export interface DlpIncidentInput {
+  payload: Record<string, unknown>;
+}
+
+/** The dlp engine's child rows (D19), written in the final row's transaction. */
+export interface DlpChildRows {
+  result: DlpResultInput;
+  evidence: DlpEvidenceInput | null;
+  incident: DlpIncidentInput | null;
+}
+
 /** Engine-specific child rows written in the finalize transaction of the final row (A12). */
 export interface EngineChildRows {
   attachments?: AttachmentResultInput[];
   sandbox?: SandboxSubmissionInput[];
   urls?: UrlChildRows;
   bec?: BecChildRows;
+  dlp?: DlpChildRows;
 }
 
 /** A definite result (S9); `evidence` adds engine flags to `scan_engine_results.evidence`. */

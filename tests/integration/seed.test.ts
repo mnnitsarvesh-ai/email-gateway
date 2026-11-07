@@ -16,7 +16,7 @@ import { stack } from './support/env';
 
 /**
  * db:seed (step 1.1 D7, step 1.2/1.3 D8 and D10) against the dev schema, with the DML account:
- * the catalog (45 permissions since step 4.4, the 8 system roles, the platform organization, the step 2.3
+ * the catalog (49 permissions since step 4.5, the 8 system roles, the platform organization, the step 2.3
  * destination provider presets), the retired
  * role-key remap, and idempotency (running it twice leaves the same row counts). The seeded
  * rows are dev data and are deliberately left in place.
@@ -96,7 +96,7 @@ describe('db:seed', () => {
     expect(await counts()).toEqual(afterFirst);
 
     expect(afterFirst).toMatchObject({
-      permissions: 45,
+      permissions: 49,
       systemRoles: 8,
       destinationPresets: 2,
       plans: expect.any(Number) as unknown,
@@ -247,7 +247,7 @@ describe('db:seed', () => {
     await prisma.domain.update({ where: { id: domain.id }, data: { nextCheckAt: new Date() } });
   });
 
-  it('seeds exactly the 45 permissions and the 8 system roles of D8, with their permissions', async () => {
+  it('seeds exactly the 49 permissions and the 8 system roles of D8, with their permissions', async () => {
     expect(seed().status).toBe(0);
     const permissions = await prisma.permission.findMany({ select: { key: true } });
     expect(permissions.map((p) => p.key).sort()).toEqual(PERMISSIONS.map((p) => p.key).sort());
@@ -338,6 +338,34 @@ describe('db:seed', () => {
       expect(holders(key), key).toEqual(['organization_admin', 'security_analyst', 'super_admin']);
     }
     expect(holders('bec:feedback_export')).toEqual(['organization_admin', 'super_admin']);
+    // Step 4.5 (D21): the DLP tenant permissions; never read-only (read_only_user and
+    // platform_admin hold none of them).
+    for (const key of ['dlp:read', 'dlp:evidence_read']) {
+      expect(holders(key), key).toEqual([
+        'compliance_auditor',
+        'organization_admin',
+        'security_analyst',
+        'super_admin',
+      ]);
+    }
+    expect(holders('dlp:manage')).toEqual([
+      'organization_admin',
+      'security_analyst',
+      'super_admin',
+    ]);
+    expect(holders('dlp:compliance_manage')).toEqual(['organization_admin', 'super_admin']);
+    for (const role of [
+      'read_only_user',
+      'platform_admin',
+      'quarantine_reviewer',
+      'domain_admin',
+    ]) {
+      const keys = roles.find((r) => r.key === role)!.permissions.map((p) => p.permission.key);
+      expect(
+        keys.filter((k) => k.startsWith('dlp:')),
+        role,
+      ).toEqual([]);
+    }
   });
 
   it('seeds the platform organization with mandatory MFA and the demo users', async () => {

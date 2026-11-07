@@ -2,6 +2,13 @@ import { Injectable } from '@nestjs/common';
 import { PrismaReadService } from '@email-gateway/common';
 import type { Prisma } from '@email-gateway/database';
 import { tenantWhere, type TenantScope } from '../../../auth-contracts/tenant-scope';
+import type {
+  DlpEvidenceStateInput,
+  DlpIdMaps,
+  DlpRefs,
+  DlpResultRowInput,
+} from '../../dlp/domain/dlp-result';
+import { resolveDlpIds } from '../../dlp/repositories/dlp-results.repository';
 import type { LifecycleMessageRow } from './message-lifecycle-read.repository';
 
 const scanSelect = {
@@ -210,8 +217,32 @@ export interface BecFeedbackRefRow {
 /** Most feedback references one page reads: ≤ 20 rounds × BEC_MAX_FEEDBACK_REFS (50). */
 const MAX_BEC_FEEDBACK_ROWS = 1_000;
 
+const dlpResultSelect = {
+  scanId: true,
+  engineVersion: true,
+  rulesVersion: true,
+  settingsVersion: true,
+  policyVersion: true,
+  extractorVersion: true,
+  verdict: true,
+  action: true,
+  actionSource: true,
+  matchedPolicyId: true,
+  matchedRuleId: true,
+  coverage: true,
+  coverageDetail: true,
+  categories: true,
+  findings: true,
+  policy: true,
+  evidenceStatus: true,
+  // Not `duration_ms`: the DLP engine is a coarse engine (D20); not `direction`, `finding_count`.
+} satisfies Prisma.DlpScanResultSelect;
+
+export type DlpResultRow = Prisma.DlpScanResultGetPayload<{ select: typeof dlpResultSelect }> &
+  DlpResultRowInput;
+
 /**
- * Read-only, tenant-scoped scan reads (step 4.1 S16; 4.2 attachments; 4.3 URLs; 4.4 BEC) on the replica (`PrismaReadService`, with
+ * Read-only, tenant-scoped scan reads (step 4.1 S16; 4.2 attachments; 4.3 URLs; 4.4 BEC; 4.5 DLP) on the replica (`PrismaReadService`, with
  * the writer fallback above the lag threshold; ADR-0014, §2.0 invariant 6). Every query matches
  * the organization of the caller's scope and the message's `(message_id, received_at)`, so the
  * partitioned tables are pruned and another tenant's rows are never read.
@@ -487,6 +518,51 @@ export class MessageScansReadRepository {
       trusted: toMap(trusted),
       suppression: toMap(suppression),
     };
+  }
+
+  /** The DLP results of the given scans (`dlp_scan_results`, one per scan, step 4.5 D20). */
+  dlpResults(
+    scope: TenantScope,
+    message: LifecycleMessageRow,
+    scanIds: readonly bigint[],
+  ): Promise<DlpResultRow[]> {
+    if (scanIds.length === 0) return Promise.resolve([]);
+    return this.db.dlpScanResult.findMany({
+      where: tenantWhere(scope, {
+        messageId: message.id,
+        receivedAt: message.receivedAt,
+        scanId: { in: [...scanIds] },
+      }),
+      select: dlpResultSelect,
+      orderBy: { scanId: 'desc' },
+      take: scanIds.length,
+    });
+  }
+
+  /**
+   * The evidence state of the given scans (`dlp_evidence`: expiry and purge time only; never
+   * the object key, hash or wrapped key).
+   */
+  dlpEvidence(
+    scope: TenantScope,
+    message: LifecycleMessageRow,
+    scanIds: readonly bigint[],
+  ): Promise<DlpEvidenceStateInput[]> {
+    if (scanIds.length === 0) return Promise.resolve([]);
+    return this.db.dlpEvidence.findMany({
+      where: tenantWhere(scope, {
+        messageId: message.id,
+        receivedAt: message.receivedAt,
+        scanId: { in: [...scanIds] },
+      }),
+      select: { scanId: true, expiresAt: true, purgedAt: true },
+      take: scanIds.length,
+    });
+  }
+
+  /** This organization's public ids of the DLP rows the stored results reference. */
+  dlpPublicIds(scope: TenantScope, refs: DlpRefs): Promise<DlpIdMaps> {
+    return resolveDlpIds(this.db, scope, refs);
   }
 
   /**

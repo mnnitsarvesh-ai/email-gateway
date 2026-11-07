@@ -130,6 +130,29 @@ export const PERMISSIONS = Object.freeze([
     key: 'bec:feedback_export',
     description: 'Export BEC feedback features for model retraining (step 4.4)',
   },
+  // Step 4.5 (docs/plan/steps/13-dlp.md D21): tenant permissions of the DLP module.
+  // organization_admin and super_admin hold them through TENANT_PERMISSIONS / ALL_PERMISSIONS;
+  // security_analyst gets read, manage and evidence read, compliance_auditor read and evidence
+  // read, explicitly. Never read-only: TENANT_READ_PERMISSIONS (read_only_user, platform_admin)
+  // gets none of them. Decrypted evidence and the Aadhaar compliance basis are separate.
+  {
+    key: 'dlp:read',
+    description:
+      'View DLP policies, exceptions, patterns, dictionaries, compliance settings and incidents (step 4.5)',
+  },
+  {
+    key: 'dlp:manage',
+    description:
+      'Manage DLP policies, exceptions, custom patterns and dictionaries; purge DLP evidence (step 4.5)',
+  },
+  {
+    key: 'dlp:evidence_read',
+    description: 'Read decrypted DLP evidence (audited; step 4.5)',
+  },
+  {
+    key: 'dlp:compliance_manage',
+    description: 'Record the Aadhaar detection compliance basis (step 4.5)',
+  },
 ] as const satisfies readonly PermissionDef[]);
 
 /** Every permission key of the catalog. */
@@ -282,6 +305,9 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'bec:read',
       'bec:manage',
       'bec:feedback',
+      'dlp:read',
+      'dlp:manage',
+      'dlp:evidence_read',
     ],
   },
   {
@@ -303,7 +329,14 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
     key: 'compliance_auditor',
     name: 'Compliance Auditor',
     description: 'Read-only access plus the audit log and archive export',
-    permissions: [...TENANT_READ_PERMISSIONS, 'audit:read', 'archive:export', 'bec:read'],
+    permissions: [
+      ...TENANT_READ_PERMISSIONS,
+      'audit:read',
+      'archive:export',
+      'bec:read',
+      'dlp:read',
+      'dlp:evidence_read',
+    ],
   },
   {
     key: 'read_only_user',

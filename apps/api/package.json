@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@email-gateway/bec": "workspace:*",
+    "@email-gateway/dlp": "workspace:*",
     "@email-gateway/common": "workspace:*",
     "@email-gateway/config": "workspace:*",
     "@email-gateway/database": "workspace:*",

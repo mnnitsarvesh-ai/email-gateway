@@ -21,9 +21,11 @@ import {
 } from '@email-gateway/security-contracts';
 import { z } from 'zod';
 import { becConfigShape, validateBecConfig } from './bec-config';
+import { dlpConfigShape, validateDlpConfig } from './dlp-config';
 import { urlConfigShape, validateUrlConfig } from './url-config';
 
 export { becPlatformFromConfig } from './bec-config';
+export { dlpPlatformFromConfig } from './dlp-config';
 export { urlPlatformFromConfig, urlProductionLike } from './url-config';
 
 const int = z.coerce.number().int();
@@ -172,11 +174,11 @@ export const scanConfigShape = {
   SCAN_ENABLED: flag.default(true),
   /**
    * Platform-enabled engines (S4), comma-separated, validated against ENGINE_CATALOG; step 4.4
-   * adds `bec` (a stage-2 engine, B1/B2).
+   * adds `bec` (a stage-2 engine, B1/B2); step 4.5 adds `dlp` (stage 1, D1).
    */
   SCAN_ENGINES: z
     .string()
-    .default('rspamd,attachment,url,bec')
+    .default('rspamd,attachment,url,bec,dlp')
     .transform((value, ctx): EngineName[] => {
       try {
         return parseEnabledEngines(value);
@@ -264,6 +266,7 @@ export const scanConfigShape = {
   ...attachmentConfigShape(),
   ...urlConfigShape(),
   ...becConfigShape(),
+  ...dlpConfigShape(),
 };
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars -- only its type is used
@@ -329,6 +332,12 @@ export function engineBudgetFromConfig(
         concurrency: cfg.SCAN_BEC_CONCURRENCY,
         timeoutMs: cfg.SCAN_BEC_TIMEOUT_MS,
         maxAttempts: cfg.SCAN_BEC_MAX_ATTEMPTS,
+      };
+    case 'dlp':
+      return {
+        concurrency: cfg.SCAN_DLP_CONCURRENCY,
+        timeoutMs: cfg.SCAN_DLP_TIMEOUT_MS,
+        maxAttempts: cfg.SCAN_DLP_MAX_ATTEMPTS,
       };
     default:
       return null;
@@ -437,6 +446,10 @@ export function attachmentScalingWarnings(cfg: ScanShapeConfig): string[] {
   }
   return warnings;
 }
+
+/** True when this replica runs the dlp engine's consumer (and the evidence sweeper, D16). */
+export const runsDlpConsumer = (cfg: ScanShapeConfig): boolean =>
+  cfg.SCAN_ENABLED && cfg.SCAN_ENGINES.includes('dlp') && consumerEngines(cfg).includes('dlp');
 
 type AttachmentValidationConfig = ScanShapeConfig & {
   NODE_ENV: 'development' | 'test' | 'production';
@@ -583,6 +596,9 @@ export function validateScanConfig(
   }
   if (cfg.SCAN_ENGINES.includes('bec')) {
     validateBecConfig(cfg, runsBecConsumer(cfg), engineQueueMaxAttempts('bec'), refuse);
+  }
+  if (cfg.SCAN_ENGINES.includes('dlp')) {
+    validateDlpConfig(cfg, runsDlpConsumer(cfg), engineQueueMaxAttempts('dlp'), refuse);
   }
   if (!cfg.SCAN_ENABLED) return;
   if (

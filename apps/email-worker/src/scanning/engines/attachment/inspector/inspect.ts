@@ -26,7 +26,7 @@ import {
   TEXT_LIKE_TYPES,
   type ZipNames,
 } from './file-type';
-import { addMatches, type YaraEngine } from './yara-scanner';
+import { addMatches, type YaraEngine } from './yara-engine';
 
 /**
  * The inspection of one attachment (step 4.2 A4), inside the inspector child, over an in-memory
@@ -60,6 +60,31 @@ const ZIP_BASED: ReadonlySet<FileTypeId> = new Set<FileTypeId>([
   'apk',
 ]);
 
+/**
+ * Entry visitor of the shared walker (step 4.5 D4): called for every inspected entry (an entry
+ * whose bytes were read within the limits) after its type was detected and refined, depth-first
+ * and post-order (a container's entries before the container). `name` is the entry's name as
+ * read from the archive (null for a gzip member); it must stay in the caller's memory. The
+ * visitor observes only: it cannot change the inspection result (byte-identical results with
+ * and without a visitor, asserted by a unit test).
+ *
+ * Error contract: a visitor that throws (or rejects) stops the walk, and `inspectBytes` rejects
+ * with that first error, whatever container format holds the entry. A container parser never
+ * absorbs it (a tar parse catch-all would otherwise report it as `archive.malformed`).
+ */
+export type EntryVisitor = (
+  data: Buffer,
+  path: string,
+  depth: number,
+  type: FileTypeId,
+  ext: FileTypeId | null,
+  name: string | null,
+) => void | Promise<void>;
+
+export interface InspectOptions {
+  onEntry?: EntryVisitor;
+}
+
 class Walk {
   entries = 0;
   decompressed = 0;
@@ -75,11 +100,15 @@ class Walk {
   readonly entryHashes: EntryHash[] = [];
   readonly yara: YaraMatch[] = [];
   yaraTimedOut = false;
+  /** The first error thrown by the entry visitor (rethrown by `inspectBytes`). */
+  visitorFailed = false;
+  visitorError: unknown = undefined;
 
   constructor(
     readonly limits_: InspectLimits,
     readonly yaraEngine: YaraEngine,
     readonly attachmentBytes: number,
+    readonly onEntry: EntryVisitor | null = null,
   ) {}
 
   limit(code: InspectorCode): void {
@@ -213,6 +242,7 @@ async function processEntry(
   depth: number,
   ext: FileTypeId | null,
   extraCodes: InspectorCode[],
+  name: string | null,
 ): Promise<void> {
   walk.depthReached = Math.max(walk.depthReached, depth);
   const codes = [...extraCodes];
@@ -220,6 +250,17 @@ async function processEntry(
   type = await walkNested(walk, type, data, depth, path, codes);
   type = refineTextType(type, ext);
   if (executableDisguised(type, ext)) codes.push('type.executable_disguised');
+  if (walk.onEntry) {
+    if (walk.visitorFailed) return;
+    try {
+      await walk.onEntry(data, path, depth, type, ext, name);
+    } catch (error) {
+      walk.visitorFailed = true;
+      walk.visitorError = error;
+      walk.stopped = true;
+      return;
+    }
+  }
   const yara = walk.yaraEngine.scan(data);
   if (yara.timedOut) {
     walk.yaraTimedOut = true;
@@ -398,7 +439,7 @@ async function walkZip(
           .toString('latin1')
           .startsWith('application/vnd.oasis.opendocument');
       }
-      await processEntry(walk, read.data, path, depth + 1, ext, entryCodes);
+      await processEntry(walk, read.data, path, depth + 1, ext, entryCodes, name);
     }
   } finally {
     zip.close();
@@ -445,7 +486,7 @@ async function walkGzip(
     walk.finding(path, 'unknown', entryCodes);
     return;
   }
-  await processEntry(walk, read.data, path, depth + 1, null, entryCodes);
+  await processEntry(walk, read.data, path, depth + 1, null, entryCodes, null);
 }
 
 async function walkTar(
@@ -492,7 +533,7 @@ async function walkTar(
         if (walk.stopped) break;
         continue;
       }
-      await processEntry(walk, read.data, path, depth + 1, ext, entryCodes);
+      await processEntry(walk, read.data, path, depth + 1, ext, entryCodes, header.name);
     }
   } catch {
     walk.malformed = true;
@@ -503,13 +544,18 @@ async function walkTar(
   }
 }
 
-/** Inspects one attachment's bytes (A4). */
+/**
+ * Inspects one attachment's bytes (A4). The attachment inspector passes no options; the DLP
+ * extractor (step 4.5 D4) passes an entry visitor and a no-op YARA engine to reach exactly the
+ * entries 4.2 reaches, within the same limits.
+ */
 export async function inspectBytes(
   bytes: Buffer,
   limits: InspectLimits,
   yara: YaraEngine,
+  options: InspectOptions = {},
 ): Promise<InspectionResult> {
-  const walk = new Walk(limits, yara, bytes.length);
+  const walk = new Walk(limits, yara, bytes.length, options.onEntry ?? null);
   const topCodes: InspectorCode[] = [];
   let detected = detectMagic(bytes);
   const textLike = TEXT_LIKE_TYPES.has(detected);
@@ -531,6 +577,7 @@ export async function inspectBytes(
   if (container || UNSUPPORTED.has(detected) || detected === 'ole_office') {
     detected = await walkNested(walk, detected, bytes, 0, null, topCodes);
   }
+  if (walk.visitorFailed) throw walk.visitorError;
   for (const code of topCodes) {
     if (code.startsWith('limit.')) walk.limit(code);
     else walk.codes.add(code);

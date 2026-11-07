@@ -2,12 +2,19 @@ import { hash } from 'argon2';
 import { randomBytes } from 'node:crypto';
 import type { PrismaClient } from '@email-gateway/database';
 import { stack } from './env';
+import { secretBoxEncrypt } from './smtp-fixtures';
+import { base32Encode, totpNow } from './totp';
 
 /**
  * A tenant user of a fixture organization, logged in to the RUNNING api (API_HOST_PORT; the
  * `api` container of the apps profile or `pnpm --filter @email-gateway/api dev` on the host).
  * The password is stored as an Argon2id hash with the api's parameters (AUTH_ARGON2_*), exactly
  * as the api's PasswordHasher stores it, and never printed. Removed by `remove()`.
+ *
+ * With `{ mfa: true }` (step 4.5: the DLP evidence endpoint is `@RequireMfa`) the user gets a
+ * TOTP secret stored exactly as the api's SecretBox stores it (AES-256-GCM with
+ * DATA_ENCRYPTION_KEY, AAD `mfa:user:<id>`) and logs in with password, then the TOTP code, like
+ * a person would; neither the password nor the secret is ever printed.
  */
 export interface ApiResponse {
   status: number;
@@ -22,6 +29,8 @@ export interface ApiSession {
   get(path: string): Promise<ApiResponse>;
   put(path: string, body: unknown): Promise<ApiResponse>;
   post(path: string, body: unknown, headers?: Record<string, string>): Promise<ApiResponse>;
+  patch(path: string, body: unknown): Promise<ApiResponse>;
+  delete(path: string): Promise<ApiResponse>;
   remove(): Promise<void>;
 }
 
@@ -40,6 +49,7 @@ export async function apiSession(
   prisma: PrismaClient,
   organization: { id: bigint; slug: string },
   roleKey: string,
+  options: { mfa?: boolean } = {},
 ): Promise<ApiSession> {
   const email = `it-${randomBytes(6).toString('hex')}@routing.integration.test`;
   const password = `It-${randomBytes(18).toString('base64url')}!9a`;
@@ -75,6 +85,16 @@ export async function apiSession(
   await prisma.userRole.create({
     data: { userId: user.id, roleId: role.id, organizationId: organization.id },
   });
+  const mfaKey = options.mfa ? randomBytes(20) : undefined;
+  if (mfaKey) {
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        mfaEnabled: true,
+        mfaSecretCiphertext: secretBoxEncrypt(base32Encode(mfaKey), `mfa:user:${user.id}`),
+      },
+    });
+  }
 
   const login = await fetch(`${apiBaseUrl()}/api/v1/auth/login`, {
     method: 'POST',
@@ -82,7 +102,23 @@ export async function apiSession(
     body: JSON.stringify({ email, password, organization: organization.slug }),
   });
   if (login.status !== 200) throw new Error(`api login failed with ${login.status}`);
-  const { accessToken } = (await login.json()) as { accessToken: string };
+  const first = (await login.json()) as {
+    accessToken?: string;
+    mfaRequired?: boolean;
+    mfaToken?: string;
+  };
+  let accessToken = first.accessToken;
+  if (first.mfaRequired) {
+    if (!mfaKey) throw new Error('the api asked for MFA, but the user has no TOTP secret');
+    const verify = await fetch(`${apiBaseUrl()}/api/v1/auth/mfa/verify`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mfaToken: first.mfaToken, code: totpNow(mfaKey) }),
+    });
+    if (verify.status !== 200) throw new Error(`MFA verification failed with ${verify.status}`);
+    accessToken = ((await verify.json()) as { accessToken: string }).accessToken;
+  }
+  if (!accessToken) throw new Error('api login returned no access token');
   const call = async (
     method: string,
     path: string,
@@ -111,6 +147,8 @@ export async function apiSession(
     get: (path) => call('GET', path),
     put: (path, body) => call('PUT', path, body),
     post: (path, body, headers) => call('POST', path, body, headers),
+    patch: (path, body) => call('PATCH', path, body),
+    delete: (path) => call('DELETE', path),
     remove: async () => {
       // Roles, sessions and tokens cascade with the user; login audit rows reference the
       // organization (fixture data, removed like the api suites remove theirs).

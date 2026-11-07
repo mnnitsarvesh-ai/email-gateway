@@ -3,7 +3,8 @@
  * goes through the real mail plane (Postfix → smtp-adapter → delivery-worker → postfix-outbound)
  * and used to stay deferred in postfix-outbound with its S3 objects. `cleanupProbeMessages`
  * finds the message(s) of this run by their unique Message-ID and removes their outbound queue
- * files, their S3 objects and their rows (the run marker proves the test owns them).
+ * files, their S3 objects (EML, parts, rewritten copies, DLP evidence) and their rows (the run
+ * marker proves the test owns them).
  */
 import { execFile } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -175,7 +176,12 @@ export async function cleanupProbeMessages(
     }
   }
 
-  // 2. S3 objects: the EML and every part object of the message.
+  // 2. S3 objects: the EML, every part object of the message and (step 4.5) the DLP evidence
+  // objects of its rounds (their keys are recorded in dlp_evidence, under org/<org>/dlp-evidence/).
+  const evidence = await prisma.dlpEvidence.findMany({
+    where: { messageId: { in: ids } },
+    select: { organizationId: true, objectKey: true },
+  });
   const { DeleteObjectCommand, ListObjectsV2Command } = s3Commands();
   const { s3, bucket } = mailBucketClient();
   let objects = 0;
@@ -205,6 +211,12 @@ export async function cleanupProbeMessages(
         objects += 1;
       }
     }
+    for (const row of evidence) {
+      if (row.objectKey?.startsWith(`org/${row.organizationId.toString()}/dlp-evidence/`)) {
+        await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: row.objectKey }));
+        objects += 1;
+      }
+    }
   } finally {
     s3.destroy();
   }
@@ -213,6 +225,9 @@ export async function cleanupProbeMessages(
   const byMessage = { messageId: { in: ids } };
   // Scan rows of the live scan role (steps 4.1–4.3): the probe is scanned like any message.
   // Step 4.4: the BEC result rows and any analyst feedback of the probe messages.
+  // Step 4.5: the DLP result and evidence rows (objects deleted above).
+  await prisma.dlpEvidence.deleteMany({ where: byMessage });
+  await prisma.dlpScanResult.deleteMany({ where: byMessage });
   await prisma.becFeedback.deleteMany({ where: { messageId: { in: ids } } });
   await prisma.becScanResult.deleteMany({ where: byMessage });
   await prisma.urlClickEvent.deleteMany({ where: byMessage });

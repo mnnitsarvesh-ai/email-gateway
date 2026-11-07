@@ -7,6 +7,7 @@ import type { TenantScope } from '../../../auth-contracts/tenant-scope';
 import {
   attachmentPlatformSettingsOf,
   becPlatformSettingsOf,
+  dlpPlatformSettingsOf,
   rspamdPlatformSettingsOf,
   urlPlatformSettingsOf,
 } from '../../../config';
@@ -41,7 +42,8 @@ export const SCAN_SETTINGS_RESOURCE = 'scan_engine_settings';
 type ScanConfig = Parameters<typeof rspamdPlatformSettingsOf>[0] &
   Parameters<typeof attachmentPlatformSettingsOf>[0] &
   Parameters<typeof urlPlatformSettingsOf>[0] &
-  Parameters<typeof becPlatformSettingsOf>[0];
+  Parameters<typeof becPlatformSettingsOf>[0] &
+  Parameters<typeof dlpPlatformSettingsOf>[0];
 
 const stored = (row: ScanSettingsRow | null) =>
   row === null ? null : { settings: row.settings, version: row.version, updatedAt: row.updatedAt };
@@ -78,6 +80,7 @@ export class ScanSettingsService {
       attachment: attachmentPlatformSettingsOf(config),
       url: urlPlatformSettingsOf(config),
       bec: becPlatformSettingsOf(config),
+      dlp: dlpPlatformSettingsOf(config),
     });
   }
 

@@ -27,6 +27,12 @@ import {
   shadowAssessmentsOf,
   thresholdsOf,
 } from '../../bec/domain/bec-result';
+import {
+  type DlpEvidenceStateInput,
+  type DlpIdMaps,
+  dlpResultViewOf,
+  NO_DLP_IDS,
+} from '../../dlp/domain/dlp-result';
 import type {
   AttachmentScanView,
   BecScanView,
@@ -44,6 +50,7 @@ import type {
   AuthResultRow,
   BecFeedbackRefRow,
   BecResultRow,
+  DlpResultRow,
   EngineResultRow,
   MessageUrlRow,
   SandboxSubmissionRow,
@@ -165,12 +172,20 @@ export const ATTACHMENT_ENGINE = 'attachment';
 export const URL_ENGINE = 'url';
 /** The phishing/BEC engine's name (step 4.4 B1). */
 export const BEC_ENGINE = 'bec';
+/** The data loss prevention engine's name (step 4.5 D1). */
+export const DLP_ENGINE = 'dlp';
 /**
  * Engines whose durations are withheld and times rounded to the second: their caches are shared
  * across organizations (attachment content cache A10; URL reputation/chain/dynamic caches U6),
- * or their timing reveals the AI layer's behaviour (BEC, B15).
+ * or their timing reveals the AI layer's behaviour (BEC, B15) or the extraction work done on a
+ * message's attachments (DLP, D20).
  */
-const COARSE_ENGINES: ReadonlySet<string> = new Set([ATTACHMENT_ENGINE, URL_ENGINE, BEC_ENGINE]);
+const COARSE_ENGINES: ReadonlySet<string> = new Set([
+  ATTACHMENT_ENGINE,
+  URL_ENGINE,
+  BEC_ENGINE,
+  DLP_ENGINE,
+]);
 
 /** The per-attachment rows of a page with the display metadata they are joined with. */
 export interface AttachmentInputs {
@@ -507,6 +522,36 @@ export function becOf(
   };
 }
 
+/** The DLP rows of a page (step 4.5 D20). */
+export interface DlpInputs {
+  /** Whether the caller holds `dlp:read`; without it every `dlp` section is null. */
+  visible: boolean;
+  results: readonly DlpResultRow[];
+  evidence: readonly DlpEvidenceStateInput[];
+  /** Internal → public ids of the policies, rules, exceptions, patterns and dictionaries. */
+  ids: DlpIdMaps;
+}
+
+export const NO_DLP: DlpInputs = Object.freeze({
+  visible: false,
+  results: [],
+  evidence: [],
+  ids: NO_DLP_IDS,
+});
+
+/**
+ * The `dlp` section of one round (D20), or null: when the caller does not hold `dlp:read`
+ * (`message:read` alone is held by read-only users and platform admins), before the final
+ * result, for a failure, or when the stored row does not form a valid masked view.
+ */
+export function dlpOf(scanId: bigint, inputs: DlpInputs): ScanEngineResultView['dlp'] {
+  if (!inputs.visible) return null;
+  const row = inputs.results.find((r) => r.scanId === scanId);
+  if (!row) return null;
+  const evidence = inputs.evidence.find((e) => e.scanId === scanId) ?? null;
+  return dlpResultViewOf(row, evidence, inputs.ids);
+}
+
 const catalogRank = (engine: string): number => {
   const index = ENGINE_CATALOG.findIndex((entry) => entry.name === engine);
   return index === -1 ? ENGINE_CATALOG.length : index;
@@ -518,7 +563,8 @@ const byCatalog = (a: string, b: string): number =>
  * A round with its engines (catalog order), the first engine's authentication results, on the
  * `attachment` engine entry its per-attachment results (step 4.2 A16), on the `url` engine
  * entry its per-URL results and rewrite (step 4.3 U16) and on the `bec` engine entry its
- * explainable verdict (step 4.4 B15).
+ * explainable verdict (step 4.4 B15) and on the `dlp` engine entry its masked result (step 4.5
+ * D20, only for callers holding `dlp:read`; no symbols: the engine's evidence is not shown).
  */
 export function roundOf(
   scan: ScanRoundRow,
@@ -527,6 +573,7 @@ export function roundOf(
   attachments: AttachmentInputs = NO_ATTACHMENTS,
   urls: UrlInputs = NO_URLS,
   bec: BecInputs = NO_BEC,
+  dlp: DlpInputs = NO_DLP,
 ): ScanRoundView {
   const byEngine = new Map<string, EngineResultRow[]>();
   for (const row of engineRows) {
@@ -561,6 +608,9 @@ export function roundOf(
       if (engine === BEC_ENGINE) {
         const final = byEngine.get(engine)!.find((row) => row.isFinal) ?? null;
         return { ...view, bec: becOf(scan.id, final, bec) };
+      }
+      if (engine === DLP_ENGINE) {
+        return { ...view, symbols: [], dlp: dlpOf(scan.id, dlp) };
       }
       return view;
     }),

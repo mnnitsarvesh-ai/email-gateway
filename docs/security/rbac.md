@@ -62,6 +62,10 @@ The `permissions` table is seeded from `PERMISSIONS` in `packages/database/src/s
 | `bec:manage`                   | Manage BEC profiles, trusted senders, suppressions and communication history (step 4.4)                  |
 | `bec:feedback`                 | Record false-positive/false-negative feedback on BEC verdicts (step 4.4)                                 |
 | `bec:feedback_export`          | Export BEC feedback features for model retraining (step 4.4)                                             |
+| `dlp:read`                     | View DLP policies, exceptions, patterns, dictionaries, compliance settings and incidents (step 4.5)      |
+| `dlp:manage`                   | Manage DLP policies, exceptions, custom patterns and dictionaries; purge DLP evidence (step 4.5)         |
+| `dlp:evidence_read`            | Read decrypted DLP evidence (audited; step 4.5)                                                          |
+| `dlp:compliance_manage`        | Record the Aadhaar detection compliance basis (step 4.5)                                                 |
 
 `GET /permissions` lists `platform:*` keys only to users of the platform organization who are not under an override; customer users and API keys see the tenant permissions only.
 
@@ -130,6 +134,10 @@ Generated from the seed catalog (`SYSTEM_ROLES`); if the catalog changes, regene
 | `bec:manage`                   |  ✓  |     |  ✓  |     |  ✓  |     |     |     |
 | `bec:feedback`                 |  ✓  |     |  ✓  |     |  ✓  |     |     |     |
 | `bec:feedback_export`          |  ✓  |     |  ✓  |     |     |     |     |     |
+| `dlp:read`                     |  ✓  |     |  ✓  |     |  ✓  |     |  ✓  |     |
+| `dlp:manage`                   |  ✓  |     |  ✓  |     |  ✓  |     |     |     |
+| `dlp:evidence_read`            |  ✓  |     |  ✓  |     |  ✓  |     |  ✓  |     |
+| `dlp:compliance_manage`        |  ✓  |     |  ✓  |     |     |     |     |     |
 
 **Platform roles** are the roles that hold any `platform:*` permission: `super_admin` and `platform_admin` (`PLATFORM_ROLE_KEYS`). They can be assigned only to users of the platform organization (`kind = platform`); assigning one in a customer organization is `400`. Customer organizations never see platform roles in `GET /roles` or `GET /roles/{key}` (`404`). Domain Admin is organization-wide; per-domain scoping of roles is out of scope for now.
 
@@ -223,6 +231,25 @@ Catalog 41 → 45 (seed data only, `pnpm db:seed`; [design](../plan/steps/12-phi
 - API keys may hold `bec:read` and `bec:manage` (profiles, trusted senders and suppressions are integration data); feedback needs a user (the idempotency key is the user) and the export and the history purge need an MFA-authenticated user, so API keys are refused there (`403`).
 - The `bec` scan settings use the existing keys: `policy:read` (`GET /scan-settings`) and `scan:settings_manage` (`PUT`/`DELETE /scan-settings/bec`).
 - Suppressions are a bounded lever: only suppressible codes (never authentication, lookalike, executive impersonation, credential-link or engine codes), ≤ 90 days, never a free-mail domain, at most `BEC_SUPPRESSIONS_MAX_PER_TENANT` active rules, all audited, so a compromised analyst account cannot silence the engine.
+
+## Data loss prevention (step 4.5)
+
+Catalog 45 → 49 (seed data only, `pnpm db:seed`; [design](../plan/steps/13-dlp.md) D16, D17, D20, D21; [ADR-0038](../architecture/adr/0038-dlp-evidence-masking-and-aadhaar-gating.md)). All four are **tenant** permissions; every route takes the organization from the authenticated scope only, and another organization's id is a `404`.
+
+| Permission              | Routes                                                                                                                                                                                                                                                                                                                          | System roles                                                          |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| `dlp:read`              | `GET /dlp/policies`, `GET /dlp/policies/{id}`, `GET /dlp/exceptions`, `GET /dlp/patterns`, `GET /dlp/patterns/{id}`, `GET /dlp/dictionaries`, `GET /dlp/dictionaries/{id}`, `GET /dlp/compliance`, `GET /dlp/incidents`; and the masked `dlp` section of `GET /messages/{messageId}/scans` (the route itself is `message:read`) | super admin, organization admin, security analyst, compliance auditor |
+| `dlp:manage`            | `POST`/`PATCH`/`DELETE` of policies, rules, exceptions, custom patterns and dictionaries, `POST /dlp/patterns/test` (30 per caller per minute), `DELETE /messages/{messageId}/scans/{scanId}/dlp-evidence` and `DELETE /dlp/evidence` (both `@RequireMfa()`)                                                                    | super admin, organization admin, security analyst                     |
+| `dlp:evidence_read`     | `GET /messages/{messageId}/scans/{scanId}/dlp-evidence` (`@RequireMfa()`, `@UserOnly()`, 30 per user per minute)                                                                                                                                                                                                                | super admin, organization admin, security analyst, compliance auditor |
+| `dlp:compliance_manage` | `PUT /dlp/compliance/aadhaar`, `DELETE /dlp/compliance/aadhaar` (`@RequireMfa()`, `@UserOnly()`)                                                                                                                                                                                                                                | super admin, organization admin                                       |
+
+- **Not in `TENANT_READ_PERMISSIONS`:** that set gives `read_only_user`, `quarantine_reviewer`, `domain_admin` and `platform_admin` their tenant reads, and DLP data (policies that reveal what the organization protects, incidents, masked samples) is deliberately kept from them. They hold `message:read`, so the scans read API returns the `dlp` engine entry to them with `dlp: null` (outcome and reason codes only); masked samples, policy/rule/exception ids, coverage detail and the evidence state need `dlp:read`. Platform operators act through an audited override when needed.
+- **Evidence access is one audited door.** Decrypted values exist only in the evidence route: `dlp:evidence_read` + an MFA-authenticated **user** (API keys `403`), an audit row `dlp_evidence.read` (actor, message, scan, match count) **committed before the evidence is fetched or decrypted**, `dlp_evidence.read_failed` (reason only) when anything fails afterwards, `Cache-Control: no-store`, purged → `410 evidence_purged`, expired → `410 evidence_expired`. Even there Aadhaar numbers, private keys and secrets are masked, card numbers keep only first 6 + last 4 and card verification codes are never stored. Evidence is envelope-encrypted under the dedicated key `DLP_EVIDENCE_KEY` (api and dlp email-worker only); purging erases the wrapped data key (crypto-shredding) before the object is deleted.
+- **Aadhaar compliance.** The Aadhaar detector runs only when the organization has recorded a basis (`regulatory_obligation`, `uidai_authorised_entity`, `data_protection_policy` or `other`), a document reference, an attestation by the recording user and a review date within 365 days that has not passed. Recording and disabling need `dlp:compliance_manage` (organization admin only by default; not the security analyst, so the analyst who investigates cannot also widen detection) and an MFA-authenticated user, and are audited (`dlp_compliance.aadhaar_enabled` / `aadhaar_disabled` with before-images). The platform records the attestation; whether the basis is lawful is the organization's decision.
+- **The pattern test never leaks.** `POST /dlp/patterns/test` persists nothing and never logs, audits or echoes the sample or the pattern (an e2e and an integration test capture the log output with marker strings).
+- **Audit.** Every DLP change is audited with before-images in the same transaction (`dlp_policy.*`, `dlp_rule.*`, `dlp_exception.*`, `dlp_pattern.*`, `dlp_dictionary.*` with term **counts** only, `dlp_compliance.*`, `dlp_evidence.read` / `read_failed` / `purged`).
+- API keys may hold `dlp:read` and `dlp:manage` (configuration is integration data); evidence reads and the Aadhaar basis need a user, and the evidence purges an MFA session, so API keys are refused there (`403`).
+- The `dlp` scan settings use the existing keys: `policy:read` (`GET /scan-settings`) and `scan:settings_manage` (`PUT`/`DELETE /scan-settings/dlp`).
 
 ## Custom roles
 

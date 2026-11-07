@@ -1,8 +1,9 @@
 import { hash } from 'argon2';
-import { createHmac, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import type { PrismaClient } from '@email-gateway/database';
 import { apiBaseUrl } from './api-client';
 import { secretBoxEncrypt } from './smtp-fixtures';
+import { base32Encode, totp } from './totp';
 
 /**
  * A platform administrator with TOTP MFA, logged in to the RUNNING api (API_HOST_PORT: the `api`
@@ -29,32 +30,7 @@ export interface PlatformAdminSession {
   remove(): Promise<void>;
 }
 
-const BASE32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
-
-function base32Encode(data: Buffer): string {
-  let bits = 0;
-  let value = 0;
-  let out = '';
-  for (const byte of data) {
-    value = (value << 8) | byte;
-    bits += 8;
-    while (bits >= 5) {
-      out += BASE32[(value >>> (bits - 5)) & 31];
-      bits -= 5;
-    }
-  }
-  if (bits > 0) out += BASE32[(value << (5 - bits)) & 31];
-  return out;
-}
-
-/** RFC 6238 TOTP of a raw key for one 30-second step (HMAC-SHA-1, dynamic truncation). */
-export function totp(key: Buffer, step: number): string {
-  const message = Buffer.alloc(8);
-  message.writeBigUInt64BE(BigInt(step));
-  const mac = createHmac('sha1', key).update(message).digest();
-  const offset = mac[mac.length - 1]! & 0x0f;
-  return ((mac.readUInt32BE(offset) & 0x7fffffff) % 1_000_000).toString().padStart(6, '0');
-}
+export { totp } from './totp';
 
 export async function platformAdminSession(prisma: PrismaClient): Promise<PlatformAdminSession> {
   const platform = await prisma.organization.findUniqueOrThrow({

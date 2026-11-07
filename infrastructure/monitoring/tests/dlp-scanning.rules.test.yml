@@ -1,0 +1,167 @@
+# promtool unit tests of rules/dlp-scanning.rules.yml (step 4.5 D22):
+#   docker run --rm -v "$PWD/infrastructure/monitoring:/m:ro" --entrypoint promtool \
+#     prom/prometheus:v3.6.0 test rules /m/tests/dlp-scanning.rules.test.yml
+rule_files:
+  - ../rules/dlp-scanning.rules.yml
+evaluation_interval: 1m
+tests:
+  - name: failures, backlog, extraction failures, kills and evidence writes
+    interval: 1m
+    input_series:
+      # 10 clean finals per minute; 1 error final per minute from minute 10 (9 %).
+      - series: 'scan_engine_results_total{job="email-worker",instance="a",engine="dlp",outcome="clean",final="true"}'
+        values: '0+10x80'
+      - series: 'scan_engine_results_total{job="email-worker",instance="a",engine="dlp",outcome="error",final="true"}'
+        values: '0x10 1+1x70'
+      # Retried attempts and other engines never count.
+      - series: 'scan_engine_results_total{job="email-worker",instance="a",engine="dlp",outcome="error",final="false"}'
+        values: '0+50x80'
+      - series: 'scan_engine_results_total{job="email-worker",instance="a",engine="bec",outcome="error",final="true"}'
+        values: '0+50x80'
+      # scan.dlp backlog from minute 10; scan.bec never alerts here.
+      - series: 'rabbitmq_detailed_queue_messages_ready{job="rabbitmq-detailed",vhost="email-gateway",queue="scan.dlp"}'
+        values: '0x10 2000x70'
+      - series: 'rabbitmq_detailed_queue_messages_ready{job="rabbitmq-detailed",vhost="email-gateway",queue="scan.bec"}'
+        values: '5000x80'
+      # 20 extractions per minute; 3 parse_error results per minute (15 %); image never counts.
+      - series: 'dlp_extractions_total{job="email-worker",instance="a",format="pdf",status="extracted"}'
+        values: '0+17x80'
+      - series: 'dlp_extractions_total{job="email-worker",instance="a",format="pdf",status="not_extracted"}'
+        values: '0+3x80'
+      - series: 'scan_dlp_coverage_total{job="email-worker",instance="a",reason="dlp.not_extracted.parse_error"}'
+        values: '0+3x80'
+      - series: 'scan_dlp_coverage_total{job="email-worker",instance="a",reason="dlp.not_extracted.image"}'
+        values: '0+100x80'
+      # 12 kills between minute 20 and 30.
+      - series: 'dlp_extractor_kills_total{job="email-worker",instance="a",reason="cpu"}'
+        values: '0x20 1+1x11 12x48'
+      # One failed evidence write at minute 40; stored writes never alert.
+      - series: 'dlp_evidence_writes_total{job="email-worker",instance="a",result="failed"}'
+        values: '0x40 1x40'
+      - series: 'dlp_evidence_writes_total{job="email-worker",instance="a",result="stored"}'
+        values: '0+20x80'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: DlpEngineFailuresHigh
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: DlpEngineFailuresHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: dlp engine final failures above 5 %
+              description: >-
+                More than 5 % of the final dlp engine results of the last 10 minutes are timeout or
+                error (part reads, MySQL, inconsistent reads, extractor timeouts or crashes, the
+                detection deadline). Their rounds end scan_failed (never clean) and outbound mail is
+                not approved; rescan them after the cause is fixed.
+              runbook_url: docs/runbooks/dlp.md#dlpenginefailureshigh
+      - eval_time: 15m
+        alertname: DlpScanQueueBacklog
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: DlpScanQueueBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: dlp scan queue backlog
+              description: >-
+                scan.dlp has had more than 1000 ready messages for 10 minutes. Outbound delivery waits
+                for the dlp final. Scale email-worker-dlp (memory: two extractor children per
+                replica), check the extractor pool (dlp_extractor_pool_children) and S3 / MySQL latency.
+              runbook_url: docs/runbooks/dlp.md#dlpscanqueuebacklog
+      - eval_time: 10m
+        alertname: DlpExtractionFailuresHigh
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: DlpExtractionFailuresHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: dlp attachment extraction failures above 10 %
+              description: >-
+                More than 10 % of the attachment extractions of the last 30 minutes failed with
+                parse_error or resource_limit. Those messages are unknown (never clean). Check for a
+                hostile campaign, a pdfjs / extractor regression after an upgrade, or limits
+                (DLP_EXTRACT_CPU_SECONDS, DLP_EXTRACT_MAX_RSS_MB) that are too small.
+              runbook_url: docs/runbooks/dlp.md#dlpextractionfailureshigh
+      - eval_time: 25m
+        alertname: DlpExtractorKillsHigh
+        exp_alerts: []
+      - eval_time: 33m
+        alertname: DlpExtractorKillsHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: dlp extractor children killed more than 10 times in 15 minutes
+              description: >-
+                The DLP extractor pool killed or lost more than 10 children in 15 minutes (reason cpu,
+                memory, wall or crash). CPU/RSS kills are definite resource_limit results; wall and
+                crash are retried attempts. Check the reason split and the worker's memory limit.
+              runbook_url: docs/runbooks/dlp.md#dlpextractorkillshigh
+      - eval_time: 79m
+        alertname: DlpExtractorKillsHigh
+        exp_alerts: []
+      - eval_time: 39m
+        alertname: DlpEvidenceWriteFailures
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: DlpEvidenceWriteFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: dlp evidence objects could not be stored
+              description: >-
+                At least one DLP evidence object could not be sealed or written to the mail bucket in
+                the last 15 minutes. The results record evidence_status failed (the finding and the
+                action stand, the evidence is missing). Check S3 and DLP_EVIDENCE_KEY.
+              runbook_url: docs/runbooks/dlp.md#dlpevidencewritefailures
+
+  - name: purge stall and block-rate spike
+    interval: 5m
+    input_series:
+      # Expired, unpurged rows from 1 h on (the sweeper stopped).
+      - series: 'dlp_evidence_expired_unpurged{job="email-worker",instance="a"}'
+        values: '0x12 3x48'
+      # A steady 1 block per 5 min for a day, then 10 per 5 min for the last hour.
+      - series: 'scan_dlp_results_total{job="email-worker",instance="a",verdict="suspicious",action="block",direction="outbound"}'
+        values: '0+1x288 289+10x12'
+      # Alerts never count.
+      - series: 'scan_dlp_results_total{job="email-worker",instance="a",verdict="suspicious",action="alert",direction="outbound"}'
+        values: '0+1000x300'
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: DlpEvidencePurgeStalled
+        exp_alerts: []
+      - eval_time: 3h5m
+        alertname: DlpEvidencePurgeStalled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: expired dlp evidence not purged for 2 hours
+              description: >-
+                Expired DLP evidence rows still hold their wrapped key or their object for two hours.
+                The evidence sweeper (leader lock scan:dlp-evidence on an email-worker-dlp replica)
+                is not running, cannot reach MySQL, or cannot delete objects.
+              runbook_url: docs/runbooks/dlp.md#dlpevidencepurgestalled
+      - eval_time: 23h
+        alertname: DlpBlockRateSpike
+        exp_alerts: []
+      - eval_time: 25h
+        alertname: DlpBlockRateSpike
+        exp_alerts:
+          - exp_labels:
+              severity: info
+            exp_annotations:
+              summary: dlp block / quarantine rate spike
+              description: >-
+                Block and quarantine DLP actions of the last hour are more than three times the
+                1-day average. Either a real exfiltration attempt or a new tenant rule / custom
+                pattern with false positives (check the incidents API and recent dlp_* audit rows).
+              runbook_url: docs/runbooks/dlp.md#dlpblockratespike

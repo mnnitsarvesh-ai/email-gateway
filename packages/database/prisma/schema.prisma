@@ -14,7 +14,7 @@
 // - Timestamps are DATETIME(3) UTC. Append-only tables have no `updated_at`.
 // - snake_case table and column names via @@map / @map. Enum values are only ever appended.
 // - No email bodies or attachment content: only S3 object keys, sizes and hashes.
-// - Partitioned tables (28, marked PARTITIONED below) use a composite primary key
+// - Partitioned tables (30, marked PARTITIONED below) use a composite primary key
 //   (id, <partition column>), have no foreign keys in either direction, and every unique key
 //   ends with the partition column. The PARTITION BY clause is hand-written in the migration
 //   SQL; Prisma does not model partitions. Child rows of a message copy the message's
@@ -498,6 +498,106 @@ enum BecContactScope {
   pair
 }
 
+/// Verdict of a `dlp` engine result (step 4.5 D10; DLP_VERDICTS of security-contracts). `skipped`
+/// = inbound with inbound scanning off (D1); `clean` only with complete coverage and no finding.
+enum DlpVerdict {
+  clean
+  suspicious
+  unknown
+  skipped
+}
+
+/// DLP action of a result or a rule (step 4.5 D11, D13; DLP_ACTIONS, order = strictness).
+enum DlpAction {
+  allow
+  alert
+  require_approval
+  quarantine
+  block
+}
+
+/// Where the DLP action of a result came from (step 4.5 D11; DLP_ACTION_SOURCES).
+enum DlpActionSource {
+  none
+  tenant_policy
+  default_policy
+}
+
+/// Extraction coverage of a DLP result (step 4.5 D10; `partial` is never `clean`).
+enum DlpCoverage {
+  complete
+  partial
+}
+
+/// Evidence state of a DLP result (step 4.5 D16).
+enum DlpEvidenceStatus {
+  none
+  stored
+  disabled
+  failed
+}
+
+/// Why a DLP evidence row was crypto-shredded (step 4.5 D16).
+enum DlpEvidencePurgeReason {
+  retention
+  tenant_request
+  organization_deleted
+}
+
+/// Mode of a DLP policy (step 4.5 D11): `monitor` records matches without acting.
+enum DlpPolicyMode {
+  enforce
+  monitor
+}
+
+/// Scope of a DLP exception (step 4.5 D12; DLP_EXCEPTION_SCOPES).
+enum DlpExceptionScope {
+  sender_address
+  sender_domain
+  recipient_address
+  recipient_domain
+}
+
+/// Checksum validator of a tenant DLP pattern (step 4.5 D6, D9; DLP_PATTERN_VALIDATORS).
+enum DlpPatternValidator {
+  none
+  luhn
+  verhoeff
+  mod97
+  gstin
+}
+
+/// Severity of a tenant DLP pattern or dictionary (step 4.5 D5; DLP_SEVERITIES without `info`).
+enum DlpSeverity {
+  low
+  medium
+  high
+  critical
+}
+
+/// Mask style of a tenant DLP pattern (step 4.5 D15; DLP_MASK_STYLES).
+enum DlpMaskStyle {
+  last4
+  full
+}
+
+/// Category of a tenant DLP keyword dictionary (step 4.5 D8; DLP_DICTIONARY_CATEGORIES).
+enum DlpDictionaryCategory {
+  confidential
+  financial
+  personal_info
+  source_code
+  custom
+}
+
+/// Compliance basis a tenant records to enable Aadhaar detection (step 4.5 D17, ADR-0038).
+enum DlpAadhaarBasis {
+  regulatory_obligation
+  uidai_authorised_entity
+  data_protection_policy
+  other
+}
+
 enum PolicyDirection {
   inbound
   outbound
@@ -806,6 +906,12 @@ model Organization {
   becFeedback              BecFeedback[]
   becSuppressionRules      BecSuppressionRule[]
   becContactHistory        BecContactHistory[]
+  dlpPolicies              DlpPolicy[]
+  dlpPolicyRules           DlpPolicyRule[]
+  dlpExceptions            DlpException[]
+  dlpCustomPatterns        DlpCustomPattern[]
+  dlpKeywordDictionaries   DlpKeywordDictionary[]
+  dlpComplianceSettings    DlpComplianceSettings?
 
   @@index([status])
   @@index([status, purgeAfter])
@@ -954,6 +1060,17 @@ model User {
   createdBecTrustedSenders   BecTrustedSender[]       @relation("BecTrustedSenderCreatedBy")
   createdBecFeedback         BecFeedback[]            @relation("BecFeedbackCreatedBy")
   createdBecSuppressions     BecSuppressionRule[]     @relation("BecSuppressionCreatedBy")
+  createdDlpPolicies         DlpPolicy[]              @relation("DlpPolicyCreatedBy")
+  updatedDlpPolicies         DlpPolicy[]              @relation("DlpPolicyUpdatedBy")
+  createdDlpRules            DlpPolicyRule[]          @relation("DlpRuleCreatedBy")
+  updatedDlpRules            DlpPolicyRule[]          @relation("DlpRuleUpdatedBy")
+  createdDlpExceptions       DlpException[]           @relation("DlpExceptionCreatedBy")
+  updatedDlpExceptions       DlpException[]           @relation("DlpExceptionUpdatedBy")
+  createdDlpPatterns         DlpCustomPattern[]       @relation("DlpPatternCreatedBy")
+  updatedDlpPatterns         DlpCustomPattern[]       @relation("DlpPatternUpdatedBy")
+  createdDlpDictionaries     DlpKeywordDictionary[]   @relation("DlpDictionaryCreatedBy")
+  updatedDlpDictionaries     DlpKeywordDictionary[]   @relation("DlpDictionaryUpdatedBy")
+  recordedDlpAadhaarSettings DlpComplianceSettings[]  @relation("DlpAadhaarRecordedBy")
 
   @@unique([organizationId, email])
   @@index([organizationId, status])
@@ -1584,7 +1701,9 @@ model EmailHeader {
 }
 
 /// PARTITIONED by RANGE COLUMNS(received_at), monthly. Metadata and an S3 key only, never
-/// content. No foreign keys.
+/// content. No foreign keys. The `dlp` engine (step 4.5 D4) reads the stored part through
+/// `object_key` and extracts its text in memory only (in the isolated extractor child); no
+/// extracted text is ever stored.
 model EmailAttachment {
   id                  BigInt                 @default(autoincrement()) @db.UnsignedBigInt
   receivedAt          DateTime               @map("received_at") @db.DateTime(3)
@@ -1820,7 +1939,8 @@ model ScanEngineResult {
   /// ENGINE_NAMES of @email-gateway/security-contracts: rspamd, attachment, url, bec, dlp,
   /// sandbox (step 4.2 A1: ClamAV and YARA are components of the `attachment` engine; step 4.3
   /// U1: `url` is written by the URL engine on scan.url; step 4.4 B1: `bec` is written by the
-  /// phishing/BEC engine on scan.bec, a stage-2 engine that runs after `rspamd` and `url`).
+  /// phishing/BEC engine on scan.bec, a stage-2 engine that runs after `rspamd` and `url`; step
+  /// 4.5 D1: `dlp` is written by the data loss prevention engine on scan.dlp, a stage-1 engine).
   engine          String        @db.VarChar(32)
   engineVersion   String?       @map("engine_version") @db.VarChar(64)
   outcome         EngineOutcome
@@ -2483,6 +2603,291 @@ model BecContactHistory {
   @@unique([organizationId, scope, keyHash])
   @@index([organizationId, lastSeenAt])
   @@map("bec_contact_history")
+}
+
+/// PARTITIONED by RANGE COLUMNS(received_at), monthly (6 months, core; step 4.5 §3, D10, D19).
+/// One row per scan round with a definite final result of the `dlp` engine, written in that final
+/// row's finalize transaction (unique per scan). Codes, counts, confidences, offsets-free source
+/// references, versions and **masked** values only (D15): never a raw matched value, context
+/// text, extracted text or dictionary terms. `matched_policy_id` / `matched_rule_id` are internal
+/// dlp_policies / dlp_policy_rules ids (no foreign keys: partitioned table). No foreign keys.
+model DlpScanResult {
+  id               BigInt            @default(autoincrement()) @db.UnsignedBigInt
+  receivedAt       DateTime          @map("received_at") @db.DateTime(3)
+  messageId        BigInt            @map("message_id") @db.UnsignedBigInt
+  organizationId   BigInt            @map("organization_id") @db.UnsignedBigInt
+  /// email_scans.id of the round.
+  scanId           BigInt            @map("scan_id") @db.UnsignedBigInt
+  lifecycleRound   Int               @map("lifecycle_round") @db.UnsignedSmallInt
+  /// email_messages.direction at scan time (trusted).
+  direction        MessageDirection
+  /// `dlp/1;dict=<8 hex>;data=<8 hex>;ext=dlp-extract/1` (D23).
+  engineVersion    String            @map("engine_version") @db.VarChar(96)
+  /// `dlp-map/1` (D5).
+  rulesVersion     String            @map("rules_version") @db.VarChar(16)
+  /// `dlp-map/1;p=<12 hex>;t=<row version | none>` (D18).
+  settingsVersion  String            @map("settings_version") @db.VarChar(96)
+  /// `pol/1;h=<12 hex>` (D11).
+  policyVersion    String            @map("policy_version") @db.VarChar(32)
+  /// `dlp-extract/1` (D4).
+  extractorVersion String            @map("extractor_version") @db.VarChar(32)
+  verdict          DlpVerdict
+  /// Effective DLP action of the tenant policy (D11); applied by the delivery stage (D13).
+  action           DlpAction
+  actionSource     DlpActionSource   @map("action_source")
+  /// dlp_policies.id / dlp_policy_rules.id of the winning rule (NULL without a winner).
+  matchedPolicyId  BigInt?           @map("matched_policy_id") @db.UnsignedBigInt
+  matchedRuleId    BigInt?           @map("matched_rule_id") @db.UnsignedBigInt
+  coverage         DlpCoverage
+  /// JSON object `{ aadhaar: 'enabled'|'disabled', sources: [≤ 64 × { source, partIndex?, path?, format, status, reasons, chars, truncated }] }` (D10, D17).
+  coverageDetail   Json              @map("coverage_detail")
+  /// JSON array (≤ 10) of `{ category, count, maxSeverity, maxConfidence }`.
+  categories       Json
+  /// JSON array (≤ 64) of findings with masked samples only (≤ 3 each, D15).
+  findings         Json
+  /// `{ winner, matched (≤ 16), matchedTruncated, defaultPolicyMatched, exceptionsApplied (≤ 16) }` with public ids (UUIDv7; internal ids only in matched_policy_id / matched_rule_id).
+  policy           Json
+  findingCount     Int               @map("finding_count") @db.UnsignedInt
+  evidenceStatus   DlpEvidenceStatus @map("evidence_status")
+  durationMs       Int               @map("duration_ms") @db.UnsignedInt
+  createdAt        DateTime          @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@id([id, receivedAt])
+  @@unique([scanId, receivedAt])
+  @@index([messageId, receivedAt])
+  @@index([organizationId, receivedAt])
+  @@index([organizationId, action, receivedAt])
+  @@map("dlp_scan_results")
+}
+
+/// PARTITIONED by RANGE COLUMNS(received_at), monthly (7 months, core; step 4.5 D16, ADR-0038).
+/// Metadata of one envelope-encrypted DLP evidence object in S3 (`object_key` under
+/// `org/<org>/dlp-evidence/`): never content. `wrapped_key` is the data key wrapped under
+/// DLP_EVIDENCE_KEY (SecretBox format); it exists only here, so purge = crypto-shred
+/// (`wrapped_key` NULL + `purged_at`) then delete the object (`object_key` NULL after a successful
+/// delete). `expires_at` = received_at + the tenant's evidence retention (≤ 180 days); partitions
+/// are dropped at 7 months. No foreign keys.
+model DlpEvidence {
+  id              BigInt                  @default(autoincrement()) @db.UnsignedBigInt
+  receivedAt      DateTime                @map("received_at") @db.DateTime(3)
+  organizationId  BigInt                  @map("organization_id") @db.UnsignedBigInt
+  messageId       BigInt                  @map("message_id") @db.UnsignedBigInt
+  /// email_scans.id of the round (one evidence per round).
+  scanId          BigInt                  @map("scan_id") @db.UnsignedBigInt
+  /// NULL after the object was deleted.
+  objectKey       String?                 @map("object_key") @db.VarChar(512)
+  /// Hex SHA-256 of the stored ciphertext object.
+  objectSha256    String                  @map("object_sha256") @db.Char(64)
+  objectSizeBytes Int                     @map("object_size_bytes") @db.UnsignedInt
+  /// `v1.<kid>.<iv>.<tag>.<ct>`; NULL = crypto-shredded.
+  wrappedKey      String?                 @map("wrapped_key") @db.VarChar(255)
+  keyId           String                  @map("key_id") @db.VarChar(16)
+  /// `dlp-evidence/1`.
+  algorithm       String                  @db.VarChar(32)
+  matchCount      Int                     @map("match_count") @db.UnsignedSmallInt
+  expiresAt       DateTime                @map("expires_at") @db.DateTime(3)
+  purgedAt        DateTime?               @map("purged_at") @db.DateTime(3)
+  purgeReason     DlpEvidencePurgeReason? @map("purge_reason")
+  createdAt       DateTime                @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@id([id, receivedAt])
+  @@unique([scanId, receivedAt])
+  @@index([messageId, receivedAt])
+  @@index([organizationId, purgedAt, expiresAt])
+  @@index([expiresAt])
+  @@map("dlp_evidence")
+}
+
+/// A tenant DLP policy (step 4.5 D11): ordered rules, evaluated at scan time. `directions` is a
+/// JSON array ⊆ ["outbound","internal","inbound"]. Deleted explicitly by organization deletion
+/// (no cascade).
+model DlpPolicy {
+  id              BigInt        @id @default(autoincrement()) @db.UnsignedBigInt
+  /// UUIDv7; the only id the API exposes.
+  publicId        String        @unique @map("public_id") @db.Char(36)
+  organizationId  BigInt        @map("organization_id") @db.UnsignedBigInt
+  name            String        @db.VarChar(128)
+  description     String?       @db.VarChar(512)
+  enabled         Boolean       @default(true)
+  mode            DlpPolicyMode @default(enforce)
+  /// 0..1000, ascending evaluation order (ties broken by id).
+  priority        Int           @default(100) @db.UnsignedSmallInt
+  directions      Json
+  /// Compare-and-set counter of the API.
+  version         Int           @default(1) @db.UnsignedInt
+  createdByUserId BigInt?       @map("created_by_user_id") @db.UnsignedBigInt
+  updatedByUserId BigInt?       @map("updated_by_user_id") @db.UnsignedBigInt
+  createdAt       DateTime      @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt       DateTime      @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization Organization    @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  createdBy    User?           @relation("DlpPolicyCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  updatedBy    User?           @relation("DlpPolicyUpdatedBy", fields: [updatedByUserId], references: [id], onDelete: SetNull)
+  rules        DlpPolicyRule[]
+  exceptions   DlpException[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId, enabled, priority])
+  @@map("dlp_policies")
+}
+
+/// A rule of a DLP policy (step 4.5 D11). `conditions` is validated by `dlpRuleConditionsSchema`
+/// (security-contracts). Deleted with its policy in the api transaction (no cascade).
+model DlpPolicyRule {
+  id              BigInt    @id @default(autoincrement()) @db.UnsignedBigInt
+  /// UUIDv7; the only id the API exposes.
+  publicId        String    @unique @map("public_id") @db.Char(36)
+  organizationId  BigInt    @map("organization_id") @db.UnsignedBigInt
+  policyId        BigInt    @map("policy_id") @db.UnsignedBigInt
+  name            String    @db.VarChar(128)
+  enabled         Boolean   @default(true)
+  priority        Int       @db.UnsignedSmallInt
+  conditions      Json
+  action          DlpAction
+  version         Int       @default(1) @db.UnsignedInt
+  createdByUserId BigInt?   @map("created_by_user_id") @db.UnsignedBigInt
+  updatedByUserId BigInt?   @map("updated_by_user_id") @db.UnsignedBigInt
+  createdAt       DateTime  @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt       DateTime  @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization Organization   @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  policy       DlpPolicy      @relation(fields: [policyId], references: [id], onDelete: Restrict)
+  createdBy    User?          @relation("DlpRuleCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  updatedBy    User?          @relation("DlpRuleUpdatedBy", fields: [updatedByUserId], references: [id], onDelete: SetNull)
+  exceptions   DlpException[]
+
+  @@unique([policyId, name])
+  @@index([organizationId, policyId, priority])
+  @@map("dlp_policy_rules")
+}
+
+/// A DLP exception (step 4.5 D12): removes findings of a sender, or recipients, from the targeted
+/// rules. `target_key` = `all` | `policy:<id>` | `rule:<id>` (so the unique key has no NULLs);
+/// `expires_at` is required (≤ 365 days ahead). Deleted explicitly by organization deletion (no
+/// cascade).
+model DlpException {
+  id              BigInt            @id @default(autoincrement()) @db.UnsignedBigInt
+  /// UUIDv7; the only id the API exposes.
+  publicId        String            @unique @map("public_id") @db.Char(36)
+  organizationId  BigInt            @map("organization_id") @db.UnsignedBigInt
+  scope           DlpExceptionScope
+  /// Normalized lower-case address or ASCII domain.
+  value           String            @db.VarChar(320)
+  policyId        BigInt?           @map("policy_id") @db.UnsignedBigInt
+  ruleId          BigInt?           @map("rule_id") @db.UnsignedBigInt
+  targetKey       String            @map("target_key") @db.VarChar(48)
+  /// `{ detectors?, categories? }`; NULL = every finding.
+  filters         Json?
+  reason          String            @db.VarChar(512)
+  expiresAt       DateTime          @map("expires_at") @db.DateTime(3)
+  enabled         Boolean           @default(true)
+  version         Int               @default(1) @db.UnsignedInt
+  createdByUserId BigInt?           @map("created_by_user_id") @db.UnsignedBigInt
+  updatedByUserId BigInt?           @map("updated_by_user_id") @db.UnsignedBigInt
+  createdAt       DateTime          @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt       DateTime          @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization Organization   @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  policy       DlpPolicy?     @relation(fields: [policyId], references: [id], onDelete: Restrict)
+  rule         DlpPolicyRule? @relation(fields: [ruleId], references: [id], onDelete: Restrict)
+  createdBy    User?          @relation("DlpExceptionCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  updatedBy    User?          @relation("DlpExceptionUpdatedBy", fields: [updatedByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([organizationId, scope, value, targetKey])
+  @@index([organizationId, expiresAt])
+  @@map("dlp_exceptions")
+}
+
+/// A tenant custom DLP pattern (step 4.5 D9): RE2 syntax (re2js), validated by
+/// `compileCustomPattern` at write and at load (≤ 256 characters enforced by the api). The pattern
+/// is tenant configuration, never matched content. Deleted explicitly by organization deletion
+/// (no cascade).
+model DlpCustomPattern {
+  id              BigInt              @id @default(autoincrement()) @db.UnsignedBigInt
+  /// UUIDv7; the only id the API exposes.
+  publicId        String              @unique @map("public_id") @db.Char(36)
+  organizationId  BigInt              @map("organization_id") @db.UnsignedBigInt
+  name            String              @db.VarChar(128)
+  pattern         String              @db.VarChar(512)
+  caseInsensitive Boolean             @default(false) @map("case_insensitive")
+  validator       DlpPatternValidator @default(none)
+  /// JSON array (≤ 20) of keywords (1..64 characters).
+  contextKeywords Json                @map("context_keywords")
+  requireContext  Boolean             @default(false) @map("require_context")
+  severity        DlpSeverity
+  /// 0.50..1.00.
+  baseConfidence  Decimal             @map("base_confidence") @db.Decimal(3, 2)
+  maskStyle       DlpMaskStyle        @default(last4) @map("mask_style")
+  enabled         Boolean             @default(true)
+  version         Int                 @default(1) @db.UnsignedInt
+  createdByUserId BigInt?             @map("created_by_user_id") @db.UnsignedBigInt
+  updatedByUserId BigInt?             @map("updated_by_user_id") @db.UnsignedBigInt
+  createdAt       DateTime            @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt       DateTime            @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  createdBy    User?        @relation("DlpPatternCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  updatedBy    User?        @relation("DlpPatternUpdatedBy", fields: [updatedByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([organizationId, name])
+  @@map("dlp_custom_patterns")
+}
+
+/// A tenant DLP keyword dictionary (step 4.5 D8). `terms` (1..1000, each 1..64 characters) are
+/// tenant configuration shown only to `dlp:read` holders; results reference a term by index.
+/// Deleted explicitly by organization deletion (no cascade).
+model DlpKeywordDictionary {
+  id              BigInt                @id @default(autoincrement()) @db.UnsignedBigInt
+  /// UUIDv7; the only id the API exposes.
+  publicId        String                @unique @map("public_id") @db.Char(36)
+  organizationId  BigInt                @map("organization_id") @db.UnsignedBigInt
+  name            String                @db.VarChar(128)
+  category        DlpDictionaryCategory
+  terms           Json
+  termCount       Int                   @map("term_count") @db.UnsignedSmallInt
+  severity        DlpSeverity
+  /// 0.50..1.00 (default 0.70).
+  baseConfidence  Decimal               @default(0.70) @map("base_confidence") @db.Decimal(3, 2)
+  minMatches      Int                   @default(1) @map("min_matches") @db.UnsignedSmallInt
+  enabled         Boolean               @default(true)
+  version         Int                   @default(1) @db.UnsignedInt
+  createdByUserId BigInt?               @map("created_by_user_id") @db.UnsignedBigInt
+  updatedByUserId BigInt?               @map("updated_by_user_id") @db.UnsignedBigInt
+  createdAt       DateTime              @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt       DateTime              @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  createdBy    User?        @relation("DlpDictionaryCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  updatedBy    User?        @relation("DlpDictionaryUpdatedBy", fields: [updatedByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([organizationId, name])
+  @@map("dlp_keyword_dictionaries")
+}
+
+/// One row per organization (step 4.5 D17, ADR-0038): the recorded compliance basis that enables
+/// Aadhaar detection. The worker runs NI2 only when enabled, attested, with basis and reference,
+/// and `aadhaar_review_due_at` in the future. Deleted explicitly by organization deletion (no
+/// cascade).
+model DlpComplianceSettings {
+  id                      BigInt           @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId          BigInt           @unique @map("organization_id") @db.UnsignedBigInt
+  aadhaarEnabled          Boolean          @default(false) @map("aadhaar_enabled")
+  aadhaarBasis            DlpAadhaarBasis? @map("aadhaar_basis")
+  /// The tenant's document or approval reference (1..256).
+  aadhaarReference        String?          @map("aadhaar_reference") @db.VarChar(256)
+  aadhaarAttested         Boolean          @default(false) @map("aadhaar_attested")
+  aadhaarRecordedByUserId BigInt?          @map("aadhaar_recorded_by_user_id") @db.UnsignedBigInt
+  aadhaarRecordedAt       DateTime?        @map("aadhaar_recorded_at") @db.DateTime(3)
+  /// ≤ recorded + 365 days.
+  aadhaarReviewDueAt      DateTime?        @map("aadhaar_review_due_at") @db.DateTime(3)
+  version                 Int              @default(1) @db.UnsignedInt
+  createdAt               DateTime         @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt               DateTime         @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  aadhaarRecordedBy User?        @relation("DlpAadhaarRecordedBy", fields: [aadhaarRecordedByUserId], references: [id], onDelete: SetNull)
+
+  @@map("dlp_compliance_settings")
 }
 
 /// `organization_id` NULL = platform-wide intelligence. Step 4.3 (U6, U16) writes platform rows

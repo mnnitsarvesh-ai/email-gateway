@@ -1,0 +1,222 @@
+{
+  "version": 1,
+  "dictionary": "negative",
+  "description": "Negative context (-0.30 for cards, Aadhaar, PAN, mobile and passport detectors; negative_phone (tel, phone) not for mobile, where phone is positive context) and disclaimer phrases (-0.60 for CF1), step 4.5 D7.",
+  "entries": [
+    {
+      "id": "en.negative.001",
+      "phrase": "test",
+      "group": "negative"
+    },
+    {
+      "id": "en.negative.002",
+      "phrase": "testing",
+      "group": "negative"
+    },
+    {
+      "id": "en.negative.003",
+      "phrase": "sample",
+      "group": "negative"
+    },
+    {
+      "id": "en.negative.004",
+      "phrase": "example",
+      "group": "negative"
+    },
+    {
+      "id": "en.negative.005",
+      "phrase": "dummy",
+      "group": "negative"
+    },
+    {
+      "id": "en.negative.006",
+      "phrase": "fake",
+      "group": "negative"
+    },
+    {
+      "id": "en.negative.007",
+      "phrase": "demo",
+      "group": "negative"
+    },
+    {
+      "id": "en.negative.008",
+      "phrase": "placeholder",
+      "group": "negative"
+    },
+    {
+      "id": "en.negative.009",
+      "phrase": "order",
+      "group": "negative"
+    },
+    {
+      "id": "en.negative.010",
+      "phrase": "order id",
+      "group": "negative"
+    },
+    {
+      "id": "en.negative.011",
+      "phrase": "order no",
+      "group": "negative"
+    },
+    {
+      "id": "en.negative.012",
+      "phrase": "invoice no",
+      "group": "negative"
+    },
+    {
+      "id": "en.negative.013",
+      "phrase": "ref",
+      "group": "negative"
+    },
+    {
+      "id": "en.negative.014",
+      "phrase": "reference",
+      "group": "negative"
+    },
+    {
+      "id": "en.negative.015",
+      "phrase": "tracking",
+      "group": "negative"
+    },
+    {
+      "id": "en.negative.016",
+      "phrase": "awb",
+      "group": "negative"
+    },
+    {
+      "id": "en.negative.017",
+      "phrase": "txn",
+      "group": "negative"
+    },
+    {
+      "id": "en.negative.018",
+      "phrase": "transaction id",
+      "group": "negative"
+    },
+    {
+      "id": "en.negative.019",
+      "phrase": "isbn",
+      "group": "negative"
+    },
+    {
+      "id": "en.negative.020",
+      "phrase": "serial",
+      "group": "negative"
+    },
+    {
+      "id": "en.negative.021",
+      "phrase": "uuid",
+      "group": "negative"
+    },
+    {
+      "id": "en.negative.022",
+      "phrase": "timestamp",
+      "group": "negative"
+    },
+    {
+      "id": "en.negative.023",
+      "phrase": "tel",
+      "group": "negative_phone"
+    },
+    {
+      "id": "en.negative.024",
+      "phrase": "phone",
+      "group": "negative_phone"
+    },
+    {
+      "id": "en.negative.025",
+      "phrase": "fax",
+      "group": "negative"
+    },
+    {
+      "id": "en.negative.026",
+      "phrase": "confidentiality notice",
+      "group": "disclaimer"
+    },
+    {
+      "id": "en.negative.027",
+      "phrase": "disclaimer",
+      "group": "disclaimer"
+    },
+    {
+      "id": "en.negative.028",
+      "phrase": "intended solely for",
+      "group": "disclaimer"
+    },
+    {
+      "id": "en.negative.029",
+      "phrase": "intended only for",
+      "group": "disclaimer"
+    },
+    {
+      "id": "en.negative.030",
+      "phrase": "if you have received this email in error",
+      "group": "disclaimer"
+    },
+    {
+      "id": "en.negative.031",
+      "phrase": "if you have received this message in error",
+      "group": "disclaimer"
+    },
+    {
+      "id": "en.negative.032",
+      "phrase": "if you are not the intended recipient",
+      "group": "disclaimer"
+    },
+    {
+      "id": "en.negative.033",
+      "phrase": "this email and any attachments",
+      "group": "disclaimer"
+    },
+    {
+      "id": "en.negative.034",
+      "phrase": "this e-mail and any attachments",
+      "group": "disclaimer"
+    },
+    {
+      "id": "hi.negative.001",
+      "phrase": "परीक्षण",
+      "group": "negative"
+    },
+    {
+      "id": "hi.negative.002",
+      "phrase": "नमूना",
+      "group": "negative"
+    },
+    {
+      "id": "hi.negative.003",
+      "phrase": "उदाहरण",
+      "group": "negative"
+    },
+    {
+      "id": "hi.negative.004",
+      "phrase": "ऑर्डर",
+      "group": "negative"
+    },
+    {
+      "id": "hi.negative.005",
+      "phrase": "यदि आपको यह ईमेल गलती से मिला है",
+      "group": "disclaimer"
+    },
+    {
+      "id": "hi.negative.006",
+      "phrase": "अस्वीकरण",
+      "group": "disclaimer"
+    },
+    {
+      "id": "hi-Latn.negative.001",
+      "phrase": "namuna",
+      "group": "negative"
+    },
+    {
+      "id": "hi-Latn.negative.002",
+      "phrase": "udaharan",
+      "group": "negative"
+    },
+    {
+      "id": "hi-Latn.negative.003",
+      "phrase": "agar aapko yeh email galti se mila hai",
+      "group": "disclaimer"
+    }
+  ]
+}

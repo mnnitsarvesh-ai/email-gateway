@@ -63,6 +63,10 @@ import { reply } from './support/smtp-tools';
  * once Rspamd recovers, bec reads the real auth row; when Rspamd's final is `error`, bec still
  * runs, records its `auth` input as `failed` (`bec.input_unavailable.auth`) and is never clean —
  * the `scan_failed` payload lists all four required engines.
+ *
+ * Step 4.5 (D1): the stage-1 `dlp` engine needs no other engine; these messages are inbound, so
+ * its final is `skipped` (`dlp.not_inbound`) at the first attempt in every round, whatever Rspamd
+ * does, and the `scan_failed` payload lists all five required engines.
  */
 const gate = await scanStackGate();
 const fx = new SmtpFixtures();
@@ -212,6 +216,8 @@ describe.skipIf(gate.skip)('scan stack: Rspamd outage', { timeout: 600_000 }, ()
           expect.objectContaining({ engine: 'rspamd', attempts: attempts.length + 1 }),
           expect.objectContaining({ engine: 'attachment', outcome: 'skipped', attempts: 1 }),
           expect.objectContaining({ engine: 'bec', outcome: becFinals[0]!.outcome, attempts: 1 }),
+          // Step 4.5: dlp (stage 1, inbound) is independent of Rspamd's attempts.
+          expect.objectContaining({ engine: 'dlp', outcome: 'skipped', attempts: 1 }),
         ]),
       );
 
@@ -269,6 +275,8 @@ describe.skipIf(gate.skip)('scan stack: Rspamd outage', { timeout: 600_000 }, ()
           expect.objectContaining({ engine: 'url', required: true }),
           // Step 4.4: triggered by the rspamd `error` final; auth input failed → never clean.
           { engine: 'bec', required: true, outcome: 'unknown', attempts: 1 },
+          // Step 4.5: dlp skipped the inbound message at its first attempt (dlp.not_inbound).
+          { engine: 'dlp', required: true, outcome: 'skipped', attempts: 1 },
         ]),
       );
       expect(failedPayload.engines).toHaveLength(REQUIRED_ENGINES.length);

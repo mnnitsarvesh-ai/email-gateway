@@ -11,6 +11,7 @@ import { swaks, type SwaksResult } from './smtp-tools';
 export {
   ATTACHMENT_LEDGER,
   BEC_LEDGER,
+  DLP_LEDGER,
   PASSTHROUGH_CONSUMER,
   REQUIRED_ENGINES,
   RSPAMD_LEDGER,
@@ -19,8 +20,11 @@ export {
   URL_LEDGER,
 } from './scan-stage';
 
-/** The stage-1 engines of the stack (consume `parsed.v1`/`rescan_requested.v1`, step 4.4 B2). */
-export const STAGE1_ENGINES = ['rspamd', 'attachment', 'url'] as const;
+/**
+ * The stage-1 engines of the stack (consume `parsed.v1`/`rescan_requested.v1`, step 4.4 B2;
+ * `dlp` since step 4.5 D1).
+ */
+export const STAGE1_ENGINES = ['rspamd', 'attachment', 'url', 'dlp'] as const;
 
 async function ready(service: 'event-relay' | 'api'): Promise<boolean> {
   try {
@@ -147,6 +151,47 @@ export function becResultsOf(prisma: PrismaClient, message: MessageKey) {
     where: { messageId: message.id, receivedAt: message.receivedAt },
     orderBy: { scanId: 'asc' },
   });
+}
+
+/** `dlp_scan_results` rows of a message (step 4.5 D19), oldest round first. */
+export function dlpResultsOf(prisma: PrismaClient, message: MessageKey) {
+  return prisma.dlpScanResult.findMany({
+    where: { messageId: message.id, receivedAt: message.receivedAt },
+    orderBy: { scanId: 'asc' },
+  });
+}
+
+/** `dlp_evidence` rows of a message (step 4.5 D16), oldest round first. */
+export function dlpEvidenceOf(prisma: PrismaClient, message: MessageKey) {
+  return prisma.dlpEvidence.findMany({
+    where: { messageId: message.id, receivedAt: message.receivedAt },
+    orderBy: { scanId: 'asc' },
+  });
+}
+
+/** `mail.message.dlp_incident.v1` outbox rows of a message (step 4.5 D14), oldest first. */
+export function dlpIncidentEventsOf(
+  prisma: PrismaClient,
+  organizationId: bigint,
+  message: MessageKey,
+) {
+  return prisma.messageOutbox.findMany({
+    where: {
+      organizationId,
+      aggregateId: message.id.toString(),
+      eventType: 'mail.message.dlp_incident.v1',
+    },
+    orderBy: { id: 'asc' },
+  });
+}
+
+/** The detector/coverage codes of a stored `dlp_scan_results.findings` JSON (masked only). */
+export function dlpFindingCodes(findings: unknown): string[] {
+  return Array.isArray(findings)
+    ? findings
+        .map((f) => (f && typeof f === 'object' ? (f as { code?: unknown }).code : undefined))
+        .filter((c): c is string => typeof c === 'string')
+    : [];
 }
 
 /**

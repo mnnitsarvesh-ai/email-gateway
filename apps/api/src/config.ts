@@ -18,6 +18,9 @@ import {
   BEC_PLATFORM_ENV_KEYS,
   type BecPlatformSettings,
   becPlatformSettingsFromEnv,
+  DLP_PLATFORM_ENV_KEYS,
+  type DlpPlatformSettings,
+  dlpPlatformSettingsFromEnv,
   RSPAMD_PLATFORM_DEFAULTS,
   RSPAMD_PLATFORM_ENV_KEYS,
   type RspamdPlatformSettings,
@@ -599,6 +602,89 @@ export function validateBecConfig(cfg: BecConfigKeys, ctx: z.RefinementCtx): voi
   }
 }
 
+/**
+ * Data loss prevention (step 4.5 D18, D21, §5): the platform DLP settings tenants may override
+ * (the same `DLP_*` keys the email-worker reads, parsed by `dlpPlatformSettingsFromEnv`: unset
+ * or empty → default), the custom-pattern validation limits, the per-tenant caps of the DLP
+ * routes and the evidence key-encryption key the audited evidence endpoint opens evidence with
+ * (D16; a dedicated secret, never `DATA_ENCRYPTION_KEY`). Start-up errors name the key, never
+ * the value.
+ */
+const dlpConfigShape = {
+  ...(Object.fromEntries(
+    Object.values(DLP_PLATFORM_ENV_KEYS).map((key) => [key, z.string().optional()]),
+  ) as Record<
+    (typeof DLP_PLATFORM_ENV_KEYS)[keyof DlpPlatformSettings],
+    z.ZodOptional<z.ZodString>
+  >),
+  /** Longest tenant pattern (D9 step 1; the column holds 512). */
+  DLP_CUSTOM_PATTERN_MAX_LENGTH: int(1, 512).default(256),
+  /** Cost probe of a tenant pattern on the packaged probe corpus (D9 step 6). */
+  DLP_CUSTOM_PATTERN_PROBE_MAX_MS: int(1, 1000).default(50),
+  /** Text budget of the tenant patterns per message (worker; validated here for consistency). */
+  DLP_CUSTOM_SCAN_MAX_CHARS: int(1000, 4_000_000).default(1_000_000),
+  DLP_CUSTOM_PATTERNS_MAX_PER_TENANT: int(1, 1000).default(50),
+  DLP_DICTIONARIES_MAX_PER_TENANT: int(1, 1000).default(20),
+  /** Terms per dictionary (`term_count SMALLINT UNSIGNED`). */
+  DLP_DICTIONARY_MAX_TERMS: int(1, 10_000).default(1000),
+  DLP_POLICIES_MAX_PER_TENANT: int(1, 1000).default(20),
+  DLP_RULES_MAX_PER_POLICY: int(1, 1000).default(50),
+  DLP_EXCEPTIONS_MAX_PER_TENANT: int(1, 100_000).default(500),
+  /** Longest an exception may be valid ahead (D12). */
+  DLP_EXCEPTION_MAX_DAYS: int(1, 3650).default(365),
+  /** Key-encryption key of the evidence (D16): 32 bytes as 64 hex characters, required. */
+  DLP_EVIDENCE_KEY: aesKey,
+  /** Opens evidence wrapped under the previous key during a rotation (D16). */
+  DLP_EVIDENCE_KEY_PREVIOUS: aesKey.optional(),
+};
+
+export type DlpConfigKeys = Partial<
+  Record<(typeof DLP_PLATFORM_ENV_KEYS)[keyof DlpPlatformSettings], string>
+>;
+
+/** The validated DLP platform settings of the api config (D18). */
+export function dlpPlatformSettingsOf(cfg: DlpConfigKeys): DlpPlatformSettings {
+  return dlpPlatformSettingsFromEnv(cfg);
+}
+
+/**
+ * Refuses invalid DLP platform settings and a previous evidence key equal to the current one at
+ * start, naming the environment key (never the value).
+ */
+export function validateDlpConfig(
+  cfg: DlpConfigKeys & { DLP_EVIDENCE_KEY?: string; DLP_EVIDENCE_KEY_PREVIOUS?: string },
+  ctx: z.RefinementCtx,
+): void {
+  try {
+    dlpPlatformSettingsFromEnv(cfg);
+  } catch (err) {
+    if (!(err instanceof z.ZodError)) throw err;
+    for (const issue of err.issues) {
+      const setting = issue.path[0] as keyof DlpPlatformSettings | undefined;
+      ctx.addIssue({
+        code: 'custom',
+        path: [
+          setting !== undefined && setting in DLP_PLATFORM_ENV_KEYS
+            ? DLP_PLATFORM_ENV_KEYS[setting]
+            : DLP_PLATFORM_ENV_KEYS.confidenceThreshold,
+        ],
+        message: issue.message,
+      });
+    }
+  }
+  if (
+    cfg.DLP_EVIDENCE_KEY !== undefined &&
+    cfg.DLP_EVIDENCE_KEY_PREVIOUS !== undefined &&
+    cfg.DLP_EVIDENCE_KEY.toLowerCase() === cfg.DLP_EVIDENCE_KEY_PREVIOUS.toLowerCase()
+  ) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['DLP_EVIDENCE_KEY_PREVIOUS'],
+      message: 'must differ from DLP_EVIDENCE_KEY (it holds the key before a rotation)',
+    });
+  }
+}
+
 /** The validated Rspamd platform settings of the api config (S8). */
 export function rspamdPlatformSettingsOf(
   cfg: Pick<ScanConfigKeys, (typeof RSPAMD_PLATFORM_ENV_KEYS)[keyof RspamdPlatformSettings]>,
@@ -654,6 +740,7 @@ export const apiConfigSchema = baseConfigSchema
   .extend(attachmentConfigShape)
   .extend(urlConfigShape)
   .extend(becConfigShape)
+  .extend(dlpConfigShape)
   .extend({
     /** Comma-separated allow-list of admin portal origins. */
     CORS_ORIGINS: z
@@ -673,6 +760,7 @@ export const apiConfigSchema = baseConfigSchema
     validateAttachmentConfig(cfg, ctx);
     validateUrlConfig(cfg, ctx);
     validateBecConfig(cfg, ctx);
+    validateDlpConfig(cfg, ctx);
     if (cfg.AUTH_SESSION_MAX_AGE_SECONDS < cfg.AUTH_REFRESH_TOKEN_TTL_SECONDS) {
       ctx.addIssue({
         code: 'custom',

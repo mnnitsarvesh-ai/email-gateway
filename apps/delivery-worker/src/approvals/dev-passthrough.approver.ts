@@ -21,7 +21,7 @@ import type { ApprovalFeed } from './approval-feed';
 export const DEV_PASSTHROUGH_CONSUMER = 'delivery-worker.dev-passthrough-scanned';
 
 export const DEV_PASSTHROUGH_WARNING =
-  'DEV PASS-THROUGH ENABLED: mail is delivered after scanning without policy; malicious verdicts are held in scanned, and so are suspicious or malicious BEC results (not production behaviour)';
+  'DEV PASS-THROUGH ENABLED: mail is delivered after scanning without policy; malicious verdicts are held in scanned, and so are suspicious or malicious BEC results and DLP actions require_approval, quarantine and block (not production behaviour)';
 
 /** The phishing/BEC engine (step 4.4 B1); its result is held by the pass-through (B17). */
 export const BEC_ENGINE = 'bec';
@@ -62,6 +62,46 @@ export interface BecRoundVerdicts {
 export function becHoldDecision(row: BecRoundVerdicts | null): 'held' | 'ai_only' | 'missing' {
   if (row === null) return 'missing';
   return HELD_BEC_OUTCOMES.has(row.deterministicVerdict) ? 'held' : 'ai_only';
+}
+
+/** The data loss prevention engine (step 4.5 D1); its policy action is applied here (D13). */
+export const DLP_ENGINE = 'dlp';
+/** Engine outcomes that are not a definite DLP result (a failed or skipped engine). */
+const NON_DEFINITE_DLP_OUTCOMES: ReadonlySet<string> = new Set(['skipped', 'timeout', 'error']);
+/** DLP actions the pass-through never approves (step 4.5 D13); weaker ones are approved. */
+const HELD_DLP_ACTIONS: ReadonlySet<string> = new Set(['require_approval', 'quarantine', 'block']);
+
+/**
+ * Whether the `scanned.v1` engines entry for `dlp` carries a definite outcome other than
+ * `skipped` (then the round's `dlp_scan_results` row decides, D13). An absent entry (a round
+ * without the dlp engine) and `skipped` (inbound not scanned) are not checked.
+ */
+export function dlpResultApplies(payload: Pick<MessageScannedV1, 'engines'>): boolean {
+  const dlp = payload.engines.find((entry) => entry.engine === DLP_ENGINE);
+  return dlp !== undefined && !NON_DEFINITE_DLP_OUTCOMES.has(dlp.outcome);
+}
+
+/**
+ * The pass-through decision for the round's DLP action (D13): `allow` → approve, `alert` →
+ * approve (counted), `require_approval` / `quarantine` / `block` → held, a missing row → held
+ * (fail-safe: policy 5.2 treats it as a block-equivalent hold, contracts.md).
+ */
+export function dlpHoldDecision(action: string | null): 'approve' | 'alert' | 'held' | 'missing' {
+  if (action === null) return 'missing';
+  if (HELD_DLP_ACTIONS.has(action)) return 'held';
+  return action === 'alert' ? 'alert' : 'approve';
+}
+
+/**
+ * A writer read of `dlp_scan_results` returned a row other than the one asked for (Prisma 6
+ * wrong read, step 4.2 §6). Thrown inside the ledger transaction: nothing is approved, the event
+ * is redelivered.
+ */
+export class InconsistentDlpResultReadError extends Error {
+  constructor() {
+    super('inconsistent read of dlp_scan_results');
+    this.name = 'InconsistentDlpResultReadError';
+  }
 }
 
 /**
@@ -130,6 +170,17 @@ export interface PassThroughResult {
  *   alone authorizes or rejects delivery): approved, `delivery_bec_ai_only_not_held_total`. A
  *   `suspicious` URL or Rspamd result, and a bec `clean`, `unknown` or `skipped` result, are
  *   still approved (policy, 5.2, must treat the bec result explicitly);
+ * - `outcome = scanned` whose `engines` entry for `dlp` has a definite outcome other than
+ *   `skipped` (step 4.5 D13, checked after the three cases above, whose reasons are unchanged)
+ *   and whose round's `dlp_scan_results.action` is `require_approval`, `quarantine` or `block`,
+ *   or whose result row is missing (fail-safe): ledger row only,
+ *   `delivery_approvals_skipped_total{reason="dlp_action"}`,
+ *   `delivery_dlp_holds_total{action}` (`missing` for the missing row), an info log (warn for the
+ *   missing row) with the ids and the action; held in `scanned`. `allow` and `alert` are approved
+ *   (`alert` counted in `delivery_dlp_alerts_approved_total` and logged: the incident already
+ *   exists). The row is read in this transaction and echo-checked (organization, message,
+ *   `received_at`, scan, round; a shifted read throws `InconsistentDlpResultReadError`,
+ *   `delivery_inconsistent_reads_total{read="dlp_result"}`, the event is redelivered);
  * - a message that is not `scanned` in that round (another stage or an operator moved it, a
  *   rescan superseded the round) or that does not exist for the envelope's organization
  *   (`delivery_approvals_skipped_total{reason="lifecycle_<result>"}`);
@@ -257,6 +308,41 @@ export class DevPassThroughApprover {
           );
         }
         return { approvals: [], recipients: 0 };
+      }
+    }
+    if (dlpResultApplies(payload)) {
+      // Step 4.5 D13: the round's DLP action, after the scan_failed, malicious and BEC checks.
+      const action = await this.dlpAction(tx, {
+        messageId,
+        receivedAt,
+        organizationId,
+        round,
+        scanId: BigInt(payload.scanId),
+      });
+      const decision = dlpHoldDecision(action);
+      if (decision === 'held' || decision === 'missing') {
+        this.metrics.approvalsSkipped.inc({ reason: 'dlp_action' });
+        this.metrics.dlpHolds.inc({ action: action ?? 'missing' });
+        if (decision === 'missing') {
+          this.logger.warn(
+            { ...ids, outcome: payload.outcome, verdict: payload.verdict },
+            'DLP result row of the round not found; held by the dev pass-through (fail-safe)',
+          );
+        } else {
+          this.logger.info(
+            { ...ids, outcome: payload.outcome, verdict: payload.verdict, dlpAction: action },
+            'DLP action holds the message; the dev pass-through does not approve it (held in ' +
+              'scanned until policy or its deadline)',
+          );
+        }
+        return { approvals: [], recipients: 0 };
+      }
+      if (decision === 'alert') {
+        this.metrics.dlpAlertsApproved.inc();
+        this.logger.info(
+          { ...ids, outcome: payload.outcome, verdict: payload.verdict, dlpAction: action },
+          'DLP alert (incident recorded); the dev pass-through approves the message',
+        );
       }
     }
     // E27 first, in the same transaction as the approvals: they exist iff the message is approved.
@@ -485,6 +571,51 @@ export class DevPassThroughApprover {
       throw new InconsistentBecResultReadError();
     }
     return { deterministicVerdict: row.deterministicVerdict, verdict: row.verdict };
+  }
+
+  /**
+   * The `action` of the round's `dlp_scan_results` row (written in the same transaction as the
+   * dlp final, D19), or null. Echo-checked writer read in the ledger transaction (step 4.2 §6).
+   */
+  private async dlpAction(
+    tx: Prisma.TransactionClient,
+    input: {
+      messageId: bigint;
+      receivedAt: Date;
+      organizationId: bigint;
+      round: number;
+      scanId: bigint;
+    },
+  ): Promise<string | null> {
+    const row = await tx.dlpScanResult.findFirst({
+      where: {
+        scanId: input.scanId,
+        receivedAt: input.receivedAt,
+        messageId: input.messageId,
+        organizationId: input.organizationId,
+        lifecycleRound: input.round,
+      },
+      select: {
+        scanId: true,
+        receivedAt: true,
+        messageId: true,
+        organizationId: true,
+        lifecycleRound: true,
+        action: true,
+      },
+    });
+    if (row === null) return null;
+    if (
+      row.scanId !== input.scanId ||
+      row.messageId !== input.messageId ||
+      row.organizationId !== input.organizationId ||
+      row.receivedAt.getTime() !== input.receivedAt.getTime() ||
+      row.lifecycleRound !== input.round
+    ) {
+      this.metrics.inconsistentReads.inc({ read: 'dlp_result' });
+      throw new InconsistentDlpResultReadError();
+    }
+    return row.action;
   }
 
   private async nextDeliverySeq(

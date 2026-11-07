@@ -63,6 +63,11 @@ async function handle(message: WorkerMessage, scanner: YaraXScanner): Promise<vo
     selftest(message.mode);
     return;
   }
+  if (message.op !== 'inspect') {
+    // An extraction job belongs to the DLP extractor child (step 4.5 D4), never to this one.
+    send({ op: 'result', id: message.id, ok: false, code: 'unsupported_op' });
+    return;
+  }
   const bytes = Buffer.from(
     message.bytes.buffer,
     message.bytes.byteOffset,

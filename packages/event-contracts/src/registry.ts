@@ -6,6 +6,7 @@ import {
   domainRoutingChangedV1,
   domainStatusChangedV1,
   EventTypes,
+  messageDlpIncidentV1,
   messageParsedV1,
   messageParseFailedV1,
   messageReceivedV1,
@@ -167,6 +168,14 @@ export const EVENT_REGISTRY = {
     EventTypes.MessageScanStageReady,
     'email.security',
     messageScanStageReadyV1,
+    'message',
+  ),
+  // Step 4.5 D14: producer email-worker (dlp engine finalize) through the outbox; no queue
+  // binding in topology v7 (analytics firehose only; the notification-worker binds it in 6.2).
+  [EventTypes.MessageDlpIncident]: define(
+    EventTypes.MessageDlpIncident,
+    'email.security',
+    messageDlpIncidentV1,
     'message',
   ),
 } as const satisfies Record<string, EventDefinition>;

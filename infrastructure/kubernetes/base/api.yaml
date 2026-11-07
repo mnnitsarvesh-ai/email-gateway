@@ -55,8 +55,17 @@ spec:
                 name: NOTIFY_SMTP_PASSWORD_FILE,
                 value: /var/run/secrets/gateway/notify-smtp-password,
               }
+            # DLP evidence (step 4.5 D16, D24): the key-encryption key opens evidence in the
+            # audited GET .../dlp-evidence route only. Its own Secret, mounted here and in
+            # email-worker-dlp only. The previous key (rotation) is optional.
+            - { name: DLP_EVIDENCE_KEY_FILE, value: /var/run/secrets/dlp-evidence/key }
+            - name: DLP_EVIDENCE_KEY_PREVIOUS
+              valueFrom:
+                secretKeyRef:
+                  { name: email-gateway-dlp-evidence-key, key: previous-key, optional: true }
           volumeMounts:
             - { name: secrets, mountPath: /var/run/secrets/gateway, readOnly: true }
+            - { name: dlp-evidence-key, mountPath: /var/run/secrets/dlp-evidence, readOnly: true }
             - { name: tmp, mountPath: /tmp }
           readinessProbe:
             httpGet: { path: /health/ready, port: http }
@@ -80,6 +89,10 @@ spec:
       volumes:
         - name: secrets
           secret: { secretName: email-gateway-secrets }
+        - name: dlp-evidence-key
+          secret:
+            secretName: email-gateway-dlp-evidence-key
+            items: [{ key: key, path: key }]
         - name: tmp
           emptyDir: {}
 ---

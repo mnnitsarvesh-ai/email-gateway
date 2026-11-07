@@ -1,0 +1,192 @@
+{
+  "version": 1,
+  "dictionary": "financial",
+  "description": "Financial document terms (FI1, step 4.5 D5, D8); kind = evidence kind.",
+  "entries": [
+    {
+      "id": "en.financial.001",
+      "phrase": "invoice",
+      "kind": "invoice"
+    },
+    {
+      "id": "en.financial.002",
+      "phrase": "tax invoice",
+      "kind": "invoice"
+    },
+    {
+      "id": "en.financial.003",
+      "phrase": "purchase order",
+      "kind": "invoice"
+    },
+    {
+      "id": "en.financial.004",
+      "phrase": "salary",
+      "kind": "salary"
+    },
+    {
+      "id": "en.financial.005",
+      "phrase": "payslip",
+      "kind": "salary"
+    },
+    {
+      "id": "en.financial.006",
+      "phrase": "pay slip",
+      "kind": "salary"
+    },
+    {
+      "id": "en.financial.007",
+      "phrase": "salary slip",
+      "kind": "salary"
+    },
+    {
+      "id": "en.financial.008",
+      "phrase": "ctc",
+      "kind": "salary"
+    },
+    {
+      "id": "en.financial.009",
+      "phrase": "gross pay",
+      "kind": "salary"
+    },
+    {
+      "id": "en.financial.010",
+      "phrase": "net pay",
+      "kind": "salary"
+    },
+    {
+      "id": "en.financial.011",
+      "phrase": "payroll",
+      "kind": "salary"
+    },
+    {
+      "id": "en.financial.012",
+      "phrase": "balance sheet",
+      "kind": "balance_sheet"
+    },
+    {
+      "id": "en.financial.013",
+      "phrase": "profit and loss",
+      "kind": "balance_sheet"
+    },
+    {
+      "id": "en.financial.014",
+      "phrase": "p&l",
+      "kind": "balance_sheet"
+    },
+    {
+      "id": "en.financial.015",
+      "phrase": "income statement",
+      "kind": "balance_sheet"
+    },
+    {
+      "id": "en.financial.016",
+      "phrase": "bank statement",
+      "kind": "bank_statement"
+    },
+    {
+      "id": "en.financial.017",
+      "phrase": "account statement",
+      "kind": "bank_statement"
+    },
+    {
+      "id": "en.financial.018",
+      "phrase": "ledger",
+      "kind": "bank_statement"
+    },
+    {
+      "id": "en.financial.019",
+      "phrase": "form 16",
+      "kind": "tax"
+    },
+    {
+      "id": "en.financial.020",
+      "phrase": "itr",
+      "kind": "tax"
+    },
+    {
+      "id": "en.financial.021",
+      "phrase": "income tax return",
+      "kind": "tax"
+    },
+    {
+      "id": "en.financial.022",
+      "phrase": "gst return",
+      "kind": "tax"
+    },
+    {
+      "id": "hi.financial.001",
+      "phrase": "चालान",
+      "kind": "invoice"
+    },
+    {
+      "id": "hi.financial.002",
+      "phrase": "बीजक",
+      "kind": "invoice"
+    },
+    {
+      "id": "hi.financial.003",
+      "phrase": "वेतन",
+      "kind": "salary"
+    },
+    {
+      "id": "hi.financial.004",
+      "phrase": "वेतन पर्ची",
+      "kind": "salary"
+    },
+    {
+      "id": "hi.financial.005",
+      "phrase": "तुलन पत्र",
+      "kind": "balance_sheet"
+    },
+    {
+      "id": "hi.financial.006",
+      "phrase": "लाभ और हानि",
+      "kind": "balance_sheet"
+    },
+    {
+      "id": "hi.financial.007",
+      "phrase": "बैंक विवरण",
+      "kind": "bank_statement"
+    },
+    {
+      "id": "hi.financial.008",
+      "phrase": "खाता बही",
+      "kind": "bank_statement"
+    },
+    {
+      "id": "hi.financial.009",
+      "phrase": "आयकर रिटर्न",
+      "kind": "tax"
+    },
+    {
+      "id": "hi-Latn.financial.001",
+      "phrase": "vetan",
+      "kind": "salary"
+    },
+    {
+      "id": "hi-Latn.financial.002",
+      "phrase": "vetan parchi",
+      "kind": "salary"
+    },
+    {
+      "id": "hi-Latn.financial.003",
+      "phrase": "tankhwah",
+      "kind": "salary"
+    },
+    {
+      "id": "hi-Latn.financial.004",
+      "phrase": "tankhwah parchi",
+      "kind": "salary"
+    },
+    {
+      "id": "hi-Latn.financial.005",
+      "phrase": "bahi khata",
+      "kind": "bank_statement"
+    },
+    {
+      "id": "hi-Latn.financial.006",
+      "phrase": "aaykar return",
+      "kind": "tax"
+    }
+  ]
+}

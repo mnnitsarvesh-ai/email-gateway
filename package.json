@@ -17,7 +17,7 @@
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
     "test:e2e": "turbo run test:e2e",
-    "test:integration": "turbo run build --filter=@email-gateway/api^... --filter=@email-gateway/message-lifecycle... --filter=@email-gateway/mail-routing... --filter=@email-gateway/delivery-worker^... --filter=@email-gateway/email-worker^... --filter=@email-gateway/event-relay^... --filter=@email-gateway/integration-tests^... --filter=@email-gateway/clamav... --filter=@email-gateway/url-security... --filter=@email-gateway/click-service^... --output-logs=errors-only && pnpm --filter @email-gateway/integration-tests run test:integration && pnpm --filter @email-gateway/api run test:integration && pnpm --filter @email-gateway/smtp-adapter run test:integration && pnpm --filter @email-gateway/message-lifecycle run test:integration && pnpm --filter @email-gateway/mail-routing run test:integration && pnpm --filter @email-gateway/rspamd run test:integration && pnpm --filter @email-gateway/clamav run test:integration && pnpm --filter @email-gateway/delivery-worker run --if-present test:integration && pnpm --filter @email-gateway/email-worker run --if-present test:integration && pnpm --filter @email-gateway/event-relay run --if-present test:integration && pnpm --filter @email-gateway/url-security run test:integration && pnpm --filter @email-gateway/bec run test:integration && pnpm --filter @email-gateway/click-service run test:integration",
+    "test:integration": "turbo run build --filter=@email-gateway/api^... --filter=@email-gateway/message-lifecycle... --filter=@email-gateway/mail-routing... --filter=@email-gateway/delivery-worker^... --filter=@email-gateway/email-worker^... --filter=@email-gateway/event-relay^... --filter=@email-gateway/integration-tests^... --filter=@email-gateway/clamav... --filter=@email-gateway/url-security... --filter=@email-gateway/dlp... --filter=@email-gateway/click-service^... --output-logs=errors-only && pnpm --filter @email-gateway/integration-tests run test:integration && pnpm --filter @email-gateway/api run test:integration && pnpm --filter @email-gateway/smtp-adapter run test:integration && pnpm --filter @email-gateway/message-lifecycle run test:integration && pnpm --filter @email-gateway/mail-routing run test:integration && pnpm --filter @email-gateway/rspamd run test:integration && pnpm --filter @email-gateway/clamav run test:integration && pnpm --filter @email-gateway/delivery-worker run --if-present test:integration && pnpm --filter @email-gateway/email-worker run --if-present test:integration && pnpm --filter @email-gateway/event-relay run --if-present test:integration && pnpm --filter @email-gateway/url-security run test:integration && pnpm --filter @email-gateway/bec run test:integration && pnpm --filter @email-gateway/dlp run test:integration && pnpm --filter @email-gateway/click-service run test:integration",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "db:generate": "pnpm --filter @email-gateway/database run generate",
@@ -49,7 +49,8 @@
   },
   "pnpm": {
     "overrides": {
-      "tldts>tldts-core": "7.4.18"
+      "tldts>tldts-core": "7.4.18",
+      "pdfjs-dist>@napi-rs/canvas": "-"
     }
   }
 }

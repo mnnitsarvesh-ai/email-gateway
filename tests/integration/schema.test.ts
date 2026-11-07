@@ -19,7 +19,8 @@ import { stack } from './support/env';
  * docs/plan/steps/06-mime-ingestion.md (§3), the message lifecycle changes of
  * docs/plan/steps/08-message-lifecycle.md (§3.1, §3.2), the scan pipeline, attachment scanning
  * and URL protection tables of steps 4.1–4.3 (docs/plan/steps/09-rspamd.md,
- * 10-attachment-scanning.md, 11-url-protection.md, §3 each).
+ * 10-attachment-scanning.md, 11-url-protection.md, §3 each), the phishing/BEC tables of step 4.4
+ * (12-phishing-bec.md §3) and the DLP tables of step 4.5 (13-dlp.md §3).
  */
 const prisma = new PrismaClient({ datasourceUrl: stack.databaseUrl() });
 
@@ -61,6 +62,9 @@ const PARTITIONED: Record<string, string> = {
   url_click_events: 'clicked_at',
   // Step 4.4 §3: the BEC result of a scan round.
   bec_scan_results: 'received_at',
+  // Step 4.5 §3: the DLP result of a scan round and its evidence metadata.
+  dlp_scan_results: 'received_at',
+  dlp_evidence: 'received_at',
 };
 
 /** Tables with no `organization_id`: platform catalogs, the root, a join table, the ledger and
@@ -149,6 +153,15 @@ const TENANT_OWNED = [
   'bec_feedback',
   'bec_suppression_rules',
   'bec_contact_history',
+  // Step 4.5 §3.
+  'dlp_scan_results',
+  'dlp_evidence',
+  'dlp_policies',
+  'dlp_policy_rules',
+  'dlp_exceptions',
+  'dlp_custom_patterns',
+  'dlp_keyword_dictionaries',
+  'dlp_compliance_settings',
   'threat_indicators',
   'yara_rules',
   'email_policies',
@@ -181,17 +194,17 @@ const TENANT_OWNED = [
 const ALL_TABLES = [...NOT_TENANT_OWNED, ...TENANT_OWNED];
 
 describe('MySQL schema', () => {
-  it('has exactly the 91 data-model tables plus _prisma_migrations', async () => {
+  it('has exactly the 99 data-model tables plus _prisma_migrations', async () => {
     const rows = await prisma.$queryRaw<{ name: string }[]>`
       SELECT TABLE_NAME AS name FROM information_schema.TABLES
       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'`;
-    expect(ALL_TABLES).toHaveLength(91);
-    expect(new Set(ALL_TABLES).size).toBe(91);
+    expect(ALL_TABLES).toHaveLength(99);
+    expect(new Set(ALL_TABLES).size).toBe(99);
     expect(rows.map((r) => r.name).sort()).toEqual([...ALL_TABLES, '_prisma_migrations'].sort());
   });
 
-  it('partitions the 28 high-volume tables by RANGE COLUMNS with a pmax partition', async () => {
-    expect(Object.keys(PARTITIONED)).toHaveLength(28);
+  it('partitions the 30 high-volume tables by RANGE COLUMNS with a pmax partition', async () => {
+    expect(Object.keys(PARTITIONED)).toHaveLength(30);
     const rows = await prisma.$queryRaw<
       { tableName: string; method: string; expression: string; partitionName: string }[]
     >`
@@ -2518,6 +2531,490 @@ describe('phishing and BEC schema (step 4.4, docs/plan/steps/12-phishing-bec.md 
     } finally {
       await prisma.becTrustedSender.deleteMany({ where: { organizationId: organization.id } });
       await prisma.organization.deleteMany({ where: { id: organization.id } });
+      await prisma.organizationPlan.deleteMany({ where: { id: plan.id } });
+    }
+  });
+});
+
+describe('data loss prevention schema (step 4.5, docs/plan/steps/13-dlp.md §3)', () => {
+  const uniqueSets = async (table: string) =>
+    [...(await indexes(table)).values()]
+      .filter((i) => i.unique)
+      .map((i) => i.columns.join(','))
+      .sort();
+  const indexSets = async (table: string) =>
+    [...(await indexes(table)).values()].map((i) => i.columns.join(','));
+  const foreignKeys = async (table: string) =>
+    prisma.$queryRaw<{ columnName: string; referenced: string; onDelete: string }[]>`
+      SELECT k.COLUMN_NAME AS columnName, k.REFERENCED_TABLE_NAME AS referenced,
+             r.DELETE_RULE AS onDelete
+      FROM information_schema.KEY_COLUMN_USAGE k
+      JOIN information_schema.REFERENTIAL_CONSTRAINTS r
+        ON r.CONSTRAINT_SCHEMA = k.TABLE_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+      WHERE k.TABLE_SCHEMA = DATABASE() AND k.TABLE_NAME = ${table}
+        AND k.REFERENCED_TABLE_NAME IS NOT NULL
+      ORDER BY k.COLUMN_NAME`;
+  const ACTION_ENUM = "enum('allow','alert','require_approval','quarantine','block')";
+  const SEVERITY_ENUM = "enum('low','medium','high','critical')";
+  const PARTITIONED_TABLES = ['dlp_scan_results', 'dlp_evidence'];
+  const TENANT_TABLES = [
+    'dlp_policies',
+    'dlp_policy_rules',
+    'dlp_exceptions',
+    'dlp_custom_patterns',
+    'dlp_keyword_dictionaries',
+    'dlp_compliance_settings',
+  ];
+  const uniqueId = () => BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000));
+  const columnNames = async (table: string) =>
+    [...(await columns([table])).keys()].map((k) => k.split('.')[1]!).sort();
+
+  it('has dlp_scan_results: one row per scan, versions, verdict, action and masked JSON (D10, D19)', async () => {
+    expect(await columnNames('dlp_scan_results')).toEqual(
+      [
+        'id',
+        'received_at',
+        'message_id',
+        'organization_id',
+        'scan_id',
+        'lifecycle_round',
+        'direction',
+        'engine_version',
+        'rules_version',
+        'settings_version',
+        'policy_version',
+        'extractor_version',
+        'verdict',
+        'action',
+        'action_source',
+        'matched_policy_id',
+        'matched_rule_id',
+        'coverage',
+        'coverage_detail',
+        'categories',
+        'findings',
+        'policy',
+        'finding_count',
+        'evidence_status',
+        'duration_ms',
+        'created_at',
+      ].sort(),
+    );
+    const cols = await columns(['dlp_scan_results']);
+    const type = (column: string) => cols.get(`dlp_scan_results.${column}`);
+    expect(type('scan_id')?.columnType).toBe('bigint unsigned');
+    expect(type('lifecycle_round')?.columnType).toBe('smallint unsigned');
+    expect(type('direction')?.columnType).toBe("enum('inbound','outbound','internal')");
+    expect(type('engine_version')?.columnType).toBe('varchar(96)');
+    expect(type('rules_version')?.columnType).toBe('varchar(16)');
+    expect(type('settings_version')?.columnType).toBe('varchar(96)');
+    expect(type('policy_version')?.columnType).toBe('varchar(32)');
+    expect(type('extractor_version')?.columnType).toBe('varchar(32)');
+    expect(type('verdict')).toMatchObject({
+      columnType: "enum('clean','suspicious','unknown','skipped')",
+      nullable: 'NO',
+    });
+    expect(type('action')).toMatchObject({ columnType: ACTION_ENUM, nullable: 'NO' });
+    expect(type('action_source')?.columnType).toBe("enum('none','tenant_policy','default_policy')");
+    for (const column of ['matched_policy_id', 'matched_rule_id']) {
+      expect(type(column), column).toMatchObject({
+        columnType: 'bigint unsigned',
+        nullable: 'YES',
+      });
+    }
+    expect(type('coverage')?.columnType).toBe("enum('complete','partial')");
+    for (const json of ['coverage_detail', 'categories', 'findings', 'policy']) {
+      expect(type(json), json).toMatchObject({ columnType: 'json', nullable: 'NO' });
+    }
+    expect(type('finding_count')?.columnType).toBe('int unsigned');
+    expect(type('evidence_status')?.columnType).toBe("enum('none','stored','disabled','failed')");
+    expect(await uniqueSets('dlp_scan_results')).toEqual(
+      ['id,received_at', 'scan_id,received_at'].sort(),
+    );
+    expect(await indexSets('dlp_scan_results')).toEqual(
+      expect.arrayContaining([
+        'message_id,received_at',
+        'organization_id,received_at',
+        'organization_id,action,received_at',
+      ]),
+    );
+    expect(await foreignKeys('dlp_scan_results')).toEqual([]);
+  });
+
+  it('has dlp_evidence: object reference, wrapped key and purge state, never content (D16)', async () => {
+    expect(await columnNames('dlp_evidence')).toEqual(
+      [
+        'id',
+        'received_at',
+        'organization_id',
+        'message_id',
+        'scan_id',
+        'object_key',
+        'object_sha256',
+        'object_size_bytes',
+        'wrapped_key',
+        'key_id',
+        'algorithm',
+        'match_count',
+        'expires_at',
+        'purged_at',
+        'purge_reason',
+        'created_at',
+      ].sort(),
+    );
+    const cols = await columns(['dlp_evidence']);
+    const type = (column: string) => cols.get(`dlp_evidence.${column}`);
+    expect(type('object_key')).toMatchObject({ columnType: 'varchar(512)', nullable: 'YES' });
+    expect(type('object_sha256')).toMatchObject({ columnType: 'char(64)', nullable: 'NO' });
+    expect(type('object_size_bytes')?.columnType).toBe('int unsigned');
+    expect(type('wrapped_key')).toMatchObject({ columnType: 'varchar(255)', nullable: 'YES' });
+    expect(type('key_id')?.columnType).toBe('varchar(16)');
+    expect(type('algorithm')?.columnType).toBe('varchar(32)');
+    expect(type('match_count')?.columnType).toBe('smallint unsigned');
+    expect(type('expires_at')).toMatchObject({ columnType: 'datetime(3)', nullable: 'NO' });
+    expect(type('purged_at')).toMatchObject({ columnType: 'datetime(3)', nullable: 'YES' });
+    expect(type('purge_reason')).toMatchObject({
+      columnType: "enum('retention','tenant_request','organization_deleted')",
+      nullable: 'YES',
+    });
+    expect(await uniqueSets('dlp_evidence')).toEqual(
+      ['id,received_at', 'scan_id,received_at'].sort(),
+    );
+    expect(await indexSets('dlp_evidence')).toEqual(
+      expect.arrayContaining([
+        'message_id,received_at',
+        'organization_id,purged_at,expires_at',
+        'expires_at',
+      ]),
+    );
+    expect(await foreignKeys('dlp_evidence')).toEqual([]);
+  });
+
+  it('has no column that could hold message content (only masked JSON in dlp_scan_results.findings)', async () => {
+    const tables = [...PARTITIONED_TABLES, ...TENANT_TABLES];
+    const cols = await columns(tables);
+    const forbidden =
+      /^(body|content|html|text|excerpt|subject|span_text|value_raw|raw_value|matched_value|context|evidence_text|extracted_text|sample)$/;
+    for (const key of cols.keys()) {
+      const column = key.split('.')[1]!;
+      expect(column, key).not.toMatch(forbidden);
+    }
+    // Free-text and JSON columns are tenant configuration or masked results only; the evidence
+    // row has no TEXT/BLOB/JSON column at all (its content lives encrypted in S3).
+    const wide = [...cols.values()].filter((c) => /text|blob/.test(c.columnType));
+    expect(wide.map((c) => `${c.tableName}.${c.columnName}`)).toEqual([]);
+    const evidenceJson = [...cols.values()].filter(
+      (c) => c.tableName === 'dlp_evidence' && c.columnType === 'json',
+    );
+    expect(evidenceJson).toEqual([]);
+  });
+
+  it('has the tenant policy, rule, exception, pattern, dictionary and compliance tables (D8, D9, D11, D12, D17)', async () => {
+    const cols = await columns(TENANT_TABLES);
+    for (const table of TENANT_TABLES) {
+      expect(cols.get(`${table}.organization_id`), table).toMatchObject({
+        columnType: 'bigint unsigned',
+        nullable: 'NO',
+      });
+      expect(cols.get(`${table}.version`), table).toMatchObject({
+        columnType: 'int unsigned',
+        columnDefault: '1',
+      });
+      if (table !== 'dlp_compliance_settings') {
+        expect(cols.get(`${table}.public_id`)?.columnType, table).toBe('char(36)');
+        expect(await uniqueSets(table), table).toContain('public_id');
+        expect(cols.get(`${table}.enabled`), table).toMatchObject({
+          columnType: 'tinyint(1)',
+          columnDefault: '1',
+        });
+      }
+    }
+    // dlp_policies
+    expect(cols.get('dlp_policies.mode')).toMatchObject({
+      columnType: "enum('enforce','monitor')",
+      columnDefault: 'enforce',
+    });
+    expect(cols.get('dlp_policies.priority')).toMatchObject({
+      columnType: 'smallint unsigned',
+      columnDefault: '100',
+    });
+    expect(cols.get('dlp_policies.directions')?.columnType).toBe('json');
+    expect(cols.get('dlp_policies.description')).toMatchObject({
+      columnType: 'varchar(512)',
+      nullable: 'YES',
+    });
+    expect(await uniqueSets('dlp_policies')).toContain('organization_id,name');
+    expect(await indexSets('dlp_policies')).toContain('organization_id,enabled,priority');
+    // dlp_policy_rules
+    expect(cols.get('dlp_policy_rules.action')?.columnType).toBe(ACTION_ENUM);
+    expect(cols.get('dlp_policy_rules.conditions')?.columnType).toBe('json');
+    expect(await uniqueSets('dlp_policy_rules')).toContain('policy_id,name');
+    expect(await indexSets('dlp_policy_rules')).toContain('organization_id,policy_id,priority');
+    // dlp_exceptions
+    expect(cols.get('dlp_exceptions.scope')?.columnType).toBe(
+      "enum('sender_address','sender_domain','recipient_address','recipient_domain')",
+    );
+    expect(cols.get('dlp_exceptions.value')?.columnType).toBe('varchar(320)');
+    expect(cols.get('dlp_exceptions.target_key')).toMatchObject({
+      columnType: 'varchar(48)',
+      nullable: 'NO',
+    });
+    expect(cols.get('dlp_exceptions.filters')).toMatchObject({
+      columnType: 'json',
+      nullable: 'YES',
+    });
+    expect(cols.get('dlp_exceptions.reason')).toMatchObject({
+      columnType: 'varchar(512)',
+      nullable: 'NO',
+    });
+    expect(cols.get('dlp_exceptions.expires_at')).toMatchObject({ nullable: 'NO' });
+    for (const column of ['policy_id', 'rule_id']) {
+      expect(cols.get(`dlp_exceptions.${column}`), column).toMatchObject({ nullable: 'YES' });
+    }
+    expect(await uniqueSets('dlp_exceptions')).toContain('organization_id,scope,value,target_key');
+    expect(await indexSets('dlp_exceptions')).toContain('organization_id,expires_at');
+    // dlp_custom_patterns
+    expect(cols.get('dlp_custom_patterns.pattern')?.columnType).toBe('varchar(512)');
+    expect(cols.get('dlp_custom_patterns.validator')).toMatchObject({
+      columnType: "enum('none','luhn','verhoeff','mod97','gstin')",
+      columnDefault: 'none',
+    });
+    expect(cols.get('dlp_custom_patterns.severity')?.columnType).toBe(SEVERITY_ENUM);
+    expect(cols.get('dlp_custom_patterns.base_confidence')?.columnType).toBe('decimal(3,2)');
+    expect(cols.get('dlp_custom_patterns.mask_style')).toMatchObject({
+      columnType: "enum('last4','full')",
+      columnDefault: 'last4',
+    });
+    expect(cols.get('dlp_custom_patterns.context_keywords')?.columnType).toBe('json');
+    expect(await uniqueSets('dlp_custom_patterns')).toContain('organization_id,name');
+    // dlp_keyword_dictionaries
+    expect(cols.get('dlp_keyword_dictionaries.category')?.columnType).toBe(
+      "enum('confidential','financial','personal_info','source_code','custom')",
+    );
+    expect(cols.get('dlp_keyword_dictionaries.terms')?.columnType).toBe('json');
+    expect(cols.get('dlp_keyword_dictionaries.term_count')?.columnType).toBe('smallint unsigned');
+    expect(cols.get('dlp_keyword_dictionaries.severity')?.columnType).toBe(SEVERITY_ENUM);
+    expect(cols.get('dlp_keyword_dictionaries.base_confidence')).toMatchObject({
+      columnType: 'decimal(3,2)',
+      columnDefault: '0.70',
+    });
+    expect(cols.get('dlp_keyword_dictionaries.min_matches')).toMatchObject({
+      columnType: 'smallint unsigned',
+      columnDefault: '1',
+    });
+    expect(await uniqueSets('dlp_keyword_dictionaries')).toContain('organization_id,name');
+    // dlp_compliance_settings
+    expect(await uniqueSets('dlp_compliance_settings')).toContain('organization_id');
+    expect(cols.get('dlp_compliance_settings.aadhaar_enabled')).toMatchObject({
+      columnType: 'tinyint(1)',
+      columnDefault: '0',
+    });
+    expect(cols.get('dlp_compliance_settings.aadhaar_attested')).toMatchObject({
+      columnDefault: '0',
+    });
+    expect(cols.get('dlp_compliance_settings.aadhaar_basis')).toMatchObject({
+      columnType:
+        "enum('regulatory_obligation','uidai_authorised_entity','data_protection_policy','other')",
+      nullable: 'YES',
+    });
+    expect(cols.get('dlp_compliance_settings.aadhaar_reference')).toMatchObject({
+      columnType: 'varchar(256)',
+      nullable: 'YES',
+    });
+    for (const column of ['aadhaar_recorded_at', 'aadhaar_review_due_at']) {
+      expect(cols.get(`dlp_compliance_settings.${column}`), column).toMatchObject({
+        columnType: 'datetime(3)',
+        nullable: 'YES',
+      });
+    }
+  });
+
+  it('references organizations (RESTRICT), users (SET NULL) and policies/rules (RESTRICT) only', async () => {
+    const audit = ['created_by_user_id', 'updated_by_user_id'];
+    const expected: Record<string, { columnName: string; referenced: string; onDelete: string }[]> =
+      {
+        dlp_policies: [],
+        dlp_policy_rules: [
+          { columnName: 'policy_id', referenced: 'dlp_policies', onDelete: 'RESTRICT' },
+        ],
+        dlp_exceptions: [
+          { columnName: 'policy_id', referenced: 'dlp_policies', onDelete: 'RESTRICT' },
+          { columnName: 'rule_id', referenced: 'dlp_policy_rules', onDelete: 'RESTRICT' },
+        ],
+        dlp_custom_patterns: [],
+        dlp_keyword_dictionaries: [],
+        dlp_compliance_settings: [],
+      };
+    for (const table of TENANT_TABLES) {
+      const users = table === 'dlp_compliance_settings' ? ['aadhaar_recorded_by_user_id'] : audit;
+      expect(await foreignKeys(table), table).toEqual(
+        [
+          { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+          ...users.map((columnName) => ({ columnName, referenced: 'users', onDelete: 'SET NULL' })),
+          ...expected[table]!,
+        ].sort((a, b) => (a.columnName < b.columnName ? -1 : 1)),
+      );
+    }
+  });
+
+  it('rejects a second dlp_scan_results and dlp_evidence row for the same (scan, received_at)', async () => {
+    const scanId = uniqueId();
+    const receivedAt = new Date();
+    const result = {
+      receivedAt,
+      messageId: 1n,
+      organizationId: 1n,
+      scanId,
+      lifecycleRound: 0,
+      direction: 'outbound' as const,
+      engineVersion: 'dlp/1;dict=00000000;data=00000000;ext=dlp-extract/1',
+      rulesVersion: 'dlp-map/1',
+      settingsVersion: 'dlp-map/1;p=000000000000;t=none',
+      policyVersion: 'pol/1;h=000000000000',
+      extractorVersion: 'dlp-extract/1',
+      verdict: 'clean' as const,
+      action: 'allow' as const,
+      actionSource: 'none' as const,
+      coverage: 'complete' as const,
+      coverageDetail: [],
+      categories: [],
+      findings: [],
+      policy: { winner: null, matched: [], exceptionsApplied: [] },
+      findingCount: 0,
+      evidenceStatus: 'none' as const,
+      durationMs: 3,
+    };
+    const evidence = {
+      receivedAt,
+      organizationId: 1n,
+      messageId: 1n,
+      scanId,
+      objectKey: `org/1/dlp-evidence/2026/11/${scanId}-${randomUUID()}.bin`,
+      objectSha256: 'a'.repeat(64),
+      objectSizeBytes: 128,
+      wrappedKey: 'v1.k1.aaaa.bbbb.cccc',
+      keyId: 'k1',
+      algorithm: 'dlp-evidence/1',
+      matchCount: 1,
+      expiresAt: new Date(receivedAt.getTime() + 30 * 86_400_000),
+    };
+    try {
+      await prisma.dlpScanResult.create({ data: result });
+      await expect(prisma.dlpScanResult.create({ data: result })).rejects.toMatchObject({
+        code: 'P2002',
+      });
+      await prisma.dlpEvidence.create({ data: evidence });
+      await expect(prisma.dlpEvidence.create({ data: evidence })).rejects.toMatchObject({
+        code: 'P2002',
+      });
+      // A rescan round has another scan id: both rows are accepted.
+      await prisma.dlpScanResult.create({ data: { ...result, scanId: scanId + 1n } });
+      // Crypto-shredding clears the wrapped key, then the object key (D16).
+      const shredded = await prisma.dlpEvidence.updateMany({
+        where: { scanId, receivedAt },
+        data: { wrappedKey: null, purgedAt: new Date(), purgeReason: 'retention' },
+      });
+      expect(shredded.count).toBe(1);
+      await prisma.dlpEvidence.updateMany({ where: { scanId }, data: { objectKey: null } });
+    } finally {
+      await prisma.dlpScanResult.deleteMany({ where: { scanId: { in: [scanId, scanId + 1n] } } });
+      await prisma.dlpEvidence.deleteMany({ where: { scanId } });
+    }
+  });
+
+  it('refuses to delete an organization (or a policy with rules) that still has DLP rows (no cascade)', async () => {
+    const suffix = randomUUID().slice(0, 8);
+    const plan = await prisma.organizationPlan.create({
+      data: {
+        code: `it-dlp-${suffix}`,
+        name: 'DLP schema test',
+        defaultLimits: {},
+        defaultFeatures: {},
+      },
+    });
+    const organization = await prisma.organization.create({
+      data: {
+        slug: `it-dlp-${suffix}`,
+        name: 'DLP schema test',
+        planId: plan.id,
+        dataRegion: 'ap-south-1',
+      },
+    });
+    const organizationId = organization.id;
+    try {
+      const policy = await prisma.dlpPolicy.create({
+        data: {
+          publicId: randomUUID(),
+          organizationId,
+          name: 'Outbound cards',
+          directions: ['outbound', 'internal'],
+        },
+      });
+      const rule = await prisma.dlpPolicyRule.create({
+        data: {
+          publicId: randomUUID(),
+          organizationId,
+          policyId: policy.id,
+          name: 'cards',
+          priority: 10,
+          conditions: { selectors: { categories: ['payment_card'] } },
+          action: 'quarantine',
+        },
+      });
+      const exception = {
+        organizationId,
+        scope: 'recipient_domain' as const,
+        value: 'partner.example',
+        ruleId: rule.id,
+        targetKey: `rule:${rule.id}`,
+        reason: 'schema test',
+        expiresAt: new Date(Date.now() + 86_400_000),
+      };
+      await prisma.dlpException.create({ data: { ...exception, publicId: randomUUID() } });
+      await expect(
+        prisma.dlpException.create({ data: { ...exception, publicId: randomUUID() } }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+      await prisma.dlpCustomPattern.create({
+        data: {
+          publicId: randomUUID(),
+          organizationId,
+          name: 'employee id',
+          pattern: 'EMP-[0-9]{6}',
+          contextKeywords: ['employee'],
+          severity: 'medium',
+          baseConfidence: new Prisma.Decimal('0.80'),
+        },
+      });
+      await prisma.dlpKeywordDictionary.create({
+        data: {
+          publicId: randomUUID(),
+          organizationId,
+          name: 'projects',
+          category: 'confidential',
+          terms: ['project falcon'],
+          termCount: 1,
+          severity: 'high',
+        },
+      });
+      await prisma.dlpComplianceSettings.create({ data: { organizationId } });
+      await expect(
+        prisma.dlpComplianceSettings.create({ data: { organizationId } }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+      // RESTRICT: the rule and its exception block the policy, every row blocks the organization.
+      await expect(prisma.dlpPolicy.delete({ where: { id: policy.id } })).rejects.toBeInstanceOf(
+        Prisma.PrismaClientKnownRequestError,
+      );
+      await expect(
+        prisma.organization.delete({ where: { id: organizationId } }),
+      ).rejects.toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+    } finally {
+      await prisma.dlpException.deleteMany({ where: { organizationId } });
+      await prisma.dlpPolicyRule.deleteMany({ where: { organizationId } });
+      await prisma.dlpPolicy.deleteMany({ where: { organizationId } });
+      await prisma.dlpCustomPattern.deleteMany({ where: { organizationId } });
+      await prisma.dlpKeywordDictionary.deleteMany({ where: { organizationId } });
+      await prisma.dlpComplianceSettings.deleteMany({ where: { organizationId } });
+      await prisma.organization.deleteMany({ where: { id: organizationId } });
       await prisma.organizationPlan.deleteMany({ where: { id: plan.id } });
     }
   });

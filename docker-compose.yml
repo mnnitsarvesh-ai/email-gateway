@@ -181,6 +181,57 @@ x-bec-env: &bec-env
   BEC_MAX_VENDORS: ${BEC_MAX_VENDORS:-2000}
   BEC_MAX_TRUSTED_SENDERS: ${BEC_MAX_TRUSTED_SENDERS:-1000}
 
+# Data loss prevention platform values (step 4.5 §5, docs/plan/steps/13-dlp.md D18, D21). The
+# bounds block is shared by the email-worker (dlp engine) and the api (scan settings bounds,
+# tenant caps, evidence retention); x-dlp-env adds the engine-only keys. No secret here:
+# DLP_EVIDENCE_KEY / _PREVIOUS are set on the email-worker and the api only (D24).
+x-dlp-bounds-env: &dlp-bounds-env
+  DLP_CONFIDENCE_THRESHOLD: ${DLP_CONFIDENCE_THRESHOLD:-0.6}
+  DLP_CONTEXT_WINDOW_CHARS: ${DLP_CONTEXT_WINDOW_CHARS:-64}
+  DLP_BULK_MIN_DISTINCT: ${DLP_BULK_MIN_DISTINCT:-5}
+  DLP_DEFAULT_POLICY: ${DLP_DEFAULT_POLICY:-alert}
+  DLP_CUSTOM_PATTERN_MAX_LENGTH: ${DLP_CUSTOM_PATTERN_MAX_LENGTH:-256}
+  DLP_CUSTOM_PATTERN_PROBE_MAX_MS: ${DLP_CUSTOM_PATTERN_PROBE_MAX_MS:-50}
+  DLP_CUSTOM_SCAN_MAX_CHARS: ${DLP_CUSTOM_SCAN_MAX_CHARS:-1000000}
+  DLP_CUSTOM_PATTERNS_MAX_PER_TENANT: ${DLP_CUSTOM_PATTERNS_MAX_PER_TENANT:-50}
+  DLP_DICTIONARIES_MAX_PER_TENANT: ${DLP_DICTIONARIES_MAX_PER_TENANT:-20}
+  DLP_DICTIONARY_MAX_TERMS: ${DLP_DICTIONARY_MAX_TERMS:-1000}
+  DLP_POLICIES_MAX_PER_TENANT: ${DLP_POLICIES_MAX_PER_TENANT:-20}
+  DLP_RULES_MAX_PER_POLICY: ${DLP_RULES_MAX_PER_POLICY:-50}
+  DLP_EXCEPTIONS_MAX_PER_TENANT: ${DLP_EXCEPTIONS_MAX_PER_TENANT:-500}
+  DLP_EXCEPTION_MAX_DAYS: ${DLP_EXCEPTION_MAX_DAYS:-365}
+  DLP_EVIDENCE_ENABLED: ${DLP_EVIDENCE_ENABLED:-true}
+  DLP_EVIDENCE_DEFAULT_RETENTION_DAYS: ${DLP_EVIDENCE_DEFAULT_RETENTION_DAYS:-30}
+  DLP_EVIDENCE_MAX_RETENTION_DAYS: ${DLP_EVIDENCE_MAX_RETENTION_DAYS:-180}
+x-dlp-env: &dlp-env
+  <<: *dlp-bounds-env
+  SCAN_DLP_CONCURRENCY: ${SCAN_DLP_CONCURRENCY:-4}
+  SCAN_DLP_TIMEOUT_MS: ${SCAN_DLP_TIMEOUT_MS:-120000}
+  SCAN_DLP_MAX_ATTEMPTS: ${SCAN_DLP_MAX_ATTEMPTS:-3}
+  DLP_EXTRACTOR_POOL_SIZE: ${DLP_EXTRACTOR_POOL_SIZE:-2}
+  DLP_EXTRACTOR_MAX_JOBS: ${DLP_EXTRACTOR_MAX_JOBS:-200}
+  DLP_EXTRACTOR_HEAP_MB: ${DLP_EXTRACTOR_HEAP_MB:-256}
+  # Fixed for the container, as the attachment inspector: the host .env sets best_effort.
+  DLP_EXTRACTOR_RLIMITS: required
+  DLP_EXTRACT_TIMEOUT_MS: ${DLP_EXTRACT_TIMEOUT_MS:-20000}
+  DLP_EXTRACT_CPU_SECONDS: ${DLP_EXTRACT_CPU_SECONDS:-10}
+  DLP_EXTRACT_MAX_RSS_MB: ${DLP_EXTRACT_MAX_RSS_MB:-512}
+  DLP_MAX_ATTACHMENTS: ${DLP_MAX_ATTACHMENTS:-50}
+  DLP_ATTACHMENT_MAX_BYTES: ${DLP_ATTACHMENT_MAX_BYTES:-26214400}
+  DLP_BYTE_BUDGET_BYTES: ${DLP_BYTE_BUDGET_BYTES:-67108864}
+  DLP_PDF_MAX_PAGES: ${DLP_PDF_MAX_PAGES:-200}
+  DLP_BODY_MAX_BYTES: ${DLP_BODY_MAX_BYTES:-4194304}
+  DLP_TEXT_MAX_CHARS_PER_PART: ${DLP_TEXT_MAX_CHARS_PER_PART:-1000000}
+  DLP_TEXT_MAX_CHARS_PER_MESSAGE: ${DLP_TEXT_MAX_CHARS_PER_MESSAGE:-4000000}
+  DLP_DETECT_TIMEOUT_MS: ${DLP_DETECT_TIMEOUT_MS:-15000}
+  DLP_SCAN_CHUNK_CHARS: ${DLP_SCAN_CHUNK_CHARS:-65536}
+  DLP_MAX_MATCHES_PER_DETECTOR: ${DLP_MAX_MATCHES_PER_DETECTOR:-1000}
+  DLP_MAX_FINDINGS: ${DLP_MAX_FINDINGS:-64}
+  DLP_EVIDENCE_MAX_BYTES: ${DLP_EVIDENCE_MAX_BYTES:-32768}
+  DLP_EVIDENCE_MAX_MATCHES: ${DLP_EVIDENCE_MAX_MATCHES:-50}
+  DLP_EVIDENCE_SWEEP_INTERVAL_MS: ${DLP_EVIDENCE_SWEEP_INTERVAL_MS:-3600000}
+  DLP_TENANT_DATA_CACHE_TTL_MS: ${DLP_TENANT_DATA_CACHE_TTL_MS:-30000}
+
 x-rabbitmq-cluster-node: &rabbitmq-cluster-node
   image: rabbitmq:4.1-management-alpine
   profiles: [rabbitmq-cluster]
@@ -477,7 +528,7 @@ services:
     # new daily database next to clamd's first load, so the design's 1536m was raised to 2048m.
     image: clamav/clamav-debian:1.4
     restart: unless-stopped
-    mem_limit: 2048m
+    mem_limit: 4096m
     volumes:
       - clamav-db:/var/lib/clamav
       - ./infrastructure/clamav/clamd.conf:/etc/clamav/clamd.conf:ro
@@ -921,7 +972,7 @@ services:
       mysql-replica-setup: { condition: service_completed_successfully }
       redis-dkim: { condition: service_healthy }
     environment:
-      <<: [*node-env, *scan-platform-env, *bec-env]
+      <<: [*node-env, *scan-platform-env, *bec-env, *dlp-bounds-env]
       HTTP_PORT: 3000
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3001}
       # Dead-letter replay and queue stats (step 3.2 Q9): role user eg-ops.
@@ -938,6 +989,11 @@ services:
       URL_DYNAMIC_INSPECTION: ${URL_DYNAMIC_INSPECTION:-on}
       # Phishing and BEC detection (step 4.4 §5): the platform values the bec settings, profile,
       # suppression and history routes validate against (x-bec-env). No BEC secret.
+      # Data loss prevention (step 4.5 §5): the bounds the dlp settings, policy, pattern,
+      # dictionary and exception routes validate against (x-dlp-bounds-env), and the evidence
+      # key-encryption key: the api opens evidence only in the audited endpoint (D16, D24).
+      DLP_EVIDENCE_KEY: ${DLP_EVIDENCE_KEY:?append the DLP keys from .env.example}
+      DLP_EVIDENCE_KEY_PREVIOUS: ${DLP_EVIDENCE_KEY_PREVIOUS:-}
       # Only the api reads from the replica (control-plane reads). Data-plane services are writer-only.
       DATABASE_READ_URL: mysql://${MYSQL_READER_USER:?}:${MYSQL_READER_PASSWORD:?}@mysql-replica:3306/${MYSQL_DATABASE:?}
       DATABASE_READ_MAX_LAG_SECONDS: ${DATABASE_READ_MAX_LAG_SECONDS:-10}
@@ -1118,7 +1174,7 @@ services:
       rspamd: { condition: service_healthy }
       clamav: { condition: service_healthy }
     environment:
-      <<: [*node-env, *scan-platform-env, *url-platform-env, *bec-env]
+      <<: [*node-env, *scan-platform-env, *url-platform-env, *bec-env, *dlp-env]
       HTTP_PORT: 3020
       # Consumes email.received (step 3.2): role user eg-email-worker.
       RABBITMQ_EMAIL_WORKER_URL: amqp://${RABBITMQ_EMAIL_WORKER_USER:-eg-email-worker}:${RABBITMQ_EMAIL_WORKER_PASSWORD:?append the RabbitMQ keys from .env.example}@rabbitmq:5672/${RABBITMQ_VHOST:-email-gateway}
@@ -1127,7 +1183,7 @@ services:
       # the engine version).
       RABBITMQ_SCANNER_URL: amqp://${RABBITMQ_SCANNER_USER:-eg-scanner}:${RABBITMQ_SCANNER_PASSWORD:?append the security scanning keys from .env.example}@rabbitmq:5672/${RABBITMQ_VHOST:-email-gateway}
       SCAN_ENABLED: ${SCAN_ENABLED:-true}
-      SCAN_ENGINES: ${SCAN_ENGINES:-rspamd,attachment,url,bec}
+      SCAN_ENGINES: ${SCAN_ENGINES:-rspamd,attachment,url,bec,dlp}
       # Engine consumers of this replica (subset of SCAN_ENGINES; empty = every enabled engine).
       SCAN_CONSUMERS: ${SCAN_CONSUMERS:-}
       SCAN_RSPAMD_URL: http://rspamd:11333
@@ -1291,6 +1347,11 @@ services:
       BEC_HISTORY_MAX_RECIPIENTS: ${BEC_HISTORY_MAX_RECIPIENTS:-50}
       BEC_HISTORY_SWEEP_INTERVAL_MS: ${BEC_HISTORY_SWEEP_INTERVAL_MS:-3600000}
       BEC_TENANT_DATA_CACHE_TTL_MS: ${BEC_TENANT_DATA_CACHE_TTL_MS:-30000}
+      # Data loss prevention (step 4.5, docs/plan/steps/13-dlp.md §5): the dlp engine (scan.dlp,
+      # stage 1), the extractor child pool and the evidence sweeper (keys: x-dlp-env). The
+      # evidence key-encryption key reaches only this service and the api (D24).
+      DLP_EVIDENCE_KEY: ${DLP_EVIDENCE_KEY:?append the DLP keys from .env.example}
+      DLP_EVIDENCE_KEY_PREVIOUS: ${DLP_EVIDENCE_KEY_PREVIOUS:-}
     networks:
       default: {}
       mailtest: {}
@@ -1439,7 +1500,7 @@ services:
       RECONCILE_MAX_REDRIVES: ${RECONCILE_MAX_REDRIVES:-3}
       RECONCILE_LOOKBACK_HOURS: ${RECONCILE_LOOKBACK_HOURS:-72}
       RECONCILE_BATCH_SIZE: ${RECONCILE_BATCH_SIZE:-1000}
-      RECONCILE_QUEUES: ${RECONCILE_QUEUES:-email.received,email.delivery.pending,scan.spam,scan.attachment,scan.url,scan.bec}
+      RECONCILE_QUEUES: ${RECONCILE_QUEUES:-email.received,email.delivery.pending,scan.spam,scan.attachment,scan.url,scan.bec,scan.dlp}
       RECONCILE_START_POSITION: ${RECONCILE_START_POSITION:-oldest}
       # Message lifecycle jobs (step 3.3 L13, L14; docs/plan/steps/08-message-lifecycle.md §5).
       LIFECYCLE_EXPIRY_ENABLED: ${LIFECYCLE_EXPIRY_ENABLED:-true}

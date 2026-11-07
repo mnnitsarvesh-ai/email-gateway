@@ -21,6 +21,7 @@ const base = {
   ATTACHMENT_CACHE_HMAC_KEY: 'test-content-cache-mac-key-0123456789',
   URL_CACHE_HMAC_KEY: 'test-url-cache-mac-key-0123456789abcdef',
   BEC_CONTEXT_HMAC_KEY: SECRET_KEY,
+  DLP_EVIDENCE_KEY: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
   URL_TOKEN_KEY_CURRENT: '0123456789abcdef'.repeat(4),
   URL_DNSBL_DOMAIN_ZONES: 'dbl.scan.test=127.0.1.2:spam,127.0.1.4:phishing',
   S3_REGION: 'ap-south-1',
@@ -111,7 +112,7 @@ describe('bec engine config (step 4.4 §5, B2, B4, B10, B13, B16)', () => {
       load({ SCAN_ENGINES: 'rspamd,bec', SCAN_ROUND_DEADLINE_SECONDS: '795' }),
     ).not.toThrow();
     const text = message({ ...base, SCAN_ROUND_DEADLINE_SECONDS: '1754' });
-    expect(text).toMatch(/stage-1 engines of SCAN_ENGINES \(rspamd, attachment, url\)/);
+    expect(text).toMatch(/stage-1 engines of SCAN_ENGINES \(rspamd, attachment, url, dlp\)/);
     expect(text).toMatch(
       /plus the maximum over the stage-2 engines \(bec\) of SCAN_BEC_MAX_ATTEMPTS/,
     );

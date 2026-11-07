@@ -122,7 +122,7 @@ describe('init.mjs --cleanup-legacy (quorum legacy queues)', () => {
     const exchanges = new Set((await mgmt.exchanges(legacy)).map((e) => e.name));
     expect(exchanges.has('mail.dlx')).toBe(false); // only the deleted .dlq queues were bound
     expect(exchanges.has('mail.events')).toBe(true); // still bound to the kept queue
-    // The topology vhost is untouched (every queue of the current topology, 17 in v6).
+    // The topology vhost is untouched (every queue of the current topology, 17 in v7).
     expect(QUEUE_NAMES).toHaveLength(17);
     expect((await mgmt.queues(vhost.vhost)).length).toBe(QUEUE_NAMES.length);
 

@@ -7,10 +7,22 @@ import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { Logger } from '@email-gateway/logger';
 import type { InspectionResult, InspectLimits } from '../content';
-import { type ChildMessage, CODE_PATTERN, isChildMessage, type SelftestMode } from './protocol';
+import {
+  type ChildMessage,
+  type ChildReadyMessage,
+  CODE_PATTERN,
+  isChildMessage,
+  isExtractorReady,
+  type SelftestMode,
+} from './protocol';
 import { defaultSampler, type ProcessSampler } from './sampler';
 
 /**
+ * The resource-limited child pool (step 4.2 A4, generalized in step 4.5 D4). `ChildPool` runs any
+ * child described by a `ChildDescriptor` (entry, arguments, extra read roots, handshake check,
+ * reply field); `InspectorPool` is the attachment inspector built on it exactly as in 4.2 (YARA
+ * bundle-id handshake, `inspect` jobs), the DLP extractor pool is another instance (step 4.5).
+ *
  * The inspector pool (step 4.2 A4): `ATTACHMENT_INSPECTOR_POOL_SIZE` resource-limited child
  * processes, one job at a time each, a bounded FIFO wait queue, recycling after
  * `ATTACHMENT_INSPECTOR_MAX_JOBS` jobs and after every kill.
@@ -32,12 +44,15 @@ import { defaultSampler, type ProcessSampler } from './sampler';
 
 export type KillReason = 'cpu' | 'memory' | 'wall' | 'crash';
 
-export type InspectOutcome =
-  | { kind: 'result'; result: InspectionResult }
+/** The outcome of one job of a pool child (`TResult` = the child's reply payload). */
+export type PoolOutcome<TResult> =
+  | { kind: 'result'; result: TResult }
   /** A load-independent limit breach: a property of the file (A4, rule S3). */
   | { kind: 'limit'; code: 'limit.cpu_time' | 'limit.memory' }
   /** `wall` / `crash`: retryable attempt failures; `aborted`: the engine call timed out. */
   | { kind: 'failure'; reason: 'wall' | 'crash' | 'aborted' | 'unavailable' };
+
+export type InspectOutcome = PoolOutcome<InspectionResult>;
 
 export interface PoolState {
   idle: number;
@@ -60,7 +75,8 @@ export interface InspectorChild {
 
 export type SpawnFn = (command: string, args: string[], options: SpawnOptions) => InspectorChild;
 
-export interface InspectorPoolOptions {
+/** Options every pool child kind shares (sizes, limits, isolation, test seams). */
+export interface ChildPoolOptions {
   size: number;
   maxJobs: number;
   heapMb: number;
@@ -70,10 +86,6 @@ export interface InspectorPoolOptions {
   wallTimeoutMs: number;
   cpuSeconds: number;
   maxRssMb: number;
-  rulesDir: string;
-  yaraTimeoutMs: number;
-  /** The worker's own bundle id (A9): a child reporting another one is refused. */
-  expectedBundleId: string;
   selftest: boolean;
   nodeEnv: string;
   /** Bound of the FIFO wait queue (the engine's concurrency x per-message parallelism). */
@@ -93,6 +105,33 @@ export interface InspectorPoolOptions {
   startTimeoutMs?: number;
 }
 
+/** What a pool child is (step 4.5 D4): the pool's only child-specific knowledge. */
+export interface ChildDescriptor<TResult> {
+  /** Logger component and log wording, e.g. `attachment-inspector`, `dlp-extractor`. */
+  component: string;
+  /** The config key of the rlimit mode (named in the no-prlimit warning). */
+  rlimitsKey: string;
+  /** The child entry: `child.js` next to the compiled module, `child.ts` in source runs. */
+  entry: string;
+  /** Arguments after the entry (no secrets: visible in the process list). */
+  args: readonly string[];
+  /** Directories the child may read besides the application and the workspace. */
+  readRoots: readonly string[];
+  /** Fields of the start log line (ids and versions only). */
+  startDetails: Readonly<Record<string, string | number>>;
+  /** Handshake check: null accepts the child, a code refuses it (killed, start fails). */
+  checkReady(message: ChildReadyMessage): string | null;
+  /** The payload of a successful reply (`result` / `extraction`); undefined = malformed. */
+  resultOf(message: Record<string, unknown>): TResult | undefined;
+}
+
+export interface InspectorPoolOptions extends ChildPoolOptions {
+  rulesDir: string;
+  yaraTimeoutMs: number;
+  /** The worker's own bundle id (A9): a child reporting another one is refused. */
+  expectedBundleId: string;
+}
+
 /** The private directory of a child: `eg-inspect-<worker pid>-<16 hex>`. */
 export const PRIVATE_DIR_PATTERN = /^eg-inspect-\d+-[0-9a-f]{16}$/;
 /** Stale private directories older than this are removed at pool start (A4). */
@@ -110,7 +149,7 @@ const RESPAWN_DELAY_MS = 1_000;
 
 interface Job {
   id: number;
-  resolve: (outcome: InspectOutcome) => void;
+  resolve: (outcome: PoolOutcome<unknown>) => void;
   killReason: KillReason | 'aborted' | null;
   baseCpu: number | null;
   sampling: boolean;
@@ -131,13 +170,19 @@ interface Slot {
 
 interface Waiter {
   run: (slot: Slot) => void;
-  fail: (outcome: InspectOutcome) => void;
+  fail: (outcome: PoolOutcome<unknown>) => void;
 }
+
+/** A job message without its id (the pool assigns it). */
+export type JobPayload = { op: string } & Record<string, unknown>;
 
 export class InspectorPoolStartError extends Error {
   override readonly name = 'InspectorPoolStartError';
-  constructor(readonly code: string) {
-    super(`attachment inspector pool cannot start (${code})`);
+  constructor(
+    readonly code: string,
+    component = 'attachment-inspector',
+  ) {
+    super(`${component.replace('-', ' ')} pool cannot start (${code})`);
   }
 }
 
@@ -198,7 +243,7 @@ export function removeStaleDirs(dir: string, now = Date.now()): number {
   return removed;
 }
 
-export class InspectorPool {
+export class ChildPool<TResult> {
   private readonly slots = new Set<Slot>();
   private readonly waiting: Waiter[] = [];
   private readonly logger: Logger;
@@ -212,8 +257,11 @@ export class InspectorPool {
   private seq = 0;
   private warnedNoRlimit = false;
 
-  constructor(private readonly options: InspectorPoolOptions) {
-    this.logger = options.logger.child({ component: 'attachment-inspector' });
+  constructor(
+    private readonly options: ChildPoolOptions,
+    private readonly descriptor: ChildDescriptor<TResult>,
+  ) {
+    this.logger = options.logger.child({ component: descriptor.component });
     this.sampler = options.sampler ?? defaultSampler();
     this.spawnFn = options.spawn ?? ((command, args, opts) => nodeSpawn(command, args, opts));
     this.tmpDir = options.tmpDir && options.tmpDir.length > 0 ? options.tmpDir : tmpdir();
@@ -225,12 +273,9 @@ export class InspectorPool {
     return !this.childEntry.endsWith('.ts');
   }
 
-  /** The child entry: `child.js` next to the compiled pool, `child.ts` in source runs. */
+  /** The child entry (descriptor), unless a test overrides it. */
   private get childEntry(): string {
-    return (
-      this.options.childEntry ??
-      join(__dirname, __filename.endsWith('.ts') ? 'child.ts' : 'child.js')
-    );
+    return this.options.childEntry ?? this.descriptor.entry;
   }
 
   /** `prlimit` (Linux, found) or `none` (readiness details, A4). */
@@ -256,13 +301,13 @@ export class InspectorPool {
 
   /**
    * Removes stale private directories, resolves prlimit (refusing to start without it in
-   * `required` mode), spawns every child and waits for their handshakes (bundle id checked).
+   * `required` mode), spawns every child and waits for their handshakes (descriptor check).
    */
   async start(): Promise<void> {
     if (this.started) return;
     this.started = true;
     const removed = removeStaleDirs(this.tmpDir);
-    if (removed > 0) this.logger.info({ removed }, 'stale inspector directories removed');
+    if (removed > 0) this.logger.info({ removed }, 'stale child directories removed');
     this.prlimit =
       this.options.prlimitPath !== undefined
         ? this.options.prlimitPath
@@ -273,6 +318,7 @@ export class InspectorPool {
       if (this.options.rlimits === 'required') {
         throw new InspectorPoolStartError(
           this.platform === 'linux' ? 'prlimit_missing' : 'rlimits_unsupported_platform',
+          this.descriptor.component,
         );
       }
       this.warnNoRlimit();
@@ -285,16 +331,12 @@ export class InspectorPool {
       const reason: unknown = failed.reason;
       throw reason instanceof InspectorPoolStartError
         ? reason
-        : new InspectorPoolStartError('spawn_failed');
+        : new InspectorPoolStartError('spawn_failed', this.descriptor.component);
     }
     this.publishState();
     this.logger.info(
-      {
-        size: this.options.size,
-        rlimits: this.rlimitMode,
-        bundleId: this.options.expectedBundleId,
-      },
-      'attachment inspector pool started',
+      { size: this.options.size, rlimits: this.rlimitMode, ...this.descriptor.startDetails },
+      `${this.descriptor.component.replace('-', ' ')} pool started`,
     );
   }
 
@@ -322,25 +364,23 @@ export class InspectorPool {
     this.publishState();
   }
 
-  /** Inspects one buffer in a child (FIFO wait for an idle child, bounded). */
-  inspect(bytes: Buffer, limits: InspectLimits, signal: AbortSignal): Promise<InspectOutcome> {
-    return this.submit({ op: 'inspect', bytes, limits }, signal);
+  /**
+   * Runs one job in a child (FIFO wait for an idle child, bounded): `payload` is the child's job
+   * message without its id (`{ op: 'inspect', … }`, `{ op: 'extract', … }`).
+   */
+  job(payload: JobPayload, signal: AbortSignal): Promise<PoolOutcome<TResult>> {
+    return this.submit(payload, signal) as Promise<PoolOutcome<TResult>>;
   }
 
   /** Test hook (EG_INSPECTOR_SELFTEST only; the child refuses otherwise). */
-  selftest(mode: SelftestMode, signal: AbortSignal): Promise<InspectOutcome> {
-    return this.submit({ op: 'selftest', mode }, signal);
+  selftest(mode: SelftestMode, signal: AbortSignal): Promise<PoolOutcome<TResult>> {
+    return this.job({ op: 'selftest', mode }, signal);
   }
 
-  private submit(
-    payload:
-      | { op: 'inspect'; bytes: Buffer; limits: InspectLimits }
-      | { op: 'selftest'; mode: SelftestMode },
-    signal: AbortSignal,
-  ): Promise<InspectOutcome> {
+  private submit(payload: JobPayload, signal: AbortSignal): Promise<PoolOutcome<unknown>> {
     if (this.stopped) return Promise.resolve({ kind: 'failure', reason: 'unavailable' });
     if (signal.aborted) return Promise.resolve({ kind: 'failure', reason: 'aborted' });
-    return new Promise<InspectOutcome>((resolveOutcome) => {
+    return new Promise<PoolOutcome<unknown>>((resolveOutcome) => {
       const run = (slot: Slot) => this.run(slot, payload, signal, resolveOutcome);
       const idle = this.idleSlot();
       if (idle) {
@@ -382,11 +422,9 @@ export class InspectorPool {
 
   private run(
     slot: Slot,
-    payload:
-      | { op: 'inspect'; bytes: Buffer; limits: InspectLimits }
-      | { op: 'selftest'; mode: SelftestMode },
+    payload: JobPayload,
     signal: AbortSignal,
-    resolveOutcome: (outcome: InspectOutcome) => void,
+    resolveOutcome: (outcome: PoolOutcome<unknown>) => void,
   ): void {
     const id = ++this.seq;
     const { options } = this;
@@ -449,10 +487,7 @@ export class InspectorPool {
       signal.removeEventListener('abort', onAbort);
     };
 
-    const message =
-      payload.op === 'inspect'
-        ? { op: 'inspect', id, bytes: payload.bytes, limits: payload.limits }
-        : { op: 'selftest', id, mode: payload.mode };
+    const message = { ...payload, id };
     try {
       slot.child.send(message);
     } catch {
@@ -495,7 +530,7 @@ export class InspectorPool {
     this.warnedNoRlimit = true;
     this.logger.warn(
       { platform: this.platform },
-      'attachment inspector runs without prlimit (ATTACHMENT_INSPECTOR_RLIMITS=best_effort); CPU and memory are enforced by the sampler only',
+      `${this.descriptor.component.replace('-', ' ')} runs without prlimit (${this.descriptor.rlimitsKey}=best_effort); CPU and memory are enforced by the sampler only`,
     );
   }
 
@@ -503,11 +538,12 @@ export class InspectorPool {
     const { options } = this;
     const entry = this.childEntry;
     const typescript = entry.endsWith('.ts');
-    const roots = new Set<string>([real(APP_ROOT), real(options.rulesDir)]);
+    const roots = new Set<string>([real(APP_ROOT), ...this.descriptor.readRoots.map(real)]);
     const workspace = workspaceRoot(APP_ROOT);
     if (workspace) roots.add(real(workspace));
     // Node's permission model (compiled children, i.e. every deployment): no child processes,
-    // no worker threads, no file writes, reads of the application and the rules only. Source
+    // no worker threads, no file writes, reads of the application and the descriptor's read
+    // roots (the YARA rules directory for the inspector) only. Source
     // runs (unit/integration tests and the benchmark on a development host) load the TypeScript
     // entry through tsx, whose esbuild transform needs worker threads and a child process, so
     // they run without it (the child's module graph is still checked statically by a test).
@@ -527,8 +563,7 @@ export class InspectorPool {
         ? ['--import', pathToFileURL(createRequire(__filename).resolve('tsx')).href]
         : []),
       entry,
-      options.rulesDir,
-      String(options.yaraTimeoutMs),
+      ...this.descriptor.args,
     ];
     if (!this.prlimit) return { command: process.execPath, args: nodeArgs, entry };
     const soft = Math.min(options.cpuSeconds * options.maxJobs, MAX_CPU_RLIMIT_SECONDS);
@@ -556,7 +591,8 @@ export class InspectorPool {
   /** Spawns one child and resolves once its handshake was accepted. */
   private spawnSlot(): Promise<Slot> {
     const { options } = this;
-    if (this.stopped) return Promise.reject(new InspectorPoolStartError('stopped'));
+    const component = this.descriptor.component;
+    if (this.stopped) return Promise.reject(new InspectorPoolStartError('stopped', component));
     const dir = join(
       this.tmpDir,
       `eg-inspect-${String(process.pid)}-${randomBytes(8).toString('hex')}`,
@@ -580,7 +616,7 @@ export class InspectorPool {
       });
     } catch {
       this.removeDir(dir);
-      return Promise.reject(new InspectorPoolStartError('spawn_failed'));
+      return Promise.reject(new InspectorPoolStartError('spawn_failed', component));
     }
     let resolveExit!: () => void;
     const slot: Slot = {
@@ -606,7 +642,7 @@ export class InspectorPool {
         if (!handshake) return;
         handshake = false;
         child.kill('SIGKILL');
-        rejectReady(new InspectorPoolStartError('handshake_timeout'));
+        rejectReady(new InspectorPoolStartError('handshake_timeout', component));
       }, options.startTimeoutMs ?? 30_000);
       startTimer.unref();
 
@@ -625,7 +661,7 @@ export class InspectorPool {
         if (handshake) {
           handshake = false;
           clearTimeout(startTimer);
-          rejectReady(new InspectorPoolStartError('spawn_failed'));
+          rejectReady(new InspectorPoolStartError('spawn_failed', component));
         }
       });
       child.on('exit', (code, signal) => {
@@ -634,7 +670,7 @@ export class InspectorPool {
         resolveExit();
         if (handshake) {
           handshake = false;
-          rejectReady(new InspectorPoolStartError('child_exited'));
+          rejectReady(new InspectorPoolStartError('child_exited', component));
         }
       });
     });
@@ -647,14 +683,11 @@ export class InspectorPool {
   ): void {
     switch (message.op) {
       case 'ready': {
-        if (message.bundleId !== this.options.expectedBundleId) {
-          this.logger.error(
-            { expected: this.options.expectedBundleId, reported: message.bundleId },
-            'inspector child reported another YARA bundle id; refused',
-          );
+        const refused = this.descriptor.checkReady(message);
+        if (refused !== null) {
           slot.retiring = true;
           slot.child.kill('SIGKILL');
-          handshake(new InspectorPoolStartError('bundle_mismatch'));
+          handshake(new InspectorPoolStartError(refused, this.descriptor.component));
           return;
         }
         slot.ready = true;
@@ -664,15 +697,16 @@ export class InspectorPool {
       }
       case 'fatal': {
         const code = CODE_PATTERN.test(message.code) ? message.code : 'fatal';
-        this.logger.error({ errorCode: code }, 'inspector child could not start');
-        handshake(new InspectorPoolStartError(code));
+        this.logger.error({ errorCode: code }, 'pool child could not start');
+        handshake(new InspectorPoolStartError(code, this.descriptor.component));
         return;
       }
       case 'result': {
         const job = slot.job;
         if (!job || job.id !== message.id || job.killReason !== null) return;
         slot.jobs += 1;
-        if (message.ok) job.resolve({ kind: 'result', result: message.result });
+        const result = message.ok ? this.descriptor.resultOf(message) : undefined;
+        if (result !== undefined) job.resolve({ kind: 'result', result });
         else job.resolve({ kind: 'failure', reason: 'crash' });
         return;
       }
@@ -692,7 +726,7 @@ export class InspectorPool {
       else if (reason === 'memory') job.resolve({ kind: 'limit', code: 'limit.memory' });
       else if (reason === 'aborted') job.resolve({ kind: 'failure', reason: 'aborted' });
       else job.resolve({ kind: 'failure', reason });
-      this.logger.warn({ reason, exitCode: code, signal }, 'inspector child ended during a job');
+      this.logger.warn({ reason, exitCode: code, signal }, 'pool child ended during a job');
     }
     this.publishState();
     // A child that never became ready is retried by the spawn path (start or replace).
@@ -716,9 +750,57 @@ export class InspectorPool {
       .catch((error: unknown) => {
         if (this.stopped) return;
         const code = error instanceof InspectorPoolStartError ? error.code : 'spawn_failed';
-        this.logger.error({ errorCode: code }, 'inspector child replacement failed; retrying');
+        this.logger.error({ errorCode: code }, 'pool child replacement failed; retrying');
         if (!this.stopped)
           setTimeout(() => this.stopped || this.replace(), RESPAWN_DELAY_MS).unref();
       });
+  }
+}
+
+/** The entry of a child module next to the calling module (`.js` compiled, `.ts` in source runs). */
+export function childEntryNextTo(dir: string, file: string, base = 'child'): string {
+  return join(dir, file.endsWith('.ts') ? `${base}.ts` : `${base}.js`);
+}
+
+/** The attachment inspector descriptor (step 4.2 A4, unchanged): YARA bundle-id handshake. */
+export function inspectorDescriptor(
+  options: Pick<InspectorPoolOptions, 'rulesDir' | 'yaraTimeoutMs' | 'expectedBundleId'> & {
+    logger: Logger;
+  },
+): ChildDescriptor<InspectionResult> {
+  const logger = options.logger.child({ component: 'attachment-inspector' });
+  return {
+    component: 'attachment-inspector',
+    rlimitsKey: 'ATTACHMENT_INSPECTOR_RLIMITS',
+    entry: childEntryNextTo(__dirname, __filename),
+    args: [options.rulesDir, String(options.yaraTimeoutMs)],
+    readRoots: [options.rulesDir],
+    startDetails: { bundleId: options.expectedBundleId },
+    checkReady: (message) => {
+      if (isExtractorReady(message) || message.bundleId !== options.expectedBundleId) {
+        logger.error(
+          {
+            expected: options.expectedBundleId,
+            reported: isExtractorReady(message) ? null : message.bundleId,
+          },
+          'inspector child reported another YARA bundle id; refused',
+        );
+        return 'bundle_mismatch';
+      }
+      return null;
+    },
+    resultOf: (message) => message.result as InspectionResult | undefined,
+  };
+}
+
+/** The attachment inspector pool (step 4.2 A4): constructed and behaving exactly as in 4.2. */
+export class InspectorPool extends ChildPool<InspectionResult> {
+  constructor(options: InspectorPoolOptions) {
+    super(options, inspectorDescriptor(options));
+  }
+
+  /** Inspects one buffer in a child (FIFO wait for an idle child, bounded). */
+  inspect(bytes: Buffer, limits: InspectLimits, signal: AbortSignal): Promise<InspectOutcome> {
+    return this.job({ op: 'inspect', bytes, limits }, signal);
   }
 }

@@ -5,10 +5,14 @@ import {
   becSettingsBounds,
   becTenantSettingsSchema,
   attachmentTenantSettingsSchema,
+  type DlpPlatformSettings,
+  dlpSettingsBounds,
+  dlpTenantSettingsSchema,
   type EngineCatalogEntry,
   ENGINE_CATALOG,
   resolveAttachmentSettings,
   resolveBecSettings,
+  resolveDlpSettings,
   resolveRspamdSettings,
   type RspamdPlatformSettings,
   rspamdSettingsBounds,
@@ -24,7 +28,7 @@ import type { EngineSettingsView } from '../dto/scan-settings.schemas';
 
 /**
  * Tenant settings per registered engine (step 4.1 S8, S16; step 4.2 A8; step 4.3 U13; step 4.4
- * B13), pure: `rspamd`, `attachment`, `url` and `bec`. An engine of the catalog without a settings definition has no
+ * B13; step 4.5 D18), pure: `rspamd`, `attachment`, `url`, `bec` and `dlp`. An engine of the catalog without a settings definition has no
  * settings routes (404).
  */
 
@@ -51,6 +55,7 @@ export interface PlatformEngineSettings {
   attachment: AttachmentPlatformSettings;
   url: UrlPlatformSettings;
   bec: BecPlatformSettings;
+  dlp: DlpPlatformSettings;
 }
 
 /** The parsed override without undefined keys (what is stored). */
@@ -401,6 +406,75 @@ function becDefinition(
   };
 }
 
+/**
+ * The `dlp` engine settings (step 4.5 D18): inbound opt-in, category thresholds (0.5–0.95, two
+ * decimals), the noisy detectors a tenant may switch off, the default policy, evidence
+ * enablement (never above the platform cap) and retention (1..platform maximum). The context
+ * window and the bulk threshold are platform only (shown in `platform` and `effective`).
+ */
+function dlpDefinition(
+  catalog: EngineCatalogEntry,
+  platform: DlpPlatformSettings,
+): EngineSettingsDefinition {
+  const check = (raw: unknown): OverrideCheck => {
+    const resolution = resolveDlpSettings(platform, raw);
+    if (!resolution.ok) return { ok: false, violations: resolution.violations };
+    return {
+      ok: true,
+      settings: definedKeys(
+        stripUndefined(dlpTenantSettingsSchema.parse(raw)) as Record<string, unknown>,
+      ),
+    };
+  };
+  const bounds = dlpSettingsBounds(platform);
+  const platformEffective = resolveDlpSettings(platform, null);
+  if (!platformEffective.ok) throw new Error('The platform DLP settings do not resolve');
+  return {
+    catalog,
+    check,
+    view(stored) {
+      const override = holdsOverride(stored) ? stored.settings : null;
+      const resolution = resolveDlpSettings(platform, override);
+      // An override that no longer fits the platform settings is ignored, as the worker does.
+      const effective = resolution.ok ? resolution.settings : platformEffective.settings;
+      return {
+        engine: 'dlp',
+        required: catalog.requiredByDefault,
+        tenantMayDisable: catalog.tenantMayDisable,
+        platform: { ...platform },
+        bounds: {
+          inboundEnabled: [...bounds.inboundEnabled],
+          thresholds: {
+            categories: [...bounds.thresholds.categories],
+            min: bounds.thresholds.min,
+            max: bounds.thresholds.max,
+          },
+          disabledDetectors: [...bounds.disabledDetectors],
+          defaultPolicy: [...bounds.defaultPolicy],
+          evidence: {
+            enabled: [...bounds.evidence.enabled],
+            retentionDays: { ...bounds.evidence.retentionDays },
+          },
+        },
+        override: override as Extract<EngineSettingsView, { engine: 'dlp' }>['override'],
+        effective: {
+          inboundEnabled: effective.inboundEnabled,
+          thresholds: { ...effective.thresholds },
+          disabledDetectors: [...effective.disabledDetectors],
+          defaultPolicy: effective.defaultPolicy,
+          evidence: { ...effective.evidence },
+          contextWindowChars: effective.contextWindowChars,
+          bulkMinDistinct: effective.bulkMinDistinct,
+        },
+        overrideApplied: override !== null && resolution.ok,
+        violations: resolution.ok ? [] : resolution.violations,
+        version: stored?.version ?? 0,
+        updatedAt: stored ? stored.updatedAt.toISOString() : null,
+      };
+    },
+  };
+}
+
 /** The settings definitions of every catalog engine that has tenant settings (catalog order). */
 export function engineSettingsDefinitions(
   platform: PlatformEngineSettings,
@@ -413,6 +487,7 @@ export function engineSettingsDefinitions(
     }
     if (entry.name === 'url') out.set(entry.name, urlDefinition(entry, platform.url));
     if (entry.name === 'bec') out.set(entry.name, becDefinition(entry, platform.bec));
+    if (entry.name === 'dlp') out.set(entry.name, dlpDefinition(entry, platform.dlp));
   }
   return out;
 }

@@ -19,6 +19,7 @@ import { ApiKeysModule } from './modules/api-keys/api-keys.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { BecModule } from './modules/bec/bec.module';
 import { DeadLettersModule } from './modules/dead-letters/dead-letters.module';
+import { DlpModule } from './modules/dlp/dlp.module';
 import { DeliveriesModule } from './modules/deliveries/deliveries.module';
 import { DomainDestinationsModule } from './modules/domain-destinations/domain-destinations.module';
 import { DomainsModule } from './modules/domains/domains.module';
@@ -80,6 +81,8 @@ export class AppModule {
         ScansModule,
         // Step 4.4 B18: BEC profiles, trusted senders, feedback, export and history purge.
         BecModule,
+        // Step 4.5: DLP tenant data, incidents and the audited evidence door.
+        DlpModule,
       ],
       providers: [{ provide: API_CONFIG, useValue: config }],
       exports: [API_CONFIG],

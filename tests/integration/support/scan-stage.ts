@@ -22,7 +22,11 @@ import { stack } from './env';
  * - since step 4.4 (B1, B2, B3): topology v6 with a consumer on `scan.bec` (every round requires
  *   the `bec` engine, `SCAN_ENGINES=rspamd,attachment,url,bec`; it is a stage-2 engine triggered
  *   by `mail.message.scan_stage_ready.v1` once rspamd and url finalized) and an email-worker that
- *   runs the BEC engine (`scan_bec_results_total` in `/metrics`).
+ *   runs the BEC engine (`scan_bec_results_total` in `/metrics`);
+ * - since step 4.5 (D1, D2): topology v7 with a consumer on `scan.dlp` (every round requires the
+ *   `dlp` engine, `SCAN_ENGINES=rspamd,attachment,url,bec,dlp`; a stage-1 engine on `parsed.v1`
+ *   and `rescan_requested.v1`) and an email-worker that runs the DLP engine
+ *   (`scan_dlp_results_total` in `/metrics`, readiness `dlp-engine` and `dlp-extractor`).
  *
  * `scanStageProblems()` returns what is missing (empty when everything is there); the routing,
  * MIME and scan gates include it.
@@ -31,20 +35,23 @@ export const RSPAMD_LEDGER = 'email-worker.scan.rspamd';
 export const ATTACHMENT_LEDGER = 'email-worker.scan.attachment';
 export const URL_LEDGER = 'email-worker.scan.url';
 export const BEC_LEDGER = 'email-worker.scan.bec';
+export const DLP_LEDGER = 'email-worker.scan.dlp';
 /**
- * The engines every round of the stack requires (step 4.2 A1, step 4.3 U1, step 4.4 B1,
- * `SCAN_ENGINES`).
+ * The engines every round of the stack requires (step 4.2 A1, step 4.3 U1, step 4.4 B1, step
+ * 4.5 D1, `SCAN_ENGINES`).
  */
-export const REQUIRED_ENGINES = ['rspamd', 'attachment', 'url', 'bec'] as const;
-/** The queues that must have a consumer for a round to complete (step 4.4 B3). */
+export const REQUIRED_ENGINES = ['rspamd', 'attachment', 'url', 'bec', 'dlp'] as const;
+/** The queues that must have a consumer for a round to complete (step 4.4 B3, step 4.5 D2). */
 export const SCAN_CONSUMED_QUEUES = [
   'scan.spam',
   'scan.attachment',
   'scan.url',
   'scan.url.results',
   'scan.bec',
+  'scan.dlp',
 ] as const;
-export const TOPOLOGY_DESCRIPTION = 'email-gateway topology v6';
+export const TOPOLOGY_VERSION = 7;
+export const TOPOLOGY_DESCRIPTION = `email-gateway topology v${TOPOLOGY_VERSION}`;
 export const PASSTHROUGH_CONSUMER = 'delivery-worker.dev-passthrough-scanned';
 
 export const SCAN_HOW_TO_START = [
@@ -52,8 +59,8 @@ export const SCAN_HOW_TO_START = [
   '  docker compose --profile apps build email-worker && docker compose --profile apps build delivery-worker',
   '  docker compose --profile apps up -d --wait email-worker delivery-worker',
   '  (or on the host: pnpm --filter @email-gateway/email-worker dev, SCAN_ENABLED=true)',
-  '  pnpm rabbitmq:init   (topology v6 and the eg-scanner user on scan.spam, scan.attachment, scan.url, scan.bec)',
-  '  (step 4.2: clamav healthy; step 4.4: SCAN_ENGINES=rspamd,attachment,url,bec on the email-worker)',
+  '  pnpm rabbitmq:init   (topology v7 and the eg-scanner user on scan.spam, scan.attachment, scan.url, scan.bec, scan.dlp)',
+  '  (step 4.2: clamav healthy; step 4.5: SCAN_ENGINES=rspamd,attachment,url,bec,dlp and DLP_EVIDENCE_KEY on the email-worker)',
 ].join('\n');
 
 async function metricsOf(port: number): Promise<string | undefined> {
@@ -90,6 +97,11 @@ export async function scanStageProblems(): Promise<string[]> {
       'the email-worker does not run the BEC engine (no scan_bec_results_total in /metrics): ' +
         'an image older than step 4.4, or SCAN_CONSUMERS without bec',
     );
+  } else if (!/^# TYPE scan_dlp_results_total /m.test(worker)) {
+    problems.push(
+      'the email-worker does not run the DLP engine (no scan_dlp_results_total in /metrics): ' +
+        'an image older than step 4.5, or SCAN_CONSUMERS without dlp',
+    );
   }
   const delivery = await metricsOf(stack.ports.services['delivery-worker']);
   if (!delivery || !delivery.includes(`consumer="${PASSTHROUGH_CONSUMER}"`)) {
@@ -103,7 +115,9 @@ export async function scanStageProblems(): Promise<string[]> {
     const vhost = stack.rabbitmqVhost();
     const info = await api.get<{ description?: string }>(`/vhosts/${encodeURIComponent(vhost)}`);
     if (info.description !== TOPOLOGY_DESCRIPTION) {
-      problems.push(`vhost ${vhost} is "${info.description ?? ''}", not topology v6`);
+      problems.push(
+        `vhost ${vhost} is "${info.description ?? ''}", not topology v${TOPOLOGY_VERSION}`,
+      );
     }
     for (const queue of SCAN_CONSUMED_QUEUES) {
       if ((await api.queue(vhost, queue)).consumers < 1) problems.push(`${queue} has no consumer`);

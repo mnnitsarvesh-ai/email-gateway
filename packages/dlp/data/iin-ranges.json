@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "description": "Card brand IIN ranges and lengths (step 4.5 D5 PC1). The longest matching prefix wins; on equal prefix length the first entry wins. Ranges are inclusive and compare prefixes of equal length.",
+  "brands": [
+    { "brand": "amex", "prefixes": ["34", "37"], "lengths": [15] },
+    { "brand": "discover", "prefixes": ["6011", "644-649", "65"], "lengths": [16, 17, 18, 19] },
+    { "brand": "rupay", "prefixes": ["60", "6521-6522", "81", "82", "508"], "lengths": [16] },
+    { "brand": "jcb", "prefixes": ["3528-3589"], "lengths": [16, 17, 18, 19] },
+    {
+      "brand": "diners",
+      "prefixes": ["300-305", "36", "38-39"],
+      "lengths": [14, 15, 16, 17, 18, 19]
+    },
+    { "brand": "unionpay", "prefixes": ["62"], "lengths": [16, 17, 18, 19] },
+    { "brand": "mastercard", "prefixes": ["51-55", "2221-2720"], "lengths": [16] },
+    { "brand": "maestro", "prefixes": ["50", "56-69"], "lengths": [13, 14, 15, 16, 17, 18, 19] },
+    { "brand": "visa", "prefixes": ["4"], "lengths": [13, 16, 19] }
+  ]
+}

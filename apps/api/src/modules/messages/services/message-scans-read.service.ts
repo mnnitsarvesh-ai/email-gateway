@@ -1,11 +1,16 @@
 import { Injectable } from '@nestjs/common';
+import type { Principal } from '../../../auth-contracts/principal';
 import type { TenantScope } from '../../../auth-contracts/tenant-scope';
 import { referencedIds } from '../../bec/domain/bec-result';
+import { collectRefs } from '../../dlp/domain/dlp-result';
 import {
   BEC_ENGINE,
   decodeScanCursor,
+  DLP_ENGINE,
+  type DlpInputs,
   encodeScanCursor,
   NO_BEC,
+  NO_DLP,
   roundOf,
   URL_ENGINE,
 } from '../domain/message-scans';
@@ -17,10 +22,14 @@ import {
 } from '../repositories/message-lifecycle-read.repository';
 import { MessageScansReadRepository } from '../repositories/message-scans-read.repository';
 
+/** Holders of this permission see the masked `dlp` section (D20; `message:read` alone does not). */
+export const DLP_READ_PERMISSION = 'dlp:read';
+
 /**
  * `GET /messages/{messageId}/scans` (step 4.1 S16; step 4.2 A16: per-attachment results on the
  * `attachment` engine entry; step 4.3 U16: per-URL results and the rewrite on the `url` entry;
- * step 4.4 B15: the explainable BEC verdict on the `bec` entry): the scan rounds of a message of the caller's organization, newest
+ * step 4.4 B15: the explainable BEC verdict on the `bec` entry; step 4.5 D20: the masked DLP
+ * result on the `dlp` entry, only for callers holding `dlp:read`): the scan rounds of a message of the caller's organization, newest
  * round first, from the read replica (a few seconds behind the writer: a round that just
  * completed may still show as running). Every query filters by the scope's organization;
  * another organization's message is `404 message_not_found`.
@@ -33,6 +42,7 @@ export class MessageScansReadService {
   ) {}
 
   async list(
+    principal: Principal,
     scope: TenantScope,
     messageId: string,
     query: MessageScansQuery,
@@ -66,6 +76,10 @@ export class MessageScansReadService {
     // Step 4.4 B15: BEC rows only when a page round has a bec engine row.
     const hasBec = engineRows.some((row) => row.engine === BEC_ENGINE);
     const becInputs = hasBec ? await this.becInputs(scope, message, scanIds) : NO_BEC;
+    // Step 4.5 D20: DLP rows only for a caller holding dlp:read and a page round with a dlp row.
+    const dlpVisible = principal.permissions.has(DLP_READ_PERMISSION);
+    const hasDlp = dlpVisible && engineRows.some((row) => row.engine === DLP_ENGINE);
+    const dlpInputs = hasDlp ? await this.dlpInputs(scope, message, scanIds) : NO_DLP;
     const parts = await this.rounds.attachmentParts(
       scope,
       message,
@@ -77,10 +91,31 @@ export class MessageScansReadService {
     return {
       messageId: message.publicId,
       data: page.map((scan) =>
-        roundOf(scan, engineRows, authRows, attachments, urlInputs, becInputs),
+        roundOf(scan, engineRows, authRows, attachments, urlInputs, becInputs, dlpInputs),
       ),
       nextCursor: rows.length > query.limit && last ? encodeScanCursor(last.lifecycleRound) : null,
     };
+  }
+
+  /**
+   * The DLP results and evidence states of the page's rounds; internal ids of the stored
+   * policy match and finding references are mapped to the organization's public ids, else
+   * dropped (D20).
+   */
+  private async dlpInputs(
+    scope: TenantScope,
+    message: LifecycleMessageRow,
+    scanIds: readonly bigint[],
+  ): Promise<DlpInputs> {
+    const [results, evidence] = await Promise.all([
+      this.rounds.dlpResults(scope, message, scanIds),
+      this.rounds.dlpEvidence(scope, message, scanIds),
+    ]);
+    const ids =
+      results.length === 0
+        ? NO_DLP.ids
+        : await this.rounds.dlpPublicIds(scope, collectRefs(results));
+    return { visible: true, results, evidence, ids };
   }
 
   /**

@@ -3,6 +3,8 @@ import {
   AUTH_FAILURE_VERDICTS,
   BEC_AI_MODES,
   CLICK_SUSPICIOUS_ACTIONS,
+  DLP_CATEGORIES,
+  DLP_TENANT_DISABLEABLE_DETECTORS,
   CLICK_UNKNOWN_ACTIONS,
   DKIM_SIGNED_POLICIES,
   DMARC_REJECT_VERDICTS,
@@ -20,7 +22,9 @@ import { z } from 'zod';
  * rules, raise-only verdicts, a tighter size limit) and `url` (step 4.3 U13: domain lists,
  * fetch mode, rewriting, click policy, dynamic inspection) and `bec` (step 4.4 B13: score
  * thresholds, extra free-mail domains, history opt-in and retention, AI layer modes within the
- * platform caps); one view shape per engine.
+ * platform caps) and `dlp` (step 4.5 D18: inbound opt-in, category thresholds, the noisy
+ * detectors a tenant may disable, the default policy, evidence enablement and retention); one
+ * view shape per engine.
  */
 
 const Version = z
@@ -45,7 +49,9 @@ export const ScanSettingsPutSchema = z.strictObject({
         'excludedDomains, dkimSignedPolicy, plainText}, click.{suspicious, unknown, ' +
         'allowContinue}, dynamicInspection; bec: suspiciousScore, maliciousScore, ' +
         'freemailExtraDomains, history.{enabled, retentionDays}, ai.{localModel, llm, ' +
-        'llmDailyCallLimit, raiseConfidence}); replaces the previous override. Unknown keys are ' +
+        'llmDailyCallLimit, raiseConfidence}; dlp: inboundEnabled, thresholds.<category>, ' +
+        'disabledDetectors, defaultPolicy, evidence.{enabled, retentionDays}); replaces the ' +
+        'previous override. Unknown keys are ' +
         'refused (422)',
     ),
 });
@@ -365,12 +371,82 @@ export const BecSettingsViewSchema = z.object({
   ...viewCommon,
 });
 
+const DlpCategoryThresholds = z
+  .object(
+    Object.fromEntries(DLP_CATEGORIES.map((c) => [c, z.number()])) as Record<
+      (typeof DLP_CATEGORIES)[number],
+      z.ZodNumber
+    >,
+  )
+  .describe('Confidence threshold per category (a finding is reportable at or above it)');
+const DlpDefaultPolicy = z.enum(['alert', 'allow']);
+const DlpDisableable = z.enum(DLP_TENANT_DISABLEABLE_DETECTORS);
+
+/** DLP platform settings (`DLP_*`, step 4.5 D18); evidence enablement and retention are caps. */
+export const DlpPlatformSettingsDoc = z.object({
+  confidenceThreshold: z.number().describe('Default of every category threshold'),
+  defaultPolicy: DlpDefaultPolicy.describe('Default of the tenant key'),
+  evidenceEnabled: z.boolean().describe('Cap of evidence.enabled'),
+  evidenceDefaultRetentionDays: z.number().int(),
+  evidenceMaxRetentionDays: z.number().int().describe('Cap of evidence.retentionDays'),
+  contextWindowChars: z.number().int().describe('Platform only'),
+  bulkMinDistinct: z.number().int().describe('Platform only'),
+});
+
+export const DlpOverrideDoc = z.object({
+  inboundEnabled: z.boolean().optional().describe('Scan inbound mail too (default false)'),
+  thresholds: DlpCategoryThresholds.partial().optional(),
+  disabledDetectors: z
+    .array(DlpDisableable)
+    .optional()
+    .describe('Noisy detectors switched off (PI1, PI2, BA3, SC1, CF2 only)'),
+  defaultPolicy: DlpDefaultPolicy.optional().describe(
+    'Action of the platform default policy when no tenant policy applies',
+  ),
+  evidence: z
+    .object({ enabled: z.boolean().optional(), retentionDays: z.number().int().optional() })
+    .optional()
+    .describe('Encrypted evidence of reportable findings (D16)'),
+});
+
+export const DlpEffectiveSettingsDoc = z.object({
+  inboundEnabled: z.boolean(),
+  thresholds: DlpCategoryThresholds,
+  disabledDetectors: z.array(DlpDisableable),
+  defaultPolicy: DlpDefaultPolicy,
+  evidence: z.object({ enabled: z.boolean(), retentionDays: z.number().int() }),
+  contextWindowChars: z.number().int(),
+  bulkMinDistinct: z.number().int(),
+});
+
+export const DlpBoundsDoc = z.object({
+  inboundEnabled: z.array(z.boolean()),
+  thresholds: z.object({
+    categories: z.array(z.enum(DLP_CATEGORIES)),
+    min: z.number(),
+    max: z.number(),
+  }),
+  disabledDetectors: z.array(DlpDisableable),
+  defaultPolicy: z.array(DlpDefaultPolicy),
+  evidence: z.object({ enabled: z.array(z.boolean()), retentionDays: IntRange }),
+});
+
+export const DlpSettingsViewSchema = z.object({
+  engine: z.literal('dlp').describe('Engine name (ENGINE_CATALOG)'),
+  platform: DlpPlatformSettingsDoc.describe('Platform settings (DLP_*)'),
+  bounds: DlpBoundsDoc.describe('What an override may choose'),
+  override: DlpOverrideDoc.nullable().describe('The organization override; null for none'),
+  effective: DlpEffectiveSettingsDoc.describe('What the DLP engine applies'),
+  ...viewCommon,
+});
+
 /** The settings of one engine, by `engine`. */
 export const EngineSettingsViewSchema = z.discriminatedUnion('engine', [
   RspamdSettingsViewSchema,
   AttachmentSettingsViewSchema,
   UrlSettingsViewSchema,
   BecSettingsViewSchema,
+  DlpSettingsViewSchema,
 ]);
 export type EngineSettingsView = z.output<typeof EngineSettingsViewSchema>;
 
@@ -392,5 +468,6 @@ export const ScanSettingsResponseSchema = z.discriminatedUnion('engine', [
   AttachmentSettingsViewSchema.extend({ note: Note }),
   UrlSettingsViewSchema.extend({ note: Note }),
   BecSettingsViewSchema.extend({ note: Note }),
+  DlpSettingsViewSchema.extend({ note: Note }),
 ]);
 export type ScanSettingsResponse = z.output<typeof ScanSettingsResponseSchema>;

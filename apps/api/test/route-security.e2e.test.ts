@@ -27,6 +27,7 @@ import {
   USER_ONLY_KEY,
 } from '../src/auth-contracts/decorators';
 import { loadApiConfig } from '../src/config';
+import { RATE_LIMIT_KEY, type RateLimitOptions } from '../src/rate-limit/rate-limit.options';
 import { EmailSender } from '../src/email/email-sender';
 import { API_GLOBAL_PREFIX, configureApiApp } from '../src/http/configure-api-app';
 import { KeyValueStore } from '../src/kv/key-value-store';
@@ -62,6 +63,7 @@ interface DiscoveredRoute {
   requirement: unknown;
   requireMfa: boolean;
   userOnly: boolean;
+  rateLimits: RateLimitOptions[];
 }
 
 const asArray = (value: unknown): string[] =>
@@ -108,6 +110,7 @@ function discoverRoutes(app: INestApplication): DiscoveredRoute[] {
               controller,
             ]),
             userOnly: !!reflector.getAllAndOverride<boolean>(USER_ONLY_KEY, [handler, controller]),
+            rateLimits: (Reflect.getMetadata(RATE_LIMIT_KEY, handler) as RateLimitOptions[]) ?? [],
           });
         }
       }
@@ -316,6 +319,78 @@ describe('route security (e2e, dependencies stubbed)', () => {
       expect(route?.requireMfa, key).toBe(flags?.mfa ?? false);
       expect(route?.userOnly, key).toBe(flags?.userOnly ?? false);
     }
+  });
+
+  it('the step 4.5 DLP routes require exactly their permission, MFA, users and rate limits where D21 says', () => {
+    type Flags = { mfa?: boolean; userOnly?: boolean; perMinute?: number };
+    const expected: Record<string, [string, Flags?]> = {
+      'get /api/v1/dlp/policies': ['dlp:read'],
+      'get /api/v1/dlp/policies/:id': ['dlp:read'],
+      'post /api/v1/dlp/policies': ['dlp:manage'],
+      'patch /api/v1/dlp/policies/:id': ['dlp:manage'],
+      'delete /api/v1/dlp/policies/:id': ['dlp:manage'],
+      'post /api/v1/dlp/policies/:id/rules': ['dlp:manage'],
+      'patch /api/v1/dlp/policies/:id/rules/:ruleId': ['dlp:manage'],
+      'delete /api/v1/dlp/policies/:id/rules/:ruleId': ['dlp:manage'],
+      'get /api/v1/dlp/exceptions': ['dlp:read'],
+      'post /api/v1/dlp/exceptions': ['dlp:manage'],
+      'patch /api/v1/dlp/exceptions/:id': ['dlp:manage'],
+      'delete /api/v1/dlp/exceptions/:id': ['dlp:manage'],
+      'get /api/v1/dlp/patterns': ['dlp:read'],
+      'get /api/v1/dlp/patterns/:id': ['dlp:read'],
+      'post /api/v1/dlp/patterns': ['dlp:manage'],
+      'post /api/v1/dlp/patterns/test': ['dlp:manage', { perMinute: 30 }],
+      'patch /api/v1/dlp/patterns/:id': ['dlp:manage'],
+      'delete /api/v1/dlp/patterns/:id': ['dlp:manage'],
+      'get /api/v1/dlp/dictionaries': ['dlp:read'],
+      'get /api/v1/dlp/dictionaries/:id': ['dlp:read'],
+      'post /api/v1/dlp/dictionaries': ['dlp:manage'],
+      'patch /api/v1/dlp/dictionaries/:id': ['dlp:manage'],
+      'delete /api/v1/dlp/dictionaries/:id': ['dlp:manage'],
+      'get /api/v1/dlp/compliance': ['dlp:read'],
+      'put /api/v1/dlp/compliance/aadhaar': [
+        'dlp:compliance_manage',
+        { mfa: true, userOnly: true },
+      ],
+      'delete /api/v1/dlp/compliance/aadhaar': [
+        'dlp:compliance_manage',
+        { mfa: true, userOnly: true },
+      ],
+      'get /api/v1/dlp/incidents': ['dlp:read'],
+      'get /api/v1/messages/:messageId/scans/:scanId/dlp-evidence': [
+        'dlp:evidence_read',
+        { mfa: true, userOnly: true, perMinute: 30 },
+      ],
+      'delete /api/v1/messages/:messageId/scans/:scanId/dlp-evidence': [
+        'dlp:manage',
+        { mfa: true },
+      ],
+      'delete /api/v1/dlp/evidence': ['dlp:manage', { mfa: true }],
+    };
+    const dlpRoutes = routes.filter(
+      (r) => r.path.includes('/api/v1/dlp/') || r.path.endsWith('/dlp-evidence'),
+    );
+    expect(dlpRoutes.map((r) => `${r.method} ${r.path}`).sort()).toEqual(
+      Object.keys(expected).sort(),
+    );
+    for (const [key, [permission, flags]] of Object.entries(expected)) {
+      const route = routes.find((r) => `${r.method} ${r.path}` === key);
+      expect(route?.isPublic, key).toBe(false);
+      expect(route?.requirement, key).toEqual({ mode: 'all', permissions: [permission] });
+      expect(route?.requireMfa, key).toBe(flags?.mfa ?? false);
+      expect(route?.userOnly, key).toBe(flags?.userOnly ?? false);
+      if (flags?.perMinute === undefined) {
+        expect(route?.rateLimits, key).toEqual([]);
+      } else {
+        expect(route?.rateLimits, key).toEqual([
+          expect.objectContaining({ limit: flags.perMinute, windowSeconds: 60, by: 'principal' }),
+        ]);
+      }
+    }
+    // The scans read API stays message:read; the dlp section is gated on dlp:read inside (D20).
+    expect(routes.find((r) => r.path === '/api/v1/messages/:messageId/scans')?.requirement).toEqual(
+      { mode: 'all', permissions: ['message:read'] },
+    );
   });
 
   it('non-public routes also reject a junk bearer token and a junk API key', async () => {

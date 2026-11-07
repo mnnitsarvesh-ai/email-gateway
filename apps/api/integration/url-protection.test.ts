@@ -375,6 +375,7 @@ describe('url settings through /scan-settings/url (U13)', () => {
       'attachment',
       'url',
       'bec',
+      'dlp',
     ]);
     const path = '/api/v1/scan-settings/url';
     const invalid = await ctx.http

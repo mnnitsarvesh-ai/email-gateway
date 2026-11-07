@@ -16,10 +16,17 @@ import {
 import { createLogger } from '@email-gateway/logger';
 import { MIME_QUEUE, type WorkerConfig } from './config';
 import { MimeIngestionModule } from './mime-ingestion/mime-ingestion.module';
-import { runsAttachmentConsumer, runsBecConsumer, runsUrlConsumer } from './scanning/config';
+import {
+  runsAttachmentConsumer,
+  runsBecConsumer,
+  runsDlpConsumer,
+  runsUrlConsumer,
+} from './scanning/config';
 import {
   BecEngineHealth,
   ClamavHealth,
+  DlpEngineHealth,
+  DlpExtractorHealth,
   InspectorHealth,
   ScannerBrokerHealth,
   ScanningModule,
@@ -67,6 +74,8 @@ export class AppModule {
     if (scanning && runsUrlConsumer(config)) indicators.push(UrlEngineHealth);
     // Step 4.4 B16: the packaged model and lexicons on replicas running the bec engine.
     if (scanning && runsBecConsumer(config)) indicators.push(BecEngineHealth);
+    // Step 4.5 D22: the dlp engine and its extractor pool on replicas running the dlp engine.
+    if (scanning && runsDlpConsumer(config)) indicators.push(DlpEngineHealth, DlpExtractorHealth);
     indicators.push(RedisService, S3Service);
     return {
       module: AppModule,

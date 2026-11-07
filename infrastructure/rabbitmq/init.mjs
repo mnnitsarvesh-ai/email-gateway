@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// RabbitMQ provisioning for topology v6 (step 3.2 Q5, Q10, ADR-0024; v2: step 3.3 L7; v3: step
+// RabbitMQ provisioning for topology v7 (step 3.2 Q5, Q10, ADR-0024; v2: step 3.3 L7; v3: step
 // 4.1 S2, ADR-0026; v4: step 4.2 A2, ADR-0028; v5: step 4.3 U2, ADR-0029; v6: step 4.4 B3,
-// ADR-0033). The only code that declares broker objects: services verify passively and their
-// users cannot configure.
+// ADR-0033; v7: step 4.5 D2, ADR-0036). The only code that declares broker objects: services
+// verify passively and their users cannot configure.
 //
 //   node init.mjs [--vhost <name>] [--mgmt-url <url>] [--definitions <path>]
 //                 [--users] [--cleanup-legacy] [--legacy-vhost <name>]
@@ -71,8 +71,13 @@ const topic = (exchange, write) => ({ exchange, write, read: '^$' });
  * gives ops the retry hops of scan.bec. The scanner's retry/dead-letter keys keep the `.org.`
  * anchoring of v5 (`bec` is no dot-prefix of another queue, so it needs none, but one pattern
  * serves every scanner queue).
+ *
+ * Topology v7 (step 4.5 D2) extends the scanner to the data loss prevention engine's work queue
+ * scan.dlp (same user and image; the incident event mail.message.dlp_incident.v1 is written to
+ * the outbox and published by the relay, so the scanner never publishes it) and gives ops the
+ * retry hops of scan.dlp. The `.org.` anchoring of v5 is kept.
  */
-const SCANNER_QUEUES = '(spam|attachment|url|url\\.results|bec)';
+const SCANNER_QUEUES = '(spam|attachment|url|url\\.results|bec|dlp)';
 const ROLE_USERS = [
   {
     role: 'relay',
@@ -98,7 +103,8 @@ const ROLE_USERS = [
   {
     // Step 4.1 S1/S2: the email-worker scan role has its own broker user (least privilege).
     // Step 4.2 A2 (v4): the same user consumes scan.attachment (the attachment engine); step 4.3
-    // (v5) scan.url and scan.url.results; step 4.4 B3 (v6) scan.bec (the BEC engine).
+    // (v5) scan.url and scan.url.results; step 4.4 B3 (v6) scan.bec (the BEC engine); step 4.5
+    // D2 (v7) scan.dlp (the DLP engine).
     role: 'scanner',
     userKey: 'RABBITMQ_SCANNER_USER',
     passwordKey: 'RABBITMQ_SCANNER_PASSWORD',
@@ -146,7 +152,7 @@ const ROLE_USERS = [
     configure: '^$',
     // Replay republishes only to the home exchanges of the replayable work queues (Q9); v3 adds
     // scan.spam, v4 scan.attachment, v5 scan.url, scan.url.inspect and scan.url.results, v6
-    // scan.bec (home exchange email.security).
+    // scan.bec, v7 scan.dlp (home exchange email.security).
     write: '^email\\.(ingestion|delivery|security)$',
     read: '^email\\.dead-letter$',
     topics: [
@@ -154,7 +160,7 @@ const ROLE_USERS = [
       topic('email.delivery', '^retry\\.email\\.delivery\\.pending\\.'),
       topic(
         'email.security',
-        '^retry\\.scan\\.(spam|attachment|url|url\\.inspect|url\\.results|bec)\\.',
+        '^retry\\.scan\\.(spam|attachment|url|url\\.inspect|url\\.results|bec|dlp)\\.',
       ),
     ],
   },

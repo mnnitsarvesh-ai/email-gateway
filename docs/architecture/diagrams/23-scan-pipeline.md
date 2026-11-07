@@ -12,13 +12,14 @@ flowchart LR
 
   P["mail.message.parsed.v1<br/>round 0, scan_kind initial"]:::impl
   R["mail.message.rescan_requested.v1<br/>round N ≥ 1 (api E19), scan_kind rescan"]:::impl
-  CAT["ENGINE_CATALOG (security-contracts, data)<br/>stage 1: rspamd (scan.spam), attachment (scan.attachment),<br/>url (scan.url); stage 2: bec (scan.bec, dependsOn rspamd, url):<br/>all required"]:::impl
-  REG["ENGINE_REGISTRY (email-worker)<br/>rspamd, attachment, url, bec registrations:<br/>consumer, adapter, settings"]:::impl
-  Q1["stage 1: scan.spam / scan.attachment / scan.url →<br/>email-worker.scan.rspamd / .attachment / .url"]:::impl
+  CAT["ENGINE_CATALOG (security-contracts, data)<br/>stage 1: rspamd (scan.spam), attachment (scan.attachment),<br/>url (scan.url), dlp (scan.dlp); stage 2: bec (scan.bec,<br/>dependsOn rspamd, url): all required"]:::impl
+  REG["ENGINE_REGISTRY (email-worker)<br/>rspamd, attachment, url, bec, dlp registrations:<br/>consumer, adapter, settings"]:::impl
+  Q1["stage 1: scan.spam / scan.attachment / scan.url / scan.dlp →<br/>email-worker.scan.rspamd / .attachment / .url / .dlp"]:::impl
   ST["stage trigger (step 4.4 B2): in the txn that inserts the<br/>last dependency final (rspamd or url, definite or failure)<br/>→ one mail.message.scan_stage_ready.v1 (outbox) per round"]:::impl
   Q3["stage 2: scan.bec (scan_stage_ready.v1 only) →<br/>email-worker.scan.bec; finds the round row<br/>(never opens one), reads the dependency finals"]:::impl
   BEC["bec final txn (step 4.4): bec_scan_results<br/>(+ keyed-hash history, round 0, opt-in)"]:::impl
-  Q2["scan.dlp, sandbox consumer<br/>engines PLANNED 4.5–4.6"]:::planned
+  DLP["dlp final txn (step 4.5): dlp_scan_results (masked),<br/>dlp_evidence (wrapped key) + dlp_incident.v1 (outbox);<br/>evidence object sealed to S3 before the txn;<br/>attachments extracted in the isolated extractor children"]:::impl
+  Q2["scan.sandbox consumer<br/>PLANNED 4.6"]:::planned
   URL["url final txn (step 4.3): message_urls, url_scan_results,<br/>url_rewrites (rewritten copy in S3), url_dynamic_inspections<br/>+ inspection_requested.v1"]:::impl
   OPEN["open round (first engine wins)<br/>E3 persisted → scanning (round 0)<br/>email_scans row: required_engines snapshot,<br/>deadline_at = now + SCAN_ROUND_DEADLINE_SECONDS"]:::impl
   RES["scan_engine_results<br/>non-final attempts (timeout/error)<br/>one final row per (scan, engine)"]:::impl
@@ -27,7 +28,7 @@ flowchart LR
   OK["E6 scanned, email_scans completed<br/>scanned.v1 outcome scanned"]:::impl
   FAIL["E7 scan_failed (scan_error / scan_timeout / eml_unavailable)<br/>email_scans failed | timed_out, scanned.v1 outcome scan_failed"]:::impl
   SW["deadline sweeper (advisory lock scan:deadline)<br/>running rounds past deadline_at → final timeout rows"]:::impl
-  DP["dev pass-through (local/ci): E27 scanned → approved<br/>emlS3Key = the round's rewritten copy, else the original (U20);<br/>held: malicious round, bec suspicious/malicious (B17)"]:::impl
+  DP["dev pass-through (local/ci): E27 scanned → approved<br/>emlS3Key = the round's rewritten copy, else the original (U20);<br/>held: malicious round, bec suspicious/malicious (B17),<br/>dlp require_approval / quarantine / block or missing row (D13)"]:::impl
   PE["policy-engine via email.policy.evaluate<br/>PLANNED 5.2"]:::planned
 
   CAT --> REG
@@ -35,11 +36,10 @@ flowchart LR
   REG -.-> Q2
   P --> Q1
   R --> Q1
-  P -.-> Q2
-  R -.-> Q2
   Q1 --> OPEN --> RES
   RES --> AUTH
   RES --> URL
+  RES --> DLP
   RES --> ST --> Q3 --> RES
   Q3 --> BEC
   RES --> DONE
@@ -52,7 +52,7 @@ flowchart LR
   FAIL -.-> PE
 ```
 
-**Legend.** Green: IMPLEMENTED (4.1 orchestrator and Rspamd; 4.2 attachment engine; 4.3 URL engine with its child rows and the rewritten copy, [11-url-protection.md](../../plan/steps/11-url-protection.md) U1, U3, U16, U20; 4.4 stage-2 dependencies and the BEC engine, [12-phishing-bec.md](../../plan/steps/12-phishing-bec.md) B1, B2, B14, B17). Amber dashed: PLANNED (4.5–4.6 engines; policy 5.2). Since step 4.4 `required_engines = ["rspamd", "attachment", "url", "bec"]`: the round completes when all four have a final row. `bec` is a **stage-2** engine: it is never triggered by `parsed.v1`/`rescan_requested.v1`, only by the round's `scan_stage_ready.v1`, which exactly one transaction writes (the one that inserts the last of the rspamd/url finals, under the message → scan locks); a failed dependency still triggers it (the input is recorded `failed`, never clean). The deadline sweeper writes no trigger: it finalizes every missing required engine, stage 2 included, as `timeout`. The URL engine's dynamic inspection never delays the round (its result acts at click time). In 4.1 the registry held only `rspamd`.
+**Legend.** Green: IMPLEMENTED (4.1 orchestrator and Rspamd; 4.2 attachment engine; 4.3 URL engine with its child rows and the rewritten copy, [11-url-protection.md](../../plan/steps/11-url-protection.md) U1, U3, U16, U20; 4.4 stage-2 dependencies and the BEC engine, [12-phishing-bec.md](../../plan/steps/12-phishing-bec.md) B1, B2, B14, B17; 4.5 the stage-1 DLP engine with its child rows, evidence and incident, [13-dlp.md](../../plan/steps/13-dlp.md) D1, D3, D13, D16, D19). Amber dashed: PLANNED (the 4.6 sandbox consumer; policy 5.2). Since step 4.5 `required_engines = ["rspamd", "attachment", "url", "bec", "dlp"]`: the round completes when all five have a final row. `dlp` is a stage-1 engine (no dependency; inbound rounds finish fast with `skipped`), so outbound approval always waits for the DLP final, which carries the tenant policy's action; the engine records the action, the delivery stage applies it (D13). `bec` is a **stage-2** engine: it is never triggered by `parsed.v1`/`rescan_requested.v1`, only by the round's `scan_stage_ready.v1`, which exactly one transaction writes (the one that inserts the last of the rspamd/url finals, under the message → scan locks); a failed dependency still triggers it (the input is recorded `failed`, never clean). The deadline sweeper writes no trigger: it finalizes every missing required engine, stage 2 included, as `timeout`. The URL engine's dynamic inspection never delays the round (its result acts at click time). In 4.1 the registry held only `rspamd`.
 
 ## Aggregation (pure `aggregateRound`)
 
@@ -83,11 +83,12 @@ A non-required engine's failure is recorded but never fails the round. Reason co
 
 ## Status
 
-| Element                                             | Status              | Evidence                                                                                                                               |
-| --------------------------------------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| Catalog, registry, round open/complete, aggregation | IMPLEMENTED 4.1     | `security-contracts` and `apps/email-worker/src/scanning` unit tests; email-worker `scan-rounds`                                       |
-| Deadline sweeper                                    | IMPLEMENTED 4.1     | `deadline-sweeper.test.ts`; email-worker `scan-resilience`                                                                             |
-| Stack round flow through Postfix                    | IMPLEMENTED 4.1     | `tests/integration/scan-pipeline.test.ts`, `scan-resilience.test.ts`                                                                   |
-| Further engines (second required engine in a round) | IMPLEMENTED 4.2–4.4 | The completion rule is engine-agnostic; four required engines since 4.4 (4.5–4.6 PLANNED)                                              |
-| URL engine child rows, rewritten copy, inspections  | IMPLEMENTED 4.3     | email-worker `url-*` integration suites; stack `url-smtp.test.ts`, `url-ssrf.test.ts`                                                  |
-| Stage-2 trigger, BEC engine, bec child rows         | IMPLEMENTED 4.4     | `stage-trigger.test.ts`, email-worker `bec-stage`/`bec-scan`; stack `bec-smtp`, `scan-pipeline`, `scan-resilience`, `lifecycle-rescan` |
+| Element                                                            | Status              | Evidence                                                                                                                               |
+| ------------------------------------------------------------------ | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| Catalog, registry, round open/complete, aggregation                | IMPLEMENTED 4.1     | `security-contracts` and `apps/email-worker/src/scanning` unit tests; email-worker `scan-rounds`                                       |
+| Deadline sweeper                                                   | IMPLEMENTED 4.1     | `deadline-sweeper.test.ts`; email-worker `scan-resilience`                                                                             |
+| Stack round flow through Postfix                                   | IMPLEMENTED 4.1     | `tests/integration/scan-pipeline.test.ts`, `scan-resilience.test.ts`                                                                   |
+| Further engines (second required engine in a round)                | IMPLEMENTED 4.2–4.4 | The completion rule is engine-agnostic; five required engines since 4.5 (4.6 PLANNED)                                                  |
+| URL engine child rows, rewritten copy, inspections                 | IMPLEMENTED 4.3     | email-worker `url-*` integration suites; stack `url-smtp.test.ts`, `url-ssrf.test.ts`                                                  |
+| Stage-2 trigger, BEC engine, bec child rows                        | IMPLEMENTED 4.4     | `stage-trigger.test.ts`, email-worker `bec-stage`/`bec-scan`; stack `bec-smtp`, `scan-pipeline`, `scan-resilience`, `lifecycle-rescan` |
+| DLP engine, extractor children, dlp child rows, evidence, incident | IMPLEMENTED 4.5     | `dlp.engine.test.ts`, email-worker `dlp-scan`; stack `dlp-smtp`, `scan-pipeline`, `lifecycle-rescan` (five engines)                    |

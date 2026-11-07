@@ -75,8 +75,12 @@ data:
   # (tenant override bounds) and the email-worker scan replicas; the required engines of a round
   # (SCAN_ENGINES) must be identical on every scan replica (A1). Step 4.3 U1 adds the required url
   # engine (Deployment email-worker-url); step 4.4 B1 the required stage-2 bec engine (Deployment
-  # email-worker-bec, triggered by the rspamd and url finals of the round).
-  SCAN_ENGINES: rspamd,attachment,url,bec
+  # email-worker-bec, triggered by the rspamd and url finals of the round); step 4.5 D1 the
+  # required stage-1 dlp engine (Deployment email-worker-dlp). Rollout of dlp is two-phase
+  # (docs/deployment/dlp.md): deploy the new image everywhere with SCAN_ENGINES unchanged and
+  # email-worker-dlp running, then add dlp here; a round that requires dlp while nobody consumes
+  # scan.dlp ends scan_failed at its deadline (never clean).
+  SCAN_ENGINES: rspamd,attachment,url,bec,dlp
   ATTACHMENT_MAX_BYTES: '26214400'
   ATTACHMENT_ARCHIVE_MAX_DEPTH: '3'
   ATTACHMENT_ARCHIVE_MAX_ENTRIES: '1000'
@@ -190,6 +194,28 @@ data:
   BEC_MAX_EXECUTIVES: '500'
   BEC_MAX_VENDORS: '2000'
   BEC_MAX_TRUSTED_SENDERS: '1000'
+  # Data loss prevention (step 4.5 §5, D18, D21; docs/deployment/dlp.md). Platform settings and
+  # tenant bounds read by both the api (/api/v1/dlp/*, /api/v1/scan-settings/dlp) and
+  # email-worker-dlp; they must agree. The engine-only keys are set in email-worker-dlp.yaml; the
+  # evidence key (DLP_EVIDENCE_KEY / _PREVIOUS) is the Secret email-gateway-dlp-evidence-key,
+  # mounted only in email-worker-dlp and the api.
+  DLP_CONFIDENCE_THRESHOLD: '0.6'
+  DLP_CONTEXT_WINDOW_CHARS: '64'
+  DLP_BULK_MIN_DISTINCT: '5'
+  DLP_DEFAULT_POLICY: alert
+  DLP_CUSTOM_PATTERN_MAX_LENGTH: '256'
+  DLP_CUSTOM_PATTERN_PROBE_MAX_MS: '50'
+  DLP_CUSTOM_SCAN_MAX_CHARS: '1000000'
+  DLP_CUSTOM_PATTERNS_MAX_PER_TENANT: '50'
+  DLP_DICTIONARIES_MAX_PER_TENANT: '20'
+  DLP_DICTIONARY_MAX_TERMS: '1000'
+  DLP_POLICIES_MAX_PER_TENANT: '20'
+  DLP_RULES_MAX_PER_POLICY: '50'
+  DLP_EXCEPTIONS_MAX_PER_TENANT: '500'
+  DLP_EXCEPTION_MAX_DAYS: '365'
+  DLP_EVIDENCE_ENABLED: 'true'
+  DLP_EVIDENCE_DEFAULT_RETENTION_DAYS: '30'
+  DLP_EVIDENCE_MAX_RETENTION_DAYS: '180'
   # click-service (U14). CLICK_TRUST_PROXY = reverse-proxy hops in front of the pods (ingress
   # controller; add one per CDN/WAF layer).
   CLICK_DB_TX_TIMEOUT_MS: '120000'

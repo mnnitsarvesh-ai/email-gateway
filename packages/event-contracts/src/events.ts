@@ -949,6 +949,118 @@ export const messageScanStageReadyV1 = z
   });
 export type MessageScanStageReadyV1 = z.infer<typeof messageScanStageReadyV1>;
 
+/**
+ * DLP actions an incident can carry (step 4.5 D11, D13, D14): every action of `DLP_ACTIONS`
+ * (`@email-gateway/security-contracts`) except `allow`, which never writes an incident.
+ */
+export const DLP_INCIDENT_ACTION_VALUES = [
+  'alert',
+  'require_approval',
+  'quarantine',
+  'block',
+] as const;
+/** Where an incident's action came from (`DLP_ACTION_SOURCES` without `none`). */
+export const DLP_INCIDENT_ACTION_SOURCE_VALUES = ['tenant_policy', 'default_policy'] as const;
+/** Severity of a DLP category aggregate (mirrors `DLP_SEVERITIES`). */
+export const DLP_SEVERITY_VALUES = ['info', 'low', 'medium', 'high', 'critical'] as const;
+
+/**
+ * A DLP incident (step 4.5 D14, ADR-0037): the `dlp` engine's tenant policy yielded an effective
+ * action other than `allow` for one scan round. Written by the email-worker scan stage through
+ * `message_outbox` (`aggregate_type = 'message'`) in the transaction that inserts the round's dlp
+ * final row and its `dlp_scan_results` row, only when the final row was inserted (once per round,
+ * idempotent with the final row). Published to `email.security`
+ * (`org.<id>.mail.message.dlp_incident.v1`); **no queue binds it in step 4.5**: it reaches only
+ * the `email.analytics` firehose; the notification-worker binds it in step 6.2.
+ *
+ * Content rules (§2.0 invariant 2, content guard): ids, codes, counts and times only. No address,
+ * no matched value, no masked sample, no policy / rule / pattern / dictionary name, no term: the
+ * objects are strict, so a producer cannot add such a field. `policyId` / `ruleId` are the
+ * winning rule's public ids (UUIDv7) for a tenant policy and null for the platform default
+ * policy. `detectorCodes` are the DLP reason codes (`dlp.*`, `DLP_REASON_CODES`) of the findings
+ * and coverage reasons the winning rule selected; categories and codes are unique. `categories`
+ * is empty only for a **coverage-only** incident (a rule that selected `coverageReasons`, with no
+ * finding): then `coverage` is `partial` and `detectorCodes` holds the coverage codes.
+ */
+export const messageDlpIncidentV1 = z
+  .strictObject({
+    messageId: decimalIdSchema,
+    receivedAt: z.iso.datetime(),
+    direction,
+    lifecycleRound: z.number().int().min(0).max(65_535),
+    /** `email_scans.id` of the round. */
+    scanId: decimalIdSchema,
+    action: z.enum(DLP_INCIDENT_ACTION_VALUES),
+    actionSource: z.enum(DLP_INCIDENT_ACTION_SOURCE_VALUES),
+    /** Public id of the winning policy (`dlp_policies.public_id`); null for the default policy. */
+    policyId: z.uuid().nullable(),
+    /** Public id of the winning rule (`dlp_policy_rules.public_id`); null for the default policy. */
+    ruleId: z.uuid().nullable(),
+    /** Per-category aggregates (`DLP_CATEGORIES`), counts of distinct values only. */
+    categories: z
+      .array(
+        z.strictObject({
+          category: z
+            .string()
+            .regex(/^[a-z][a-z_]{1,31}$/, 'Expected a dotless lower-case category'),
+          count: z.number().int().min(0).max(1_000_000),
+          maxSeverity: z.enum(DLP_SEVERITY_VALUES),
+        }),
+      )
+      .max(10),
+    detectorCodes: z.array(scanReasonCode).min(1).max(24),
+    exceptionApplied: z.boolean(),
+    coverage: z.enum(['complete', 'partial']),
+    /** An encrypted evidence object was stored for the round (`dlp_evidence`). */
+    evidenceAvailable: z.boolean(),
+    detectedAt: z.iso.datetime(),
+  })
+  .superRefine((payload, ctx) => {
+    if (payload.categories.length === 0 && payload.coverage !== 'partial') {
+      // A rule that matched on coverage reasons only (e.g. hold encrypted archives) has no
+      // category; with complete coverage some category must have matched.
+      ctx.addIssue({
+        code: 'custom',
+        path: ['categories'],
+        message: 'An incident without a category must have partial coverage',
+      });
+    }
+    const categories = payload.categories.map((c) => c.category);
+    if (new Set(categories).size !== categories.length) {
+      ctx.addIssue({ code: 'custom', path: ['categories'], message: 'Duplicate category' });
+    }
+    if (new Set(payload.detectorCodes).size !== payload.detectorCodes.length) {
+      ctx.addIssue({ code: 'custom', path: ['detectorCodes'], message: 'Duplicate reason code' });
+    }
+    payload.detectorCodes.forEach((code, index) => {
+      if (!code.startsWith('dlp.')) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['detectorCodes', index],
+          message: 'Expected a DLP reason code (dlp.*)',
+        });
+      }
+    });
+    const tenant = payload.actionSource === 'tenant_policy';
+    for (const field of ['policyId', 'ruleId'] as const) {
+      if (tenant && payload[field] === null) {
+        ctx.addIssue({
+          code: 'custom',
+          path: [field],
+          message: 'A tenant policy incident names its winning policy and rule',
+        });
+      }
+      if (!tenant && payload[field] !== null) {
+        ctx.addIssue({
+          code: 'custom',
+          path: [field],
+          message: 'The default policy has no policy or rule id',
+        });
+      }
+    }
+  });
+export type MessageDlpIncidentV1 = z.infer<typeof messageDlpIncidentV1>;
+
 export const EventTypes = {
   MessageReceived: 'mail.message.received.v1',
   MessageScanned: 'mail.message.scanned.v1',
@@ -966,4 +1078,5 @@ export const EventTypes = {
   UrlInspectionCompleted: 'mail.url.inspection_completed.v1',
   UrlClicked: 'mail.url.clicked.v1',
   MessageScanStageReady: 'mail.message.scan_stage_ready.v1',
+  MessageDlpIncident: 'mail.message.dlp_incident.v1',
 } as const;

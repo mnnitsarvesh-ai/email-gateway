@@ -305,7 +305,13 @@ describe.skipIf(gate.skip)(
         status: 'completed',
         requiredEngines: [...REQUIRED_ENGINES],
       });
-      expect(finals.map((f) => f.engine).sort()).toEqual(['attachment', 'bec', 'rspamd', 'url']);
+      expect(finals.map((f) => f.engine).sort()).toEqual([
+        'attachment',
+        'bec',
+        'dlp',
+        'rspamd',
+        'url',
+      ]);
       expect(round.scanVerdict).not.toBe('malicious');
       expect(becFinal).toMatchObject({ outcome: 'suspicious', errorCode: null, attempt: 1 });
       expect(becFinal!.engineVersion).toMatch(

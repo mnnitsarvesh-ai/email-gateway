@@ -28,8 +28,35 @@ function refusal(value: unknown): { code: ContentGuardCode; path: string } {
 describe('assertMetadataOnly: valid envelopes pass', () => {
   const types = Object.keys(EVENT_REGISTRY) as RegisteredEventType[];
 
-  it('covers all sixteen registered event types (two added by step 3.3, one by step 4.2, three by step 4.3, one by step 4.4)', () => {
-    expect(types).toHaveLength(16);
+  it('covers all seventeen registered event types (two added by step 3.3, one by step 4.2, three by step 4.3, one by step 4.4, one by step 4.5)', () => {
+    expect(types).toHaveLength(17);
+    expect(types).toContain('mail.message.dlp_incident.v1');
+  });
+
+  it('passes a maximal mail.message.dlp_incident.v1 (ids, codes and counts only, step 4.5 D14)', () => {
+    const base = EXAMPLE_EVENT_PAYLOADS['mail.message.dlp_incident.v1'] as Record<string, unknown>;
+    const payload = {
+      ...base,
+      categories: [
+        'payment_card',
+        'bank_account',
+        'national_id',
+        'passport',
+        'personal_info',
+        'confidential',
+        'source_code',
+        'credential',
+        'financial',
+        'custom',
+      ].map((category) => ({ category, count: 1_000_000, maxSeverity: 'critical' })),
+      detectorCodes: Array.from({ length: 24 }, (_, i) => `dlp.detector_${i}.code`),
+    };
+    expect(EVENT_REGISTRY['mail.message.dlp_incident.v1'].schema.safeParse(payload).success).toBe(
+      true,
+    );
+    expect(() =>
+      assertMetadataOnly(envelope('mail.message.dlp_incident.v1', payload)),
+    ).not.toThrow();
   });
 
   it.each(types)('%s example passes the registry schema and the guard', (type) => {

@@ -1,0 +1,107 @@
+# Data loss prevention engine alerts (step 4.5 D22, docs/plan/steps/13-dlp.md). Series: the
+# email-worker's dlp engine (scan_dlp_*, dlp_extractions_total, dlp_extractor_kills_total,
+# dlp_evidence_*; labels verdict, action, direction, detector, reason, format, status, result,
+# read: bounded enums only, never a value, a tenant id, a pattern or a dictionary id), the
+# generic scan series with engine="dlp" (scan_engine_results_total) and the topology vhost's
+# queue series of job `rabbitmq-detailed`. Every alert links its section of docs/runbooks/dlp.md.
+# Validate with `promtool check rules` and `promtool test rules tests/dlp-scanning.rules.test.yml`.
+groups:
+  - name: dlp-scanning
+    rules:
+      - alert: DlpEngineFailuresHigh
+        # Final results only: an attempt that was retried successfully is not counted.
+        expr: >-
+          sum(rate(scan_engine_results_total{engine="dlp",final="true",outcome=~"timeout|error"}[10m]))
+          / sum(rate(scan_engine_results_total{engine="dlp",final="true"}[10m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: dlp engine final failures above 5 %
+          description: >-
+            More than 5 % of the final dlp engine results of the last 10 minutes are timeout or
+            error (part reads, MySQL, inconsistent reads, extractor timeouts or crashes, the
+            detection deadline). Their rounds end scan_failed (never clean) and outbound mail is
+            not approved; rescan them after the cause is fixed.
+          runbook_url: docs/runbooks/dlp.md#dlpenginefailureshigh
+      - alert: DlpScanQueueBacklog
+        expr: >-
+          max(rabbitmq_detailed_queue_messages_ready{vhost="email-gateway",queue="scan.dlp"}) > 1000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: dlp scan queue backlog
+          description: >-
+            scan.dlp has had more than 1000 ready messages for 10 minutes. Outbound delivery waits
+            for the dlp final. Scale email-worker-dlp (memory: two extractor children per
+            replica), check the extractor pool (dlp_extractor_pool_children) and S3 / MySQL latency.
+          runbook_url: docs/runbooks/dlp.md#dlpscanqueuebacklog
+      - alert: DlpExtractionFailuresHigh
+        # Results with a parse_error or resource_limit coverage reason, relative to the
+        # extractions of the same window (an approximation per message: one result may carry
+        # several failed attachments).
+        expr: >-
+          sum(rate(scan_dlp_coverage_total{reason=~"dlp\\.not_extracted\\.(parse_error|resource_limit)"}[30m]))
+          / sum(rate(dlp_extractions_total[30m])) > 0.10
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: dlp attachment extraction failures above 10 %
+          description: >-
+            More than 10 % of the attachment extractions of the last 30 minutes failed with
+            parse_error or resource_limit. Those messages are unknown (never clean). Check for a
+            hostile campaign, a pdfjs / extractor regression after an upgrade, or limits
+            (DLP_EXTRACT_CPU_SECONDS, DLP_EXTRACT_MAX_RSS_MB) that are too small.
+          runbook_url: docs/runbooks/dlp.md#dlpextractionfailureshigh
+      - alert: DlpExtractorKillsHigh
+        expr: sum(increase(dlp_extractor_kills_total[15m])) > 10
+        labels:
+          severity: warning
+        annotations:
+          summary: dlp extractor children killed more than 10 times in 15 minutes
+          description: >-
+            The DLP extractor pool killed or lost more than 10 children in 15 minutes (reason cpu,
+            memory, wall or crash). CPU/RSS kills are definite resource_limit results; wall and
+            crash are retried attempts. Check the reason split and the worker's memory limit.
+          runbook_url: docs/runbooks/dlp.md#dlpextractorkillshigh
+      - alert: DlpEvidenceWriteFailures
+        expr: sum(increase(dlp_evidence_writes_total{result="failed"}[15m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: dlp evidence objects could not be stored
+          description: >-
+            At least one DLP evidence object could not be sealed or written to the mail bucket in
+            the last 15 minutes. The results record evidence_status failed (the finding and the
+            action stand, the evidence is missing). Check S3 and DLP_EVIDENCE_KEY.
+          runbook_url: docs/runbooks/dlp.md#dlpevidencewritefailures
+      - alert: DlpEvidencePurgeStalled
+        expr: max(dlp_evidence_expired_unpurged) > 0
+        for: 2h
+        labels:
+          severity: warning
+        annotations:
+          summary: expired dlp evidence not purged for 2 hours
+          description: >-
+            Expired DLP evidence rows still hold their wrapped key or their object for two hours.
+            The evidence sweeper (leader lock scan:dlp-evidence on an email-worker-dlp replica)
+            is not running, cannot reach MySQL, or cannot delete objects.
+          runbook_url: docs/runbooks/dlp.md#dlpevidencepurgestalled
+      - alert: DlpBlockRateSpike
+        # Informational: block + quarantine results of the last hour above 3 x the 1-day
+        # average rate (with a minimum of 10 such results in the hour).
+        expr: >-
+          (sum(rate(scan_dlp_results_total{action=~"block|quarantine"}[1h]))
+          > 3 * sum(rate(scan_dlp_results_total{action=~"block|quarantine"}[1d])))
+          and sum(increase(scan_dlp_results_total{action=~"block|quarantine"}[1h])) >= 10
+        labels:
+          severity: info
+        annotations:
+          summary: dlp block / quarantine rate spike
+          description: >-
+            Block and quarantine DLP actions of the last hour are more than three times the
+            1-day average. Either a real exfiltration attempt or a new tenant rule / custom
+            pattern with false positives (check the incidents API and recent dlp_* audit rows).
+          runbook_url: docs/runbooks/dlp.md#dlpblockratespike

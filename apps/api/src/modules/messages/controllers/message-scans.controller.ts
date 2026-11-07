@@ -1,6 +1,11 @@
 import { Controller, Get, Param, Query, UseFilters } from '@nestjs/common';
 import { ApiBearerAuth, ApiOkResponse, ApiOperation, ApiSecurity, ApiTags } from '@nestjs/swagger';
-import { CurrentScope, RequirePermissions } from '../../../auth-contracts/decorators';
+import {
+  CurrentPrincipal,
+  CurrentScope,
+  RequirePermissions,
+} from '../../../auth-contracts/decorators';
+import type { Principal } from '../../../auth-contracts/principal';
 import type { TenantScope } from '../../../auth-contracts/tenant-scope';
 import { CodedExceptionFilter } from '../../../http/coded-exception';
 import { ACCESS_TOKEN_SCHEME, API_KEY_SCHEME } from '../../../http/openapi';
@@ -53,8 +58,14 @@ export class MessageScansController {
       'verdict: versions, deterministic and final verdict and score, thresholds, input states, ' +
       'the fired rules with structured evidence (span offsets, never text), applied and shadow ' +
       'AI assessments (no response hashes or durations) and feedback references; `scanId` of ' +
-      'a round is the id the BEC feedback route takes. From the read replica: a round that just completed ' +
-      'may still show as running. Symbol options can contain addresses or URLs of the ' +
+      'a round is the id the BEC feedback route takes. The `dlp` engine entry (step 4.5) carries ' +
+      'its masked result (versions, verdict, action, coverage detail, category aggregates, ' +
+      'findings with masked samples only, the policy match and applied exceptions as public ' +
+      'ids, the evidence state) **only for callers also holding `dlp:read`**; otherwise `dlp` ' +
+      'is null and only the standard engine fields are shown. Matched values are never shown ' +
+      'here: decrypted evidence is only in the audited ' +
+      '`GET /messages/{messageId}/scans/{scanId}/dlp-evidence`. From the read replica: a round ' +
+      'that just completed may still show as running. Symbol options can contain addresses or URLs of the ' +
       'message; filenames are attacker-controlled text.',
   })
   @ApiMessageId()
@@ -63,10 +74,11 @@ export class MessageScansController {
   @ApiErrors(400, 401, 403)
   @ApiMessageNotFound()
   scansOf(
+    @CurrentPrincipal() principal: Principal,
     @CurrentScope() scope: TenantScope,
     @Param('messageId', messageIdPipe) messageId: string,
     @Query(new ZodValidationPipe(MessageScansQuerySchema)) query: MessageScansQuery,
   ): Promise<MessageScansPage> {
-    return this.scans.list(scope, messageId, query);
+    return this.scans.list(principal, scope, messageId, query);
   }
 }

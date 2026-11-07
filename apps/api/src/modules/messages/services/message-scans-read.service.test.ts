@@ -1,6 +1,8 @@
 import { HttpException } from '@nestjs/common';
 import { describe, expect, it, vi } from 'vitest';
+import type { Principal } from '../../../auth-contracts/principal';
 import { systemScope } from '../../../auth-contracts/tenant-scope';
+import { NO_DLP_IDS } from '../../dlp/domain/dlp-result';
 import { encodeScanCursor } from '../domain/message-scans';
 import type {
   LifecycleMessageRow,
@@ -13,6 +15,8 @@ import type {
 import { MessageScansReadService } from './message-scans-read.service';
 
 const scope = systemScope(3n);
+/** A caller with message:read only (the D20 permission split: no dlp section). */
+const reader = { permissions: new Set(['message:read']) } as unknown as Principal;
 const message: LifecycleMessageRow = {
   id: 10n,
   publicId: '0190f0f0-0000-7000-8000-000000000010',
@@ -51,6 +55,9 @@ function setup(rows: ScanRoundRow[], found = true) {
     urlRewrites: vi.fn(() => Promise.resolve([] as unknown[])),
     urlInspections: vi.fn(() => Promise.resolve([] as unknown[])),
     urlClicks: vi.fn(() => Promise.resolve([] as unknown[])),
+    dlpResults: vi.fn(() => Promise.resolve([] as unknown[])),
+    dlpEvidence: vi.fn(() => Promise.resolve([] as unknown[])),
+    dlpPublicIds: vi.fn(() => Promise.resolve(NO_DLP_IDS)),
   };
   const service = new MessageScansReadService(
     lifecycle as unknown as MessageLifecycleReadRepository,
@@ -62,7 +69,7 @@ function setup(rows: ScanRoundRow[], found = true) {
 describe('MessageScansReadService (step 4.1 S16)', () => {
   it('pages newest round first with a round cursor, reading only the page’s scans', async () => {
     const { service, scans } = setup([round(30n, 2), round(20n, 1), round(10n, 0)]);
-    const page = await service.list(scope, message.publicId, { limit: 2 });
+    const page = await service.list(reader, scope, message.publicId, { limit: 2 });
     expect(page.messageId).toBe(message.publicId);
     expect(page.data.map((r) => r.round)).toEqual([2, 1]);
     expect(page.nextCursor).toBe(encodeScanCursor(1));
@@ -71,7 +78,7 @@ describe('MessageScansReadService (step 4.1 S16)', () => {
     expect(scans.authResults).toHaveBeenCalledWith(scope, message, [30n, 20n]);
 
     const next = setup([round(10n, 0)]);
-    const last = await next.service.list(scope, message.publicId, {
+    const last = await next.service.list(reader, scope, message.publicId, {
       limit: 2,
       cursor: encodeScanCursor(1),
     });
@@ -82,7 +89,7 @@ describe('MessageScansReadService (step 4.1 S16)', () => {
   it('is 404 message_not_found for an unknown or foreign message (looked up in the scope)', async () => {
     const { service, lifecycle, scans } = setup([], false);
     const error: unknown = await service
-      .list(scope, message.publicId, { limit: 10 })
+      .list(reader, scope, message.publicId, { limit: 10 })
       .catch((e: unknown) => e);
     expect(error).toBeInstanceOf(HttpException);
     expect((error as HttpException).getStatus()).toBe(404);
@@ -138,7 +145,7 @@ describe('MessageScansReadService (step 4.1 S16)', () => {
     scans.attachmentParts.mockResolvedValue([
       { partIndex: 1, filename: 'eicar.txt', declaredContentType: 'text/plain' },
     ]);
-    const page = await service.list(scope, message.publicId, { limit: 10 });
+    const page = await service.list(reader, scope, message.publicId, { limit: 10 });
     expect(scans.attachmentParts).toHaveBeenCalledWith(scope, message, [1]);
     expect(scans.attachmentResults).toHaveBeenCalledWith(scope, message, [30n]);
     expect(scans.sandboxSubmissions).toHaveBeenCalledWith(scope, message, [30n]);
@@ -161,7 +168,7 @@ describe('MessageScansReadService (step 4.1 S16)', () => {
 
   it('reads the URL rows only when a page round has a url engine row (step 4.3 U16)', async () => {
     const without = setup([round(30n, 2)]);
-    await without.service.list(scope, message.publicId, { limit: 10 });
+    await without.service.list(reader, scope, message.publicId, { limit: 10 });
     expect(without.scans.messageUrls).not.toHaveBeenCalled();
     expect(without.scans.urlClicks).not.toHaveBeenCalled();
 
@@ -197,7 +204,7 @@ describe('MessageScansReadService (step 4.1 S16)', () => {
         expiresAt: null,
       },
     ]);
-    const page = await service.list(scope, message.publicId, { limit: 10 });
+    const page = await service.list(reader, scope, message.publicId, { limit: 10 });
     expect(scans.messageUrls).toHaveBeenCalledWith(scope, message);
     expect(scans.urlResults).toHaveBeenCalledWith(scope, message, [30n]);
     expect(scans.urlRewrites).toHaveBeenCalledWith(scope, message, [30n]);
@@ -211,5 +218,96 @@ describe('MessageScansReadService (step 4.1 S16)', () => {
       urls: [],
       rewrite: { status: 'skipped', skipReason: 'no_urls' },
     });
+  });
+
+  it('shows the masked dlp section only to dlp:read holders (step 4.5 D20 permission split)', async () => {
+    const dlpEngineRow = {
+      scanId: 30n,
+      engine: 'dlp',
+      engineVersion: 'dlp/1;dict=0123abcd;data=4567ef01;ext=dlp-extract/1',
+      outcome: 'suspicious',
+      score: null,
+      requiredScore: null,
+      action: null,
+      reasonCodes: ['dlp.action.alert', 'dlp.payment_card.number'],
+      errorCode: null,
+      settingsVersion: 'dlp-map/1;p=0123456789ab;t=none',
+      durationMs: 812,
+      evidence: { signals: [{ name: 'LEAK', score: 1, options: ['4532015112830366'] }] },
+      attempt: 1,
+      isFinal: true,
+      completedAt: new Date('2026-11-05T08:00:05.700Z'),
+    };
+    const stored = {
+      scanId: 30n,
+      engineVersion: 'dlp/1;dict=0123abcd;data=4567ef01;ext=dlp-extract/1',
+      rulesVersion: 'dlp-map/1',
+      settingsVersion: 'dlp-map/1;p=0123456789ab;t=none',
+      policyVersion: 'pol/1;h=0123456789ab',
+      extractorVersion: 'dlp-extract/1',
+      verdict: 'suspicious',
+      action: 'alert',
+      actionSource: 'default_policy',
+      matchedPolicyId: null,
+      matchedRuleId: null,
+      coverage: 'complete',
+      coverageDetail: [
+        { source: 'body_text', format: 'text', status: 'scanned', reasons: [], chars: 40 },
+      ],
+      categories: [
+        { category: 'payment_card', count: 1, maxSeverity: 'high', maxConfidence: 0.95 },
+      ],
+      findings: [
+        {
+          detector: 'PC1',
+          code: 'dlp.payment_card.number',
+          category: 'payment_card',
+          severity: 'high',
+          confidence: 0.95,
+          count: 1,
+          capped: false,
+          sources: [{ kind: 'body_text' }],
+          masked: ['************0366'],
+        },
+      ],
+      policy: { winner: null, matched: [], exceptionsApplied: [] },
+      evidenceStatus: 'disabled',
+    };
+    const hidden = setup([round(30n, 2)]);
+    hidden.scans.engineResults.mockResolvedValue([dlpEngineRow]);
+    const withheld = await hidden.service.list(reader, scope, message.publicId, { limit: 10 });
+    expect(hidden.scans.dlpResults).not.toHaveBeenCalled();
+    expect(withheld.data[0]!.engines[0]).toMatchObject({
+      engine: 'dlp',
+      outcome: 'suspicious',
+      reasonCodes: ['dlp.action.alert', 'dlp.payment_card.number'],
+      symbols: [],
+      dlp: null,
+      durationMs: null,
+      completedAt: '2026-11-05T08:00:05.000Z',
+    });
+    expect(JSON.stringify(withheld)).not.toContain('0366');
+
+    const analyst = {
+      permissions: new Set(['message:read', 'dlp:read']),
+    } as unknown as Principal;
+    const shown = setup([round(30n, 2)]);
+    shown.scans.engineResults.mockResolvedValue([dlpEngineRow]);
+    shown.scans.dlpResults.mockResolvedValue([stored]);
+    const page = await shown.service.list(analyst, scope, message.publicId, { limit: 10 });
+    expect(shown.scans.dlpResults).toHaveBeenCalledWith(scope, message, [30n]);
+    expect(shown.scans.dlpEvidence).toHaveBeenCalledWith(scope, message, [30n]);
+    expect(page.data[0]!.engines[0]).toMatchObject({
+      engine: 'dlp',
+      symbols: [],
+      dlp: {
+        verdict: 'suspicious',
+        action: 'alert',
+        actionSource: 'default_policy',
+        findings: [{ detector: 'PC1', masked: ['************0366'] }],
+        evidence: { status: 'disabled', expiresAt: null, purged: false },
+      },
+    });
+    expect(JSON.stringify(page)).not.toContain('4532015112830366');
   });
 });

@@ -96,6 +96,13 @@ export const PARTITION_REGISTRY: readonly PartitionSpec[] = Object.freeze([
   // as long as the scan rounds (email_scans). The non-partitioned BEC tenant tables are swept
   // by row (bec_contact_history: per tenant retention; bec_feedback: 24 months, retention.md).
   monthly('bec_scan_results', 'received_at', 6, 'core'),
+  // Step 4.5 (docs/plan/steps/13-dlp.md §3, D16, D19): the DLP result of a scan round lives as
+  // long as the scan rounds. The evidence metadata rows are kept one month longer (7): each
+  // evidence is crypto-shredded by the email-worker sweeper at its tenant retention (≤ 180 days),
+  // so a dropped partition only ever holds already-purged rows. The non-partitioned DLP tenant
+  // tables are configuration (deleted with the organization).
+  monthly('dlp_scan_results', 'received_at', 6, 'core'),
+  monthly('dlp_evidence', 'received_at', 7, 'core'),
   // Legal hold and per-tenant archive retention are row-level (step 8.1).
   monthly('email_archives', 'received_at', null, 'compliance'),
   monthly('bounce_events', 'occurred_at', 6, 'core'),

@@ -27,6 +27,8 @@ export function attachmentMessage(options: {
   to: readonly string[];
   subject: string;
   attachments: readonly MessageAttachment[];
+  /** Plain-text body (UTF-8, CRLF line endings; default: a sentence naming the subject). */
+  body?: string;
 }): { text: string; messageId: string } {
   const messageId = `<${randomUUID()}@attachment.integration.test>`;
   const headers = [
@@ -42,7 +44,7 @@ export function attachmentMessage(options: {
       ...headers,
       'Content-Type: text/plain; charset=utf-8',
       '',
-      `Body of ${options.subject} (no attachments).`,
+      options.body ?? `Body of ${options.subject} (no attachments).`,
       '',
     ].join(CRLF);
     return { text, messageId };
@@ -57,7 +59,7 @@ export function attachmentMessage(options: {
     'Content-Type: text/plain; charset=utf-8',
     'Content-Transfer-Encoding: 7bit',
     '',
-    `Body of ${options.subject}; see the attachment.`,
+    options.body ?? `Body of ${options.subject}; see the attachment.`,
   ];
   for (const a of options.attachments) {
     if (!/^[A-Za-z0-9._-]{1,64}$/.test(a.filename)) throw new Error(`filename ${a.filename}`);

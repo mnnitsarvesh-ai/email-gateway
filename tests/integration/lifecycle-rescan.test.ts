@@ -15,6 +15,8 @@ import {
   ATTACHMENT_LEDGER,
   BEC_LEDGER,
   becResultsOf,
+  DLP_LEDGER,
+  dlpResultsOf,
   engineResultsOf,
   REQUIRED_ENGINES,
   RSPAMD_LEDGER,
@@ -35,13 +37,21 @@ import { assertStackReady } from './support/smtp-stack';
  * message in `scan_failed` (fixture, L8.6, with its parse row and no attachments) is rescanned
  * with `POST /api/v1/messages/{id}/rescan`: E19 moves it to `scanning` with round + 1 and writes
  * `mail.message.rescan_requested.v1`, which the relay publishes to `email.security`. The topology
- * binds it to FOUR scan queues: the dormant `scan.dlp` holds exactly one copy (peeked through the
- * management API, then purged); `scan.spam`, (since v4) `scan.attachment` and (since v5, step 4.3
- * U2) `scan.url` are consumed by the email-worker scan role, which scans round 1 with the three
- * required engines (Rspamd; the attachment engine `skipped`, `attachment.none`; the URL engine
- * `skipped`, `url.none`: the fixture has no stored body) and completes it (`scanned`), after which
- * the dev pass-through approves round 1 and the message is delivered. `scan.auth` lost its event
- * bindings in v3 and receives nothing.
+ * binds it to FOUR scan queues, all consumed by the email-worker scan role since topology v7:
+ * `scan.spam`, (since v4) `scan.attachment`, (since v5, step 4.3 U2) `scan.url` and (since v7,
+ * step 4.5 D2) `scan.dlp`. The scan role scans round 1 with the stage-1 engines (Rspamd; the
+ * attachment engine `skipped`, `attachment.none`; the URL engine `skipped`, `url.none`: the
+ * fixture has no stored body; the DLP engine `skipped`, `dlp.not_inbound`: the fixture is
+ * inbound) and completes it (`scanned`), after which the dev pass-through approves round 1 and
+ * the message is delivered. `scan.auth` lost its event bindings in v3 and receives nothing.
+ *
+ * Step 4.5 (D2): `scan.dlp` was the last dormant scan queue bound to the request and is a work
+ * queue now, so the exactly-one-copy assertion moves to where the request still rests without a
+ * consumer: the `email.events` → `email.analytics` firehose (dormant, `org.#`) holds exactly one
+ * copy of it (peeked through the management API, then purged); the dlp consumer
+ * (`email-worker.scan.dlp`) handles the request exactly once (one ledger row) and writes round
+ * 1's dlp final and `dlp_scan_results` row. The dormant `scan.sandbox` and the other non-scan
+ * dormant queues never receive it.
  *
  * Step 4.4 (B2, B3): round 1 also requires the stage-2 `bec` engine; `scan.bec` binds only
  * `scan_stage_ready.v1`, so it gets NO copy of the rescan request: the transaction that inserts
@@ -51,10 +61,15 @@ import { assertStackReady } from './support/smtp-stack';
  * Timing (step 4.4 §9, 4.3 §13.10): the dormant queues are shared with every other suite, whose
  * late traffic may still arrive after a purge. The suite therefore never asserts a queue depth:
  * it inspects the queues without losing messages (management `get` with requeue) and asserts
- * exactly one message with THIS run's rescan event id in each dormant scan queue, none with that
- * id in any other dormant queue, and that its own message is gone after the purge.
+ * exactly one message with THIS run's rescan event id in each dormant queue the request is bound
+ * to, none with that id in any other dormant queue, and that its own message is gone after the
+ * purge.
  */
-const DORMANT_SCAN_QUEUES = ['scan.dlp'];
+/**
+ * Dormant queues bound to the rescan request (v7: none of the scan queues; the analytics
+ * firehose through `email.events`).
+ */
+const DORMANT_SCAN_QUEUES = ['email.analytics'];
 /** Dormant queues that must never receive the rescan request (v3+: scan.auth unbound). */
 const NOT_BOUND_QUEUES = ['scan.auth', 'scan.sandbox', 'email.quarantine', 'email.policy.evaluate'];
 const gate = await messagingStackGate();
@@ -81,7 +96,7 @@ afterAll(async () => {
 }, 300_000);
 
 describe.skipIf(gate.skip)('lifecycle stack: administrative rescan', { timeout: 300_000 }, () => {
-  it('lands one rescan request in each dormant scan queue; scan.spam scans round 1 and the message is delivered', async () => {
+  it('lands one rescan request in the dormant firehose and none in scan.sandbox; the five engines scan round 1 (dlp included) and the message is delivered', async () => {
     const message = await insertFixtureMessage(fx, {
       organizationId: scenario.org,
       domainId: scenario.domain.id,
@@ -120,7 +135,7 @@ describe.skipIf(gate.skip)('lifecycle stack: administrative rescan', { timeout: 
     });
     await expectConsistentHistory(fx.prisma, message);
 
-    // The relay publishes the request; one copy per dormant scan queue, none elsewhere.
+    // The relay publishes the request; one copy in the dormant firehose, none elsewhere.
     await eventually(
       async () => {
         const copies = await Promise.all(
@@ -129,7 +144,7 @@ describe.skipIf(gate.skip)('lifecycle stack: administrative rescan', { timeout: 
         return copies.every((n) => n >= 1);
       },
       30_000,
-      'the rescan request in each dormant scan queue',
+      'the rescan request in the dormant firehose',
       500,
     );
     // The relay marks the row after the broker confirm, so the copies can be visible first.
@@ -197,7 +212,7 @@ describe.skipIf(gate.skip)('lifecycle stack: administrative rescan', { timeout: 
       requiredEngines: [...REQUIRED_ENGINES],
     });
     expect(await scanRoundsOf(fx.prisma, message)).toHaveLength(1);
-    for (const consumer of [RSPAMD_LEDGER, ATTACHMENT_LEDGER, URL_LEDGER]) {
+    for (const consumer of [RSPAMD_LEDGER, ATTACHMENT_LEDGER, URL_LEDGER, DLP_LEDGER]) {
       expect(
         await fx.prisma.messageIdempotency.count({
           where: { consumer, eventId: rescanEventId },
@@ -205,6 +220,12 @@ describe.skipIf(gate.skip)('lifecycle stack: administrative rescan', { timeout: 
         consumer,
       ).toBe(1);
     }
+    // Step 4.5 (D2): the dlp consumer took the rescan request exactly once and finalized round 1
+    // (inbound fixture: `skipped`, `dlp.not_inbound`) with exactly one dlp_scan_results row.
+    const dlpRows = await dlpResultsOf(fx.prisma, message);
+    expect(dlpRows.map((r) => [r.lifecycleRound, r.scanId, r.verdict, r.action])).toEqual([
+      [1, round.id, 'skipped', 'allow'],
+    ]);
     // Step 4.4: scan.bec got no copy of the request (no ledger row of the bec consumer for it);
     // round 1's own stage trigger reached it exactly once and bec finalized round 1.
     expect(
@@ -228,7 +249,20 @@ describe.skipIf(gate.skip)('lifecycle stack: administrative rescan', { timeout: 
     const becRows = await becResultsOf(fx.prisma, message);
     expect(becRows.map((r) => [r.lifecycleRound, r.scanId])).toEqual([[1, round.id]]);
     const finals = (await engineResultsOf(fx.prisma, message)).filter((r) => r.isFinal);
-    expect(finals.map((r) => r.engine).sort()).toEqual(['attachment', 'bec', 'rspamd', 'url']);
+    expect(finals.map((r) => r.engine).sort()).toEqual([
+      'attachment',
+      'bec',
+      'dlp',
+      'rspamd',
+      'url',
+    ]);
+    expect(finals.filter((r) => r.engine === 'dlp')).toEqual([
+      expect.objectContaining({
+        scanId: round.id,
+        outcome: 'skipped',
+        reasonCodes: ['dlp.not_inbound'],
+      }),
+    ]);
     expect(finals.find((r) => r.engine === 'attachment')).toMatchObject({
       outcome: 'skipped',
       reasonCodes: ['attachment.none'],
@@ -237,7 +271,7 @@ describe.skipIf(gate.skip)('lifecycle stack: administrative rescan', { timeout: 
       outcome: 'skipped',
       reasonCodes: ['url.none'],
     });
-    for (const queue of ['scan.spam', 'scan.attachment', 'scan.url', 'scan.bec']) {
+    for (const queue of ['scan.spam', 'scan.attachment', 'scan.url', 'scan.bec', 'scan.dlp']) {
       expect((await mgmt.queue(vhost, queue)).messages, queue).toBe(0);
     }
     await waitForLifecycle(fx.prisma, message, 'delivered', 'delivery_complete');
@@ -285,7 +319,7 @@ describe.skipIf(gate.skip)('lifecycle stack: administrative rescan', { timeout: 
       }),
     ).toBe(1);
     record('lifecycle-rescan', {
-      dormant_scan_queues_with_one_copy: DORMANT_SCAN_QUEUES.length,
+      dormant_queues_with_one_copy: DORMANT_SCAN_QUEUES.length,
       round1_verdict: round.scanVerdict,
     });
   });
