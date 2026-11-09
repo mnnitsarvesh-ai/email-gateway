@@ -34,8 +34,8 @@ sequenceDiagram
   PL->>DB: one transaction: email_deliveries (pending, direction inbound,<br/>destination_key tenant:<domainId>), delivery_reinjections per<br/>(listener, direction, destination) chunked ≤ 100, planner audit rows,<br/>message → delivery_pending (step 3.3: approved → delivery_pending, E20)
   RJ->>DB: claim due rows FOR UPDATE SKIP LOCKED, lease
   RJ->>S3: GetObject org/<orgId>/… (prefix checked), read header block only
-  Note over RJ: hop check (R10): Received count, gateway passes in both directions;<br/>over the limit → failed loop_detected, nothing sent
-  RJ->>PX: EHLO delivery.gateway.local<br/>XFORWARD NAME/ADDR/HELO (original client), XFORWARD IDENT=dw1-<token><br/>MAIL FROM:<original sender> RET=HDRS ENVID=dw1-<token><br/>RCPT TO NOTIFY=NEVER ORCPT=rfc822;…
+  Note over RJ: hop check (R10): Received count, gateway passes in both directions#59;<br/>over the limit → failed loop_detected, nothing sent
+  RJ->>PX: EHLO delivery.gateway.local<br/>XFORWARD NAME/ADDR/HELO (original client), XFORWARD IDENT=dw1-<token><br/>MAIL FROM:<original sender> RET=HDRS ENVID=dw1-<token><br/>RCPT TO NOTIFY=NEVER ORCPT=rfc822#59;…
   PX->>SM: transport (user@domain): next-hop list of the domain's servers
   alt usable destination
     SM-->>PX: OK smtp:[h1]:25,[h2]:25 (priority order, hosts re-validated)
@@ -55,11 +55,11 @@ sequenceDiagram
   alt 2xx after the final dot
     D-->>PX: 250
     PX->>LOG: QID: to=<a>, relay=h1…, dsn=2.0.0, status=sent (250 …)
-    ST->>DB: delivered (only from status=sent + 2.x.x), delivery_attempts success,<br/>audit row, email_events, outbox mail.delivery.status_changed.v1;<br/>all terminal → email_messages delivered / partially_delivered / failed
+    ST->>DB: delivered (only from status=sent + 2.x.x), delivery_attempts success,<br/>audit row, email_events, outbox mail.delivery.status_changed.v1#59;<br/>all terminal → email_messages delivered / partially_delivered / failed
   else 4xx or connection failure
     PX->>LOG: status=deferred (… ) → deferred, retried by Postfix (diagram 19)
   else 5xx
-    PX->>LOG: status=bounced → bounced; NO DSN to the external sender (NOTIFY=NEVER)
+    PX->>LOG: status=bounced → bounced#59; NO DSN to the external sender (NOTIFY=NEVER)
   end
 ```
 

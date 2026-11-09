@@ -70,7 +70,7 @@ sequenceDiagram
     end
   end
   alt S3 or MySQL failure or timeout
-    ING-->>PF: 451 4.3.0 for that organization's recipients; Postfix keeps them queued and retries
+    ING-->>PF: 451 4.3.0 for that organization's recipients#59; Postfix keeps them queued and retries
   end
   RL->>DB: SELECT unpublished rows of its shard (GET_LOCK er:relay#i/n), id order
   RL->>MQ: publish with confirms, mandatory, routing key org.<id>.mail.message.received.v1

@@ -182,15 +182,15 @@ flowchart LR
   XP -->|org.*.policy.decided.v1| QA[email.archive\ndormant: 8.1]
   XD -->|org.*.approved.v1| QD[email.delivery.pending\nwork: delivery-worker]
   XD -->|delay.email.delivery.pending.#| QR[email.delivery.retry\nTTL per message]
-  QR -. expired: retry.email.delivery.pending.expired .-> XD
+  QR -.->|"expired: retry.email.delivery.pending.expired"| XD
   XD -->|retry.email.delivery.pending.#| QD
   XI -->|retry.email.received.#| Q1
   XI & XS & XP & XD & XA -->|org.#| XE
   XE -->|org.#| QAN[email.analytics\ndormant: analytics]
   XE -->|dead-letter.#| DLQ[email.dead-letter\nreplay via api]
-  Q1 -. dead-letter.email.received .-> XE
-  QD -. dead-letter.email.delivery.pending .-> XE
-  QSP -. dead-letter.scan.spam .-> XE
+  Q1 -.->|"dead-letter.email.received"| XE
+  QD -.->|"dead-letter.email.delivery.pending"| XE
+  QSP -.->|"dead-letter.scan.spam"| XE
   classDef p fill:#eef,stroke:#88a
 ```
 

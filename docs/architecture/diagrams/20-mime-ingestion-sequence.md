@@ -19,7 +19,7 @@ sequenceDiagram
   RL->>MQ: publish org.<id>.mail.message.received.v1 (confirms), then mark published_at
   MQ->>FEED: deliver from email.received (prefetch MIME_CONCURRENCY)
   FEED->>FEED: decode: type, schema version, envelope, tenant (routing key = header = envelope)
-  FEED->>SVC: handle(event), up to MIME_CONCURRENCY at once; ack after it returns
+  FEED->>SVC: handle(event), up to MIME_CONCURRENCY at once#59; ack after it returns
   SVC->>DB: ledger pre-check (email-worker.mime-parser, eventId)
   SVC->>DB: load email_messages by (id, received_at, organization_id = envelope org)
   alt missing row or cross-tenant envelope
@@ -33,7 +33,7 @@ sequenceDiagram
     else eml key outside org/{org}/ or size above MIME_MAX_MESSAGE_BYTES
       SVC->>DB: finalize parse_failed / eml_key_mismatch, or parse_limit_exceeded [message_size]
     else
-      SVC->>S3: GetObject eml_object_key (streamed; MIME_S3_TIMEOUT_MS per wait on S3)
+      SVC->>S3: GetObject eml_object_key (streamed#59; MIME_S3_TIMEOUT_MS per wait on S3)
       SVC->>P: parseMessage(stream, limits, part sink, AbortSignal MIME_PARSE_TIMEOUT_MS)
       loop each body / attachment leaf
         P->>S3: Upload org/{org}/part/yyyy/mm/dd/{messageId}/{partIndex}.text|html|att<br/>(deterministic key, ContentDisposition attachment)

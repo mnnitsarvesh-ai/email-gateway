@@ -19,7 +19,7 @@ sequenceDiagram
   P->>DB: state change + outbox row (same transaction, payload validated)
   loop every RELAY_POLL_INTERVAL_MS while holding GET_LOCK('er:relay#i/n')
     R->>DB: SELECT unpublished, non-poison rows of the shard ORDER BY id LIMIT RELAY_SCAN_LIMIT
-    R->>R: envelope per row; registry schema + content guard (else poison: attempts = max, last_error = code)
+    R->>R: envelope per row#59; registry schema + content guard (else poison: attempts = max, last_error = code)
     R->>X: publish batch: persistent, mandatory, messageId = eventId, key org.<id>.mail.delivery.approved.v1
     alt confirmed
       X-->>R: ack
@@ -45,21 +45,21 @@ sequenceDiagram
     D-->>X: expired: broker dead-letters with retry.email.delivery.pending.expired
     X->>Q: back to email.delivery.pending
   else retryable failure, x-eg-attempt + 1 below maxAttempts (10)
-    C->>D: copy with exponential backoff (equal jitter, 5 s … 15 min), confirmed; ack original
+    C->>D: copy with exponential backoff (equal jitter, 5 s … 15 min), confirmed#59; ack original
   else maxAttempts reached, retry age (48 h) exceeded, or NonRetryableError
     C->>E: copy to dead-letter.email.delivery.pending.org.<id>.<type> with x-eg-source-queue, failure reason, class, attempts, confirmed
     C->>Q: ack original (never acked without a confirmed copy)
   end
-  Note over Q,C: Connection or channel lost: unacked deliveries return to the queue and are redelivered;<br/>a handler that had committed records a ledger duplicate. delivery-limit 20 is the crash-loop backstop.
+  Note over Q,C: Connection or channel lost: unacked deliveries return to the queue and are redelivered#59;<br/>a handler that had committed records a ledger duplicate. delivery-limit 20 is the crash-loop backstop.
   A->>E: POST /api/v1/platform/dead-letters/replay (MFA platform admin, Redis lock): basic.get matching letters
   A->>X: unchanged body to retry.email.delivery.pending.org.<id>.<type>, attempts reset, x-eg-replay-id, confirmed
-  A->>E: ack replayed letters; nack(requeue) everything else
+  A->>E: ack replayed letters#59; nack(requeue) everything else
   A->>DB: one audit_logs row (platform.dead_letters_replayed)
   X->>Q: replayed copy → C applies it once (or records a ledger duplicate)
   loop every RECONCILE_INTERVAL_MS while holding GET_LOCK('er:reconciler')
     REC->>DB: published rows older than RECONCILE_UNCONSUMED_AFTER_SECONDS without a ledger row of the queue's consumer
     REC->>DB: re-drive: published_at = NULL, redrive_count + 1 (≤ RECONCILE_MAX_REDRIVES), same event_id
-    Note over REC,R: the relay republishes the row; every bound queue gets a copy, every ledger absorbs duplicates
+    Note over REC,R: the relay republishes the row#59; every bound queue gets a copy, every ledger absorbs duplicates
   end
 ```
 

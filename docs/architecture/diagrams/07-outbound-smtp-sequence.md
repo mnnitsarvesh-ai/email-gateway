@@ -63,7 +63,7 @@ sequenceDiagram
     Note over W: scanning (diagram 9) incl. DLP 4.5, then policy: deliver, tag, quarantine or discard
     W->>DW: mail.delivery.approved.v1 source=policy (PLANNED 4.x, 5.2)
   end
-  Note over DW: today: development-only pass-through approval (local/CI);<br/>plan per recipient domain, outbound rate limits (diagram 17)
+  Note over DW: today: development-only pass-through approval (local/CI)#59;<br/>plan per recipient domain, outbound rate limits (diagram 17)
   DW->>PR: SMTP reinject from POSTFIX_REINJECT_NETWORKS: XFORWARD (IDENT = token),<br/>MAIL … RET=HDRS ENVID=token, RCPT NOTIFY=FAILURE,DELAY, X-Gateway-Trace d=out
   PR->>SA: policy_context=reinject-outbound: sender tenant + outbound-enabled,<br/>suppression, HEXISTS dkim_selectors (fail closed: 4.7.0)
   PR->>RO: milter: sign with the domain's active RSA key (keys published by the api)
@@ -77,7 +77,7 @@ sequenceDiagram
     PR-->>T: DSN to the envelope sender (authenticated tenant user)
     PR->>BH: postmaster copy from double-bounce@ (notify_classes bounce, delay)
     Note over BH: counted only with the outbound X-Gateway-Trace of the sender organization
-    BH->>DB: bounce_events; hard address failure: delivery_suppressions (hard_bounce)
+    BH->>DB: bounce_events#59; hard address failure: delivery_suppressions (hard_bounce)
   end
 ```
 

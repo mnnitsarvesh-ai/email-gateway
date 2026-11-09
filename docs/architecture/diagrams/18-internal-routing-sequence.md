@@ -18,7 +18,7 @@ sequenceDiagram
 
   T->>PO: AUTH (connector of organization O), MAIL FROM <user@O-domain>, RCPT …
   PO->>ING: LMTP after queueing (listener direction outbound)
-  ING->>DB: per recipient: resolveActiveDomain(R) owner = O → internal (inbound_enabled not required);<br/>otherwise outbound. All internal → email_messages.direction = internal
+  ING->>DB: per recipient: resolveActiveDomain(R) owner = O → internal (inbound_enabled not required)#59;<br/>otherwise outbound. All internal → email_messages.direction = internal
   rect rgb(255, 248, 225)
     EW->>DB: internal inspection (feature internal_inspection), policy for direction internal (PLANNED 4.x, 5.2)
   end
@@ -29,7 +29,7 @@ sequenceDiagram
   PX->>D: SMTP with the destination's TLS policy (verify for provider presets)
   D-->>PX: 250
   PX->>LOG: status=sent → delivered
-  Note over T,D: The trace d=in for O stops a loop if O's server sends the copy back<br/>through the inbound MX (554 5.4.6); evaluateHops stops loops alternating directions
+  Note over T,D: The trace d=in for O stops a loop if O's server sends the copy back<br/>through the inbound MX (554 5.4.6)#59; evaluateHops stops loops alternating directions
 ```
 
 **Legend.** Plain messages: IMPLEMENTED (step 2.3). Shaded block: PLANNED. Approval today is the development-only pass-through (diagram 16).

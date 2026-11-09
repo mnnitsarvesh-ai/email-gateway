@@ -22,7 +22,7 @@ sequenceDiagram
     D--xPX: no answer or 4xx
     PX->>LOG: QID: to=<a>, relay=…, dsn=4.x.x, status=deferred (connect to …)
     ST->>DB: deferred, attempt_count + 1, last_error_class connect / timeout / remote_4xx / tls / dns
-    Note over PX: backoff from the environment: production 300s → 4000s (≈ 5, 10, 20, 40, 66… min),<br/>test profile 10s → 60s, queue_run_delay 10s; nothing in code depends on it
+    Note over PX: backoff from the environment: production 300s → 4000s (≈ 5, 10, 20, 40, 66… min),<br/>test profile 10s → 60s, queue_run_delay 10s#59; nothing in code depends on it
     PX->>D: retry after the backoff (no operator action, never postqueue -f)
     D-->>PX: 250
     PX->>LOG: status=sent → delivered (deferred → delivered)
@@ -37,7 +37,7 @@ sequenceDiagram
       Note over PX: no sender notification: no backscatter to external senders
     end
     PX->>BH: postmaster copy (X-Postfix-Queue-ID, Original-Envelope-Id = token)
-    BH->>DB: match reinjection by queue id / ENVID → bounce_notice signal (duplicate of the log's → no change);<br/>outbound with a valid d=out trace: bounce_events (message_id linked) + hard-bounce suppression
+    BH->>DB: match reinjection by queue id / ENVID → bounce_notice signal (duplicate of the log's → no change)#59;<br/>outbound with a valid d=out trace: bounce_events (message_id linked) + hard-bounce suppression
   else still deferred after maximal_queue_lifetime (5d)
     PX->>LOG: QID: from=<…>, status=expired, returned to sender (message level)
     ST->>DB: every non-final recipient of QID → expired (+ DSN to the sender unless NOTIFY=NEVER)
@@ -45,7 +45,7 @@ sequenceDiagram
   PX->>LOG: QID: removed
   ST->>DB: any delivery of QID still non-terminal → unknown (should never happen)
   loop every DELIVERY_RECONCILE_INTERVAL_MS
-    RC->>DB: expired lease: bound queue id → queued; log passed the session → pending; else wait
+    RC->>DB: expired lease: bound queue id → queued#59; log passed the session → pending#59; else wait
     RC->>DB: queued/deferred with no signal for DELIVERY_STATUS_STALE_AFTER_SECONDS → unknown (status_signal_missing)
   end
   Note over ST,DB: every signal: audit row keyed (delivery, signal_key) first — a re-read log line or a<br/>redelivered notice is a duplicate: no transition, no email_events, no outbox row

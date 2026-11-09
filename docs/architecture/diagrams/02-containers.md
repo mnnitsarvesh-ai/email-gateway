@@ -32,7 +32,7 @@ flowchart LR
     aw["archive-worker<br/>:3060"]:::impl
     nw["notification-worker<br/>:3050"]:::impl
     er["event-relay<br/>outbox relay + reconciler<br/>:3070 (3.2)"]:::impl
-    click["click-service (4.3)<br/>public GET /c/{token} :3080,<br/>admin :3081"]:::impl
+    clickSvc["click-service (4.3)<br/>public GET /c/{token} :3080,<br/>admin :3081"]:::impl
     ubw["url-browser-worker (4.3, profile url-browser)<br/>Chromium headless shell, :3090,<br/>network url-sandbox (internal)"]:::impl
     uep["url-egress-proxy (4.3)<br/>:3128, admin :3091,<br/>SSRF guard"]:::impl
   end
@@ -74,8 +74,8 @@ flowchart LR
   mq -->|"scan.url.inspect (lossy), eg-url-browser"| ubw
   ubw -->|"inspection_completed.v1 (confirms)"| mq
   ubw -->|"all browser traffic (token auth)"| uep
-  click -->|"gateway_click: URL rows, click events + clicked.v1"| mysqlW
-  click -->|"rate limits, URL cache (HMAC)"| redis
+  clickSvc -->|"gateway_click: URL rows, click events + clicked.v1"| mysqlW
+  clickSvc -->|"rate limits, URL cache (HMAC)"| redis
   ew -->|"read EML, write parts (3.1)"| s3
   mq -.->|"email.policy.evaluate (dormant), P 5.x"| pe
   mq -->|"email.delivery.pending (3.2)"| dw

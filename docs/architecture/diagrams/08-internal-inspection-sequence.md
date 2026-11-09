@@ -53,12 +53,12 @@ sequenceDiagram
 
   U->>PO: SMTP from the tenant connector (SASL, IP allow-list or TLS client cert)
   PO->>SA: policy request (sender ownership), then LMTP after queueing
-  SA->>DB: per recipient classifyRecipient → email_recipients.direction;<br/>email_messages direction=internal if all internal; outbox; COMMIT
+  SA->>DB: per recipient classifyRecipient → email_recipients.direction#59;<br/>email_messages direction=internal if all internal#59; outbox#59; COMMIT
   SA-->>PO: 250 only after COMMIT
   rect rgb(255, 248, 225)
     Note over EW: only when organization_features internal_inspection is enabled,<br/>otherwise policy short-circuits to deliver
     EW->>DB: email_scans, scan_engine_results (malware, URL, DLP for lateral movement)
-    PE->>DB: policies with direction internal or any; mail.delivery.approved.v1 (PLANNED 5.2)
+    PE->>DB: policies with direction internal or any#59; mail.delivery.approved.v1 (PLANNED 5.2)
   end
   Note over DW: today: development-only pass-through approval (local/CI)
   DW->>DB: plan: internal recipients per tenant domain (destination tenant:<domainId>),<br/>direction re-checked

@@ -20,7 +20,7 @@ sequenceDiagram
   end
   EW->>DB: load the message by (id, received_at, organization_id = envelope org)
   Note over EW,DB: absent → ledger row, skipped. EML key must start with org/{envelope org}/<br/>and equal the row's key, else a final error eml_key_mismatch
-  EW->>DB: short txn: lock message row; persisted + round 0 → E3 scanning (key scan-open:id:0);<br/>scanning of this round → no transition; other state or round → ledger row, skipped<br/>INSERT email_scans if absent (round, scan_kind, running, deadline_at, required_engines snapshot)
+  EW->>DB: short txn: lock message row#59; persisted + round 0 → E3 scanning (key scan-open:id:0)#59;<br/>scanning of this round → no transition#59; other state or round → ledger row, skipped<br/>INSERT email_scans if absent (round, scan_kind, running, deadline_at, required_engines snapshot)
   EW->>DB: this engine's rows of the round: final row present → completion re-check only
   EW->>EW: settings: platform SCAN_RSPAMD_* + tenant scan_engine_settings (validated, cached)
   EW->>S3: GET EML (streamed, SCAN_S3_TIMEOUT_MS)
@@ -34,13 +34,13 @@ sequenceDiagram
   end
   alt failure, retryable, attempts left and before deadline_at
     EW->>DB: INSERT scan_engine_results non-final (attempt n, timeout/error, error_code)
-    EW->>MQ: retry (hold strategy, SCAN_RETRY_BASE_MS doubling to SCAN_RETRY_MAX_MS); no ledger row
+    EW->>MQ: retry (hold strategy, SCAN_RETRY_BASE_MS doubling to SCAN_RETRY_MAX_MS)#59; no ledger row
   else definite verdict, or the last allowed failure
-    EW->>DB: processOnce txn: lock message → lock scan; INSERT final scan_engine_results<br/>(+ email_auth_results for Rspamd); every required engine final?
+    EW->>DB: processOnce txn: lock message → lock scan#59; INSERT final scan_engine_results<br/>(+ email_auth_results for Rspamd)#59; every required engine final?
     alt round complete
       EW->>DB: UPDATE email_scans (completed | failed | timed_out, scan_verdict, reason_codes)
       EW->>DB: E6 scanned or E7 scan_failed (key scan-complete:id:round, expectedRound)
-      EW->>OB: INSERT mail.message.scanned.v1 (outcome, verdict, engines, reasonCodes; no symbols)
+      EW->>OB: INSERT mail.message.scanned.v1 (outcome, verdict, engines, reasonCodes#59; no symbols)
     end
     EW->>DB: ledger row, COMMIT
     EW->>MQ: ack

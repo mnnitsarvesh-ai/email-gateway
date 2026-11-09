@@ -17,7 +17,7 @@ sequenceDiagram
   participant GW as Gateway inbound MX (other tenant's domain)
   participant LOG as maillog_file → status tailer
 
-  ING->>DB: per recipient classifyRecipient: own active domain → internal,<br/>anything else (incl. another tenant's domain) → outbound;<br/>email_recipients.direction, email_messages.direction (internal only if all internal)
+  ING->>DB: per recipient classifyRecipient: own active domain → internal,<br/>anything else (incl. another tenant's domain) → outbound#59;<br/>email_recipients.direction, email_messages.direction (internal only if all internal)
   alt today (development and CI only)
     DW->>DB: dev pass-through: mail.delivery.approved.v1 source=dev_passthrough
   else production
@@ -26,7 +26,7 @@ sequenceDiagram
     end
   end
   DW->>DB: plan: one group per recipient domain (destination_key mx:<domain>),<br/>suppressed recipients → suppressed, direction changed → failed
-  DW->>RL: one Lua script: tenant, tenant×domain, destination-domain minute windows;<br/>increment only if the whole group fits
+  DW->>RL: one Lua script: tenant, tenant×domain, destination-domain minute windows#59;<br/>increment only if the whole group fits
   alt over a limit
     RL-->>DW: over
     DW->>DB: deliveries deferred gateway_rate_limited, row pending until the next window

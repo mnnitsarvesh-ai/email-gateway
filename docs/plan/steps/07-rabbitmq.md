@@ -460,12 +460,12 @@ flowchart LR
   XP -->|org.*.policy.decided.v1| QA[email.archive]
   XD -->|org.*.approved.v1| QD[email.delivery.pending]
   XD -->|delay.email.delivery.pending.#| QR[email.delivery.retry\nTTL per message]
-  QR -. expired: retry.email.delivery.pending.expired .-> XD
+  QR -.->|"expired: retry.email.delivery.pending.expired"| XD
   XI & XS & XP & XD & XA -->|org.#| XE
   XE -->|org.#| QAN[email.analytics]
   XE -->|dead-letter.#| DLQ[email.dead-letter]
-  Q1 -. dead-letter.email.received .-> XE
-  QD -. dead-letter.email.delivery.pending .-> XE
+  Q1 -.->|"dead-letter.email.received"| XE
+  QD -.->|"dead-letter.email.delivery.pending"| XE
 ```
 
 ---
