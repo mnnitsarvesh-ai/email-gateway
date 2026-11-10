@@ -34,6 +34,7 @@ import { type AuthMethod, TokenService } from '../src/modules/auth/services/toke
 import { BecFeedbackRepository } from '../src/modules/bec/repositories/bec-feedback.repository';
 import { BecProfilesRepository } from '../src/modules/bec/repositories/bec-profiles.repository';
 import { ScanSettingsRepository } from '../src/modules/scans/repositories/scan-settings.repository';
+import { OrganizationFeaturesService } from '../src/tenancy/organization-features.service';
 import { InMemoryKeyValueStore } from './support/in-memory-key-value-store';
 import { RecordingEmailSender } from './support/recording-email-sender';
 import { TEST_DOMAIN_ENV } from './support/test-env';
@@ -215,6 +216,9 @@ describe('step 4.4 BEC routes (e2e, dependencies stubbed)', () => {
       .useValue(feedback)
       .overrideProvider(ScanSettingsRepository)
       .useValue(settingsRows)
+      // Plan features (step 4.6 X17: the scan-settings views state attachment_sandbox).
+      .overrideProvider(OrganizationFeaturesService)
+      .useValue({ isEnabled: () => Promise.resolve(false) })
       .compile();
     app = moduleRef.createNestApplication({ logger: false });
     configureHttpApp(app, createLogger({ service: 'api-test', level: 'silent' }));

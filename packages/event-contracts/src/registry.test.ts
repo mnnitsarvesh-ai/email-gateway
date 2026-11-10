@@ -50,6 +50,11 @@ describe('EVENT_REGISTRY', () => {
       'mail.message.scan_stage_ready.v1': ['email.security', 'message'],
       // Step 4.5 D14: the DLP incident of a scan round.
       'mail.message.dlp_incident.v1': ['email.security', 'message'],
+      // Step 4.6 X11: the sandbox task and result (aggregate sandbox_analysis) and the
+      // submission's completion (aggregate attachment, like sandbox_requested).
+      'mail.sandbox.task_requested.v1': ['email.security', 'sandbox_analysis'],
+      'mail.sandbox.task_completed.v1': ['email.security', 'sandbox_analysis'],
+      'mail.attachment.sandbox_completed.v1': ['email.security', 'attachment'],
     });
     for (const definition of Object.values(EVENT_REGISTRY)) {
       expect(EXCHANGE_NAMES).toContain(definition.exchange);

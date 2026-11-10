@@ -98,12 +98,68 @@ export interface AttachmentPartRow {
   declaredContentType: string | null;
 }
 
-export interface SandboxSubmissionRow {
-  id: bigint;
-  scanId: bigint;
-  attachmentId: bigint;
-  status: 'pending' | 'submitted' | 'completed' | 'failed' | 'expired';
-}
+const sandboxSubmissionSelect = {
+  id: true,
+  scanId: true,
+  attachmentId: true,
+  partIndex: true,
+  sha256: true,
+  status: true,
+  skipReason: true,
+  sandboxVerdict: true,
+  sandboxReasonCodes: true,
+  completedAt: true,
+  analysisId: true,
+  externalRef: true,
+} satisfies Prisma.SandboxSubmissionSelect;
+
+export type SandboxSubmissionRow = Prisma.SandboxSubmissionGetPayload<{
+  select: typeof sandboxSubmissionSelect;
+}>;
+
+/**
+ * The fields of a `sandbox_analyses` row a tenant may see through its own completed submission
+ * (step 4.6 X18). Not `organization_id` (the dispatching organization may be another tenant),
+ * `dedupe_key`, `reuse_until`, `dispatched_at`, `deadline_at`, `completed_at`, `duration_ms`,
+ * the event ids or the sample key: they would reveal that (and when) another organization's
+ * byte-identical file was analysed first. `public_id` is read only to match the submission's
+ * `external_ref` and is never returned.
+ */
+const sandboxAnalysisSelect = {
+  id: true,
+  publicId: true,
+  report: true,
+  backend: true,
+  backendVersion: true,
+  isolation: true,
+  executed: true,
+  controllerVersion: true,
+  analyzerVersion: true,
+  mapVersion: true,
+} satisfies Prisma.SandboxAnalysisSelect;
+
+export type SandboxAnalysisRow = Prisma.SandboxAnalysisGetPayload<{
+  select: typeof sandboxAnalysisSelect;
+}>;
+
+/** Artifact metadata (never the object key, hashes of the sealed object or the wrapped key). */
+const sandboxArtifactSelect = {
+  analysisId: true,
+  seq: true,
+  kind: true,
+  contentType: true,
+  sizeBytes: true,
+  plainSha256: true,
+  expiresAt: true,
+  purgedAt: true,
+} satisfies Prisma.SandboxArtifactSelect;
+
+export type SandboxArtifactRow = Prisma.SandboxArtifactGetPayload<{
+  select: typeof sandboxArtifactSelect;
+}>;
+
+/** Most artifact rows one page reads: ≤ 20 rounds × 5 submissions × 16 artifacts. */
+const MAX_SANDBOX_ARTIFACT_ROWS = 2_000;
 
 /**
  * Most per-attachment rows one page reads: ≤ 20 rounds × ATTACHMENT_MAX_PER_MESSAGE (100, the
@@ -242,7 +298,8 @@ export type DlpResultRow = Prisma.DlpScanResultGetPayload<{ select: typeof dlpRe
   DlpResultRowInput;
 
 /**
- * Read-only, tenant-scoped scan reads (step 4.1 S16; 4.2 attachments; 4.3 URLs; 4.4 BEC; 4.5 DLP) on the replica (`PrismaReadService`, with
+ * Read-only, tenant-scoped scan reads (step 4.1 S16; 4.2 attachments; 4.3 URLs; 4.4 BEC; 4.5 DLP;
+ * 4.6 sandbox submissions and the analyses/artifacts they reference) on the replica (`PrismaReadService`, with
  * the writer fallback above the lag threshold; ADR-0014, §2.0 invariant 6). Every query matches
  * the organization of the caller's scope and the message's `(message_id, received_at)`, so the
  * partitioned tables are pruned and another tenant's rows are never read.
@@ -335,7 +392,10 @@ export class MessageScansReadRepository {
     });
   }
 
-  /** The sandbox submissions of the given scans (step 4.2 A11), one per scan and attachment. */
+  /**
+   * The sandbox submissions of the given scans (step 4.2 A11; step 4.6 X18 outcome columns), one
+   * per scan and attachment.
+   */
   sandboxSubmissions(
     scope: TenantScope,
     message: LifecycleMessageRow,
@@ -348,8 +408,37 @@ export class MessageScansReadRepository {
         receivedAt: message.receivedAt,
         scanId: { in: [...scanIds] },
       }),
-      select: { id: true, scanId: true, attachmentId: true, status: true },
+      select: sandboxSubmissionSelect,
+      orderBy: [{ scanId: 'desc' }, { partIndex: 'asc' }],
       take: MAX_ATTACHMENT_ROWS,
+    });
+  }
+
+  /**
+   * The analyses that completed the given submissions (step 4.6 X18). `sandbox_analyses` is a
+   * platform table (content-addressed, shared by every organization that submitted the same
+   * file), so it is never queried on its own: the ids come only from this organization's
+   * completed submissions (tenant-scoped above), and the caller additionally matches each row's
+   * public id with the submission's `external_ref`.
+   */
+  sandboxAnalyses(analysisIds: readonly bigint[]): Promise<SandboxAnalysisRow[]> {
+    if (analysisIds.length === 0) return Promise.resolve([]);
+    const ids = [...new Set(analysisIds)];
+    return this.db.sandboxAnalysis.findMany({
+      where: { id: { in: ids } },
+      select: sandboxAnalysisSelect,
+      take: ids.length,
+    });
+  }
+
+  /** Artifact metadata of the given analyses (ids from the tenant's own submissions only). */
+  sandboxArtifacts(analysisIds: readonly bigint[]): Promise<SandboxArtifactRow[]> {
+    if (analysisIds.length === 0) return Promise.resolve([]);
+    return this.db.sandboxArtifact.findMany({
+      where: { analysisId: { in: [...new Set(analysisIds)] } },
+      select: sandboxArtifactSelect,
+      orderBy: [{ analysisId: 'asc' }, { seq: 'asc' }],
+      take: MAX_SANDBOX_ARTIFACT_ROWS,
     });
   }
 

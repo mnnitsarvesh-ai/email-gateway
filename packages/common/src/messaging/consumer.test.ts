@@ -157,10 +157,29 @@ describe('QueueConsumer construction', () => {
   it('accepts only event types bound to the queue', () => {
     expect(() => build({ eventTypes: ['mail.message.parsed.v1'] })).toThrow(/not bound/);
     expect(() => build({ eventTypes: [] })).toThrow();
-    // Step 4.2 registered the schema of the type scan.sandbox is bound to (it was reserved).
+    // Step 4.2 registered the schema of sandbox_requested.v1 (it was reserved); topology v8 (step
+    // 4.6 X11) moved its binding from scan.sandbox to scan.sandbox.submissions, and scan.sandbox
+    // now carries the controller's task_requested.v1.
+    expect(() =>
+      build({
+        queue: 'scan.sandbox.submissions',
+        eventTypes: ['mail.attachment.sandbox_requested.v1'],
+      }),
+    ).not.toThrow();
     expect(() =>
       build({ queue: 'scan.sandbox', eventTypes: ['mail.attachment.sandbox_requested.v1'] }),
+    ).toThrow(/not bound/);
+    expect(() =>
+      build({ queue: 'scan.sandbox', eventTypes: ['mail.sandbox.task_requested.v1'] }),
     ).not.toThrow();
+    expect(() =>
+      build({ queue: 'scan.sandbox.results', eventTypes: ['mail.sandbox.task_completed.v1'] }),
+    ).not.toThrow();
+    // A well-formed but unregistered type is never bound (step 4.6 registered the former
+    // example mail.attachment.sandbox_completed.v1).
+    expect(() =>
+      build({ queue: 'email.analytics', eventTypes: ['mail.example.unregistered.v1'] }),
+    ).toThrow();
     expect(() =>
       build({ queue: 'email.analytics', eventTypes: [RECEIVED, APPROVED] }),
     ).not.toThrow();

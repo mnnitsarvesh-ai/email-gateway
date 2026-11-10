@@ -24,6 +24,7 @@
   "devDependencies": {
     "@email-gateway/attachment-corpus": "workspace:*",
     "@email-gateway/dlp": "workspace:*",
+    "@email-gateway/sandbox": "workspace:*",
     "@types/amqplib": "^0.10.7"
   }
 }

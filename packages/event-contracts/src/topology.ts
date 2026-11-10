@@ -7,10 +7,10 @@ import {
 } from './registry';
 
 /**
- * RabbitMQ topology v7 as data (step 3.2 §3, ADR-0024; v2: step 3.3 L7, ADR-0025; v3: step 4.1
+ * RabbitMQ topology v8 as data (step 3.2 §3, ADR-0024; v2: step 3.3 L7, ADR-0025; v3: step 4.1
  * S2, ADR-0026; v4: step 4.2 A2, ADR-0028; v5: step 4.3 U2, ADR-0029; v6: step 4.4 B3,
- * ADR-0033; v7: step 4.5 D2, ADR-0036): exactly six topic exchanges and seventeen quorum queues
- * in the vhost `email-gateway`. v2 added the bindings of `mail.message.rescan_requested.v1`
+ * ADR-0033; v7: step 4.5 D2, ADR-0036; v8: step 4.6 X11, ADR-0040): exactly six topic exchanges
+ * and nineteen quorum queues in the vhost `email-gateway`. v2 added the bindings of `mail.message.rescan_requested.v1`
  * (`email.security`) to the five scan queues, and `mail.message.state_changed.v1`
  * (`email.events`) reaches only the `email.analytics` firehose. v3 makes `scan.spam` a work queue
  * (the Rspamd engine of the email-worker scan role, ledger consumer `email-worker.scan.rspamd`)
@@ -45,6 +45,21 @@ import {
  * count is unchanged. v7 registers `mail.message.dlp_incident.v1` on `email.security`, which no
  * queue binds in this step (it reaches only the `email.analytics` firehose; the notification
  * worker binds it in step 6.2). The exchanges and the other queues are unchanged.
+ *
+ * v8 (step 4.6 X11) builds the asynchronous sandbox engine. `scan.sandbox` becomes the work
+ * queue of the isolated `sandbox-controller` (consumer kind `stateless`: no database, results
+ * deduplicated downstream; policy `work-lossy`: a bounded lossy buffer, the controller is
+ * optional and an undelivered task expires at the analysis deadline). It binds the new
+ * `mail.sandbox.task_requested.v1` instead of `mail.attachment.sandbox_requested.v1` (its v1–v7
+ * binding is removed by `init.mjs`'s prune step). Two new work queues of the email-worker:
+ * `scan.sandbox.submissions` (ledger `email-worker.scan.sandbox`, binds
+ * `mail.attachment.sandbox_requested.v1`: the dispatcher) and `scan.sandbox.results` (ledger
+ * `email-worker.scan.sandbox.results`, binds `mail.sandbox.task_completed.v1`, published
+ * directly by the controller with confirms). Because `scan.sandbox` is now a dot-prefix of both,
+ * its retry binding is the qualified `retry.scan.sandbox.org.#` (`retryBindingKey`).
+ * `mail.attachment.sandbox_completed.v1` is registered but bound by no queue (analytics firehose
+ * only). The exchanges and the other queues are unchanged.
+ *
  * `infrastructure/rabbitmq/definitions.json` is
  * generated from `TOPOLOGY` (`pnpm --filter @email-gateway/event-contracts topology:export`) and
  * imported by `infrastructure/rabbitmq/init.mjs`; services never declare, they verify passively.
@@ -53,7 +68,7 @@ import {
  * target, overflow, length limits) is a per-queue policy `eg.<queue>` (Q4), so it changes without
  * re-declaring a queue.
  */
-export const TOPOLOGY_VERSION = 7;
+export const TOPOLOGY_VERSION = 8;
 export const DEFAULT_VHOST = 'email-gateway';
 
 /** The six exchanges of the topology (ADR-0024): all topic, durable, not internal. */
@@ -78,6 +93,8 @@ export const QUEUE_NAMES = [
   'scan.bec',
   'scan.dlp',
   'scan.sandbox',
+  'scan.sandbox.submissions',
+  'scan.sandbox.results',
   'email.policy.evaluate',
   'email.delivery.pending',
   'email.delivery.retry',
@@ -192,7 +209,7 @@ export const UNLIMITED_DELIVERIES = -1;
  * Policy kinds: one per queue role, plus `work-lossy` (v5, step 4.3 U2) for a work queue that is a
  * bounded lossy buffer by design (`scan.url.inspect`: the browser worker is an optional
  * deployable, a dropped request is expired by the sweeper, and the outbox relay must never be
- * blocked by `reject-publish` on it).
+ * blocked by `reject-publish` on it; v8 `scan.sandbox`: the same for the sandbox-controller).
  */
 export type PolicyKind = QueueRole | 'work-lossy';
 
@@ -539,14 +556,84 @@ export const TOPOLOGY: Topology = {
       policy: policyFor('work', 'scan.dlp'),
       description: 'Data loss prevention (step 4.5): stage 1',
     },
-    dormant(
-      'scan.sandbox',
-      'email.security',
-      [eventBinding('email.security', 'mail.attachment.sandbox_requested.v1')],
-      '4.6',
-      'sandbox orchestration',
-      'Sandbox orchestration of mail.attachment.sandbox_requested.v1 submissions',
-    ),
+    {
+      // v8 (step 4.6 X1, X7, X11): tasks for the isolated sandbox-controller (no database). A
+      // bounded lossy buffer by design (work-lossy): the controller is optional, an undelivered
+      // task's analysis expires at its deadline (verdict timeout, never clean). The v1–v7 binding
+      // of mail.attachment.sandbox_requested.v1 moved to scan.sandbox.submissions.
+      name: 'scan.sandbox',
+      role: 'work',
+      homeExchange: 'email.security',
+      bindings: [
+        eventBinding('email.security', 'mail.sandbox.task_requested.v1'),
+        retryBinding('email.security', 'scan.sandbox'),
+      ],
+      consumer: {
+        kind: 'stateless',
+        service: 'sandbox-controller',
+        reason:
+          'no database; results are deduplicated by analysis id, state and result MAC in scan.sandbox.results',
+      },
+      retry: {
+        strategy: 'hold',
+        maxAttempts: 3,
+        baseDelayMs: 5 * SECOND,
+        maxDelayMs: MINUTE,
+        maxRetryAgeMs: HOUR,
+      },
+      lossy: true,
+      policy: policyFor('work-lossy', 'scan.sandbox'),
+      description: 'Sandbox tasks for the isolated sandbox-controller (step 4.6)',
+    },
+    {
+      // v8 (step 4.6 X13): the sandbox dispatcher of the email-worker (staging, dedup, tasks).
+      name: 'scan.sandbox.submissions',
+      role: 'work',
+      homeExchange: 'email.security',
+      bindings: [
+        eventBinding('email.security', 'mail.attachment.sandbox_requested.v1'),
+        retryBinding('email.security', 'scan.sandbox.submissions'),
+      ],
+      consumer: {
+        kind: 'ledger',
+        ledgerName: 'email-worker.scan.sandbox',
+        service: 'email-worker',
+      },
+      retry: {
+        strategy: 'hold',
+        maxAttempts: 10,
+        baseDelayMs: 2 * SECOND,
+        maxDelayMs: MINUTE,
+        maxRetryAgeMs: 24 * HOUR,
+      },
+      policy: policyFor('work', 'scan.sandbox.submissions'),
+      description:
+        'Sandbox submissions of the attachment engine, dispatched by the email-worker (step 4.6)',
+    },
+    {
+      // v8 (step 4.6 X13): sandbox task results, applied by the email-worker (token-checked).
+      name: 'scan.sandbox.results',
+      role: 'work',
+      homeExchange: 'email.security',
+      bindings: [
+        eventBinding('email.security', 'mail.sandbox.task_completed.v1'),
+        retryBinding('email.security', 'scan.sandbox.results'),
+      ],
+      consumer: {
+        kind: 'ledger',
+        ledgerName: 'email-worker.scan.sandbox.results',
+        service: 'email-worker',
+      },
+      retry: {
+        strategy: 'hold',
+        maxAttempts: 10,
+        baseDelayMs: 2 * SECOND,
+        maxDelayMs: MINUTE,
+        maxRetryAgeMs: 24 * HOUR,
+      },
+      policy: policyFor('work', 'scan.sandbox.results'),
+      description: 'Sandbox task results of the sandbox-controller (step 4.6)',
+    },
     dormant(
       'email.policy.evaluate',
       'email.policy',

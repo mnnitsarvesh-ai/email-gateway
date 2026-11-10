@@ -20,6 +20,7 @@ import {
   runsAttachmentConsumer,
   runsBecConsumer,
   runsDlpConsumer,
+  runsSandboxConsumers,
   runsUrlConsumer,
 } from './scanning/config';
 import {
@@ -28,6 +29,7 @@ import {
   DlpEngineHealth,
   DlpExtractorHealth,
   InspectorHealth,
+  SandboxBucketHealth,
   ScannerBrokerHealth,
   ScanningModule,
   UrlEngineHealth,
@@ -76,6 +78,8 @@ export class AppModule {
     if (scanning && runsBecConsumer(config)) indicators.push(BecEngineHealth);
     // Step 4.5 D22: the dlp engine and its extractor pool on replicas running the dlp engine.
     if (scanning && runsDlpConsumer(config)) indicators.push(DlpEngineHealth, DlpExtractorHealth);
+    // Step 4.6 X13: the restricted sandbox bucket on replicas running the sandbox engine.
+    if (scanning && runsSandboxConsumers(config)) indicators.push(SandboxBucketHealth);
     indicators.push(RedisService, S3Service);
     return {
       module: AppModule,

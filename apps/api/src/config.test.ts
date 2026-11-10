@@ -4,6 +4,7 @@ import {
   ATTACHMENT_PLATFORM_DEFAULTS,
   BEC_PLATFORM_DEFAULTS,
   DLP_PLATFORM_DEFAULTS,
+  SANDBOX_PLATFORM_DEFAULTS,
 } from '@email-gateway/security-contracts';
 import { describe, expect, it } from 'vitest';
 import { TEST_DOMAIN_ENV } from '../test/support/test-env';
@@ -13,6 +14,7 @@ import {
   dlpPlatformSettingsOf,
   loadApiConfig,
   rspamdPlatformSettingsOf,
+  sandboxPlatformSettingsOf,
 } from './config';
 
 const hex64 = () => randomBytes(32).toString('hex');
@@ -812,6 +814,57 @@ describe('loadApiConfig: data loss prevention (step 4.5 D16, D18, D21)', () => {
     [{ DLP_RULES_MAX_PER_POLICY: '0' }, 'DLP_RULES_MAX_PER_POLICY'],
     [{ DLP_EXCEPTION_MAX_DAYS: '0' }, 'DLP_EXCEPTION_MAX_DAYS'],
     [{ DLP_EVIDENCE_KEY_PREVIOUS: 'abc' }, 'DLP_EVIDENCE_KEY_PREVIOUS'],
+  ])('refuses %o naming %s', (env, key) => {
+    expect(rejection({ ...valid, ...env })).toContain(key);
+  });
+});
+
+describe('loadApiConfig: sandbox (step 4.6 X17)', () => {
+  it('defaults the sandbox platform settings and the expected backend (disabled)', () => {
+    const cfg = loadApiConfig(valid);
+    expect(sandboxPlatformSettingsOf(cfg)).toEqual(SANDBOX_PLATFORM_DEFAULTS);
+    expect(cfg.SANDBOX_EXPECTED_BACKEND).toBe('disabled');
+  });
+
+  it('reads the SANDBOX_* platform keys as the email-worker does', () => {
+    const cfg = loadApiConfig({
+      ...valid,
+      SANDBOX_TENANT_DEFAULT_ENABLED: 'true',
+      SANDBOX_FILE_TYPES: 'pdf, script_shell',
+      SANDBOX_MAX_SAMPLE_BYTES: '1048576',
+      SANDBOX_BROWSER_ANALYSIS: 'false',
+      SANDBOX_EXPECTED_BACKEND: 'static',
+    });
+    expect(sandboxPlatformSettingsOf(cfg)).toEqual({
+      tenantDefaultEnabled: true,
+      fileTypes: ['pdf', 'script_shell'],
+      maxSampleBytes: 1_048_576,
+      browserAnalysis: false,
+    });
+    expect(cfg.SANDBOX_EXPECTED_BACKEND).toBe('static');
+  });
+
+  it('accepts the local test runner only in APP_ENV local or ci', () => {
+    expect(
+      loadApiConfig({ ...valid, APP_ENV: 'local', SANDBOX_EXPECTED_BACKEND: 'hardened-container' })
+        .SANDBOX_EXPECTED_BACKEND,
+    ).toBe('hardened-container');
+    expect(
+      rejection({
+        ...valid,
+        APP_ENV: 'production',
+        SANDBOX_EXPECTED_BACKEND: 'hardened-container',
+      }),
+    ).toContain('SANDBOX_EXPECTED_BACKEND');
+  });
+
+  it.each([
+    [{ SANDBOX_TENANT_DEFAULT_ENABLED: 'yes' }, 'SANDBOX_TENANT_DEFAULT_ENABLED'],
+    [{ SANDBOX_FILE_TYPES: 'pdf,not_a_type' }, 'SANDBOX_FILE_TYPES'],
+    [{ SANDBOX_MAX_SAMPLE_BYTES: '0' }, 'SANDBOX_MAX_SAMPLE_BYTES'],
+    [{ SANDBOX_MAX_SAMPLE_BYTES: String(64 * 1024 * 1024 + 1) }, 'SANDBOX_MAX_SAMPLE_BYTES'],
+    [{ SANDBOX_BROWSER_ANALYSIS: '1' }, 'SANDBOX_BROWSER_ANALYSIS'],
+    [{ SANDBOX_EXPECTED_BACKEND: 'vm' }, 'SANDBOX_EXPECTED_BACKEND'],
   ])('refuses %o naming %s', (env, key) => {
     expect(rejection({ ...valid, ...env })).toContain(key);
   });

@@ -17,6 +17,7 @@ import {
   engineResultsOf,
   messagePublicId,
   REQUIRED_ENGINES,
+  roundFinalEngines,
   scanStackGate,
   sendToMx,
   waitForRoundComplete,
@@ -198,13 +199,7 @@ describe.skipIf(gate.skip)(
       const { rcpt, message, round, finals, urlFinal } = await send('links', () => built.text);
       expect(round).toMatchObject({ status: 'completed', requiredEngines: [...REQUIRED_ENGINES] });
       expect(round.scanVerdict).not.toBe('malicious');
-      expect(finals.map((f) => f.engine).sort()).toEqual([
-        'attachment',
-        'bec',
-        'dlp',
-        'rspamd',
-        'url',
-      ]);
+      expect(roundFinalEngines(finals)).toEqual(['attachment', 'bec', 'dlp', 'rspamd', 'url']);
       expect(urlFinal).toMatchObject({ errorCode: null });
       expect(urlFinal!.engineVersion).toMatch(/^url\/2;url-fetch\/1;/);
       expect(urlFinal!.settingsVersion).toMatch(/^url-map\/1;/);

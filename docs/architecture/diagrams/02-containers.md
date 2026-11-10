@@ -35,14 +35,16 @@ flowchart LR
     clickSvc["click-service (4.3)<br/>public GET /c/{token} :3080,<br/>admin :3081"]:::impl
     ubw["url-browser-worker (4.3, profile url-browser)<br/>Chromium headless shell, :3090,<br/>network url-sandbox (internal)"]:::impl
     uep["url-egress-proxy (4.3)<br/>:3128, admin :3091,<br/>SSRF guard"]:::impl
+    sbc["sandbox-controller (4.6, profile apps)<br/>:3092, network sandbox-control (internal);<br/>no DB/Redis/mail bucket; backend disabled:<br/>EXECUTION DISABLED"]:::impl
+    sbr["detonation runners + sinkhole (4.6)<br/>LOCAL/CI exec override only, NOT a VM;<br/>VM runner NOT IMPLEMENTED"]:::planned
   end
 
   subgraph data["Data stores"]
     mysqlW[("MySQL 8.4 primary<br/>writer, GTID")]:::impl
     mysqlR[("MySQL 8.4 replica<br/>reader")]:::impl
-    mq{{"RabbitMQ 4.1, vhost email-gateway<br/>6 exchanges, 14 quorum queues<br/>(topology v1, 3.2)"}}:::impl
+    mq{{"RabbitMQ 4.1, vhost email-gateway<br/>6 exchanges, 19 quorum queues<br/>(topology v8 since 4.6)"}}:::impl
     redis[("Redis 7.4")]:::impl
-    s3[("S3 / MinIO<br/>mail + archive buckets")]:::impl
+    s3[("S3 / MinIO<br/>mail + archive buckets,<br/>restricted sandbox bucket (4.6)")]:::impl
     os[("OpenSearch 2.19<br/>analytics profile")]:::impl
     ch[("ClickHouse 25.8<br/>analytics profile")]:::impl
   end
@@ -77,6 +79,12 @@ flowchart LR
   clickSvc -->|"gateway_click: URL rows, click events + clicked.v1"| mysqlW
   clickSvc -->|"rate limits, URL cache (HMAC)"| redis
   ew -->|"read EML, write parts (3.1)"| s3
+  mq -->|"scan.sandbox.submissions, scan.sandbox.results (4.6)"| ew
+  ew -->|"sealed samples (sandbox bucket, 4.6)"| s3
+  mq -->|"scan.sandbox (task_requested.v1), eg-sandbox"| sbc
+  sbc -->|"task_completed.v1 (MAC, confirms)"| mq
+  sbc -->|"samples/ read, artifacts/ write (own MinIO user)"| s3
+  sbc -.->|"exec override only"| sbr
   mq -.->|"email.policy.evaluate (dormant), P 5.x"| pe
   mq -->|"email.delivery.pending (3.2)"| dw
   mysqlW -->|"dev pass-through outbox poller (local/CI only)"| dw
@@ -105,7 +113,7 @@ flowchart LR
   apps -->|"OTLP traces, metrics"| obs
 ```
 
-**Legend.** Green solid: IMPLEMENTED. Amber dashed and dotted arrows: PLANNED with the step. Since step 3.2 no service declares broker objects: `rabbitmq-init` provisions the vhost from `infrastructure/rabbitmq/definitions.json`, services verify passively with their least-privilege role users, and policy-engine, archive-worker and notification-worker do not connect to RabbitMQ until their consumers exist. "Dormant" queues are declared and bound with no consumer (bounded `drop-head` buffers, [messaging topology](../messaging-topology.md)).
+**Legend.** Green solid: IMPLEMENTED. Amber dashed and dotted arrows: PLANNED with the step. Since step 3.2 no service declares broker objects: `rabbitmq-init` provisions the vhost from `infrastructure/rabbitmq/definitions.json`, services verify passively with their least-privilege role users, and policy-engine, archive-worker and notification-worker do not connect to RabbitMQ until their consumers exist. Step 4.6: the `sandbox-controller` runs in the `apps` profile on the internal `sandbox-control` network only (its port is not reachable from the host) with backend `disabled` — **execution of unknown files is disabled**; the detonation runners and the recording sinkhole exist only with the LOCAL/CI exec override (`infrastructure/sandbox/compose.exec.yml`; a shared-kernel container, **not a VM boundary**); a VM-class runner is not implemented. "Dormant" queues are declared and bound with no consumer (bounded `drop-head` buffers, [messaging topology](../messaging-topology.md)).
 
 ## Status
 

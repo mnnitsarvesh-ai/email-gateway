@@ -365,13 +365,58 @@ enum SandboxAttachmentVerdict {
 }
 
 /// Status of a sandbox submission (step 4.2 A11). Step 4.2 writes `pending` only; the sandbox
-/// orchestrator (step 4.6) moves it to `submitted`, then `completed`, `failed` or `expired`.
+/// engine (step 4.6 X13, X15) moves it to `submitted` (linked to an analysis), then `completed`,
+/// `failed` or `expired`, or straight to `skipped` (step 4.6: tenant not opted in, plan feature
+/// off, type or size excluded, part unavailable; `skip_reason` says which).
 enum SandboxSubmissionStatus {
   pending
   submitted
   completed
   failed
   expired
+  skipped
+}
+
+/// Analysis profile of a sandbox analysis (step 4.6 X13): `static` (no execution), `execute`
+/// (scripts/binaries; executed only by an approved runner) or `browser` (HTML/SVG rendering).
+enum SandboxProfile {
+  static
+  execute
+  browser
+}
+
+/// Status of a sandbox analysis (step 4.6 X13, X16): `pending` (created, sample not yet staged),
+/// `dispatched` (task published through the outbox), then one terminal value: `completed`,
+/// `not_executed` (the backend did not run the sample), `failed` (controller/infrastructure
+/// failure) or `expired` (no result by `deadline_at`).
+enum SandboxAnalysisStatus {
+  pending
+  dispatched
+  completed
+  not_executed
+  failed
+  expired
+}
+
+/// Verdict of a sandbox analysis (`SANDBOX_VERDICTS`, map `sandbox-map/1`, step 4.6 X14). `clean`
+/// only from rule C1 (a complete run with VM isolation; unreachable in 4.6); `error` and
+/// `timeout` are failures, never a classification.
+enum SandboxVerdict {
+  clean
+  suspicious
+  malicious
+  unknown
+  error
+  timeout
+}
+
+/// Kind of a sealed sandbox artifact (`ARTIFACT_KINDS`, step 4.6 X12).
+enum SandboxArtifactKind {
+  screenshot
+  process_log
+  network_log
+  static_report
+  dropped_file
 }
 
 /// What created a bulk attachment rescan job (step 4.2 A13).
@@ -2075,41 +2120,164 @@ model AttachmentScanResult {
 /// PARTITIONED by RANGE COLUMNS(received_at), monthly (6 months, core; step 4.2 §3, A11). One row
 /// per attachment of a round submitted to the sandbox, written in the attachment engine's
 /// finalize transaction together with the `mail.attachment.sandbox_requested.v1` outbox row. The
-/// part is referenced by its S3 key only. `external_ref`, `sandbox_verdict` and `completed_at`
-/// are reserved for the sandbox orchestrator (step 4.6). No foreign keys.
+/// part is referenced by its S3 key only. Step 4.6 (§3, X13, X15): the sandbox engine of the
+/// email-worker links the row to a content-addressed `sandbox_analyses` row (`analysis_id`, no
+/// foreign key: partitioned) and completes it (`external_ref` = the analysis public id,
+/// `sandbox_verdict`, `sandbox_reason_codes`, `completed_at`) or skips it (`skip_reason`). No
+/// foreign keys.
 model SandboxSubmission {
-  id                BigInt                   @default(autoincrement()) @db.UnsignedBigInt
-  receivedAt        DateTime                 @map("received_at") @db.DateTime(3)
-  messageId         BigInt                   @map("message_id") @db.UnsignedBigInt
-  organizationId    BigInt                   @map("organization_id") @db.UnsignedBigInt
-  scanId            BigInt                   @map("scan_id") @db.UnsignedBigInt
-  attachmentId      BigInt                   @map("attachment_id") @db.UnsignedBigInt
-  partIndex         Int                      @map("part_index") @db.UnsignedSmallInt
-  sha256            String                   @db.Char(64)
-  sizeBytes         Int                      @map("size_bytes") @db.UnsignedInt
-  detectedType      String                   @map("detected_type") @db.VarChar(32)
+  id                 BigInt                   @default(autoincrement()) @db.UnsignedBigInt
+  receivedAt         DateTime                 @map("received_at") @db.DateTime(3)
+  messageId          BigInt                   @map("message_id") @db.UnsignedBigInt
+  organizationId     BigInt                   @map("organization_id") @db.UnsignedBigInt
+  scanId             BigInt                   @map("scan_id") @db.UnsignedBigInt
+  attachmentId       BigInt                   @map("attachment_id") @db.UnsignedBigInt
+  partIndex          Int                      @map("part_index") @db.UnsignedSmallInt
+  sha256             String                   @db.Char(64)
+  sizeBytes          Int                      @map("size_bytes") @db.UnsignedInt
+  detectedType       String                   @map("detected_type") @db.VarChar(32)
   /// `org/{organizationId}/part/…` (email_attachments.object_key of the attachment).
-  objectKey         String                   @map("object_key") @db.VarChar(512)
-  attachmentVerdict SandboxAttachmentVerdict @map("attachment_verdict")
+  objectKey          String                   @map("object_key") @db.VarChar(512)
+  attachmentVerdict  SandboxAttachmentVerdict @map("attachment_verdict")
   /// JSON array (≤ 16) of ATTACHMENT_REASON_CODES.
-  reasonCodes       Json                     @map("reason_codes")
-  status            SandboxSubmissionStatus  @default(pending)
+  reasonCodes        Json                     @map("reason_codes")
+  status             SandboxSubmissionStatus  @default(pending)
   /// Envelope event id of the sandbox_requested.v1 outbox row.
-  requestedEventId  String                   @map("requested_event_id") @db.Char(36)
-  /// Reserved for step 4.6: the sandbox's own reference.
-  externalRef       String?                  @map("external_ref") @db.VarChar(128)
-  /// Reserved for step 4.6: the sandbox verdict.
-  sandboxVerdict    String?                  @map("sandbox_verdict") @db.VarChar(16)
-  /// Reserved for step 4.6.
-  completedAt       DateTime?                @map("completed_at") @db.DateTime(3)
-  createdAt         DateTime                 @default(now()) @map("created_at") @db.DateTime(3)
-  updatedAt         DateTime                 @updatedAt @map("updated_at") @db.DateTime(3)
+  requestedEventId   String                   @map("requested_event_id") @db.Char(36)
+  /// Step 4.6: the public id (UUIDv7) of the linked `sandbox_analyses` row, set on completion.
+  externalRef        String?                  @map("external_ref") @db.VarChar(128)
+  /// Step 4.6: a `SANDBOX_VERDICTS` value of the linked analysis, or NULL (pending, skipped).
+  sandboxVerdict     String?                  @map("sandbox_verdict") @db.VarChar(16)
+  /// Step 4.6: the terminal time (completed, failed, expired, skipped).
+  completedAt        DateTime?                @map("completed_at") @db.DateTime(3)
+  /// Step 4.6 X13: `sandbox_analyses.id` once linked (no foreign key: partitioned table).
+  analysisId         BigInt?                  @map("analysis_id") @db.UnsignedBigInt
+  /// Step 4.6: a `SANDBOX_SKIP_REASONS` value when `status = skipped`.
+  skipReason         String?                  @map("skip_reason") @db.VarChar(48)
+  /// Step 4.6: JSON array (≤ 16) of `SANDBOX_REASON_CODES` of the submission's outcome.
+  sandboxReasonCodes Json?                    @map("sandbox_reason_codes")
+  /// Step 4.6 X14: `settings_version` of the dispatch-time `resolveSandboxSettings` resolution.
+  settingsVersion    String?                  @map("settings_version") @db.VarChar(96)
+  createdAt          DateTime                 @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt          DateTime                 @updatedAt @map("updated_at") @db.DateTime(3)
 
   @@id([id, receivedAt])
   @@unique([scanId, attachmentId, receivedAt])
   @@index([status, createdAt])
   @@index([sha256])
+  @@index([analysisId])
   @@map("sandbox_submissions")
+}
+
+/// One sandbox analysis of one sample (step 4.6 §3, X13): platform-level and content-addressed
+/// (`dedupe_key` = `<sha256>:<analysis_key>`; NULL once superseded, failed or expired, so a new
+/// analysis can take the key). Tenants reach it only through their `sandbox_submissions`;
+/// `organization_id` is the dispatching organization (routing of the task and result only). The
+/// sample lives sealed in the sandbox bucket (`sample_object_key`, deleted after the result);
+/// `report` is the bounded `sandboxReportViewSchema` (codes, counts, hosts, hashes; never
+/// content). Not partitioned; retention by the sandbox sweeper (X16, `expires_at`).
+model SandboxAnalysis {
+  id                BigInt                @id @default(autoincrement()) @db.UnsignedBigInt
+  /// UUIDv7; the task id of `mail.sandbox.task_requested.v1` / `task_completed.v1`.
+  publicId          String                @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  sha256            String                @db.Char(64)
+  sizeBytes         Int                   @map("size_bytes") @db.UnsignedInt
+  detectedType      String                @map("detected_type") @db.VarChar(32)
+  profile           SandboxProfile
+  /// First 16 hex of SHA-256 over { profile, limits, epoch, map } (`analysisKey`, X13).
+  analysisKey       String                @map("analysis_key") @db.Char(16)
+  /// `<sha256>:<analysis_key>`; NULL when superseded or failed (many NULLs allowed).
+  dedupeKey         String?               @unique @map("dedupe_key") @db.VarChar(81)
+  status            SandboxAnalysisStatus @default(pending)
+  /// The dispatching organization (task/result routing only; not an owner of the result).
+  organizationId    BigInt                @map("organization_id") @db.UnsignedBigInt
+  /// `samples/<yyyy>/<mm>/<taskId>.bin` in the sandbox bucket (`sandbox-sample/1`).
+  sampleObjectKey   String?               @map("sample_object_key") @db.VarChar(512)
+  sampleDeletedAt   DateTime?             @map("sample_deleted_at") @db.DateTime(3)
+  /// Envelope event id of the task_requested.v1 outbox row.
+  requestedEventId  String?               @map("requested_event_id") @db.Char(36)
+  /// Envelope event id of the applied task_completed.v1.
+  resultEventId     String?               @map("result_event_id") @db.Char(36)
+  dispatchedAt      DateTime?             @map("dispatched_at") @db.DateTime(3)
+  /// SHA-256 (hex) of the task's one-time result token (X11), set when the task is dispatched;
+  /// the token itself travels only sealed in the task. A result is accepted only with a MAC
+  /// keyed to it.
+  resultTokenSha256 String?               @map("result_token_sha256") @db.Char(64)
+  /// After this instant a pending/dispatched analysis expires (verdict `timeout`).
+  deadlineAt        DateTime              @map("deadline_at") @db.DateTime(3)
+  completedAt       DateTime?             @map("completed_at") @db.DateTime(3)
+  verdict           SandboxVerdict?
+  /// JSON array (≤ 16) of `SANDBOX_REASON_CODES`.
+  reasonCodes       Json?                 @map("reason_codes")
+  /// The bounded `sandboxReportViewSchema` (no content).
+  report            Json?
+  /// A `SANDBOX_BACKENDS` value.
+  backend           String?               @db.VarChar(32)
+  backendVersion    String?               @map("backend_version") @db.VarChar(64)
+  /// A `SANDBOX_ISOLATION_CLASSES` value (`container` is NOT a VM boundary).
+  isolation         String?               @db.VarChar(16)
+  executed          Boolean?
+  controllerVersion String?               @map("controller_version") @db.VarChar(64)
+  analyzerVersion   String?               @map("analyzer_version") @db.VarChar(64)
+  /// `sandbox-map/1`.
+  mapVersion        String?               @map("map_version") @db.VarChar(16)
+  /// A `SANDBOX_NOT_EXECUTED_REASONS` value.
+  notExecutedReason String?               @map("not_executed_reason") @db.VarChar(48)
+  /// A `SANDBOX_ERROR_CODES` value.
+  errorCode         String?               @map("error_code") @db.VarChar(48)
+  durationMs        Int?                  @map("duration_ms") @db.UnsignedInt
+  /// A terminal analysis is reused for the same dedupe key until then (NULL: never).
+  reuseUntil        DateTime?             @map("reuse_until") @db.DateTime(3)
+  /// The sweeper deletes the row (after its artifacts) from then on.
+  expiresAt         DateTime              @map("expires_at") @db.DateTime(3)
+  createdAt         DateTime              @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt         DateTime              @updatedAt @map("updated_at") @db.DateTime(3)
+
+  artifacts SandboxArtifact[]
+
+  @@index([status, deadlineAt])
+  @@index([sha256])
+  @@index([expiresAt])
+  @@index([sampleDeletedAt, status])
+  @@map("sandbox_analyses")
+}
+
+/// One sealed artifact of a sandbox analysis (step 4.6 §3, X12): the object lives in the sandbox
+/// bucket (`artifacts/<yyyy>/<mm>/<taskId>/<seq>-<kind>.bin`, `sandbox-artifact/1`); its data key
+/// is wrapped to the artifact X25519 public key (`wrapped_key`, NULL after the purge:
+/// crypto-shredding first, then the object delete). Not partitioned; foreign key to the analysis
+/// ON DELETE RESTRICT (the sweeper deletes artifacts first).
+model SandboxArtifact {
+  id              BigInt              @id @default(autoincrement()) @db.UnsignedBigInt
+  analysisId      BigInt              @map("analysis_id") @db.UnsignedBigInt
+  /// 0..15 within the analysis.
+  seq             Int                 @db.UnsignedSmallInt
+  kind            SandboxArtifactKind
+  /// An `ARTIFACT_CONTENT_TYPES` value.
+  contentType     String              @map("content_type") @db.VarChar(64)
+  objectKey       String              @map("object_key") @db.VarChar(512)
+  /// Hex SHA-256 of the sealed object.
+  objectSha256    String              @map("object_sha256") @db.Char(64)
+  /// Hex SHA-256 of the plaintext artifact.
+  plainSha256     String              @map("plain_sha256") @db.Char(64)
+  sizeBytes       Int                 @map("size_bytes") @db.UnsignedInt
+  /// `x1.<kid>.<ephemeralPub>.<iv>.<tag>.<ct>`; NULL = crypto-shredded.
+  wrappedKey      String?             @map("wrapped_key") @db.VarChar(256)
+  keyId           String              @map("key_id") @db.VarChar(16)
+  /// `sandbox-artifact/1`.
+  algorithm       String              @db.VarChar(32)
+  expiresAt       DateTime            @map("expires_at") @db.DateTime(3)
+  purgedAt        DateTime?           @map("purged_at") @db.DateTime(3)
+  /// E.g. `retention`.
+  purgeReason     String?             @map("purge_reason") @db.VarChar(32)
+  objectDeletedAt DateTime?           @map("object_deleted_at") @db.DateTime(3)
+  createdAt       DateTime            @default(now()) @map("created_at") @db.DateTime(3)
+
+  analysis SandboxAnalysis @relation(fields: [analysisId], references: [id], onDelete: Restrict)
+
+  @@unique([analysisId, seq])
+  @@index([expiresAt, purgedAt])
+  @@map("sandbox_artifacts")
 }
 
 /// Bulk attachment rescan jobs (step 4.2 A13): written by the api (`admin`) or the signature

@@ -26,6 +26,7 @@ import {
   messagePublicId,
   PASSTHROUGH_CONSUMER,
   REQUIRED_ENGINES,
+  roundFinalEngines,
   scannedEventsOf,
   scanStackGate,
   sendToMx,
@@ -286,7 +287,7 @@ async function scanned(
   const scannedAfterMs = Date.now() - started;
   expect(round).toMatchObject({ status: 'completed', requiredEngines: [...REQUIRED_ENGINES] });
   const finals = (await engineResultsOf(fx.prisma, message)).filter((r) => r.isFinal);
-  expect(finals.map((f) => f.engine).sort()).toEqual(['attachment', 'bec', 'dlp', 'rspamd', 'url']);
+  expect(roundFinalEngines(finals)).toEqual(['attachment', 'bec', 'dlp', 'rspamd', 'url']);
   const dlpFinal = finals.find((f) => f.engine === 'dlp')!;
   const [dlpRow, ...moreDlp] = await dlpResultsOf(fx.prisma, message);
   expect(moreDlp).toEqual([]);

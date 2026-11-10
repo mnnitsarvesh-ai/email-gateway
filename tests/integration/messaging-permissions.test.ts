@@ -12,7 +12,10 @@ import { stack } from './support/env';
  * (topology v5) extends them to scan.url and scan.url.results and adds the url-browser user of the
  * isolated browser worker, docs/plan/steps/11-url-protection.md; step 4.4 B3 (topology v6)
  * extends the scanner and the ops replay to scan.bec, docs/plan/steps/12-phishing-bec.md; step
- * 4.5 D2 (topology v7) extends them to scan.dlp, docs/plan/steps/13-dlp.md). Probes
+ * 4.5 D2 (topology v7) extends them to scan.dlp, docs/plan/steps/13-dlp.md; step 4.6 X11
+ * (topology v8) extends the scanner to scan.sandbox.submissions and scan.sandbox.results, the
+ * ops replay to the three sandbox queues, and adds the sandbox-controller user eg-sandbox,
+ * docs/plan/steps/14-sandbox.md). Probes
  * never leave a message in a real queue: every publish probe is one the broker refuses (a
  * refused publish routes nothing), and the allowed read is a passive checkQueue. Topic
  * permissions restrict the routing keys each user may publish: an allowed key always matches a
@@ -24,22 +27,34 @@ const PROBE_KEY = 'it.permission-probe';
 const ACCESS_REFUSED = 403;
 const api = new ManagementApi();
 
-type Role = 'relay' | 'emailWorker' | 'scanner' | 'deliveryWorker' | 'ops' | 'urlBrowser';
-const ROLES = ['relay', 'emailWorker', 'scanner', 'deliveryWorker', 'ops', 'urlBrowser'] as const;
+type Role =
+  'relay' | 'emailWorker' | 'scanner' | 'deliveryWorker' | 'ops' | 'urlBrowser' | 'sandbox';
+const ROLES = [
+  'relay',
+  'emailWorker',
+  'scanner',
+  'deliveryWorker',
+  'ops',
+  'urlBrowser',
+  'sandbox',
+] as const;
 const models = new Map<Role, ChannelModel>();
 let countsBefore: number[] = [];
 
 /**
  * The AMQP URLs of the role users: those of `stack.rabbitmqRoleUrls()` plus (step 4.3 U2) the
- * url-browser user (`RABBITMQ_URL_BROWSER_URL` of `.env`; never logged).
+ * url-browser user (`RABBITMQ_URL_BROWSER_URL` of `.env`) and (step 4.6 X11) the
+ * sandbox-controller user (`RABBITMQ_SANDBOX_URL`); never logged.
  */
 function roleUrls(): Record<Role, string> {
   const urlBrowser = process.env.RABBITMQ_URL_BROWSER_URL;
   if (!urlBrowser) throw new Error('RABBITMQ_URL_BROWSER_URL is not set (step 4.3 .env keys)');
-  return { ...stack.rabbitmqRoleUrls(), urlBrowser };
+  const sandbox = process.env.RABBITMQ_SANDBOX_URL;
+  if (!sandbox) throw new Error('RABBITMQ_SANDBOX_URL is not set (step 4.6 .env keys)');
+  return { ...stack.rabbitmqRoleUrls(), urlBrowser, sandbox };
 }
 
-/** Message counts of the 17 real queues (administrator, passive declares). */
+/** Message counts of the 19 real queues (administrator, passive declares). */
 async function queueCounts(): Promise<number[]> {
   const url = new URL(stack.rabbitmqUrl());
   url.pathname = `/${encodeURIComponent(stack.rabbitmqVhost())}`;
@@ -129,16 +144,34 @@ const EXPECTED_TOPICS: Record<Role, TopicPermission[]> = {
   // Step 4.1 S2: the scan role publishes only the retry and dead-letter hops of its queues;
   // step 4.2 A2 (topology v4) adds scan.attachment, step 4.3 U2 (v5) scan.url and
   // scan.url.results, anchored on `.org.` so that `url` never covers scan.url.inspect; step 4.4
-  // B3 (v6) scan.bec; step 4.5 D2 (v7) scan.dlp.
+  // B3 (v6) scan.bec; step 4.5 D2 (v7) scan.dlp; step 4.6 X11 (v8) scan.sandbox.submissions and
+  // scan.sandbox.results.
   scanner: [
     {
       exchange: 'email.security',
-      write: '^retry\\.scan\\.(spam|attachment|url|url\\.results|bec|dlp)\\.org\\.',
+      write:
+        '^retry\\.scan\\.(spam|attachment|url|url\\.results|bec|dlp|sandbox\\.submissions|sandbox\\.results)\\.org\\.',
       read: '^$',
     },
     {
       exchange: 'email.events',
-      write: '^dead-letter\\.scan\\.(spam|attachment|url|url\\.results|bec|dlp)(\\.org\\.|$)',
+      write:
+        '^dead-letter\\.scan\\.(spam|attachment|url|url\\.results|bec|dlp|sandbox\\.submissions|sandbox\\.results)(\\.org\\.|$)',
+      read: '^$',
+    },
+  ],
+  // Step 4.6 X11: the sandbox-controller publishes its result events and its queue's hops only
+  // (`.org.`-anchored: scan.sandbox is a dot-prefix of the email-worker's sandbox queues).
+  sandbox: [
+    {
+      exchange: 'email.security',
+      write:
+        '^(org\\.[1-9][0-9]{0,19}\\.mail\\.sandbox\\.task_completed\\.v1$|retry\\.scan\\.sandbox\\.org\\.)',
+      read: '^$',
+    },
+    {
+      exchange: 'email.events',
+      write: '^dead-letter\\.scan\\.sandbox(\\.org\\.|$)',
       read: '^$',
     },
   ],
@@ -171,12 +204,14 @@ const EXPECTED_TOPICS: Record<Role, TopicPermission[]> = {
   ops: [
     { exchange: 'email.ingestion', write: '^retry\\.email\\.received\\.', read: '^$' },
     { exchange: 'email.delivery', write: '^retry\\.email\\.delivery\\.pending\\.', read: '^$' },
-    // Step 4.1 S2 / 4.2 A2 / 4.3 U2 / 4.4 B3 / 4.5 D2: replay of the work queues scan.spam,
-    // scan.attachment, scan.url, scan.url.inspect, scan.url.results, scan.bec and scan.dlp (home
-    // exchange email.security).
+    // Step 4.1 S2 / 4.2 A2 / 4.3 U2 / 4.4 B3 / 4.5 D2 / 4.6 X11: replay of the work queues
+    // scan.spam, scan.attachment, scan.url, scan.url.inspect, scan.url.results, scan.bec, scan.dlp,
+    // scan.sandbox, scan.sandbox.submissions and scan.sandbox.results (home exchange
+    // email.security).
     {
       exchange: 'email.security',
-      write: '^retry\\.scan\\.(spam|attachment|url|url\\.inspect|url\\.results|bec|dlp)\\.',
+      write:
+        '^retry\\.scan\\.(spam|attachment|url|url\\.inspect|url\\.results|bec|dlp|sandbox|sandbox\\.submissions|sandbox\\.results)\\.',
       read: '^$',
     },
   ],
@@ -300,15 +335,24 @@ describe('RabbitMQ role permissions on the real vhost', () => {
     for (const exchange of ['email.security', 'email.policy', 'email.archive', 'email.events']) {
       expect(await publishRefused('ops', exchange), exchange).toBe(ACCESS_REFUSED);
     }
-    // Dormant scan queues are not replayable (v7: only the work queues scan.spam,
-    // scan.attachment, scan.url, scan.url.inspect, scan.url.results, scan.bec and scan.dlp are).
+    // Dormant scan queues are not replayable (v8: only the work queues scan.spam,
+    // scan.attachment, scan.url, scan.url.inspect, scan.url.results, scan.bec, scan.dlp and the
+    // three sandbox queues are; the reserved scan.auth is not).
     expect(
       await publishKeyRefused(
         'ops',
         'email.security',
-        'retry.scan.sandbox.org.1.mail.attachment.sandbox_requested.v1',
+        'retry.scan.auth.org.1.mail.message.parsed.v1',
       ),
     ).toBe(ACCESS_REFUSED);
+    // v8: replay may never mint a sandbox task, result or completion (event keys).
+    for (const key of [
+      'org.1.mail.sandbox.task_requested.v1',
+      'org.1.mail.sandbox.task_completed.v1',
+      'org.1.mail.attachment.sandbox_completed.v1',
+    ]) {
+      expect(await publishKeyRefused('ops', 'email.security', key), key).toBe(ACCESS_REFUSED);
+    }
     expect(await replyCodeOf('ops', (ch) => ch.consume('email.received', () => undefined))).toBe(
       ACCESS_REFUSED,
     );
@@ -331,7 +375,7 @@ describe('RabbitMQ role permissions on the real vhost', () => {
     ).toBe(ACCESS_REFUSED);
   });
 
-  it('scanner (steps 4.1–4.5) reads scan.spam, scan.attachment, scan.url, scan.url.results, scan.bec and scan.dlp (passive) and nothing else', async () => {
+  it('scanner (steps 4.1–4.6) reads scan.spam, scan.attachment, scan.url, scan.url.results, scan.bec, scan.dlp, scan.sandbox.submissions and scan.sandbox.results (passive) and nothing else', async () => {
     const channel = await model('scanner').createChannel();
     for (const queue of [
       'scan.spam',
@@ -340,6 +384,8 @@ describe('RabbitMQ role permissions on the real vhost', () => {
       'scan.url.results',
       'scan.bec',
       'scan.dlp',
+      'scan.sandbox.submissions',
+      'scan.sandbox.results',
     ]) {
       await expect(channel.checkQueue(queue), queue).resolves.toMatchObject({ queue });
     }
@@ -390,6 +436,12 @@ describe('RabbitMQ role permissions on the real vhost', () => {
       // v7 (step 4.5 D14): the DLP incident is written to the outbox in the dlp finalize
       // transaction and published by the relay, never by the worker.
       'org.1.mail.message.dlp_incident.v1',
+      // v8 (step 4.6 X11): the task and the completion go through the outbox; the result is the
+      // controller's (direct publish); the controller's queue hops are not the scanner's.
+      'org.1.mail.sandbox.task_requested.v1',
+      'org.1.mail.sandbox.task_completed.v1',
+      'org.1.mail.attachment.sandbox_completed.v1',
+      'retry.scan.sandbox.org.1.mail.sandbox.task_requested.v1',
     ]) {
       expect(await publishKeyRefused('scanner', 'email.security', key), key).toBe(ACCESS_REFUSED);
     }
@@ -433,6 +485,102 @@ describe('RabbitMQ role permissions on the real vhost', () => {
     expect(retry.test('retry.scan.dlp.x.org.1.mail.message.parsed.v1')).toBe(false);
     expect(deadLetter.test('dead-letter.scan.dlp.x')).toBe(false);
     expect(retry.test('retry.scan.sandbox.org.1.mail.attachment.sandbox_requested.v1')).toBe(false);
+  });
+
+  it('scanner may publish the retry and dead-letter hops of scan.sandbox.submissions and scan.sandbox.results (v8), never scan.sandbox', async () => {
+    const actual = await api.get<TopicPermission[]>(
+      `/topic-permissions/${encodeURIComponent(stack.rabbitmqVhost())}/${encodeURIComponent(userOf('scanner'))}`,
+    );
+    const write = (exchange: string) =>
+      new RegExp(actual.find((t) => t.exchange === exchange)?.write ?? '^$');
+    const retry = write('email.security');
+    const deadLetter = write('email.events');
+    const hops: [string, string][] = [
+      ['scan.sandbox.submissions', 'mail.attachment.sandbox_requested.v1'],
+      ['scan.sandbox.results', 'mail.sandbox.task_completed.v1'],
+    ];
+    for (const [queue, type] of hops) {
+      expect(retry.test(`retry.${queue}.org.1.${type}`), queue).toBe(true);
+      expect(deadLetter.test(`dead-letter.${queue}.org.1.${type}`), queue).toBe(true);
+      expect(deadLetter.test(`dead-letter.${queue}`), queue).toBe(true);
+    }
+    expect(retry.test('retry.scan.sandbox.org.1.mail.sandbox.task_requested.v1')).toBe(false);
+    expect(deadLetter.test('dead-letter.scan.sandbox.org.1.mail.sandbox.task_requested.v1')).toBe(
+      false,
+    );
+    expect(deadLetter.test('dead-letter.scan.sandbox')).toBe(false);
+    expect(retry.test('retry.scan.sandbox.submissionsx.org.1.x.v1')).toBe(false);
+  });
+
+  it('sandbox-controller (step 4.6) reads scan.sandbox (passive) and nothing else', async () => {
+    const channel = await model('sandbox').createChannel();
+    await expect(channel.checkQueue('scan.sandbox')).resolves.toMatchObject({
+      queue: 'scan.sandbox',
+    });
+    await channel.close();
+    for (const queue of QUEUE_NAMES.filter((q) => q !== 'scan.sandbox')) {
+      expect(await replyCodeOf('sandbox', (ch) => ch.consume(queue, () => undefined)), queue).toBe(
+        ACCESS_REFUSED,
+      );
+    }
+  });
+
+  it('sandbox-controller publishes only task results and its own hops: no other event, queue or exchange', async () => {
+    for (const key of [
+      PROBE_KEY,
+      'org.1.mail.sandbox.task_requested.v1',
+      'org.1.mail.attachment.sandbox_requested.v1',
+      'org.1.mail.attachment.sandbox_completed.v1',
+      'org.1.mail.message.scanned.v1',
+      'org.1.mail.url.inspection_completed.v1',
+      'org.01.mail.sandbox.task_completed.v1',
+      'org.1.mail.sandbox.task_completed.v1.extra',
+      'org.1.mail.sandbox.task_completed.v2',
+      // The email-worker's sandbox queues are dot-extensions of scan.sandbox: the controller's
+      // `.org.`-anchored retry key never reaches them.
+      'retry.scan.sandbox.submissions.org.1.mail.attachment.sandbox_requested.v1',
+      'retry.scan.sandbox.results.org.1.mail.sandbox.task_completed.v1',
+      'retry.scan.url.inspect.org.1.mail.url.inspection_requested.v1',
+      'retry.scan.spam.org.1.mail.message.parsed.v1',
+    ]) {
+      expect(await publishKeyRefused('sandbox', 'email.security', key), key).toBe(ACCESS_REFUSED);
+    }
+    for (const key of [
+      PROBE_KEY,
+      'dead-letter.scan.sandbox.submissions.org.1.mail.attachment.sandbox_requested.v1',
+      'dead-letter.scan.sandbox.results',
+      'dead-letter.scan.url.inspect.org.1.mail.url.inspection_requested.v1',
+      'org.1.mail.message.state_changed.v1',
+    ]) {
+      expect(await publishKeyRefused('sandbox', 'email.events', key), key).toBe(ACCESS_REFUSED);
+    }
+    for (const exchange of ['email.ingestion', 'email.delivery', 'email.policy', 'email.archive']) {
+      expect(await publishRefused('sandbox', exchange), exchange).toBe(ACCESS_REFUSED);
+    }
+    const permission = await api.get<{ configure: string; write: string; read: string }>(
+      `/permissions/${encodeURIComponent(stack.rabbitmqVhost())}/${encodeURIComponent(userOf('sandbox'))}`,
+    );
+    expect(permission).toMatchObject({
+      configure: '^$',
+      write: '^email\\.(security|events)$',
+      read: '^scan\\.sandbox$',
+    });
+    // The allowed side (checked against the broker's topic permissions, never published).
+    const actual = await api.get<TopicPermission[]>(
+      `/topic-permissions/${encodeURIComponent(stack.rabbitmqVhost())}/${encodeURIComponent(userOf('sandbox'))}`,
+    );
+    const write = (exchange: string) =>
+      new RegExp(actual.find((t) => t.exchange === exchange)?.write ?? '^$');
+    expect(
+      write('email.security').test('org.18446744073709551615.mail.sandbox.task_completed.v1'),
+    ).toBe(true);
+    expect(
+      write('email.security').test('retry.scan.sandbox.org.1.mail.sandbox.task_requested.v1'),
+    ).toBe(true);
+    expect(
+      write('email.events').test('dead-letter.scan.sandbox.org.1.mail.sandbox.task_requested.v1'),
+    ).toBe(true);
+    expect(write('email.events').test('dead-letter.scan.sandbox')).toBe(true);
   });
 
   it('url-browser (step 4.3) reads scan.url.inspect (passive) and nothing else', async () => {

@@ -9,24 +9,35 @@ import {
   becPlatformSettingsOf,
   dlpPlatformSettingsOf,
   rspamdPlatformSettingsOf,
+  type SandboxExpectedBackend,
+  sandboxPlatformSettingsOf,
   urlPlatformSettingsOf,
 } from '../../../config';
 import { TransactionRunner } from '../../../database/transaction-runner';
+import { OrganizationFeaturesService } from '../../../tenancy/organization-features.service';
 import type { ClientContext } from '../../auth/services/session.service';
 import { isUniqueViolation } from '../../domains/repositories/domains.repository';
 import {
   type EngineSettingsDefinition,
   engineSettingsDefinitions,
+  type EngineViewContext,
   holdsOverride,
+  SANDBOX_FEATURE_KEY,
 } from '../domain/engine-settings';
 import {
   type EngineSettingsView,
+  type SandboxExecutionMode,
   SETTINGS_APPLY_NOTE,
   type ScanSettingsList,
   type ScanSettingsPut,
   type ScanSettingsResponse,
 } from '../dto/scan-settings.schemas';
-import { scanEngineNotFound, scanSettingsInvalid, versionConflict } from '../scans.errors';
+import {
+  featureNotEnabled,
+  scanEngineNotFound,
+  scanSettingsInvalid,
+  versionConflict,
+} from '../scans.errors';
 import {
   type ScanSettingsRow,
   ScanSettingsRepository,
@@ -43,7 +54,17 @@ type ScanConfig = Parameters<typeof rspamdPlatformSettingsOf>[0] &
   Parameters<typeof attachmentPlatformSettingsOf>[0] &
   Parameters<typeof urlPlatformSettingsOf>[0] &
   Parameters<typeof becPlatformSettingsOf>[0] &
-  Parameters<typeof dlpPlatformSettingsOf>[0];
+  Parameters<typeof dlpPlatformSettingsOf>[0] &
+  Parameters<typeof sandboxPlatformSettingsOf>[0] & {
+    SANDBOX_EXPECTED_BACKEND?: SandboxExpectedBackend;
+  };
+
+/** How the settings view describes the configured controller backend (X17). */
+export const SANDBOX_EXECUTION_OF: Record<SandboxExpectedBackend, SandboxExecutionMode> = {
+  disabled: 'disabled',
+  static: 'static_only',
+  'hardened-container': 'local_test_runner',
+};
 
 const stored = (row: ScanSettingsRow | null) =>
   row === null ? null : { settings: row.settings, version: row.version, updatedAt: row.updatedAt };
@@ -63,6 +84,10 @@ const userIdOf = (principal: Principal): bigint | null =>
  * before/after settings in the same writer transaction. The organization comes from the
  * authenticated scope only. A reset keeps the row with an empty override and a new version, so
  * versions never repeat (no lost update after a reset).
+ *
+ * Step 4.6 X17: an override with `sandbox.enabled = true` needs the organization's plan feature
+ * `attachment_sandbox` (read on the writer inside the change transaction; `409
+ * feature_not_enabled`); every view states that feature.
  */
 @Injectable()
 export class ScanSettingsService {
@@ -74,6 +99,7 @@ export class ScanSettingsService {
     private readonly repository: ScanSettingsRepository,
     private readonly transactions: TransactionRunner,
     private readonly audit: AuditService,
+    private readonly features: OrganizationFeaturesService,
   ) {
     this.definitions = engineSettingsDefinitions({
       rspamd: rspamdPlatformSettingsOf(config),
@@ -81,15 +107,34 @@ export class ScanSettingsService {
       url: urlPlatformSettingsOf(config),
       bec: becPlatformSettingsOf(config),
       dlp: dlpPlatformSettingsOf(config),
+      sandbox: {
+        settings: sandboxPlatformSettingsOf(config),
+        execution: SANDBOX_EXECUTION_OF[config.SANDBOX_EXPECTED_BACKEND ?? 'disabled'],
+      },
     });
+  }
+
+  /** The organization facts the views show (plan features are read on the writer). */
+  private async context(
+    scope: TenantScope,
+    tx?: Prisma.TransactionClient,
+  ): Promise<EngineViewContext> {
+    return {
+      attachmentSandbox: await this.features.isEnabled(
+        scope.organizationId,
+        SANDBOX_FEATURE_KEY,
+        tx,
+      ),
+    };
   }
 
   /** `GET /scan-settings`. */
   async list(scope: TenantScope): Promise<ScanSettingsList> {
-    const rows = new Map((await this.repository.list(scope)).map((row) => [row.engine, row]));
+    const [list, context] = await Promise.all([this.repository.list(scope), this.context(scope)]);
+    const rows = new Map(list.map((row) => [row.engine, row]));
     return {
       data: [...this.definitions.values()].map((definition) =>
-        definition.view(stored(rows.get(definition.catalog.name) ?? null)),
+        definition.view(stored(rows.get(definition.catalog.name) ?? null), context),
       ),
       note: SETTINGS_APPLY_NOTE,
     };
@@ -112,6 +157,14 @@ export class ScanSettingsService {
         const current = await this.repository.find(tx, scope, engine);
         const currentVersion = current?.version ?? 0;
         if (currentVersion !== body.expectedVersion) throw versionConflict(currentVersion);
+        const feature = definition.requiredFeature?.(checked.settings) ?? null;
+        if (
+          feature !== null &&
+          !(await this.features.isEnabled(scope.organizationId, feature, tx))
+        ) {
+          throw featureNotEnabled(feature);
+        }
+        const context = await this.context(scope, tx);
         const updatedByUserId = userIdOf(principal);
         if (current === null) {
           await this.repository.create(tx, scope, { engine, settings, updatedByUserId });
@@ -144,7 +197,7 @@ export class ScanSettingsService {
           },
           tx,
         );
-        return definition.view(stored(await this.repository.find(tx, scope, engine)));
+        return definition.view(stored(await this.repository.find(tx, scope, engine)), context);
       });
       this.logChange('updated', scope, view);
       return { ...view, note: SETTINGS_APPLY_NOTE };
@@ -175,8 +228,9 @@ export class ScanSettingsService {
       const current = await this.repository.find(tx, scope, engine);
       const currentVersion = current?.version ?? 0;
       if (currentVersion !== expectedVersion) throw versionConflict(currentVersion);
+      const context = await this.context(scope, tx);
       if (!holdsOverride(stored(current))) {
-        return { view: definition.view(stored(current)), changed: false };
+        return { view: definition.view(stored(current), context), changed: false };
       }
       const changed = await this.repository.replaceIfVersion(tx, scope, {
         engine,
@@ -207,7 +261,7 @@ export class ScanSettingsService {
         tx,
       );
       return {
-        view: definition.view(stored(await this.repository.find(tx, scope, engine))),
+        view: definition.view(stored(await this.repository.find(tx, scope, engine)), context),
         changed: true,
       };
     });

@@ -26,7 +26,12 @@ import { stack } from './env';
  * - since step 4.5 (D1, D2): topology v7 with a consumer on `scan.dlp` (every round requires the
  *   `dlp` engine, `SCAN_ENGINES=rspamd,attachment,url,bec,dlp`; a stage-1 engine on `parsed.v1`
  *   and `rescan_requested.v1`) and an email-worker that runs the DLP engine
- *   (`scan_dlp_results_total` in `/metrics`, readiness `dlp-engine` and `dlp-extractor`).
+ *   (`scan_dlp_results_total` in `/metrics`, readiness `dlp-engine` and `dlp-extractor`);
+ * - since step 4.6 (X11, X13): topology v8 with consumers on `scan.sandbox.submissions` and
+ *   `scan.sandbox.results` (the email-worker's asynchronous sandbox engine,
+ *   `SANDBOX_ENABLED=true`: `scan_sandbox_submissions_total` in `/metrics`). The round never
+ *   waits for the sandbox; without these consumers the attachment engine's sandbox requests
+ *   would only pile up. The sandbox-controller (`scan.sandbox`) is the sandbox suites' own gate.
  *
  * `scanStageProblems()` returns what is missing (empty when everything is there); the routing,
  * MIME and scan gates include it.
@@ -49,8 +54,10 @@ export const SCAN_CONSUMED_QUEUES = [
   'scan.url.results',
   'scan.bec',
   'scan.dlp',
+  'scan.sandbox.submissions',
+  'scan.sandbox.results',
 ] as const;
-export const TOPOLOGY_VERSION = 7;
+export const TOPOLOGY_VERSION = 8;
 export const TOPOLOGY_DESCRIPTION = `email-gateway topology v${TOPOLOGY_VERSION}`;
 export const PASSTHROUGH_CONSUMER = 'delivery-worker.dev-passthrough-scanned';
 
@@ -59,8 +66,9 @@ export const SCAN_HOW_TO_START = [
   '  docker compose --profile apps build email-worker && docker compose --profile apps build delivery-worker',
   '  docker compose --profile apps up -d --wait email-worker delivery-worker',
   '  (or on the host: pnpm --filter @email-gateway/email-worker dev, SCAN_ENABLED=true)',
-  '  pnpm rabbitmq:init   (topology v7 and the eg-scanner user on scan.spam, scan.attachment, scan.url, scan.bec, scan.dlp)',
-  '  (step 4.2: clamav healthy; step 4.5: SCAN_ENGINES=rspamd,attachment,url,bec,dlp and DLP_EVIDENCE_KEY on the email-worker)',
+  '  pnpm rabbitmq:init   (topology v8 and the eg-scanner user on scan.spam, scan.attachment, scan.url, scan.bec, scan.dlp, scan.sandbox.submissions, scan.sandbox.results)',
+  '  (step 4.2: clamav healthy; step 4.5: SCAN_ENGINES=rspamd,attachment,url,bec,dlp and DLP_EVIDENCE_KEY on the email-worker;',
+  '   step 4.6: SANDBOX_ENABLED=true with the sandbox bucket and keys on the email-worker)',
 ].join('\n');
 
 async function metricsOf(port: number): Promise<string | undefined> {
@@ -101,6 +109,11 @@ export async function scanStageProblems(): Promise<string[]> {
     problems.push(
       'the email-worker does not run the DLP engine (no scan_dlp_results_total in /metrics): ' +
         'an image older than step 4.5, or SCAN_CONSUMERS without dlp',
+    );
+  } else if (!/^# TYPE scan_sandbox_submissions_total /m.test(worker)) {
+    problems.push(
+      'the email-worker does not run the sandbox engine (no scan_sandbox_submissions_total in ' +
+        '/metrics): an image older than step 4.6, or SANDBOX_ENABLED=false',
     );
   }
   const delivery = await metricsOf(stack.ports.services['delivery-worker']);

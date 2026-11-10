@@ -1,0 +1,99 @@
+# =============================================================================================
+# LOCAL/CI ONLY — NOT A VM BOUNDARY — NEVER IN PRODUCTION, NEVER IN KUBERNETES.
+#
+# Sandbox execution override (step 4.6 X5, X6; docs/plan/steps/14-sandbox.md; ADR-0039;
+# docs/security/sandbox-threat-model.md R3/R4; docs/security/sandbox-escape-testing.md).
+# It turns on the `hardened-container` backend: the sandbox-controller starts one disposable,
+# hardened, SHARED-KERNEL Docker container per task on the internal `sandbox-detonation`
+# network, whose only other member is the recording sinkhole below. A container is not a VM:
+# only synthetic benign probes and the EICAR test string (built at run time) may be executed.
+# The controller gets the Docker socket here, i.e. control of the Docker VM (accepted for
+# local/CI only, threat model R3); the main docker-compose.yml never mounts it.
+#
+#   docker compose -f docker-compose.yml -f infrastructure/sandbox/compose.exec.yml \
+#     --profile sandbox up -d sandbox-sinkhole            # sinkhole only (escape suite, host-run)
+#   docker compose -f docker-compose.yml -f infrastructure/sandbox/compose.exec.yml \
+#     --profile apps --profile sandbox up -d --wait sandbox-controller
+#                                                        # controller (profile apps) with the runner
+# Undo: `docker compose --profile apps up -d sandbox-controller` (without this file) recreates
+# the controller with SANDBOX_BACKEND=disabled and no Docker socket.
+#
+# The runner images are built separately, one at a time:
+#   docker build -f infrastructure/docker/sandbox-runner.Dockerfile -t email-gateway/sandbox-runner:local .
+#   docker build -f infrastructure/docker/url-browser-worker.Dockerfile -t email-gateway/url-browser-worker:local .
+# Never start this together with the analytics or observability profiles (8 GB VM budget).
+# =============================================================================================
+
+services:
+  # Recording sinkhole (X5): DNS (UDP+TCP 53), HTTP 80 and TLS-SNI 443 on the detonation address;
+  # admin API only on the control address (bearer token). Never forwards anything. The script is
+  # mounted read-only into the pinned node:22-alpine (no image build), like url-test.
+  sandbox-sinkhole:
+    profiles: [sandbox]
+    image: node:22-alpine@sha256:0e1754758c2df4cfa3e68d59e2e1b7374bb7fd9ea6328eaaacf15cc934af8202
+    restart: unless-stopped
+    command: ['node', '/opt/sinkhole/sinkhole.mjs']
+    volumes:
+      - ./infrastructure/sandbox/sinkhole/sinkhole.mjs:/opt/sinkhole/sinkhole.mjs:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    # Ports 53/80/443 without CAP_NET_BIND_SERVICE (namespaced sysctl of this container only).
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: 0
+    user: '65532:65532'
+    mem_limit: 64m
+    pids_limit: 32
+    environment:
+      SINKHOLE_DNS_ADDRESS: ${SANDBOX_SINKHOLE_DNS:-172.31.253.53}
+      SINKHOLE_ADMIN_ADDRESS: 172.31.252.53
+      SINKHOLE_ADMIN_PORT: '3094'
+      SANDBOX_SINKHOLE_ADMIN_TOKEN: ${SANDBOX_SINKHOLE_ADMIN_TOKEN:?append the sandbox keys from .env.example}
+    networks:
+      sandbox-detonation:
+        ipv4_address: ${SANDBOX_SINKHOLE_DNS:-172.31.253.53}
+      sandbox-control:
+        ipv4_address: 172.31.252.53
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://172.31.252.53:3094/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # The controller (profile `apps` in docker-compose.yml) with the hardened-container backend:
+  # the factory builds withStaticAnalysis(static, HardenedContainerBackend) from these keys.
+  sandbox-controller:
+    environment:
+      SANDBOX_BACKEND: hardened-container
+      SANDBOX_ALLOW_NON_VM_EXECUTION: 'true'
+      SANDBOX_DOCKER_SOCKET: /var/run/docker.sock
+      SANDBOX_RUNNER_IMAGE: ${SANDBOX_RUNNER_IMAGE:-email-gateway/sandbox-runner:local}
+      SANDBOX_BROWSER_IMAGE: ${SANDBOX_BROWSER_IMAGE:-email-gateway/url-browser-worker:local}
+      SANDBOX_RUNNER_NETWORK: ${COMPOSE_PROJECT_NAME:-email-gateway}_sandbox-detonation
+      SANDBOX_SINKHOLE_DNS: ${SANDBOX_SINKHOLE_DNS:-172.31.253.53}
+      SANDBOX_SINKHOLE_ADMIN_URL: http://172.31.252.53:3094
+      SANDBOX_SINKHOLE_ADMIN_TOKEN: ${SANDBOX_SINKHOLE_ADMIN_TOKEN:?append the sandbox keys from .env.example}
+    # The Docker socket (root:root 0660 inside containers on Docker Desktop): the controller
+    # (uid 1000) needs group 0 for it. LOCAL/CI ONLY (threat model R3).
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    group_add: ['0']
+    depends_on:
+      sandbox-sinkhole: { condition: service_healthy }
+
+networks:
+  # Merged into docker-compose.yml's `sandbox-detonation` (internal, 172.31.253.0/24). Docker gives
+  # an internal bridge an address on the VM side (172.31.253.128 here), and the escape suite found
+  # a VM listener reachable there (TCP 111 of the Docker Desktop VM, §12 WP4). `isolated` (Docker
+  # ≥ 28) leaves the bridge without any address: runners reach the sinkhole and nothing on the
+  # Docker host. The hardened-container self-test refuses a detonation network without it.
+  sandbox-detonation:
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv4: isolated

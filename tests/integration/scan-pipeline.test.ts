@@ -660,7 +660,7 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
     }
   });
 
-  it('runs topology v7: scan.spam, scan.attachment, scan.url, scan.url.results, scan.bec and scan.dlp consumed by the scanner user, scan.auth without event bindings', async () => {
+  it('runs topology v8: scan.spam, scan.attachment, scan.url, scan.url.results, scan.bec, scan.dlp, scan.sandbox.submissions and scan.sandbox.results consumed by the scanner user, scan.auth without event bindings', async () => {
     const scanner = process.env.RABBITMQ_SCANNER_USER || 'eg-scanner';
     for (const queue of SCAN_CONSUMED_QUEUES) {
       const details = await mgmt.get<{

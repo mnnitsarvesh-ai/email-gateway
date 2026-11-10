@@ -44,7 +44,14 @@ async function partitionNames(table: string): Promise<string[]> {
 
 describe('partition maintenance', () => {
   it('manages the 30 partitioned tables, including the step 2.3, 3.1, 4.1, 4.2, 4.3, 4.4 and 4.5 tables', () => {
+    // Step 4.6 §3 adds sandbox_analyses and sandbox_artifacts unpartitioned (count unchanged).
     expect(PARTITION_REGISTRY).toHaveLength(30);
+    expect(PARTITION_REGISTRY.map((s) => s.table)).not.toEqual(
+      expect.arrayContaining(['sandbox_analyses']),
+    );
+    expect(PARTITION_REGISTRY.map((s) => s.table)).not.toEqual(
+      expect.arrayContaining(['sandbox_artifacts']),
+    );
     expect(PARTITION_REGISTRY.map((s) => s.table)).toEqual(
       expect.arrayContaining([
         'delivery_reinjections',

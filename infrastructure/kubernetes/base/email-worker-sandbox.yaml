@@ -1,0 +1,214 @@
+# The sandbox engine of the email-worker (step 4.6 X13, X15, X16; ADR-0040;
+# docs/deployment/sandbox.md, docs/runbooks/sandbox-engine.md): the scan role of the email-worker
+# image with only the sandbox consumers (SCAN_CONSUMERS=sandbox): the dispatcher on
+# scan.sandbox.submissions (opt-in, type/size checks, content-hash dedup, staging of the sealed
+# sample into the sandbox bucket, the task outbox row), the results consumer on
+# scan.sandbox.results (result MAC, state, organization, hash and artifact-key checks,
+# sandbox-map/1, the round's asynchronous `sandbox` final) and the sweeper (leader lock
+# scan:sandbox: expiry, sample deletion, artifact crypto-shredding). As role user eg-scanner.
+#
+# The sandbox never delays or changes delivery: it is an asynchronous engine outside the round.
+# EXECUTION OF UNKNOWN FILES IS DISABLED: the sandbox-controller runs SANDBOX_BACKEND=disabled
+# (or `static`); no backend executes anything in production and the `vm` backend refuses.
+#
+# Keys this Deployment needs:
+#   From config.yaml `email-gateway-config` (shared with the api): SANDBOX_TENANT_DEFAULT_ENABLED,
+#     SANDBOX_FILE_TYPES, SANDBOX_MAX_SAMPLE_BYTES, SANDBOX_BROWSER_ANALYSIS, SANDBOX_S3_BUCKET,
+#     the retention keys and the artifact caps, NODE_ENV=production.
+#   Set below: SCAN_ENABLED=true, SCAN_CONSUMERS=sandbox, SANDBOX_ENABLED=true and the engine-only
+#     SANDBOX_* keys (concurrency, deadlines, reuse windows, run limits, sweeper).
+#   Secrets (External Secrets): SANDBOX_SAMPLE_KEY / SANDBOX_RESULT_KEY (+ optional
+#     SANDBOX_SAMPLE_KEY_PREVIOUS) from email-gateway-sandbox-keys — shared ONLY with the
+#     sandbox-controller; DATABASE_URL, RABBITMQ_SCANNER_URL, REDIS_URL and the S3 credentials from
+#     email-gateway-secrets (IAM: the email-worker-sandbox role may put/get/delete samples/* and
+#     get/delete artifacts/* of the sandbox bucket, besides its mail-bucket reads).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: email-worker-sandbox
+  labels:
+    {
+      app.kubernetes.io/name: email-worker-sandbox,
+      app.kubernetes.io/component: scan-sandbox,
+      app.kubernetes.io/part-of: email-gateway,
+    }
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels: { app.kubernetes.io/name: email-worker-sandbox }
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  template:
+    metadata:
+      labels:
+        {
+          app.kubernetes.io/name: email-worker-sandbox,
+          app.kubernetes.io/component: scan-sandbox,
+          app.kubernetes.io/part-of: email-gateway,
+        }
+    spec:
+      serviceAccountName: email-worker-sandbox
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: email-worker
+          image: email-gateway/email-worker:latest
+          ports:
+            - { name: http, containerPort: 3020 }
+          envFrom:
+            - configMapRef: { name: email-gateway-config }
+          env:
+            - { name: HTTP_PORT, value: '3020' }
+            - { name: APP_ENV, value: production }
+            - { name: MIME_INGESTION_ENABLED, value: 'false' }
+            - { name: SCAN_ENABLED, value: 'true' }
+            - { name: SCAN_CONSUMERS, value: sandbox }
+            - { name: SCAN_S3_TIMEOUT_MS, value: '30000' }
+            - { name: SCAN_DB_TIMEOUT_MS, value: '120000' }
+            - { name: SANDBOX_ENABLED, value: 'true' }
+            - { name: SANDBOX_DISPATCH_CONCURRENCY, value: '4' }
+            - { name: SANDBOX_RESULTS_CONCURRENCY, value: '4' }
+            - { name: SANDBOX_TASK_DEADLINE_SECONDS, value: '900' }
+            - { name: SANDBOX_SUBMISSION_TTL_SECONDS, value: '3600' }
+            - { name: SANDBOX_REUSE_DEFINITE_SECONDS, value: '86400' }
+            - { name: SANDBOX_REUSE_UNKNOWN_SECONDS, value: '21600' }
+            - { name: SANDBOX_REUSE_NOT_EXECUTED_SECONDS, value: '3600' }
+            - { name: SANDBOX_ANALYSIS_EPOCH, value: '1' }
+            - { name: SANDBOX_RUN_TIMEOUT_MS, value: '60000' }
+            - { name: SANDBOX_RUN_MEMORY_MB, value: '512' }
+            - { name: SANDBOX_RUN_CPU_MILLIS, value: '1000' }
+            - { name: SANDBOX_RUN_PIDS, value: '128' }
+            - { name: SANDBOX_RUN_SCRATCH_MB, value: '64' }
+            - { name: SANDBOX_SWEEP_INTERVAL_MS, value: '60000' }
+            - { name: SANDBOX_SWEEP_BATCH, value: '500' }
+            - { name: SANDBOX_PUBLISH_HASHES, value: 'false' }
+            - { name: DATABASE_URL_FILE, value: /var/run/secrets/gateway/database-url }
+            - {
+                name: RABBITMQ_SCANNER_URL_FILE,
+                value: /var/run/secrets/gateway/rabbitmq-scanner-url,
+              }
+            - { name: REDIS_URL_FILE, value: /var/run/secrets/gateway/redis-url }
+            - { name: SANDBOX_SAMPLE_KEY_FILE, value: /var/run/secrets/sandbox-keys/sample-key }
+            - { name: SANDBOX_RESULT_KEY_FILE, value: /var/run/secrets/sandbox-keys/result-key }
+            - name: SANDBOX_SAMPLE_KEY_PREVIOUS
+              valueFrom:
+                secretKeyRef:
+                  { name: email-gateway-sandbox-keys, key: sample-key-previous, optional: true }
+          volumeMounts:
+            - { name: secrets, mountPath: /var/run/secrets/gateway, readOnly: true }
+            - { name: sandbox-keys, mountPath: /var/run/secrets/sandbox-keys, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+          readinessProbe:
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /health/live, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          startupProbe:
+            httpGet: { path: /health/live, port: http }
+            periodSeconds: 5
+            failureThreshold: 24
+          resources:
+            # Staging holds at most SANDBOX_DISPATCH_CONCURRENCY samples (≤ 25 MiB each) in memory.
+            requests: { cpu: 250m, memory: 384Mi }
+            limits: { cpu: '1', memory: 768Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+      volumes:
+        - name: secrets
+          secret: { secretName: email-gateway-secrets }
+        - name: sandbox-keys
+          secret:
+            secretName: email-gateway-sandbox-keys
+            items:
+              - { key: sample-key, path: sample-key }
+              - { key: result-key, path: result-key }
+        - name: tmp
+          emptyDir: { sizeLimit: 64Mi }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: email-worker-sandbox
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: email-worker-sandbox
+  labels: { app.kubernetes.io/name: email-worker-sandbox }
+spec:
+  selector: { app.kubernetes.io/name: email-worker-sandbox }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: email-worker-sandbox
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: email-worker-sandbox }
+---
+# Egress of the sandbox engine: the data stores by subnet (replace per environment, as
+# email-worker-dlp.yaml), cluster DNS, OTLP and HTTPS to public addresses for S3 only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: email-worker-sandbox
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: email-worker-sandbox }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: observability }
+          podSelector:
+            matchLabels: { app.kubernetes.io/name: prometheus }
+      ports: [{ protocol: TCP, port: 3020 }]
+  egress:
+    - to: [{ ipBlock: { cidr: 10.0.32.0/20 } }]
+      ports: [{ protocol: TCP, port: 3306 }]
+    - to: [{ ipBlock: { cidr: 10.0.48.0/20 } }]
+      ports: [{ protocol: TCP, port: 6379 }]
+    - to: [{ ipBlock: { cidr: 10.0.64.0/20 } }]
+      ports: [{ protocol: TCP, port: 5671 }, { protocol: TCP, port: 5672 }]
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }]
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: observability }
+      ports: [{ protocol: TCP, port: 4318 }]
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 0.0.0.0/8
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.0.0.0/24
+              - 192.168.0.0/16
+              - 198.18.0.0/15
+              - 224.0.0.0/4
+              - 240.0.0.0/4
+      ports: [{ protocol: TCP, port: 443 }]

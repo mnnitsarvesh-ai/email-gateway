@@ -42,6 +42,7 @@ import {
 import { MessageScansReadRepository } from '../src/modules/messages/repositories/message-scans-read.repository';
 import { AttachmentRescansRepository } from '../src/modules/scans/repositories/attachment-rescans.repository';
 import { ScanSettingsRepository } from '../src/modules/scans/repositories/scan-settings.repository';
+import { OrganizationFeaturesService } from '../src/tenancy/organization-features.service';
 import { ScanTrainingRepository } from '../src/modules/scans/repositories/scan-training.repository';
 import { ThreatHashesRepository } from '../src/modules/scans/repositories/threat-hashes.repository';
 import { ThreatIndicatorsRepository } from '../src/modules/scans/repositories/threat-indicators.repository';
@@ -279,6 +280,40 @@ const jobRow = (status: 'pending' | 'completed' = 'pending') => ({
   requestedBy: { publicId: ids.user },
 });
 
+const pendingSubmission = {
+  id: 31n,
+  scanId: 900n,
+  attachmentId: 4000n,
+  partIndex: 1,
+  sha256: 'd'.repeat(64),
+  status: 'pending',
+  skipReason: null,
+  sandboxVerdict: null,
+  sandboxReasonCodes: null,
+  completedAt: null,
+  analysisId: null,
+  externalRef: null,
+};
+const SANDBOX_TASK = '0193a7c0-0000-7000-8000-00000000abcd';
+const sandboxEngineRow = {
+  ...engineRow(1, true),
+  engine: 'sandbox',
+  engineVersion: '0.1.0+static/sandbox-static/1',
+  outcome: 'unknown' as const,
+  score: null,
+  requiredScore: null,
+  action: null,
+  reasonCodes: ['sandbox.static_only', 'sandbox.static.script_download_cradle'],
+  settingsVersion: 'sandbox-map/1;p=abc;t=1',
+  durationMs: 0,
+  evidence: { submissions: 1, executed: 0, isolation: ['process'] },
+  completedAt: new Date('2026-11-05T08:03:07.654Z'),
+};
+const sandboxState = {
+  submissions: [pendingSubmission] as unknown[],
+  extraEngineRows: [] as unknown[],
+};
+
 describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
   let app: INestApplication;
   const kv = new InMemoryKeyValueStore();
@@ -364,6 +399,15 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
     record: vi.fn((_entry: Record<string, unknown>) => Promise.resolve()),
   };
   const transactions = { run: vi.fn((fn: (tx: unknown) => Promise<unknown>) => fn({})) };
+  const features = {
+    isEnabled: vi.fn((_organizationId: bigint, _key: string, _tx?: unknown) =>
+      Promise.resolve(false),
+    ),
+  };
+  const sandboxReads = {
+    analyses: vi.fn((_ids: bigint[]) => Promise.resolve([] as unknown[])),
+    artifacts: vi.fn((_ids: bigint[]) => Promise.resolve([] as unknown[])),
+  };
 
   const bearer = async (amr: AuthMethod[] = ['pwd', 'otp']) => {
     const { token } = await tokens.issue({
@@ -419,6 +463,7 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
             engineRow(1, false),
             attachmentEngineRow,
             urlEngineRow,
+            ...sandboxState.extraEngineRows,
           ]),
         messageUrls: () => Promise.resolve([messageUrlRow]),
         urlResults: () => Promise.resolve([urlResultRow]),
@@ -448,8 +493,9 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
         attachmentResults: () => Promise.resolve([attachmentResultRow]),
         attachmentParts: () =>
           Promise.resolve([{ partIndex: 1, filename: 'invoice.pdf', declaredContentType: null }]),
-        sandboxSubmissions: () =>
-          Promise.resolve([{ id: 31n, scanId: 900n, attachmentId: 4000n, status: 'pending' }]),
+        sandboxSubmissions: () => Promise.resolve(sandboxState.submissions),
+        sandboxAnalyses: (ids: bigint[]) => sandboxReads.analyses(ids),
+        sandboxArtifacts: (ids: bigint[]) => sandboxReads.artifacts(ids),
         authResults: () =>
           Promise.resolve([
             {
@@ -468,6 +514,8 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
       })
       .overrideProvider(ScanSettingsRepository)
       .useValue(settingsRows)
+      .overrideProvider(OrganizationFeaturesService)
+      .useValue(features)
       .overrideProvider(ScanTrainingRepository)
       .useValue(training)
       .overrideProvider(ThreatHashesRepository)
@@ -492,6 +540,9 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
     kv.entries.clear();
     apiKeyPermissions = new Set([READ, POLICY_READ]);
     principalWith([READ, POLICY_READ, MANAGE]);
+    sandboxState.submissions = [pendingSubmission];
+    sandboxState.extraEngineRows = [];
+    features.isEnabled.mockResolvedValue(false);
   });
 
   it('answers 401 without credentials', async () => {
@@ -611,7 +662,16 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
                     yara: { bundleId: 'yara-1-462fab6e5cc4', matches: [] },
                     archive: null,
                     knownHash: null,
-                    sandbox: { submissionId: '31', status: 'pending' },
+                    sandbox: {
+                      submissionId: '31',
+                      status: 'pending',
+                      skipReason: null,
+                      verdict: null,
+                      reasonCodes: [],
+                      executed: null,
+                      isolation: null,
+                      completedAt: null,
+                    },
                   },
                 ],
               },
@@ -771,6 +831,20 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
             evidence: { enabled: true, retentionDays: 30 },
           }),
         }),
+        expect.objectContaining({
+          engine: 'sandbox',
+          mode: 'asynchronous',
+          required: false,
+          tenantMayDisable: true,
+          override: null,
+          platform: expect.objectContaining({
+            tenantDefaultEnabled: false,
+            maxSampleBytes: 26_214_400,
+          }),
+          effective: expect.objectContaining({ enabled: false, browserAnalysis: true }),
+          feature: { attachmentSandbox: false },
+          execution: 'disabled',
+        }),
       ]);
       expect(res.body.note).toContain('SCAN_SETTINGS_CACHE_TTL_MS');
     });
@@ -863,6 +937,295 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
         .set(await bearer())
         .expect(400);
       expect(audit.record).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('sandbox settings (step 4.6 X17)', () => {
+    it('PUT enabled=true without the plan feature is 409 feature_not_enabled, nothing written', async () => {
+      const res = await http()
+        .put('/api/v1/scan-settings/sandbox')
+        .set(await bearer())
+        .send({ expectedVersion: 0, settings: { enabled: true } })
+        .expect(409);
+      expect(res.body).toMatchObject({
+        statusCode: 409,
+        code: 'feature_not_enabled',
+        feature: 'attachment_sandbox',
+      });
+      // The feature is read for the authenticated organization (scope), never from the client.
+      expect(features.isEnabled).toHaveBeenCalledWith(1n, 'attachment_sandbox', {});
+      expect(settingsRows.create).not.toHaveBeenCalled();
+      expect(audit.record).not.toHaveBeenCalled();
+    });
+
+    it('PUT with the plan feature stores the opt-in (audited), and needs scan:settings_manage', async () => {
+      principalWith([READ, POLICY_READ]);
+      await http()
+        .put('/api/v1/scan-settings/sandbox')
+        .set(await bearer())
+        .send({ expectedVersion: 0, settings: { enabled: true } })
+        .expect(403);
+      principalWith([READ, POLICY_READ, MANAGE]);
+      features.isEnabled.mockResolvedValue(true);
+      settingsRows.find.mockResolvedValueOnce(null).mockResolvedValueOnce({
+        engine: 'sandbox',
+        settings: { enabled: true, fileTypes: ['pdf', 'script_shell'] },
+        version: 1,
+        updatedAt: new Date('2026-11-08T09:00:00.000Z'),
+      });
+      const res = await http()
+        .put('/api/v1/scan-settings/sandbox')
+        .set(await bearer())
+        .send({
+          expectedVersion: 0,
+          settings: { enabled: true, fileTypes: ['pdf', 'script_shell'] },
+        })
+        .expect(200);
+      expect(res.body).toMatchObject({
+        engine: 'sandbox',
+        version: 1,
+        override: { enabled: true, fileTypes: ['pdf', 'script_shell'] },
+        effective: { enabled: true, fileTypes: ['pdf', 'script_shell'] },
+        feature: { attachmentSandbox: true },
+        execution: 'disabled',
+      });
+      expect(audit.record).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'scan_settings.updated',
+          resourceId: 'sandbox',
+          metadata: expect.objectContaining({
+            after: { enabled: true, fileTypes: ['pdf', 'script_shell'] },
+          }),
+        }),
+        {},
+      );
+    });
+
+    it('PUT refuses out-of-bounds sandbox settings (422) before any database access', async () => {
+      const res = await http()
+        .put('/api/v1/scan-settings/sandbox')
+        .set(await bearer())
+        .send({
+          expectedVersion: 0,
+          settings: { fileTypes: ['zip'], maxSampleBytes: 0, backend: 'hardened-container' },
+        })
+        .expect(422);
+      expect(res.body.code).toBe('scan_settings_invalid');
+      expect(res.body.violations).toEqual([
+        expect.objectContaining({ path: 'backend', code: 'unknown_key' }),
+      ]);
+      const bounds = await http()
+        .put('/api/v1/scan-settings/sandbox')
+        .set(await bearer())
+        .send({ expectedVersion: 0, settings: { fileTypes: ['zip'], maxSampleBytes: 0 } })
+        .expect(422);
+      expect(bounds.body.violations).toEqual([
+        expect.objectContaining({ path: 'fileTypes', code: 'out_of_bounds' }),
+        expect.objectContaining({ path: 'maxSampleBytes', code: 'out_of_bounds' }),
+      ]);
+      expect(transactions.run).not.toHaveBeenCalled();
+    });
+
+    it('409 version_conflict before the feature check; DELETE resets without a feature', async () => {
+      settingsRows.find.mockResolvedValueOnce({
+        engine: 'sandbox',
+        settings: { enabled: false },
+        version: 2,
+        updatedAt: new Date(),
+      });
+      const res = await http()
+        .put('/api/v1/scan-settings/sandbox')
+        .set(await bearer())
+        .send({ expectedVersion: 1, settings: { enabled: true } })
+        .expect(409);
+      expect(res.body).toMatchObject({ code: 'version_conflict', currentVersion: 2 });
+      settingsRows.find
+        .mockResolvedValueOnce({
+          engine: 'sandbox',
+          settings: { enabled: true },
+          version: 2,
+          updatedAt: new Date(),
+        })
+        .mockResolvedValueOnce({
+          engine: 'sandbox',
+          settings: {},
+          version: 3,
+          updatedAt: new Date(),
+        });
+      const reset = await http()
+        .delete('/api/v1/scan-settings/sandbox?expectedVersion=2')
+        .set(await bearer())
+        .expect(200);
+      expect(reset.body).toMatchObject({ engine: 'sandbox', version: 3, override: null });
+      expect(audit.record).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'scan_settings.reset', resourceId: 'sandbox' }),
+        {},
+      );
+    });
+  });
+
+  describe('sandbox results on GET /messages/{messageId}/scans (step 4.6 X18)', () => {
+    const completed = {
+      ...pendingSubmission,
+      status: 'completed',
+      sandboxVerdict: 'unknown',
+      sandboxReasonCodes: ['sandbox.static_only', 'sandbox.static.script_download_cradle'],
+      completedAt: new Date('2026-11-05T08:03:07.321Z'),
+      analysisId: 66n,
+      externalRef: SANDBOX_TASK,
+    };
+    const analysisRow = {
+      id: 66n,
+      publicId: SANDBOX_TASK,
+      report: {
+        v: 1,
+        findings: [{ code: 'static.script_download_cradle', severity: 'high', count: 1 }],
+        indicators: { dns: ['dl.example'], httpHosts: [], tlsSni: [], ips: [] },
+        networkTotals: { dns: 1, http: 0, tls: 0, connections: 0 },
+        processes: { count: 0, images: [] },
+        droppedFiles: [],
+        deniedWrites: 0,
+        limitsHit: [],
+        browser: null,
+      },
+      backend: 'static',
+      backendVersion: 'sandbox-static/1',
+      isolation: 'process',
+      executed: false,
+      controllerVersion: '0.1.0',
+      analyzerVersion: 'sandbox-static/1',
+      mapVersion: 'sandbox-map/1',
+    };
+
+    it('shows the submission outcome on the attachment and the report on the sandbox entry', async () => {
+      sandboxState.submissions = [completed];
+      sandboxState.extraEngineRows = [sandboxEngineRow];
+      sandboxReads.analyses.mockResolvedValueOnce([analysisRow]);
+      sandboxReads.artifacts.mockResolvedValueOnce([
+        {
+          analysisId: 66n,
+          seq: 0,
+          kind: 'static_report',
+          contentType: 'application/json',
+          sizeBytes: 812,
+          plainSha256: 'e'.repeat(64),
+          expiresAt: new Date('2026-12-05T08:03:07.111Z'),
+          purgedAt: null,
+        },
+      ]);
+      const res = await http()
+        .get(`/api/v1/messages/${knownMessage.publicId}/scans`)
+        .set(apiKey)
+        .expect(200);
+      // Analyses are read only by the ids of this organization's own submissions.
+      expect(sandboxReads.analyses).toHaveBeenCalledWith([66n]);
+      const round = res.body.data[0];
+      // The asynchronous sandbox final never changes the round verdict.
+      expect(round.verdict).toBe('spam');
+      const attachment = round.engines.find((e: { engine: string }) => e.engine === 'attachment');
+      expect(attachment.attachments[0].sandbox).toEqual({
+        submissionId: '31',
+        status: 'completed',
+        skipReason: null,
+        verdict: 'unknown',
+        reasonCodes: ['sandbox.static_only', 'sandbox.static.script_download_cradle'],
+        executed: false,
+        isolation: 'process',
+        completedAt: '2026-11-05T08:03:07.000Z',
+      });
+      const sandbox = round.engines.find((e: { engine: string }) => e.engine === 'sandbox');
+      expect(sandbox).toMatchObject({
+        engine: 'sandbox',
+        outcome: 'unknown',
+        symbols: [],
+        durationMs: null,
+        completedAt: '2026-11-05T08:03:07.000Z',
+        attempts: [{ attempt: 1, durationMs: null, at: '2026-11-05T08:03:07.000Z' }],
+        submissions: [
+          {
+            submissionId: '31',
+            partIndex: 1,
+            sha256: 'd'.repeat(64),
+            status: 'completed',
+            verdict: 'unknown',
+            executed: false,
+            isolation: 'process',
+            backend: 'static',
+            versions: {
+              controller: '0.1.0',
+              backend: 'sandbox-static/1',
+              analyzer: 'sandbox-static/1',
+              map: 'sandbox-map/1',
+            },
+            findings: [{ code: 'static.script_download_cradle', severity: 'high', count: 1 }],
+            indicators: { dns: ['dl.example'], httpHosts: [], tlsSni: [], ips: [] },
+            artifacts: [
+              {
+                seq: 0,
+                kind: 'static_report',
+                contentType: 'application/json',
+                sizeBytes: 812,
+                sha256: 'e'.repeat(64),
+                expiresAt: '2026-12-05T00:00:00.000Z',
+                purged: false,
+              },
+            ],
+          },
+        ],
+      });
+      // No analysis id, reuse flag, analysis timing or object key reaches the tenant.
+      const json = JSON.stringify(sandbox);
+      expect(json).not.toContain(SANDBOX_TASK);
+      expect(json).not.toMatch(
+        /analysisId|reuse|objectKey|wrappedKey|dispatchedAt|"durationMs":\d/,
+      );
+    });
+
+    it('shows a skipped submission (tenant not opted in) without reading any analysis', async () => {
+      sandboxState.submissions = [
+        {
+          ...pendingSubmission,
+          status: 'skipped',
+          skipReason: 'tenant_disabled',
+          sandboxReasonCodes: ['sandbox.tenant_disabled'],
+          completedAt: new Date('2026-11-05T08:00:06.500Z'),
+        },
+      ];
+      sandboxState.extraEngineRows = [
+        {
+          ...sandboxEngineRow,
+          outcome: 'skipped',
+          engineVersion: 'sandbox-engine/1',
+          reasonCodes: ['sandbox.tenant_disabled'],
+        },
+      ];
+      const res = await http()
+        .get(`/api/v1/messages/${knownMessage.publicId}/scans`)
+        .set(apiKey)
+        .expect(200);
+      expect(sandboxReads.analyses).not.toHaveBeenCalled();
+      const sandbox = res.body.data[0].engines.find(
+        (e: { engine: string }) => e.engine === 'sandbox',
+      );
+      expect(sandbox.outcome).toBe('skipped');
+      expect(sandbox.submissions).toEqual([
+        expect.objectContaining({
+          status: 'skipped',
+          skipReason: 'tenant_disabled',
+          verdict: null,
+          executed: null,
+          findings: [],
+          artifacts: [],
+        }),
+      ]);
+    });
+
+    it('needs message:read only (no new permission); another organization’s message is 404', async () => {
+      apiKeyPermissions = new Set([POLICY_READ]);
+      await http().get(`/api/v1/messages/${knownMessage.publicId}/scans`).set(apiKey).expect(403);
+      apiKeyPermissions = new Set([READ]);
+      await http().get(`/api/v1/messages/${knownMessage.publicId}/scans`).set(apiKey).expect(200);
+      await http().get(`/api/v1/messages/${randomUUID()}/scans`).set(apiKey).expect(404);
     });
   });
 

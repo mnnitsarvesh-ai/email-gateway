@@ -28,10 +28,155 @@ function refusal(value: unknown): { code: ContentGuardCode; path: string } {
 describe('assertMetadataOnly: valid envelopes pass', () => {
   const types = Object.keys(EVENT_REGISTRY) as RegisteredEventType[];
 
-  it('covers all seventeen registered event types (two added by step 3.3, one by step 4.2, three by step 4.3, one by step 4.4, one by step 4.5)', () => {
-    expect(types).toHaveLength(17);
+  it('covers all twenty registered event types (two added by step 3.3, one by step 4.2, three by step 4.3, one by step 4.4, one by step 4.5, three by step 4.6)', () => {
+    expect(types).toHaveLength(20);
     expect(types).toContain('mail.message.dlp_incident.v1');
+    expect(types).toEqual(
+      expect.arrayContaining([
+        'mail.sandbox.task_requested.v1',
+        'mail.sandbox.task_completed.v1',
+        'mail.attachment.sandbox_completed.v1',
+      ]),
+    );
   });
+
+  /** Step 4.6 §4: every maximal sandbox payload is metadata only and well below 128 KiB. */
+  const MAX_MESSAGE_BYTES = 131_072;
+  const sandboxTaskId = '01890a5d-ac96-774b-bcce-b302099a8070';
+  const hex = (c: string) => c.repeat(64);
+  const host = (i: number) => `${'a'.repeat(50)}-${i}.${'b'.repeat(60)}.${'c'.repeat(60)}.test`;
+  const maximalSandbox: Record<string, unknown> = {
+    'mail.sandbox.task_requested.v1': {
+      ...(EXAMPLE_EVENT_PAYLOADS['mail.sandbox.task_requested.v1'] as object),
+      sample: {
+        key: `samples/2026/11/${sandboxTaskId}.bin`,
+        sha256: hex('c'),
+        sizeBytes: 67_108_864,
+        detectedType: 'ooxml_powerpoint',
+      },
+      limits: {
+        wallTimeoutMs: 600_000,
+        memoryMb: 4_096,
+        cpuMillis: 4_000,
+        pids: 1_024,
+        scratchMb: 1_024,
+        maxArtifacts: 16,
+        maxArtifactBytes: 8_388_608,
+        maxTotalArtifactBytes: 33_554_432,
+      },
+    },
+    'mail.sandbox.task_completed.v1': {
+      ...(EXAMPLE_EVENT_PAYLOADS['mail.sandbox.task_completed.v1'] as object),
+      backend: 'hardened-container',
+      backendVersion: `hardened-container/1+runner:${'d'.repeat(36)}`,
+      isolation: 'container',
+      executed: true,
+      controllerVersion: 'v'.repeat(64),
+      analyzerVersion: 'w'.repeat(64),
+      observations: {
+        processes: Array.from({ length: 32 }, (_, i) => ({
+          seq: i,
+          parentSeq: i === 0 ? null : i - 1,
+          image: 'i'.repeat(64),
+          argvSha256: hex('a'),
+          exitCode: -2_147_483_648,
+          killedBy: 'pids',
+        })),
+        processCount: 1_000_000,
+        network: {
+          dns: Array.from({ length: 50 }, (_, i) => ({
+            name: host(i),
+            type: 'AAAA',
+            source: 'sinkhole',
+          })),
+          http: Array.from({ length: 50 }, (_, i) => ({
+            host: host(i),
+            port: 65_535,
+            method: 'OTHER',
+            pathSha256: hex('b'),
+            userAgentSha256: hex('c'),
+          })),
+          tls: Array.from({ length: 50 }, (_, i) => ({ sni: host(i), port: 443 })),
+          connections: Array.from({ length: 50 }, (_, i) => ({
+            ip: `2001:db8:ffff:ffff:ffff:ffff:ffff:${(0xff00 + i).toString(16)}`,
+            port: 65_535,
+            protocol: 'udp',
+            outcome: 'sinkhole',
+          })),
+          totals: { dns: 1_000_000, http: 1_000_000, tls: 1_000_000, connections: 1_000_000 },
+        },
+        files: {
+          dropped: Array.from({ length: 32 }, (_, i) => ({
+            seq: i,
+            sha256: hex('e'),
+            sizeBytes: 2 ** 40,
+            typeHint: 'pe_executable',
+          })),
+          deniedWrites: 1_000_000,
+        },
+        findings: Array.from({ length: 32 }, (_, i) => ({
+          code: `behaviour.${'x'.repeat(50)}_${String(i).padStart(2, '0')}`,
+          severity: 'critical',
+          count: 1_000_000,
+        })),
+        limitsHit: [
+          'memory',
+          'pids',
+          'cpu',
+          'scratch_full',
+          'wall_timeout',
+          'analyzer_resources',
+          'output_truncated',
+          'artifact_cap',
+        ],
+        browser: {
+          navigations: 1_000_000,
+          requests: 1_000_000,
+          downloadsAttempted: 1_000_000,
+          dialogs: 1_000_000,
+          passwordFields: 1_000_000,
+          forms: 1_000_000,
+        },
+      },
+      artifacts: Array.from({ length: 16 }, (_, i) => ({
+        seq: i,
+        kind: 'dropped_file',
+        contentType: 'application/octet-stream',
+        key: `artifacts/2026/11/${sandboxTaskId}/0f1e2d3c4b5a6978/${i}-dropped_file.bin`,
+        objectSha256: hex('a'),
+        plainSha256: hex('b'),
+        sizeBytes: 8_388_608,
+        wrappedKey: `x1.k1234567.${'A'.repeat(43)}.${'B'.repeat(16)}.${'C'.repeat(22)}.${'D'.repeat(43)}`,
+        keyId: 'k1234567',
+        algorithm: 'sandbox-artifact/1',
+      })),
+      cleanup: { runnerRemoved: true, scratchRemoved: true },
+    },
+    'mail.attachment.sandbox_completed.v1': {
+      ...(EXAMPLE_EVENT_PAYLOADS['mail.attachment.sandbox_completed.v1'] as object),
+      submissionId: '18446744073709551615',
+      messageId: '18446744073709551615',
+      scanId: '18446744073709551615',
+      lifecycleRound: 65_535,
+      partIndex: 65_535,
+      reasonCodes: Array.from(
+        { length: 16 },
+        (_, i) => `sandbox.behaviour.${'y'.repeat(40)}_${String(i).padStart(2, '0')}`,
+      ),
+    },
+  };
+
+  it.each(Object.keys(maximalSandbox))(
+    'passes a maximal %s (step 4.6 §4: metadata only, < 128 KiB)',
+    (type) => {
+      const payload = maximalSandbox[type];
+      const schema = EVENT_REGISTRY[type as RegisteredEventType].schema;
+      expect(schema.safeParse(payload).error).toBeUndefined();
+      const value = envelope(type, payload);
+      expect(() => assertMetadataOnly(value)).not.toThrow();
+      expect(Buffer.byteLength(JSON.stringify(value), 'utf8')).toBeLessThan(MAX_MESSAGE_BYTES);
+    },
+  );
 
   it('passes a maximal mail.message.dlp_incident.v1 (ids, codes and counts only, step 4.5 D14)', () => {
     const base = EXAMPLE_EVENT_PAYLOADS['mail.message.dlp_incident.v1'] as Record<string, unknown>;

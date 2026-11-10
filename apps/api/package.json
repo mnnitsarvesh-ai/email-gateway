@@ -25,6 +25,7 @@
     "@email-gateway/mail-routing": "workspace:*",
     "@email-gateway/message-lifecycle": "workspace:*",
     "@email-gateway/rspamd": "workspace:*",
+    "@email-gateway/sandbox": "workspace:*",
     "@email-gateway/security-contracts": "workspace:*",
     "@email-gateway/shared-types": "workspace:*",
     "@email-gateway/url-security": "workspace:*",

@@ -1,5 +1,6 @@
 import type { z } from 'zod';
 import {
+  attachmentSandboxCompletedV1,
   attachmentSandboxRequestedV1,
   deliveryApprovedV1,
   deliveryStatusChangedV1,
@@ -15,6 +16,8 @@ import {
   messageScanStageReadyV1,
   messageStateChangedV1,
   policyDecidedV1,
+  sandboxTaskCompletedV1,
+  sandboxTaskRequestedV1,
   urlClickedV1,
   urlInspectionCompletedV1,
   urlInspectionRequestedV1,
@@ -30,9 +33,11 @@ import type { ExchangeName } from './topology';
 
 /**
  * Outbox `aggregate_type` values of registered events. `attachment` (step 4.2 A2): the aggregate
- * is a sandbox submission (`aggregate_id` = `sandbox_submissions.id`).
+ * is a sandbox submission (`aggregate_id` = `sandbox_submissions.id`). `sandbox_analysis` (step
+ * 4.6 X11): the aggregate is a sandbox analysis (`aggregate_id` = `sandbox_analyses.id`;
+ * `message_outbox.aggregate_type` is VARCHAR(64), no DDL).
  */
-export type AggregateType = 'message' | 'domain' | 'attachment';
+export type AggregateType = 'message' | 'domain' | 'attachment' | 'sandbox_analysis';
 
 export interface EventDefinition<S extends z.ZodType = z.ZodType> {
   type: string;
@@ -177,6 +182,30 @@ export const EVENT_REGISTRY = {
     'email.security',
     messageDlpIncidentV1,
     'message',
+  ),
+  // Step 4.6 X11: producer email-worker (sandbox dispatcher) through the outbox; bound to the
+  // controller's queue scan.sandbox (topology v8).
+  [EventTypes.SandboxTaskRequested]: define(
+    EventTypes.SandboxTaskRequested,
+    'email.security',
+    sandboxTaskRequestedV1,
+    'sandbox_analysis',
+  ),
+  // Step 4.6 X11: producer sandbox-controller by direct publish with publisher confirms (no
+  // outbox: the controller has no database); bound to scan.sandbox.results.
+  [EventTypes.SandboxTaskCompleted]: define(
+    EventTypes.SandboxTaskCompleted,
+    'email.security',
+    sandboxTaskCompletedV1,
+    'sandbox_analysis',
+  ),
+  // Step 4.6 X15: producer email-worker (sandbox finalizer) through the outbox; no queue binding
+  // in topology v8 (analytics firehose only; policy 5.x binds it).
+  [EventTypes.AttachmentSandboxCompleted]: define(
+    EventTypes.AttachmentSandboxCompleted,
+    'email.security',
+    attachmentSandboxCompletedV1,
+    'attachment',
   ),
 } as const satisfies Record<string, EventDefinition>;
 

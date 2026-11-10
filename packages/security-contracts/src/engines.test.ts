@@ -5,6 +5,8 @@ import {
   ENGINE_NAMES,
   type EngineCatalogEntry,
   engineCatalogEntry,
+  isAsynchronousEngine,
+  isAsynchronousEntry,
   isEngineName,
   isStage2Engine,
   parseEnabledEngines,
@@ -15,8 +17,8 @@ import {
 } from './index';
 
 describe('engine catalog (S4)', () => {
-  it('registers rspamd (4.1), attachment (4.2), url (4.3), bec (4.4) and dlp (4.5), required and not disableable', () => {
-    expect(ENGINE_CATALOG).toHaveLength(5);
+  it('registers rspamd (4.1), attachment (4.2), url (4.3), bec (4.4) and dlp (4.5), required and not disableable, and the asynchronous sandbox (4.6)', () => {
+    expect(ENGINE_CATALOG).toHaveLength(6);
     expect(ENGINE_CATALOG[0]).toMatchObject({
       name: 'rspamd',
       stage: 'antispam',
@@ -65,7 +67,22 @@ describe('engine catalog (S4)', () => {
         'Data loss prevention: card, bank, national id, passport, personal, confidential, source code, credential, financial and tenant patterns; attachment text extraction; outbound policy actions (step 4.5)',
     });
     expect(isStage2Engine(ENGINE_CATALOG[4]!)).toBe(false);
-    for (const name of ['rspamd', 'attachment', 'url', 'dlp']) {
+    // Step 4.6 X10: asynchronous, optional, disableable by a tenant, dispatched to scan.sandbox.
+    expect(ENGINE_CATALOG[5]).toEqual({
+      name: 'sandbox',
+      stage: 'sandbox',
+      queue: 'scan.sandbox',
+      requiredByDefault: false,
+      tenantMayDisable: true,
+      mode: 'asynchronous',
+      description:
+        'Sandbox: static analysis and (when an approved isolation backend exists) detonation of suspicious/unknown attachments; asynchronous, never required (step 4.6)',
+    });
+    for (const entry of ENGINE_CATALOG.slice(0, 5)) {
+      expect(entry.mode, entry.name).toBeUndefined();
+      expect(isAsynchronousEntry(entry), entry.name).toBe(false);
+    }
+    for (const name of ['rspamd', 'attachment', 'url', 'dlp', 'sandbox']) {
       expect(engineCatalogEntry(name)?.dependsOn, name).toBeUndefined();
     }
     for (const entry of ENGINE_CATALOG) {
@@ -102,7 +119,7 @@ describe('engine catalog (S4)', () => {
     expect(engineCatalogEntry('url')?.queue).toBe('scan.url');
     expect(engineCatalogEntry('bec')?.queue).toBe('scan.bec');
     expect(engineCatalogEntry('dlp')?.queue).toBe('scan.dlp');
-    expect(engineCatalogEntry('sandbox')).toBeUndefined();
+    expect(engineCatalogEntry('sandbox')?.queue).toBe('scan.sandbox');
     expect(engineCatalogEntry('clamav')).toBeUndefined();
     expect(isEngineName('url')).toBe(true);
     expect(isEngineName('clamav')).toBe(false);
@@ -133,7 +150,20 @@ describe('engine catalog (S4)', () => {
       'dlp',
     ]);
     expect(parseEnabledEngines('rspamd,dlp')).toEqual(['rspamd', 'dlp']);
-    expect(() => parseEnabledEngines('rspamd,sandbox')).toThrow(/not in the catalog: sandbox/);
+    // Step 4.6 X10: SCAN_ENGINES lists synchronous engines only.
+    expect(() => parseEnabledEngines('rspamd,sandbox')).toThrow(/sandbox is asynchronous/);
+    expect(() => parseEnabledEngines('sandbox')).toThrow(/asynchronous/);
+  });
+
+  it('knows the asynchronous engines (step 4.6 X10)', () => {
+    expect(isAsynchronousEngine('sandbox')).toBe(true);
+    for (const name of ['rspamd', 'attachment', 'url', 'bec', 'dlp', 'clamav', '']) {
+      expect(isAsynchronousEngine(name), name).toBe(false);
+    }
+    expect(isAsynchronousEntry({})).toBe(false);
+    expect(isAsynchronousEntry({ mode: 'synchronous' })).toBe(false);
+    expect(isAsynchronousEntry({ mode: 'asynchronous' })).toBe(true);
+    expect(ENGINE_CATALOG.filter(isAsynchronousEntry).map((e) => e.name)).toEqual(['sandbox']);
   });
 
   it('snapshots the required engines; a tenant cannot drop an engine it may not disable', () => {
@@ -168,6 +198,10 @@ describe('engine catalog (S4)', () => {
       'dlp',
     ]);
     expect(requiredEngines(['rspamd', 'attachment', 'url', 'bec'])).not.toContain('dlp');
+    // Step 4.6 X10: the asynchronous sandbox is never required, even when listed as enabled.
+    expect(requiredEngines(['rspamd', 'attachment', 'url', 'bec', 'dlp', 'sandbox'])).not.toContain(
+      'sandbox',
+    );
   });
 });
 
@@ -185,7 +219,7 @@ describe('engine dependencies (step 4.4 B2)', () => {
     description: name,
   });
 
-  it('validates the registered catalog (with dlp, stage 1): bec is the only stage-2 engine', () => {
+  it('validates the registered catalog (with dlp, stage 1, and the asynchronous sandbox): bec is the only stage-2 engine', () => {
     expect(() => validateCatalog()).not.toThrow();
     expect(() => validateCatalog(ENGINE_CATALOG)).not.toThrow();
     expect(stage2Engines()).toEqual(['bec']);
@@ -194,6 +228,7 @@ describe('engine dependencies (step 4.4 B2)', () => {
       'attachment',
       'url',
       'dlp',
+      'sandbox',
     ]);
     expect(isStage2Engine({})).toBe(false);
     expect(isStage2Engine({ dependsOn: [] })).toBe(false);
@@ -218,5 +253,47 @@ describe('engine dependencies (step 4.4 B2)', () => {
     );
     expect(() => validateCatalog([entry('rspamd'), entry('url'), entry('bec', [])])).not.toThrow();
     expect(stage2Engines([entry('rspamd'), entry('dlp', ['rspamd'])])).toEqual(['dlp']);
+  });
+});
+
+describe('asynchronous engines in the catalog (step 4.6 X10)', () => {
+  const entry = (
+    name: EngineCatalogEntry['name'],
+    extra: Partial<EngineCatalogEntry> = {},
+  ): EngineCatalogEntry => ({
+    name,
+    stage: 'sandbox',
+    queue: `scan.${name}`,
+    requiredByDefault: true,
+    tenantMayDisable: false,
+    description: name,
+    ...extra,
+  });
+  const sandbox = entry('sandbox', {
+    requiredByDefault: false,
+    tenantMayDisable: true,
+    mode: 'asynchronous',
+  });
+
+  it('accepts an optional asynchronous engine without dependencies', () => {
+    expect(() => validateCatalog([entry('rspamd'), sandbox])).not.toThrow();
+  });
+
+  it('refuses a required asynchronous engine', () => {
+    expect(() =>
+      validateCatalog([entry('rspamd'), { ...sandbox, requiredByDefault: true }]),
+    ).toThrow('Asynchronous engine sandbox cannot be required by default');
+  });
+
+  it('refuses an asynchronous engine with dependencies', () => {
+    expect(() => validateCatalog([entry('rspamd'), { ...sandbox, dependsOn: ['rspamd'] }])).toThrow(
+      'Asynchronous engine sandbox cannot declare dependencies',
+    );
+  });
+
+  it('refuses an engine that depends on an asynchronous engine', () => {
+    expect(() => validateCatalog([sandbox, entry('bec', { dependsOn: ['sandbox'] })])).toThrow(
+      'Engine bec depends on sandbox, which is an asynchronous engine',
+    );
   });
 });

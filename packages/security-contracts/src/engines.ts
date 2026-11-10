@@ -43,13 +43,23 @@ export interface EngineCatalogEntry {
    * final row. Depth 1 only: a dependency never has dependencies itself (`validateCatalog`).
    */
   readonly dependsOn?: readonly EngineName[];
+  /**
+   * Step 4.6 X10 (ADR-0040 decision 1): absent or `synchronous` — a round engine (in
+   * `SCAN_ENGINES`, aggregated into the round verdict when required). `asynchronous` — the round
+   * never waits for it and its finals are excluded from the round aggregation; it is never
+   * required, has no dependencies, no engine depends on it, and it is enabled by its own switch
+   * (`SANDBOX_ENABLED`), never through `SCAN_ENGINES`. `queue` then names where its work is
+   * dispatched.
+   */
+  readonly mode?: 'synchronous' | 'asynchronous';
   readonly description: string;
 }
 
 /**
  * The registered engines (step 4.1: Rspamd; step 4.2: the attachment engine, A1; step 4.3: the URL
  * engine, U1; step 4.4: the phishing/BEC engine, B1, a stage-2 engine depending on `rspamd` and
- * `url`; step 4.5: the DLP engine, D1, a stage-1 engine without dependencies).
+ * `url`; step 4.5: the DLP engine, D1, a stage-1 engine without dependencies; step 4.6: the
+ * sandbox engine, X10, asynchronous and never required).
  */
 export const ENGINE_CATALOG: readonly EngineCatalogEntry[] = Object.freeze([
   Object.freeze({
@@ -98,6 +108,16 @@ export const ENGINE_CATALOG: readonly EngineCatalogEntry[] = Object.freeze([
     description:
       'Data loss prevention: card, bank, national id, passport, personal, confidential, source code, credential, financial and tenant patterns; attachment text extraction; outbound policy actions (step 4.5)',
   } as const),
+  Object.freeze({
+    name: 'sandbox',
+    stage: 'sandbox',
+    queue: 'scan.sandbox',
+    requiredByDefault: false,
+    tenantMayDisable: true,
+    mode: 'asynchronous',
+    description:
+      'Sandbox: static analysis and (when an approved isolation backend exists) detonation of suspicious/unknown attachments; asynchronous, never required (step 4.6)',
+  } as const),
 ]);
 
 export const isEngineName = (value: string): value is EngineName =>
@@ -106,6 +126,23 @@ export const isEngineName = (value: string): value is EngineName =>
 /** The catalog entry of `name`, or undefined when the engine is not registered. */
 export function engineCatalogEntry(name: string): EngineCatalogEntry | undefined {
   return ENGINE_CATALOG.find((entry) => entry.name === name);
+}
+
+/** Whether `entry` is an asynchronous engine (step 4.6 X10): `mode: 'asynchronous'`. */
+export function isAsynchronousEntry(entry: Pick<EngineCatalogEntry, 'mode'>): boolean {
+  return entry.mode === 'asynchronous';
+}
+
+/**
+ * Whether the engine `name` is an asynchronous engine of `catalog` (default `ENGINE_CATALOG`;
+ * step 4.6 X10). False for an unknown name.
+ */
+export function isAsynchronousEngine(
+  name: string,
+  catalog: readonly EngineCatalogEntry[] = ENGINE_CATALOG,
+): boolean {
+  const entry = catalog.find((e) => e.name === name);
+  return entry !== undefined && isAsynchronousEntry(entry);
 }
 
 /** Whether `entry` is a stage-2 engine (step 4.4 B2): it declares at least one dependency. */
@@ -124,8 +161,10 @@ export function stage2Engines(
  * Validates the engine dependencies of `catalog` (step 4.4 B2): every dependency is an engine of
  * the catalog, no engine depends on itself or lists a dependency twice, and the depth is 1 (a
  * dependency declares no dependencies itself, so a stage-2 engine is triggered by stage-1
- * engines only). Throws an `Error` naming the engine; returns nothing for a valid catalog. The
- * email-worker calls it at start and a unit test calls it on `ENGINE_CATALOG`.
+ * engines only). Step 4.6 X10: an asynchronous engine is not required by default, declares no
+ * dependencies, and no engine depends on it. Throws an `Error` naming the engine; returns
+ * nothing for a valid catalog. The email-worker calls it at start and a unit test calls it on
+ * `ENGINE_CATALOG`.
  */
 export function validateCatalog(catalog: readonly EngineCatalogEntry[] = ENGINE_CATALOG): void {
   const byName = new Map<string, EngineCatalogEntry>();
@@ -135,6 +174,14 @@ export function validateCatalog(catalog: readonly EngineCatalogEntry[] = ENGINE_
     byName.set(entry.name, entry);
   }
   for (const entry of catalog) {
+    if (isAsynchronousEntry(entry)) {
+      if (entry.requiredByDefault) {
+        throw new Error(`Asynchronous engine ${entry.name} cannot be required by default`);
+      }
+      if ((entry.dependsOn?.length ?? 0) > 0) {
+        throw new Error(`Asynchronous engine ${entry.name} cannot declare dependencies`);
+      }
+    }
     const deps = entry.dependsOn ?? [];
     if (new Set(deps).size !== deps.length) {
       throw new Error(`Engine ${entry.name} lists a dependency twice`);
@@ -145,6 +192,11 @@ export function validateCatalog(catalog: readonly EngineCatalogEntry[] = ENGINE_
       if (!target) {
         throw new Error(
           `Engine ${entry.name} depends on ${dependency}, which is not in the catalog`,
+        );
+      }
+      if (isAsynchronousEntry(target)) {
+        throw new Error(
+          `Engine ${entry.name} depends on ${dependency}, which is an asynchronous engine`,
         );
       }
       if (isStage2Engine(target)) {
@@ -158,9 +210,10 @@ export function validateCatalog(catalog: readonly EngineCatalogEntry[] = ENGINE_
 
 /**
  * Parses the platform's enabled engines (`SCAN_ENGINES`, a comma-separated list, default
- * `rspamd,attachment,url,bec,dlp` from step 4.5). Throws on an empty list, a duplicate or a name
- * that is not in the catalog, so a misconfigured worker refuses to start instead of scanning with
- * fewer engines.
+ * `rspamd,attachment,url,bec,dlp` from step 4.5). Throws on an empty list, a duplicate, a name
+ * that is not in the catalog or an asynchronous engine (step 4.6 X10: `SCAN_ENGINES` lists
+ * synchronous round engines only; the sandbox is enabled by `SANDBOX_ENABLED`), so a
+ * misconfigured worker refuses to start instead of scanning with fewer engines.
  */
 export function parseEnabledEngines(value: string): EngineName[] {
   const names = value
@@ -172,7 +225,13 @@ export function parseEnabledEngines(value: string): EngineName[] {
   for (const name of names) {
     if (seen.has(name)) throw new Error(`Scan engine listed twice: ${name}`);
     seen.add(name);
-    if (!engineCatalogEntry(name)) throw new Error(`Scan engine not in the catalog: ${name}`);
+    const entry = engineCatalogEntry(name);
+    if (!entry) throw new Error(`Scan engine not in the catalog: ${name}`);
+    if (isAsynchronousEntry(entry)) {
+      throw new Error(
+        `Scan engine ${name} is asynchronous and cannot be listed in SCAN_ENGINES (it has its own switch)`,
+      );
+    }
   }
   return names as EngineName[];
 }

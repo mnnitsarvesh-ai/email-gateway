@@ -114,14 +114,19 @@ groups:
             job was recorded (ATTACHMENT_SIGNATURE_RESCAN=record) or started (rescan).
           runbook_url: docs/runbooks/attachment-scanning.md#attachmentsignaturechanged
       - alert: SandboxSubmissionsAccumulating
-        expr: max(rabbitmq_detailed_queue_messages_ready{vhost="email-gateway",queue="scan.sandbox"}) > 5000
+        # Step 4.6 X20: the submissions now go to the email-worker's sandbox dispatcher
+        # (scan.sandbox.submissions, a work queue); scan.sandbox carries the controller's tasks.
+        expr: >-
+          max(rabbitmq_detailed_queue_messages_ready{vhost="email-gateway",queue="scan.sandbox.submissions"}) > 5000
         for: 15m
         labels:
           severity: info
         annotations:
           summary: Sandbox submissions accumulating
           description: >-
-            scan.sandbox holds more than 5000 sandbox_requested.v1 events for 15 minutes. Until
-            step 4.6 the queue is a bounded dormant buffer (drop-head): this is expected volume
-            information, not a failure.
+            scan.sandbox.submissions holds more than 5000 sandbox_requested.v1 events for 15
+            minutes: the sandbox dispatcher of the email-worker (SCAN_CONSUMERS empty or with
+            sandbox, SANDBOX_ENABLED=true) is not keeping up or not running. The round never waits
+            for the sandbox; undispatched submissions expire after SANDBOX_SUBMISSION_TTL_SECONDS
+            (timeout, never clean).
           runbook_url: docs/runbooks/attachment-scanning.md#sandboxsubmissionsaccumulating

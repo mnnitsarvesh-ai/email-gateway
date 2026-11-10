@@ -22,6 +22,9 @@ import {
   type DlpPlatformSettings,
   dlpPlatformSettingsFromEnv,
   RSPAMD_PLATFORM_DEFAULTS,
+  SANDBOX_PLATFORM_ENV_KEYS,
+  type SandboxPlatformSettings,
+  sandboxPlatformSettingsFromEnv,
   RSPAMD_PLATFORM_ENV_KEYS,
   type RspamdPlatformSettings,
   rspamdPlatformSettingsSchema,
@@ -685,6 +688,81 @@ export function validateDlpConfig(
   }
 }
 
+/**
+ * The sandbox backends the api may be told about (step 4.6 X17), and how the settings view
+ * describes them: `disabled` → nothing is analysed or executed, `static` → static analysis only
+ * (no execution), `hardened-container` → the local/CI test runner (NOT a VM boundary). `vm` is
+ * not accepted: that backend refuses to start in 4.6 (its runner is not implemented).
+ */
+export const SANDBOX_EXPECTED_BACKENDS = ['disabled', 'static', 'hardened-container'] as const;
+export type SandboxExpectedBackend = (typeof SANDBOX_EXPECTED_BACKENDS)[number];
+
+/**
+ * Sandbox (step 4.6 X17, §5): the four platform settings tenants may override (the same keys
+ * the email-worker reads, parsed by `sandboxPlatformSettingsFromEnv`: unset or empty → default)
+ * and `SANDBOX_EXPECTED_BACKEND`, the controller backend this environment runs — informational
+ * only (the api never talks to the controller); it lets the settings view state plainly whether
+ * files are executed. Start-up errors name the key, never the value.
+ */
+const sandboxConfigShape = {
+  ...(Object.fromEntries(
+    Object.values(SANDBOX_PLATFORM_ENV_KEYS).map((key) => [key, z.string().optional()]),
+  ) as Record<
+    (typeof SANDBOX_PLATFORM_ENV_KEYS)[keyof SandboxPlatformSettings],
+    z.ZodOptional<z.ZodString>
+  >),
+  SANDBOX_EXPECTED_BACKEND: z.enum(SANDBOX_EXPECTED_BACKENDS).default('disabled'),
+};
+
+export type SandboxConfigKeys = Partial<
+  Record<(typeof SANDBOX_PLATFORM_ENV_KEYS)[keyof SandboxPlatformSettings], string>
+>;
+
+/** The validated sandbox platform settings of the api config (X17). */
+export function sandboxPlatformSettingsOf(cfg: SandboxConfigKeys): SandboxPlatformSettings {
+  return sandboxPlatformSettingsFromEnv(cfg);
+}
+
+/**
+ * Refuses invalid sandbox platform settings, and `SANDBOX_EXPECTED_BACKEND=hardened-container`
+ * outside APP_ENV local/ci (the controller refuses that backend there; the view must not claim
+ * it), naming the environment key (never the value).
+ */
+export function validateSandboxConfig(
+  cfg: SandboxConfigKeys & { SANDBOX_EXPECTED_BACKEND?: SandboxExpectedBackend; APP_ENV?: string },
+  ctx: z.RefinementCtx,
+): void {
+  try {
+    sandboxPlatformSettingsFromEnv(cfg);
+  } catch (err) {
+    if (!(err instanceof z.ZodError)) throw err;
+    for (const issue of err.issues) {
+      const setting = issue.path[0] as keyof SandboxPlatformSettings | undefined;
+      ctx.addIssue({
+        code: 'custom',
+        path: [
+          setting !== undefined && setting in SANDBOX_PLATFORM_ENV_KEYS
+            ? SANDBOX_PLATFORM_ENV_KEYS[setting]
+            : SANDBOX_PLATFORM_ENV_KEYS.fileTypes,
+        ],
+        message: issue.message,
+      });
+    }
+  }
+  if (
+    cfg.SANDBOX_EXPECTED_BACKEND === 'hardened-container' &&
+    cfg.APP_ENV !== 'local' &&
+    cfg.APP_ENV !== 'ci'
+  ) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['SANDBOX_EXPECTED_BACKEND'],
+      message:
+        'hardened-container (the local/CI test runner, not a VM boundary) is refused outside APP_ENV local or ci',
+    });
+  }
+}
+
 /** The validated Rspamd platform settings of the api config (S8). */
 export function rspamdPlatformSettingsOf(
   cfg: Pick<ScanConfigKeys, (typeof RSPAMD_PLATFORM_ENV_KEYS)[keyof RspamdPlatformSettings]>,
@@ -741,6 +819,7 @@ export const apiConfigSchema = baseConfigSchema
   .extend(urlConfigShape)
   .extend(becConfigShape)
   .extend(dlpConfigShape)
+  .extend(sandboxConfigShape)
   .extend({
     /** Comma-separated allow-list of admin portal origins. */
     CORS_ORIGINS: z
@@ -761,6 +840,7 @@ export const apiConfigSchema = baseConfigSchema
     validateUrlConfig(cfg, ctx);
     validateBecConfig(cfg, ctx);
     validateDlpConfig(cfg, ctx);
+    validateSandboxConfig(cfg, ctx);
     if (cfg.AUTH_SESSION_MAX_AGE_SECONDS < cfg.AUTH_REFRESH_TOKEN_TTL_SECONDS) {
       ctx.addIssue({
         code: 'custom',

@@ -7,7 +7,16 @@ import {
   fileTypeIdSchema,
   isAttachmentReasonCode,
   isUrlReasonCode,
+  ARTIFACT_CONTENT_TYPES,
+  ARTIFACT_KINDS,
+  isSandboxReasonCode,
   REWRITE_SKIP_REASONS,
+  SANDBOX_BACKENDS,
+  SANDBOX_ISOLATION_CLASSES,
+  SANDBOX_MAX_REASON_CODES,
+  SANDBOX_SKIP_REASONS,
+  SANDBOX_VERDICTS,
+  sandboxReportViewSchema,
   URL_ENGINE_LEVEL_CODES,
   URL_SOURCES,
   urlChainEntrySchema,
@@ -34,8 +43,10 @@ import {
   NO_DLP_IDS,
 } from '../../dlp/domain/dlp-result';
 import type {
+  AttachmentSandboxView,
   AttachmentScanView,
   BecScanView,
+  SandboxSubmissionView,
   ScanAttempt,
   ScanAuthView,
   ScanEngineResultView,
@@ -53,6 +64,8 @@ import type {
   DlpResultRow,
   EngineResultRow,
   MessageUrlRow,
+  SandboxAnalysisRow,
+  SandboxArtifactRow,
   SandboxSubmissionRow,
   ScanRoundRow,
   UrlClickSummaryRow,
@@ -174,17 +187,21 @@ export const URL_ENGINE = 'url';
 export const BEC_ENGINE = 'bec';
 /** The data loss prevention engine's name (step 4.5 D1). */
 export const DLP_ENGINE = 'dlp';
+/** The asynchronous sandbox engine's name (step 4.6 X10). */
+export const SANDBOX_ENGINE = 'sandbox';
 /**
  * Engines whose durations are withheld and times rounded to the second: their caches are shared
  * across organizations (attachment content cache A10; URL reputation/chain/dynamic caches U6),
  * or their timing reveals the AI layer's behaviour (BEC, B15) or the extraction work done on a
- * message's attachments (DLP, D20).
+ * message's attachments (DLP, D20), or whether an earlier analysis of the same file (possibly
+ * another organization's) was reused (sandbox, step 4.6 X18).
  */
 const COARSE_ENGINES: ReadonlySet<string> = new Set([
   ATTACHMENT_ENGINE,
   URL_ENGINE,
   BEC_ENGINE,
   DLP_ENGINE,
+  SANDBOX_ENGINE,
 ]);
 
 /** The per-attachment rows of a page with the display metadata they are joined with. */
@@ -192,13 +209,151 @@ export interface AttachmentInputs {
   results: readonly AttachmentResultRow[];
   parts: readonly AttachmentPartRow[];
   submissions: readonly SandboxSubmissionRow[];
+  /** Step 4.6 X18: the analyses that completed the page's submissions, and their artifacts. */
+  analyses?: readonly SandboxAnalysisRow[];
+  artifacts?: readonly SandboxArtifactRow[];
 }
 
 export const NO_ATTACHMENTS: AttachmentInputs = Object.freeze({
   results: [],
   parts: [],
   submissions: [],
+  analyses: [],
+  artifacts: [],
 });
+
+const SANDBOX_TERMINAL: ReadonlySet<string> = new Set(['completed', 'failed', 'expired']);
+const sandboxVerdictSchema = z.enum(SANDBOX_VERDICTS);
+const sandboxSkipReasonSchema = z.enum(SANDBOX_SKIP_REASONS);
+const sandboxIsolationSchema = z.enum(SANDBOX_ISOLATION_CLASSES);
+const sandboxBackendSchema = z.enum(SANDBOX_BACKENDS);
+const artifactKindSchema = z.enum(ARTIFACT_KINDS);
+const artifactContentTypeSchema = z.enum(ARTIFACT_CONTENT_TYPES);
+
+/** `sandbox.*` reason codes of a JSON array (unknown codes dropped, unique, ≤ 16). */
+function sandboxCodes(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const out = new Set<string>();
+  for (const code of value) {
+    if (typeof code === 'string' && isSandboxReasonCode(code)) out.add(code);
+    if (out.size >= SANDBOX_MAX_REASON_CODES) break;
+  }
+  return [...out];
+}
+
+/**
+ * The analysis that completed a submission (X18): only for a terminal submission whose
+ * `external_ref` is the analysis's public id (the id came from this organization's row; the
+ * public id match guards against a mislinked or reused row id).
+ */
+function completingAnalysis(
+  submission: SandboxSubmissionRow,
+  analyses: ReadonlyMap<string, SandboxAnalysisRow>,
+): SandboxAnalysisRow | undefined {
+  if (!SANDBOX_TERMINAL.has(submission.status) || submission.analysisId === null) return undefined;
+  const analysis = analyses.get(submission.analysisId.toString());
+  return analysis && analysis.publicId === submission.externalRef ? analysis : undefined;
+}
+
+/** The outcome of one submission (step 4.6 X18); no analysis id, timing or reuse flag. */
+export function sandboxOutcomeOf(
+  submission: SandboxSubmissionRow,
+  analysis: SandboxAnalysisRow | undefined,
+): AttachmentSandboxView {
+  const verdict = sandboxVerdictSchema.safeParse(submission.sandboxVerdict);
+  const skip = sandboxSkipReasonSchema.safeParse(submission.skipReason);
+  const isolation = sandboxIsolationSchema.safeParse(analysis?.isolation);
+  return {
+    submissionId: submission.id.toString(),
+    status: submission.status,
+    skipReason: submission.status === 'skipped' && skip.success ? skip.data : null,
+    verdict: verdict.success ? verdict.data : null,
+    reasonCodes: sandboxCodes(submission.sandboxReasonCodes),
+    executed: analysis?.executed ?? null,
+    isolation: isolation.success ? isolation.data : null,
+    completedAt: submission.completedAt === null ? null : toSecond(submission.completedAt),
+  };
+}
+
+/** UTC midnight of a date (artifact retention end; the exact value would date the analysis). */
+const toDay = (value: Date): string =>
+  new Date(Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate())).toISOString();
+
+const EMPTY_REPORT = {
+  findings: [],
+  indicators: { dns: [], httpHosts: [], tlsSni: [], ips: [] },
+  processes: { count: 0, images: [] },
+  droppedFiles: [],
+  limitsHit: [],
+} satisfies Pick<
+  SandboxSubmissionView,
+  'findings' | 'indicators' | 'processes' | 'droppedFiles' | 'limitsHit'
+>;
+
+/**
+ * The submissions of one round for the `sandbox` engine entry (X18), by part index, each with
+ * the bounded report of the analysis that completed it (validated against
+ * `sandboxReportViewSchema`; a malformed report is shown as empty) and its artifact metadata.
+ */
+export function sandboxSubmissionsOf(
+  scanId: bigint,
+  inputs: AttachmentInputs,
+): SandboxSubmissionView[] {
+  const analyses = new Map((inputs.analyses ?? []).map((a) => [a.id.toString(), a]));
+  const artifacts = new Map<string, SandboxArtifactRow[]>();
+  for (const row of inputs.artifacts ?? []) {
+    const list = artifacts.get(row.analysisId.toString()) ?? [];
+    list.push(row);
+    artifacts.set(row.analysisId.toString(), list);
+  }
+  return inputs.submissions
+    .filter((s) => s.scanId === scanId)
+    .sort((a, b) => a.partIndex - b.partIndex)
+    .map((submission) => {
+      const analysis = completingAnalysis(submission, analyses);
+      const report = analysis ? sandboxReportViewSchema.safeParse(analysis.report) : null;
+      const backend = sandboxBackendSchema.safeParse(analysis?.backend);
+      const view = report?.success ? report.data : null;
+      return {
+        ...sandboxOutcomeOf(submission, analysis),
+        partIndex: submission.partIndex,
+        sha256: submission.sha256,
+        backend: backend.success ? backend.data : null,
+        versions: {
+          controller: analysis?.controllerVersion ?? null,
+          backend: analysis?.backendVersion ?? null,
+          analyzer: analysis?.analyzerVersion ?? null,
+          map: analysis?.mapVersion ?? null,
+        },
+        findings: view?.findings ?? EMPTY_REPORT.findings,
+        indicators: view?.indicators ?? EMPTY_REPORT.indicators,
+        processes: view?.processes ?? EMPTY_REPORT.processes,
+        droppedFiles: view?.droppedFiles ?? EMPTY_REPORT.droppedFiles,
+        limitsHit: view?.limitsHit ?? EMPTY_REPORT.limitsHit,
+        artifacts: analysis
+          ? (artifacts.get(analysis.id.toString()) ?? [])
+              .sort((a, b) => a.seq - b.seq)
+              .flatMap((row) => {
+                const kind = artifactKindSchema.safeParse(row.kind);
+                const contentType = artifactContentTypeSchema.safeParse(row.contentType);
+                if (!kind.success || !contentType.success) return [];
+                return [
+                  {
+                    seq: row.seq,
+                    kind: kind.data,
+                    contentType: contentType.data,
+                    sizeBytes: row.sizeBytes,
+                    sha256: row.plainSha256,
+                    expiresAt: toDay(row.expiresAt),
+                    purged: row.purgedAt !== null,
+                  },
+                ];
+              })
+              .slice(0, 16)
+          : [],
+      };
+    });
+}
 
 /**
  * One `attachment_scan_results` row as the A16 view. Stored JSON (reason codes, YARA matches,
@@ -210,6 +365,7 @@ export function attachmentOf(
   row: AttachmentResultRow,
   part: AttachmentPartRow | undefined,
   submission: SandboxSubmissionRow | undefined,
+  analysis?: SandboxAnalysisRow,
 ): AttachmentScanView {
   const detected = fileTypeIdSchema.safeParse(row.detectedType);
   const family = fileTypeFamilySchema.safeParse(row.typeFamily);
@@ -250,9 +406,7 @@ export function attachmentOf(
     knownHash:
       row.knownHashSeverity === null ? null : { severity: row.knownHashSeverity, family: null },
     // No `cache` / `durationMs`: they reveal the cross-tenant cache (AttachmentScanViewSchema).
-    sandbox: submission
-      ? { submissionId: submission.id.toString(), status: submission.status }
-      : null,
+    sandbox: submission ? sandboxOutcomeOf(submission, analysis) : null,
   };
 }
 
@@ -264,12 +418,19 @@ export function attachmentsOf(scanId: bigint, inputs: AttachmentInputs): Attachm
       .filter((s) => s.scanId === scanId)
       .map((s) => [s.attachmentId.toString(), s]),
   );
+  const analyses = new Map((inputs.analyses ?? []).map((a) => [a.id.toString(), a]));
   return inputs.results
     .filter((row) => row.scanId === scanId)
     .sort((a, b) => a.partIndex - b.partIndex)
-    .map((row) =>
-      attachmentOf(row, parts.get(row.partIndex), submissions.get(row.attachmentId.toString())),
-    );
+    .map((row) => {
+      const submission = submissions.get(row.attachmentId.toString());
+      return attachmentOf(
+        row,
+        parts.get(row.partIndex),
+        submission,
+        submission ? completingAnalysis(submission, analyses) : undefined,
+      );
+    });
 }
 
 /** The URL rows of a page joined for the url engine entries (step 4.3 U16). */
@@ -564,7 +725,8 @@ const byCatalog = (a: string, b: string): number =>
  * `attachment` engine entry its per-attachment results (step 4.2 A16), on the `url` engine
  * entry its per-URL results and rewrite (step 4.3 U16) and on the `bec` engine entry its
  * explainable verdict (step 4.4 B15) and on the `dlp` engine entry its masked result (step 4.5
- * D20, only for callers holding `dlp:read`; no symbols: the engine's evidence is not shown).
+ * D20, only for callers holding `dlp:read`; no symbols: the engine's evidence is not shown) and
+ * on the asynchronous `sandbox` engine entry its submissions with their reports (step 4.6 X18).
  */
 export function roundOf(
   scan: ScanRoundRow,
@@ -611,6 +773,10 @@ export function roundOf(
       }
       if (engine === DLP_ENGINE) {
         return { ...view, symbols: [], dlp: dlpOf(scan.id, dlp) };
+      }
+      if (engine === SANDBOX_ENGINE) {
+        // Asynchronous (X10): its final never changed the round's verdict; no symbols.
+        return { ...view, symbols: [], submissions: sandboxSubmissionsOf(scan.id, attachments) };
       }
       return view;
     }),

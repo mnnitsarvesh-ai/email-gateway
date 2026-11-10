@@ -2,6 +2,7 @@ import {
   type DefiniteVerdict,
   type EngineOutcome,
   isDefiniteVerdict,
+  isAsynchronousEngine,
   isFailureOutcome,
   MAX_REASON_CODES,
   mostSevere,
@@ -57,11 +58,17 @@ function weight(outcome: EngineOutcome): number {
  *   non-required engines' failures never fail the round;
  * - reason codes: union of the finals' codes, ordered by the severity of the final that raised
  *   them (failures first), then by name, at most 32.
+ *
+ * Finals of **asynchronous** engines (`isAsynchronousEngine`, step 4.6 X10: the `sandbox`) are
+ * ignored before anything else: their final row may be written before or after the round
+ * completes, so counting it would make the verdict depend on arrival order. They never change
+ * the verdict, the reason codes or the outcome.
  */
 export function aggregateRound(
   required: readonly string[],
-  finals: readonly FinalEngineResult[],
+  allFinals: readonly FinalEngineResult[],
 ): RoundAggregate {
+  const finals = allFinals.filter((f) => !isAsynchronousEngine(f.engine));
   const byEngine = new Map(finals.map((f) => [f.engine, f]));
   const failedRequired = required.filter((engine) => {
     const final = byEngine.get(engine);

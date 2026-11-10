@@ -17,6 +17,10 @@ import {
   type RspamdPlatformSettings,
   rspamdSettingsBounds,
   rspamdTenantSettingsSchema,
+  resolveSandboxSettings,
+  type SandboxPlatformSettings,
+  sandboxSettingsBounds,
+  sandboxTenantSettingsSchema,
   type SettingsViolation,
   resolveUrlSettings,
   type UrlPlatformSettings,
@@ -24,12 +28,13 @@ import {
   urlTenantSettingsSchema,
 } from '@email-gateway/security-contracts';
 import { normalizeDomainInput } from '@email-gateway/url-security';
-import type { EngineSettingsView } from '../dto/scan-settings.schemas';
+import type { EngineSettingsView, SandboxExecutionMode } from '../dto/scan-settings.schemas';
 
 /**
  * Tenant settings per registered engine (step 4.1 S8, S16; step 4.2 A8; step 4.3 U13; step 4.4
- * B13; step 4.5 D18), pure: `rspamd`, `attachment`, `url`, `bec` and `dlp`. An engine of the catalog without a settings definition has no
- * settings routes (404).
+ * B13; step 4.5 D18; step 4.6 X17), pure: `rspamd`, `attachment`, `url`, `bec`, `dlp` and
+ * `sandbox`. An engine of the catalog without a settings definition has no settings routes
+ * (404).
  */
 
 export interface StoredOverride {
@@ -41,12 +46,29 @@ export interface StoredOverride {
 export type OverrideCheck =
   { ok: true; settings: Record<string, unknown> } | { ok: false; violations: SettingsViolation[] };
 
+/** Organization facts a view may show (read by the service from the writer). */
+export interface EngineViewContext {
+  /** `organization_features.attachment_sandbox` (step 4.6 X17). */
+  attachmentSandbox: boolean;
+}
+
+/** The plan feature key the sandbox opt-in needs (FEATURE_KEYS). */
+export const SANDBOX_FEATURE_KEY = 'attachment_sandbox';
+
 export interface EngineSettingsDefinition {
   readonly catalog: EngineCatalogEntry;
   /** Validates an override against the platform settings; returns the normalized override. */
   check(override: unknown): OverrideCheck;
-  /** The settings view of the engine for one organization. */
-  view(stored: StoredOverride | null): EngineSettingsView;
+  /**
+   * The settings view of the engine for one organization. Without `context` the organization is
+   * shown without plan features (the service always passes it).
+   */
+  view(stored: StoredOverride | null, context?: EngineViewContext): EngineSettingsView;
+  /**
+   * The plan feature a (checked) override needs, or null (step 4.6 X17: `sandbox.enabled =
+   * true` needs `attachment_sandbox`; the service answers `409 feature_not_enabled`).
+   */
+  requiredFeature?(settings: Record<string, unknown>): string | null;
 }
 
 /** The platform settings of every engine that has tenant settings. */
@@ -56,6 +78,7 @@ export interface PlatformEngineSettings {
   url: UrlPlatformSettings;
   bec: BecPlatformSettings;
   dlp: DlpPlatformSettings;
+  sandbox: { settings: SandboxPlatformSettings; execution: SandboxExecutionMode };
 }
 
 /** The parsed override without undefined keys (what is stored). */
@@ -475,6 +498,60 @@ function dlpDefinition(
   };
 }
 
+/**
+ * The `sandbox` engine settings (step 4.6 X17): the opt-in (`enabled`; `true` needs the plan
+ * feature `attachment_sandbox`), a non-empty subset of the platform file types, a sample size
+ * within [1, platform maximum] and browser analysis within the platform setting. The backend,
+ * limits and timeouts are platform-only configuration. The view adds the plan feature and the
+ * environment's execution mode, so a client can state plainly whether files are executed.
+ */
+function sandboxDefinition(
+  catalog: EngineCatalogEntry,
+  platform: SandboxPlatformSettings,
+  execution: SandboxExecutionMode,
+): EngineSettingsDefinition {
+  const check = (raw: unknown): OverrideCheck => {
+    const resolution = resolveSandboxSettings(platform, raw);
+    if (!resolution.ok) return { ok: false, violations: resolution.violations };
+    return { ok: true, settings: definedKeys(sandboxTenantSettingsSchema.parse(raw)) };
+  };
+  const bounds = sandboxSettingsBounds(platform);
+  const platformEffective = resolveSandboxSettings(platform, null);
+  if (!platformEffective.ok) throw new Error('The platform sandbox settings do not resolve');
+  return {
+    catalog,
+    check,
+    requiredFeature: (settings) => (settings.enabled === true ? SANDBOX_FEATURE_KEY : null),
+    view(stored, context) {
+      const override = holdsOverride(stored) ? stored.settings : null;
+      const resolution = resolveSandboxSettings(platform, override);
+      // An override that no longer fits the platform settings is ignored, as the worker does.
+      const effective = resolution.ok ? resolution.settings : platformEffective.settings;
+      return {
+        engine: 'sandbox',
+        mode: 'asynchronous',
+        required: catalog.requiredByDefault,
+        tenantMayDisable: catalog.tenantMayDisable,
+        platform: { ...platform, fileTypes: [...platform.fileTypes] },
+        bounds: {
+          enabled: [...bounds.enabled],
+          fileTypes: [...bounds.fileTypes],
+          maxSampleBytes: { ...bounds.maxSampleBytes },
+          browserAnalysis: [...bounds.browserAnalysis],
+        },
+        override: override as Extract<EngineSettingsView, { engine: 'sandbox' }>['override'],
+        effective: { ...effective, fileTypes: [...effective.fileTypes] },
+        feature: { attachmentSandbox: context?.attachmentSandbox ?? false },
+        execution,
+        overrideApplied: override !== null && resolution.ok,
+        violations: resolution.ok ? [] : resolution.violations,
+        version: stored?.version ?? 0,
+        updatedAt: stored ? stored.updatedAt.toISOString() : null,
+      };
+    },
+  };
+}
+
 /** The settings definitions of every catalog engine that has tenant settings (catalog order). */
 export function engineSettingsDefinitions(
   platform: PlatformEngineSettings,
@@ -488,6 +565,12 @@ export function engineSettingsDefinitions(
     if (entry.name === 'url') out.set(entry.name, urlDefinition(entry, platform.url));
     if (entry.name === 'bec') out.set(entry.name, becDefinition(entry, platform.bec));
     if (entry.name === 'dlp') out.set(entry.name, dlpDefinition(entry, platform.dlp));
+    if (entry.name === 'sandbox') {
+      out.set(
+        entry.name,
+        sandboxDefinition(entry, platform.sandbox.settings, platform.sandbox.execution),
+      );
+    }
   }
   return out;
 }

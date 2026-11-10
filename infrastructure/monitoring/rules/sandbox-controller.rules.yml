@@ -1,0 +1,79 @@
+# Sandbox-controller alerts (step 4.6 X20, docs/plan/steps/14-sandbox.md; ADR-0039; threat model
+# docs/security/sandbox-threat-model.md §8 item 7). Series: the controller's sandbox_* metrics
+# (labels backend/status/profile/isolation/executes/kind/mode/limit/severity/op — bounded tokens,
+# never a tenant, hash, host or task) and `up` of job `sandbox-controller`. Execution of unknown
+# files is disabled: production runs SANDBOX_BACKEND=disabled or static; an executing backend
+# outside local/CI is a configuration breach. Every alert links its section of
+# docs/runbooks/sandbox-controller.md. Validate with `promtool check rules` and
+# `promtool test rules tests/sandbox-controller.rules.test.yml`.
+groups:
+  - name: sandbox-controller
+    rules:
+      - alert: SandboxControllerDown
+        expr: up{job="sandbox-controller"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: sandbox-controller down
+          description: >-
+            The sandbox-controller has not been scraped for 5 minutes. Sandbox tasks wait in the
+            bounded scan.sandbox queue (dropped beyond 10 000) and analyses expire at their
+            deadline (verdict timeout). Mail flow is unaffected. Locally the job is 0 unless
+            Prometheus is attached to the internal sandbox-control network.
+          runbook_url: docs/runbooks/sandbox-controller.md#sandboxcontrollerdown
+      - alert: SandboxBackendNotReady
+        expr: max by (backend) (sandbox_backend_ready) == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Sandbox backend {{ $labels.backend }} not ready
+          description: >-
+            The {{ $labels.backend }} backend's self-test has failed for 10 minutes; the task
+            consumer is paused until it passes again. Check /health/ready (sandbox-backend
+            details: self-test code) and the controller logs.
+          runbook_url: docs/runbooks/sandbox-controller.md#sandboxbackendnotready
+      - alert: SandboxCleanupFailures
+        # A runner or scratch directory that could not be removed may hold sample bytes or a
+        # still-running sample: always critical.
+        expr: sum by (kind) (increase(sandbox_cleanup_failures_total[10m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: Sandbox {{ $labels.kind }} cleanup failed
+          description: >-
+            At least one sandbox {{ $labels.kind }} could not be removed in the last 10 minutes
+            (per-task cleanup or the reaper). Find the leftover (container label
+            eg.sandbox.controller / scratch directory) and remove it; if a runner keeps running,
+            follow the suspected-escape procedure.
+          runbook_url: docs/runbooks/sandbox-controller.md#sandboxcleanupfailures
+      - alert: SandboxTaskFailuresHigh
+        expr: >-
+          sum(rate(sandbox_tasks_total{status="failed"}[15m]))
+          / sum(rate(sandbox_tasks_total{status=~"completed|not_executed|failed"}[15m])) > 0.1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Sandbox task failures above 10 %
+          description: >-
+            More than 10 % of the sandbox results of the last 15 minutes are failed (sample
+            unavailable or not authentic, storage unavailable after the retry budget, analyzer
+            crashes or timeouts, backend not ready). Their analyses end with verdict error, never
+            clean.
+          runbook_url: docs/runbooks/sandbox-controller.md#sandboxtaskfailureshigh
+      - alert: SandboxExecutingBackendOutsideTest
+        # Defence in depth for the configuration refusal (invariant 1): a backend that executes
+        # samples reported by a target whose `environment` label is not local/ci (or missing).
+        expr: max by (backend, environment) (sandbox_backend_info{executes="true", environment!~"local|ci"}) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: Executing sandbox backend {{ $labels.backend }} outside local/CI
+          description: >-
+            A sandbox-controller reports an executing backend ({{ $labels.backend }}) in
+            environment "{{ $labels.environment }}". Production accepts disabled or static only;
+            execution needs every precondition of the threat model §8 and an ADR. Stop the
+            controller and restore SANDBOX_BACKEND=disabled.
+          runbook_url: docs/runbooks/sandbox-controller.md#sandboxexecutingbackendoutsidetest

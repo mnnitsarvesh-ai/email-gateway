@@ -18972,7 +18972,7 @@
                                       },
                                       "sandbox": {
                                         "nullable": true,
-                                        "description": "Sandbox submission of a suspicious/unknown attachment; null when not submitted",
+                                        "description": "Sandbox submission of a suspicious/unknown attachment (step 4.6 X18); null when not submitted",
                                         "type": "object",
                                         "properties": {
                                           "submissionId": {
@@ -18986,11 +18986,71 @@
                                               "submitted",
                                               "completed",
                                               "failed",
-                                              "expired"
+                                              "expired",
+                                              "skipped"
                                             ]
+                                          },
+                                          "skipReason": {
+                                            "nullable": true,
+                                            "description": "Why a `skipped` submission was not analysed (tenant not opted in, plan, type, size)",
+                                            "type": "string",
+                                            "enum": [
+                                              "feature_disabled",
+                                              "tenant_disabled",
+                                              "type_excluded",
+                                              "size_excluded",
+                                              "part_unavailable",
+                                              "part_integrity"
+                                            ]
+                                          },
+                                          "verdict": {
+                                            "nullable": true,
+                                            "description": "Sandbox verdict; never `clean` unless a VM-isolated run proved it (not possible in this release). Informational: it never changes the round verdict",
+                                            "type": "string",
+                                            "enum": [
+                                              "clean",
+                                              "suspicious",
+                                              "malicious",
+                                              "unknown",
+                                              "error",
+                                              "timeout"
+                                            ]
+                                          },
+                                          "reasonCodes": {
+                                            "maxItems": 16,
+                                            "type": "array",
+                                            "items": { "type": "string" },
+                                            "description": "`sandbox.*` reason codes of the submission (sandbox-map/1)"
+                                          },
+                                          "executed": {
+                                            "nullable": true,
+                                            "description": "Whether the sample was executed at all",
+                                            "type": "boolean"
+                                          },
+                                          "isolation": {
+                                            "nullable": true,
+                                            "type": "string",
+                                            "enum": ["none", "process", "container", "vm"],
+                                            "description": "What isolated the sample: none (nothing ran), process (static analyzer child), container (hardened shared-kernel container — NOT a VM boundary; local/CI only), vm"
+                                          },
+                                          "completedAt": {
+                                            "nullable": true,
+                                            "description": "When the submission reached its outcome",
+                                            "type": "string",
+                                            "format": "date-time",
+                                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
                                           }
                                         },
-                                        "required": ["submissionId", "status"],
+                                        "required": [
+                                          "submissionId",
+                                          "status",
+                                          "skipReason",
+                                          "verdict",
+                                          "reasonCodes",
+                                          "executed",
+                                          "isolation",
+                                          "completedAt"
+                                        ],
                                         "additionalProperties": false
                                       }
                                     },
@@ -20726,6 +20786,426 @@
                                   ],
                                   "additionalProperties": false
                                 },
+                                "submissions": {
+                                  "description": "Engine `sandbox` only (step 4.6 X18, asynchronous: its final never changes the round verdict): the round’s sandbox submissions by part index with the bounded report of the analysis that completed each",
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "submissionId": {
+                                        "type": "string",
+                                        "description": "sandbox_submissions id (decimal)"
+                                      },
+                                      "status": {
+                                        "type": "string",
+                                        "enum": [
+                                          "pending",
+                                          "submitted",
+                                          "completed",
+                                          "failed",
+                                          "expired",
+                                          "skipped"
+                                        ]
+                                      },
+                                      "skipReason": {
+                                        "nullable": true,
+                                        "description": "Why a `skipped` submission was not analysed (tenant not opted in, plan, type, size)",
+                                        "type": "string",
+                                        "enum": [
+                                          "feature_disabled",
+                                          "tenant_disabled",
+                                          "type_excluded",
+                                          "size_excluded",
+                                          "part_unavailable",
+                                          "part_integrity"
+                                        ]
+                                      },
+                                      "verdict": {
+                                        "nullable": true,
+                                        "description": "Sandbox verdict; never `clean` unless a VM-isolated run proved it (not possible in this release). Informational: it never changes the round verdict",
+                                        "type": "string",
+                                        "enum": [
+                                          "clean",
+                                          "suspicious",
+                                          "malicious",
+                                          "unknown",
+                                          "error",
+                                          "timeout"
+                                        ]
+                                      },
+                                      "reasonCodes": {
+                                        "maxItems": 16,
+                                        "type": "array",
+                                        "items": { "type": "string" },
+                                        "description": "`sandbox.*` reason codes of the submission (sandbox-map/1)"
+                                      },
+                                      "executed": {
+                                        "nullable": true,
+                                        "description": "Whether the sample was executed at all",
+                                        "type": "boolean"
+                                      },
+                                      "isolation": {
+                                        "nullable": true,
+                                        "type": "string",
+                                        "enum": ["none", "process", "container", "vm"],
+                                        "description": "What isolated the sample: none (nothing ran), process (static analyzer child), container (hardened shared-kernel container — NOT a VM boundary; local/CI only), vm"
+                                      },
+                                      "completedAt": {
+                                        "nullable": true,
+                                        "description": "When the submission reached its outcome",
+                                        "type": "string",
+                                        "format": "date-time",
+                                        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                                      },
+                                      "partIndex": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 9007199254740991
+                                      },
+                                      "sha256": { "type": "string" },
+                                      "backend": {
+                                        "nullable": true,
+                                        "type": "string",
+                                        "enum": ["disabled", "static", "hardened-container", "vm"]
+                                      },
+                                      "versions": {
+                                        "type": "object",
+                                        "properties": {
+                                          "controller": { "nullable": true, "type": "string" },
+                                          "backend": { "nullable": true, "type": "string" },
+                                          "analyzer": { "nullable": true, "type": "string" },
+                                          "map": { "nullable": true, "type": "string" }
+                                        },
+                                        "required": ["controller", "backend", "analyzer", "map"],
+                                        "additionalProperties": false,
+                                        "description": "Versions of the controller, the backend, the static analyzer and sandbox-map"
+                                      },
+                                      "findings": {
+                                        "maxItems": 32,
+                                        "type": "array",
+                                        "items": {
+                                          "type": "object",
+                                          "properties": {
+                                            "code": {
+                                              "type": "string",
+                                              "enum": [
+                                                "static.pe_injection_imports",
+                                                "static.pe_downloader_imports",
+                                                "static.pe_packed",
+                                                "static.pe_anti_debug",
+                                                "static.pe_overlay",
+                                                "static.elf_packed",
+                                                "static.office_macro",
+                                                "static.office_auto_exec",
+                                                "static.office_macro_shell",
+                                                "static.office_auto_exec_shell",
+                                                "static.office_ole_object",
+                                                "static.office_external_template",
+                                                "static.office_dde",
+                                                "static.pdf_javascript",
+                                                "static.pdf_open_action_js",
+                                                "static.pdf_launch",
+                                                "static.pdf_embedded_file",
+                                                "static.pdf_obfuscated_names",
+                                                "static.html_smuggling",
+                                                "static.html_password_form",
+                                                "static.html_external_form",
+                                                "static.html_meta_refresh_external",
+                                                "static.html_obfuscated_script",
+                                                "static.script_encoded_powershell",
+                                                "static.script_download_cradle",
+                                                "static.script_lolbin",
+                                                "static.script_shell_exec",
+                                                "static.script_obfuscation",
+                                                "static.lnk_present",
+                                                "static.lnk_command",
+                                                "static.eicar_test",
+                                                "static.embedded_urls",
+                                                "static.embedded_ips",
+                                                "static.high_entropy",
+                                                "behaviour.process_spawn",
+                                                "behaviour.shell_spawn",
+                                                "behaviour.many_processes",
+                                                "behaviour.metadata_access",
+                                                "behaviour.internal_network_access",
+                                                "behaviour.direct_ip_connect",
+                                                "behaviour.dns_queries",
+                                                "behaviour.http_requests",
+                                                "behaviour.network_beacon",
+                                                "behaviour.dropped_files",
+                                                "behaviour.dropped_executable",
+                                                "behaviour.write_outside_scratch",
+                                                "behaviour.privilege_escalation_attempt",
+                                                "behaviour.persistence_attempt",
+                                                "browser.download_attempt",
+                                                "browser.password_form",
+                                                "browser.cross_origin_form",
+                                                "browser.js_redirect",
+                                                "browser.dialogs",
+                                                "limit.memory",
+                                                "limit.pids",
+                                                "limit.cpu",
+                                                "limit.scratch_full",
+                                                "limit.wall_timeout",
+                                                "limit.analyzer_resources",
+                                                "limit.output_truncated",
+                                                "limit.artifact_cap",
+                                                "evasion.long_sleep",
+                                                "evasion.environment_checks"
+                                              ]
+                                            },
+                                            "severity": {
+                                              "type": "string",
+                                              "enum": ["info", "low", "medium", "high", "critical"]
+                                            },
+                                            "count": {
+                                              "type": "integer",
+                                              "minimum": 1,
+                                              "maximum": 1000000
+                                            }
+                                          },
+                                          "required": ["code", "severity", "count"],
+                                          "additionalProperties": false
+                                        },
+                                        "description": "Findings with their fixed severities, highest first"
+                                      },
+                                      "indicators": {
+                                        "type": "object",
+                                        "properties": {
+                                          "dns": {
+                                            "maxItems": 50,
+                                            "type": "array",
+                                            "items": {
+                                              "type": "string",
+                                              "maxLength": 253,
+                                              "pattern": "^(?:(?=.{1,253}$)[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?(?:\\.[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?)*|\\[[0-9a-f:.]{2,45}\\])$"
+                                            }
+                                          },
+                                          "httpHosts": {
+                                            "maxItems": 50,
+                                            "type": "array",
+                                            "items": {
+                                              "type": "string",
+                                              "maxLength": 253,
+                                              "pattern": "^(?:(?=.{1,253}$)[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?(?:\\.[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?)*|\\[[0-9a-f:.]{2,45}\\])$"
+                                            }
+                                          },
+                                          "tlsSni": {
+                                            "maxItems": 50,
+                                            "type": "array",
+                                            "items": {
+                                              "type": "string",
+                                              "maxLength": 253,
+                                              "pattern": "^(?:(?=.{1,253}$)[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?(?:\\.[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?)*|\\[[0-9a-f:.]{2,45}\\])$"
+                                            }
+                                          },
+                                          "ips": {
+                                            "maxItems": 50,
+                                            "type": "array",
+                                            "items": { "type": "string", "maxLength": 45 }
+                                          }
+                                        },
+                                        "required": ["dns", "httpHosts", "tlsSni", "ips"],
+                                        "additionalProperties": false,
+                                        "description": "Network indicators: host names and canonical IPs only (never paths or URLs; ≤ 50 each)"
+                                      },
+                                      "processes": {
+                                        "type": "object",
+                                        "properties": {
+                                          "count": {
+                                            "type": "integer",
+                                            "minimum": 0,
+                                            "maximum": 1000000
+                                          },
+                                          "images": {
+                                            "maxItems": 32,
+                                            "type": "array",
+                                            "items": {
+                                              "type": "string",
+                                              "pattern": "^[A-Za-z0-9._+-]{1,64}$"
+                                            }
+                                          }
+                                        },
+                                        "required": ["count", "images"],
+                                        "additionalProperties": false,
+                                        "description": "Process count and image basenames (≤ 32)"
+                                      },
+                                      "droppedFiles": {
+                                        "maxItems": 32,
+                                        "type": "array",
+                                        "items": {
+                                          "type": "object",
+                                          "properties": {
+                                            "sha256": {
+                                              "type": "string",
+                                              "pattern": "^[0-9a-f]{64}$"
+                                            },
+                                            "sizeBytes": {
+                                              "type": "integer",
+                                              "minimum": 0,
+                                              "maximum": 9007199254740991
+                                            },
+                                            "typeHint": {
+                                              "type": "string",
+                                              "enum": [
+                                                "pdf",
+                                                "ooxml_word",
+                                                "ooxml_excel",
+                                                "ooxml_powerpoint",
+                                                "ooxml_macro",
+                                                "odf",
+                                                "ole_office",
+                                                "rtf",
+                                                "chm",
+                                                "zip",
+                                                "gzip",
+                                                "tar",
+                                                "7z",
+                                                "rar",
+                                                "cab",
+                                                "bzip2",
+                                                "xz",
+                                                "jar",
+                                                "apk",
+                                                "pe_executable",
+                                                "msi",
+                                                "elf",
+                                                "macho",
+                                                "lnk",
+                                                "script_js",
+                                                "script_vbs",
+                                                "script_ps1",
+                                                "script_batch",
+                                                "script_shell",
+                                                "hta",
+                                                "iso",
+                                                "vhd",
+                                                "html",
+                                                "svg",
+                                                "xml",
+                                                "png",
+                                                "jpeg",
+                                                "gif",
+                                                "bmp",
+                                                "webp",
+                                                "tiff",
+                                                "text",
+                                                "ics",
+                                                "eml",
+                                                "unknown"
+                                              ]
+                                            }
+                                          },
+                                          "required": ["sha256", "sizeBytes", "typeHint"],
+                                          "additionalProperties": false
+                                        },
+                                        "description": "Files the sample wrote: hash, size, type hint"
+                                      },
+                                      "limitsHit": {
+                                        "maxItems": 8,
+                                        "type": "array",
+                                        "items": {
+                                          "type": "string",
+                                          "enum": [
+                                            "memory",
+                                            "pids",
+                                            "cpu",
+                                            "scratch_full",
+                                            "wall_timeout",
+                                            "analyzer_resources",
+                                            "output_truncated",
+                                            "artifact_cap"
+                                          ]
+                                        }
+                                      },
+                                      "artifacts": {
+                                        "maxItems": 16,
+                                        "type": "array",
+                                        "items": {
+                                          "type": "object",
+                                          "properties": {
+                                            "seq": {
+                                              "type": "integer",
+                                              "minimum": 0,
+                                              "maximum": 9007199254740991
+                                            },
+                                            "kind": {
+                                              "type": "string",
+                                              "enum": [
+                                                "screenshot",
+                                                "process_log",
+                                                "network_log",
+                                                "static_report",
+                                                "dropped_file"
+                                              ]
+                                            },
+                                            "contentType": {
+                                              "type": "string",
+                                              "enum": [
+                                                "image/png",
+                                                "text/plain",
+                                                "application/json",
+                                                "application/octet-stream"
+                                              ]
+                                            },
+                                            "sizeBytes": {
+                                              "type": "integer",
+                                              "minimum": 0,
+                                              "maximum": 9007199254740991,
+                                              "description": "Plaintext size"
+                                            },
+                                            "sha256": {
+                                              "type": "string",
+                                              "description": "SHA-256 of the plaintext artifact"
+                                            },
+                                            "expiresAt": {
+                                              "type": "string",
+                                              "format": "date-time",
+                                              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$",
+                                              "description": "Retention end, rounded down to the day (the exact value would date the analysis)"
+                                            },
+                                            "purged": {
+                                              "type": "boolean",
+                                              "description": "Crypto-shredded (key destroyed) and deleted"
+                                            }
+                                          },
+                                          "required": [
+                                            "seq",
+                                            "kind",
+                                            "contentType",
+                                            "sizeBytes",
+                                            "sha256",
+                                            "expiresAt",
+                                            "purged"
+                                          ],
+                                          "additionalProperties": false
+                                        },
+                                        "description": "Sealed artifacts (metadata only; no download API in this release)"
+                                      }
+                                    },
+                                    "required": [
+                                      "submissionId",
+                                      "status",
+                                      "skipReason",
+                                      "verdict",
+                                      "reasonCodes",
+                                      "executed",
+                                      "isolation",
+                                      "completedAt",
+                                      "partIndex",
+                                      "sha256",
+                                      "backend",
+                                      "versions",
+                                      "findings",
+                                      "indicators",
+                                      "processes",
+                                      "droppedFiles",
+                                      "limitsHit",
+                                      "artifacts"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                },
                                 "dlp": {
                                   "description": "Engine `dlp` only (step 4.5 D20): the masked DLP result; null before the final result, for failures, and for callers without `dlp:read`",
                                   "nullable": true,
@@ -21172,7 +21652,7 @@
                                 },
                                 "durationMs": {
                                   "nullable": true,
-                                  "description": "Engine duration of the final result; always null for the `attachment`, `url`, `bec` and `dlp` engines (cross-tenant cache hits; the AI layer’s and extraction timing)",
+                                  "description": "Engine duration of the final result; always null for the `attachment`, `url`, `bec`, `dlp` and `sandbox` engines (cross-tenant cache hits and analysis reuse; the AI layer’s and extraction timing)",
                                   "type": "integer",
                                   "minimum": 0,
                                   "maximum": 9007199254740991
@@ -21180,7 +21660,7 @@
                                 "settingsVersion": { "nullable": true, "type": "string" },
                                 "completedAt": {
                                   "nullable": true,
-                                  "description": "Final result time (whole seconds for the `attachment`, `url`, `bec` and `dlp` engines)",
+                                  "description": "Final result time (whole seconds for the `attachment`, `url`, `bec`, `dlp` and `sandbox` engines)",
                                   "type": "string",
                                   "format": "date-time",
                                   "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
@@ -21427,7 +21907,7 @@
     },
     "/api/v1/platform/dead-letters/replay": {
       "post": {
-        "description": "Fetches up to `limit` dead letters of `sourceQueue` (a work queue: `email.received`, `scan.spam`, `scan.url`, `scan.url.inspect`, `scan.url.results`, `scan.attachment`, `scan.bec`, `scan.dlp`, `email.delivery.pending`; other queues are 400 `source_queue_not_replayable`) matching the optional filters, republishes each unchanged envelope to the source queue with fresh retry headers and a replay id, confirmed before the dead letter is removed. Non-matching and invalid messages stay in the queue. A replayed event that was already processed is a ledger duplicate, so replays are safe to repeat. `dryRun` changes nothing. One replay at a time platform-wide (409 `replay_in_progress`); audited as `platform.dead_letters_replayed`. 503 `dead_letter_replay_unavailable` without RABBITMQ_OPS_URL or when the broker fails (the audit row then says `partial`).",
+        "description": "Fetches up to `limit` dead letters of `sourceQueue` (a work queue: `email.received`, `scan.spam`, `scan.url`, `scan.url.inspect`, `scan.url.results`, `scan.attachment`, `scan.bec`, `scan.dlp`, `scan.sandbox`, `scan.sandbox.submissions`, `scan.sandbox.results`, `email.delivery.pending`; other queues are 400 `source_queue_not_replayable`) matching the optional filters, republishes each unchanged envelope to the source queue with fresh retry headers and a replay id, confirmed before the dead letter is removed. Non-matching and invalid messages stay in the queue. A replayed event that was already processed is a ledger duplicate, so replays are safe to repeat. `dryRun` changes nothing. One replay at a time platform-wide (409 `replay_in_progress`); audited as `platform.dead_letters_replayed`. 503 `dead_letter_replay_unavailable` without RABBITMQ_OPS_URL or when the broker fails (the audit row then says `partial`).",
         "operationId": "DeadLettersController_replay_v1",
         "parameters": [],
         "requestBody": {
@@ -21438,7 +21918,7 @@
                 "type": "object",
                 "properties": {
                   "sourceQueue": {
-                    "description": "The work queue whose dead letters are replayed: email.received, scan.spam, scan.url, scan.url.inspect, scan.url.results, scan.attachment, scan.bec, scan.dlp, email.delivery.pending",
+                    "description": "The work queue whose dead letters are replayed: email.received, scan.spam, scan.url, scan.url.inspect, scan.url.results, scan.attachment, scan.bec, scan.dlp, scan.sandbox, scan.sandbox.submissions, scan.sandbox.results, email.delivery.pending",
                     "type": "string"
                   },
                   "limit": {
@@ -21716,7 +22196,7 @@
     },
     "/api/v1/scan-settings": {
       "get": {
-        "description": "For every registered scan engine: whether it is required, the platform settings, the bounds an override must respect, the organization’s override, the effective settings and the override `version` (0 = none). An override that no longer fits the platform settings is listed with its violations and not applied. Scan workers cache the settings per organization and engine for up to SCAN_SETTINGS_CACHE_TTL_MS (default 30 seconds): a change applies to messages scanned after that; rounds already scanned keep their results. From the read replica.",
+        "description": "For every registered scan engine: whether it is required, the platform settings, the bounds an override must respect, the organization’s override, the effective settings and the override `version` (0 = none); the `sandbox` entry also states the plan feature `attachment_sandbox` and the execution mode of this environment (`disabled`, `static_only`, `local_test_runner`). An override that no longer fits the platform settings is listed with its violations and not applied. Scan workers cache the settings per organization and engine for up to SCAN_SETTINGS_CACHE_TTL_MS (default 30 seconds): a change applies to messages scanned after that; rounds already scanned keep their results. From the read replica.",
         "operationId": "ScanSettingsController_list_v1",
         "parameters": [],
         "responses": {
@@ -23846,6 +24326,417 @@
                               "updatedAt"
                             ],
                             "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "engine": {
+                                "type": "string",
+                                "enum": ["sandbox"],
+                                "description": "Engine name (ENGINE_CATALOG)"
+                              },
+                              "mode": {
+                                "type": "string",
+                                "enum": ["asynchronous"],
+                                "description": "The sandbox never holds a scan round and never changes its verdict"
+                              },
+                              "platform": {
+                                "type": "object",
+                                "properties": {
+                                  "tenantDefaultEnabled": {
+                                    "type": "boolean",
+                                    "description": "Opt-in default of every tenant (still needs the plan feature)"
+                                  },
+                                  "fileTypes": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string",
+                                      "enum": [
+                                        "pdf",
+                                        "ooxml_word",
+                                        "ooxml_excel",
+                                        "ooxml_powerpoint",
+                                        "ooxml_macro",
+                                        "odf",
+                                        "ole_office",
+                                        "rtf",
+                                        "chm",
+                                        "zip",
+                                        "gzip",
+                                        "tar",
+                                        "7z",
+                                        "rar",
+                                        "cab",
+                                        "bzip2",
+                                        "xz",
+                                        "jar",
+                                        "apk",
+                                        "pe_executable",
+                                        "msi",
+                                        "elf",
+                                        "macho",
+                                        "lnk",
+                                        "script_js",
+                                        "script_vbs",
+                                        "script_ps1",
+                                        "script_batch",
+                                        "script_shell",
+                                        "hta",
+                                        "iso",
+                                        "vhd",
+                                        "html",
+                                        "svg",
+                                        "xml",
+                                        "png",
+                                        "jpeg",
+                                        "gif",
+                                        "bmp",
+                                        "webp",
+                                        "tiff",
+                                        "text",
+                                        "ics",
+                                        "eml",
+                                        "unknown"
+                                      ]
+                                    },
+                                    "description": "File types that may be submitted (tenant: a subset)"
+                                  },
+                                  "maxSampleBytes": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 9007199254740991,
+                                    "description": "Largest sample submitted (tenant: smaller or equal)"
+                                  },
+                                  "browserAnalysis": {
+                                    "type": "boolean",
+                                    "description": "HTML/SVG samples get the browser profile (cap)"
+                                  }
+                                },
+                                "required": [
+                                  "tenantDefaultEnabled",
+                                  "fileTypes",
+                                  "maxSampleBytes",
+                                  "browserAnalysis"
+                                ],
+                                "additionalProperties": false,
+                                "description": "Platform settings (SANDBOX_*)"
+                              },
+                              "bounds": {
+                                "type": "object",
+                                "properties": {
+                                  "enabled": { "type": "array", "items": { "type": "boolean" } },
+                                  "fileTypes": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string",
+                                      "enum": [
+                                        "pdf",
+                                        "ooxml_word",
+                                        "ooxml_excel",
+                                        "ooxml_powerpoint",
+                                        "ooxml_macro",
+                                        "odf",
+                                        "ole_office",
+                                        "rtf",
+                                        "chm",
+                                        "zip",
+                                        "gzip",
+                                        "tar",
+                                        "7z",
+                                        "rar",
+                                        "cab",
+                                        "bzip2",
+                                        "xz",
+                                        "jar",
+                                        "apk",
+                                        "pe_executable",
+                                        "msi",
+                                        "elf",
+                                        "macho",
+                                        "lnk",
+                                        "script_js",
+                                        "script_vbs",
+                                        "script_ps1",
+                                        "script_batch",
+                                        "script_shell",
+                                        "hta",
+                                        "iso",
+                                        "vhd",
+                                        "html",
+                                        "svg",
+                                        "xml",
+                                        "png",
+                                        "jpeg",
+                                        "gif",
+                                        "bmp",
+                                        "webp",
+                                        "tiff",
+                                        "text",
+                                        "ics",
+                                        "eml",
+                                        "unknown"
+                                      ]
+                                    }
+                                  },
+                                  "maxSampleBytes": {
+                                    "type": "object",
+                                    "properties": {
+                                      "min": {
+                                        "type": "integer",
+                                        "minimum": -9007199254740991,
+                                        "maximum": 9007199254740991
+                                      },
+                                      "max": {
+                                        "type": "integer",
+                                        "minimum": -9007199254740991,
+                                        "maximum": 9007199254740991
+                                      }
+                                    },
+                                    "required": ["min", "max"],
+                                    "additionalProperties": false
+                                  },
+                                  "browserAnalysis": {
+                                    "type": "array",
+                                    "items": { "type": "boolean" }
+                                  }
+                                },
+                                "required": [
+                                  "enabled",
+                                  "fileTypes",
+                                  "maxSampleBytes",
+                                  "browserAnalysis"
+                                ],
+                                "additionalProperties": false,
+                                "description": "What an override may choose"
+                              },
+                              "override": {
+                                "nullable": true,
+                                "description": "The organization override; null for none",
+                                "type": "object",
+                                "properties": {
+                                  "enabled": {
+                                    "description": "Submit suspicious/unknown attachments; true needs the plan feature",
+                                    "type": "boolean"
+                                  },
+                                  "fileTypes": {
+                                    "description": "Non-empty subset of the platform list",
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string",
+                                      "enum": [
+                                        "pdf",
+                                        "ooxml_word",
+                                        "ooxml_excel",
+                                        "ooxml_powerpoint",
+                                        "ooxml_macro",
+                                        "odf",
+                                        "ole_office",
+                                        "rtf",
+                                        "chm",
+                                        "zip",
+                                        "gzip",
+                                        "tar",
+                                        "7z",
+                                        "rar",
+                                        "cab",
+                                        "bzip2",
+                                        "xz",
+                                        "jar",
+                                        "apk",
+                                        "pe_executable",
+                                        "msi",
+                                        "elf",
+                                        "macho",
+                                        "lnk",
+                                        "script_js",
+                                        "script_vbs",
+                                        "script_ps1",
+                                        "script_batch",
+                                        "script_shell",
+                                        "hta",
+                                        "iso",
+                                        "vhd",
+                                        "html",
+                                        "svg",
+                                        "xml",
+                                        "png",
+                                        "jpeg",
+                                        "gif",
+                                        "bmp",
+                                        "webp",
+                                        "tiff",
+                                        "text",
+                                        "ics",
+                                        "eml",
+                                        "unknown"
+                                      ]
+                                    }
+                                  },
+                                  "maxSampleBytes": {
+                                    "description": "1 … platform maximum",
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "browserAnalysis": {
+                                    "description": "true only when the platform allows it",
+                                    "type": "boolean"
+                                  }
+                                },
+                                "additionalProperties": false
+                              },
+                              "effective": {
+                                "type": "object",
+                                "properties": {
+                                  "enabled": { "type": "boolean" },
+                                  "fileTypes": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string",
+                                      "enum": [
+                                        "pdf",
+                                        "ooxml_word",
+                                        "ooxml_excel",
+                                        "ooxml_powerpoint",
+                                        "ooxml_macro",
+                                        "odf",
+                                        "ole_office",
+                                        "rtf",
+                                        "chm",
+                                        "zip",
+                                        "gzip",
+                                        "tar",
+                                        "7z",
+                                        "rar",
+                                        "cab",
+                                        "bzip2",
+                                        "xz",
+                                        "jar",
+                                        "apk",
+                                        "pe_executable",
+                                        "msi",
+                                        "elf",
+                                        "macho",
+                                        "lnk",
+                                        "script_js",
+                                        "script_vbs",
+                                        "script_ps1",
+                                        "script_batch",
+                                        "script_shell",
+                                        "hta",
+                                        "iso",
+                                        "vhd",
+                                        "html",
+                                        "svg",
+                                        "xml",
+                                        "png",
+                                        "jpeg",
+                                        "gif",
+                                        "bmp",
+                                        "webp",
+                                        "tiff",
+                                        "text",
+                                        "ics",
+                                        "eml",
+                                        "unknown"
+                                      ]
+                                    }
+                                  },
+                                  "maxSampleBytes": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "browserAnalysis": { "type": "boolean" }
+                                },
+                                "required": [
+                                  "enabled",
+                                  "fileTypes",
+                                  "maxSampleBytes",
+                                  "browserAnalysis"
+                                ],
+                                "additionalProperties": false,
+                                "description": "What the sandbox engine applies (it still skips with feature_disabled without the plan feature)"
+                              },
+                              "feature": {
+                                "type": "object",
+                                "properties": {
+                                  "attachmentSandbox": {
+                                    "type": "boolean",
+                                    "description": "The organization’s plan includes `attachment_sandbox` (required for enabled)"
+                                  }
+                                },
+                                "required": ["attachmentSandbox"],
+                                "additionalProperties": false,
+                                "description": "Plan features the engine needs"
+                              },
+                              "execution": {
+                                "type": "string",
+                                "enum": ["disabled", "static_only", "local_test_runner"],
+                                "description": "What happens to a submitted file in this environment: disabled (nothing is analysed or executed), static_only (static analysis, no execution) or local_test_runner (local/CI only: scripts run in a hardened container that is NOT a VM boundary). Execution of unknown files is never available in production in this release."
+                              },
+                              "required": {
+                                "type": "boolean",
+                                "description": "Required for every scan round"
+                              },
+                              "tenantMayDisable": { "type": "boolean" },
+                              "overrideApplied": {
+                                "type": "boolean",
+                                "description": "False when there is no override or it no longer fits the platform settings"
+                              },
+                              "violations": {
+                                "type": "array",
+                                "items": {
+                                  "type": "object",
+                                  "properties": {
+                                    "path": { "type": "string" },
+                                    "code": {
+                                      "type": "string",
+                                      "enum": [
+                                        "invalid",
+                                        "unknown_key",
+                                        "out_of_bounds",
+                                        "threshold_order",
+                                        "severity_lowered"
+                                      ]
+                                    },
+                                    "message": { "type": "string" }
+                                  },
+                                  "required": ["path", "code", "message"],
+                                  "additionalProperties": false
+                                },
+                                "description": "Why a stored override is ignored (platform settings tightened since it was saved)"
+                              },
+                              "version": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 4294967295,
+                                "description": "Version of the override row (0 = no row yet); +1 per change"
+                              },
+                              "updatedAt": {
+                                "nullable": true,
+                                "type": "string",
+                                "format": "date-time",
+                                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                              }
+                            },
+                            "required": [
+                              "engine",
+                              "mode",
+                              "platform",
+                              "bounds",
+                              "override",
+                              "effective",
+                              "feature",
+                              "execution",
+                              "required",
+                              "tenantMayDisable",
+                              "overrideApplied",
+                              "violations",
+                              "version",
+                              "updatedAt"
+                            ],
+                            "additionalProperties": false
                           }
                         ]
                       },
@@ -23914,14 +24805,14 @@
     },
     "/api/v1/scan-settings/{engine}": {
       "put": {
-        "description": "Replaces the override with `settings` (rspamd: `spamScore` and `suspiciousScore` within the platform score bounds with suspiciousScore below spamScore; `phishingVerdict`, `dmarcRejectVerdict` and `authFailureVerdict` may only be raised above the platform value; attachment: `deniedTypes` added to the platform deny list, `allowedTypes` for allow-list mode (never a platform-denied type), `deniedTypeVerdict`, `typeMismatchVerdict` and `encryptedArchiveVerdict` raise-only (`suspicious` → `malicious`), `maxAttachmentBytes` tighten-only; archive, CPU and memory limits are platform-only). Compare-and-set on `expectedVersion` (0 when there is no override yet). Audited as `scan_settings.updated` with the settings before and after. A required engine cannot be disabled. Scan workers cache the settings per organization and engine for up to SCAN_SETTINGS_CACHE_TTL_MS (default 30 seconds): a change applies to messages scanned after that; rounds already scanned keep their results.",
+        "description": "Replaces the override with `settings` (rspamd: `spamScore` and `suspiciousScore` within the platform score bounds with suspiciousScore below spamScore; `phishingVerdict`, `dmarcRejectVerdict` and `authFailureVerdict` may only be raised above the platform value; attachment: `deniedTypes` added to the platform deny list, `allowedTypes` for allow-list mode (never a platform-denied type), `deniedTypeVerdict`, `typeMismatchVerdict` and `encryptedArchiveVerdict` raise-only (`suspicious` → `malicious`), `maxAttachmentBytes` tighten-only; archive, CPU and memory limits are platform-only; sandbox: `enabled` (true needs the plan feature `attachment_sandbox`, else 409 `feature_not_enabled`), `fileTypes` a non-empty subset of the platform list, `maxSampleBytes` within [1, platform maximum], `browserAnalysis` only when the platform allows it; the backend, limits and timeouts are platform-only, and execution of unknown files stays disabled in production). Compare-and-set on `expectedVersion` (0 when there is no override yet). Audited as `scan_settings.updated` with the settings before and after. A required engine cannot be disabled. Scan workers cache the settings per organization and engine for up to SCAN_SETTINGS_CACHE_TTL_MS (default 30 seconds): a change applies to messages scanned after that; rounds already scanned keep their results.",
         "operationId": "ScanSettingsController_replace_v1",
         "parameters": [
           {
             "name": "engine",
             "required": true,
             "in": "path",
-            "description": "Scan engine name with tenant settings: `rspamd` (step 4.1), `attachment` (step 4.2), `url` (step 4.3), `bec` (step 4.4)",
+            "description": "Scan engine name with tenant settings: `rspamd` (step 4.1), `attachment` (step 4.2), `url` (step 4.3), `bec` (step 4.4), `dlp` (step 4.5), `sandbox` (step 4.6)",
             "schema": { "type": "string" }
           }
         ],
@@ -23941,7 +24832,7 @@
                   "settings": {
                     "type": "object",
                     "additionalProperties": {},
-                    "description": "The override, all keys optional (rspamd: spamScore, suspiciousScore, phishingVerdict, dmarcRejectVerdict, authFailureVerdict; attachment: deniedTypes, allowedTypes, deniedTypeVerdict, typeMismatchVerdict, encryptedArchiveVerdict, maxAttachmentBytes; url: allowedDomains, blockedDomains, scanTimeFetch, lookalike.extraProtectedDomains, rewrite.{enabled, directions, expiryDays, excludedDomains, dkimSignedPolicy, plainText}, click.{suspicious, unknown, allowContinue}, dynamicInspection; bec: suspiciousScore, maliciousScore, freemailExtraDomains, history.{enabled, retentionDays}, ai.{localModel, llm, llmDailyCallLimit, raiseConfidence}; dlp: inboundEnabled, thresholds.<category>, disabledDetectors, defaultPolicy, evidence.{enabled, retentionDays}); replaces the previous override. Unknown keys are refused (422)"
+                    "description": "The override, all keys optional (rspamd: spamScore, suspiciousScore, phishingVerdict, dmarcRejectVerdict, authFailureVerdict; attachment: deniedTypes, allowedTypes, deniedTypeVerdict, typeMismatchVerdict, encryptedArchiveVerdict, maxAttachmentBytes; url: allowedDomains, blockedDomains, scanTimeFetch, lookalike.extraProtectedDomains, rewrite.{enabled, directions, expiryDays, excludedDomains, dkimSignedPolicy, plainText}, click.{suspicious, unknown, allowContinue}, dynamicInspection; bec: suspiciousScore, maliciousScore, freemailExtraDomains, history.{enabled, retentionDays}, ai.{localModel, llm, llmDailyCallLimit, raiseConfidence}; dlp: inboundEnabled, thresholds.<category>, disabledDetectors, defaultPolicy, evidence.{enabled, retentionDays}; sandbox: enabled (true needs the plan feature attachment_sandbox, else 409 feature_not_enabled), fileTypes, maxSampleBytes, browserAnalysis); replaces the previous override. Unknown keys are refused (422)"
                   }
                 },
                 "required": ["expectedVersion", "settings"],
@@ -26055,6 +26946,409 @@
                         "note"
                       ],
                       "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "engine": {
+                          "type": "string",
+                          "enum": ["sandbox"],
+                          "description": "Engine name (ENGINE_CATALOG)"
+                        },
+                        "mode": {
+                          "type": "string",
+                          "enum": ["asynchronous"],
+                          "description": "The sandbox never holds a scan round and never changes its verdict"
+                        },
+                        "platform": {
+                          "type": "object",
+                          "properties": {
+                            "tenantDefaultEnabled": {
+                              "type": "boolean",
+                              "description": "Opt-in default of every tenant (still needs the plan feature)"
+                            },
+                            "fileTypes": {
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "enum": [
+                                  "pdf",
+                                  "ooxml_word",
+                                  "ooxml_excel",
+                                  "ooxml_powerpoint",
+                                  "ooxml_macro",
+                                  "odf",
+                                  "ole_office",
+                                  "rtf",
+                                  "chm",
+                                  "zip",
+                                  "gzip",
+                                  "tar",
+                                  "7z",
+                                  "rar",
+                                  "cab",
+                                  "bzip2",
+                                  "xz",
+                                  "jar",
+                                  "apk",
+                                  "pe_executable",
+                                  "msi",
+                                  "elf",
+                                  "macho",
+                                  "lnk",
+                                  "script_js",
+                                  "script_vbs",
+                                  "script_ps1",
+                                  "script_batch",
+                                  "script_shell",
+                                  "hta",
+                                  "iso",
+                                  "vhd",
+                                  "html",
+                                  "svg",
+                                  "xml",
+                                  "png",
+                                  "jpeg",
+                                  "gif",
+                                  "bmp",
+                                  "webp",
+                                  "tiff",
+                                  "text",
+                                  "ics",
+                                  "eml",
+                                  "unknown"
+                                ]
+                              },
+                              "description": "File types that may be submitted (tenant: a subset)"
+                            },
+                            "maxSampleBytes": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991,
+                              "description": "Largest sample submitted (tenant: smaller or equal)"
+                            },
+                            "browserAnalysis": {
+                              "type": "boolean",
+                              "description": "HTML/SVG samples get the browser profile (cap)"
+                            }
+                          },
+                          "required": [
+                            "tenantDefaultEnabled",
+                            "fileTypes",
+                            "maxSampleBytes",
+                            "browserAnalysis"
+                          ],
+                          "additionalProperties": false,
+                          "description": "Platform settings (SANDBOX_*)"
+                        },
+                        "bounds": {
+                          "type": "object",
+                          "properties": {
+                            "enabled": { "type": "array", "items": { "type": "boolean" } },
+                            "fileTypes": {
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "enum": [
+                                  "pdf",
+                                  "ooxml_word",
+                                  "ooxml_excel",
+                                  "ooxml_powerpoint",
+                                  "ooxml_macro",
+                                  "odf",
+                                  "ole_office",
+                                  "rtf",
+                                  "chm",
+                                  "zip",
+                                  "gzip",
+                                  "tar",
+                                  "7z",
+                                  "rar",
+                                  "cab",
+                                  "bzip2",
+                                  "xz",
+                                  "jar",
+                                  "apk",
+                                  "pe_executable",
+                                  "msi",
+                                  "elf",
+                                  "macho",
+                                  "lnk",
+                                  "script_js",
+                                  "script_vbs",
+                                  "script_ps1",
+                                  "script_batch",
+                                  "script_shell",
+                                  "hta",
+                                  "iso",
+                                  "vhd",
+                                  "html",
+                                  "svg",
+                                  "xml",
+                                  "png",
+                                  "jpeg",
+                                  "gif",
+                                  "bmp",
+                                  "webp",
+                                  "tiff",
+                                  "text",
+                                  "ics",
+                                  "eml",
+                                  "unknown"
+                                ]
+                              }
+                            },
+                            "maxSampleBytes": {
+                              "type": "object",
+                              "properties": {
+                                "min": {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                },
+                                "max": {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                }
+                              },
+                              "required": ["min", "max"],
+                              "additionalProperties": false
+                            },
+                            "browserAnalysis": { "type": "array", "items": { "type": "boolean" } }
+                          },
+                          "required": ["enabled", "fileTypes", "maxSampleBytes", "browserAnalysis"],
+                          "additionalProperties": false,
+                          "description": "What an override may choose"
+                        },
+                        "override": {
+                          "nullable": true,
+                          "description": "The organization override; null for none",
+                          "type": "object",
+                          "properties": {
+                            "enabled": {
+                              "description": "Submit suspicious/unknown attachments; true needs the plan feature",
+                              "type": "boolean"
+                            },
+                            "fileTypes": {
+                              "description": "Non-empty subset of the platform list",
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "enum": [
+                                  "pdf",
+                                  "ooxml_word",
+                                  "ooxml_excel",
+                                  "ooxml_powerpoint",
+                                  "ooxml_macro",
+                                  "odf",
+                                  "ole_office",
+                                  "rtf",
+                                  "chm",
+                                  "zip",
+                                  "gzip",
+                                  "tar",
+                                  "7z",
+                                  "rar",
+                                  "cab",
+                                  "bzip2",
+                                  "xz",
+                                  "jar",
+                                  "apk",
+                                  "pe_executable",
+                                  "msi",
+                                  "elf",
+                                  "macho",
+                                  "lnk",
+                                  "script_js",
+                                  "script_vbs",
+                                  "script_ps1",
+                                  "script_batch",
+                                  "script_shell",
+                                  "hta",
+                                  "iso",
+                                  "vhd",
+                                  "html",
+                                  "svg",
+                                  "xml",
+                                  "png",
+                                  "jpeg",
+                                  "gif",
+                                  "bmp",
+                                  "webp",
+                                  "tiff",
+                                  "text",
+                                  "ics",
+                                  "eml",
+                                  "unknown"
+                                ]
+                              }
+                            },
+                            "maxSampleBytes": {
+                              "description": "1 … platform maximum",
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            "browserAnalysis": {
+                              "description": "true only when the platform allows it",
+                              "type": "boolean"
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        "effective": {
+                          "type": "object",
+                          "properties": {
+                            "enabled": { "type": "boolean" },
+                            "fileTypes": {
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "enum": [
+                                  "pdf",
+                                  "ooxml_word",
+                                  "ooxml_excel",
+                                  "ooxml_powerpoint",
+                                  "ooxml_macro",
+                                  "odf",
+                                  "ole_office",
+                                  "rtf",
+                                  "chm",
+                                  "zip",
+                                  "gzip",
+                                  "tar",
+                                  "7z",
+                                  "rar",
+                                  "cab",
+                                  "bzip2",
+                                  "xz",
+                                  "jar",
+                                  "apk",
+                                  "pe_executable",
+                                  "msi",
+                                  "elf",
+                                  "macho",
+                                  "lnk",
+                                  "script_js",
+                                  "script_vbs",
+                                  "script_ps1",
+                                  "script_batch",
+                                  "script_shell",
+                                  "hta",
+                                  "iso",
+                                  "vhd",
+                                  "html",
+                                  "svg",
+                                  "xml",
+                                  "png",
+                                  "jpeg",
+                                  "gif",
+                                  "bmp",
+                                  "webp",
+                                  "tiff",
+                                  "text",
+                                  "ics",
+                                  "eml",
+                                  "unknown"
+                                ]
+                              }
+                            },
+                            "maxSampleBytes": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "browserAnalysis": { "type": "boolean" }
+                          },
+                          "required": ["enabled", "fileTypes", "maxSampleBytes", "browserAnalysis"],
+                          "additionalProperties": false,
+                          "description": "What the sandbox engine applies (it still skips with feature_disabled without the plan feature)"
+                        },
+                        "feature": {
+                          "type": "object",
+                          "properties": {
+                            "attachmentSandbox": {
+                              "type": "boolean",
+                              "description": "The organization’s plan includes `attachment_sandbox` (required for enabled)"
+                            }
+                          },
+                          "required": ["attachmentSandbox"],
+                          "additionalProperties": false,
+                          "description": "Plan features the engine needs"
+                        },
+                        "execution": {
+                          "type": "string",
+                          "enum": ["disabled", "static_only", "local_test_runner"],
+                          "description": "What happens to a submitted file in this environment: disabled (nothing is analysed or executed), static_only (static analysis, no execution) or local_test_runner (local/CI only: scripts run in a hardened container that is NOT a VM boundary). Execution of unknown files is never available in production in this release."
+                        },
+                        "required": {
+                          "type": "boolean",
+                          "description": "Required for every scan round"
+                        },
+                        "tenantMayDisable": { "type": "boolean" },
+                        "overrideApplied": {
+                          "type": "boolean",
+                          "description": "False when there is no override or it no longer fits the platform settings"
+                        },
+                        "violations": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "path": { "type": "string" },
+                              "code": {
+                                "type": "string",
+                                "enum": [
+                                  "invalid",
+                                  "unknown_key",
+                                  "out_of_bounds",
+                                  "threshold_order",
+                                  "severity_lowered"
+                                ]
+                              },
+                              "message": { "type": "string" }
+                            },
+                            "required": ["path", "code", "message"],
+                            "additionalProperties": false
+                          },
+                          "description": "Why a stored override is ignored (platform settings tightened since it was saved)"
+                        },
+                        "version": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 4294967295,
+                          "description": "Version of the override row (0 = no row yet); +1 per change"
+                        },
+                        "updatedAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                        },
+                        "note": {
+                          "type": "string",
+                          "description": "Scan workers cache the settings per organization and engine for up to SCAN_SETTINGS_CACHE_TTL_MS (default 30 seconds): a change applies to messages scanned after that; rounds already scanned keep their results."
+                        }
+                      },
+                      "required": [
+                        "engine",
+                        "mode",
+                        "platform",
+                        "bounds",
+                        "override",
+                        "effective",
+                        "feature",
+                        "execution",
+                        "required",
+                        "tenantMayDisable",
+                        "overrideApplied",
+                        "violations",
+                        "version",
+                        "updatedAt",
+                        "note"
+                      ],
+                      "additionalProperties": false
                     }
                   ]
                 }
@@ -26146,7 +27440,7 @@
             }
           },
           "409": {
-            "description": "`expectedVersion` is not the current version; `currentVersion` is the version now",
+            "description": "`version_conflict`: `expectedVersion` is not the current version (`currentVersion` is the version now); `feature_not_enabled`: the override switches on a feature the organization’s plan does not include (`feature` names it, e.g. `attachment_sandbox` for `sandbox.enabled = true`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -26154,9 +27448,13 @@
                   "properties": {
                     "statusCode": { "type": "integer", "enum": [409] },
                     "error": { "type": "string" },
-                    "code": { "type": "string", "enum": ["version_conflict"] },
+                    "code": {
+                      "type": "string",
+                      "enum": ["version_conflict", "feature_not_enabled"]
+                    },
                     "message": { "type": "string" },
                     "currentVersion": { "type": "integer", "minimum": 0 },
+                    "feature": { "type": "string" },
                     "correlationId": { "type": "string" }
                   },
                   "required": ["statusCode", "error", "code", "message"]
@@ -26165,7 +27463,7 @@
             }
           },
           "422": {
-            "description": "The override breaks the platform settings: scores outside the bounds, suspiciousScore not below spamScore, a severity or verdict lowered below the platform value, maxAttachmentBytes outside [1 MiB, ATTACHMENT_MAX_BYTES], a platform-denied type on allowedTypes, an unknown file type, a URL domain that is not a registrable domain or host (IP literal, single label, public suffix), a domain both allowed and blocked, a fetch mode above the platform mode, an expiry outside [1, URL_TOKEN_MAX_EXPIRY_DAYS], rewriting or dynamic inspection switched on while the platform has it off, BEC thresholds or AI modes outside their bounds or caps, a BEC free-mail domain that is a public suffix, or an unknown key",
+            "description": "The override breaks the platform settings: scores outside the bounds, suspiciousScore not below spamScore, a severity or verdict lowered below the platform value, maxAttachmentBytes outside [1 MiB, ATTACHMENT_MAX_BYTES], a platform-denied type on allowedTypes, an unknown file type, a URL domain that is not a registrable domain or host (IP literal, single label, public suffix), a domain both allowed and blocked, a fetch mode above the platform mode, an expiry outside [1, URL_TOKEN_MAX_EXPIRY_DAYS], rewriting or dynamic inspection switched on while the platform has it off, BEC thresholds or AI modes outside their bounds or caps, a BEC free-mail domain that is a public suffix, sandbox fileTypes outside the platform list, a sandbox maxSampleBytes outside [1, SANDBOX_MAX_SAMPLE_BYTES], sandbox browserAnalysis switched on while the platform has it off, or an unknown key",
             "content": {
               "application/json": {
                 "schema": {
@@ -26216,7 +27514,7 @@
             "name": "engine",
             "required": true,
             "in": "path",
-            "description": "Scan engine name with tenant settings: `rspamd` (step 4.1), `attachment` (step 4.2), `url` (step 4.3), `bec` (step 4.4)",
+            "description": "Scan engine name with tenant settings: `rspamd` (step 4.1), `attachment` (step 4.2), `url` (step 4.3), `bec` (step 4.4), `dlp` (step 4.5), `sandbox` (step 4.6)",
             "schema": { "type": "string" }
           },
           {
@@ -28327,6 +29625,409 @@
                         "bounds",
                         "override",
                         "effective",
+                        "required",
+                        "tenantMayDisable",
+                        "overrideApplied",
+                        "violations",
+                        "version",
+                        "updatedAt",
+                        "note"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "engine": {
+                          "type": "string",
+                          "enum": ["sandbox"],
+                          "description": "Engine name (ENGINE_CATALOG)"
+                        },
+                        "mode": {
+                          "type": "string",
+                          "enum": ["asynchronous"],
+                          "description": "The sandbox never holds a scan round and never changes its verdict"
+                        },
+                        "platform": {
+                          "type": "object",
+                          "properties": {
+                            "tenantDefaultEnabled": {
+                              "type": "boolean",
+                              "description": "Opt-in default of every tenant (still needs the plan feature)"
+                            },
+                            "fileTypes": {
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "enum": [
+                                  "pdf",
+                                  "ooxml_word",
+                                  "ooxml_excel",
+                                  "ooxml_powerpoint",
+                                  "ooxml_macro",
+                                  "odf",
+                                  "ole_office",
+                                  "rtf",
+                                  "chm",
+                                  "zip",
+                                  "gzip",
+                                  "tar",
+                                  "7z",
+                                  "rar",
+                                  "cab",
+                                  "bzip2",
+                                  "xz",
+                                  "jar",
+                                  "apk",
+                                  "pe_executable",
+                                  "msi",
+                                  "elf",
+                                  "macho",
+                                  "lnk",
+                                  "script_js",
+                                  "script_vbs",
+                                  "script_ps1",
+                                  "script_batch",
+                                  "script_shell",
+                                  "hta",
+                                  "iso",
+                                  "vhd",
+                                  "html",
+                                  "svg",
+                                  "xml",
+                                  "png",
+                                  "jpeg",
+                                  "gif",
+                                  "bmp",
+                                  "webp",
+                                  "tiff",
+                                  "text",
+                                  "ics",
+                                  "eml",
+                                  "unknown"
+                                ]
+                              },
+                              "description": "File types that may be submitted (tenant: a subset)"
+                            },
+                            "maxSampleBytes": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991,
+                              "description": "Largest sample submitted (tenant: smaller or equal)"
+                            },
+                            "browserAnalysis": {
+                              "type": "boolean",
+                              "description": "HTML/SVG samples get the browser profile (cap)"
+                            }
+                          },
+                          "required": [
+                            "tenantDefaultEnabled",
+                            "fileTypes",
+                            "maxSampleBytes",
+                            "browserAnalysis"
+                          ],
+                          "additionalProperties": false,
+                          "description": "Platform settings (SANDBOX_*)"
+                        },
+                        "bounds": {
+                          "type": "object",
+                          "properties": {
+                            "enabled": { "type": "array", "items": { "type": "boolean" } },
+                            "fileTypes": {
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "enum": [
+                                  "pdf",
+                                  "ooxml_word",
+                                  "ooxml_excel",
+                                  "ooxml_powerpoint",
+                                  "ooxml_macro",
+                                  "odf",
+                                  "ole_office",
+                                  "rtf",
+                                  "chm",
+                                  "zip",
+                                  "gzip",
+                                  "tar",
+                                  "7z",
+                                  "rar",
+                                  "cab",
+                                  "bzip2",
+                                  "xz",
+                                  "jar",
+                                  "apk",
+                                  "pe_executable",
+                                  "msi",
+                                  "elf",
+                                  "macho",
+                                  "lnk",
+                                  "script_js",
+                                  "script_vbs",
+                                  "script_ps1",
+                                  "script_batch",
+                                  "script_shell",
+                                  "hta",
+                                  "iso",
+                                  "vhd",
+                                  "html",
+                                  "svg",
+                                  "xml",
+                                  "png",
+                                  "jpeg",
+                                  "gif",
+                                  "bmp",
+                                  "webp",
+                                  "tiff",
+                                  "text",
+                                  "ics",
+                                  "eml",
+                                  "unknown"
+                                ]
+                              }
+                            },
+                            "maxSampleBytes": {
+                              "type": "object",
+                              "properties": {
+                                "min": {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                },
+                                "max": {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                }
+                              },
+                              "required": ["min", "max"],
+                              "additionalProperties": false
+                            },
+                            "browserAnalysis": { "type": "array", "items": { "type": "boolean" } }
+                          },
+                          "required": ["enabled", "fileTypes", "maxSampleBytes", "browserAnalysis"],
+                          "additionalProperties": false,
+                          "description": "What an override may choose"
+                        },
+                        "override": {
+                          "nullable": true,
+                          "description": "The organization override; null for none",
+                          "type": "object",
+                          "properties": {
+                            "enabled": {
+                              "description": "Submit suspicious/unknown attachments; true needs the plan feature",
+                              "type": "boolean"
+                            },
+                            "fileTypes": {
+                              "description": "Non-empty subset of the platform list",
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "enum": [
+                                  "pdf",
+                                  "ooxml_word",
+                                  "ooxml_excel",
+                                  "ooxml_powerpoint",
+                                  "ooxml_macro",
+                                  "odf",
+                                  "ole_office",
+                                  "rtf",
+                                  "chm",
+                                  "zip",
+                                  "gzip",
+                                  "tar",
+                                  "7z",
+                                  "rar",
+                                  "cab",
+                                  "bzip2",
+                                  "xz",
+                                  "jar",
+                                  "apk",
+                                  "pe_executable",
+                                  "msi",
+                                  "elf",
+                                  "macho",
+                                  "lnk",
+                                  "script_js",
+                                  "script_vbs",
+                                  "script_ps1",
+                                  "script_batch",
+                                  "script_shell",
+                                  "hta",
+                                  "iso",
+                                  "vhd",
+                                  "html",
+                                  "svg",
+                                  "xml",
+                                  "png",
+                                  "jpeg",
+                                  "gif",
+                                  "bmp",
+                                  "webp",
+                                  "tiff",
+                                  "text",
+                                  "ics",
+                                  "eml",
+                                  "unknown"
+                                ]
+                              }
+                            },
+                            "maxSampleBytes": {
+                              "description": "1 … platform maximum",
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            "browserAnalysis": {
+                              "description": "true only when the platform allows it",
+                              "type": "boolean"
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        "effective": {
+                          "type": "object",
+                          "properties": {
+                            "enabled": { "type": "boolean" },
+                            "fileTypes": {
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "enum": [
+                                  "pdf",
+                                  "ooxml_word",
+                                  "ooxml_excel",
+                                  "ooxml_powerpoint",
+                                  "ooxml_macro",
+                                  "odf",
+                                  "ole_office",
+                                  "rtf",
+                                  "chm",
+                                  "zip",
+                                  "gzip",
+                                  "tar",
+                                  "7z",
+                                  "rar",
+                                  "cab",
+                                  "bzip2",
+                                  "xz",
+                                  "jar",
+                                  "apk",
+                                  "pe_executable",
+                                  "msi",
+                                  "elf",
+                                  "macho",
+                                  "lnk",
+                                  "script_js",
+                                  "script_vbs",
+                                  "script_ps1",
+                                  "script_batch",
+                                  "script_shell",
+                                  "hta",
+                                  "iso",
+                                  "vhd",
+                                  "html",
+                                  "svg",
+                                  "xml",
+                                  "png",
+                                  "jpeg",
+                                  "gif",
+                                  "bmp",
+                                  "webp",
+                                  "tiff",
+                                  "text",
+                                  "ics",
+                                  "eml",
+                                  "unknown"
+                                ]
+                              }
+                            },
+                            "maxSampleBytes": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "browserAnalysis": { "type": "boolean" }
+                          },
+                          "required": ["enabled", "fileTypes", "maxSampleBytes", "browserAnalysis"],
+                          "additionalProperties": false,
+                          "description": "What the sandbox engine applies (it still skips with feature_disabled without the plan feature)"
+                        },
+                        "feature": {
+                          "type": "object",
+                          "properties": {
+                            "attachmentSandbox": {
+                              "type": "boolean",
+                              "description": "The organization’s plan includes `attachment_sandbox` (required for enabled)"
+                            }
+                          },
+                          "required": ["attachmentSandbox"],
+                          "additionalProperties": false,
+                          "description": "Plan features the engine needs"
+                        },
+                        "execution": {
+                          "type": "string",
+                          "enum": ["disabled", "static_only", "local_test_runner"],
+                          "description": "What happens to a submitted file in this environment: disabled (nothing is analysed or executed), static_only (static analysis, no execution) or local_test_runner (local/CI only: scripts run in a hardened container that is NOT a VM boundary). Execution of unknown files is never available in production in this release."
+                        },
+                        "required": {
+                          "type": "boolean",
+                          "description": "Required for every scan round"
+                        },
+                        "tenantMayDisable": { "type": "boolean" },
+                        "overrideApplied": {
+                          "type": "boolean",
+                          "description": "False when there is no override or it no longer fits the platform settings"
+                        },
+                        "violations": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "path": { "type": "string" },
+                              "code": {
+                                "type": "string",
+                                "enum": [
+                                  "invalid",
+                                  "unknown_key",
+                                  "out_of_bounds",
+                                  "threshold_order",
+                                  "severity_lowered"
+                                ]
+                              },
+                              "message": { "type": "string" }
+                            },
+                            "required": ["path", "code", "message"],
+                            "additionalProperties": false
+                          },
+                          "description": "Why a stored override is ignored (platform settings tightened since it was saved)"
+                        },
+                        "version": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 4294967295,
+                          "description": "Version of the override row (0 = no row yet); +1 per change"
+                        },
+                        "updatedAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                        },
+                        "note": {
+                          "type": "string",
+                          "description": "Scan workers cache the settings per organization and engine for up to SCAN_SETTINGS_CACHE_TTL_MS (default 30 seconds): a change applies to messages scanned after that; rounds already scanned keep their results."
+                        }
+                      },
+                      "required": [
+                        "engine",
+                        "mode",
+                        "platform",
+                        "bounds",
+                        "override",
+                        "effective",
+                        "feature",
+                        "execution",
                         "required",
                         "tenantMayDisable",
                         "overrideApplied",

@@ -15,10 +15,9 @@ import {
   deliveryWorkerCounter,
   type MessageAttachment,
 } from './support/attachment-stack';
-import { eventually, ManagementApi, purgeDormantQueues } from './support/broker';
+import { purgeDormantQueues } from './support/broker';
 import { waitFor } from './support/compose';
 import { waitForAllDeliveries, waitForMessage } from './support/deliveries';
-import { stack } from './support/env';
 import {
   DELIVERED_PATH,
   expectConsistentHistory,
@@ -34,6 +33,7 @@ import {
   engineResultsOf,
   messagePublicId,
   REQUIRED_ENGINES,
+  roundFinalEngines,
   sandboxSubmissionsOf,
   scannedEventsOf,
   scanStackGate,
@@ -62,8 +62,11 @@ import { reply } from './support/smtp-tools';
  * - No attachments: attachment final `skipped` with `attachment.none` (rule A0), delivered.
  * - EICAR inside a zip inside a zip: `malicious`.
  * - An encrypted zip: `suspicious` with `archive.encrypted`, one `sandbox_submissions` row and
- *   one `mail.attachment.sandbox_requested.v1`, which the relay publishes to the dormant
- *   `scan.sandbox` (peeked, then purged); suspicious is approved and delivered.
+ *   one `mail.attachment.sandbox_requested.v1`, which the relay publishes to
+ *   `scan.sandbox.submissions` (topology v8, step 4.6 X11) where the email-worker's sandbox
+ *   dispatcher consumes it: the fixture organization has no plan feature `attachment_sandbox`,
+ *   so the submission ends `skipped` / `feature_disabled` and the round gets a `skipped` sandbox
+ *   final (asynchronous: the round verdict is unchanged); suspicious is approved and delivered.
  *
  * Every test file is generated at test time by `@email-gateway/attachment-corpus` (EICAR is
  * assembled from fragments; nothing binary is committed).
@@ -73,8 +76,6 @@ const fx = new SmtpFixtures();
 let org = 0n;
 let domain: FixtureDomain;
 let session: ApiSession | undefined;
-const mgmt = new ManagementApi();
-const vhost = stack.rabbitmqVhost();
 
 beforeAll(async () => {
   assertStackReady(gate);
@@ -168,13 +169,7 @@ describe.skipIf(gate.skip)('attachment stack: engine through Postfix', { timeout
       requiredEngines: [...REQUIRED_ENGINES],
     });
     expect(codes(round.reasonCodes)).toContain('malware.clamav');
-    expect(finals.map((f) => f.engine).sort()).toEqual([
-      'attachment',
-      'bec',
-      'dlp',
-      'rspamd',
-      'url',
-    ]);
+    expect(roundFinalEngines(finals)).toEqual(['attachment', 'bec', 'dlp', 'rspamd', 'url']);
     expect(attachmentFinal).toMatchObject({ outcome: 'malicious', errorCode: null });
     expect(codes(attachmentFinal!.reasonCodes)).toContain('malware.clamav');
     expect(attachmentFinal!.engineVersion).toMatch(/^clamav\/1\.\d+\.\d+\/\d+;yara-x\//);
@@ -353,8 +348,7 @@ describe.skipIf(gate.skip)('attachment stack: engine through Postfix', { timeout
     });
   });
 
-  it('an encrypted zip: suspicious (archive.encrypted), one sandbox submission and its event on scan.sandbox', async () => {
-    await purgeDormantQueues(mgmt, vhost);
+  it('an encrypted zip: suspicious (archive.encrypted), one sandbox submission, dispatched and skipped (no plan feature)', async () => {
     const { rcpt, message, round, attachmentFinal } = await send(
       'encrypted',
       'Attachment stack: encrypted zip',
@@ -368,53 +362,63 @@ describe.skipIf(gate.skip)('attachment stack: engine through Postfix', { timeout
     expect(codes(row!.reasonCodes)).toContain('archive.encrypted');
 
     // A11: one submission row and its outbox event, written with the final row.
-    const [submission, ...moreSubmissions] = await sandboxSubmissionsOf(fx.prisma, message);
+    const [first, ...moreSubmissions] = await sandboxSubmissionsOf(fx.prisma, message);
     expect(moreSubmissions).toEqual([]);
-    expect(submission).toMatchObject({
+    expect(first).toMatchObject({
       organizationId: org,
       scanId: round.id,
       attachmentId: row!.attachmentId,
       partIndex: row!.partIndex,
       sha256: row!.sha256,
       attachmentVerdict: 'suspicious',
-      status: 'pending',
     });
-    expect(submission!.objectKey.startsWith(`org/${org.toString()}/part/`)).toBe(true);
+    expect(first!.objectKey.startsWith(`org/${org.toString()}/part/`)).toBe(true);
     const outbox = await fx.prisma.messageOutbox.findFirstOrThrow({
-      where: { organizationId: org, eventId: submission!.requestedEventId },
+      where: { organizationId: org, eventId: first!.requestedEventId },
     });
     expect(outbox.eventType).toBe('mail.attachment.sandbox_requested.v1');
     const payload = attachmentSandboxRequestedV1.parse(outbox.payload);
     expect(payload).toMatchObject({
-      submissionId: submission!.id.toString(),
+      submissionId: first!.id.toString(),
       messageId: message.id.toString(),
       scanId: round.id.toString(),
       lifecycleRound: 0,
       attachmentVerdict: 'suspicious',
-      attachment: { sha256: row!.sha256, detectedType: 'zip', objectKey: submission!.objectKey },
+      attachment: { sha256: row!.sha256, detectedType: 'zip', objectKey: first!.objectKey },
     });
     expect(JSON.stringify(outbox.payload)).not.toContain('protected.zip');
 
-    // Published by the relay to email.security, bound to the dormant scan.sandbox (step 4.6).
-    const routingKey = `org.${org.toString()}.mail.attachment.sandbox_requested.v1`;
-    let peeked: { routingKey: string; payload: string }[] = [];
-    await eventually(
+    // Topology v8 (step 4.6 X11): the relay publishes it to scan.sandbox.submissions, the
+    // email-worker's sandbox dispatcher consumes it. Without the plan feature the submission is
+    // skipped (feature_disabled), no analysis or task is created, and the round gets its
+    // asynchronous `skipped` sandbox final.
+    const submission = await waitFor(
+      'the sandbox submission skipped by the dispatcher',
       async () => {
-        peeked = (await mgmt.peek(vhost, 'scan.sandbox', 50)).filter(
-          (m) => m.routingKey === routingKey,
-        );
-        return peeked.length >= 1;
+        const [s] = await sandboxSubmissionsOf(fx.prisma, message);
+        return s && s.status === 'skipped' ? s : undefined;
       },
-      60_000,
-      'the sandbox request on scan.sandbox',
-      500,
+      { timeoutMs: 60_000, intervalMs: 500 },
     );
-    expect(peeked).toHaveLength(1);
-    const envelope = JSON.parse(peeked[0]!.payload) as { eventId: string; eventType: string };
-    expect(envelope).toMatchObject({
-      eventId: submission!.requestedEventId,
-      eventType: 'mail.attachment.sandbox_requested.v1',
+    expect(submission).toMatchObject({
+      skipReason: 'feature_disabled',
+      analysisId: null,
+      sandboxVerdict: null,
     });
+    expect(codes(submission.sandboxReasonCodes)).toEqual(['sandbox.feature_disabled']);
+    const sandboxFinal = await waitFor(
+      'the skipped sandbox final',
+      async () =>
+        (await engineResultsOf(fx.prisma, message)).find(
+          (r) => r.engine === 'sandbox' && r.isFinal,
+        ),
+      { timeoutMs: 30_000, intervalMs: 500 },
+    );
+    expect(sandboxFinal).toMatchObject({ outcome: 'skipped', engineVersion: 'sandbox-engine/1' });
+    // Asynchronous: the round (already completed) is unchanged by the sandbox final.
+    const after = await waitForRoundComplete(fx.prisma, message, 0);
+    expect(after).toMatchObject({ scanVerdict: round.scanVerdict, status: 'completed' });
+    expect(codes(after.reasonCodes)).toEqual(codes(round.reasonCodes));
 
     // The round does not wait for the sandbox; the pass-through approves suspicious.
     await waitForLifecycle(fx.prisma, message, 'delivered', 'delivery_complete');
@@ -422,21 +426,20 @@ describe.skipIf(gate.skip)('attachment stack: engine through Postfix', { timeout
     const view = await attachmentEngineView(await messagePublicId(fx.prisma, message));
     expect(view.engine.attachments![0]).toMatchObject({
       verdict: 'suspicious',
-      sandbox: { submissionId: submission!.id.toString(), status: 'pending' },
+      sandbox: {
+        submissionId: submission.id.toString(),
+        status: 'skipped',
+        skipReason: 'feature_disabled',
+        verdict: null,
+        executed: null,
+      },
     });
-    // Purge the dormant queue (L16); its statistics refresh every few seconds.
-    await purgeDormantQueues(mgmt, vhost);
-    await eventually(
-      async () => (await mgmt.queue(vhost, 'scan.sandbox')).messages === 0,
-      20_000,
-      'scan.sandbox empty after the purge',
-      500,
-    );
     record('attachment-smtp', {
       encrypted_verdict: row!.verdict,
       encrypted_reasons: codes(row!.reasonCodes).join(','),
       sandbox_submissions: 1,
-      sandbox_events_on_queue: peeked.length,
+      sandbox_status: submission.status,
+      sandbox_skip_reason: submission.skipReason ?? '',
     });
   });
 });

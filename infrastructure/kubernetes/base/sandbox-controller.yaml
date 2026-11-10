@@ -1,0 +1,242 @@
+# The isolated sandbox-controller (step 4.6 X1, X5, X8, X20; ADR-0039; docs/deployment/sandbox.md;
+# docs/security/sandbox-threat-model.md; docs/runbooks/sandbox-controller.md).
+#
+# EXECUTION OF UNKNOWN FILES IS DISABLED. This Deployment runs SANDBOX_BACKEND=disabled (every
+# task is answered not_executed/backend_disabled, never clean). Production may switch to `static`
+# (bounded static analyzers in a limited child process, no execution) after the checks of the
+# deployment doc. `hardened-container` is a local/CI test harness and is REFUSED by the
+# controller's configuration here (APP_ENV=production, Kubernetes detected). The `vm` backend is
+# a preflight contract that REFUSES TO START in step 4.6 (its runner is not implemented); enabling
+# execution needs every precondition of the threat model §8 and a new ADR.
+#
+# The controller holds nothing worth stealing: its broker user eg-sandbox (read scan.sandbox,
+# publish its own result keys only), the sandbox bucket through its own IAM user (GetObject
+# samples/*, PutObject artifacts/*), SANDBOX_SAMPLE_KEY, SANDBOX_RESULT_KEY and the artifact PUBLIC
+# key. NEVER mount the database, Redis, main S3, token, DLP, BEC, DKIM or other broker secrets, nor
+# the artifact private key: the process refuses to start when any of them is present.
+#
+# Keys (explicit env, no shared ConfigMap — email-gateway-config carries S3_* keys the controller
+# refuses): set below; secrets from External Secrets:
+#   email-gateway-rabbitmq-sandbox (url: amqps://eg-sandbox:…@…/email-gateway),
+#   email-gateway-sandbox-s3 (access-key-id, secret-access-key: the eg-sandbox-controller IAM user),
+#   email-gateway-sandbox-keys (sample-key, sample-key-previous (optional), result-key,
+#   artifact-public-key). The artifact PRIVATE key stays offline (ops tooling only).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-controller
+  labels:
+    {
+      app.kubernetes.io/name: sandbox-controller,
+      app.kubernetes.io/component: sandbox,
+      app.kubernetes.io/part-of: email-gateway,
+    }
+spec:
+  # One instance: tasks are bounded (scan.sandbox drops beyond 10 000) and analyses expire at their
+  # deadline when the controller is absent; mail flow never waits for it.
+  replicas: 1
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels: { app.kubernetes.io/name: sandbox-controller }
+  strategy:
+    # Never two controllers on one scratch generation; the new pod's startup reap is safe.
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        {
+          app.kubernetes.io/name: sandbox-controller,
+          app.kubernetes.io/component: sandbox,
+          app.kubernetes.io/part-of: email-gateway,
+        }
+    spec:
+      serviceAccountName: sandbox-controller
+      # No Kubernetes API access: the disabled/static backends need none. The vm backend, when it
+      # exists, gets a dedicated namespaced service account (threat model §8 item 5).
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      # In-flight tasks are awaited up to SANDBOX_TASK_TIMEOUT_MS (180 s), then aborted (their
+      # scratch is removed in finally; anything left is reaped by the next pod's startup pass).
+      terminationGracePeriodSeconds: 200
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: sandbox-controller
+          image: email-gateway/sandbox-controller:latest
+          ports:
+            - { name: http, containerPort: 3092 }
+          env:
+            - { name: NODE_ENV, value: production }
+            - { name: APP_ENV, value: production }
+            - { name: LOG_LEVEL, value: info }
+            - { name: HTTP_HOST, value: 0.0.0.0 }
+            - { name: SANDBOX_HTTP_PORT, value: '3092' }
+            # Execution disabled. `static` is the only other production-eligible value.
+            - { name: SANDBOX_BACKEND, value: disabled }
+            - { name: SANDBOX_ALLOW_NON_VM_EXECUTION, value: 'false' }
+            # Distinct per instance (labels runners, X8): the pod name.
+            - name: SANDBOX_CONTROLLER_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - { name: SANDBOX_S3_BUCKET, value: replace-per-environment-sandbox }
+            - { name: SANDBOX_S3_REGION, value: ap-south-1 }
+            - { name: SANDBOX_S3_FORCE_PATH_STYLE, value: 'false' }
+            - { name: SANDBOX_CONCURRENCY, value: '1' }
+            - { name: SANDBOX_TASK_TIMEOUT_MS, value: '180000' }
+            - { name: SANDBOX_MAX_RUN_TIMEOUT_MS, value: '300000' }
+            - { name: SANDBOX_MAX_MEMORY_MB, value: '1024' }
+            - { name: SANDBOX_MAX_CPU_MILLIS, value: '2000' }
+            - { name: SANDBOX_MAX_PIDS, value: '256' }
+            - { name: SANDBOX_MAX_SCRATCH_MB, value: '256' }
+            - { name: SANDBOX_MAX_ARTIFACTS, value: '16' }
+            - { name: SANDBOX_MAX_ARTIFACT_BYTES, value: '2097152' }
+            - { name: SANDBOX_MAX_TOTAL_ARTIFACT_BYTES, value: '8388608' }
+            - { name: SANDBOX_MAX_SAMPLE_BYTES, value: '26214400' }
+            - { name: SANDBOX_SCRATCH_DIR, value: /scratch }
+            - { name: SANDBOX_REAPER_INTERVAL_MS, value: '30000' }
+            - { name: SANDBOX_SELF_TEST_INTERVAL_MS, value: '300000' }
+            - { name: SANDBOX_STATIC_HEAP_MB, value: '256' }
+            - { name: SANDBOX_STATIC_MAX_RSS_MB, value: '384' }
+            - { name: SANDBOX_STATIC_CPU_SECONDS, value: '20' }
+            - { name: SANDBOX_STATIC_TIMEOUT_MS, value: '30000' }
+            # Read by the vm preflight only (which refuses in 4.6).
+            - { name: SANDBOX_VM_RUNTIME_CLASS, value: gvisor }
+            - { name: SANDBOX_VM_ALLOWED_HANDLERS, value: 'runsc,kata,kata-qemu,kata-clh,kata-fc' }
+            - { name: SANDBOX_VM_NAMESPACE, value: email-gateway-sandbox-runners }
+            # Secrets as files (<KEY>_FILE convention), never as values in this manifest.
+            - { name: RABBITMQ_SANDBOX_URL_FILE, value: /var/run/secrets/rabbitmq-sandbox/url }
+            - {
+                name: SANDBOX_S3_ACCESS_KEY_ID_FILE,
+                value: /var/run/secrets/sandbox-s3/access-key-id,
+              }
+            - {
+                name: SANDBOX_S3_SECRET_ACCESS_KEY_FILE,
+                value: /var/run/secrets/sandbox-s3/secret-access-key,
+              }
+            - { name: SANDBOX_SAMPLE_KEY_FILE, value: /var/run/secrets/sandbox-keys/sample-key }
+            - { name: SANDBOX_RESULT_KEY_FILE, value: /var/run/secrets/sandbox-keys/result-key }
+            - {
+                name: SANDBOX_ARTIFACT_PUBLIC_KEY_FILE,
+                value: /var/run/secrets/sandbox-keys/artifact-public-key,
+              }
+            # Rotation only (optional): an env reference, because a *_FILE path that does not
+            # exist is refused at start.
+            - name: SANDBOX_SAMPLE_KEY_PREVIOUS
+              valueFrom:
+                secretKeyRef:
+                  { name: email-gateway-sandbox-keys, key: sample-key-previous, optional: true }
+          volumeMounts:
+            - {
+                name: rabbitmq-sandbox,
+                mountPath: /var/run/secrets/rabbitmq-sandbox,
+                readOnly: true,
+              }
+            - { name: sandbox-s3, mountPath: /var/run/secrets/sandbox-s3, readOnly: true }
+            - { name: sandbox-keys, mountPath: /var/run/secrets/sandbox-keys, readOnly: true }
+            # Per-task scratch (0700 directories, removed after every task, reaped on start and
+            # on a timer). Size-limited: the static backend writes the sample and nothing else.
+            - { name: scratch, mountPath: /scratch }
+            - { name: tmp, mountPath: /tmp }
+          readinessProbe:
+            # rabbitmq + sandbox-backend (backend, isolation, executes, boundary, last self-test)
+            # + sandbox-s3 (static only).
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 15
+            failureThreshold: 3
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health/live, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          startupProbe:
+            httpGet: { path: /health/live, port: http }
+            periodSeconds: 5
+            failureThreshold: 24
+          resources:
+            requests: { cpu: 250m, memory: 256Mi }
+            # disabled ≈ 120 MiB; static adds one analyzer child (heap 256 MiB, killed above
+            # SANDBOX_STATIC_MAX_RSS_MB = 384 MiB).
+            limits: { cpu: '1', memory: 768Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            privileged: false
+            capabilities: { drop: [ALL] }
+      volumes:
+        - name: rabbitmq-sandbox
+          secret: { secretName: email-gateway-rabbitmq-sandbox, items: [{ key: url, path: url }] }
+        - name: sandbox-s3
+          secret:
+            secretName: email-gateway-sandbox-s3
+            items:
+              - { key: access-key-id, path: access-key-id }
+              - { key: secret-access-key, path: secret-access-key }
+        - name: sandbox-keys
+          secret:
+            secretName: email-gateway-sandbox-keys
+            items:
+              - { key: sample-key, path: sample-key }
+              - { key: result-key, path: result-key }
+              - { key: artifact-public-key, path: artifact-public-key }
+        - name: scratch
+          emptyDir: { sizeLimit: 256Mi }
+        - name: tmp
+          emptyDir: { medium: Memory, sizeLimit: 64Mi }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sandbox-controller
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandbox-controller
+  labels: { app.kubernetes.io/name: sandbox-controller }
+spec:
+  selector: { app.kubernetes.io/name: sandbox-controller }
+  ports:
+    - { name: http, port: 3092, targetPort: http }
+---
+# Egress ONLY to the broker subnet, the S3 interface VPC endpoint subnet and cluster DNS; no
+# public address, no instance metadata (X5). Ingress: Prometheus on 3092 only. Replace both
+# subnets per environment (overlay patch); a world CIDR is refused by the deployment check.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sandbox-controller
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: sandbox-controller }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: observability }
+          podSelector:
+            matchLabels: { app.kubernetes.io/name: prometheus }
+      ports: [{ protocol: TCP, port: 3092 }]
+  egress:
+    # RabbitMQ (Amazon MQ subnet; replace per environment).
+    - to: [{ ipBlock: { cidr: 10.0.64.0/20 } }]
+      ports: [{ protocol: TCP, port: 5671 }, { protocol: TCP, port: 5672 }]
+    # Cluster DNS (for the broker and S3 names).
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }]
+    # S3: HTTPS ONLY to the subnet of the S3 *interface* VPC endpoint (PrivateLink, private DNS
+    # enabled, or SANDBOX_S3_ENDPOINT set to the endpoint's DNS name); replace per environment.
+    # Fail-closed: never a public range (0.0.0.0/0, ::/0, any non-private CIDR) — a compromised
+    # controller (it parses attacker files and holds SANDBOX_SAMPLE_KEY) must have no Internet
+    # exfiltration path. A gateway endpoint cannot be expressed in a NetworkPolicy
+    # (prefix list of public IPs): use the interface endpoint. Checked by
+    # apps/sandbox-controller/src/deployment/network-policy.test.ts (base and every overlay).
+    - to: [{ ipBlock: { cidr: 10.0.80.0/24 } }]
+      ports: [{ protocol: TCP, port: 443 }]

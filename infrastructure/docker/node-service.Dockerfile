@@ -26,10 +26,16 @@ RUN pnpm turbo run build --filter="@email-gateway/${APP}..."
 # Self-contained production bundle: the app, its workspace packages and prod dependencies only.
 RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
     pnpm --filter="@email-gateway/${APP}" deploy --prod /out
-# Generate the Prisma client inside the bundle when the app depends on the database package.
-RUN if [ -d /out/node_modules/@email-gateway/database ] || [ "${APP}" = "database" ]; then \
-      cd "$( [ "${APP}" = "database" ] && echo /out || echo /out/node_modules/@email-gateway/database )" \
-      && node "$(node -p "require.resolve('prisma/build/index.js')")" generate; \
+# Generate the Prisma client inside the bundle when the app depends on the database package,
+# directly or transitively (the sandbox-controller imports @email-gateway/common, which depends on
+# it, although the controller never receives a database URL: its configuration refuses one;
+# step 4.6 §12 WP5 — without the client the module graph does not load).
+RUN if [ "${APP}" = "database" ]; then db=/out; \
+    elif [ -d /out/node_modules/@email-gateway/database ]; then db=/out/node_modules/@email-gateway/database; \
+    else db="$(find /out/node_modules/.pnpm -maxdepth 4 -type d -path '*/node_modules/@email-gateway/database' | head -n 1)"; \
+    fi; \
+    if [ -n "$db" ]; then \
+      cd "$db" && node "$(node -p "require.resolve('prisma/build/index.js')")" generate; \
     fi
 
 FROM ${NODE_IMAGE} AS runtime

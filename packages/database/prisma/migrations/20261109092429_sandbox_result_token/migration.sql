@@ -1,0 +1,21 @@
+-- Step 4.6 (review fix): per-task one-time result token of the sandbox engine
+-- (docs/plan/steps/14-sandbox.md X11, X13; ADR-0040 decisions 3-4).
+--
+-- What changes:
+--   * sandbox_analyses (NOT partitioned): one nullable column `result_token_sha256` CHAR(64), the
+--     SHA-256 (lower-case hex) of the analysis's one-time result token. The dispatcher sets it in
+--     the transaction that marks the analysis `dispatched` and writes the task; the token itself
+--     travels only sealed inside mail.sandbox.task_requested.v1. The results consumer accepts a
+--     task_completed.v1 only when its MAC (whole payload, organization, token hash) verifies
+--     against this value.
+--
+-- Online and backward compatible: an instant ADD COLUMN (MySQL 8.4, nullable, no default, no
+-- index); no rewrite, no backfill. Existing rows keep NULL. A result for an analysis without a
+-- token hash is rejected (`bad_mac`), so an analysis that was dispatched before this release
+-- simply expires (`timeout`) through the sweeper (runbook sandbox-engine, "rollout").
+--
+-- Rollback: ALTER TABLE `sandbox_analyses` DROP COLUMN `result_token_sha256`; (after rolling the
+-- email-worker back; the older code ignores the column).
+
+-- AlterTable
+ALTER TABLE `sandbox_analyses` ADD COLUMN `result_token_sha256` CHAR(64) NULL;

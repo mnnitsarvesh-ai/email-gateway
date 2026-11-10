@@ -468,6 +468,9 @@ export class SmtpFixtures {
         await this.prisma.emailMessage.deleteMany({ where });
         await this.deleteDeliveryRows(ids);
         await this.deleteParseRows(ids);
+        // Step 4.6: analyses/artifacts reached through this run's submissions, before the
+        // submissions themselves go with the scan rows.
+        await this.deleteSandboxRows(ids);
         await this.deleteScanRows(ids);
         await this.prisma.messageOutbox.deleteMany({ where });
         await this.prisma.emailEvent.deleteMany({ where });
@@ -487,6 +490,8 @@ export class SmtpFixtures {
         await this.prisma.bounceEvent.deleteMany({ where });
         await this.prisma.deliverySuppression.deleteMany({ where });
         await this.prisma.organizationLimit.deleteMany({ where });
+        // Plan features a suite switched on (step 4.6: attachment_sandbox; Restrict).
+        await this.prisma.organizationFeature.deleteMany({ where });
         await this.prisma.smtpConnectorNetwork.deleteMany({ where });
         await this.prisma.smtpConnector.deleteMany({ where });
         await this.prisma.domainRecipientAddress.deleteMany({ where });
@@ -499,6 +504,7 @@ export class SmtpFixtures {
         await new Promise((r) => setTimeout(r, 1_500));
         await this.deleteDeliveryRows(ids);
         await this.deleteParseRows(ids);
+        await this.deleteSandboxRows(ids);
         await this.deleteScanRows(ids);
         for (const id of ids) {
           for (const key of await this.objectKeys(id)) {
@@ -517,6 +523,103 @@ export class SmtpFixtures {
       this.redis.disconnect();
       this.s3.destroy();
     }
+  }
+
+  /** Plan feature row (`organization_features`, source `override`) of a fixture organization. */
+  async feature(organizationId: bigint, featureKey: string, enabled: boolean): Promise<void> {
+    await this.prisma.organizationFeature.upsert({
+      where: { organizationId_featureKey: { organizationId, featureKey } },
+      create: { organizationId, featureKey, enabled, source: 'override' },
+      update: { enabled, source: 'override' },
+    });
+  }
+
+  /**
+   * Step 4.6 rows (docs/plan/steps/14-sandbox.md §3, X12): `sandbox_analyses` are platform rows
+   * (content-addressed), reached through this run's submissions or dispatched by a fixture
+   * organization; an analysis also linked to another organization's submission is left alone.
+   * Their artifact rows, the results consumer's ledger rows (keyed by the controller's result
+   * event id, not an outbox row of ours) and the sealed sample/artifact objects of the restricted
+   * sandbox bucket go with them.
+   */
+  async deleteSandboxRows(ids: readonly bigint[]): Promise<void> {
+    const orgs = [...ids];
+    const linked = await this.prisma.sandboxSubmission.findMany({
+      where: { organizationId: { in: orgs }, analysisId: { not: null } },
+      select: { analysisId: true },
+    });
+    const dispatched = await this.prisma.sandboxAnalysis.findMany({
+      where: { organizationId: { in: orgs } },
+      select: { id: true },
+    });
+    const candidates = [
+      ...new Set([
+        ...linked.flatMap((r) => (r.analysisId === null ? [] : [r.analysisId])),
+        ...dispatched.map((r) => r.id),
+      ]),
+    ];
+    if (candidates.length === 0) return;
+    const shared = await this.prisma.sandboxSubmission.findMany({
+      where: { analysisId: { in: candidates }, organizationId: { notIn: orgs } },
+      select: { analysisId: true },
+    });
+    const keep = new Set(shared.map((r) => r.analysisId?.toString()));
+    const analysisIds = candidates.filter((id) => !keep.has(id.toString()));
+    if (analysisIds.length === 0) return;
+    const analyses = await this.prisma.sandboxAnalysis.findMany({
+      where: { id: { in: analysisIds } },
+      select: { publicId: true, resultEventId: true, sampleObjectKey: true },
+    });
+    const resultEvents = analyses.flatMap((a) => (a.resultEventId ? [a.resultEventId] : []));
+    if (resultEvents.length > 0) {
+      await this.prisma.messageIdempotency.deleteMany({ where: { eventId: { in: resultEvents } } });
+    }
+    const artifacts = await this.prisma.sandboxArtifact.findMany({
+      where: { analysisId: { in: analysisIds } },
+      select: { objectKey: true },
+    });
+    const taskIds = new Set(analyses.map((a) => a.publicId));
+    const keys = new Set<string>([
+      ...artifacts.map((a) => a.objectKey),
+      ...analyses.flatMap((a) => (a.sampleObjectKey ? [a.sampleObjectKey] : [])),
+    ]);
+    // Objects the rows no longer name (a retried put, a run interrupted before its row).
+    for (const prefix of ['samples/', 'artifacts/']) {
+      for (const key of await this.sandboxObjectKeys(prefix)) {
+        if ([...taskIds].some((task) => key.includes(task))) keys.add(key);
+      }
+    }
+    for (const key of keys) {
+      await this.s3
+        .send(new DeleteObjectCommand({ Bucket: this.sandboxBucket, Key: key }))
+        .catch(() => undefined);
+    }
+    await this.prisma.sandboxArtifact.deleteMany({ where: { analysisId: { in: analysisIds } } });
+    await this.prisma.sandboxSubmission.updateMany({
+      where: { analysisId: { in: analysisIds }, organizationId: { in: orgs } },
+      data: { analysisId: null },
+    });
+    await this.prisma.sandboxAnalysis.deleteMany({ where: { id: { in: analysisIds } } });
+  }
+
+  /** The restricted sandbox bucket (step 4.6 X12; root credentials of the test run only). */
+  readonly sandboxBucket = process.env.SANDBOX_S3_BUCKET || 'email-gateway-sandbox';
+
+  async sandboxObjectKeys(prefix = ''): Promise<string[]> {
+    const keys: string[] = [];
+    let token: string | undefined;
+    do {
+      const page = await this.s3.send(
+        new ListObjectsV2Command({
+          Bucket: this.sandboxBucket,
+          Prefix: prefix,
+          ContinuationToken: token,
+        }),
+      );
+      for (const item of page.Contents ?? []) if (item.Key) keys.push(item.Key);
+      token = page.IsTruncated ? page.NextContinuationToken : undefined;
+    } while (token);
+    return keys;
   }
 
   /** Delivery rows of step 2.3 (worker, adapter bounce matching, recorder) of `ids`. */

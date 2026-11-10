@@ -5,6 +5,7 @@ import { AuditService } from '../../../audit/audit.service';
 import type { Principal } from '../../../auth-contracts/principal';
 import { systemScope } from '../../../auth-contracts/tenant-scope';
 import type { TransactionRunner } from '../../../database/transaction-runner';
+import type { OrganizationFeaturesService } from '../../../tenancy/organization-features.service';
 import type {
   ScanSettingsRepository,
   ScanSettingsRow,
@@ -45,7 +46,7 @@ const config = {
 };
 
 /** An in-memory scan_engine_settings table with the repository's compare-and-set. */
-function fakeStore(initial?: ScanSettingsRow) {
+function fakeStore(initial?: ScanSettingsRow, attachmentSandbox = false) {
   let row: (ScanSettingsRow & { updatedByUserId: bigint | null }) | null = initial
     ? { ...initial, updatedByUserId: null }
     : null;
@@ -94,13 +95,19 @@ function fakeStore(initial?: ScanSettingsRow) {
     }),
   };
   const transactions = { run: vi.fn((fn: (tx: unknown) => Promise<unknown>) => fn(TX)) };
+  const features = {
+    isEnabled: vi.fn((organizationId: bigint, key: string) =>
+      Promise.resolve(organizationId === 7n && key === 'attachment_sandbox' && attachmentSandbox),
+    ),
+  };
   const service = new ScanSettingsService(
     config,
     repository as unknown as ScanSettingsRepository,
     transactions as unknown as TransactionRunner,
     audit as unknown as AuditService,
+    features as unknown as OrganizationFeaturesService,
   );
-  return { service, repository, audits, row: () => row };
+  return { service, repository, audits, features, row: () => row };
 }
 const TX = { tx: true };
 
@@ -288,7 +295,13 @@ describe('ScanSettingsService (step 4.1 S8, S16)', () => {
       'url',
       'bec',
       'dlp',
+      'sandbox',
     ]);
+    expect(list.data[5]).toMatchObject({
+      engine: 'sandbox',
+      feature: { attachmentSandbox: false },
+      execution: 'disabled',
+    });
     expect(list.data[0]).toMatchObject({
       engine: 'rspamd',
       version: 2,
@@ -399,5 +412,104 @@ describe('ScanSettingsService (step 4.1 S8, S16)', () => {
       expect.objectContaining({ path: 'blockedDomains.0', code: 'invalid' }),
     ]);
     expect(row()).toBeNull();
+  });
+});
+
+describe('ScanSettingsService: sandbox (step 4.6 X17)', () => {
+  it('refuses enabled=true without the plan feature (409 feature_not_enabled), nothing written', async () => {
+    const { service, audits, row, features } = fakeStore();
+    const refused = await codeOf(
+      service.replace(
+        user,
+        scope,
+        'sandbox',
+        { expectedVersion: 0, settings: { enabled: true } },
+        client,
+      ),
+    );
+    expect(refused).toMatchObject({ status: 409, code: 'feature_not_enabled' });
+    expect((refused.error as { details: unknown }).details).toEqual({
+      feature: 'attachment_sandbox',
+    });
+    // Read inside the change transaction, on the writer.
+    expect(features.isEnabled).toHaveBeenCalledWith(7n, 'attachment_sandbox', TX);
+    expect(row()).toBeNull();
+    expect(audits).toHaveLength(0);
+    // Narrowing without opting in needs no feature.
+    const narrowed = await service.replace(
+      user,
+      scope,
+      'sandbox',
+      { expectedVersion: 0, settings: { fileTypes: ['pdf'], enabled: false } },
+      client,
+    );
+    expect(narrowed).toMatchObject({
+      engine: 'sandbox',
+      version: 1,
+      effective: { enabled: false, fileTypes: ['pdf'] },
+      feature: { attachmentSandbox: false },
+      execution: 'disabled',
+    });
+  });
+
+  it('opts in with the plan feature, audited; a stale version is still a version conflict', async () => {
+    const { service, audits } = fakeStore(undefined, true);
+    const view = await service.replace(
+      user,
+      scope,
+      'sandbox',
+      { expectedVersion: 0, settings: { enabled: true, maxSampleBytes: 1_048_576 } },
+      client,
+    );
+    expect(view).toMatchObject({
+      engine: 'sandbox',
+      version: 1,
+      override: { enabled: true, maxSampleBytes: 1_048_576 },
+      effective: { enabled: true, maxSampleBytes: 1_048_576 },
+      feature: { attachmentSandbox: true },
+    });
+    expect(audits[0]).toMatchObject({
+      action: 'scan_settings.updated',
+      resourceId: 'sandbox',
+      metadata: { before: null, after: { enabled: true, maxSampleBytes: 1_048_576 } },
+    });
+    expect(
+      await codeOf(
+        service.replace(user, scope, 'sandbox', { expectedVersion: 0, settings: {} }, client),
+      ),
+    ).toMatchObject({ status: 409, code: 'version_conflict' });
+  });
+
+  it('refuses out-of-bounds sandbox settings (422) before any transaction', async () => {
+    const { service, repository } = fakeStore(undefined, true);
+    expect(
+      await codeOf(
+        service.replace(
+          user,
+          scope,
+          'sandbox',
+          { expectedVersion: 0, settings: { fileTypes: ['zip'], maxSampleBytes: 0 } },
+          client,
+        ),
+      ),
+    ).toMatchObject({ status: 422, code: 'scan_settings_invalid' });
+    expect(repository.find).not.toHaveBeenCalled();
+  });
+
+  it('describes the configured backend: static → static_only, hardened-container → local_test_runner', async () => {
+    const make = (backend: 'static' | 'hardened-container') =>
+      new ScanSettingsService(
+        { ...config, SANDBOX_EXPECTED_BACKEND: backend },
+        { list: () => Promise.resolve([]) } as unknown as ScanSettingsRepository,
+        {} as TransactionRunner,
+        {} as AuditService,
+        { isEnabled: () => Promise.resolve(false) } as unknown as OrganizationFeaturesService,
+      );
+    const execution = async (backend: 'static' | 'hardened-container') =>
+      (await make(backend).list(scope)).data.find((v) => v.engine === 'sandbox');
+    expect(await execution('static')).toMatchObject({ execution: 'static_only' });
+    expect(await execution('hardened-container')).toMatchObject({
+      execution: 'local_test_runner',
+    });
   });
 });

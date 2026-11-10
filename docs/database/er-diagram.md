@@ -36,6 +36,8 @@ flowchart LR
     email_auth_results[(email_auth_results P)]
     attachment_scan_results[(attachment_scan_results P)]
     sandbox_submissions[(sandbox_submissions P)]
+    sandbox_analyses
+    sandbox_artifacts
     message_urls[(message_urls P)]
     url_scan_results[(url_scan_results P)]
     url_rewrites[(url_rewrites P)]
@@ -87,6 +89,8 @@ flowchart LR
   email_scans -.-> email_auth_results
   email_scans -.-> attachment_scan_results
   email_scans -.-> sandbox_submissions
+  sandbox_submissions -.-> sandbox_analyses
+  sandbox_analyses --> sandbox_artifacts
   email_messages -.-> message_urls
   email_scans -.-> url_scan_results
   email_scans -.-> url_rewrites
@@ -455,6 +459,8 @@ erDiagram
   email_scans ||..o{ attachment_scan_results : "scan_id + received_at, one per attachment"
   email_attachments ||..o{ attachment_scan_results : "attachment_id, one per round"
   email_scans ||..o{ sandbox_submissions : "scan_id + received_at, one per submitted attachment"
+  sandbox_analyses |o..o{ sandbox_submissions : "analysis_id (logical), many submissions per analysis"
+  sandbox_analyses ||--o{ sandbox_artifacts : "RESTRICT, unique (analysis_id, seq)"
   organizations |o--o{ attachment_rescan_jobs : "RESTRICT, NULL = every organization"
   users |o--o{ attachment_rescan_jobs : "requested_by, SET NULL"
   users |o--o{ malware_signatures : "added_by, SET NULL"
@@ -760,7 +766,27 @@ erDiagram
     bigint scan_id "UK with attachment_id, received_at"
     bigint attachment_id
     varchar object_key "S3 part key"
-    enum status "pending until step 4.6"
+    enum status "4.6 appends skipped"
+    bigint analysis_id "logical, indexed (4.6)"
+    varchar skip_reason "4.6"
+  }
+  sandbox_analyses {
+    bigint id PK
+    char public_id UK "task id"
+    char sha256
+    varchar dedupe_key UK "sha256:analysis_key, nullable"
+    enum status
+    bigint organization_id "dispatching org, routing only"
+    varchar sample_object_key "sandbox bucket"
+    enum verdict "nullable"
+    json report "bounded view, no content"
+  }
+  sandbox_artifacts {
+    bigint id PK
+    bigint analysis_id FK "UK with seq"
+    enum kind
+    varchar object_key "sandbox bucket"
+    varchar wrapped_key "nullable = crypto-shredded"
   }
   attachment_rescan_jobs {
     bigint id PK
@@ -791,6 +817,8 @@ Step 4.2 ([§3](../plan/steps/10-attachment-scanning.md#3-data-model-one-forward
 Step 4.3 ([§3](../plan/steps/11-url-protection.md#3-data-model-one-forward-migration-url_protection-wp1)): the URL engine writes, in the finalize transaction of its final `scan_engine_results` row, the message's new `message_urls` rows (one per unique URL; a rescan keeps the seqs already stored), one `url_scan_results` row per URL, one `url_rewrites` row and one `url_dynamic_inspections` row per URL sent to the browser worker; all four copy the message's `received_at`. The click-service writes one `url_click_events` row per decided click, partitioned by `clicked_at` and pointing to its URL by `(message_id, message_received_at, url_seq)`. No foreign keys (all five are partitioned); `threat_indicators` gains the analyst who added a platform indicator (`SET NULL`).
 
 Step 4.4 ([§3](../plan/steps/12-phishing-bec.md#3-data-model-one-forward-migration-bec_detection-wp1)): the BEC engine (a stage-2 engine that runs after `rspamd` and `url` finalized) writes, in the finalize transaction of its final `scan_engine_results` row, one `bec_scan_results` row per round (partitioned, copies the message's `received_at`, no foreign keys) and, in round 0 only and when the tenant opted in, its `bec_contact_history` upserts. The six tenant tables are not partitioned and reference `organizations` (`RESTRICT`, deleted explicitly by organization deletion) and `users` (`SET NULL`); `bec_feedback` points to its result by `(bec_result_id, message_received_at)` and `bec_suppression_rules` to its feedback by `feedback_id`, both logical references without a foreign key.
+
+Step 4.6 ([§3](../plan/steps/14-sandbox.md#3-data-model-one-forward-migration-sandbox_engine-wp1)): the sandbox engine of the email-worker links each `sandbox_submissions` row (partitioned) to one content-addressed `sandbox_analyses` row by `analysis_id` (a logical reference: no foreign key from a partitioned table); several submissions of different tenants and rounds can share one analysis (`dedupe_key`). `sandbox_analyses` and `sandbox_artifacts` are not partitioned and platform-level (no foreign key to `organizations`); `sandbox_artifacts` references its analysis (`RESTRICT`: the sweeper deletes artifacts first). Sample and artifact bytes live only in the sandbox bucket, sealed.
 
 Step 4.5 ([§3](../plan/steps/13-dlp.md#3-data-model-one-forward-migration-dlp_engine-wp1)): the DLP engine (a stage-1 engine on `scan.dlp`) writes, in the finalize transaction of its final `scan_engine_results` row, one `dlp_scan_results` row per round and, when a reportable finding was sealed into an encrypted S3 evidence object, one `dlp_evidence` row (both partitioned, copy the message's `received_at`, no foreign keys; `matched_policy_id` / `matched_rule_id` are logical references). The six tenant tables are not partitioned and reference `organizations` (`RESTRICT`, deleted explicitly by organization deletion) and `users` (`SET NULL`); rules reference their policy and exceptions their target policy or rule (`RESTRICT`).
 

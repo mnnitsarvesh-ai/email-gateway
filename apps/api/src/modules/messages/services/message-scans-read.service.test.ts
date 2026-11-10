@@ -50,6 +50,8 @@ function setup(rows: ScanRoundRow[], found = true) {
     attachmentResults: vi.fn(() => Promise.resolve([] as unknown[])),
     attachmentParts: vi.fn((..._args: unknown[]) => Promise.resolve([] as unknown[])),
     sandboxSubmissions: vi.fn(() => Promise.resolve([] as unknown[])),
+    sandboxAnalyses: vi.fn((..._args: unknown[]) => Promise.resolve([] as unknown[])),
+    sandboxArtifacts: vi.fn((..._args: unknown[]) => Promise.resolve([] as unknown[])),
     messageUrls: vi.fn(() => Promise.resolve([] as unknown[])),
     urlResults: vi.fn(() => Promise.resolve([] as unknown[])),
     urlRewrites: vi.fn(() => Promise.resolve([] as unknown[])),
@@ -309,5 +311,97 @@ describe('MessageScansReadService (step 4.1 S16)', () => {
       },
     });
     expect(JSON.stringify(page)).not.toContain('4532015112830366');
+  });
+});
+
+describe('MessageScansReadService: sandbox (step 4.6 X18)', () => {
+  const TASK = '0193a7c0-0000-7000-8000-00000000abcd';
+  const sub = (overrides: Record<string, unknown>) => ({
+    id: 501n,
+    scanId: 30n,
+    attachmentId: 900n,
+    partIndex: 1,
+    sha256: 'a'.repeat(64),
+    status: 'completed',
+    skipReason: null,
+    sandboxVerdict: 'unknown',
+    sandboxReasonCodes: ['sandbox.not_executed', 'sandbox.not_executed.backend_disabled'],
+    completedAt: new Date('2026-11-08T08:00:05.600Z'),
+    analysisId: 40n,
+    externalRef: TASK,
+    ...overrides,
+  });
+
+  it('reads analyses and artifacts only by the ids of the organization’s terminal submissions', async () => {
+    const { service, scans } = setup([round(30n, 2)]);
+    scans.engineResults.mockResolvedValue([
+      {
+        scanId: 30n,
+        engine: 'sandbox',
+        engineVersion: '0.1.0+disabled/disabled/1',
+        outcome: 'unknown',
+        score: null,
+        requiredScore: null,
+        action: null,
+        reasonCodes: ['sandbox.not_executed'],
+        errorCode: null,
+        settingsVersion: null,
+        durationMs: 0,
+        evidence: { submissions: 2, executed: 0, isolation: ['none'] },
+        attempt: 1,
+        isFinal: true,
+        completedAt: new Date('2026-11-08T08:00:06.900Z'),
+      },
+    ]);
+    scans.sandboxSubmissions.mockResolvedValue([
+      sub({}),
+      sub({
+        id: 502n,
+        attachmentId: 901n,
+        partIndex: 2,
+        status: 'skipped',
+        skipReason: 'type_excluded',
+        sandboxVerdict: null,
+        sandboxReasonCodes: ['sandbox.type_excluded'],
+        analysisId: null,
+        externalRef: null,
+      }),
+      sub({ id: 503n, attachmentId: 902n, partIndex: 3, status: 'submitted', externalRef: null }),
+    ]);
+    scans.sandboxAnalyses.mockResolvedValue([
+      {
+        id: 40n,
+        publicId: TASK,
+        report: null,
+        backend: 'disabled',
+        backendVersion: 'disabled/1',
+        isolation: 'none',
+        executed: false,
+        controllerVersion: '0.1.0',
+        analyzerVersion: null,
+        mapVersion: 'sandbox-map/1',
+      },
+    ]);
+    const page = await service.list(reader, scope, message.publicId, { limit: 10 });
+    expect(scans.sandboxAnalyses).toHaveBeenCalledWith([40n]);
+    expect(scans.sandboxArtifacts).toHaveBeenCalledWith([40n]);
+    const entry = page.data[0]!.engines.find((e) => e.engine === 'sandbox')!;
+    expect(entry).toMatchObject({ outcome: 'unknown', durationMs: null, symbols: [] });
+    expect(entry.submissions).toEqual([
+      expect.objectContaining({
+        submissionId: '501',
+        status: 'completed',
+        executed: false,
+        isolation: 'none',
+        backend: 'disabled',
+        completedAt: '2026-11-08T08:00:05.000Z',
+      }),
+      expect.objectContaining({
+        submissionId: '502',
+        status: 'skipped',
+        skipReason: 'type_excluded',
+      }),
+      expect.objectContaining({ submissionId: '503', status: 'submitted', executed: null }),
+    ]);
   });
 });

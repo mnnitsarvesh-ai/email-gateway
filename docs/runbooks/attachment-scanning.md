@@ -90,7 +90,7 @@ Informational: a ClamAV database (`clamav_db`), engine (`clamav_engine`) or YARA
 
 ## SandboxSubmissionsAccumulating
 
-Informational until step 4.6: `scan.sandbox` is a dormant bounded buffer (drop-head). The authoritative record is `sandbox_submissions` (`status = pending`). Nothing to do unless volume is unexpected (check `scan_attachment_sandbox_submissions_total{verdict}`).
+Step 4.6 (topology v8): `mail.attachment.sandbox_requested.v1` is bound to the work queue `scan.sandbox.submissions`, consumed by the email-worker's sandbox dispatcher (ledger `email-worker.scan.sandbox`); `scan.sandbox` now carries the controller's tasks. Informational: more than 5000 ready submissions for 15 minutes means the dispatcher is not running (`SANDBOX_ENABLED=true` and `SCAN_CONSUMERS` empty or naming `sandbox` on some replica; Kubernetes `email-worker-sandbox`) or not keeping up (`SANDBOX_DISPATCH_CONCURRENCY`, S3 and MySQL latency). The round never waits for the sandbox; pending submissions expire after `SANDBOX_SUBMISSION_TTL_SECONDS` (verdict `timeout`, never `clean`). The authoritative record is `sandbox_submissions`; the volume submitted by this engine is `scan_attachment_sandbox_submissions_total{verdict}`. Dispatch, dedup and the warning-level backlog alert are in [sandbox-engine.md](sandbox-engine.md#sandboxdispatchbacklog).
 
 ## clamd down, slow or OOM
 

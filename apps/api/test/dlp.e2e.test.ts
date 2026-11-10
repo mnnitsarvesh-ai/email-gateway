@@ -43,6 +43,7 @@ import { DlpEvidenceStore } from '../src/modules/dlp/services/dlp-evidence-store
 import { MessageLifecycleReadRepository } from '../src/modules/messages/repositories/message-lifecycle-read.repository';
 import { MessageScansReadRepository } from '../src/modules/messages/repositories/message-scans-read.repository';
 import { ScanSettingsRepository } from '../src/modules/scans/repositories/scan-settings.repository';
+import { OrganizationFeaturesService } from '../src/tenancy/organization-features.service';
 import { InMemoryKeyValueStore } from './support/in-memory-key-value-store';
 import { RecordingEmailSender } from './support/recording-email-sender';
 import { TEST_DOMAIN_ENV } from './support/test-env';
@@ -441,6 +442,9 @@ describe('step 4.5 DLP routes (e2e, dependencies stubbed)', () => {
       .useValue(scanReads)
       .overrideProvider(ScanSettingsRepository)
       .useValue(settingsRows)
+      // Plan features (step 4.6 X17: the scan-settings views state attachment_sandbox).
+      .overrideProvider(OrganizationFeaturesService)
+      .useValue({ isEnabled: () => Promise.resolve(false) })
       .compile();
     // Production logging: the Nest logger on pino (every service log line and the exception
     // filter), captured in memory so the pattern-test markers can be searched for.

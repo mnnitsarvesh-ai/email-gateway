@@ -22,10 +22,12 @@ import {
 import { z } from 'zod';
 import { becConfigShape, validateBecConfig } from './bec-config';
 import { dlpConfigShape, validateDlpConfig } from './dlp-config';
+import { sandboxConfigShape, validateSandboxConfig } from './sandbox/sandbox-config';
 import { urlConfigShape, validateUrlConfig } from './url-config';
 
 export { becPlatformFromConfig } from './bec-config';
 export { dlpPlatformFromConfig } from './dlp-config';
+export { sandboxPlatformFromConfig } from './sandbox/sandbox-config';
 export { urlPlatformFromConfig, urlProductionLike } from './url-config';
 
 const int = z.coerce.number().int();
@@ -33,6 +35,34 @@ const positiveInt = int.min(1);
 const flag = z.enum(['true', 'false', '1', '0']).transform((v) => v === 'true' || v === '1');
 const httpUrl = z.url({ protocol: /^https?$/ });
 const score = z.coerce.number().finite();
+
+/** The asynchronous engine SCAN_CONSUMERS may name although SCAN_ENGINES never does (X13). */
+export const SANDBOX_CONSUMER = 'sandbox' satisfies EngineName;
+
+/**
+ * SCAN_CONSUMERS: `sandbox` (at most once) plus synchronous engines validated like SCAN_ENGINES.
+ * Empty = every enabled engine (and the sandbox when SANDBOX_ENABLED).
+ */
+function parseConsumers(value: string, ctx: z.RefinementCtx): EngineName[] {
+  if (value.trim() === '') return [];
+  const names = value
+    .split(',')
+    .map((name) => name.trim())
+    .filter((name) => name.length > 0);
+  const sandbox = names.filter((name) => name === SANDBOX_CONSUMER).length;
+  if (sandbox > 1) {
+    ctx.addIssue({ code: 'custom', message: `Scan engine listed twice: ${SANDBOX_CONSUMER}` });
+    return z.NEVER;
+  }
+  const synchronous = names.filter((name) => name !== SANDBOX_CONSUMER);
+  try {
+    const engines = synchronous.length > 0 ? parseEnabledEngines(synchronous.join(',')) : [];
+    return sandbox === 1 ? [...engines, SANDBOX_CONSUMER] : engines;
+  } catch (err) {
+    ctx.addIssue({ code: 'custom', message: (err as Error).message });
+    return z.NEVER;
+  }
+}
 
 /** Longest round deadline (S10): must stay well below LIFECYCLE_DEADLINE_SCANNING_HOURS (24). */
 export const SCAN_ROUND_DEADLINE_MAX_SECONDS = 6 * 3600;
@@ -190,20 +220,14 @@ export const scanConfigShape = {
   /**
    * Engines whose queue consumers this replica runs (step 4.2 A1), comma-separated; empty = every
    * enabled engine. Must be a non-empty subset of SCAN_ENGINES (validated). The required engines
-   * of a round still come from SCAN_ENGINES, identical on every scan replica.
+   * of a round still come from SCAN_ENGINES, identical on every scan replica. Step 4.6 X13: it
+   * also accepts the asynchronous `sandbox` (not in SCAN_ENGINES; switched by SANDBOX_ENABLED),
+   * so a replica can run the sandbox consumers alone (`SCAN_CONSUMERS=sandbox`).
    */
   SCAN_CONSUMERS: z
     .string()
     .default('')
-    .transform((value, ctx): EngineName[] => {
-      if (value.trim() === '') return [];
-      try {
-        return parseEnabledEngines(value);
-      } catch (err) {
-        ctx.addIssue({ code: 'custom', message: (err as Error).message });
-        return z.NEVER;
-      }
-    }),
+    .transform((value, ctx): EngineName[] => parseConsumers(value, ctx)),
   /**
    * The scan role's own least-privilege RabbitMQ user `eg-scanner` (S1, S2): read `scan.spam`,
    * write `email.security` / `email.events`. Comma-separated node URLs (`_FILE` supported).
@@ -267,6 +291,7 @@ export const scanConfigShape = {
   ...urlConfigShape(),
   ...becConfigShape(),
   ...dlpConfigShape(),
+  ...sandboxConfigShape(),
 };
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars -- only its type is used
@@ -411,6 +436,16 @@ export const runsBecConsumer = (cfg: ScanShapeConfig): boolean =>
 /** True when this replica runs the url engine's consumer (and its results consumer, U1). */
 export const runsUrlConsumer = (cfg: ScanShapeConfig): boolean =>
   cfg.SCAN_ENABLED && cfg.SCAN_ENGINES.includes('url') && consumerEngines(cfg).includes('url');
+
+/**
+ * True when this replica runs the sandbox engine (step 4.6 X13): the dispatcher on
+ * `scan.sandbox.submissions`, the results consumer on `scan.sandbox.results` and the sweeper.
+ * Needs SCAN_ENABLED, SANDBOX_ENABLED and SCAN_CONSUMERS empty or naming `sandbox`.
+ */
+export const runsSandboxConsumers = (cfg: ScanShapeConfig): boolean =>
+  cfg.SCAN_ENABLED &&
+  cfg.SANDBOX_ENABLED &&
+  (cfg.SCAN_CONSUMERS.length === 0 || cfg.SCAN_CONSUMERS.includes(SANDBOX_CONSUMER));
 
 /** The platform attachment settings of the config (A8). Not validated (see the schema). */
 export function attachmentPlatformFromConfig(cfg: ScanShapeConfig): AttachmentPlatformSettings {
@@ -586,6 +621,12 @@ export function validateScanConfig(
     );
   }
   for (const engine of cfg.SCAN_CONSUMERS) {
+    if (engine === SANDBOX_CONSUMER) {
+      if (!cfg.SANDBOX_ENABLED) {
+        refuse('SCAN_CONSUMERS', 'names sandbox, which needs SANDBOX_ENABLED=true');
+      }
+      continue;
+    }
     if (!cfg.SCAN_ENGINES.includes(engine)) {
       refuse('SCAN_CONSUMERS', `must be a subset of SCAN_ENGINES (${engine} is not enabled)`);
     }
@@ -600,6 +641,7 @@ export function validateScanConfig(
   if (cfg.SCAN_ENGINES.includes('dlp')) {
     validateDlpConfig(cfg, runsDlpConsumer(cfg), engineQueueMaxAttempts('dlp'), refuse);
   }
+  validateSandboxConfig(cfg, runsSandboxConsumers(cfg), refuse);
   if (!cfg.SCAN_ENABLED) return;
   if (
     consumerEngines(cfg).includes('attachment') &&

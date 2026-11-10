@@ -2,6 +2,7 @@ import { ApiParam } from '@nestjs/swagger';
 import { ApiCodedError } from '../../http/coded-exception';
 import {
   CONTENT_UNAVAILABLE,
+  FEATURE_NOT_ENABLED,
   HASH_EXISTS,
   INDICATOR_EXISTS,
   ORGANIZATION_NOT_FOUND,
@@ -32,7 +33,7 @@ export const ApiEngineParam = (): MethodDecorator =>
     name: 'engine',
     description:
       'Scan engine name with tenant settings: `rspamd` (step 4.1), `attachment` (step 4.2), ' +
-      '`url` (step 4.3), `bec` (step 4.4)',
+      '`url` (step 4.3), `bec` (step 4.4), `dlp` (step 4.5), `sandbox` (step 4.6)',
   });
 
 export const ApiScanEngineNotFound = (): MethodDecorator =>
@@ -46,6 +47,25 @@ export const ApiVersionConflict = (): MethodDecorator =>
     { currentVersion: { type: 'integer', minimum: 0 } },
   );
 
+/**
+ * 409 of `PUT /scan-settings/{engine}`: a version conflict, or (step 4.6 X17) an override that
+ * needs a plan feature the organization lacks (`sandbox.enabled = true` without
+ * `attachment_sandbox`).
+ */
+export const ApiVersionOrFeatureConflict = (): MethodDecorator =>
+  ApiCodedError(
+    409,
+    '`version_conflict`: `expectedVersion` is not the current version (`currentVersion` is the ' +
+      'version now); `feature_not_enabled`: the override switches on a feature the ' +
+      'organization’s plan does not include (`feature` names it, e.g. `attachment_sandbox` for ' +
+      '`sandbox.enabled = true`)',
+    [VERSION_CONFLICT, FEATURE_NOT_ENABLED],
+    {
+      currentVersion: { type: 'integer', minimum: 0 },
+      feature: { type: 'string' },
+    },
+  );
+
 export const ApiScanSettingsInvalid = (): MethodDecorator =>
   ApiCodedError(
     422,
@@ -57,7 +77,9 @@ export const ApiScanSettingsInvalid = (): MethodDecorator =>
       'fetch mode above the platform mode, an expiry outside [1, URL_TOKEN_MAX_EXPIRY_DAYS], ' +
       'rewriting or dynamic inspection switched on while the platform has it off, BEC ' +
       'thresholds or AI modes outside their bounds or caps, a BEC free-mail domain that is a ' +
-      'public suffix, or an unknown key',
+      'public suffix, sandbox fileTypes outside the platform list, a sandbox maxSampleBytes ' +
+      'outside [1, SANDBOX_MAX_SAMPLE_BYTES], sandbox browserAnalysis switched on while the ' +
+      'platform has it off, or an unknown key',
     [SCAN_SETTINGS_INVALID],
     {
       violations: {

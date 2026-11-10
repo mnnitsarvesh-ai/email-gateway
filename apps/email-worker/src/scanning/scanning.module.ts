@@ -36,6 +36,7 @@ import {
   runsAttachmentConsumer,
   runsBecConsumer,
   runsDlpConsumer,
+  runsSandboxConsumers,
   runsUrlConsumer,
 } from './config';
 import { DlpMetrics } from './engines/dlp/dlp-metrics';
@@ -68,6 +69,9 @@ import {
 } from './round-service';
 import { ScanMetrics } from './scan-metrics';
 import { ScanRepository } from './scan-repository';
+import { createSandboxJobs, type SandboxJobs } from './sandbox/sandbox-engine';
+import { SANDBOX_SUBMISSIONS_QUEUE } from './sandbox/sandbox-dispatcher';
+import { SANDBOX_RESULTS_QUEUE } from './sandbox/sandbox-results';
 import { SettingsResolver } from './settings-resolver';
 
 export const SCAN_LOGGER = Symbol('SCAN_LOGGER');
@@ -108,6 +112,9 @@ export const DLP_JOBS = Symbol('DLP_JOBS');
 export interface DlpJobs {
   sweeper: DlpEvidenceSweeper;
 }
+
+/** The sandbox engine (step 4.6 X13, X16), or null on replicas that do not run it. */
+export const SANDBOX_JOBS = Symbol('SANDBOX_JOBS');
 
 /** `amqp_connection_up{connection}` of the scan role. */
 export const SCANNER_CONNECTION_NAME = 'email-worker-scanner';
@@ -281,6 +288,21 @@ export class DlpExtractorHealth implements HealthIndicator {
     const check = engineHealthCheck(this.engines, this.healthName);
     if (!check) throw new Error('the dlp engine does not run in this worker');
     return (await check.check()) as void | HealthDetails;
+  }
+}
+
+/**
+ * Readiness `sandbox-bucket` (step 4.6 X13): the restricted sandbox bucket is reachable with the
+ * worker's S3 client (HeadBucket), on replicas running the sandbox engine.
+ */
+@Injectable()
+export class SandboxBucketHealth implements HealthIndicator {
+  readonly healthName = 'sandbox-bucket';
+  constructor(@Inject(SANDBOX_JOBS) private readonly jobs: SandboxJobs | null) {}
+
+  async checkHealth(): Promise<void | HealthDetails> {
+    if (!this.jobs) throw new Error('the sandbox engine does not run in this worker');
+    await this.jobs.objects.check();
   }
 }
 
@@ -519,6 +541,7 @@ export class ScanningRuntime implements OnModuleInit, OnApplicationBootstrap, On
     @Inject(URL_JOBS) private readonly urlJobs: UrlJobs | null,
     @Inject(BEC_JOBS) private readonly becJobs: BecJobs | null,
     @Inject(DLP_JOBS) private readonly dlpJobs: DlpJobs | null,
+    @Inject(SANDBOX_JOBS) private readonly sandboxJobs: SandboxJobs | null,
   ) {}
 
   get running(): boolean {
@@ -531,6 +554,7 @@ export class ScanningRuntime implements OnModuleInit, OnApplicationBootstrap, On
       queues: [
         ...this.engines.map((e) => e.registration.catalog.queue),
         ...(this.urlJobs ? [URL_RESULTS_QUEUE] : []),
+        ...(this.sandboxJobs ? [SANDBOX_SUBMISSIONS_QUEUE, SANDBOX_RESULTS_QUEUE] : []),
       ],
     });
     this.connection.start();
@@ -555,11 +579,18 @@ export class ScanningRuntime implements OnModuleInit, OnApplicationBootstrap, On
     }
     this.becJobs?.sweeper.start();
     this.dlpJobs?.sweeper.start();
+    if (this.sandboxJobs) {
+      const { dispatcher, results } = this.sandboxJobs;
+      this.sandboxJobs.dispatchConsumer.start((event) => dispatcher.handle(event));
+      this.sandboxJobs.resultsConsumer.start((event) => results.handle(event));
+      this.sandboxJobs.sweeper.start();
+    }
     this.started = true;
     this.logger.info(
       {
         engines: this.engines.map((e) => e.registration.catalog.name),
         queues: this.engines.map((e) => e.registration.catalog.queue),
+        sandbox: this.sandboxJobs !== null,
       },
       'security scanning started',
     );
@@ -601,6 +632,17 @@ export class ScanningRuntime implements OnModuleInit, OnApplicationBootstrap, On
         await this.dlpJobs.sweeper
           .stop()
           .catch(() => this.logger.warn('dlp evidence sweeper stop failed'));
+      }
+      if (this.sandboxJobs) {
+        await this.sandboxJobs.dispatchConsumer
+          .stop()
+          .catch(() => this.logger.warn('sandbox dispatch consumer stop failed'));
+        await this.sandboxJobs.resultsConsumer
+          .stop()
+          .catch(() => this.logger.warn('sandbox results consumer stop failed'));
+        await this.sandboxJobs.sweeper
+          .stop()
+          .catch(() => this.logger.warn('sandbox sweeper stop failed'));
       }
     }
     // Kills the inspector children (graceful shutdown) after the consumers stopped.
@@ -828,6 +870,43 @@ export class ScanningModule {
           },
           inject: [PrismaService, S3Service, SCAN_LOCKS, MetricsService],
         },
+        {
+          provide: SANDBOX_JOBS,
+          useFactory: (
+            prisma: PrismaService,
+            s3: S3Service,
+            locks: LeaderLock,
+            registry: MetricsService,
+            metrics: ScanMetrics,
+            connection: AmqpConnection,
+            publisher: ConfirmPublisher,
+            messaging: MessagingMetrics,
+          ): SandboxJobs | null => {
+            if (!runsSandboxConsumers(config)) return null;
+            return createSandboxJobs({
+              config,
+              prisma,
+              s3,
+              locks,
+              registry,
+              settingsInvalid: (engine) => metrics.settingsInvalid.inc({ engine }),
+              connection,
+              publisher,
+              messaging,
+              logger: scanLogger,
+            });
+          },
+          inject: [
+            PrismaService,
+            S3Service,
+            SCAN_LOCKS,
+            MetricsService,
+            ScanMetrics,
+            SCANNER_AMQP_CONNECTION,
+            SCANNER_PUBLISHER,
+            SCANNER_MESSAGING_METRICS,
+          ],
+        },
         ScannerBrokerHealth,
         ClamavHealth,
         InspectorHealth,
@@ -835,6 +914,7 @@ export class ScanningModule {
         BecEngineHealth,
         DlpEngineHealth,
         DlpExtractorHealth,
+        SandboxBucketHealth,
         ScanningRuntime,
       ],
       exports: [
@@ -847,6 +927,7 @@ export class ScanningModule {
         BecEngineHealth,
         DlpEngineHealth,
         DlpExtractorHealth,
+        SandboxBucketHealth,
       ],
     };
   }

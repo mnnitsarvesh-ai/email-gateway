@@ -291,9 +291,10 @@ export async function copiesOfEvent(
 export const DORMANT_QUEUES = [
   // `scan.spam` is a work queue since topology v3 (step 4.1 S2, consumed by the scan role),
   // `scan.attachment` since v4 (step 4.2 A2, the attachment engine), `scan.url` since v5 (step
-  // 4.3 U2, the URL engine), `scan.dlp` since v7 (step 4.5 D2, the DLP engine).
+  // 4.3 U2, the URL engine), `scan.dlp` since v7 (step 4.5 D2, the DLP engine), `scan.sandbox`
+  // since v8 (step 4.6 X11: the sandbox-controller's lossy work queue; with the controller
+  // stopped its tasks wait there and analyses expire — suites remove only their own tasks).
   'scan.auth',
-  'scan.sandbox',
   'email.policy.evaluate',
   'email.quarantine',
   'email.archive',

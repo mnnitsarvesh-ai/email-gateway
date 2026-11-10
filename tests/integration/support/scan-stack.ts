@@ -97,6 +97,19 @@ export function scannedEventsOf(prisma: PrismaClient, organizationId: bigint, me
   });
 }
 
+/**
+ * The engines of a round's final rows WITHOUT the asynchronous `sandbox` engine (step 4.6 X10):
+ * its final may be written before or after the round completes (an attachment submitted to the
+ * sandbox), never counts for the round and is asserted by the sandbox suites, so round-level
+ * assertions compare the synchronous engines only. Sorted.
+ */
+export function roundFinalEngines(rows: readonly { engine: string; isFinal: boolean }[]): string[] {
+  return rows
+    .filter((r) => r.isFinal && r.engine !== 'sandbox')
+    .map((r) => r.engine)
+    .sort();
+}
+
 /** Waits until the message's round `round` is no longer `running` (or `pending`); returns it. */
 export async function waitForRoundComplete(
   prisma: PrismaClient,

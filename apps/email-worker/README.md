@@ -49,10 +49,10 @@ port is 3020.
 
 ## Roles (step 4.1 S1)
 
-| Role | Flag                                    | Broker user (URL)                               | Consumes                                                                                                                         | Readiness                                                                                                       |
-| ---- | --------------------------------------- | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| MIME | `MIME_INGESTION_ENABLED` (default true) | `eg-email-worker` (`RABBITMQ_EMAIL_WORKER_URL`) | `email.received`                                                                                                                 | `rabbitmq`                                                                                                      |
-| Scan | `SCAN_ENABLED` (default true)           | `eg-scanner` (`RABBITMQ_SCANNER_URL`)           | `scan.spam`, `scan.attachment`, `scan.url` + `scan.url.results`, `scan.bec`, `scan.dlp` (one queue per engine, `SCAN_CONSUMERS`) | `rabbitmq-scanner`, `clamav`, `attachment-inspector`, `url-engine`, `bec-engine`, `dlp-engine`, `dlp-extractor` |
+| Role | Flag                                    | Broker user (URL)                               | Consumes                                                                                                                                                                                                                 | Readiness                                                                                                                         |
+| ---- | --------------------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| MIME | `MIME_INGESTION_ENABLED` (default true) | `eg-email-worker` (`RABBITMQ_EMAIL_WORKER_URL`) | `email.received`                                                                                                                                                                                                         | `rabbitmq`                                                                                                                        |
+| Scan | `SCAN_ENABLED` (default true)           | `eg-scanner` (`RABBITMQ_SCANNER_URL`)           | `scan.spam`, `scan.attachment`, `scan.url` + `scan.url.results`, `scan.bec`, `scan.dlp` (one queue per engine, `SCAN_CONSUMERS`); with `SANDBOX_ENABLED`: `scan.sandbox.submissions` + `scan.sandbox.results` (step 4.6) | `rabbitmq-scanner`, `clamav`, `attachment-inspector`, `url-engine`, `bec-engine`, `dlp-engine`, `dlp-extractor`, `sandbox-bucket` |
 
 Locally (Compose, host) one process runs both roles. Production runs two Deployments of the same
 image (`infrastructure/kubernetes/base/email-worker.yaml`): `email-worker` (`SCAN_ENABLED=false`)
@@ -418,6 +418,52 @@ integration `integration/dlp-scan.test.ts` (real MySQL writer, MinIO and extract
 masked rows, encrypted evidence, rule action and incident, exception, idempotent duplicates with
 orphan deletion, rescan, not-extracted codes, a selftest CPU kill, Aadhaar gating, the sweeper, a
 forged read). Benchmark: `pnpm --filter @email-gateway/email-worker bench:dlp`.
+
+## Sandbox engine (step 4.6)
+
+Design [14-sandbox.md](../../docs/plan/steps/14-sandbox.md) (decision ids X*n*: X10, X13–X17,
+X19, X20), [ADR-0040](../../docs/architecture/adr/0040-sandbox-engine-dispatch-results-artifacts.md),
+threat model [sandbox-threat-model.md](../../docs/security/sandbox-threat-model.md), runbook
+[sandbox-engine.md](../../docs/runbooks/sandbox-engine.md). Envelopes, the result MAC, the analysis
+key and the verdict map `sandbox-map/1` live in [`@email-gateway/sandbox`](../../packages/sandbox);
+the isolated `apps/sandbox-controller` analyses the samples. Code: `src/scanning/sandbox/`.
+
+**The sandbox never changes the round verdict.** `sandbox` is an **asynchronous, optional**
+engine (X10): not in `SCAN_ENGINES`, never required, not in `ENGINE_REGISTRY`; `aggregateRound`
+ignores finals of asynchronous engines (`isAsynchronousEngine`), so a sandbox final written before
+or after completion changes neither the verdict, the reason codes nor the outcome. Its final row
+(`scan_engine_results`, engine `sandbox`) is written when the round's last submission ends and
+never touches `email_scans` or the lifecycle. **Execution of unknown files is disabled by
+default** (the controller's `SANDBOX_BACKEND=disabled`: every analysis answers `not_executed` →
+`unknown`); `not_executed`, failures, timeouts, static-only and non-VM runs are never `clean`.
+
+The engine runs where `SCAN_ENABLED=true`, `SANDBOX_ENABLED=true` (code default `false`) and
+`SCAN_CONSUMERS` is empty or contains `sandbox` (`SCAN_CONSUMERS` accepts `sandbox` although
+`SCAN_ENGINES` refuses it; Kubernetes `email-worker-sandbox` runs `SCAN_CONSUMERS=sandbox`). It
+adds the consumers of `scan.sandbox.submissions` and `scan.sandbox.results` (topology v8 retry
+policies: hold, 10 attempts, 2 s–60 s, 24 h) on the scan role's connection, the sweeper and the
+readiness indicator `sandbox-bucket`.
+
+| File                    | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sandbox-config.ts`     | The `SANDBOX_*` keys of the email-worker and the shared platform settings (§5), bounds and refusals (bucket + sample key + result key where the engine runs, result ≠ sample key, analysis retention ≥ artifact retention, sample retention ≥ deadline, deadline > run timeout, run limits ≤ the controller's clamp defaults); values never echoed                                                                                                                                                                              |
+| `sandbox-dispatcher.ts` | Ledger `email-worker.scan.sandbox` (X13 steps 1–7): key organization = envelope, echo-checked submission, gates (plan feature `attachment_sandbox`, tenant `scan_engine_settings` through `resolveSandboxSettings`, type, size), profile and limits, `analysisKey` / `dedupeKey`, dedup under `FOR UPDATE` (reusable → complete at once, in flight → link, stale → clear and create, unique violation → re-read), staging by the creating event only, transaction B (`pending → dispatched` + `mail.sandbox.task_requested.v1`) |
+| `sample-stager.ts`      | Bounded part read from the mail bucket (prefix re-check, size and SHA-256), `sandbox-sample/1` sealing under `SANDBOX_SAMPLE_KEY`, `PutObject` to `samples/<yyyy>/<mm>/<taskId>.bin` in `SANDBOX_S3_BUCKET` with the worker's S3 client; deletes restricted to `samples/` and `artifacts/` keys                                                                                                                                                                                                                                 |
+| `sandbox-results.ts`    | Ledger `email-worker.scan.sandbox.results` (X13 results steps 1–5): schema + security-contracts enums, `verifyResultMac`, the analysis `FOR UPDATE` (task id, hash, organization, `dispatched`), artifact key prefix/seq checks, `mapAnalysis`, the analysis update (report view, versions, `reuse_until`), `sandbox_artifacts` rows, ≤ 200 linked submissions, optional `malware_signatures` (`SANDBOX_PUBLISH_HASHES`), sample delete after commit                                                                            |
+| `sandbox-finalizer.ts`  | X15: `email_scans` rows `FOR UPDATE` (ascending), conditional submission updates, one `mail.attachment.sandbox_completed.v1` per changed submission, and the round's `sandbox` final through `aggregateSubmissions` when no submission of the round is `pending`/`submitted` (submissions read `FOR SHARE`; a final written earlier is kept)                                                                                                                                                                                    |
+| `sandbox-sweeper.ts`    | X16, leader lock `scan:sandbox`: (a) pending submissions past the TTL, (b) analyses past the deadline, (c) catch-up of submitted submissions, (d) sample deletion, (e) artifact crypto-shredding then object deletion, (f) analysis deletion; batches of `SANDBOX_SWEEP_BATCH` in their own transactions                                                                                                                                                                                                                        |
+| `sandbox-store.ts`      | Every MySQL access (writer): echo checks (`InconsistentSandboxReadError`, retryable, `scan_sandbox_inconsistent_reads_total{read}`), `FOR UPDATE` / `FOR SHARE` raw reads, conditional writes, SCAN_DB_TIMEOUT_MS transaction budgets                                                                                                                                                                                                                                                                                           |
+| `sandbox-engine.ts`     | `createSandboxJobs` (store, stager, dispatcher, results service, consumers, sweeper), used by `ScanningModule` and the integration tests                                                                                                                                                                                                                                                                                                                                                                                        |
+| `sandbox-metrics.ts`    | The X20 worker series (bounded labels; no tenant, hash or task label)                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+
+**Tests:** unit tests in `src/scanning/sandbox/*.test.ts` (in-memory `FakeSandboxStore` with the
+store's semantics: every gate and skip, profiles, dedup branches incl. the concurrent unique
+violation and concurrent deliveries of the creating event, resume after a crash between the
+transactions, integrity/missing parts, every rejection reason, verdict mapping, artifacts, reuse
+windows, the 200-submission cap, hash publishing, finals and their serialization, every sweeper
+step and the shredding order, config refusals) and `src/scanning/aggregate.test.ts` (asynchronous
+finals excluded); package integration `integration/sandbox-{dispatch,results,sweeper}.test.ts`
+(real MySQL writer, MinIO and a topology v8 vhost; MinIO paused during staging).
 
 ## Message lifecycle (step 3.3 L8.2)
 

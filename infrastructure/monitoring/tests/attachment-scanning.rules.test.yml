@@ -52,9 +52,12 @@ tests:
       # One database change at minute 10.
       - series: 'scan_attachment_signature_changes_total{job="email-worker",instance="a",component="clamav_db"}'
         values: '0x10 1x35'
-      # scan.sandbox above 5000 from minute 10.
-      - series: 'rabbitmq_detailed_queue_messages_ready{job="rabbitmq-detailed",vhost="email-gateway",queue="scan.sandbox"}'
+      # scan.sandbox.submissions above 5000 from minute 10 (step 4.6: scan.sandbox carries the
+      # controller's tasks and never fires this alert).
+      - series: 'rabbitmq_detailed_queue_messages_ready{job="rabbitmq-detailed",vhost="email-gateway",queue="scan.sandbox.submissions"}'
         values: '10x10 6000x35'
+      - series: 'rabbitmq_detailed_queue_messages_ready{job="rabbitmq-detailed",vhost="email-gateway",queue="scan.sandbox"}'
+        values: '9000x45'
     alert_rule_test:
       - eval_time: 6m
         alertname: ClamavUnavailable
@@ -195,7 +198,9 @@ tests:
             exp_annotations:
               summary: Sandbox submissions accumulating
               description: >-
-                scan.sandbox holds more than 5000 sandbox_requested.v1 events for 15 minutes.
-                Until step 4.6 the queue is a bounded dormant buffer (drop-head): this is
-                expected volume information, not a failure.
+                scan.sandbox.submissions holds more than 5000 sandbox_requested.v1 events for 15
+                minutes: the sandbox dispatcher of the email-worker (SCAN_CONSUMERS empty or with
+                sandbox, SANDBOX_ENABLED=true) is not keeping up or not running. The round never
+                waits for the sandbox; undispatched submissions expire after
+                SANDBOX_SUBMISSION_TTL_SECONDS (timeout, never clean).
               runbook_url: docs/runbooks/attachment-scanning.md#sandboxsubmissionsaccumulating

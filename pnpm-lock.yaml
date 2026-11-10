@@ -118,6 +118,9 @@ importers:
       '@email-gateway/rspamd':
         specifier: workspace:*
         version: link:../../packages/rspamd
+      '@email-gateway/sandbox':
+        specifier: workspace:*
+        version: link:../../packages/sandbox
       '@email-gateway/security-contracts':
         specifier: workspace:*
         version: link:../../packages/security-contracts
@@ -434,6 +437,9 @@ importers:
       '@email-gateway/rspamd':
         specifier: workspace:*
         version: link:../../packages/rspamd
+      '@email-gateway/sandbox':
+        specifier: workspace:*
+        version: link:../../packages/sandbox
       '@email-gateway/security-contracts':
         specifier: workspace:*
         version: link:../../packages/security-contracts
@@ -669,6 +675,70 @@ importers:
       '@swc/core':
         specifier: ^1.13.5
         version: 1.16.21
+      '@types/express':
+        specifier: ^5.0.3
+        version: 5.0.6
+      unplugin-swc:
+        specifier: ^1.5.7
+        version: 1.6.0(@swc/core@1.16.21)(esbuild@0.28.2)(rollup@4.67.4)(vite@7.3.7(@types/node@22.20.5)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.51.2)(tsx@4.23.15)(yaml@2.9.1))(webpack@5.106.2(@swc/core@1.16.21)(esbuild@0.28.2)(lightningcss@1.32.0))
+
+  apps/sandbox-controller:
+    dependencies:
+      '@aws-sdk/client-s3':
+        specifier: ^3.890.0
+        version: 3.1161.0
+      '@email-gateway/common':
+        specifier: workspace:*
+        version: link:../../packages/common
+      '@email-gateway/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+      '@email-gateway/event-contracts':
+        specifier: workspace:*
+        version: link:../../packages/event-contracts
+      '@email-gateway/logger':
+        specifier: workspace:*
+        version: link:../../packages/logger
+      '@email-gateway/sandbox':
+        specifier: workspace:*
+        version: link:../../packages/sandbox
+      '@email-gateway/security-contracts':
+        specifier: workspace:*
+        version: link:../../packages/security-contracts
+      '@email-gateway/shared-types':
+        specifier: workspace:*
+        version: link:../../packages/shared-types
+      '@nestjs/common':
+        specifier: ^11.1.6
+        version: 11.2.8(reflect-metadata@0.2.2)(rxjs@7.8.2)
+      '@nestjs/core':
+        specifier: ^11.1.6
+        version: 11.2.8(@nestjs/common@11.2.8(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/platform-express@11.2.8)(reflect-metadata@0.2.2)(rxjs@7.8.2)
+      '@nestjs/platform-express':
+        specifier: ^11.1.6
+        version: 11.2.8(@nestjs/common@11.2.8(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.2.8)
+      amqplib:
+        specifier: ^0.10.9
+        version: 0.10.9
+      reflect-metadata:
+        specifier: ^0.2.2
+        version: 0.2.2
+      rxjs:
+        specifier: ^7.8.2
+        version: 7.8.2
+      zod:
+        specifier: ^4.1.5
+        version: 4.6.7
+    devDependencies:
+      '@nestjs/testing':
+        specifier: ^11.1.6
+        version: 11.2.8(@nestjs/common@11.2.8(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.2.8)(@nestjs/platform-express@11.2.8)
+      '@swc/core':
+        specifier: ^1.13.5
+        version: 1.16.21
+      '@types/amqplib':
+        specifier: ^0.10.7
+        version: 0.10.8
       '@types/express':
         specifier: ^5.0.3
         version: 5.0.6
@@ -1088,6 +1158,16 @@ importers:
         specifier: ^4.1.5
         version: 4.6.7
 
+  packages/sandbox:
+    dependencies:
+      '@email-gateway/security-contracts':
+        specifier: workspace:*
+        version: link:../security-contracts
+    devDependencies:
+      '@email-gateway/event-contracts':
+        specifier: workspace:*
+        version: link:../event-contracts
+
   packages/security-contracts:
     dependencies:
       '@email-gateway/shared-types':
@@ -1178,6 +1258,9 @@ importers:
       '@email-gateway/dlp':
         specifier: workspace:*
         version: link:../packages/dlp
+      '@email-gateway/sandbox':
+        specifier: workspace:*
+        version: link:../packages/sandbox
       '@types/amqplib':
         specifier: ^0.10.7
         version: 0.10.8

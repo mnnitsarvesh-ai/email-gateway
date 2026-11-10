@@ -218,8 +218,9 @@ describe('OutboxRelay.runShard', () => {
   it('classifies poison rows and never publishes them', async () => {
     const t = setup();
     const unknown = outboxRow({ eventType: 'mail.something.unknown.v1' });
-    // No type is reserved since step 4.2; a type defined by a later step is unknown until then.
-    const reserved = outboxRow({ eventType: 'mail.attachment.sandbox_completed.v1' });
+    // No type is reserved since step 4.2; a well-formed type no step registers is unknown (step
+    // 4.6 registered the former example, mail.attachment.sandbox_completed.v1).
+    const reserved = outboxRow({ eventType: 'mail.example.unregistered.v1' });
     const invalid = outboxRow({ payload: { messageId: 'not-a-number' } });
     const bodyLike = outboxRow({
       payload: { ...(outboxRow().payload as object), body: 'Hello, this is the message body' },

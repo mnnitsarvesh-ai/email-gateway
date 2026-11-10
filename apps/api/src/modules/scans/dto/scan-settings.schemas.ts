@@ -23,8 +23,10 @@ import { z } from 'zod';
  * fetch mode, rewriting, click policy, dynamic inspection) and `bec` (step 4.4 B13: score
  * thresholds, extra free-mail domains, history opt-in and retention, AI layer modes within the
  * platform caps) and `dlp` (step 4.5 D18: inbound opt-in, category thresholds, the noisy
- * detectors a tenant may disable, the default policy, evidence enablement and retention); one
- * view shape per engine.
+ * detectors a tenant may disable, the default policy, evidence enablement and retention) and
+ * `sandbox` (step 4.6 X17: opt-in behind the plan feature `attachment_sandbox`, a subset of the
+ * platform file types, a smaller sample size, browser analysis within the platform setting; the
+ * view also states the plan feature and whether files are executed); one view shape per engine.
  */
 
 const Version = z
@@ -50,7 +52,9 @@ export const ScanSettingsPutSchema = z.strictObject({
         'allowContinue}, dynamicInspection; bec: suspiciousScore, maliciousScore, ' +
         'freemailExtraDomains, history.{enabled, retentionDays}, ai.{localModel, llm, ' +
         'llmDailyCallLimit, raiseConfidence}; dlp: inboundEnabled, thresholds.<category>, ' +
-        'disabledDetectors, defaultPolicy, evidence.{enabled, retentionDays}); replaces the ' +
+        'disabledDetectors, defaultPolicy, evidence.{enabled, retentionDays}; sandbox: enabled ' +
+        '(true needs the plan feature attachment_sandbox, else 409 feature_not_enabled), ' +
+        'fileTypes, maxSampleBytes, browserAnalysis); replaces the ' +
         'previous override. Unknown keys are ' +
         'refused (422)',
     ),
@@ -440,6 +444,79 @@ export const DlpSettingsViewSchema = z.object({
   ...viewCommon,
 });
 
+/** Sandbox platform settings (`SANDBOX_*`, step 4.6 X17); backend, limits and timeouts are not settings. */
+export const SandboxPlatformSettingsDoc = z.object({
+  tenantDefaultEnabled: z
+    .boolean()
+    .describe('Opt-in default of every tenant (still needs the plan feature)'),
+  fileTypes: z.array(FileTypeId).describe('File types that may be submitted (tenant: a subset)'),
+  maxSampleBytes: ByteCount.describe('Largest sample submitted (tenant: smaller or equal)'),
+  browserAnalysis: z.boolean().describe('HTML/SVG samples get the browser profile (cap)'),
+});
+
+export const SandboxOverrideDoc = z.object({
+  enabled: z
+    .boolean()
+    .optional()
+    .describe('Submit suspicious/unknown attachments; true needs the plan feature'),
+  fileTypes: z.array(FileTypeId).optional().describe('Non-empty subset of the platform list'),
+  maxSampleBytes: z.number().int().optional().describe('1 … platform maximum'),
+  browserAnalysis: z.boolean().optional().describe('true only when the platform allows it'),
+});
+
+export const SandboxEffectiveSettingsDoc = z.object({
+  enabled: z.boolean(),
+  fileTypes: z.array(FileTypeId),
+  maxSampleBytes: ByteCount,
+  browserAnalysis: z.boolean(),
+});
+
+export const SandboxBoundsDoc = z.object({
+  enabled: z.array(z.boolean()),
+  fileTypes: z.array(FileTypeId),
+  maxSampleBytes: IntRange,
+  browserAnalysis: z.array(z.boolean()),
+});
+
+/**
+ * What the sandbox of this environment does with a submitted file (X17, from
+ * `SANDBOX_EXPECTED_BACKEND`, informational): `disabled` — nothing is analysed or executed;
+ * `static_only` — static analysis without execution; `local_test_runner` — the local/CI test
+ * runner executes scripts in a hardened container that is NOT a VM boundary (never in
+ * production).
+ */
+export const SANDBOX_EXECUTION_MODES = ['disabled', 'static_only', 'local_test_runner'] as const;
+export type SandboxExecutionMode = (typeof SANDBOX_EXECUTION_MODES)[number];
+
+export const SandboxSettingsViewSchema = z.object({
+  engine: z.literal('sandbox').describe('Engine name (ENGINE_CATALOG)'),
+  mode: z
+    .literal('asynchronous')
+    .describe('The sandbox never holds a scan round and never changes its verdict'),
+  platform: SandboxPlatformSettingsDoc.describe('Platform settings (SANDBOX_*)'),
+  bounds: SandboxBoundsDoc.describe('What an override may choose'),
+  override: SandboxOverrideDoc.nullable().describe('The organization override; null for none'),
+  effective: SandboxEffectiveSettingsDoc.describe(
+    'What the sandbox engine applies (it still skips with feature_disabled without the plan feature)',
+  ),
+  feature: z
+    .object({
+      attachmentSandbox: z
+        .boolean()
+        .describe('The organization’s plan includes `attachment_sandbox` (required for enabled)'),
+    })
+    .describe('Plan features the engine needs'),
+  execution: z
+    .enum(SANDBOX_EXECUTION_MODES)
+    .describe(
+      'What happens to a submitted file in this environment: disabled (nothing is analysed or ' +
+        'executed), static_only (static analysis, no execution) or local_test_runner (local/CI ' +
+        'only: scripts run in a hardened container that is NOT a VM boundary). Execution of ' +
+        'unknown files is never available in production in this release.',
+    ),
+  ...viewCommon,
+});
+
 /** The settings of one engine, by `engine`. */
 export const EngineSettingsViewSchema = z.discriminatedUnion('engine', [
   RspamdSettingsViewSchema,
@@ -447,6 +524,7 @@ export const EngineSettingsViewSchema = z.discriminatedUnion('engine', [
   UrlSettingsViewSchema,
   BecSettingsViewSchema,
   DlpSettingsViewSchema,
+  SandboxSettingsViewSchema,
 ]);
 export type EngineSettingsView = z.output<typeof EngineSettingsViewSchema>;
 
@@ -469,5 +547,6 @@ export const ScanSettingsResponseSchema = z.discriminatedUnion('engine', [
   UrlSettingsViewSchema.extend({ note: Note }),
   BecSettingsViewSchema.extend({ note: Note }),
   DlpSettingsViewSchema.extend({ note: Note }),
+  SandboxSettingsViewSchema.extend({ note: Note }),
 ]);
 export type ScanSettingsResponse = z.output<typeof ScanSettingsResponseSchema>;

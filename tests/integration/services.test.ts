@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { runningServices } from './support/compose';
+import { composeExec, runningServices } from './support/compose';
 import { stack } from './support/env';
 
 // The whole `apps` profile runs as containers (smtp-adapter alone may run on the host for the
@@ -21,7 +21,8 @@ const EXPECTED_CHECKS: Record<string, string[]> = {
   // URL cache; DNS reachability and egress mode as details). Step 4.4 B4: the BEC consumer adds
   // `bec-engine` (static data, local models and LLM layer loaded; model versions as details).
   // Step 4.5 (WP3): the DLP consumer adds `dlp-engine` (static data and evidence key loaded) and
-  // `dlp-extractor` (ready extractor children of the second pool).
+  // `dlp-extractor` (ready extractor children of the second pool). Step 4.6 (WP3): the sandbox
+  // consumers add `sandbox-bucket` (HeadBucket of the restricted sandbox bucket).
   'email-worker': [
     'attachment-inspector',
     'bec-engine',
@@ -33,6 +34,7 @@ const EXPECTED_CHECKS: Record<string, string[]> = {
     'rabbitmq-scanner',
     'redis',
     's3',
+    'sandbox-bucket',
     'url-engine',
   ],
   'policy-engine': ['mysql', 'redis'],
@@ -72,6 +74,31 @@ describe.skipIf(!running)('Application services (compose profile: apps)', () => 
     // The public port serves the click routes only (no health or metrics there).
     const publicPort = Number(process.env.CLICK_SERVICE_HOST_PORT ?? 3080);
     expect((await fetch(`http://${stack.host}:${publicPort}/health/ready`)).status).toBe(404);
+  });
+
+  it('sandbox-controller (step 4.6) is ready with backend disabled: rabbitmq and sandbox-backend, port not published', async () => {
+    // Its only network (sandbox-control) is internal: read the probe from inside the container.
+    const result = await composeExec(
+      'sandbox-controller',
+      [
+        'node',
+        '-e',
+        "fetch('http://127.0.0.1:3092/health/ready').then(async r=>process.stdout.write(r.status+' '+await r.text()))",
+      ],
+      { timeoutMs: 20_000 },
+    );
+    expect(result.exitCode, result.stderr).toBe(0);
+    const [status, ...rest] = result.stdout.split(' ');
+    const body = JSON.parse(rest.join(' ')) as {
+      checks: { name: string; status: string; details?: Record<string, unknown> }[];
+    };
+    expect(status).toBe('200');
+    expect(body.checks.map((c) => c.name).sort()).toEqual(['rabbitmq', 'sandbox-backend']);
+    expect(body.checks.find((c) => c.name === 'sandbox-backend')!.details).toMatchObject({
+      backend: 'disabled',
+      isolation: 'none',
+      executes: false,
+    });
   });
 
   it('event-relay holds every relay shard and reports no outbox lag', async () => {

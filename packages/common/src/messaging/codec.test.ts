@@ -89,11 +89,12 @@ describe('encodeEvent', () => {
     expect(() => encodeEvent({ ...event, eventType: 'mail.unknown.thing.v1' }, 'a')).toThrow(
       UnknownEventTypeError,
     );
-    // No type is reserved since step 4.2 registered sandbox_requested.v1; a type a later step
-    // defines (4.6) is unknown until it is registered.
-    expect(() =>
-      encodeEvent({ ...event, eventType: 'mail.attachment.sandbox_completed.v1' }, 'a'),
-    ).toThrow(UnknownEventTypeError);
+    // No type is reserved since step 4.2 registered sandbox_requested.v1; a well-formed type that
+    // no step registers is unknown (step 4.6 registered the former example,
+    // mail.attachment.sandbox_completed.v1).
+    expect(() => encodeEvent({ ...event, eventType: 'mail.example.unregistered.v1' }, 'a')).toThrow(
+      UnknownEventTypeError,
+    );
   });
 });
 

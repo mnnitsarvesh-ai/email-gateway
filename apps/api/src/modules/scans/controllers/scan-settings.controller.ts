@@ -27,6 +27,7 @@ import {
   ApiScanEngineNotFound,
   ApiScanSettingsInvalid,
   ApiVersionConflict,
+  ApiVersionOrFeatureConflict,
   POLICY_READ,
   SCAN_SETTINGS_MANAGE,
 } from '../api-docs';
@@ -63,7 +64,9 @@ export class ScanSettingsController {
     description:
       'For every registered scan engine: whether it is required, the platform settings, the ' +
       'bounds an override must respect, the organization’s override, the effective settings ' +
-      'and the override `version` (0 = none). An override that no longer fits the platform ' +
+      'and the override `version` (0 = none); the `sandbox` entry also states the plan feature ' +
+      '`attachment_sandbox` and the execution mode of this environment (`disabled`, ' +
+      '`static_only`, `local_test_runner`). An override that no longer fits the platform ' +
       `settings is listed with its violations and not applied. ${SETTINGS_APPLY_NOTE} From the ` +
       'read replica.',
   })
@@ -85,7 +88,12 @@ export class ScanSettingsController {
       'allow-list mode (never a platform-denied type), `deniedTypeVerdict`, ' +
       '`typeMismatchVerdict` and `encryptedArchiveVerdict` raise-only (`suspicious` → ' +
       '`malicious`), `maxAttachmentBytes` tighten-only; archive, CPU and memory limits are ' +
-      'platform-only). Compare-and-set on `expectedVersion` (0 when there is no override yet). ' +
+      'platform-only; sandbox: `enabled` (true needs the plan feature `attachment_sandbox`, ' +
+      'else 409 `feature_not_enabled`), `fileTypes` a non-empty subset of the platform list, ' +
+      '`maxSampleBytes` within [1, platform maximum], `browserAnalysis` only when the platform ' +
+      'allows it; the backend, limits and timeouts are platform-only, and execution of unknown ' +
+      'files stays disabled in production). Compare-and-set on `expectedVersion` (0 when there ' +
+      'is no override yet). ' +
       'Audited as `scan_settings.updated` with the settings before and after. A required ' +
       `engine cannot be disabled. ${SETTINGS_APPLY_NOTE}`,
   })
@@ -94,7 +102,7 @@ export class ScanSettingsController {
   @ApiOkResponse({ schema: zodToOpenApi(ScanSettingsResponseSchema) })
   @ApiErrors(400, 401, 403)
   @ApiScanEngineNotFound()
-  @ApiVersionConflict()
+  @ApiVersionOrFeatureConflict()
   @ApiScanSettingsInvalid()
   replace(
     @CurrentPrincipal() principal: Principal,

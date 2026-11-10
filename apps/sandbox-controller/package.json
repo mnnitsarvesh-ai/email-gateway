@@ -1,0 +1,39 @@
+{
+  "name": "@email-gateway/sandbox-controller",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "tsc -p tsconfig.build.json && node scripts/dev-env.mjs",
+    "start": "node dist/main.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint --no-error-on-unmatched-pattern src integration",
+    "test": "vitest run --dir src --passWithNoTests",
+    "test:integration": "vitest run --config vitest.integration.config.ts --exclude 'integration/runner/**'",
+    "test:integration:runner": "vitest run --config vitest.integration.config.ts integration/runner"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.890.0",
+    "@email-gateway/common": "workspace:*",
+    "@email-gateway/config": "workspace:*",
+    "@email-gateway/event-contracts": "workspace:*",
+    "@email-gateway/logger": "workspace:*",
+    "@email-gateway/sandbox": "workspace:*",
+    "@email-gateway/security-contracts": "workspace:*",
+    "@email-gateway/shared-types": "workspace:*",
+    "@nestjs/common": "^11.1.6",
+    "@nestjs/core": "^11.1.6",
+    "@nestjs/platform-express": "^11.1.6",
+    "amqplib": "^0.10.9",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "@nestjs/testing": "^11.1.6",
+    "@swc/core": "^1.13.5",
+    "@types/amqplib": "^0.10.7",
+    "@types/express": "^5.0.3",
+    "unplugin-swc": "^1.5.7"
+  }
+}

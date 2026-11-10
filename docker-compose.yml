@@ -56,6 +56,15 @@
 # TEST-ONLY `url-test` (smtp-test profile) is the local "Internet": 203.0.113.10 on `urltest`,
 # 172.31.250.60 on `mailtest` (its DNS responder serves the rebinding name for dns-sink).
 #   docker compose --profile smtp-test --profile apps --profile url-browser up -d --wait
+#
+# Sandbox (step 4.6, docs/plan/steps/14-sandbox.md, ADR-0039/0040, threat model
+# docs/security/sandbox-threat-model.md): `sandbox-controller` runs only in profile `sandbox`
+# (WP5 moves it to `apps`) with SANDBOX_BACKEND=disabled by default: EXECUTION OF UNKNOWN FILES IS
+# DISABLED. It sits only on the internal network `sandbox-control` (rabbitmq + minio), holds no
+# DB/Redis/main-S3/token key (not the x-node-env anchor), uses its own broker user eg-sandbox and
+# its own MinIO user (samples/ read, artifacts/ write in the sandbox bucket) and the artifact
+# PUBLIC key only. `sandbox-detonation` (internal) is used only by the local/CI exec override.
+#   docker compose --profile sandbox up -d --wait sandbox-controller
 
 name: ${COMPOSE_PROJECT_NAME:-email-gateway}
 
@@ -99,6 +108,14 @@ x-scan-platform-env: &scan-platform-env
   SCAN_RSPAMD_PHISHING_VERDICT: ${SCAN_RSPAMD_PHISHING_VERDICT:-suspicious}
   SCAN_RSPAMD_DMARC_REJECT_VERDICT: ${SCAN_RSPAMD_DMARC_REJECT_VERDICT:-suspicious}
   SCAN_RSPAMD_AUTH_FAILURE_VERDICT: ${SCAN_RSPAMD_AUTH_FAILURE_VERDICT:-reason_only}
+
+# Sandbox platform settings (step 4.6 X17): the api (scan settings bounds) and the email-worker
+# (sandbox engine) read them identically. No secret here.
+x-sandbox-platform-env: &sandbox-platform-env
+  SANDBOX_TENANT_DEFAULT_ENABLED: ${SANDBOX_TENANT_DEFAULT_ENABLED:-false}
+  SANDBOX_FILE_TYPES: ${SANDBOX_FILE_TYPES:-pdf,ooxml_word,ooxml_excel,ooxml_powerpoint,ooxml_macro,ole_office,rtf,pe_executable,msi,elf,lnk,script_js,script_vbs,script_ps1,script_batch,script_shell,hta,html,svg}
+  SANDBOX_MAX_SAMPLE_BYTES: ${SANDBOX_MAX_SAMPLE_BYTES:-26214400}
+  SANDBOX_BROWSER_ANALYSIS: ${SANDBOX_BROWSER_ANALYSIS:-true}
 
 # URL protection platform settings shared by the email-worker (url engine) and the click-service
 # (step 4.3 §5). Container values: DNS only through dns-sink, the TEST-ONLY documentation-range
@@ -359,9 +376,11 @@ services:
       - rabbitmq-data:/var/lib/rabbitmq
       - ./infrastructure/rabbitmq/rabbitmq.conf:/etc/rabbitmq/conf.d/20-gateway.conf:ro
     # url-sandbox (step 4.3 U15): the browser worker's only broker path (it has no other route).
+    # sandbox-control (step 4.6 X5): the sandbox-controller's only broker path.
     networks:
       default: {}
       url-sandbox: { aliases: [rabbitmq] }
+      sandbox-control: { aliases: [rabbitmq] }
     ports:
       [
         '127.0.0.1:${RABBITMQ_HOST_PORT:-5672}:5672',
@@ -399,6 +418,9 @@ services:
       # Browser worker (step 4.3 U2): reads scan.url.inspect, publishes inspection_completed only.
       RABBITMQ_URL_BROWSER_USER: ${RABBITMQ_URL_BROWSER_USER:-eg-url-browser}
       RABBITMQ_URL_BROWSER_PASSWORD: ${RABBITMQ_URL_BROWSER_PASSWORD:?append the URL protection keys from .env.example}
+      # Sandbox controller (step 4.6 X11): reads scan.sandbox, publishes task_completed only.
+      RABBITMQ_SANDBOX_USER: ${RABBITMQ_SANDBOX_USER:-eg-sandbox}
+      RABBITMQ_SANDBOX_PASSWORD: ${RABBITMQ_SANDBOX_PASSWORD:?append the sandbox keys from .env.example}
     volumes: ['./infrastructure/rabbitmq:/rabbitmq:ro']
     depends_on:
       rabbitmq: { condition: service_healthy }
@@ -438,6 +460,11 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:?}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?}
     volumes: ['minio-data:/data']
+    # sandbox-control (step 4.6 X5): the sandbox-controller reaches only the sandbox bucket here
+    # (its MinIO user's policy allows samples/ read and artifacts/ write, nothing else).
+    networks:
+      default: {}
+      sandbox-control: { aliases: [minio] }
     ports:
       ['127.0.0.1:${MINIO_HOST_PORT:-9000}:9000', '127.0.0.1:${MINIO_CONSOLE_HOST_PORT:-9001}:9001']
     healthcheck:
@@ -456,6 +483,12 @@ services:
       S3_BUCKET_ARCHIVE: ${S3_BUCKET_ARCHIVE:?}
       # Step 4.3 U11: lifecycle rule expiring objects tagged eg-object=rewrite.
       URL_REWRITE_OBJECT_RETENTION_DAYS: ${URL_REWRITE_OBJECT_RETENTION_DAYS:-30}
+      # Step 4.6 X12: the sandbox bucket, its lifecycle and the controller's MinIO user.
+      SANDBOX_S3_BUCKET: ${SANDBOX_S3_BUCKET:-email-gateway-sandbox}
+      SANDBOX_S3_ACCESS_KEY_ID: ${SANDBOX_S3_ACCESS_KEY_ID:-eg-sandbox-controller}
+      SANDBOX_S3_SECRET_ACCESS_KEY: ${SANDBOX_S3_SECRET_ACCESS_KEY:?append the sandbox keys from .env.example}
+      SANDBOX_SAMPLE_RETENTION_HOURS: ${SANDBOX_SAMPLE_RETENTION_HOURS:-24}
+      SANDBOX_ARTIFACT_RETENTION_DAYS: ${SANDBOX_ARTIFACT_RETENTION_DAYS:-30}
       MC_CONFIG_DIR: /tmp/mc
     volumes: ['./infrastructure/minio/init-buckets.sh:/init-buckets.sh:ro']
     depends_on:
@@ -972,8 +1005,11 @@ services:
       mysql-replica-setup: { condition: service_completed_successfully }
       redis-dkim: { condition: service_healthy }
     environment:
-      <<: [*node-env, *scan-platform-env, *bec-env, *dlp-bounds-env]
+      <<: [*node-env, *scan-platform-env, *bec-env, *dlp-bounds-env, *sandbox-platform-env]
       HTTP_PORT: 3000
+      # Sandbox (step 4.6 X17): what the deployed controller does, reported by the scan settings
+      # API (informational only; files are not executed unless an approved backend exists).
+      SANDBOX_EXPECTED_BACKEND: ${SANDBOX_EXPECTED_BACKEND:-disabled}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3001}
       # Dead-letter replay and queue stats (step 3.2 Q9): role user eg-ops.
       RABBITMQ_OPS_URL: amqp://${RABBITMQ_OPS_USER:-eg-ops}:${RABBITMQ_OPS_PASSWORD:?append the RabbitMQ keys from .env.example}@rabbitmq:5672/${RABBITMQ_VHOST:-email-gateway}
@@ -1174,7 +1210,15 @@ services:
       rspamd: { condition: service_healthy }
       clamav: { condition: service_healthy }
     environment:
-      <<: [*node-env, *scan-platform-env, *url-platform-env, *bec-env, *dlp-env]
+      <<:
+        [
+          *node-env,
+          *scan-platform-env,
+          *url-platform-env,
+          *bec-env,
+          *dlp-env,
+          *sandbox-platform-env,
+        ]
       HTTP_PORT: 3020
       # Consumes email.received (step 3.2): role user eg-email-worker.
       RABBITMQ_EMAIL_WORKER_URL: amqp://${RABBITMQ_EMAIL_WORKER_USER:-eg-email-worker}:${RABBITMQ_EMAIL_WORKER_PASSWORD:?append the RabbitMQ keys from .env.example}@rabbitmq:5672/${RABBITMQ_VHOST:-email-gateway}
@@ -1352,6 +1396,38 @@ services:
       # evidence key-encryption key reaches only this service and the api (D24).
       DLP_EVIDENCE_KEY: ${DLP_EVIDENCE_KEY:?append the DLP keys from .env.example}
       DLP_EVIDENCE_KEY_PREVIOUS: ${DLP_EVIDENCE_KEY_PREVIOUS:-}
+      # Sandbox engine (step 4.6, docs/plan/steps/14-sandbox.md §5, X13): dispatcher
+      # (scan.sandbox.submissions), results consumer (scan.sandbox.results) and sweeper, as role
+      # user eg-scanner. The sandbox bucket uses this service's existing S3 credentials; the sample
+      # key-encryption key and the result MAC key reach only this service and the controller.
+      # The artifact private key is never set here (no service holds it in 4.6).
+      SANDBOX_ENABLED: ${SANDBOX_ENABLED:-true}
+      SANDBOX_S3_BUCKET: ${SANDBOX_S3_BUCKET:-email-gateway-sandbox}
+      SANDBOX_SAMPLE_KEY: ${SANDBOX_SAMPLE_KEY:?append the sandbox keys from .env.example}
+      SANDBOX_SAMPLE_KEY_PREVIOUS: ${SANDBOX_SAMPLE_KEY_PREVIOUS:-}
+      SANDBOX_RESULT_KEY: ${SANDBOX_RESULT_KEY:?append the sandbox keys from .env.example}
+      SANDBOX_DISPATCH_CONCURRENCY: ${SANDBOX_DISPATCH_CONCURRENCY:-4}
+      SANDBOX_RESULTS_CONCURRENCY: ${SANDBOX_RESULTS_CONCURRENCY:-4}
+      SANDBOX_TASK_DEADLINE_SECONDS: ${SANDBOX_TASK_DEADLINE_SECONDS:-900}
+      SANDBOX_SUBMISSION_TTL_SECONDS: ${SANDBOX_SUBMISSION_TTL_SECONDS:-3600}
+      SANDBOX_REUSE_DEFINITE_SECONDS: ${SANDBOX_REUSE_DEFINITE_SECONDS:-86400}
+      SANDBOX_REUSE_UNKNOWN_SECONDS: ${SANDBOX_REUSE_UNKNOWN_SECONDS:-21600}
+      SANDBOX_REUSE_NOT_EXECUTED_SECONDS: ${SANDBOX_REUSE_NOT_EXECUTED_SECONDS:-3600}
+      SANDBOX_ANALYSIS_EPOCH: ${SANDBOX_ANALYSIS_EPOCH:-1}
+      SANDBOX_RUN_TIMEOUT_MS: ${SANDBOX_RUN_TIMEOUT_MS:-60000}
+      SANDBOX_RUN_MEMORY_MB: ${SANDBOX_RUN_MEMORY_MB:-512}
+      SANDBOX_RUN_CPU_MILLIS: ${SANDBOX_RUN_CPU_MILLIS:-1000}
+      SANDBOX_RUN_PIDS: ${SANDBOX_RUN_PIDS:-128}
+      SANDBOX_RUN_SCRATCH_MB: ${SANDBOX_RUN_SCRATCH_MB:-64}
+      SANDBOX_MAX_ARTIFACTS: ${SANDBOX_MAX_ARTIFACTS:-16}
+      SANDBOX_MAX_ARTIFACT_BYTES: ${SANDBOX_MAX_ARTIFACT_BYTES:-2097152}
+      SANDBOX_MAX_TOTAL_ARTIFACT_BYTES: ${SANDBOX_MAX_TOTAL_ARTIFACT_BYTES:-8388608}
+      SANDBOX_SWEEP_INTERVAL_MS: ${SANDBOX_SWEEP_INTERVAL_MS:-60000}
+      SANDBOX_SWEEP_BATCH: ${SANDBOX_SWEEP_BATCH:-500}
+      SANDBOX_ARTIFACT_RETENTION_DAYS: ${SANDBOX_ARTIFACT_RETENTION_DAYS:-30}
+      SANDBOX_ANALYSIS_RETENTION_DAYS: ${SANDBOX_ANALYSIS_RETENTION_DAYS:-180}
+      SANDBOX_SAMPLE_RETENTION_HOURS: ${SANDBOX_SAMPLE_RETENTION_HOURS:-24}
+      SANDBOX_PUBLISH_HASHES: ${SANDBOX_PUBLISH_HASHES:-false}
     networks:
       default: {}
       mailtest: {}
@@ -1500,7 +1576,7 @@ services:
       RECONCILE_MAX_REDRIVES: ${RECONCILE_MAX_REDRIVES:-3}
       RECONCILE_LOOKBACK_HOURS: ${RECONCILE_LOOKBACK_HOURS:-72}
       RECONCILE_BATCH_SIZE: ${RECONCILE_BATCH_SIZE:-1000}
-      RECONCILE_QUEUES: ${RECONCILE_QUEUES:-email.received,email.delivery.pending,scan.spam,scan.attachment,scan.url,scan.bec,scan.dlp}
+      RECONCILE_QUEUES: ${RECONCILE_QUEUES:-email.received,email.delivery.pending,scan.spam,scan.attachment,scan.url,scan.bec,scan.dlp,scan.sandbox.submissions}
       RECONCILE_START_POSITION: ${RECONCILE_START_POSITION:-oldest}
       # Message lifecycle jobs (step 3.3 L13, L14; docs/plan/steps/08-message-lifecycle.md §5).
       LIFECYCLE_EXPIRY_ENABLED: ${LIFECYCLE_EXPIRY_ENABLED:-true}
@@ -1750,6 +1826,96 @@ services:
           "fetch('http://127.0.0.1:3091/health/ready').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))",
         ]
 
+  # Sandbox controller (step 4.6 X1, X5, X7; ADR-0039). Profile `apps` (since step 4.6 WP5).
+  # SANDBOX_BACKEND defaults to `disabled`: nothing is executed (results not_executed → unknown,
+  # never clean); `static` analyses without executing; `hardened-container` is refused here
+  # (APP_ENV=local is allowed, but the opt-in SANDBOX_ALLOW_NON_VM_EXECUTION stays false and the
+  # Docker socket is not mounted; only infrastructure/sandbox/compose.exec.yml, LOCAL/CI ONLY and
+  # NOT A VM BOUNDARY, sets both); `vm` refuses to start (runner not implemented). Not the
+  # x-node-env anchor: that carries database, Redis and MinIO root credentials, which the
+  # controller refuses. Only its own broker user, its own MinIO user on the sandbox bucket, the
+  # sample key, the result MAC key and the artifact PUBLIC key. Read-only root, tmpfs scratch,
+  # no capabilities, no new privileges, bounded pids/memory/CPU, non-root, internal network only.
+  sandbox-controller:
+    profiles: [apps]
+    restart: unless-stopped
+    build:
+      {
+        context: .,
+        dockerfile: infrastructure/docker/node-service.Dockerfile,
+        args: { APP: sandbox-controller },
+      }
+    image: email-gateway/sandbox-controller:local
+    read_only: true
+    tmpfs:
+      - /scratch:size=256m,mode=0700,uid=1000,gid=1000
+      - /tmp:size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    pids_limit: 128
+    mem_limit: 384m
+    cpus: 1
+    user: '1000:1000'
+    depends_on:
+      rabbitmq: { condition: service_healthy }
+      rabbitmq-init: { condition: service_completed_successfully }
+      minio-init: { condition: service_completed_successfully }
+    environment:
+      NODE_ENV: production
+      APP_ENV: local
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      SERVICE_VERSION: ${SERVICE_VERSION:-0.1.0-local}
+      HTTP_HOST: 0.0.0.0
+      SANDBOX_HTTP_PORT: ${SANDBOX_HTTP_PORT:-3092}
+      SANDBOX_BACKEND: ${SANDBOX_BACKEND:-disabled}
+      SANDBOX_ALLOW_NON_VM_EXECUTION: ${SANDBOX_ALLOW_NON_VM_EXECUTION:-false}
+      SANDBOX_CONTROLLER_NAME: ${SANDBOX_CONTROLLER_NAME:-sandbox-controller-local}
+      RABBITMQ_SANDBOX_URL: amqp://${RABBITMQ_SANDBOX_USER:-eg-sandbox}:${RABBITMQ_SANDBOX_PASSWORD:?append the sandbox keys from .env.example}@rabbitmq:5672/${RABBITMQ_VHOST:-email-gateway}
+      SANDBOX_S3_BUCKET: ${SANDBOX_S3_BUCKET:-email-gateway-sandbox}
+      SANDBOX_S3_ENDPOINT: http://minio:9000
+      SANDBOX_S3_REGION: ${SANDBOX_S3_REGION:-ap-south-1}
+      SANDBOX_S3_FORCE_PATH_STYLE: 'true'
+      SANDBOX_S3_ACCESS_KEY_ID: ${SANDBOX_S3_ACCESS_KEY_ID:-eg-sandbox-controller}
+      SANDBOX_S3_SECRET_ACCESS_KEY: ${SANDBOX_S3_SECRET_ACCESS_KEY:?append the sandbox keys from .env.example}
+      SANDBOX_SAMPLE_KEY: ${SANDBOX_SAMPLE_KEY:?append the sandbox keys from .env.example}
+      SANDBOX_SAMPLE_KEY_PREVIOUS: ${SANDBOX_SAMPLE_KEY_PREVIOUS:-}
+      SANDBOX_RESULT_KEY: ${SANDBOX_RESULT_KEY:?append the sandbox keys from .env.example}
+      SANDBOX_ARTIFACT_PUBLIC_KEY: ${SANDBOX_ARTIFACT_PUBLIC_KEY:?append the sandbox keys from .env.example}
+      SANDBOX_CONCURRENCY: ${SANDBOX_CONCURRENCY:-1}
+      SANDBOX_TASK_TIMEOUT_MS: ${SANDBOX_TASK_TIMEOUT_MS:-180000}
+      SANDBOX_MAX_RUN_TIMEOUT_MS: ${SANDBOX_MAX_RUN_TIMEOUT_MS:-300000}
+      SANDBOX_MAX_MEMORY_MB: ${SANDBOX_MAX_MEMORY_MB:-1024}
+      SANDBOX_MAX_CPU_MILLIS: ${SANDBOX_MAX_CPU_MILLIS:-2000}
+      SANDBOX_MAX_PIDS: ${SANDBOX_MAX_PIDS:-256}
+      SANDBOX_MAX_SCRATCH_MB: ${SANDBOX_MAX_SCRATCH_MB:-256}
+      SANDBOX_MAX_ARTIFACTS: ${SANDBOX_MAX_ARTIFACTS:-16}
+      SANDBOX_MAX_ARTIFACT_BYTES: ${SANDBOX_MAX_ARTIFACT_BYTES:-2097152}
+      SANDBOX_MAX_TOTAL_ARTIFACT_BYTES: ${SANDBOX_MAX_TOTAL_ARTIFACT_BYTES:-8388608}
+      SANDBOX_MAX_SAMPLE_BYTES: ${SANDBOX_MAX_SAMPLE_BYTES:-26214400}
+      # Container path (tmpfs above), not a host path from .env.
+      SANDBOX_SCRATCH_DIR: /scratch
+      SANDBOX_REAPER_INTERVAL_MS: ${SANDBOX_REAPER_INTERVAL_MS:-30000}
+      SANDBOX_SELF_TEST_INTERVAL_MS: ${SANDBOX_SELF_TEST_INTERVAL_MS:-300000}
+      SANDBOX_STATIC_HEAP_MB: ${SANDBOX_STATIC_HEAP_MB:-256}
+      SANDBOX_STATIC_MAX_RSS_MB: ${SANDBOX_STATIC_MAX_RSS_MB:-384}
+      SANDBOX_STATIC_CPU_SECONDS: ${SANDBOX_STATIC_CPU_SECONDS:-20}
+      SANDBOX_STATIC_TIMEOUT_MS: ${SANDBOX_STATIC_TIMEOUT_MS:-30000}
+      SANDBOX_VM_RUNTIME_CLASS: ${SANDBOX_VM_RUNTIME_CLASS:-gvisor}
+      SANDBOX_VM_ALLOWED_HANDLERS: ${SANDBOX_VM_ALLOWED_HANDLERS:-runsc,kata,kata-qemu,kata-clh,kata-fc}
+      SANDBOX_VM_NAMESPACE: ${SANDBOX_VM_NAMESPACE:-email-gateway-sandbox-runners}
+    networks:
+      sandbox-control: {}
+    ports: ['127.0.0.1:${SANDBOX_CONTROLLER_HOST_PORT:-3092}:3092']
+    healthcheck:
+      <<: *node-healthcheck
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3092/health/ready').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))",
+        ]
+
   admin-portal:
     profiles: [apps]
     restart: unless-stopped
@@ -1969,3 +2135,27 @@ networks:
   # rabbitmq are on it.
   url-sandbox:
     internal: true
+  # Step 4.6 X5: the sandbox-controller's only network (internal, no route out): rabbitmq and
+  # minio (aliases), and the sinkhole's admin address .53 (exec override only). Dynamic addresses
+  # from the upper half only, so they never take a fixed address.
+  sandbox-control:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.31.252.0/24
+          ip_range: 172.31.252.128/25
+  # Step 4.6 X5: the runners' only network (internal): runner containers and the sinkhole (.53).
+  # Defined here so its name is stable (email-gateway_sandbox-detonation = SANDBOX_RUNNER_NETWORK);
+  # only the local/CI exec override attaches services to it. The controller is never on it.
+  # `gateway_mode_ipv4: isolated` (Docker >= 28): the bridge gets no address on the Docker host,
+  # so runners reach the sinkhole and nothing else (step 4.6 §12 WP4 finding F1; the
+  # hardened-container self-test refuses a detonation network without it). Kept here as well as
+  # in the exec override so both definitions of the network are identical.
+  sandbox-detonation:
+    internal: true
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv4: isolated
+    ipam:
+      config:
+        - subnet: 172.31.253.0/24
+          ip_range: 172.31.253.128/25

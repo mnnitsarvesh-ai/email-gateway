@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// RabbitMQ provisioning for topology v7 (step 3.2 Q5, Q10, ADR-0024; v2: step 3.3 L7; v3: step
+// RabbitMQ provisioning for topology v8 (step 3.2 Q5, Q10, ADR-0024; v2: step 3.3 L7; v3: step
 // 4.1 S2, ADR-0026; v4: step 4.2 A2, ADR-0028; v5: step 4.3 U2, ADR-0029; v6: step 4.4 B3,
-// ADR-0033; v7: step 4.5 D2, ADR-0036). The only code that declares broker objects: services
-// verify passively and their users cannot configure.
+// ADR-0033; v7: step 4.5 D2, ADR-0036; v8: step 4.6 X11, ADR-0040). The only code that declares
+// broker objects: services verify passively and their users cannot configure.
 //
 //   node init.mjs [--vhost <name>] [--mgmt-url <url>] [--definitions <path>]
 //                 [--users] [--cleanup-legacy] [--legacy-vhost <name>]
@@ -17,7 +17,8 @@
 //   3. import definitions.json (exchanges, quorum queues, bindings, policies) into the vhost;
 //   4. prune bindings: an import only adds, so a binding that an earlier topology version
 //      declared and this one does not (v3: the two event bindings of scan.auth; v5: the
-//      unqualified retry binding retry.scan.url.# of scan.url) is removed. Only
+//      unqualified retry binding retry.scan.url.# of scan.url; v8: scan.sandbox's
+//      sandbox_requested.v1 binding and its unqualified retry.scan.sandbox.#) is removed. Only
 //      bindings whose destination is a queue or exchange of the definitions are touched; objects
 //      outside the topology are never changed. Logs binding names and counts only;
 //   5. --users: create/update the role users (no tags) with exactly their Q10 permissions and
@@ -26,7 +27,7 @@
 //   6. --cleanup-legacy: delete the ADR-0005 objects on vhost "/" only when empty (queues with
 //      no messages and no consumers; RabbitMQ 4.x refuses `if-empty` deletes of quorum queues,
 //      so emptiness is checked first); --legacy-vhost points it at another vhost (tests only);
-//   7. verify: exactly the 6 exchanges and 17 quorum queues, exactly the bindings of the
+//   7. verify: exactly the 6 exchanges and 19 quorum queues, exactly the bindings of the
 //      definitions (no missing and no extra binding), every policy applied, and (--users) each
 //      role user's permissions and topic permissions exactly.
 // Exits non-zero on any failure. Logs object names and counts only: never a password, never a
@@ -76,8 +77,21 @@ const topic = (exchange, write) => ({ exchange, write, read: '^$' });
  * scan.dlp (same user and image; the incident event mail.message.dlp_incident.v1 is written to
  * the outbox and published by the relay, so the scanner never publishes it) and gives ops the
  * retry hops of scan.dlp. The `.org.` anchoring of v5 is kept.
+ *
+ * Topology v8 (step 4.6 X11) extends the scanner to the email-worker's two sandbox queues
+ * (scan.sandbox.submissions: the dispatcher; scan.sandbox.results: the results consumer); the
+ * `.org.`-anchored retry/dead-letter keys keep them apart from scan.sandbox (the controller's
+ * queue, a dot-prefix of both) and from each other. The task (mail.sandbox.task_requested.v1) and
+ * the completion (mail.attachment.sandbox_completed.v1) go through the outbox, so the scanner
+ * publishes neither. The new sandbox-controller user (the isolated controller, no database) reads
+ * only scan.sandbox and publishes only its own result key (`mail.sandbox.task_completed.v1`,
+ * direct publish with confirms) and the hops of its own queue (its retry key is the qualified
+ * `retry.scan.sandbox.org.`, its dead-letter keys `dead-letter.scan.sandbox[.org.…]`, so it can
+ * never publish into the email-worker's sandbox queues); it configures nothing. ops may replay
+ * the three sandbox work queues. The relay needs nothing new.
  */
-const SCANNER_QUEUES = '(spam|attachment|url|url\\.results|bec|dlp)';
+const SCANNER_QUEUES =
+  '(spam|attachment|url|url\\.results|bec|dlp|sandbox\\.submissions|sandbox\\.results)';
 const ROLE_USERS = [
   {
     role: 'relay',
@@ -104,7 +118,8 @@ const ROLE_USERS = [
     // Step 4.1 S1/S2: the email-worker scan role has its own broker user (least privilege).
     // Step 4.2 A2 (v4): the same user consumes scan.attachment (the attachment engine); step 4.3
     // (v5) scan.url and scan.url.results; step 4.4 B3 (v6) scan.bec (the BEC engine); step 4.5
-    // D2 (v7) scan.dlp (the DLP engine).
+    // D2 (v7) scan.dlp (the DLP engine); step 4.6 X11 (v8) scan.sandbox.submissions and
+    // scan.sandbox.results (the sandbox engine's dispatcher and results consumer).
     role: 'scanner',
     userKey: 'RABBITMQ_SCANNER_USER',
     passwordKey: 'RABBITMQ_SCANNER_PASSWORD',
@@ -134,6 +149,24 @@ const ROLE_USERS = [
     ],
   },
   {
+    // Step 4.6 X1, X11 (v8): the isolated sandbox-controller. Reads its one queue, publishes only
+    // its result events (with publisher confirms) and the hops of its own queue (`.org.`
+    // anchored: scan.sandbox is a dot-prefix of scan.sandbox.submissions / .results).
+    role: 'sandbox-controller',
+    userKey: 'RABBITMQ_SANDBOX_USER',
+    passwordKey: 'RABBITMQ_SANDBOX_PASSWORD',
+    configure: '^$',
+    write: '^email\\.(security|events)$',
+    read: '^scan\\.sandbox$',
+    topics: [
+      topic(
+        'email.security',
+        '^(org\\.[1-9][0-9]{0,19}\\.mail\\.sandbox\\.task_completed\\.v1$|retry\\.scan\\.sandbox\\.org\\.)',
+      ),
+      topic('email.events', '^dead-letter\\.scan\\.sandbox(\\.org\\.|$)'),
+    ],
+  },
+  {
     role: 'delivery-worker',
     userKey: 'RABBITMQ_DELIVERY_WORKER_USER',
     passwordKey: 'RABBITMQ_DELIVERY_WORKER_PASSWORD',
@@ -152,7 +185,8 @@ const ROLE_USERS = [
     configure: '^$',
     // Replay republishes only to the home exchanges of the replayable work queues (Q9); v3 adds
     // scan.spam, v4 scan.attachment, v5 scan.url, scan.url.inspect and scan.url.results, v6
-    // scan.bec, v7 scan.dlp (home exchange email.security).
+    // scan.bec, v7 scan.dlp, v8 scan.sandbox, scan.sandbox.submissions and scan.sandbox.results
+    // (home exchange email.security).
     write: '^email\\.(ingestion|delivery|security)$',
     read: '^email\\.dead-letter$',
     topics: [
@@ -160,7 +194,7 @@ const ROLE_USERS = [
       topic('email.delivery', '^retry\\.email\\.delivery\\.pending\\.'),
       topic(
         'email.security',
-        '^retry\\.scan\\.(spam|attachment|url|url\\.inspect|url\\.results|bec|dlp)\\.',
+        '^retry\\.scan\\.(spam|attachment|url|url\\.inspect|url\\.results|bec|dlp|sandbox|sandbox\\.submissions|sandbox\\.results)\\.',
       ),
     ],
   },

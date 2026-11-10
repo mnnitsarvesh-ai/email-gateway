@@ -216,6 +216,24 @@ data:
   DLP_EVIDENCE_ENABLED: 'true'
   DLP_EVIDENCE_DEFAULT_RETENTION_DAYS: '30'
   DLP_EVIDENCE_MAX_RETENTION_DAYS: '180'
+  # Sandbox (step 4.6 §5, X12, X17; docs/deployment/sandbox.md). Platform settings and tenant
+  # bounds read by both the api (/api/v1/scan-settings/sandbox) and email-worker-sandbox; they must
+  # agree. SANDBOX_EXPECTED_BACKEND only tells the api/portal what the controller runs (execution
+  # is disabled: `disabled`; `static` = static analysis only); it enables nothing. The
+  # sandbox-controller does NOT read this ConfigMap (it refuses S3_* and other keys) and the
+  # sample/result keys are the Secret email-gateway-sandbox-keys.
+  SANDBOX_TENANT_DEFAULT_ENABLED: 'false'
+  SANDBOX_FILE_TYPES: pdf,ooxml_word,ooxml_excel,ooxml_powerpoint,ooxml_macro,ole_office,rtf,pe_executable,msi,elf,lnk,script_js,script_vbs,script_ps1,script_batch,script_shell,hta,html,svg
+  SANDBOX_MAX_SAMPLE_BYTES: '26214400'
+  SANDBOX_BROWSER_ANALYSIS: 'true'
+  SANDBOX_EXPECTED_BACKEND: disabled
+  SANDBOX_S3_BUCKET: replace-per-environment-sandbox
+  SANDBOX_MAX_ARTIFACTS: '16'
+  SANDBOX_MAX_ARTIFACT_BYTES: '2097152'
+  SANDBOX_MAX_TOTAL_ARTIFACT_BYTES: '8388608'
+  SANDBOX_ARTIFACT_RETENTION_DAYS: '30'
+  SANDBOX_ANALYSIS_RETENTION_DAYS: '180'
+  SANDBOX_SAMPLE_RETENTION_HOURS: '24'
   # click-service (U14). CLICK_TRUST_PROXY = reverse-proxy hops in front of the pods (ingress
   # controller; add one per CDN/WAF layer).
   CLICK_DB_TX_TIMEOUT_MS: '120000'

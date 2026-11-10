@@ -20,7 +20,8 @@ import { stack } from './support/env';
  * docs/plan/steps/08-message-lifecycle.md (§3.1, §3.2), the scan pipeline, attachment scanning
  * and URL protection tables of steps 4.1–4.3 (docs/plan/steps/09-rspamd.md,
  * 10-attachment-scanning.md, 11-url-protection.md, §3 each), the phishing/BEC tables of step 4.4
- * (12-phishing-bec.md §3) and the DLP tables of step 4.5 (13-dlp.md §3).
+ * (12-phishing-bec.md §3), the DLP tables of step 4.5 (13-dlp.md §3) and the sandbox engine
+ * tables and columns of step 4.6 (14-sandbox.md §3).
  */
 const prisma = new PrismaClient({ datasourceUrl: stack.databaseUrl() });
 
@@ -86,6 +87,8 @@ const NOT_TENANT_OWNED = [
   'stream_cursors',
   // Step 4.2 §3.5: signature component versions (platform catalog).
   'scan_signature_versions',
+  // Step 4.6 §3: artifacts of a (platform-level) sandbox analysis; reached through the analysis.
+  'sandbox_artifacts',
 ];
 
 /** Tenant-owned tables whose `organization_id` is nullable (platform-level rows), per D1. */
@@ -162,6 +165,9 @@ const TENANT_OWNED = [
   'dlp_custom_patterns',
   'dlp_keyword_dictionaries',
   'dlp_compliance_settings',
+  // Step 4.6 §3: platform-level, content-addressed analyses; organization_id (NOT NULL) is the
+  // dispatching organization (task/result routing only; tenants read through their submissions).
+  'sandbox_analyses',
   'threat_indicators',
   'yara_rules',
   'email_policies',
@@ -194,12 +200,12 @@ const TENANT_OWNED = [
 const ALL_TABLES = [...NOT_TENANT_OWNED, ...TENANT_OWNED];
 
 describe('MySQL schema', () => {
-  it('has exactly the 99 data-model tables plus _prisma_migrations', async () => {
+  it('has exactly the 101 data-model tables plus _prisma_migrations', async () => {
     const rows = await prisma.$queryRaw<{ name: string }[]>`
       SELECT TABLE_NAME AS name FROM information_schema.TABLES
       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'`;
-    expect(ALL_TABLES).toHaveLength(99);
-    expect(new Set(ALL_TABLES).size).toBe(99);
+    expect(ALL_TABLES).toHaveLength(101);
+    expect(new Set(ALL_TABLES).size).toBe(101);
     expect(rows.map((r) => r.name).sort()).toEqual([...ALL_TABLES, '_prisma_migrations'].sort());
   });
 
@@ -1983,10 +1989,11 @@ describe('attachment scanning schema (step 4.2, docs/plan/steps/10-attachment-sc
     );
   });
 
-  it('has sandbox_submissions: pending by default, unique per (scan, attachment), 4.6 columns reserved (A11)', async () => {
+  it('has sandbox_submissions: pending by default, unique per (scan, attachment), 4.6 columns nullable (A11)', async () => {
     const cols = await columns(['sandbox_submissions']);
     expect(cols.get('sandbox_submissions.status')).toMatchObject({
-      columnType: "enum('pending','submitted','completed','failed','expired')",
+      // Step 4.6 §3 appended `skipped`.
+      columnType: "enum('pending','submitted','completed','failed','expired','skipped')",
       nullable: 'NO',
       columnDefault: 'pending',
     });
@@ -3016,6 +3023,278 @@ describe('data loss prevention schema (step 4.5, docs/plan/steps/13-dlp.md §3)'
       await prisma.dlpComplianceSettings.deleteMany({ where: { organizationId } });
       await prisma.organization.deleteMany({ where: { id: organizationId } });
       await prisma.organizationPlan.deleteMany({ where: { id: plan.id } });
+    }
+  });
+});
+
+describe('sandbox engine schema (step 4.6, docs/plan/steps/14-sandbox.md §3)', () => {
+  const uniqueSets = async (table: string) =>
+    [...(await indexes(table)).values()]
+      .filter((i) => i.unique)
+      .map((i) => i.columns.join(','))
+      .sort();
+  const indexSets = async (table: string) =>
+    [...(await indexes(table)).values()].map((i) => i.columns.join(','));
+  const foreignKeys = async (table: string) =>
+    prisma.$queryRaw<{ columnName: string; referenced: string; onDelete: string }[]>`
+      SELECT k.COLUMN_NAME AS columnName, k.REFERENCED_TABLE_NAME AS referenced,
+             r.DELETE_RULE AS onDelete
+      FROM information_schema.KEY_COLUMN_USAGE k
+      JOIN information_schema.REFERENTIAL_CONSTRAINTS r
+        ON r.CONSTRAINT_SCHEMA = k.TABLE_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+      WHERE k.TABLE_SCHEMA = DATABASE() AND k.TABLE_NAME = ${table}
+        AND k.REFERENCED_TABLE_NAME IS NOT NULL
+      ORDER BY k.COLUMN_NAME`;
+
+  const analysisRow = (overrides: Partial<Prisma.SandboxAnalysisUncheckedCreateInput> = {}) => {
+    const sha256 = randomUUID().replaceAll('-', '').padEnd(64, 'a').slice(0, 64);
+    return {
+      publicId: randomUUID(),
+      sha256,
+      sizeBytes: 1024,
+      detectedType: 'script_js',
+      profile: 'static' as const,
+      analysisKey: '0123456789abcdef',
+      dedupeKey: `${sha256}:0123456789abcdef`,
+      organizationId: 1n,
+      deadlineAt: new Date(Date.now() + 900_000),
+      expiresAt: new Date(Date.now() + 180 * 86_400_000),
+      ...overrides,
+    };
+  };
+
+  it('has sandbox_analyses with exactly the §3 columns, types and nullability', async () => {
+    const cols = await columns(['sandbox_analyses']);
+    const expected: Record<string, [string, 'YES' | 'NO']> = {
+      id: ['bigint unsigned', 'NO'],
+      public_id: ['char(36)', 'NO'],
+      sha256: ['char(64)', 'NO'],
+      size_bytes: ['int unsigned', 'NO'],
+      detected_type: ['varchar(32)', 'NO'],
+      profile: ["enum('static','execute','browser')", 'NO'],
+      analysis_key: ['char(16)', 'NO'],
+      dedupe_key: ['varchar(81)', 'YES'],
+      status: ["enum('pending','dispatched','completed','not_executed','failed','expired')", 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      sample_object_key: ['varchar(512)', 'YES'],
+      sample_deleted_at: ['datetime(3)', 'YES'],
+      requested_event_id: ['char(36)', 'YES'],
+      result_event_id: ['char(36)', 'YES'],
+      result_token_sha256: ['char(64)', 'YES'],
+      dispatched_at: ['datetime(3)', 'YES'],
+      deadline_at: ['datetime(3)', 'NO'],
+      completed_at: ['datetime(3)', 'YES'],
+      verdict: ["enum('clean','suspicious','malicious','unknown','error','timeout')", 'YES'],
+      reason_codes: ['json', 'YES'],
+      report: ['json', 'YES'],
+      backend: ['varchar(32)', 'YES'],
+      backend_version: ['varchar(64)', 'YES'],
+      isolation: ['varchar(16)', 'YES'],
+      executed: ['tinyint(1)', 'YES'],
+      controller_version: ['varchar(64)', 'YES'],
+      analyzer_version: ['varchar(64)', 'YES'],
+      map_version: ['varchar(16)', 'YES'],
+      not_executed_reason: ['varchar(48)', 'YES'],
+      error_code: ['varchar(48)', 'YES'],
+      duration_ms: ['int unsigned', 'YES'],
+      reuse_until: ['datetime(3)', 'YES'],
+      expires_at: ['datetime(3)', 'NO'],
+      created_at: ['datetime(3)', 'NO'],
+      updated_at: ['datetime(3)', 'NO'],
+    };
+    expect([...cols.keys()].map((k) => k.split('.')[1]).sort()).toEqual(
+      Object.keys(expected).sort(),
+    );
+    for (const [column, [type, nullable]] of Object.entries(expected)) {
+      expect(cols.get(`sandbox_analyses.${column}`), column).toMatchObject({
+        columnType: type,
+        nullable,
+      });
+    }
+    expect(cols.get('sandbox_analyses.status')?.columnDefault).toBe('pending');
+    expect(await uniqueSets('sandbox_analyses')).toEqual(['dedupe_key', 'id', 'public_id']);
+    expect(await indexSets('sandbox_analyses')).toEqual(
+      expect.arrayContaining([
+        'status,deadline_at',
+        'sha256',
+        'expires_at',
+        'sample_deleted_at,status',
+      ]),
+    );
+    expect(await foreignKeys('sandbox_analyses')).toEqual([]);
+  });
+
+  it('has sandbox_artifacts with the §3 columns, a unique (analysis, seq) and RESTRICT to the analysis', async () => {
+    const cols = await columns(['sandbox_artifacts']);
+    const expected: Record<string, [string, 'YES' | 'NO']> = {
+      id: ['bigint unsigned', 'NO'],
+      analysis_id: ['bigint unsigned', 'NO'],
+      seq: ['smallint unsigned', 'NO'],
+      kind: ["enum('screenshot','process_log','network_log','static_report','dropped_file')", 'NO'],
+      content_type: ['varchar(64)', 'NO'],
+      object_key: ['varchar(512)', 'NO'],
+      object_sha256: ['char(64)', 'NO'],
+      plain_sha256: ['char(64)', 'NO'],
+      size_bytes: ['int unsigned', 'NO'],
+      wrapped_key: ['varchar(256)', 'YES'],
+      key_id: ['varchar(16)', 'NO'],
+      algorithm: ['varchar(32)', 'NO'],
+      expires_at: ['datetime(3)', 'NO'],
+      purged_at: ['datetime(3)', 'YES'],
+      purge_reason: ['varchar(32)', 'YES'],
+      object_deleted_at: ['datetime(3)', 'YES'],
+      created_at: ['datetime(3)', 'NO'],
+    };
+    expect([...cols.keys()].map((k) => k.split('.')[1]).sort()).toEqual(
+      Object.keys(expected).sort(),
+    );
+    for (const [column, [type, nullable]] of Object.entries(expected)) {
+      expect(cols.get(`sandbox_artifacts.${column}`), column).toMatchObject({
+        columnType: type,
+        nullable,
+      });
+    }
+    expect(await uniqueSets('sandbox_artifacts')).toEqual(['analysis_id,seq', 'id']);
+    expect(await indexSets('sandbox_artifacts')).toContain('expires_at,purged_at');
+    expect(await foreignKeys('sandbox_artifacts')).toEqual([
+      { columnName: 'analysis_id', referenced: 'sandbox_analyses', onDelete: 'RESTRICT' },
+    ]);
+  });
+
+  it('extends sandbox_submissions with the four nullable 4.6 columns and an analysis_id index', async () => {
+    const cols = await columns(['sandbox_submissions']);
+    expect(cols.get('sandbox_submissions.analysis_id')).toMatchObject({
+      columnType: 'bigint unsigned',
+      nullable: 'YES',
+    });
+    expect(cols.get('sandbox_submissions.skip_reason')).toMatchObject({
+      columnType: 'varchar(48)',
+      nullable: 'YES',
+    });
+    expect(cols.get('sandbox_submissions.sandbox_reason_codes')).toMatchObject({
+      columnType: 'json',
+      nullable: 'YES',
+    });
+    expect(cols.get('sandbox_submissions.settings_version')).toMatchObject({
+      columnType: 'varchar(96)',
+      nullable: 'YES',
+    });
+    expect(await indexSets('sandbox_submissions')).toContain('analysis_id');
+    expect(await foreignKeys('sandbox_submissions')).toEqual([]);
+  });
+
+  it('stores no content-like column: no TEXT/BLOB in the sandbox tables', async () => {
+    const rows = await prisma.$queryRaw<{ tableName: string; columnName: string }[]>`
+      SELECT TABLE_NAME AS tableName, COLUMN_NAME AS columnName
+      FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME IN ('sandbox_analyses', 'sandbox_artifacts', 'sandbox_submissions')
+        AND DATA_TYPE IN ('text', 'mediumtext', 'longtext', 'blob', 'mediumblob', 'longblob',
+                          'tinytext', 'tinyblob', 'binary', 'varbinary')`;
+    expect(rows).toEqual([]);
+  });
+
+  it('allows many NULL dedupe keys, rejects a duplicate dedupe key and blocks deleting an analysis with artifacts', async () => {
+    const first = analysisRow();
+    const nullA = analysisRow({ dedupeKey: null });
+    const nullB = analysisRow({ dedupeKey: null });
+    const ids: bigint[] = [];
+    try {
+      const a = await prisma.sandboxAnalysis.create({ data: first });
+      ids.push(a.id);
+      expect(a.status).toBe('pending');
+      expect(a.publicId).toBe(first.publicId);
+      // Superseded / failed analyses release the key: many NULLs are allowed.
+      ids.push((await prisma.sandboxAnalysis.create({ data: nullA })).id);
+      ids.push((await prisma.sandboxAnalysis.create({ data: nullB })).id);
+      // A concurrent dispatcher with the same dedupe key gets P2002 (it re-reads and links).
+      await expect(
+        prisma.sandboxAnalysis.create({
+          data: analysisRow({ sha256: first.sha256, dedupeKey: first.dedupeKey }),
+        }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+      // The public id (task id) is unique.
+      await expect(
+        prisma.sandboxAnalysis.create({
+          data: analysisRow({ publicId: first.publicId, dedupeKey: null }),
+        }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+      // A defaulted public id is a UUIDv7.
+      const { publicId: _unused, ...withoutPublicId } = analysisRow({ dedupeKey: null });
+      const defaulted = await prisma.sandboxAnalysis.create({ data: withoutPublicId });
+      ids.push(defaulted.id);
+      expect(defaulted.publicId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-/);
+
+      const artifact = {
+        analysisId: a.id,
+        seq: 0,
+        kind: 'static_report' as const,
+        contentType: 'application/json',
+        objectKey: `artifacts/2026/11/${first.publicId}/0123456789abcdef/0-static_report.bin`,
+        objectSha256: 'b'.repeat(64),
+        plainSha256: 'c'.repeat(64),
+        sizeBytes: 100,
+        wrappedKey: 'x1.k1.AAAA.BBBB.CCCC.DDDD',
+        keyId: 'k1',
+        algorithm: 'sandbox-artifact/1',
+        expiresAt: new Date(Date.now() + 30 * 86_400_000),
+      };
+      await prisma.sandboxArtifact.create({ data: artifact });
+      await expect(prisma.sandboxArtifact.create({ data: artifact })).rejects.toMatchObject({
+        code: 'P2002',
+      });
+      // RESTRICT: the sweeper must delete the artifacts first.
+      await expect(prisma.sandboxAnalysis.delete({ where: { id: a.id } })).rejects.toBeInstanceOf(
+        Prisma.PrismaClientKnownRequestError,
+      );
+      // Crypto-shredding: the wrapped key can be nulled.
+      const shredded = await prisma.sandboxArtifact.update({
+        where: { analysisId_seq: { analysisId: a.id, seq: 0 } },
+        data: { wrappedKey: null, purgedAt: new Date(), purgeReason: 'retention' },
+      });
+      expect(shredded.wrappedKey).toBeNull();
+    } finally {
+      await prisma.sandboxArtifact.deleteMany({ where: { analysisId: { in: ids } } });
+      await prisma.sandboxAnalysis.deleteMany({ where: { id: { in: ids } } });
+    }
+  });
+
+  it('accepts the skipped status and the 4.6 columns on a sandbox_submissions row', async () => {
+    const receivedAt = new Date();
+    const scanId = BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000));
+    try {
+      const row = await prisma.sandboxSubmission.create({
+        data: {
+          receivedAt,
+          messageId: 1n,
+          organizationId: 1n,
+          scanId,
+          attachmentId: 1n,
+          partIndex: 0,
+          sha256: 'd'.repeat(64),
+          sizeBytes: 10,
+          detectedType: 'script_js',
+          objectKey: 'org/1/part/x',
+          attachmentVerdict: 'suspicious',
+          reasonCodes: ['type.mismatch'],
+          requestedEventId: randomUUID(),
+        },
+      });
+      expect(row.status).toBe('pending');
+      expect(row.analysisId).toBeNull();
+      const skipped = await prisma.sandboxSubmission.update({
+        where: { id_receivedAt: { id: row.id, receivedAt } },
+        data: {
+          status: 'skipped',
+          skipReason: 'tenant_disabled',
+          sandboxReasonCodes: ['sandbox.tenant_disabled'],
+          settingsVersion: 'sandbox-map/1;p=0123456789ab;t=none',
+          completedAt: new Date(),
+        },
+      });
+      expect(skipped).toMatchObject({ status: 'skipped', skipReason: 'tenant_disabled' });
+    } finally {
+      await prisma.sandboxSubmission.deleteMany({ where: { scanId } });
     }
   });
 });

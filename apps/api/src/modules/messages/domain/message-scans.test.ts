@@ -246,7 +246,20 @@ describe('attachment results (step 4.2 A16)', () => {
     const view = attachmentOf(
       base,
       { partIndex: 2, filename: 'a.zip', declaredContentType: 'application/zip' },
-      { id: 55n, scanId: 7n, attachmentId: 900n, status: 'pending' },
+      {
+        id: 55n,
+        scanId: 7n,
+        attachmentId: 900n,
+        partIndex: 2,
+        sha256: 'b'.repeat(64),
+        status: 'pending',
+        skipReason: null,
+        sandboxVerdict: null,
+        sandboxReasonCodes: null,
+        completedAt: null,
+        analysisId: null,
+        externalRef: null,
+      },
     );
     expect(view).toMatchObject({
       partIndex: 2,
@@ -256,7 +269,16 @@ describe('attachment results (step 4.2 A16)', () => {
       yara: { bundleId: 'yara-1-462fab6e5cc4', matches: [{ rule: 'EG_Test_Marker_Medium' }] },
       archive: { format: 'zip', encrypted: true },
       knownHash: { severity: 'medium', family: null },
-      sandbox: { submissionId: '55', status: 'pending' },
+      sandbox: {
+        submissionId: '55',
+        status: 'pending',
+        skipReason: null,
+        verdict: null,
+        reasonCodes: [],
+        executed: null,
+        isolation: null,
+        completedAt: null,
+      },
     });
     // The cross-tenant content cache outcome and the per-file timing are never shown.
     expect(view).not.toHaveProperty('cache');

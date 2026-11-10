@@ -25,6 +25,11 @@ resources:
   # Data loss prevention (step 4.5 D1, D24): the stage-1 dlp engine with its extractor children
   # and the evidence sweeper, the only email-worker Deployment holding the evidence key.
   - email-worker-dlp.yaml
+  # Sandbox (step 4.6 X1, X13; docs/deployment/sandbox.md): the isolated sandbox-controller with
+  # SANDBOX_BACKEND=disabled (execution of unknown files is disabled; the vm backend refuses to
+  # start in 4.6) and the email-worker's asynchronous sandbox engine.
+  - sandbox-controller.yaml
+  - email-worker-sandbox.yaml
   - policy-engine.yaml
   - delivery-worker.yaml
   - notification-worker.yaml

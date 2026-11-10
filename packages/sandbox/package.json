@@ -1,0 +1,24 @@
+{
+  "name": "@email-gateway/sandbox",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src",
+    "test": "vitest run",
+    "test:integration": "echo 'no infrastructure suites in @email-gateway/sandbox'",
+    "artifact:open": "node --env-file-if-exists=../../.env dist/cli/artifact-open.js"
+  },
+  "dependencies": {
+    "@email-gateway/security-contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "@email-gateway/event-contracts": "workspace:*"
+  }
+}

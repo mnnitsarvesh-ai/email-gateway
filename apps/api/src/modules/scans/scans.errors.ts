@@ -10,6 +10,8 @@ export const ORGANIZATION_NOT_FOUND = 'organization_not_found';
 export const CONTENT_UNAVAILABLE = 'content_unavailable';
 export const RSPAMD_UNAVAILABLE = 'rspamd_unavailable';
 export const SCAN_TRAINING_NOT_APPLICABLE = 'scan_training_not_applicable';
+/** Step 4.6 X17: an override needs a plan feature the organization does not have. */
+export const FEATURE_NOT_ENABLED = 'feature_not_enabled';
 
 /** An engine that is not in ENGINE_CATALOG (or has no tenant settings). */
 export const scanEngineNotFound = (): CodedHttpException =>
@@ -33,6 +35,18 @@ export const versionConflict = (currentVersion: number): CodedHttpException =>
     VERSION_CONFLICT,
     'The settings changed since expectedVersion; read them and retry',
     { currentVersion },
+  );
+
+/**
+ * The override switches on something the organization's plan does not include (step 4.6 X17:
+ * `sandbox.enabled = true` needs the plan feature `attachment_sandbox`).
+ */
+export const featureNotEnabled = (feature: string): CodedHttpException =>
+  new CodedHttpException(
+    HttpStatus.CONFLICT,
+    FEATURE_NOT_ENABLED,
+    'The organization’s plan does not include this feature',
+    { feature },
   );
 
 export const organizationNotFound = (): CodedHttpException =>

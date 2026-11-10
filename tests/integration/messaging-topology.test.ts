@@ -21,15 +21,18 @@ import { stack } from './support/env';
 /**
  * The provisioned vhost `email-gateway` matches the topology exactly (step 3.2 Q1, Q4, §3; v2:
  * step 3.3 L7; v3: step 4.1 S2; v4: step 4.2 A2; v5: step 4.3 U2; v6: step 4.4 B3; v7: step 4.5
- * D2): checks through the management API. The prune case adds one stray binding to the dormant
+ * D2; v8: step 4.6 X11): checks through the management API. The prune case adds one stray binding to the dormant
  * `scan.auth` and lets `init.mjs` remove it again.
  */
 /**
- * Bindings of topology v7 (queue and exchange destinations), besides the default exchange's. v7
+ * Bindings of topology v8 (queue and exchange destinations), besides the default exchange's. v7
  * turned the dormant scan.dlp into a work queue with the same three bindings (it always had its
- * retry binding), so the count is v6's 41 (docs/plan/steps/13-dlp.md §12, WP1 deviation 1).
+ * retry binding), so the count stayed v6's 41 (docs/plan/steps/13-dlp.md §12, WP1 deviation 1).
+ * v8 (step 4.6 X11): scan.sandbox keeps two bindings (task_requested.v1 replaces
+ * sandbox_requested.v1, the retry key is qualified) and scan.sandbox.submissions /
+ * scan.sandbox.results add two each: 45 (40 queue + 5 exchange bindings).
  */
-const TOPOLOGY_BINDINGS = 41;
+const TOPOLOGY_BINDINGS = 45;
 const api = new ManagementApi();
 const vhost = stack.rabbitmqVhost();
 
@@ -61,8 +64,8 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
     }
   });
 
-  it('has exactly the seventeen durable quorum queues, each under its policy eg.<queue>', () => {
-    expect(QUEUE_NAMES).toHaveLength(17);
+  it('has exactly the nineteen durable quorum queues, each under its policy eg.<queue>', () => {
+    expect(QUEUE_NAMES).toHaveLength(19);
     expect(queues.map((q) => q.name).sort()).toEqual([...QUEUE_NAMES].sort());
     for (const queue of queues) {
       expect(queue.type, queue.name).toBe('quorum');
@@ -130,10 +133,10 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
     expect(bindings.filter((b) => b.destination_type === 'exchange')).toHaveLength(5);
   });
 
-  it('is topology v7: the vhost description and the rescan bindings (steps 4.1 S2, 4.2 A2, 4.3 U2, 4.4 B3, 4.5 D2)', async () => {
-    expect(TOPOLOGY_VERSION).toBe(7);
+  it('is topology v8: the vhost description and the rescan bindings (steps 4.1 S2, 4.2 A2, 4.3 U2, 4.4 B3, 4.5 D2, 4.6 X11)', async () => {
+    expect(TOPOLOGY_VERSION).toBe(8);
     const info = await api.get<{ description?: string }>(`/vhosts/${encodeURIComponent(vhost)}`);
-    expect(info.description).toBe('email-gateway topology v7');
+    expect(info.description).toBe('email-gateway topology v8');
     const rescan = bindings
       .filter(
         (b) =>
@@ -404,24 +407,109 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
     for (const user of users) expect(user).toBe(scanner);
   });
 
-  it('scan.sandbox stays dormant, bound to the now registered sandbox_requested.v1 (v4)', () => {
+  it('scan.sandbox is a lossy work queue (v8) for the stateless sandbox-controller, with the qualified retry binding', async () => {
     expect(queueDefinition('scan.sandbox')).toMatchObject({
-      role: 'dormant',
-      consumer: { kind: 'planned', plannedStep: '4.6' },
+      role: 'work',
+      lossy: true,
+      consumer: { kind: 'stateless', service: 'sandbox-controller' },
     });
-    const sandbox = bindings
-      .filter((b) => b.source !== '' && b.destination === 'scan.sandbox')
-      .map((b) => `${b.source} [${b.routing_key}]`)
-      .sort();
-    expect(sandbox).toEqual(
+    // The v1–v7 binding of sandbox_requested.v1 and the unqualified retry.scan.sandbox.# are gone
+    // (pruned by init.mjs): scan.sandbox is a dot-prefix of the two new queues.
+    expect(bindingsOf('scan.sandbox')).toEqual(
       [
-        'email.security [org.*.mail.attachment.sandbox_requested.v1]',
-        'email.security [retry.scan.sandbox.#]',
+        'email.security [org.*.mail.sandbox.task_requested.v1]',
+        'email.security [retry.scan.sandbox.org.#]',
       ].sort(),
     );
-    expect(policies.find((p) => p.name === 'eg.scan.sandbox')?.definition).toEqual(
-      policyFor('dormant', 'scan.sandbox'),
+    const policy = policies.find((p) => p.name === 'eg.scan.sandbox');
+    expect(policy?.definition).toEqual(policyFor('work-lossy', 'scan.sandbox'));
+    expect(policy?.definition).toMatchObject({
+      overflow: 'drop-head',
+      'max-length': 10_000,
+      'dead-letter-routing-key': 'dead-letter.scan.sandbox',
+    });
+    // Only the controller's own broker user may consume it (the stack suite of WP5 proves that
+    // the controller does; it is an optional deployable, profile `sandbox`).
+    const controller = process.env.RABBITMQ_SANDBOX_USER || 'eg-sandbox';
+    for (const user of await consumerUsers('scan.sandbox')) expect(user).toBe(controller);
+  });
+
+  it('scan.sandbox.submissions and scan.sandbox.results are work queues (v8) for eg-scanner only', async () => {
+    expect(queueDefinition('scan.sandbox.submissions')).toMatchObject({
+      role: 'work',
+      consumer: {
+        kind: 'ledger',
+        ledgerName: 'email-worker.scan.sandbox',
+        service: 'email-worker',
+      },
+    });
+    expect(queueDefinition('scan.sandbox.results')).toMatchObject({
+      role: 'work',
+      consumer: {
+        kind: 'ledger',
+        ledgerName: 'email-worker.scan.sandbox.results',
+        service: 'email-worker',
+      },
+    });
+    expect(bindingsOf('scan.sandbox.submissions')).toEqual(
+      [
+        'email.security [org.*.mail.attachment.sandbox_requested.v1]',
+        'email.security [retry.scan.sandbox.submissions.#]',
+      ].sort(),
     );
+    expect(bindingsOf('scan.sandbox.results')).toEqual(
+      [
+        'email.security [org.*.mail.sandbox.task_completed.v1]',
+        'email.security [retry.scan.sandbox.results.#]',
+      ].sort(),
+    );
+    for (const name of ['scan.sandbox.submissions', 'scan.sandbox.results']) {
+      expect(policies.find((p) => p.name === `eg.${name}`)?.definition, name).toEqual(
+        policyFor('work', name),
+      );
+    }
+    // The sandbox engine of the email-worker (SCAN_CONSUMERS empty or containing sandbox, step
+    // 4.6 WP3) consumes both as eg-scanner; nobody else may.
+    const scanner = process.env.RABBITMQ_SCANNER_USER || 'eg-scanner';
+    for (const name of ['scan.sandbox.submissions', 'scan.sandbox.results']) {
+      for (const user of await consumerUsers(name)) expect(user, name).toBe(scanner);
+    }
+  });
+
+  it('routes the sandbox events on the live bindings (v8): submission → dispatcher, task → controller, result → results consumer, completion → firehose only', () => {
+    const route = (type: string) => {
+      const key = `org.42.${type}`;
+      const fromSecurity = bindings
+        .filter((b) => b.source === 'email.security' && topicMatches(b.routing_key, key))
+        .map((b) => `${b.destination_type}:${b.destination}`)
+        .sort();
+      return fromSecurity;
+    };
+    expect(route('mail.attachment.sandbox_requested.v1')).toEqual([
+      'exchange:email.events',
+      'queue:scan.sandbox.submissions',
+    ]);
+    expect(route('mail.sandbox.task_requested.v1')).toEqual([
+      'exchange:email.events',
+      'queue:scan.sandbox',
+    ]);
+    expect(route('mail.sandbox.task_completed.v1')).toEqual([
+      'exchange:email.events',
+      'queue:scan.sandbox.results',
+    ]);
+    expect(route('mail.attachment.sandbox_completed.v1')).toEqual(['exchange:email.events']);
+    // Retry hops reach exactly their own queue.
+    const retry = (queue: string) =>
+      bindings
+        .filter(
+          (b) =>
+            b.source === 'email.security' &&
+            topicMatches(b.routing_key, `retry.${queue}.org.42.mail.sandbox.task_requested.v1`),
+        )
+        .map((b) => b.destination);
+    for (const queue of ['scan.sandbox', 'scan.sandbox.submissions', 'scan.sandbox.results']) {
+      expect(retry(queue), queue).toEqual([queue]);
+    }
   });
 
   it('init.mjs prunes a binding on a topology queue that the definitions do not have', async () => {

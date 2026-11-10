@@ -19,6 +19,7 @@ import {
   dlpResultsOf,
   engineResultsOf,
   REQUIRED_ENGINES,
+  roundFinalEngines,
   RSPAMD_LEDGER,
   scanRoundsOf,
   stageReadyEventsOf,
@@ -50,8 +51,9 @@ import { assertStackReady } from './support/smtp-stack';
  * consumer: the `email.events` → `email.analytics` firehose (dormant, `org.#`) holds exactly one
  * copy of it (peeked through the management API, then purged); the dlp consumer
  * (`email-worker.scan.dlp`) handles the request exactly once (one ledger row) and writes round
- * 1's dlp final and `dlp_scan_results` row. The dormant `scan.sandbox` and the other non-scan
- * dormant queues never receive it.
+ * 1's dlp final and `dlp_scan_results` row. `scan.sandbox` (the sandbox-controller's task queue
+ * since topology v8, step 4.6 X11: bound to `task_requested.v1` only) and the non-scan dormant
+ * queues never receive it.
  *
  * Step 4.4 (B2, B3): round 1 also requires the stage-2 `bec` engine; `scan.bec` binds only
  * `scan_stage_ready.v1`, so it gets NO copy of the rescan request: the transaction that inserts
@@ -193,7 +195,7 @@ describe.skipIf(gate.skip)('lifecycle stack: administrative rescan', { timeout: 
       // Peeking requeued it: still exactly one.
       expect(await copiesOfEvent(mgmt, vhost, queue, rescanEventId), queue).toBe(1);
     }
-    // Not bound to scan.auth (v3), the sandbox, quarantine or policy queues (the dormant
+    // Not bound to scan.auth (v3), the sandbox task queue (v8), quarantine or policy queues (the dormant
     // `email.policy.evaluate` is bound to `scanned.v1` for step 5.2 and may hold round 1's
     // `scanned.v1`, but never the rescan request itself).
     for (const queue of NOT_BOUND_QUEUES) {
@@ -249,13 +251,7 @@ describe.skipIf(gate.skip)('lifecycle stack: administrative rescan', { timeout: 
     const becRows = await becResultsOf(fx.prisma, message);
     expect(becRows.map((r) => [r.lifecycleRound, r.scanId])).toEqual([[1, round.id]]);
     const finals = (await engineResultsOf(fx.prisma, message)).filter((r) => r.isFinal);
-    expect(finals.map((r) => r.engine).sort()).toEqual([
-      'attachment',
-      'bec',
-      'dlp',
-      'rspamd',
-      'url',
-    ]);
+    expect(roundFinalEngines(finals)).toEqual(['attachment', 'bec', 'dlp', 'rspamd', 'url']);
     expect(finals.filter((r) => r.engine === 'dlp')).toEqual([
       expect.objectContaining({
         scanId: round.id,

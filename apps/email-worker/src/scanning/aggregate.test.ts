@@ -94,4 +94,52 @@ describe('aggregateRound (S6)', () => {
     expect(r.reasonCodes.slice(0, 2)).toEqual(['engine.error', 'info.code_00']);
     expect(new Set(r.reasonCodes).size).toBe(32);
   });
+
+  describe('asynchronous engines are excluded (step 4.6 X10)', () => {
+    const required = ['rspamd', 'attachment'];
+    const base = [
+      final('rspamd', 'clean', ['clean.below_threshold']),
+      final('attachment', 'suspicious', ['archive.encrypted']),
+    ];
+    const without = aggregateRound(required, base);
+
+    it.each([
+      ['malicious', ['sandbox.static.eicar_test']],
+      ['unknown', ['sandbox.static_only', 'sandbox.no_findings']],
+      ['error', ['sandbox.error', 'sandbox.error.internal']],
+      ['timeout', ['sandbox.timeout']],
+      ['skipped', ['sandbox.tenant_disabled']],
+    ] as const)(
+      'a sandbox %s final changes neither the verdict, the codes nor the outcome',
+      (outcome, sandboxCodes) => {
+        const sandbox = final('sandbox', outcome, [...sandboxCodes]);
+        // Before completion (written first) and after (written last): same aggregate.
+        expect(aggregateRound(required, [sandbox, ...base])).toEqual(without);
+        expect(aggregateRound(required, [...base, sandbox])).toEqual(without);
+      },
+    );
+
+    it('a sandbox final never satisfies or fails a required engine, even if listed as required', () => {
+      const missing = aggregateRound(required, [base[0]!, final('sandbox', 'malicious')]);
+      expect(missing).toMatchObject({
+        outcome: 'scan_failed',
+        verdict: 'error',
+        failedRequired: ['attachment'],
+      });
+      expect(missing.reasonCodes).toEqual(['clean.below_threshold']);
+      // A (misconfigured) snapshot naming the sandbox: its final is still not counted.
+      expect(
+        aggregateRound(['rspamd', 'sandbox'], [base[0]!, final('sandbox', 'clean')]),
+      ).toMatchObject({ outcome: 'scan_failed', failedRequired: ['sandbox'] });
+    });
+
+    it('a malicious sandbox final alone leaves a clean round clean', () => {
+      expect(
+        aggregateRound(
+          ['rspamd'],
+          [final('sandbox', 'malicious', ['sandbox.static.eicar_test']), base[0]!],
+        ),
+      ).toEqual(aggregateRound(['rspamd'], [base[0]!]));
+    });
+  });
 });

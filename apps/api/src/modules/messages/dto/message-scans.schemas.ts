@@ -16,8 +16,16 @@ import {
   CLICK_DECISIONS,
   dlpResultViewSchema,
   DMARC_POLICIES,
+  ARTIFACT_CONTENT_TYPES,
+  ARTIFACT_KINDS,
   REWRITE_SKIP_REASONS,
+  SANDBOX_BACKENDS,
+  SANDBOX_ISOLATION_CLASSES,
+  SANDBOX_MAX_REASON_CODES,
+  SANDBOX_SKIP_REASONS,
+  SANDBOX_VERDICTS,
   SCAN_VERDICTS,
+  sandboxReportViewSchema,
   urlResultSchema,
 } from '@email-gateway/security-contracts';
 import { z } from 'zod';
@@ -40,7 +48,12 @@ import { z } from 'zod';
  * hashes. Step 4.5 D20: the `dlp` engine entry carries its masked result (versions, verdict,
  * action, coverage detail, category aggregates, findings with masked samples, the policy match
  * with public ids, the evidence state) for callers holding `dlp:read`, else `dlp: null`; never
- * raw values, context text, offsets, dictionary terms, pattern text or durations.
+ * raw values, context text, offsets, dictionary terms, pattern text or durations. Step 4.6 X18:
+ * each attachment's `sandbox` submission carries its outcome, and the asynchronous `sandbox`
+ * engine entry lists its submissions with the bounded analysis report (findings, indicator host
+ * names and IPs, process image basenames, dropped-file hashes, limits, artifact metadata) — never
+ * sample or artifact content, file names, paths, URLs, analysis ids, analysis timings or whether
+ * an earlier analysis was reused (cross-tenant signal, 4.2 A16). No artifact download.
  */
 
 /** Rounds per page (S16: at most 20). */
@@ -90,14 +103,95 @@ export const ScanAttemptSchema = z.object({
 });
 export type ScanAttempt = z.output<typeof ScanAttemptSchema>;
 
-/** Status of a sandbox submission (step 4.2 A11; the sandbox itself arrives in step 4.6). */
+/** Status of a sandbox submission (step 4.2 A11; `skipped` since step 4.6 X13). */
 export const SandboxSubmissionStatusSchema = z.enum([
   'pending',
   'submitted',
   'completed',
   'failed',
   'expired',
+  'skipped',
 ]);
+
+const SandboxVerdictSchema = z.enum(SANDBOX_VERDICTS);
+const SandboxIsolationSchema = z
+  .enum(SANDBOX_ISOLATION_CLASSES)
+  .describe(
+    'What isolated the sample: none (nothing ran), process (static analyzer child), container ' +
+      '(hardened shared-kernel container — NOT a VM boundary; local/CI only), vm',
+  );
+const SandboxReasonCodes = z
+  .array(z.string())
+  .max(SANDBOX_MAX_REASON_CODES)
+  .describe('`sandbox.*` reason codes of the submission (sandbox-map/1)');
+const SecondDate = IsoDate.describe('Whole seconds');
+
+/**
+ * The outcome of one attachment's sandbox submission (step 4.6 X18). `executed` / `isolation`
+ * come from the analysis that completed the submission and are null until then. No analysis id,
+ * timing or reuse flag (cross-tenant signal).
+ */
+export const AttachmentSandboxViewSchema = z.object({
+  submissionId: z.string().describe('sandbox_submissions id (decimal)'),
+  status: SandboxSubmissionStatusSchema,
+  skipReason: z
+    .enum(SANDBOX_SKIP_REASONS)
+    .nullable()
+    .describe(
+      'Why a `skipped` submission was not analysed (tenant not opted in, plan, type, size)',
+    ),
+  verdict: SandboxVerdictSchema.nullable().describe(
+    'Sandbox verdict; never `clean` unless a VM-isolated run proved it (not possible in this ' +
+      'release). Informational: it never changes the round verdict',
+  ),
+  reasonCodes: SandboxReasonCodes,
+  executed: z.boolean().nullable().describe('Whether the sample was executed at all'),
+  isolation: SandboxIsolationSchema.nullable(),
+  completedAt: SecondDate.nullable().describe('When the submission reached its outcome'),
+});
+export type AttachmentSandboxView = z.output<typeof AttachmentSandboxViewSchema>;
+
+const ReportView = sandboxReportViewSchema.shape;
+
+/** Metadata of one sealed artifact (step 4.6 X12, X18). No download in this release. */
+export const SandboxArtifactViewSchema = z.object({
+  seq: z.number().int().min(0),
+  kind: z.enum(ARTIFACT_KINDS),
+  contentType: z.enum(ARTIFACT_CONTENT_TYPES),
+  sizeBytes: z.number().int().min(0).describe('Plaintext size'),
+  sha256: z.string().describe('SHA-256 of the plaintext artifact'),
+  expiresAt: IsoDate.describe(
+    'Retention end, rounded down to the day (the exact value would date the analysis)',
+  ),
+  purged: z.boolean().describe('Crypto-shredded (key destroyed) and deleted'),
+});
+
+/** One sandbox submission of a round with the report of the analysis that completed it (X18). */
+export const SandboxSubmissionViewSchema = AttachmentSandboxViewSchema.extend({
+  partIndex: z.number().int().min(0),
+  sha256: z.string(),
+  backend: z.enum(SANDBOX_BACKENDS).nullable(),
+  versions: z
+    .object({
+      controller: z.string().nullable(),
+      backend: z.string().nullable(),
+      analyzer: z.string().nullable(),
+      map: z.string().nullable(),
+    })
+    .describe('Versions of the controller, the backend, the static analyzer and sandbox-map'),
+  findings: ReportView.findings.describe('Findings with their fixed severities, highest first'),
+  indicators: ReportView.indicators.describe(
+    'Network indicators: host names and canonical IPs only (never paths or URLs; ≤ 50 each)',
+  ),
+  processes: ReportView.processes.describe('Process count and image basenames (≤ 32)'),
+  droppedFiles: ReportView.droppedFiles.describe('Files the sample wrote: hash, size, type hint'),
+  limitsHit: ReportView.limitsHit,
+  artifacts: z
+    .array(SandboxArtifactViewSchema)
+    .max(16)
+    .describe('Sealed artifacts (metadata only; no download API in this release)'),
+});
+export type SandboxSubmissionView = z.output<typeof SandboxSubmissionViewSchema>;
 
 /**
  * The per-attachment fields shown to a tenant: the normalized result without `cache` and
@@ -125,13 +219,9 @@ export const AttachmentScanViewSchema = z.object({
     .nullable()
     .describe('Sanitized display filename of the part (attacker-controlled text, escaped)'),
   declaredContentType: z.string().nullable().describe('Content type the message declared'),
-  sandbox: z
-    .object({
-      submissionId: z.string().describe('sandbox_submissions id (decimal)'),
-      status: SandboxSubmissionStatusSchema,
-    })
-    .nullable()
-    .describe('Sandbox submission of a suspicious/unknown attachment; null when not submitted'),
+  sandbox: AttachmentSandboxViewSchema.nullable().describe(
+    'Sandbox submission of a suspicious/unknown attachment (step 4.6 X18); null when not submitted',
+  ),
 });
 export type AttachmentScanView = z.output<typeof AttachmentScanViewSchema>;
 
@@ -305,6 +395,14 @@ export const ScanEngineResultSchema = z.object({
       'Engine `bec` only (step 4.4 B15): the explainable verdict; null before the final ' +
         'result and for failures',
     ),
+  submissions: z
+    .array(SandboxSubmissionViewSchema)
+    .optional()
+    .describe(
+      'Engine `sandbox` only (step 4.6 X18, asynchronous: its final never changes the round ' +
+        'verdict): the round’s sandbox submissions by part index with the bounded report of ' +
+        'the analysis that completed each',
+    ),
   dlp: dlpResultViewSchema
     .nullable()
     .optional()
@@ -318,12 +416,14 @@ export const ScanEngineResultSchema = z.object({
     .min(0)
     .nullable()
     .describe(
-      'Engine duration of the final result; always null for the `attachment`, `url`, `bec` ' +
-        'and `dlp` engines (cross-tenant cache hits; the AI layer’s and extraction timing)',
+      'Engine duration of the final result; always null for the `attachment`, `url`, `bec`, ' +
+        '`dlp` and `sandbox` engines (cross-tenant cache hits and analysis reuse; the AI ' +
+        'layer’s and extraction timing)',
     ),
   settingsVersion: z.string().nullable(),
   completedAt: IsoDate.nullable().describe(
-    'Final result time (whole seconds for the `attachment`, `url`, `bec` and `dlp` engines)',
+    'Final result time (whole seconds for the `attachment`, `url`, `bec`, `dlp` and `sandbox` ' +
+      'engines)',
   ),
 });
 export type ScanEngineResultView = z.output<typeof ScanEngineResultSchema>;

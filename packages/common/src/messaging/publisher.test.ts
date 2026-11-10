@@ -133,7 +133,8 @@ describe('ConfirmPublisher.publishBatch', () => {
         },
       },
       { envelope: { ...envelope(), eventType: 'mail.unknown.thing.v1' } },
-      { envelope: { ...envelope(), eventType: 'mail.attachment.sandbox_completed.v1' } },
+      // A well-formed but unregistered type (step 4.6 registered the former example).
+      { envelope: { ...envelope(), eventType: 'mail.example.unregistered.v1' } },
     ]);
     expect(results).toEqual([
       { outcome: 'refused', code: 'forbidden_field' },

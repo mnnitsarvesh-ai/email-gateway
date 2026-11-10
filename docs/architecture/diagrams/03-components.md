@@ -42,7 +42,8 @@ flowchart TB
     ewMime["MimeIngestionModule (3.1; 3.2): QueueConsumer of email.received<br/>(prefetch = MIME_CONCURRENCY, hold retries),<br/>MimeIngestionService, S3 EML source + part sink,<br/>MimeRepository (writer), MimeMetrics"]:::impl
     pMime["mime-parser (3.1)<br/>streaming parse, limits, defects, headers,<br/>filenames, sniffer, zip inspector"]:::impl
     ewCons["Consumers of scan.auth, scan.spam,<br/>scan.url, scan.attachment, scan.dlp<br/>(queues dormant) PLANNED 4.x"]:::planned
-    ewEng["Engine adapters: Rspamd 4.1,<br/>ClamAV + YARA 4.2, URL 4.3,<br/>BEC 4.4, DLP 4.5, sandbox 4.6"]:::planned
+    ewEng["Engine adapters: Rspamd 4.1,<br/>ClamAV + YARA 4.2, URL 4.3,<br/>BEC 4.4, DLP 4.5"]:::impl
+    ewSbx["Sandbox engine (4.6, asynchronous):<br/>dispatcher, sample stager, results consumer,<br/>finalizer, sweeper (never changes the round)"]:::impl
     ewAgg["Verdict aggregation, risk score<br/>PLANNED 5.1"]:::planned
   end
 
@@ -65,6 +66,14 @@ flowchart TB
     erInfra["DatabaseModule writer, AmqpModule (eg-relay),<br/>MetricsModule, HealthModule: mysql, rabbitmq"]:::impl
   end
 
+  subgraph sbc["sandbox-controller (4.6, own deployable)"]
+    sbcCfg["Config: forbidden-key refusal (no DB, Redis,<br/>main S3, tokens, other broker users)"]:::impl
+    sbcTask["TaskConsumer (scan.sandbox, eg-sandbox), TaskHandler<br/>state machine, ArtifactSealer (X25519), SandboxS3"]:::impl
+    sbcBack["Backends: disabled (default), static (analyzer child),<br/>hardened-container (local/CI, NOT a VM), vm (refuses)"]:::impl
+    sbcReap["ReaperService (startup + periodic), BackendHealth,<br/>ControllerMetrics"]:::impl
+    sbcVm["VM-class runner<br/>NOT IMPLEMENTED"]:::planned
+  end
+
   subgraph pkgs["Shared packages"]
     pConfig["config<br/>zod schemas, _FILE secrets"]:::impl
     pLogger["logger<br/>pino, context, OTel"]:::impl
@@ -72,6 +81,7 @@ flowchart TB
     pDb["database<br/>Prisma schema, processOnce, ids"]:::impl
     pEvents["event-contracts<br/>envelope, events, registry,<br/>topology v1, routing keys, definitions"]:::impl
     pSec["security-contracts<br/>SecurityEngine, EngineVerdict"]:::impl
+    pSbx["sandbox (4.6)<br/>sealed sample/artifact envelopes, result MAC,<br/>analysis key, sandbox-map/1"]:::impl
     pTypes["shared-types<br/>health, enums"]:::impl
   end
 
@@ -104,10 +114,18 @@ flowchart TB
   pCommon --> pEvents
   pCommon --> pTypes
   ewEng -.-> pSec
+  erRelay -->|"scan.sandbox.submissions, scan.sandbox.results (4.6)"| ewSbx
+  ewSbx -->|"outbox task_requested.v1"| erRelay
+  erRelay -->|"scan.sandbox (4.6)"| sbcTask
+  sbcTask --> sbcBack
+  sbcTask -->|"task_completed.v1 (confirms)"| ewSbx
+  sbcBack -.-> sbcVm
+  ewSbx --> pSbx
+  sbcTask --> pSbx
   ingest -.-> pEvents
 ```
 
-**Legend.** Green solid: IMPLEMENTED module or package. Amber dashed: PLANNED module with its step. `archive-worker` and `notification-worker` are shells (writer and health, plus S3 for the archive worker; no RabbitMQ since step 3.2); their business modules are PLANNED 8.1 and 6.2. Broker hops are drawn between components for readability: every one goes `message_outbox` → event-relay → exchange → queue → consumer (diagram [21](21-event-relay-sequence.md)).
+**Legend.** Green solid: IMPLEMENTED module or package. Amber dashed: PLANNED module with its step. `archive-worker` and `notification-worker` are shells (writer and health, plus S3 for the archive worker; no RabbitMQ since step 3.2); their business modules are PLANNED 8.1 and 6.2. Step 4.6: the email-worker's asynchronous sandbox engine and the separate `sandbox-controller` are IMPLEMENTED with execution of unknown files **disabled** (default backend `disabled`; `hardened-container` is a local/CI harness and not a VM boundary); the VM-class runner is PLANNED (the `vm` backend only refuses). Broker hops are drawn between components for readability: every one goes `message_outbox` → event-relay → exchange → queue → consumer (diagram [21](21-event-relay-sequence.md)).
 
 ## Status
 

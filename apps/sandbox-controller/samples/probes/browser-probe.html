@@ -1,0 +1,43 @@
+<!doctype html>
+<!-- Synthetic benign probe (step 4.6 §9.3, browser profile). NOT malware. When rendered it
+     (1) fetches the cloud metadata address and an internal service name via JavaScript,
+     (2) shows a login form with a password field posting to another origin, (3) triggers a
+     download of a tiny text Blob, (4) opens one alert dialog. Inside a runner every request ends
+     at the recording sinkhole or fails; the download is cancelled. Harmless anywhere. -->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>eg sandbox browser probe</title>
+  </head>
+  <body>
+    <h1>eg sandbox browser probe</h1>
+    <form action="http://login.example.test/submit" method="post">
+      <input name="user" /><input type="password" name="pass" /><button>Sign in</button>
+    </form>
+    <pre id="out"></pre>
+    <script>
+      const out = document.getElementById('out');
+      const log = (line) => {
+        out.textContent += line + '\n';
+      };
+      fetch('http://169.254.169.254/latest/meta-data/', { mode: 'no-cors' }).then(
+        () => log('metadata ANSWERED'),
+        (e) => log('metadata BLOCKED ' + e.name),
+      );
+      fetch('http://mysql:3306/', { mode: 'no-cors' }).then(
+        () => log('mysql ANSWERED'),
+        (e) => log('mysql BLOCKED ' + e.name),
+      );
+      fetch('http://eg-browser-probe.sandbox.invalid/beacon?x=1', { mode: 'no-cors' }).then(
+        () => log('beacon ANSWERED'),
+        (e) => log('beacon BLOCKED ' + e.name),
+      );
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob(['eg-probe download'], { type: 'text/plain' }));
+      a.download = 'eg-probe.txt';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => alert('eg-probe dialog'), 200);
+    </script>
+  </body>
+</html>

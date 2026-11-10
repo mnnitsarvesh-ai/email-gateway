@@ -4,6 +4,7 @@ import {
   DLP_PLATFORM_DEFAULTS,
   RSPAMD_PLATFORM_DEFAULTS,
   type RspamdPlatformSettings,
+  SANDBOX_PLATFORM_DEFAULTS,
   URL_PLATFORM_DEFAULTS,
   type UrlPlatformSettings,
 } from '@email-gateway/security-contracts';
@@ -26,18 +27,20 @@ const platforms = (
   url,
   bec: BEC_PLATFORM_DEFAULTS,
   dlp: DLP_PLATFORM_DEFAULTS,
+  sandbox: { settings: SANDBOX_PLATFORM_DEFAULTS, execution: 'disabled' },
 });
 const rspamd = engineSettingsDefinitions(platforms()).get('rspamd')!;
 const updatedAt = new Date('2026-11-05T09:00:00Z');
 
 describe('engine settings (step 4.1 S8, S16)', () => {
-  it('defines settings for the catalog engines rspamd, attachment, url, bec and dlp (catalog order)', () => {
+  it('defines settings for the catalog engines rspamd, attachment, url, bec, dlp and sandbox (catalog order)', () => {
     expect([...engineSettingsDefinitions(platforms()).keys()]).toEqual([
       'rspamd',
       'attachment',
       'url',
       'bec',
       'dlp',
+      'sandbox',
     ]);
   });
 
@@ -562,5 +565,118 @@ describe('dlp engine settings (step 4.5 D18)', () => {
     expect(view.violations).toEqual([
       expect.objectContaining({ path: 'evidence.enabled', code: 'out_of_bounds' }),
     ]);
+  });
+});
+
+describe('sandbox engine settings (step 4.6 X17)', () => {
+  const sandbox = engineSettingsDefinitions(platforms()).get('sandbox')!;
+  const codes = (definition: EngineSettingsDefinition, override: unknown) => {
+    const r = definition.check(override);
+    return r.ok ? [] : r.violations.map((v) => `${v.path}:${v.code}`);
+  };
+
+  it('views platform settings, bounds, the plan feature and the execution mode', () => {
+    const view = sandbox.view(null, { attachmentSandbox: false });
+    expect(view).toEqual({
+      engine: 'sandbox',
+      mode: 'asynchronous',
+      required: false,
+      tenantMayDisable: true,
+      platform: {
+        ...SANDBOX_PLATFORM_DEFAULTS,
+        fileTypes: [...SANDBOX_PLATFORM_DEFAULTS.fileTypes],
+      },
+      bounds: {
+        enabled: [false, true],
+        fileTypes: [...SANDBOX_PLATFORM_DEFAULTS.fileTypes],
+        maxSampleBytes: { min: 1, max: SANDBOX_PLATFORM_DEFAULTS.maxSampleBytes },
+        browserAnalysis: [false, true],
+      },
+      override: null,
+      effective: {
+        enabled: false,
+        fileTypes: [...SANDBOX_PLATFORM_DEFAULTS.fileTypes],
+        maxSampleBytes: SANDBOX_PLATFORM_DEFAULTS.maxSampleBytes,
+        browserAnalysis: true,
+      },
+      feature: { attachmentSandbox: false },
+      execution: 'disabled',
+      overrideApplied: false,
+      violations: [],
+      version: 0,
+      updatedAt: null,
+    });
+    // Without a context the organization is shown without the plan feature.
+    expect(sandbox.view(null)).toMatchObject({ feature: { attachmentSandbox: false } });
+    expect(sandbox.view(null, { attachmentSandbox: true })).toMatchObject({
+      feature: { attachmentSandbox: true },
+    });
+  });
+
+  it('states the execution mode of the configured backend', () => {
+    for (const execution of ['disabled', 'static_only', 'local_test_runner'] as const) {
+      const definition = engineSettingsDefinitions({
+        ...platforms(),
+        sandbox: { settings: SANDBOX_PLATFORM_DEFAULTS, execution },
+      }).get('sandbox')!;
+      expect(definition.view(null)).toMatchObject({ execution });
+    }
+  });
+
+  it('accepts an override within the bounds and names the plan feature enabled=true needs', () => {
+    const checked = sandbox.check({
+      enabled: true,
+      fileTypes: ['pdf', 'script_shell'],
+      maxSampleBytes: 1_048_576,
+      browserAnalysis: false,
+    });
+    expect(checked).toEqual({
+      ok: true,
+      settings: {
+        enabled: true,
+        fileTypes: ['pdf', 'script_shell'],
+        maxSampleBytes: 1_048_576,
+        browserAnalysis: false,
+      },
+    });
+    expect(sandbox.requiredFeature!({ enabled: true })).toBe('attachment_sandbox');
+    expect(sandbox.requiredFeature!({ enabled: false })).toBeNull();
+    expect(sandbox.requiredFeature!({ fileTypes: ['pdf'] })).toBeNull();
+    const view = sandbox.view(
+      { settings: { enabled: true, fileTypes: ['pdf'] }, version: 3, updatedAt },
+      { attachmentSandbox: true },
+    );
+    expect(view).toMatchObject({
+      override: { enabled: true, fileTypes: ['pdf'] },
+      effective: { enabled: true, fileTypes: ['pdf'] },
+      overrideApplied: true,
+      version: 3,
+    });
+  });
+
+  it('refuses types outside the platform list, sizes out of bounds, browser above the platform and unknown keys', () => {
+    expect(codes(sandbox, { fileTypes: ['zip'] })).toEqual(['fileTypes:out_of_bounds']);
+    expect(codes(sandbox, { fileTypes: [] })).toEqual(['fileTypes:invalid']);
+    expect(codes(sandbox, { maxSampleBytes: 0 })).toEqual(['maxSampleBytes:out_of_bounds']);
+    expect(
+      codes(sandbox, { maxSampleBytes: SANDBOX_PLATFORM_DEFAULTS.maxSampleBytes + 1 }),
+    ).toEqual(['maxSampleBytes:out_of_bounds']);
+    expect(codes(sandbox, { backend: 'hardened-container' })).toEqual(['backend:unknown_key']);
+    expect(codes(sandbox, { enabled: 'yes' })).toEqual(['enabled:invalid']);
+    const noBrowser = engineSettingsDefinitions({
+      ...platforms(),
+      sandbox: {
+        settings: { ...SANDBOX_PLATFORM_DEFAULTS, browserAnalysis: false },
+        execution: 'disabled',
+      },
+    }).get('sandbox')!;
+    expect(codes(noBrowser, { browserAnalysis: true })).toEqual(['browserAnalysis:out_of_bounds']);
+    expect(noBrowser.view(null)).toMatchObject({ bounds: { browserAnalysis: [false] } });
+    // A stored override the platform no longer allows is shown with violations and ignored.
+    const ignored = noBrowser.view({ settings: { browserAnalysis: true }, version: 1, updatedAt });
+    expect(ignored).toMatchObject({
+      overrideApplied: false,
+      effective: { browserAnalysis: false },
+    });
   });
 });

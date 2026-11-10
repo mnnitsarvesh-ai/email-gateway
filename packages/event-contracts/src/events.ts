@@ -596,8 +596,9 @@ const partS3Key = z
  * transaction of the engine's final result, together with the `sandbox_submissions` row, for
  * every attachment whose verdict is `suspicious` or `unknown` and whose part object is stored
  * (at most `ATTACHMENT_SANDBOX_MAX_PER_MESSAGE` per message). Published to `email.security`
- * (`org.<id>.mail.attachment.sandbox_requested.v1`) and bound to the dormant `scan.sandbox`. The
- * round never waits for the sandbox.
+ * (`org.<id>.mail.attachment.sandbox_requested.v1`) and bound to `scan.sandbox.submissions` (topology
+ * v8, step 4.6 X11: the email-worker's sandbox dispatcher; v4–v7 bound it to the dormant
+ * `scan.sandbox`). The round never waits for the sandbox.
  *
  * Content rules (§2.0 invariant 2): ids, the part's S3 key, its hash, size, detected type, the
  * verdict and reason codes only. No filename, no content: the object is strict. Consumers must
@@ -1061,6 +1062,463 @@ export const messageDlpIncidentV1 = z
   });
 export type MessageDlpIncidentV1 = z.infer<typeof messageDlpIncidentV1>;
 
+// ---------------------------------------------------------------------------------------------
+// Sandbox (step 4.6, docs/plan/steps/14-sandbox.md §4, X11; ADR-0039, ADR-0040)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Sandbox vocabularies. Mirror the lists of `@email-gateway/security-contracts` `sandbox.ts`
+ * (event-contracts has no dependency on it; `@email-gateway/sandbox`, which depends on both,
+ * asserts that the lists are equal).
+ */
+export const SANDBOX_PROFILE_VALUES = ['static', 'execute', 'browser'] as const;
+export const SANDBOX_BACKEND_VALUES = ['disabled', 'static', 'hardened-container', 'vm'] as const;
+export const SANDBOX_ISOLATION_VALUES = ['none', 'process', 'container', 'vm'] as const;
+export const SANDBOX_VERDICT_VALUES = [
+  'clean',
+  'suspicious',
+  'malicious',
+  'unknown',
+  'error',
+  'timeout',
+] as const;
+export const SANDBOX_TASK_STATUS_VALUES = ['completed', 'not_executed', 'failed'] as const;
+/** Terminal statuses of a submission announced by `mail.attachment.sandbox_completed.v1`. */
+export const SANDBOX_COMPLETION_STATUS_VALUES = [
+  'completed',
+  'skipped',
+  'failed',
+  'expired',
+] as const;
+export const SANDBOX_FINDING_SEVERITY_VALUES = [
+  'info',
+  'low',
+  'medium',
+  'high',
+  'critical',
+] as const;
+export const SANDBOX_ARTIFACT_KIND_VALUES = [
+  'screenshot',
+  'process_log',
+  'network_log',
+  'static_report',
+  'dropped_file',
+] as const;
+export const SANDBOX_ARTIFACT_CONTENT_TYPE_VALUES = [
+  'image/png',
+  'text/plain',
+  'application/json',
+  'application/octet-stream',
+] as const;
+/** The content type of each artifact kind (mirrors `ARTIFACT_KIND_CONTENT_TYPE`). */
+const ARTIFACT_KIND_CONTENT_TYPE: Readonly<
+  Record<
+    (typeof SANDBOX_ARTIFACT_KIND_VALUES)[number],
+    (typeof SANDBOX_ARTIFACT_CONTENT_TYPE_VALUES)[number]
+  >
+> = {
+  screenshot: 'image/png',
+  process_log: 'text/plain',
+  network_log: 'text/plain',
+  static_report: 'application/json',
+  dropped_file: 'application/octet-stream',
+};
+/** The isolation class of each backend (mirrors `SANDBOX_BACKEND_ISOLATION`). */
+const BACKEND_ISOLATION: Readonly<
+  Record<(typeof SANDBOX_BACKEND_VALUES)[number], (typeof SANDBOX_ISOLATION_VALUES)[number]>
+> = { disabled: 'none', static: 'process', 'hardened-container': 'container', vm: 'vm' };
+/** Backends that can execute a sample (X3). */
+const EXECUTING_BACKENDS: readonly string[] = ['hardened-container', 'vm'];
+/** Largest sample (64 MiB, X17). */
+export const SANDBOX_MAX_SAMPLE_BYTES = 67_108_864;
+export const SANDBOX_ARTIFACT_ALGORITHM_VALUE = 'sandbox-artifact/1';
+
+const sandboxSeverity = z.enum(SANDBOX_FINDING_SEVERITY_VALUES);
+const sandboxBounded = (min: number, max: number) => z.number().int().min(min).max(max);
+const sandboxCounter = sandboxBounded(0, 1_000_000);
+const sandboxPort = sandboxBounded(1, 65_535);
+const isoInstant = z.iso.datetime();
+
+/**
+ * A canonical IP literal: dotted-quad IPv4 without leading zeros, or IPv6 as WHATWG serializes
+ * it (lower case, compressed, no brackets, no zone).
+ */
+function isCanonicalIpLiteral(value: string): boolean {
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(value)) {
+    return value.split('.').every((o) => o === String(Number(o)) && Number(o) <= 255);
+  }
+  if (!/^[0-9a-f:.]{2,45}$/.test(value) || !value.includes(':')) return false;
+  try {
+    return new URL(`http://[${value}]/`).hostname === `[${value}]`;
+  } catch {
+    return false;
+  }
+}
+const canonicalIp = z
+  .string()
+  .max(45)
+  .refine(isCanonicalIpLiteral, { message: 'Expected a canonical IP literal' });
+/** A dotted finding code (`static.eicar_test`, `behaviour.metadata_access`), ≤ 64. */
+const sandboxFindingCode = z
+  .string()
+  .max(64)
+  .regex(/^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$/, 'Expected a dotted lower-case finding code');
+/** A sandbox reason code (`sandbox.*`), ≤ 64. */
+const sandboxReasonCode = scanReasonCode.refine((value) => value.startsWith('sandbox.'), {
+  message: 'Expected a sandbox reason code (sandbox.*)',
+});
+const sandboxReasonCodes = z
+  .array(sandboxReasonCode)
+  .max(16)
+  .refine(unique, { message: 'Duplicate reason code' });
+
+/** The task limits (X2 `TaskLimits`), bounded as `SANDBOX_TASK_LIMIT_BOUNDS`. */
+const sandboxTaskLimits = z.strictObject({
+  wallTimeoutMs: sandboxBounded(5_000, 600_000),
+  memoryMb: sandboxBounded(64, 4_096),
+  cpuMillis: sandboxBounded(100, 4_000),
+  pids: sandboxBounded(16, 1_024),
+  scratchMb: sandboxBounded(8, 1_024),
+  maxArtifacts: sandboxBounded(0, 16),
+  maxArtifactBytes: sandboxBounded(1, 8_388_608),
+  maxTotalArtifactBytes: sandboxBounded(1, 33_554_432),
+});
+
+/** `samples/<yyyy>/<mm>/<taskId>.bin` (X12). */
+const SAMPLE_KEY_PATTERN = /^samples\/\d{4}\/\d{2}\/([0-9a-f-]{36})\.bin$/;
+/** `artifacts/<yyyy>/<mm>/<taskId>/<runId>/<seq>-<kind>.bin` (X12; runId: 16 hex per run). */
+const ARTIFACT_KEY_PATTERN =
+  /^artifacts\/\d{4}\/\d{2}\/([0-9a-f-]{36})\/([0-9a-f]{16})\/(\d{1,2})-([a-z_]+)\.bin$/;
+/** The sealed one-time result token `t1.<iv>.<tag>.<ct>` (X11; base64url parts of 12, 16, 32 bytes). */
+const SEALED_RESULT_TOKEN_PATTERN = /^t1\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}$/;
+
+/**
+ * A sandbox task (step 4.6 X11, X13): one analysis of one staged sample, for the
+ * `sandbox-controller`. Written by the email-worker's sandbox dispatcher through
+ * `message_outbox` (`aggregate_type = 'sandbox_analysis'`, `aggregate_id` =
+ * `sandbox_analyses.id`, organization = the analysis's dispatching organization) in the
+ * transaction that marks the analysis `dispatched`. Published to `email.security`
+ * (`org.<id>.mail.sandbox.task_requested.v1`), bound to `scan.sandbox` (bounded lossy work queue,
+ * stateless consumer); also reaches the `email.analytics` firehose.
+ *
+ * Nothing secret in clear and no content (the task reaches the firehose): the sealed sample's key
+ * in the sandbox bucket (the key embeds the task id), its plaintext hash, size and detected type,
+ * the profile, the limits, the deadline and the task's one-time result token **sealed** under a
+ * subkey of `SANDBOX_RESULT_KEY` (AAD bound to the task id; only its SHA-256 is stored on the
+ * analysis). The controller opens it and authenticates its result with it (X11). Strict object.
+ */
+export const sandboxTaskRequestedV1 = z
+  .strictObject({
+    /** `sandbox_analyses.public_id` (UUIDv7). */
+    taskId: z.uuid(),
+    /** `sandbox_analyses.id`. */
+    analysisId: decimalIdSchema,
+    sample: z.strictObject({
+      key: z
+        .string()
+        .max(512)
+        .regex(SAMPLE_KEY_PATTERN, 'Expected samples/<yyyy>/<mm>/<taskId>.bin'),
+      sha256: sha256Hex,
+      sizeBytes: sandboxBounded(1, SANDBOX_MAX_SAMPLE_BYTES),
+      detectedType: z.enum(ATTACHMENT_FILE_TYPE_VALUES),
+    }),
+    profile: z.enum(SANDBOX_PROFILE_VALUES),
+    limits: sandboxTaskLimits,
+    requestedAt: isoInstant,
+    /** After this instant the controller answers `not_executed`/`deadline_passed` without a run. */
+    deadlineAt: isoInstant,
+    /** The sealed one-time result token (X11), `t1.<iv>.<tag>.<ct>`. */
+    resultToken: z
+      .string()
+      .regex(SEALED_RESULT_TOKEN_PATTERN, 'Expected a sealed result token (t1.<iv>.<tag>.<ct>)'),
+  })
+  .superRefine((payload, ctx) => {
+    if (SAMPLE_KEY_PATTERN.exec(payload.sample.key)?.[1] !== payload.taskId) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['sample', 'key'],
+        message: 'The sample key must embed the task id',
+      });
+    }
+    if (Date.parse(payload.deadlineAt) <= Date.parse(payload.requestedAt)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['deadlineAt'],
+        message: 'deadlineAt must be after requestedAt',
+      });
+    }
+  });
+export type SandboxTaskRequestedV1 = z.infer<typeof sandboxTaskRequestedV1>;
+
+const sandboxObservations = z.strictObject({
+  processes: z
+    .array(
+      z.strictObject({
+        seq: sandboxBounded(0, 63),
+        parentSeq: sandboxBounded(0, 63).nullable(),
+        image: z.string().regex(/^[A-Za-z0-9._+-]{1,64}$/, 'Expected an image basename'),
+        argvSha256: sha256Hex.nullable(),
+        exitCode: z.number().int().min(-2_147_483_648).max(2_147_483_647).nullable(),
+        killedBy: z.enum(['timeout', 'memory', 'pids']).nullable(),
+      }),
+    )
+    .max(32),
+  processCount: sandboxCounter,
+  network: z.strictObject({
+    dns: z
+      .array(
+        z.strictObject({
+          name: urlHost,
+          type: z.enum(['A', 'AAAA', 'MX', 'TXT', 'other']),
+          source: z.enum(['sinkhole', 'static']),
+        }),
+      )
+      .max(50),
+    http: z
+      .array(
+        z.strictObject({
+          host: urlHost,
+          port: sandboxPort,
+          method: z.enum(['GET', 'POST', 'HEAD', 'PUT', 'OTHER']),
+          pathSha256: sha256Hex,
+          userAgentSha256: sha256Hex.nullable(),
+        }),
+      )
+      .max(50),
+    tls: z.array(z.strictObject({ sni: urlHost, port: sandboxPort })).max(50),
+    connections: z
+      .array(
+        z.strictObject({
+          ip: canonicalIp,
+          port: sandboxPort,
+          protocol: z.enum(['tcp', 'udp']),
+          outcome: z.enum(['refused', 'unreachable', 'sinkhole', 'timeout']),
+        }),
+      )
+      .max(50),
+    totals: z.strictObject({
+      dns: sandboxCounter,
+      http: sandboxCounter,
+      tls: sandboxCounter,
+      connections: sandboxCounter,
+    }),
+  }),
+  files: z.strictObject({
+    dropped: z
+      .array(
+        z.strictObject({
+          seq: sandboxBounded(0, 65_535),
+          sha256: sha256Hex,
+          sizeBytes: count,
+          typeHint: z.enum(ATTACHMENT_FILE_TYPE_VALUES),
+        }),
+      )
+      .max(32),
+    deniedWrites: sandboxCounter,
+  }),
+  findings: z
+    .array(
+      z.strictObject({
+        code: sandboxFindingCode,
+        severity: sandboxSeverity,
+        count: sandboxBounded(1, 1_000_000),
+      }),
+    )
+    .max(32),
+  limitsHit: z.array(token).max(8),
+  browser: z
+    .strictObject({
+      navigations: sandboxCounter,
+      requests: sandboxCounter,
+      downloadsAttempted: sandboxCounter,
+      dialogs: sandboxCounter,
+      passwordFields: sandboxCounter,
+      forms: sandboxCounter,
+    })
+    .nullable(),
+});
+
+/**
+ * The result of one sandbox task (step 4.6 X7, X11). Published by the `sandbox-controller`
+ * **directly** (broker user `eg-sandbox`, publisher confirms; no outbox: the controller has no
+ * database), routing key `org.<id>.mail.sandbox.task_completed.v1` on `email.security`; the
+ * task is acked only after the confirm. Bound to `scan.sandbox.results` (ledger consumer
+ * `email-worker.scan.sandbox.results`), which applies it to the dispatched `sandbox_analyses` row
+ * after checking the result MAC — HMAC-SHA256 under a subkey of `SANDBOX_RESULT_KEY` over the
+ * SHA-256 of the task's one-time result token, the envelope organization and the canonical JSON
+ * of this whole payload without `resultMac` (X11; `@email-gateway/sandbox` `resultMac`) — and the
+ * analysis id, organization, hash and the artifact key prefix. A modified body or a result for a
+ * task its sender never received does not verify. Also reaches the analytics firehose.
+ *
+ * Codes, counts, hashes, sizes, types, host names and canonical IPs of observed indicators,
+ * process image basenames and sealed artifact references only: no file names, no paths, no URLs,
+ * no content (strict object). The controller never produces a verdict (`sandbox-map/1` runs in
+ * the email-worker). `failed` carries an `errorCode`, `not_executed` a `notExecutedReason`,
+ * `completed` neither; the isolation class is the backend's; only an executing backend can
+ * report `executed: true`.
+ */
+export const sandboxTaskCompletedV1 = z
+  .strictObject({
+    taskId: z.uuid(),
+    analysisId: decimalIdSchema,
+    sampleSha256: sha256Hex,
+    /** Hex HMAC-SHA256 over the token hash, organization and the whole payload (X11). */
+    resultMac: sha256Hex,
+    status: z.enum(SANDBOX_TASK_STATUS_VALUES),
+    notExecutedReason: token.nullable(),
+    errorCode: token.nullable(),
+    backend: z.enum(SANDBOX_BACKEND_VALUES),
+    backendVersion: versionString,
+    isolation: z.enum(SANDBOX_ISOLATION_VALUES),
+    executed: z.boolean(),
+    profile: z.enum(SANDBOX_PROFILE_VALUES),
+    controllerVersion: versionString,
+    analyzerVersion: versionString.nullable(),
+    startedAt: isoInstant,
+    completedAt: isoInstant,
+    durationMs: z.number().int().nonnegative().max(86_400_000),
+    observations: sandboxObservations,
+    artifacts: z
+      .array(
+        z.strictObject({
+          seq: sandboxBounded(0, 15),
+          kind: z.enum(SANDBOX_ARTIFACT_KIND_VALUES),
+          contentType: z.enum(SANDBOX_ARTIFACT_CONTENT_TYPE_VALUES),
+          key: z.string().max(512).regex(ARTIFACT_KEY_PATTERN, 'Expected an artifact key'),
+          /** SHA-256 of the sealed object. */
+          objectSha256: sha256Hex,
+          /** SHA-256 of the plaintext artifact. */
+          plainSha256: sha256Hex,
+          sizeBytes: sandboxBounded(0, 8_388_608),
+          /** `x1.<kid>.<ephemeralPub>.<iv>.<tag>.<ct>` (base64url). */
+          wrappedKey: z
+            .string()
+            .max(256)
+            .regex(/^x1\.[a-z0-9]{1,8}(\.[A-Za-z0-9_-]+){4}$/, 'Expected an x1 wrapped key'),
+          keyId: z.string().regex(/^[a-z0-9]{1,16}$/, 'Expected a key id'),
+          algorithm: z.literal(SANDBOX_ARTIFACT_ALGORITHM_VALUE),
+        }),
+      )
+      .max(16),
+    cleanup: z.strictObject({
+      runnerRemoved: z.boolean().nullable(),
+      scratchRemoved: z.boolean(),
+    }),
+  })
+  .superRefine((payload, ctx) => {
+    const issue = (path: (string | number)[], message: string) =>
+      ctx.addIssue({ code: 'custom', path, message });
+    if ((payload.status === 'failed') !== (payload.errorCode !== null)) {
+      issue(['errorCode'], 'failed requires errorCode; other statuses carry none');
+    }
+    if ((payload.status === 'not_executed') !== (payload.notExecutedReason !== null)) {
+      issue(
+        ['notExecutedReason'],
+        'not_executed requires notExecutedReason; other statuses carry none',
+      );
+    }
+    if (payload.status === 'not_executed' && payload.executed) {
+      issue(['executed'], 'not_executed cannot have executed the sample');
+    }
+    if (payload.executed && !EXECUTING_BACKENDS.includes(payload.backend)) {
+      issue(['executed'], `backend ${payload.backend} never executes a sample`);
+    }
+    if (BACKEND_ISOLATION[payload.backend] !== payload.isolation) {
+      issue(
+        ['isolation'],
+        `the isolation of backend ${payload.backend} is ${BACKEND_ISOLATION[payload.backend]}`,
+      );
+    }
+    if (Date.parse(payload.completedAt) < Date.parse(payload.startedAt)) {
+      issue(['completedAt'], 'completedAt must not be before startedAt');
+    }
+    const o = payload.observations;
+    if (!unique(o.findings.map((f) => f.code)))
+      issue(['observations', 'findings'], 'Duplicate finding code');
+    if (!unique(o.limitsHit)) issue(['observations', 'limitsHit'], 'Duplicate limit');
+    if (!unique(o.processes.map((p) => p.seq))) {
+      issue(['observations', 'processes'], 'Duplicate process seq');
+    }
+    if (!unique(payload.artifacts.map((a) => a.seq)))
+      issue(['artifacts'], 'Duplicate artifact seq');
+    const runIds = new Set(payload.artifacts.map((a) => ARTIFACT_KEY_PATTERN.exec(a.key)?.[2]));
+    if (runIds.size > 1) issue(['artifacts'], 'The artifacts of one result belong to one run');
+    payload.artifacts.forEach((artifact, index) => {
+      const match = ARTIFACT_KEY_PATTERN.exec(artifact.key);
+      if (
+        match?.[1] !== payload.taskId ||
+        Number(match[3]) !== artifact.seq ||
+        match[4] !== artifact.kind
+      ) {
+        issue(['artifacts', index, 'key'], 'The artifact key must embed the task id, seq and kind');
+      }
+      if (ARTIFACT_KIND_CONTENT_TYPE[artifact.kind] !== artifact.contentType) {
+        issue(
+          ['artifacts', index, 'contentType'],
+          `The content type of ${artifact.kind} is ${ARTIFACT_KIND_CONTENT_TYPE[artifact.kind]}`,
+        );
+      }
+      if (artifact.wrappedKey.split('.')[1] !== artifact.keyId) {
+        issue(['artifacts', index, 'keyId'], 'The wrapped key names another key id');
+      }
+    });
+  });
+export type SandboxTaskCompletedV1 = z.infer<typeof sandboxTaskCompletedV1>;
+
+/**
+ * One sandbox submission reached a terminal state (step 4.6 X15): completed from its analysis,
+ * skipped (tenant not opted in, plan feature off, type or size excluded, part unavailable),
+ * failed or expired. Written by the email-worker's sandbox finalizer through `message_outbox`
+ * (`aggregate_type = 'attachment'`, `aggregate_id` = `sandbox_submissions.id`, the submission's
+ * organization) in the transaction that changes the submission. Published to `email.security`;
+ * **no queue binds it in 4.6**: it reaches only the `email.analytics` firehose until policy (5.x)
+ * and post-delivery remediation bind it. Ids, codes and times only (strict object).
+ */
+export const attachmentSandboxCompletedV1 = z
+  .strictObject({
+    submissionId: decimalIdSchema,
+    messageId: decimalIdSchema,
+    receivedAt: isoInstant,
+    scanId: decimalIdSchema,
+    lifecycleRound: z.number().int().min(0).max(65_535),
+    partIndex: z.number().int().min(0).max(65_535),
+    sha256: sha256Hex,
+    status: z.enum(SANDBOX_COMPLETION_STATUS_VALUES),
+    verdict: z.enum(SANDBOX_VERDICT_VALUES).nullable(),
+    reasonCodes: sandboxReasonCodes,
+    executed: z.boolean(),
+    isolation: z.enum(SANDBOX_ISOLATION_VALUES).nullable(),
+    completedAt: isoInstant,
+  })
+  .superRefine((payload, ctx) => {
+    const issue = (path: string, message: string) =>
+      ctx.addIssue({ code: 'custom', path: [path], message });
+    switch (payload.status) {
+      case 'skipped':
+        if (payload.verdict !== null) issue('verdict', 'skipped carries no verdict');
+        if (payload.isolation !== null) issue('isolation', 'skipped carries no isolation');
+        if (payload.executed) issue('executed', 'skipped never executed');
+        break;
+      case 'completed':
+        if (payload.verdict === null) issue('verdict', 'completed requires a verdict');
+        break;
+      case 'expired':
+        if (payload.verdict !== null && payload.verdict !== 'timeout') {
+          issue('verdict', 'expired carries verdict timeout or none');
+        }
+        break;
+      case 'failed':
+        if (payload.verdict !== null && payload.verdict !== 'error') {
+          issue('verdict', 'failed carries verdict error or none');
+        }
+        break;
+    }
+    if (payload.verdict === 'clean' && payload.isolation !== 'vm') {
+      issue('verdict', 'clean requires vm isolation (sandbox-map/1 C1)');
+    }
+  });
+export type AttachmentSandboxCompletedV1 = z.infer<typeof attachmentSandboxCompletedV1>;
+
 export const EventTypes = {
   MessageReceived: 'mail.message.received.v1',
   MessageScanned: 'mail.message.scanned.v1',
@@ -1079,4 +1537,7 @@ export const EventTypes = {
   UrlClicked: 'mail.url.clicked.v1',
   MessageScanStageReady: 'mail.message.scan_stage_ready.v1',
   MessageDlpIncident: 'mail.message.dlp_incident.v1',
+  SandboxTaskRequested: 'mail.sandbox.task_requested.v1',
+  SandboxTaskCompleted: 'mail.sandbox.task_completed.v1',
+  AttachmentSandboxCompleted: 'mail.attachment.sandbox_completed.v1',
 } as const;

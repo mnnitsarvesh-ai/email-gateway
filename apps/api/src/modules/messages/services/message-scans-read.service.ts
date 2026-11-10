@@ -29,7 +29,9 @@ export const DLP_READ_PERMISSION = 'dlp:read';
  * `GET /messages/{messageId}/scans` (step 4.1 S16; step 4.2 A16: per-attachment results on the
  * `attachment` engine entry; step 4.3 U16: per-URL results and the rewrite on the `url` entry;
  * step 4.4 B15: the explainable BEC verdict on the `bec` entry; step 4.5 D20: the masked DLP
- * result on the `dlp` entry, only for callers holding `dlp:read`): the scan rounds of a message of the caller's organization, newest
+ * result on the `dlp` entry, only for callers holding `dlp:read`; step 4.6 X18: the sandbox
+ * submissions with their outcome on each attachment and with the analysis report on the
+ * `sandbox` entry): the scan rounds of a message of the caller's organization, newest
  * round first, from the read replica (a few seconds behind the writer: a round that just
  * completed may still show as running). Every query filters by the scope's organization;
  * another organization's message is `404 message_not_found`.
@@ -80,12 +82,23 @@ export class MessageScansReadService {
     const dlpVisible = principal.permissions.has(DLP_READ_PERMISSION);
     const hasDlp = dlpVisible && engineRows.some((row) => row.engine === DLP_ENGINE);
     const dlpInputs = hasDlp ? await this.dlpInputs(scope, message, scanIds) : NO_DLP;
-    const parts = await this.rounds.attachmentParts(
-      scope,
-      message,
-      results.map((row) => row.partIndex),
+    // Step 4.6 X18: the analyses that completed this organization's terminal submissions (ids
+    // from the tenant-scoped submission rows only) and their artifact metadata.
+    const analysisIds = submissions.flatMap((s) =>
+      s.analysisId !== null && s.externalRef !== null && s.status !== 'skipped'
+        ? [s.analysisId]
+        : [],
     );
-    const attachments = { results, parts, submissions };
+    const [parts, analyses, artifacts] = await Promise.all([
+      this.rounds.attachmentParts(
+        scope,
+        message,
+        results.map((row) => row.partIndex),
+      ),
+      analysisIds.length === 0 ? [] : this.rounds.sandboxAnalyses(analysisIds),
+      analysisIds.length === 0 ? [] : this.rounds.sandboxArtifacts(analysisIds),
+    ]);
+    const attachments = { results, parts, submissions, analyses, artifacts };
     const urlInputs = { urls, results: urlResults, rewrites, inspections, clicks };
     const last = page.at(-1);
     return {

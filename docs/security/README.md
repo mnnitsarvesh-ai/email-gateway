@@ -1,6 +1,6 @@
 # Security baseline
 
-This document lists the controls in place from Phase 0. A full threat model (STRIDE across the mail path, portal and tenant boundaries) is a dedicated follow-up task.
+This document lists the controls in place from Phase 0. A full threat model (STRIDE across the mail path, portal and tenant boundaries) is a dedicated follow-up task. Component threat models: the **[sandbox threat model](sandbox-threat-model.md)** (step 4.6: the sandbox-controller boundary, isolation backends, residual risks and the production preconditions for executing unknown files — execution is disabled) with its [escape-testing procedure and results](sandbox-escape-testing.md).
 
 ## Secrets
 

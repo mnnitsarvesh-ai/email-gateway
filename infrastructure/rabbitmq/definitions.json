@@ -1,5 +1,5 @@
 {
-  "topology_version": 7,
+  "topology_version": 8,
   "exchanges": [
     {
       "name": "email.ingestion",
@@ -140,6 +140,24 @@
     },
     {
       "name": "scan.sandbox",
+      "vhost": "email-gateway",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-queue-type": "quorum"
+      }
+    },
+    {
+      "name": "scan.sandbox.submissions",
+      "vhost": "email-gateway",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-queue-type": "quorum"
+      }
+    },
+    {
+      "name": "scan.sandbox.results",
       "vhost": "email-gateway",
       "durable": true,
       "auto_delete": false,
@@ -465,7 +483,7 @@
       "vhost": "email-gateway",
       "destination": "scan.sandbox",
       "destination_type": "queue",
-      "routing_key": "org.*.mail.attachment.sandbox_requested.v1",
+      "routing_key": "org.*.mail.sandbox.task_requested.v1",
       "arguments": {}
     },
     {
@@ -473,7 +491,39 @@
       "vhost": "email-gateway",
       "destination": "scan.sandbox",
       "destination_type": "queue",
-      "routing_key": "retry.scan.sandbox.#",
+      "routing_key": "retry.scan.sandbox.org.#",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
+      "destination": "scan.sandbox.results",
+      "destination_type": "queue",
+      "routing_key": "org.*.mail.sandbox.task_completed.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
+      "destination": "scan.sandbox.results",
+      "destination_type": "queue",
+      "routing_key": "retry.scan.sandbox.results.#",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
+      "destination": "scan.sandbox.submissions",
+      "destination_type": "queue",
+      "routing_key": "org.*.mail.attachment.sandbox_requested.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
+      "destination": "scan.sandbox.submissions",
+      "destination_type": "queue",
+      "routing_key": "retry.scan.sandbox.submissions.#",
       "arguments": {}
     },
     {
@@ -681,9 +731,42 @@
       "apply-to": "queues",
       "priority": 10,
       "definition": {
-        "delivery-limit": -1,
-        "max-length": 10000,
-        "overflow": "drop-head"
+        "delivery-limit": 20,
+        "dead-letter-exchange": "email.events",
+        "dead-letter-routing-key": "dead-letter.scan.sandbox",
+        "dead-letter-strategy": "at-most-once",
+        "overflow": "drop-head",
+        "max-length": 10000
+      }
+    },
+    {
+      "vhost": "email-gateway",
+      "name": "eg.scan.sandbox.submissions",
+      "pattern": "^scan\\.sandbox\\.submissions$",
+      "apply-to": "queues",
+      "priority": 10,
+      "definition": {
+        "delivery-limit": 20,
+        "dead-letter-exchange": "email.events",
+        "dead-letter-routing-key": "dead-letter.scan.sandbox.submissions",
+        "dead-letter-strategy": "at-least-once",
+        "overflow": "reject-publish",
+        "max-length": 1000000
+      }
+    },
+    {
+      "vhost": "email-gateway",
+      "name": "eg.scan.sandbox.results",
+      "pattern": "^scan\\.sandbox\\.results$",
+      "apply-to": "queues",
+      "priority": 10,
+      "definition": {
+        "delivery-limit": 20,
+        "dead-letter-exchange": "email.events",
+        "dead-letter-routing-key": "dead-letter.scan.sandbox.results",
+        "dead-letter-strategy": "at-least-once",
+        "overflow": "reject-publish",
+        "max-length": 1000000
       }
     },
     {

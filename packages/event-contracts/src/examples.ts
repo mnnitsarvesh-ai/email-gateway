@@ -9,6 +9,7 @@ const receivedAt = '2026-11-01T10:15:30.123Z';
 const messageId = '9007199254740993';
 const emlS3Key = 'org/42/eml/2026/11/01/9007199254740993.eml';
 const partPrefix = 'org/42/part/2026/11/01/9007199254740993';
+const sandboxTaskId = '01890a5d-ac96-774b-bcce-b302099a8070';
 
 export const EXAMPLE_EVENT_PAYLOADS: Readonly<Record<RegisteredEventType, unknown>> = {
   'mail.message.received.v1': {
@@ -241,6 +242,99 @@ export const EXAMPLE_EVENT_PAYLOADS: Readonly<Record<RegisteredEventType, unknow
     coverage: 'partial',
     evidenceAvailable: true,
     detectedAt: '2026-11-01T10:15:31.900Z',
+  },
+  'mail.sandbox.task_requested.v1': {
+    taskId: sandboxTaskId,
+    analysisId: '501',
+    sample: {
+      key: `samples/2026/11/${sandboxTaskId}.bin`,
+      sha256: 'c'.repeat(64),
+      sizeBytes: 48_213,
+      detectedType: 'script_js',
+    },
+    profile: 'execute',
+    limits: {
+      wallTimeoutMs: 60_000,
+      memoryMb: 512,
+      cpuMillis: 1000,
+      pids: 128,
+      scratchMb: 64,
+      maxArtifacts: 16,
+      maxArtifactBytes: 2_097_152,
+      maxTotalArtifactBytes: 8_388_608,
+    },
+    requestedAt: '2026-11-01T10:15:32.000Z',
+    deadlineAt: '2026-11-01T10:30:32.000Z',
+    resultToken:
+      't1.AAAAAAAAAAAAAAAA.BBBBBBBBBBBBBBBBBBBBBB.CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC',
+  },
+  'mail.sandbox.task_completed.v1': {
+    taskId: sandboxTaskId,
+    analysisId: '501',
+    sampleSha256: 'c'.repeat(64),
+    resultMac: 'f'.repeat(64),
+    status: 'completed',
+    notExecutedReason: null,
+    errorCode: null,
+    backend: 'static',
+    backendVersion: 'sandbox-static/1',
+    isolation: 'process',
+    executed: false,
+    profile: 'execute',
+    controllerVersion: 'sandbox-controller/0.1.0',
+    analyzerVersion: 'sandbox-static/1',
+    startedAt: '2026-11-01T10:15:33.000Z',
+    completedAt: '2026-11-01T10:15:34.250Z',
+    durationMs: 1250,
+    observations: {
+      processes: [],
+      processCount: 0,
+      network: {
+        dns: [{ name: 'payload-host.test', type: 'A', source: 'static' }],
+        http: [],
+        tls: [],
+        connections: [],
+        totals: { dns: 1, http: 0, tls: 0, connections: 0 },
+      },
+      files: { dropped: [], deniedWrites: 0 },
+      findings: [
+        { code: 'static.script_download_cradle', severity: 'high', count: 1 },
+        { code: 'static.embedded_urls', severity: 'info', count: 2 },
+      ],
+      limitsHit: [],
+      browser: null,
+    },
+    artifacts: [
+      {
+        seq: 0,
+        kind: 'static_report',
+        contentType: 'application/json',
+        key: `artifacts/2026/11/${sandboxTaskId}/0f1e2d3c4b5a6978/0-static_report.bin`,
+        objectSha256: 'a'.repeat(64),
+        plainSha256: 'b'.repeat(64),
+        sizeBytes: 1024,
+        wrappedKey:
+          'x1.k1.MCowBQYDK2VuAyEA.AAAAAAAAAAAAAAAA.BBBBBBBBBBBBBBBBBBBBBB.CCCCCCCCCCCCCCCC',
+        keyId: 'k1',
+        algorithm: 'sandbox-artifact/1',
+      },
+    ],
+    cleanup: { runnerRemoved: null, scratchRemoved: true },
+  },
+  'mail.attachment.sandbox_completed.v1': {
+    submissionId: '301',
+    messageId,
+    receivedAt,
+    scanId: '11',
+    lifecycleRound: 0,
+    partIndex: 3,
+    sha256: 'c'.repeat(64),
+    status: 'completed',
+    verdict: 'malicious',
+    reasonCodes: ['sandbox.static.script_download_cradle', 'sandbox.static.embedded_urls'],
+    executed: false,
+    isolation: 'process',
+    completedAt: '2026-11-01T10:15:35.000Z',
   },
   'domain.routing.changed.v1': {
     domainId: '77',

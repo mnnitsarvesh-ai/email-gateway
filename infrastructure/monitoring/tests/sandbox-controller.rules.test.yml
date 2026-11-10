@@ -1,0 +1,149 @@
+# promtool unit tests of rules/sandbox-controller.rules.yml (step 4.6 X20):
+#   docker run --rm -v "$PWD/infrastructure/monitoring:/m:ro" --entrypoint promtool \
+#     prom/prometheus:v3.6.0 test rules /m/tests/sandbox-controller.rules.test.yml
+rule_files:
+  - ../rules/sandbox-controller.rules.yml
+evaluation_interval: 1m
+tests:
+  - name: down, not ready, cleanup failures, task failures
+    interval: 1m
+    input_series:
+      # Scrapes fail from minute 10.
+      - series: 'up{job="sandbox-controller",instance="sandbox-controller:3092",environment="production"}'
+        values: '1x10 0x30'
+      # The static backend's self-test fails from minute 5; disabled stays ready.
+      - series: 'sandbox_backend_ready{job="sandbox-controller",instance="a",backend="static"}'
+        values: '1x5 0x35'
+      - series: 'sandbox_backend_ready{job="sandbox-controller",instance="b",backend="disabled"}'
+        values: '1x40'
+      # One scratch cleanup failure at minute 20; runner cleanups never fail.
+      - series: 'sandbox_cleanup_failures_total{job="sandbox-controller",instance="a",kind="scratch"}'
+        values: '0x20 1x20'
+      - series: 'sandbox_cleanup_failures_total{job="sandbox-controller",instance="a",kind="runner"}'
+        values: '0x40'
+      # 10 completed per minute throughout; 3 failed per minute from minute 10 (23 %); retried and
+      # rejected never count.
+      - series: 'sandbox_tasks_total{job="sandbox-controller",instance="a",backend="static",status="completed"}'
+        values: '0+10x40'
+      - series: 'sandbox_tasks_total{job="sandbox-controller",instance="a",backend="static",status="failed"}'
+        values: '0x10 3+3x30'
+      - series: 'sandbox_tasks_total{job="sandbox-controller",instance="a",backend="static",status="retried"}'
+        values: '0+100x40'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: SandboxControllerDown
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: SandboxControllerDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: sandbox-controller
+              instance: sandbox-controller:3092
+              environment: production
+            exp_annotations:
+              summary: sandbox-controller down
+              description: >-
+                The sandbox-controller has not been scraped for 5 minutes. Sandbox tasks wait in
+                the bounded scan.sandbox queue (dropped beyond 10 000) and analyses expire at
+                their deadline (verdict timeout). Mail flow is unaffected. Locally the job is 0
+                unless Prometheus is attached to the internal sandbox-control network.
+              runbook_url: docs/runbooks/sandbox-controller.md#sandboxcontrollerdown
+      - eval_time: 14m
+        alertname: SandboxBackendNotReady
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: SandboxBackendNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              backend: static
+            exp_annotations:
+              summary: Sandbox backend static not ready
+              description: >-
+                The static backend's self-test has failed for 10 minutes; the task consumer is
+                paused until it passes again. Check /health/ready (sandbox-backend details:
+                self-test code) and the controller logs.
+              runbook_url: docs/runbooks/sandbox-controller.md#sandboxbackendnotready
+      - eval_time: 19m
+        alertname: SandboxCleanupFailures
+        exp_alerts: []
+      - eval_time: 22m
+        alertname: SandboxCleanupFailures
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              kind: scratch
+            exp_annotations:
+              summary: Sandbox scratch cleanup failed
+              description: >-
+                At least one sandbox scratch could not be removed in the last 10 minutes
+                (per-task cleanup or the reaper). Find the leftover (container label
+                eg.sandbox.controller / scratch directory) and remove it; if a runner keeps
+                running, follow the suspected-escape procedure.
+              runbook_url: docs/runbooks/sandbox-controller.md#sandboxcleanupfailures
+      - eval_time: 35m
+        alertname: SandboxCleanupFailures
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: SandboxTaskFailuresHigh
+        exp_alerts: []
+      - eval_time: 38m
+        alertname: SandboxTaskFailuresHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Sandbox task failures above 10 %
+              description: >-
+                More than 10 % of the sandbox results of the last 15 minutes are failed (sample
+                unavailable or not authentic, storage unavailable after the retry budget,
+                analyzer crashes or timeouts, backend not ready). Their analyses end with verdict
+                error, never clean.
+              runbook_url: docs/runbooks/sandbox-controller.md#sandboxtaskfailureshigh
+
+  - name: executing backend outside local/CI
+    interval: 1m
+    input_series:
+      # A local harness (executes) never alerts; neither does a non-executing production backend.
+      - series: 'sandbox_backend_info{job="sandbox-controller",instance="a",environment="local",backend="hardened-container",isolation="container",executes="true"}'
+        values: '1x10'
+      - series: 'sandbox_backend_info{job="sandbox-controller",instance="b",environment="ci",backend="hardened-container",isolation="container",executes="true"}'
+        values: '1x10'
+      - series: 'sandbox_backend_info{job="sandbox-controller",instance="c",environment="production",backend="static",isolation="process",executes="false"}'
+        values: '1x10'
+      # Production reporting an executing backend, and a target without the environment label.
+      - series: 'sandbox_backend_info{job="sandbox-controller",instance="d",environment="production",backend="hardened-container",isolation="container",executes="true"}'
+        values: '_x5 1x5'
+      - series: 'sandbox_backend_info{job="sandbox-controller",instance="e",backend="vm",isolation="vm",executes="true"}'
+        values: '_x5 1x5'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: SandboxExecutingBackendOutsideTest
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: SandboxExecutingBackendOutsideTest
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              backend: hardened-container
+              environment: production
+            exp_annotations:
+              summary: Executing sandbox backend hardened-container outside local/CI
+              description: >-
+                A sandbox-controller reports an executing backend (hardened-container) in
+                environment "production". Production accepts disabled or static only; execution
+                needs every precondition of the threat model §8 and an ADR. Stop the controller
+                and restore SANDBOX_BACKEND=disabled.
+              runbook_url: docs/runbooks/sandbox-controller.md#sandboxexecutingbackendoutsidetest
+          - exp_labels:
+              severity: critical
+              backend: vm
+            exp_annotations:
+              summary: Executing sandbox backend vm outside local/CI
+              description: >-
+                A sandbox-controller reports an executing backend (vm) in environment "".
+                Production accepts disabled or static only; execution needs every precondition
+                of the threat model §8 and an ADR. Stop the controller and restore
+                SANDBOX_BACKEND=disabled.
+              runbook_url: docs/runbooks/sandbox-controller.md#sandboxexecutingbackendoutsidetest

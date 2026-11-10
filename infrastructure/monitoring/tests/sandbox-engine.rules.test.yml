@@ -1,0 +1,118 @@
+# promtool unit tests of rules/sandbox-engine.rules.yml (step 4.6 X20):
+#   docker run --rm -v "$PWD/infrastructure/monitoring:/m:ro" --entrypoint promtool \
+#     prom/prometheus:v3.6.0 test rules /m/tests/sandbox-engine.rules.test.yml
+rule_files:
+  - ../rules/sandbox-engine.rules.yml
+evaluation_interval: 1m
+tests:
+  - name: rejected results, expiries, backlogs and stalled purges
+    interval: 1m
+    input_series:
+      # One bad_mac rejection at minute 5; invalid_result stays at 0.
+      - series: 'scan_sandbox_results_rejected_total{job="email-worker",instance="a",reason="bad_mac"}'
+        values: '0x5 1x55'
+      - series: 'scan_sandbox_results_rejected_total{job="email-worker",instance="a",reason="invalid_result"}'
+        values: '0x60'
+      # 12 expiries per minute (0.2/s) from minute 0; dispatched ones never count.
+      - series: 'scan_sandbox_submissions_total{job="email-worker",instance="a",result="expired"}'
+        values: '0+12x90'
+      - series: 'scan_sandbox_submissions_total{job="email-worker",instance="a",result="dispatched"}'
+        values: '0+600x90'
+      # scan.sandbox.submissions above 1000 from minute 10; scan.sandbox above 1000 from minute 20.
+      - series: 'rabbitmq_detailed_queue_messages_ready{job="rabbitmq-detailed",vhost="email-gateway",queue="scan.sandbox.submissions"}'
+        values: '0x10 1500x80'
+      - series: 'rabbitmq_detailed_queue_messages_ready{job="rabbitmq-detailed",vhost="email-gateway",queue="scan.sandbox"}'
+        values: '0x20 2000x70'
+      # Artifact object deletes fail every minute from minute 0; samples never fail.
+      - series: 'scan_sandbox_purge_failures_total{job="email-worker",instance="a",kind="artifact_object"}'
+        values: '0+1x150'
+      - series: 'scan_sandbox_purge_failures_total{job="email-worker",instance="a",kind="sample"}'
+        values: '0x150'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: SandboxResultsRejected
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: SandboxResultsRejected
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              category: security
+              reason: bad_mac
+            exp_annotations:
+              summary: 'Sandbox results rejected (bad_mac)'
+              description: >-
+                The email-worker rejected sandbox task results in the last 15 minutes (reason
+                bad_mac). Nothing was written for them. bad_mac or analysis_mismatch can mean a
+                forged result on email.security or a SANDBOX_RESULT_KEY mismatch between the
+                email-worker and the sandbox-controller; check the controller version and key
+                rotation.
+              runbook_url: docs/runbooks/sandbox-engine.md#sandboxresultsrejected
+      - eval_time: 30m
+        alertname: SandboxResultsRejected
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: SandboxSubmissionsExpiring
+        exp_alerts: []
+      - eval_time: 65m
+        alertname: SandboxSubmissionsExpiring
+        exp_alerts:
+          - exp_labels:
+              severity: info
+            exp_annotations:
+              summary: Sandbox submissions expiring
+              description: >-
+                More than 0.1 sandbox submissions per second expired (timeout) over the last 30
+                minutes: the dispatcher or the sandbox-controller is not answering in time
+                (SANDBOX_SUBMISSION_TTL_SECONDS, SANDBOX_TASK_DEADLINE_SECONDS). Delivery is not
+                affected; the expired submissions carry verdict timeout, never clean.
+              runbook_url: docs/runbooks/sandbox-engine.md#sandboxsubmissionsexpiring
+      - eval_time: 20m
+        alertname: SandboxDispatchBacklog
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: SandboxDispatchBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Sandbox dispatch backlog
+              description: >-
+                scan.sandbox.submissions has had more than 1000 ready messages for 15 minutes.
+                Check that a replica runs the sandbox engine (SCAN_CONSUMERS empty or with
+                sandbox, SANDBOX_ENABLED=true; Kubernetes email-worker-sandbox), staging latency
+                (scan_sandbox_staging_seconds) and S3 / MySQL health.
+              runbook_url: docs/runbooks/sandbox-engine.md#sandboxdispatchbacklog
+      - eval_time: 30m
+        alertname: SandboxTaskQueueBacklog
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: SandboxTaskQueueBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: info
+            exp_annotations:
+              summary: Sandbox task queue backlog
+              description: >-
+                scan.sandbox (the sandbox-controller's bounded lossy task queue) has had more than
+                1000 ready tasks for 15 minutes. The controller is absent, not ready or too slow;
+                tasks beyond 10000 are dropped and their analyses expire at their deadline
+                (timeout).
+              runbook_url: docs/runbooks/sandbox-engine.md#sandboxtaskqueuebacklog
+      - eval_time: 50m
+        alertname: SandboxPurgeStalled
+        exp_alerts: []
+      - eval_time: 130m
+        alertname: SandboxPurgeStalled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              kind: artifact_object
+            exp_annotations:
+              summary: 'Sandbox purge stalled (artifact_object)'
+              description: >-
+                The sandbox sweeper could not delete artifact_object objects in the sandbox bucket
+                for more than an hour (it retries every pass). Check the bucket, the email-worker's
+                S3 permissions (delete on samples/* and artifacts/*) and MinIO / S3 health. The
+                bucket lifecycle rules remain the backstop.
+              runbook_url: docs/runbooks/sandbox-engine.md#sandboxpurgestalled
