@@ -12,7 +12,6 @@ function components(order: string[]): WorkerComponents {
   });
   return {
     approvals: part('approvals'),
-    passThrough: part('passthrough'),
     scheduler: part('scheduler'),
     tailer: part('tailer'),
     reconciler: part('reconciler'),
@@ -24,7 +23,6 @@ const roles = (overrides: Partial<WorkerRoles> = {}): WorkerRoles => ({
   DELIVERY_APPROVALS_ENABLED: true,
   DELIVERY_REINJECTION_ENABLED: true,
   DELIVERY_STATUS_LOG_ENABLED: true,
-  DELIVERY_DEV_PASSTHROUGH_ENABLED: false,
   ...overrides,
 });
 const logger = createLogger({ service: 't', level: 'silent' });
@@ -32,15 +30,10 @@ const logger = createLogger({ service: 't', level: 'silent' });
 describe('WorkerLifecycle', () => {
   it('starts every enabled role and stops consumers first, the lock connection last', async () => {
     const order: string[] = [];
-    const lifecycle = new WorkerLifecycle(
-      components(order),
-      roles({ DELIVERY_DEV_PASSTHROUGH_ENABLED: true }),
-      logger,
-    );
+    const lifecycle = new WorkerLifecycle(components(order), roles(), logger);
     lifecycle.start();
     expect(lifecycle.startedRoles).toEqual([
       'approvals',
-      'dev_passthrough',
       'reinjection',
       'reconciler',
       'status_log',
@@ -48,11 +41,9 @@ describe('WorkerLifecycle', () => {
     await lifecycle.stop();
     expect(order).toEqual([
       'start:approvals',
-      'start:passthrough',
       'start:scheduler',
       'start:reconciler',
       'start:tailer',
-      'stop:passthrough',
       'stop:approvals',
       'stop:scheduler',
       'stop:tailer',
@@ -74,14 +65,11 @@ describe('WorkerLifecycle', () => {
     expect(order).toEqual(['start:tailer', 'stop:tailer', 'close:locks']);
   });
 
-  it('never starts the pass-through without the approvals role', () => {
+  it('has no development pass-through role any more (step 5.2 P14)', () => {
     const order: string[] = [];
-    const lifecycle = new WorkerLifecycle(
-      components(order),
-      roles({ DELIVERY_APPROVALS_ENABLED: false, DELIVERY_DEV_PASSTHROUGH_ENABLED: true }),
-      logger,
-    );
+    const lifecycle = new WorkerLifecycle(components(order), roles(), logger);
     lifecycle.start();
-    expect(order).not.toContain('start:passthrough');
+    expect(lifecycle.startedRoles).not.toContain('dev_passthrough' as never);
+    expect(order.some((step) => step.includes('passthrough'))).toBe(false);
   });
 });

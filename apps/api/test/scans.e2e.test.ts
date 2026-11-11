@@ -496,6 +496,7 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
         sandboxSubmissions: () => Promise.resolve(sandboxState.submissions),
         // Step 5.1 R15: no stored risk score for this round (rounds scored before 5.1).
         riskScores: () => Promise.resolve([]),
+        policyEvaluations: () => Promise.resolve([]),
         sandboxAnalyses: (ids: bigint[]) => sandboxReads.analyses(ids),
         sandboxArtifacts: (ids: bigint[]) => sandboxReads.artifacts(ids),
         authResults: () =>
@@ -748,6 +749,7 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
               },
             ],
             risk: [],
+            policy: null,
           },
         ],
       });

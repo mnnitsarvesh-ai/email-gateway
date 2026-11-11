@@ -136,10 +136,10 @@ jobs:
     # Test profile of step 2.3 (docs/plan/steps/05-routing.md §5), for THIS job only. Compose
     # and the test runner take these over the generated .env (shell environment wins over .env
     # in Compose interpolation; process.loadEnvFile never overrides a set variable).
-    # - DELIVERY_DEV_PASSTHROUGH_ENABLED: DEVELOPMENT/CI ONLY, the delivery-worker approves every
-    #   SCANNED message (step 4.1 E27; never scan_failed) without policy (step 5.2 does not exist
-    #   yet), so the routing, lifecycle and scan stack suites can deliver end to end. The worker refuses it unless APP_ENV is
-    #   local or ci; never set it anywhere else.
+    # - Step 5.2 (docs/plan/steps/16-policy-engine.md P14, ADR-0044): delivery is approved by the
+    #   policy-engine of the apps profile; the development pass-through and its keys
+    #   (DELIVERY_DEV_PASSTHROUGH_ENABLED, DELIVERY_OUTBOX_*) were removed and the delivery-worker
+    #   refuses DELIVERY_DEV_PASSTHROUGH_ENABLED=true, so it is never set here.
     # - Postfix retry and connect timeout shortened by configuration only (nothing in code
     #   depends on them): 10s/60s/10s backoff, 5s connect timeout.
     # - The test CA of the smtp-test sinks (volume test-pki) for verified TLS to the provider
@@ -150,7 +150,6 @@ jobs:
     #   and classifies with Bayes after 10 learns per class (test only), like the local .env; the
     #   ARC corpus fixtures need the test sealer arc-trusted.scan.test on the trusted list.
     env:
-      DELIVERY_DEV_PASSTHROUGH_ENABLED: 'true'
       POSTFIX_MINIMAL_BACKOFF_TIME: 10s
       POSTFIX_MAXIMAL_BACKOFF_TIME: 60s
       POSTFIX_QUEUE_RUN_DELAY: 10s
@@ -160,7 +159,6 @@ jobs:
       DELIVERY_REINJECT_RETRY_BASE_SECONDS: '2'
       DELIVERY_REINJECT_RETRY_MAX_SECONDS: '20'
       DELIVERY_POLL_INTERVAL_MS: '500'
-      DELIVERY_OUTBOX_POLL_INTERVAL_MS: '500'
       DELIVERY_RECONCILE_INTERVAL_MS: '5000'
       RSPAMD_DNS_SERVERS: 172.31.250.53
       RSPAMD_RBL_PROFILE: test
@@ -205,6 +203,8 @@ jobs:
           docker compose exec -T rspamd rspamadm configtest
           curl -fsS "http://127.0.0.1:${EMAIL_WORKER_HOST_PORT:-3020}/metrics" | grep -q '^# TYPE scan_engine_results_total '
           docker compose ps --all --format '{{.Service}} {{.ExitCode}}' rabbitmq-init | grep -qx 'rabbitmq-init 0'
+          # Step 5.2: the delivery gate (policy-engine evaluates every scanned round).
+          curl -fsS "http://127.0.0.1:${POLICY_ENGINE_HOST_PORT:-3030}/metrics" | grep -q '^# TYPE policy_evaluations_total '
       # The api integration tests need the catalog (plans, permissions, platform organization).
       - name: Seed catalog
         run: pnpm db:seed

@@ -1,8 +1,9 @@
 import { spawnSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {
   DEMO,
+  DEMO_POLICY_DSL_VERSION,
   MAIL_DESTINATION_PRESETS,
   PERMISSIONS,
   PLATFORM_ORGANIZATION_SLUG,
@@ -68,6 +69,10 @@ async function counts() {
     demoMailServers: await prisma.domainMailServer.count({ where: { organizationId } }),
     demoPolicies: await prisma.emailPolicy.count({ where: { organizationId } }),
     demoPolicyVersions: await prisma.policyVersion.count({ where: { organizationId } }),
+    demoPolicySettings: await prisma.policySettings.count({ where: { organizationId } }),
+    demoLegacyPolicyRows:
+      (await prisma.policyCondition.count({ where: { organizationId } })) +
+      (await prisma.policyAction.count({ where: { organizationId } })),
     platformUsers: await prisma.user.count({ where: { organizationId: platformId } }),
     platformUserRoles: await prisma.userRole.count({ where: { organizationId: platformId } }),
     platformSettings: await prisma.organizationSetting.count({
@@ -108,7 +113,6 @@ describe('db:seed', () => {
       demoDeployments: 1,
       demoDomains: 1,
       demoPolicies: 1,
-      demoPolicyVersions: 1,
       platformUsers: 1,
       platformUserRoles: 1,
       platformSettings: 1,
@@ -117,6 +121,10 @@ describe('db:seed', () => {
       platformDeployments: 1,
     });
     expect(afterFirst.plans).toBeGreaterThanOrEqual(4);
+    // Step 5.2 §3: one policy-dsl/1 version on a fresh database; a database migrated from the
+    // step 1.1 seed also keeps its retired legacy version 1 (superseded, never deleted).
+    expect([1, 2]).toContain(afterFirst.demoPolicyVersions);
+    expect(afterFirst.demoPolicySettings).toBe(1);
 
     // Step 2.2 (D6): the SMTP recipient limits are materialized from the plan (demo = standard).
     const demo = await prisma.organization.findUniqueOrThrow({ where: { slug: 'demo' } });
@@ -245,6 +253,105 @@ describe('db:seed', () => {
     const again = await prisma.domain.findUniqueOrThrow({ where: { id: domain.id } });
     expect(again.nextCheckAt).toEqual(scheduled);
     await prisma.domain.update({ where: { id: domain.id }, data: { nextCheckAt: new Date() } });
+  });
+
+  it('seeds the demo policy as a published, active policy-dsl/1 version (step 5.2 §3)', async () => {
+    expect(seed().status).toBe(0);
+    const demo = await prisma.organization.findUniqueOrThrow({ where: { slug: 'demo' } });
+    const policy = await prisma.emailPolicy.findUniqueOrThrow({
+      where: { organizationId_name: { organizationId: demo.id, name: DEMO.policy.name } },
+    });
+    const versions = await prisma.policyVersion.findMany({
+      where: { organizationId: demo.id, policyId: policy.id },
+      orderBy: { version: 'asc' },
+    });
+    const legacy = versions.filter((v) => v.dslVersion === null);
+    const dsl = versions.filter((v) => v.dslVersion !== null);
+    // Legacy (step 1.1) versions are retired by the migration, never deleted or reactivated.
+    for (const v of legacy) expect(v.status).toBe('superseded');
+    expect(dsl).toHaveLength(1);
+    const version = dsl[0]!;
+    // Version 1 on a fresh database, the next number after the legacy rows otherwise.
+    expect(version.version).toBe(Math.max(0, ...legacy.map((v) => v.version)) + 1);
+
+    // The definition verbatim from the design (§3) and its canonical hash.
+    const expected = {
+      dslVersion: 'policy-dsl/1',
+      direction: 'inbound',
+      priority: 100,
+      rules: [
+        {
+          id: 'quarantine-malware-phishing',
+          priority: 10,
+          when: { field: 'risk.verdict', op: 'in', value: ['malware', 'phishing'] },
+          actions: [{ type: 'QUARANTINE' }, { type: 'TAG', label: 'sample-policy' }],
+        },
+      ],
+    };
+    expect(version.definition).toEqual(expected);
+    const canonical =
+      '{"direction":"inbound","dslVersion":"policy-dsl/1","priority":100,"rules":[{"actions":' +
+      '[{"type":"QUARANTINE"},{"label":"sample-policy","type":"TAG"}],"id":"quarantine-malware-' +
+      'phishing","priority":10,"when":{"field":"risk.verdict","op":"in","value":["malware",' +
+      '"phishing"]}}]}';
+    expect(version.definitionSha256).toBe(createHash('sha256').update(canonical).digest('hex'));
+    expect(version).toMatchObject({
+      status: 'published',
+      dslVersion: DEMO_POLICY_DSL_VERSION,
+      references: { departmentIds: [], userIds: [] },
+      hasOverrideRules: false,
+      ruleCount: 1,
+    });
+    expect(version.publishedAt).toBeInstanceOf(Date);
+    expect(policy).toMatchObject({
+      status: 'active',
+      activeVersionId: version.id,
+      direction: 'inbound',
+      priority: 100,
+      deletedAt: null,
+    });
+    // The retired relational rows are never written for a DSL version.
+    expect(await prisma.policyCondition.count({ where: { policyVersionId: version.id } })).toBe(0);
+    expect(await prisma.policyAction.count({ where: { policyVersionId: version.id } })).toBe(0);
+
+    const settings = await prisma.policySettings.findUniqueOrThrow({
+      where: { organizationId: demo.id },
+    });
+    expect(settings.settings).toEqual({});
+    expect(settings.settingsSha256).toBe(createHash('sha256').update('{}').digest('hex'));
+    expect(settings.generation).toBeGreaterThanOrEqual(1n);
+
+    // Re-seeding changes nothing (no new version, no generation or row_version bump).
+    expect(seed().status).toBe(0);
+    expect(
+      await prisma.policySettings.findUniqueOrThrow({ where: { organizationId: demo.id } }),
+    ).toMatchObject({ generation: settings.generation, rowVersion: settings.rowVersion });
+    expect(await prisma.emailPolicy.findUniqueOrThrow({ where: { id: policy.id } })).toMatchObject({
+      rowVersion: policy.rowVersion,
+      activeVersionId: version.id,
+    });
+    expect(await prisma.policyVersion.count({ where: { policyId: policy.id } })).toBe(
+      versions.length,
+    );
+
+    // The state the migration leaves a legacy policy in (pointer cleared, disabled): the seed
+    // re-activates its DSL version and bumps the generation exactly once (P12).
+    await prisma.emailPolicy.update({
+      where: { id: policy.id },
+      data: { activeVersionId: null, status: 'disabled' },
+    });
+    expect(seed().status).toBe(0);
+    expect(await prisma.emailPolicy.findUniqueOrThrow({ where: { id: policy.id } })).toMatchObject({
+      status: 'active',
+      activeVersionId: version.id,
+    });
+    expect(
+      (await prisma.policySettings.findUniqueOrThrow({ where: { organizationId: demo.id } }))
+        .generation,
+    ).toBe(settings.generation + 1n);
+    expect(await prisma.policyVersion.count({ where: { policyId: policy.id } })).toBe(
+      versions.length,
+    );
   });
 
   it('seeds exactly the 49 permissions and the 8 system roles of D8, with their permissions', async () => {

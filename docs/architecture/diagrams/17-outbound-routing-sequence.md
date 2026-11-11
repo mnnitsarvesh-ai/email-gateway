@@ -7,8 +7,8 @@ sequenceDiagram
   autonumber
   participant ING as smtp-adapter LMTP 10051 (outbound listener)
   participant DB as MySQL writer
-  participant PE as policy-engine (PLANNED 5.2)
-  participant DW as delivery-worker (pass-through, planner, reinjector)
+  participant PE as policy-engine (5.2)
+  participant DW as delivery-worker (planner, reinjector)
   participant RL as Redis (dw:rl:* counters)
   participant PR as postfix-outbound 10027 reinject-outbound
   participant SA as smtp-adapter policy reinject-outbound
@@ -18,13 +18,7 @@ sequenceDiagram
   participant LOG as maillog_file → status tailer
 
   ING->>DB: per recipient classifyRecipient: own active domain → internal,<br/>anything else (incl. another tenant's domain) → outbound#59;<br/>email_recipients.direction, email_messages.direction (internal only if all internal)
-  alt today (development and CI only)
-    DW->>DB: dev pass-through: mail.delivery.approved.v1 source=dev_passthrough
-  else production
-    rect rgb(255, 248, 225)
-      PE->>DB: mail.delivery.approved.v1 source=policy (PLANNED 5.2)
-    end
-  end
+  PE->>DB: after the scan (step 5.2): evaluation, mail.delivery.approved.v1 source=policy (allow only)
   DW->>DB: plan: one group per recipient domain (destination_key mx:<domain>),<br/>suppressed recipients → suppressed, direction changed → failed
   DW->>RL: one Lua script: tenant, tenant×domain, destination-domain minute windows#59;<br/>increment only if the whole group fits
   alt over a limit

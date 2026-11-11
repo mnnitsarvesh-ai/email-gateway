@@ -21,7 +21,7 @@ evidence object, read through the audited api route (D16).
   [DlpBlockRateSpike](#dlpblockratespike)
 - [False positives and exceptions](#false-positives-and-exceptions) · [Custom pattern rejection codes](#custom-pattern-rejection-codes)
 - [Evidence access, audit, purge and key rotation](#evidence-access-audit-purge-and-key-rotation) ·
-  [Aadhaar enablement](#aadhaar-enablement) · [Dev pass-through holds](#dev-pass-through-holds) ·
+  [Aadhaar enablement](#aadhaar-enablement) · [Policy holds](#policy-holds) ·
   [Rollout order](#rollout-order) · [Checking the alert rules](#checking-the-alert-rules)
 
 ## The engine
@@ -221,12 +221,16 @@ at all (`coverage_detail.aadhaar = "disabled"`). Values are stored masked (last 
 tenant's basis is lawful is the tenant's decision, not a platform function. An expired review turns
 detection off silently at the next cache refresh; ask the tenant to renew.
 
-## Dev pass-through holds
+## Policy holds
 
-In local/ci the delivery-worker's pass-through approves `allow` / `alert` and holds
-`require_approval` / `quarantine` / `block` and a missing dlp row (`delivery_approvals_skipped_total{reason="dlp_action"}`,
-`delivery_dlp_holds_total{action}`); held messages stay `scanned` until policy (5.2) or their
-deadline. This is expected behaviour, not a stuck pipeline.
+Since step 5.2 the policy-engine binds the DLP action (ADR-0037 through the strictness floor,
+[policy-engine runbook](policy-engine.md)): `allow` → delivered; `alert` → delivered with the
+mandatory `dlp-alert` TAG (outbound: recorded, header not added by default); `require_approval` → `held_for_review`;
+`quarantine` → `quarantined`; `block` → `rejected` (outbound: a sender non-delivery notice is
+requested unless the tenant turned `notices.senderNonDelivery` off; default on); a missing dlp
+row is held. Counted in
+`policy_floor_raises_total{reason="dlp_<action>"}`. The pass-through metrics
+`delivery_dlp_holds_total` and `delivery_approvals_skipped_total` no longer exist.
 
 ## Rollout order
 

@@ -20,7 +20,7 @@ groups:
           description: >-
             The email-worker wrote fail-safe risk error rows in the last 15 minutes (reason
             {{ $labels.reason }}). Those rounds are recommended for quarantine (high, verdict
-            unknown) whatever their engines found; the development pass-through holds them.
+            unknown) whatever their engines found; the policy floor holds them (step 5.2).
             Find the rows (message_risk_scores.status = error) and the email-worker error logs.
           runbook_url: docs/runbooks/risk-scoring.md#riskscoringerrors
       - alert: RiskScoringErrors
@@ -67,7 +67,7 @@ groups:
           summary: Completed scan rounds without a risk score
           description: >-
             For 30 minutes more scan rounds completed than revision-0 risk score rows were
-            written. Policy (5.2) and the development pass-through treat a missing row as a hold.
+            written. Policy (5.2) holds such a round by its floor (risk_missing) as a hold.
             Check that every scan replica runs a release with step 5.1 (mixed versions during a
             rollout), the email-worker logs, and scan_risk_duplicates_total.
           runbook_url: docs/runbooks/risk-scoring.md#riskscoremissing

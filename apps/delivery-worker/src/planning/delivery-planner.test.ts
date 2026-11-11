@@ -9,7 +9,7 @@ import {
 import type * as Lifecycle from '@email-gateway/message-lifecycle';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DeliveryMetrics } from '../metrics/delivery-metrics';
-import { DeliveryPlanner } from './delivery-planner';
+import { approvalObjectLabel, DeliveryPlanner } from './delivery-planner';
 
 vi.mock('@email-gateway/message-lifecycle', async (original) => ({
   ...(await original<typeof Lifecycle>()),
@@ -279,5 +279,17 @@ describe('DeliveryPlanner lifecycle rule (step 3.3 L8.4)', () => {
       reason: 'lifecycle_state',
     });
     expect(t.emailDelivery.findMany).not.toHaveBeenCalled();
+  });
+});
+
+describe('approvalObjectLabel (delivery_approvals_total{object}, step 4.3 U20, step 5.2 P14)', () => {
+  it('labels rewritten copies, policy copies and originals by the organization prefix', () => {
+    expect(approvalObjectLabel('org/7/rewrite/2026/11/03/100/r0-ab.eml', 7n)).toBe('rewritten');
+    expect(approvalObjectLabel('org/7/policy/2026/11/03/100/r0-cd.eml', 7n)).toBe('policy_copy');
+    expect(approvalObjectLabel('org/7/eml/2026/11/03/x.eml', 7n)).toBe('original');
+    // Another organization's prefix (the planner refuses such keys) or a look-alike segment.
+    expect(approvalObjectLabel('org/8/policy/2026/11/03/100/r0-cd.eml', 7n)).toBe('original');
+    expect(approvalObjectLabel('org/70/policy/x.eml', 7n)).toBe('original');
+    expect(approvalObjectLabel('org/7/policyx/x.eml', 7n)).toBe('original');
   });
 });

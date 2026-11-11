@@ -162,7 +162,7 @@ describe.skipIf(gate.skip)(
       expect(object).not.toContain(sasl.username);
       // Ingested over LMTP: the submission's own queue file is gone. Step 2.3
       // (docs/plan/steps/05-routing.md R5, R7, R8): with the delivery-worker running, the
-      // development pass-through approves the message and the worker reinjects it through 10027,
+      // policy-engine (step 5.2; before it the development pass-through) approves the message and the worker reinjects it through 10027,
       // so a NEW queue file (another queue id) may be in postfix-outbound while it is delivered;
       // any such file must belong to a reinjection the worker planned for this message.
       const queued = involving(await listQueue('postfix-outbound'), [out.name]);

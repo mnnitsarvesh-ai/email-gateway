@@ -36,7 +36,7 @@ import { waitFor } from './support/compose';
 /**
  * Inbound routing through BOTH Postfix instances (docs/plan/steps/05-routing.md §9 items 1 and
  * 3): smtp-tools → gateway MX (postfix:25) → LMTP 10050 → smtp-adapter ingestion → delivery-worker
- * (dev pass-through approval, planning, reinjection on 10026 with token, XFORWARD and trace) →
+ * (policy-engine approval since step 5.2, planning, reinjection on 10026 with token, XFORWARD and trace) →
  * postfix-outbound → transport socketmap → the tenant's destination servers (sinks) → status from
  * postfix-outbound's delivery log.
  */
@@ -119,9 +119,9 @@ describe.skipIf(gate.skip)(
       expect(delivered[0]).toMatchObject({ source: 'postfix_log', applied: true, smtpCode: 250 });
       expect(audit.find((e) => e.toStatus === 'queued')).toBeDefined();
       // Step 3.3 lifecycle end to end (L5.2, E20, E23), with the step 4.1 scan (E3, E6) and
-      // the pass-through after it (E27): history received → persisted (SMTP commit) → scanning
-      // → scanned (email-worker scan role) → approved (dev pass-through) → delivery_pending
-      // (planner) → delivered.
+      // the step 5.2 policy decision after it (E8, E10): history received → persisted (SMTP
+      // commit) → scanning → scanned (email-worker scan role) → policy_evaluated → approved
+      // (policy-engine) → delivery_pending (planner) → delivered.
       await waitForLifecycle(fx.prisma, message, 'delivered', 'delivery_complete');
       expect(await pathOf(fx.prisma, message)).toEqual(
         DELIVERED_PATH('delivered', 'delivery_complete'),
@@ -133,7 +133,8 @@ describe.skipIf(gate.skip)(
       expect(history.slice(2).map((h) => [h.actorRole, h.actorService])).toEqual([
         ['scanner', 'email-worker'],
         ['scanner', 'email-worker'],
-        ['dev_passthrough', 'delivery-worker'],
+        ['policy', 'policy-engine'],
+        ['policy', 'policy-engine'],
         ['delivery', 'delivery-worker'],
         ['delivery', 'delivery-worker'],
       ]);

@@ -7,12 +7,13 @@ import { smtpStackGate, type SmtpStackGate } from './smtp-stack';
 /**
  * Gate of the step 2.3 routing stack suites (tests/integration/routing-*.test.ts,
  * docs/plan/steps/05-routing.md §9): everything the step 2.2 suites need, plus the step 2.3
- * sinks and forwarder, a ready delivery-worker with the DEVELOPMENT-ONLY pass-through
- * (`DELIVERY_DEV_PASSTHROUGH_ENABLED=true`: mail is delivered without policy, which does not
- * exist before step 5.x) and the delivery log on the host. Since step 4.1 the pass-through
- * approves only scanned mail (E27, docs/plan/steps/09-rspamd.md S15), so the gate also requires
- * the email-worker scan role and the scanned pass-through (`scanStageProblems`). Missing pieces
- * FAIL the suites with an explanation; only `SMTP_STACK_TESTS=skip` skips them.
+ * sinks and forwarder, a ready delivery-worker and the delivery log on the host. Since step 4.1
+ * mail is approved only after the scan, and since step 5.2 only by the policy-engine (the
+ * development pass-through `DELIVERY_DEV_PASSTHROUGH_ENABLED` was removed: the delivery-worker
+ * refuses `true`, docs/plan/steps/16-policy-engine.md P14), so the gate also requires the
+ * email-worker scan role and a ready policy-engine consuming `email.policy.evaluate`
+ * (`scanStageProblems`). Missing pieces FAIL the suites with an explanation; only
+ * `SMTP_STACK_TESTS=skip` skips them.
  */
 const REQUIRED_SERVICES = [
   'sink-m365',
@@ -26,7 +27,8 @@ const HOW_TO_START = [
   'Start them with:',
   '  docker compose --profile smtp-test up -d --wait',
   '  pnpm --filter @email-gateway/smtp-adapter dev     (or the apps profile)',
-  '  pnpm --filter @email-gateway/delivery-worker dev  (DELIVERY_DEV_PASSTHROUGH_ENABLED=true in .env)',
+  '  pnpm --filter @email-gateway/delivery-worker dev',
+  '  docker compose --profile apps up -d --wait policy-engine   (step 5.2: the delivery gate)',
 ].join('\n');
 
 let cached: Promise<SmtpStackGate> | undefined;
@@ -44,8 +46,11 @@ async function detect(): Promise<SmtpStackGate> {
   const missing = REQUIRED_SERVICES.filter((s) => !services.has(s));
   if (missing.length > 0) problems.push(`Compose services not running: ${missing.join(', ')}`);
   if (!(await workerHealth('ready'))) problems.push('delivery-worker is not ready (port 3040)');
-  if (process.env.DELIVERY_DEV_PASSTHROUGH_ENABLED !== 'true') {
-    problems.push('DELIVERY_DEV_PASSTHROUGH_ENABLED=true is required (local/CI only)');
+  if (process.env.DELIVERY_DEV_PASSTHROUGH_ENABLED === 'true') {
+    problems.push(
+      'DELIVERY_DEV_PASSTHROUGH_ENABLED=true is set: removed in step 5.2 (ADR-0044), the ' +
+        'delivery-worker refuses it; remove the key (the policy-engine approves delivery)',
+    );
   }
   if ((await maillogOffset()) === 0) problems.push(`delivery log ${maillogPath()} is missing`);
   const scan = await scanStageProblems();

@@ -42,13 +42,13 @@ const mutableQueue = (topology: { queues: QueueDefinition[] }, name: QueueName) 
   return queue;
 };
 
-describe('TOPOLOGY v8', () => {
+describe('TOPOLOGY v9', () => {
   it('satisfies every invariant of design §3', () => {
     expect(validateTopology(TOPOLOGY)).toEqual([]);
   });
 
-  it('declares exactly the six exchanges and nineteen queues (v8)', () => {
-    expect(TOPOLOGY_VERSION).toBe(8);
+  it('declares exactly the six exchanges and twenty queues (v9)', () => {
+    expect(TOPOLOGY_VERSION).toBe(9);
     expect(DEFAULT_VHOST).toBe('email-gateway');
     expect([...TOPOLOGY.exchanges]).toEqual([
       'email.ingestion',
@@ -59,9 +59,9 @@ describe('TOPOLOGY v8', () => {
       'email.events',
     ]);
     expect(EXCHANGE_NAMES).toHaveLength(6);
-    expect(QUEUE_NAMES).toHaveLength(19);
+    expect(QUEUE_NAMES).toHaveLength(20);
     expect(TOPOLOGY.queues.map((q) => q.name)).toEqual([...QUEUE_NAMES]);
-    expect(new Set(QUEUE_NAMES).size).toBe(19);
+    expect(new Set(QUEUE_NAMES).size).toBe(20);
     expect(QUEUE_NAMES).toEqual(
       expect.arrayContaining([
         'scan.url.inspect',
@@ -69,11 +69,13 @@ describe('TOPOLOGY v8', () => {
         'scan.bec',
         'scan.sandbox.submissions',
         'scan.sandbox.results',
+        // v9 (step 5.2 P15).
+        'email.notifications',
       ]),
     );
   });
 
-  it('assigns roles: twelve work queues, one delay, one dead-letter, five dormant (v8)', () => {
+  it('assigns roles: fourteen work queues, one delay, one dead-letter, four dormant (v9)', () => {
     const byRole = (role: string) =>
       TOPOLOGY.queues.filter((q) => q.role === role).map((q) => q.name);
     expect(byRole('work')).toEqual([
@@ -88,13 +90,14 @@ describe('TOPOLOGY v8', () => {
       'scan.sandbox',
       'scan.sandbox.submissions',
       'scan.sandbox.results',
+      'email.policy.evaluate',
       'email.delivery.pending',
+      'email.notifications',
     ]);
     expect(byRole('delay')).toEqual(['email.delivery.retry']);
     expect(byRole('dead-letter')).toEqual(['email.dead-letter']);
     expect(byRole('dormant')).toEqual([
       'scan.auth',
-      'email.policy.evaluate',
       'email.quarantine',
       'email.archive',
       'email.analytics',
@@ -103,6 +106,10 @@ describe('TOPOLOGY v8', () => {
     // v7 (step 4.5 D2): scan.dlp is no longer dormant; v8 (step 4.6 X11): nor scan.sandbox.
     expect(byRole('dormant')).not.toContain('scan.dlp');
     expect(byRole('dormant')).not.toContain('scan.sandbox');
+    // v9 (step 5.2 P13): the policy engine is the delivery gate; never lossy.
+    expect(byRole('dormant')).not.toContain('email.policy.evaluate');
+    expect(queueDefinition('email.policy.evaluate').lossy).toBeUndefined();
+    expect(queueDefinition('email.notifications').lossy).toBeUndefined();
   });
 
   it('has the bindings and home exchanges of design §3', () => {
@@ -180,6 +187,7 @@ describe('TOPOLOGY v8', () => {
         'email.security org.*.mail.sandbox.task_completed.v1',
         'email.security retry.scan.sandbox.results.#',
       ],
+      // v9 (step 5.2 P15): a work queue; bindings unchanged from the dormant v1–v8 queue.
       'email.policy.evaluate': [
         'email.policy',
         'email.security org.*.mail.message.scanned.v1',
@@ -197,10 +205,17 @@ describe('TOPOLOGY v8', () => {
         'email.policy org.*.mail.policy.decided.v1',
         'email.policy retry.email.quarantine.#',
       ],
+      // v9 (step 5.2 P15): the archive request replaces mail.policy.decided.v1 (still dormant).
       'email.archive': [
         'email.archive',
-        'email.policy org.*.mail.policy.decided.v1',
+        'email.archive org.*.mail.message.archive_requested.v1',
         'email.archive retry.email.archive.#',
+      ],
+      // v9 (step 5.2 P15, P25): policy notifications for the notification-worker.
+      'email.notifications': [
+        'email.policy',
+        'email.policy org.*.mail.policy.notification_requested.v1',
+        'email.policy retry.email.notifications.#',
       ],
       'email.analytics': [
         'email.events',
@@ -335,8 +350,32 @@ describe('TOPOLOGY v8', () => {
         .filter((q) => q.consumer.kind === 'planned')
         .map((q) => [q.name, q.consumer.kind === 'planned' ? q.consumer.plannedStep : '']),
     );
+    // v9 (step 5.2 P13, P25): the policy-engine and the notification-worker.
+    expect(queueDefinition('email.policy.evaluate').consumer).toEqual({
+      kind: 'ledger',
+      ledgerName: 'policy-engine.evaluate',
+      service: 'policy-engine',
+    });
+    expect(queueDefinition('email.policy.evaluate').retry).toEqual({
+      strategy: 'hold',
+      maxAttempts: 10,
+      baseDelayMs: 2_000,
+      maxDelayMs: 60_000,
+      maxRetryAgeMs: 24 * 3_600_000,
+    });
+    expect(queueDefinition('email.notifications').consumer).toEqual({
+      kind: 'ledger',
+      ledgerName: 'notification-worker.policy',
+      service: 'notification-worker',
+    });
+    expect(queueDefinition('email.notifications').retry).toEqual({
+      strategy: 'hold',
+      maxAttempts: 8,
+      baseDelayMs: 5_000,
+      maxDelayMs: 60_000,
+      maxRetryAgeMs: 24 * 3_600_000,
+    });
     expect(planned).toEqual({
-      'email.policy.evaluate': '5.1/5.2',
       'email.quarantine': '5.3',
       'email.archive': '8.1',
       'email.analytics': 'not scheduled (ADR-0009)',
@@ -375,9 +414,20 @@ describe('policies (Q4)', () => {
       'scan.dlp',
       'scan.sandbox.submissions',
       'scan.sandbox.results',
+      'email.policy.evaluate',
+      'email.notifications',
     ] as const) {
       expect(queueDefinition(name).policy, name).toEqual(policyFor('work', name));
     }
+    // v9 (step 5.2): the delivery gate rejects publishes when full, it never drops mail.
+    expect(queueDefinition('email.policy.evaluate').policy).toEqual({
+      'delivery-limit': 20,
+      'dead-letter-exchange': 'email.events',
+      'dead-letter-routing-key': 'dead-letter.email.policy.evaluate',
+      'dead-letter-strategy': 'at-least-once',
+      overflow: 'reject-publish',
+      'max-length': 1_000_000,
+    });
     expect(queueDefinition('email.received').policy).toEqual({
       'delivery-limit': 20,
       'dead-letter-exchange': 'email.events',
@@ -697,9 +747,17 @@ describe('routing (topic semantics)', () => {
       'email.policy.evaluate',
     ]);
     expect(route('mail.message.scanned.v1')).toEqual(['email.analytics', 'email.policy.evaluate']);
-    expect(route('mail.policy.decided.v1')).toEqual(
-      ['email.analytics', 'email.archive', 'email.quarantine'].sort(),
-    );
+    // Topology v9 (step 5.2 P15): the decision reaches only the dormant quarantine queue; the
+    // archive and notification requests their own queues.
+    expect(route('mail.policy.decided.v1')).toEqual(['email.analytics', 'email.quarantine']);
+    expect(route('mail.message.archive_requested.v1')).toEqual([
+      'email.analytics',
+      'email.archive',
+    ]);
+    expect(route('mail.policy.notification_requested.v1')).toEqual([
+      'email.analytics',
+      'email.notifications',
+    ]);
     expect(route('mail.delivery.approved.v1')).toEqual([
       'email.analytics',
       'email.delivery.pending',
@@ -756,6 +814,9 @@ describe('routing (topic semantics)', () => {
     expect(retryBindingKey('scan.sandbox')).toBe('retry.scan.sandbox.org.#');
     expect(retryBindingKey('scan.sandbox.submissions')).toBe('retry.scan.sandbox.submissions.#');
     expect(retryBindingKey('scan.sandbox.results')).toBe('retry.scan.sandbox.results.#');
+    // v9 (step 5.2): no new dot-prefix: plain retry bindings.
+    expect(retryBindingKey('email.policy.evaluate')).toBe('retry.email.policy.evaluate.#');
+    expect(retryBindingKey('email.notifications')).toBe('retry.email.notifications.#');
     // Every retry key of every work/dormant queue and every event type reaches exactly that queue.
     const types = [...Object.keys(EVENT_REGISTRY), ...Object.keys(RESERVED_EVENT_TYPES)];
     for (const queue of TOPOLOGY.queues.filter((q) => q.role === 'work' || q.role === 'dormant')) {
@@ -1048,7 +1109,7 @@ describe('toRabbitDefinitions (Q5)', () => {
   const definitions = toRabbitDefinitions(TOPOLOGY, { vhost: DEFAULT_VHOST });
 
   it('declares topic exchanges and quorum queues with no other argument', () => {
-    expect(definitions.topology_version).toBe(8);
+    expect(definitions.topology_version).toBe(9);
     expect(definitions.exchanges).toHaveLength(6);
     for (const exchange of definitions.exchanges) {
       expect(exchange).toEqual({
@@ -1061,7 +1122,7 @@ describe('toRabbitDefinitions (Q5)', () => {
         arguments: {},
       });
     }
-    expect(definitions.queues).toHaveLength(19);
+    expect(definitions.queues).toHaveLength(20);
     for (const queue of definitions.queues) {
       expect(queue).toEqual({
         name: queue.name,
@@ -1083,8 +1144,11 @@ describe('toRabbitDefinitions (Q5)', () => {
     // v7 (step 4.5 D2): scan.dlp turned from dormant into a work queue with the same three
     // bindings, so the count was the v6 count (36 queue + 5 exchange bindings = 41). v8 (step 4.6
     // X11): scan.sandbox keeps two bindings (task_requested.v1 replaces sandbox_requested.v1, the
-    // retry key is qualified), the two new queues add two each: 40 queue + 5 exchange = 45.
-    expect(definitions.bindings).toHaveLength(45);
+    // retry key is qualified), the two new queues add two each: 40 queue + 5 exchange = 45. v9
+    // (step 5.2 P15): email.policy.evaluate keeps its three bindings, email.archive keeps two
+    // (archive_requested.v1 replaces policy.decided.v1), email.notifications adds two: 42 queue
+    // + 5 exchange = 47.
+    expect(definitions.bindings).toHaveLength(47);
     const keys = definitions.bindings.map(
       (b) => `${b.source}|${b.destination_type}|${b.destination}|${b.routing_key}`,
     );
@@ -1112,7 +1176,7 @@ describe('toRabbitDefinitions (Q5)', () => {
   });
 
   it('generates one anchored policy per queue', () => {
-    expect(definitions.policies).toHaveLength(19);
+    expect(definitions.policies).toHaveLength(20);
     for (const policy of definitions.policies) {
       const queue = policy.name.slice('eg.'.length);
       expect(policy).toEqual({

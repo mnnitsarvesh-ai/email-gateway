@@ -70,7 +70,11 @@ export class MessageScansController {
       'by signal and group, engine evidence, trust decision, explanation and every version ' +
       '(profile public ids only); `[]` while running. Step 5.1 recommends and does not ' +
       'enforce (policy, step 5.2, decides); the default weights and thresholds are not ' +
-      'validated detection accuracy. From the read replica: a round ' +
+      'validated detection accuracy. Each round carries its stored policy evaluation in ' +
+      '`policy` (step 5.2; null while not evaluated): disposition, decisive rule, actions ' +
+      'with their status (`enforced`, `requested`, `recorded`, `not_applicable`), floor, ' +
+      'recommendation, explanation and hashes (ids and codes only; the full list per message ' +
+      'is `GET /messages/{messageId}/policy-evaluations`). From the read replica: a round ' +
       'that just completed may still show as running. Symbol options can contain addresses or URLs of the ' +
       'message; filenames are attacker-controlled text.',
   })

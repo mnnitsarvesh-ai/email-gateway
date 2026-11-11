@@ -40,12 +40,12 @@ function approve(m: MessageFixture, key: string): TransitionRequest {
   return {
     message: m,
     to: 'approved',
-    reason: 'dev_passthrough',
-    actor: { role: 'dev_passthrough', service: 'delivery-worker', type: 'system' },
+    reason: 'policy_deliver',
+    actor: { role: 'policy', service: 'policy-engine', type: 'system' },
     transitionKey: key,
     expectedRound: 0,
-    // E27 (step 4.1): the dev pass-through approves a scanned message (E4 is retired).
-    expectedFrom: ['scanned'],
+    // E10 (step 5.2): the policy engine approves a policy-evaluated message (E4 and E27 retired).
+    expectedFrom: ['policy_evaluated'],
   };
 }
 
@@ -68,8 +68,8 @@ async function assertContiguous(m: MessageFixture): Promise<number> {
 }
 
 describe('concurrent transitions (§9 item 8)', () => {
-  it('(a) 64 parallel scanned → approved with distinct keys: 1 applied, 63 duplicate', async () => {
-    const m = await fx.message(org, { state: 'scanned' });
+  it('(a) 64 parallel policy_evaluated → approved with distinct keys: 1 applied, 63 duplicate', async () => {
+    const m = await fx.message(org, { state: 'policy_evaluated' });
     const outcomes = await Promise.all(
       Array.from({ length: 64 }, (_, i) =>
         transitionMessageWithRetry(prisma, approve(m, `evt:${randomUUID()}:approved:${i}`), TX),
@@ -84,7 +84,7 @@ describe('concurrent transitions (§9 item 8)', () => {
   });
 
   it('(b) 64 parallel requests with the same key: 1 applied', async () => {
-    const m = await fx.message(org, { state: 'scanned' });
+    const m = await fx.message(org, { state: 'policy_evaluated' });
     const key = `evt:${randomUUID()}:approved`;
     const outcomes = await Promise.all(
       Array.from({ length: 64 }, () => transitionMessageWithRetry(prisma, approve(m, key), TX)),
@@ -184,7 +184,8 @@ describe('concurrent transitions (§9 item 8)', () => {
     const steps: { to: MessageState; reason: TransitionRequest['reason']; role: string }[] = [
       { to: 'scanning', reason: 'scan_started', role: 'scanner' },
       { to: 'scanned', reason: 'scan_complete', role: 'scanner' },
-      { to: 'approved', reason: 'dev_passthrough', role: 'dev_passthrough' },
+      { to: 'policy_evaluated', reason: 'policy_decided', role: 'policy' },
+      { to: 'approved', reason: 'policy_deliver', role: 'policy' },
       { to: 'delivery_pending', reason: 'delivery_planned', role: 'delivery' },
       { to: 'delivery_retry', reason: 'delivery_deferred', role: 'delivery' },
       { to: 'delivered', reason: 'delivery_partial', role: 'delivery' },
@@ -219,7 +220,7 @@ describe('concurrent transitions (§9 item 8)', () => {
       }
     };
     // Repeat until every message reached the end (an early step may be refused before its cause).
-    for (let pass = 0; pass < 6; pass += 1) {
+    for (let pass = 0; pass < 8; pass += 1) {
       await Promise.all(Array.from({ length: 8 }, (_, w) => writer(w)));
       const states = await prisma.emailMessage.findMany({
         where: { organizationId: org, id: { in: messages.map((m) => m.id) } },
@@ -227,14 +228,14 @@ describe('concurrent transitions (§9 item 8)', () => {
       });
       if (states.every((s) => s.status === 'delivered')) break;
     }
-    // `delivered` may follow `delivery_pending` directly (E23), so a message has 5 or 6 applied
-    // transitions after creation (E3, E6, E27, E20, [E21], E23); each has its history, event and
-    // outbox row.
+    // `delivered` may follow `delivery_pending` directly (E23), so a message has 6 or 7 applied
+    // transitions after creation (E3, E6, E8, E10, E20, [E21], E23); each has its history, event
+    // and outbox row.
     let applied = 0;
     for (const m of messages) {
       expect((await fx.row(m)).status).toBe('delivered');
       const version = await assertContiguous(m);
-      expect([6, 7]).toContain(version);
+      expect([7, 8]).toContain(version);
       applied += version - 1;
     }
     const outbox = await prisma.messageOutbox.count({

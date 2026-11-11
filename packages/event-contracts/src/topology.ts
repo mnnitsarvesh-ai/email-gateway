@@ -7,10 +7,10 @@ import {
 } from './registry';
 
 /**
- * RabbitMQ topology v8 as data (step 3.2 §3, ADR-0024; v2: step 3.3 L7, ADR-0025; v3: step 4.1
+ * RabbitMQ topology v9 as data (step 3.2 §3, ADR-0024; v2: step 3.3 L7, ADR-0025; v3: step 4.1
  * S2, ADR-0026; v4: step 4.2 A2, ADR-0028; v5: step 4.3 U2, ADR-0029; v6: step 4.4 B3,
- * ADR-0033; v7: step 4.5 D2, ADR-0036; v8: step 4.6 X11, ADR-0040): exactly six topic exchanges
- * and nineteen quorum queues in the vhost `email-gateway`. v2 added the bindings of `mail.message.rescan_requested.v1`
+ * ADR-0033; v7: step 4.5 D2, ADR-0036; v8: step 4.6 X11, ADR-0040; v9: step 5.2 P15, ADR-0044):
+ * exactly six topic exchanges and twenty quorum queues in the vhost `email-gateway`. v2 added the bindings of `mail.message.rescan_requested.v1`
  * (`email.security`) to the five scan queues, and `mail.message.state_changed.v1`
  * (`email.events`) reaches only the `email.analytics` firehose. v3 makes `scan.spam` a work queue
  * (the Rspamd engine of the email-worker scan role, ledger consumer `email-worker.scan.rspamd`)
@@ -60,6 +60,20 @@ import {
  * `mail.attachment.sandbox_completed.v1` is registered but bound by no queue (analytics firehose
  * only). The exchanges and the other queues are unchanged.
  *
+ * v9 (step 5.2 P13, P15, ADR-0044) builds the policy engine. `email.policy.evaluate` becomes the
+ * work queue of the `policy-engine` (ledger `policy-engine.evaluate`; event bindings
+ * `mail.message.scanned.v1` on `email.security` and `mail.message.parse_failed.v1` on
+ * `email.ingestion` and its retry binding unchanged; policy `work`: reject-publish at 1 000 000,
+ * so evaluations are never dropped while the engine is down). New work queue
+ * `email.notifications` (home exchange `email.policy`, ledger `notification-worker.policy`) binds
+ * the new `mail.policy.notification_requested.v1` (policy ALERT and sender non-delivery notices).
+ * The dormant `email.archive` (step 8.1) binds the new `mail.message.archive_requested.v1` on
+ * `email.archive` instead of `mail.policy.decided.v1` (its v1–v8 binding is removed by
+ * `init.mjs`'s prune step); `mail.policy.decided.v1` (redefined in place) stays bound to the
+ * dormant `email.quarantine` (5.3) only. No new queue name is a dot-prefix of another, so every
+ * new retry binding is the plain `retry.<queue>.#`. The exchanges and the other queues are
+ * unchanged.
+ *
  * `infrastructure/rabbitmq/definitions.json` is
  * generated from `TOPOLOGY` (`pnpm --filter @email-gateway/event-contracts topology:export`) and
  * imported by `infrastructure/rabbitmq/init.mjs`; services never declare, they verify passively.
@@ -68,7 +82,7 @@ import {
  * target, overflow, length limits) is a per-queue policy `eg.<queue>` (Q4), so it changes without
  * re-declaring a queue.
  */
-export const TOPOLOGY_VERSION = 8;
+export const TOPOLOGY_VERSION = 9;
 export const DEFAULT_VHOST = 'email-gateway';
 
 /** The six exchanges of the topology (ADR-0024): all topic, durable, not internal. */
@@ -100,6 +114,7 @@ export const QUEUE_NAMES = [
   'email.delivery.retry',
   'email.quarantine',
   'email.archive',
+  'email.notifications',
   'email.analytics',
   'email.dead-letter',
 ] as const;
@@ -634,17 +649,33 @@ export const TOPOLOGY: Topology = {
       policy: policyFor('work', 'scan.sandbox.results'),
       description: 'Sandbox task results of the sandbox-controller (step 4.6)',
     },
-    dormant(
-      'email.policy.evaluate',
-      'email.policy',
-      [
+    {
+      // v9 (step 5.2 P13, ADR-0044): the policy-engine; bindings unchanged from the dormant
+      // v1–v8 queue. A work queue (reject-publish, never lossy): mail is held until evaluated.
+      name: 'email.policy.evaluate',
+      role: 'work',
+      homeExchange: 'email.policy',
+      bindings: [
         eventBinding('email.security', 'mail.message.scanned.v1'),
         eventBinding('email.ingestion', 'mail.message.parse_failed.v1'),
+        retryBinding('email.policy', 'email.policy.evaluate'),
       ],
-      '5.1/5.2',
-      'policy-engine',
-      'Policy evaluation of scanned messages; parse failures go to the policy fail-safe',
-    ),
+      consumer: {
+        kind: 'ledger',
+        ledgerName: 'policy-engine.evaluate',
+        service: 'policy-engine',
+      },
+      retry: {
+        strategy: 'hold',
+        maxAttempts: 10,
+        baseDelayMs: 2 * SECOND,
+        maxDelayMs: MINUTE,
+        maxRetryAgeMs: 24 * HOUR,
+      },
+      policy: policyFor('work', 'email.policy.evaluate'),
+      description:
+        'Policy evaluation of scanned, scan-failed and parse-failed messages (step 5.2): the delivery gate',
+    },
     {
       name: 'email.delivery.pending',
       role: 'work',
@@ -689,14 +720,41 @@ export const TOPOLOGY: Topology = {
       'quarantine',
       'Quarantine of messages whose policy action is quarantine',
     ),
+    // v9 (step 5.2 P15): binds the archive request of a policy ARCHIVE action instead of
+    // mail.policy.decided.v1 (still dormant: the consumer is step 8.1).
     dormant(
       'email.archive',
       'email.archive',
-      [eventBinding('email.policy', 'mail.policy.decided.v1')],
+      [eventBinding('email.archive', 'mail.message.archive_requested.v1')],
       '8.1',
       'archive-worker',
-      'Archiving of messages whose policy decision sets archive',
+      'Archive requests of policy ARCHIVE actions (consumer: step 8.1)',
     ),
+    {
+      // v9 (step 5.2 P15, P25): policy ALERT notifications and sender non-delivery notices, sent
+      // by the notification-worker (at least once).
+      name: 'email.notifications',
+      role: 'work',
+      homeExchange: 'email.policy',
+      bindings: [
+        eventBinding('email.policy', 'mail.policy.notification_requested.v1'),
+        retryBinding('email.policy', 'email.notifications'),
+      ],
+      consumer: {
+        kind: 'ledger',
+        ledgerName: 'notification-worker.policy',
+        service: 'notification-worker',
+      },
+      retry: {
+        strategy: 'hold',
+        maxAttempts: 8,
+        baseDelayMs: 5 * SECOND,
+        maxDelayMs: MINUTE,
+        maxRetryAgeMs: 24 * HOUR,
+      },
+      policy: policyFor('work', 'email.notifications'),
+      description: 'Policy alert and sender non-delivery notifications (step 5.2)',
+    },
     dormant(
       'email.analytics',
       'email.events',

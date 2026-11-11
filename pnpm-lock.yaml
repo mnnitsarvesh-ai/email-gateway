@@ -115,6 +115,9 @@ importers:
       '@email-gateway/message-lifecycle':
         specifier: workspace:*
         version: link:../../packages/message-lifecycle
+      '@email-gateway/policy-dsl':
+        specifier: workspace:*
+        version: link:../../packages/policy-dsl
       '@email-gateway/risk-scoring':
         specifier: workspace:*
         version: link:../../packages/risk-scoring
@@ -607,6 +610,9 @@ importers:
       '@nestjs/platform-express':
         specifier: ^11.1.6
         version: 11.2.8(@nestjs/common@11.2.8(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.2.8)
+      nodemailer:
+        specifier: ^10.3.1
+        version: 10.3.1
       reflect-metadata:
         specifier: ^0.2.2
         version: 0.2.2
@@ -629,12 +635,21 @@ importers:
       '@types/express':
         specifier: ^5.0.3
         version: 5.0.6
+      '@types/nodemailer':
+        specifier: ^8.0.2
+        version: 8.0.2
       unplugin-swc:
         specifier: ^1.5.7
         version: 1.6.0(@swc/core@1.16.21)(esbuild@0.28.2)(rollup@4.67.4)(vite@7.3.7(@types/node@22.20.5)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.51.2)(tsx@4.23.15)(yaml@2.9.1))(webpack@5.106.2(@swc/core@1.16.21)(esbuild@0.28.2)(lightningcss@1.32.0))
 
   apps/policy-engine:
     dependencies:
+      '@aws-sdk/client-s3':
+        specifier: ^3.890.0
+        version: 3.1161.0
+      '@aws-sdk/lib-storage':
+        specifier: ^3.1152.0
+        version: 3.1152.0(@aws-sdk/client-s3@3.1161.0)
       '@email-gateway/common':
         specifier: workspace:*
         version: link:../../packages/common
@@ -650,6 +665,15 @@ importers:
       '@email-gateway/logger':
         specifier: workspace:*
         version: link:../../packages/logger
+      '@email-gateway/message-lifecycle':
+        specifier: workspace:*
+        version: link:../../packages/message-lifecycle
+      '@email-gateway/policy-dsl':
+        specifier: workspace:*
+        version: link:../../packages/policy-dsl
+      '@email-gateway/security-contracts':
+        specifier: workspace:*
+        version: link:../../packages/security-contracts
       '@email-gateway/shared-types':
         specifier: workspace:*
         version: link:../../packages/shared-types
@@ -1157,6 +1181,28 @@ importers:
       yazl:
         specifier: 3.3.1
         version: 3.3.1
+
+  packages/policy-dsl:
+    dependencies:
+      '@email-gateway/risk-scoring':
+        specifier: workspace:*
+        version: link:../risk-scoring
+      '@email-gateway/security-contracts':
+        specifier: workspace:*
+        version: link:../security-contracts
+      re2js:
+        specifier: 2.9.0
+        version: 2.9.0
+      tldts:
+        specifier: 7.4.18
+        version: 7.4.18
+      zod:
+        specifier: ^4.1.5
+        version: 4.6.7
+    devDependencies:
+      prettier:
+        specifier: ^3.6.2
+        version: 3.9.10
 
   packages/risk-scoring:
     dependencies:

@@ -15,14 +15,14 @@ import { assertStackReady } from './support/smtp-stack';
 /**
  * Crash between consume and transition (docs/plan/steps/08-message-lifecycle.md L14 row 1, §9
  * "Stack"), as `messaging-consumer-crash` does for the email-worker: messages through
- * postfix:25 while the DELIVERY-WORKER container — the process that applies E27 (dev
- * pass-through after the scan, outbox poller of `scanned.v1`, step 4.1) and E20 (planner, `email.delivery.pending` consumer) and derives
- * the delivery states (recorder) — is SIGKILLed with approvals in flight, then started again.
- * A transition commits in the handler's transaction with its ledger row, so a kill rolls both
- * back; the broker redelivers the unacked approvals and the pass-through cursor re-reads its
- * rows. `MessagingScenario.run` asserts the exactly-once effects of every stage and, for step
+ * postfix:25 while the DELIVERY-WORKER container — the process that applies E20 (planner,
+ * `email.delivery.pending` consumer) and derives the delivery states (recorder); until step 5.2
+ * also E27 (the dev pass-through, removed: the policy-engine approves since then) — is
+ * SIGKILLed with approvals in flight, then started again. A transition commits in the handler's
+ * transaction with its ledger row, so a kill rolls both back; the broker redelivers the unacked
+ * approvals. `MessagingScenario.run` asserts the exactly-once effects of every stage and, for step
  * 3.3, that every message is `delivered`/`delivery_complete` with exactly one history row per
- * transition (versions 0..6 since the step 4.1 scan hop, distinct transition keys) and one `state_changed` row per applied
+ * transition (versions 0..7 since the step 4.1 scan hop and the step 5.2 policy hop, distinct transition keys) and one `state_changed` row per applied
  * transition after creation.
  */
 const N = Number(process.env.LIFECYCLE_CHAOS_MESSAGES ?? 200);

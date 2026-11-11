@@ -69,7 +69,7 @@ spec:
             - { name: RECONCILE_BATCH_SIZE, value: '1000' }
             - {
                 name: RECONCILE_QUEUES,
-                value: 'email.received,email.delivery.pending,scan.spam,scan.attachment,scan.url,scan.bec,scan.dlp,scan.sandbox.submissions',
+                value: 'email.received,email.delivery.pending,scan.spam,scan.attachment,scan.url,scan.bec,scan.dlp,scan.sandbox.submissions,email.policy.evaluate,email.notifications',
               }
             - { name: RECONCILE_START_POSITION, value: oldest }
             # Message lifecycle jobs (docs/plan/steps/08-message-lifecycle.md §5, L13, L14); defaults.

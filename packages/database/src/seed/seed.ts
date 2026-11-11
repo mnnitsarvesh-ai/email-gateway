@@ -510,77 +510,135 @@ export async function seedDemo(
       userIds.push(row.id);
     }
 
-    const policy = await tx.emailPolicy.upsert({
-      where: { organizationId_name: { organizationId, name: DEMO.policy.name } },
-      create: {
-        organizationId,
-        name: DEMO.policy.name,
-        description: DEMO.policy.description,
-        direction: 'inbound',
-        priority: DEMO.policy.priority,
-        status: 'active',
-        createdByUserId: demoAdminId,
-      },
-      update: {},
-      select: { id: true, activeVersionId: true },
-    });
-    const definition = {
-      conditions: [{ group: 0, ...DEMO.policy.condition, negate: false }],
-      actions: [DEMO.policy.action],
-    };
-    const version = await tx.policyVersion.upsert({
-      where: { policyId_version: { policyId: policy.id, version: 1 } },
-      create: {
-        organizationId,
-        policyId: policy.id,
-        version: 1,
-        status: 'published',
-        definition,
-        definitionSha256: createHash('sha256').update(canonicalJson(definition)).digest('hex'),
-        changeNote: 'Seeded sample policy',
-        publishedAt: new Date(),
-        publishedByUserId: demoAdminId,
-      },
-      update: {},
-      select: { id: true },
-    });
-    await tx.policyCondition.upsert({
-      where: { policyVersionId_seq: { policyVersionId: version.id, seq: 1 } },
-      create: {
-        organizationId,
-        policyVersionId: version.id,
-        seq: 1,
-        groupSeq: 0,
-        field: DEMO.policy.condition.field,
-        operator: DEMO.policy.condition.operator,
-        value: DEMO.policy.condition.value,
-      },
-      update: {},
-    });
-    await tx.policyAction.upsert({
-      where: { policyVersionId_seq: { policyVersionId: version.id, seq: 1 } },
-      create: {
-        organizationId,
-        policyVersionId: version.id,
-        seq: 1,
-        action: DEMO.policy.action.action,
-        params: DEMO.policy.action.params,
-      },
-      update: {},
-    });
-    if (policy.activeVersionId === null) {
-      await tx.emailPolicy.update({
-        where: { id: policy.id },
-        data: { activeVersionId: version.id },
-      });
-    }
+    const policyId = await seedDemoPolicy(tx, organizationId, demoAdminId);
 
     return {
       platformOrganizationId: platform.id,
       organizationId,
       domainId,
       userIds,
-      policyId: policy.id,
+      policyId,
     };
   }, TX_OPTIONS);
+}
+
+/**
+ * The demo policy (step 5.2 §3): a published, activated `policy-dsl/1` version of
+ * `DEMO.policy.definition` and the organization's policy_settings row. Version 1 on a fresh
+ * database; on a database migrated from a legacy (step 1.1) seed, whose version 1 the migration
+ * `policy_engine` retired (`superseded`, policy `disabled`), the next version number. Never writes
+ * the retired policy_conditions / policy_actions.
+ *
+ * Idempotent and conservative: the version is found by its definition hash; once the policy has
+ * any DSL version that the seed did not write (a tenant edit), no version is added; the policy is
+ * activated only while it has no active DSL version (an operator's later activation or rollback
+ * is kept) and is not archived. policy_settings is created with generation 1; an activation on an
+ * existing row increments `generation` (step 5.2 P12: every change evaluation sees does).
+ */
+async function seedDemoPolicy(
+  tx: Tx,
+  organizationId: bigint,
+  demoAdminId: bigint | null,
+): Promise<bigint> {
+  const { definition } = DEMO.policy;
+  const definitionSha256 = sha256Hex(canonicalJson(definition));
+  const policy = await tx.emailPolicy.upsert({
+    where: { organizationId_name: { organizationId, name: DEMO.policy.name } },
+    create: {
+      organizationId,
+      name: DEMO.policy.name,
+      description: DEMO.policy.description,
+      direction: definition.direction,
+      priority: definition.priority,
+      status: 'draft',
+      createdByUserId: demoAdminId,
+    },
+    update: {},
+    select: { id: true, activeVersionId: true, deletedAt: true },
+  });
+
+  const versions = await tx.policyVersion.findMany({
+    where: { organizationId, policyId: policy.id },
+    select: { id: true, version: true, status: true, dslVersion: true, definitionSha256: true },
+  });
+  let seeded = versions.find(
+    (v) =>
+      v.dslVersion === DEMO.policy.dslVersion &&
+      v.definitionSha256 === definitionSha256 &&
+      v.status === 'published',
+  );
+  if (!seeded && !versions.some((v) => v.dslVersion !== null)) {
+    const nextVersion = versions.reduce((max, v) => Math.max(max, v.version), 0) + 1;
+    const now = new Date();
+    seeded = await tx.policyVersion.create({
+      data: {
+        organizationId,
+        policyId: policy.id,
+        version: nextVersion,
+        status: 'published',
+        definition: toJson(definition),
+        definitionSha256,
+        dslVersion: DEMO.policy.dslVersion,
+        references: toJson(DEMO.policy.references),
+        hasOverrideRules: DEMO.policy.hasOverrideRules,
+        ruleCount: DEMO.policy.ruleCount,
+        changeNote: 'Seeded sample policy (policy-dsl/1)',
+        createdByUserId: demoAdminId,
+        publishedAt: now,
+        publishedByUserId: demoAdminId,
+      },
+      select: { id: true, version: true, status: true, dslVersion: true, definitionSha256: true },
+    });
+  }
+
+  const active = versions.find((v) => v.id === policy.activeVersionId);
+  const activate =
+    seeded !== undefined &&
+    policy.deletedAt === null &&
+    (active === undefined || active.dslVersion === null);
+  if (activate && seeded) {
+    await tx.emailPolicy.update({
+      where: { id: policy.id },
+      data: {
+        activeVersionId: seeded.id,
+        status: 'active',
+        direction: definition.direction,
+        priority: definition.priority,
+        rowVersion: { increment: 1 },
+        updatedByUserId: demoAdminId,
+      },
+    });
+  }
+
+  const settings = await tx.policySettings.findUnique({
+    where: { organizationId },
+    select: { id: true },
+  });
+  if (!settings) {
+    const empty = {};
+    await tx.policySettings.create({
+      data: {
+        organizationId,
+        generation: 1n,
+        settings: empty,
+        settingsSha256: sha256Hex(canonicalJson(empty)),
+        updatedByUserId: demoAdminId,
+      },
+    });
+  } else if (activate) {
+    await tx.policySettings.update({
+      where: { id: settings.id },
+      data: { generation: { increment: 1 } },
+    });
+  }
+  return policy.id;
+}
+
+function sha256Hex(text: string): string {
+  return createHash('sha256').update(text).digest('hex');
+}
+
+/** Deep, mutable JSON copy of a frozen catalog constant (Prisma's input JSON type). */
+function toJson(value: unknown): Prisma.InputJsonValue {
+  return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
 }

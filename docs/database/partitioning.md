@@ -34,7 +34,7 @@ The registry is `packages/database/src/partitioning/registry.ts`. "Retention N m
 | `email_events`                 | `received_at`       | month       | 3 months   | detail      |                                         |
 | `email_message_status_history` | `received_at`       | month       | 3 months   | detail      |                                         |
 | `scan_engine_results`          | `received_at`       | month       | 3 months   | detail      |                                         |
-| `policy_execution_logs`        | `received_at`       | month       | 3 months   | detail      |                                         |
+| `policy_execution_logs`        | `received_at`       | month       | 6 months   | core        |                                         |
 | `delivery_attempts`            | `received_at`       | month       | 3 months   | detail      |                                         |
 | `delivery_reinjections`        | `received_at`       | month       | 6 months   | core        |                                         |
 | `delivery_status_events`       | `received_at`       | month       | 3 months   | detail      |                                         |

@@ -341,7 +341,9 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
         !op.key.endsWith('/scans') &&
         !op.key.endsWith('/bec-feedback') &&
         !op.key.endsWith('/dlp-evidence') &&
-        !op.key.endsWith('/risk/dry-run'),
+        !op.key.endsWith('/risk/dry-run') &&
+        !op.key.endsWith('/policy/dry-run') &&
+        !op.key.endsWith('/policy-evaluations'),
     );
     expect(messageOps.map((op) => op.key).sort()).toEqual([...expected].sort());
 
@@ -568,6 +570,126 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     expect(JSON.stringify(scans.responses)).toContain('recommendedAction');
     expect(JSON.stringify(scans.responses)).toContain('inputSha256');
     expect(scans.description).toContain('risk');
+  });
+
+  it('documents the step 5.2 policy and department endpoints (P22) with errors and notes', () => {
+    const byKey = new Map(operations(doc).map((op) => [op.key, op]));
+    const policies = [
+      'GET /api/v1/policies/catalog',
+      'GET /api/v1/policies',
+      'POST /api/v1/policies',
+      'GET /api/v1/policies/{policyId}',
+      'PATCH /api/v1/policies/{policyId}',
+      'POST /api/v1/policies/{policyId}/disable',
+      'POST /api/v1/policies/{policyId}/enable',
+      'DELETE /api/v1/policies/{policyId}',
+      'GET /api/v1/policies/{policyId}/versions',
+      'POST /api/v1/policies/{policyId}/versions',
+      'GET /api/v1/policies/{policyId}/versions/{versionNo}',
+      'PUT /api/v1/policies/{policyId}/versions/{versionNo}',
+      'DELETE /api/v1/policies/{policyId}/versions/{versionNo}',
+      'POST /api/v1/policies/{policyId}/versions/{versionNo}/publish',
+      'POST /api/v1/policies/{policyId}/versions/{versionNo}/activate',
+      'GET /api/v1/policy-settings',
+      'PUT /api/v1/policy-settings',
+      'POST /api/v1/policies/test',
+      'GET /api/v1/policies/executions',
+      'POST /api/v1/messages/{messageId}/scans/{scanId}/policy/dry-run',
+      'GET /api/v1/messages/{messageId}/policy-evaluations',
+    ];
+    const departments = [
+      'GET /api/v1/departments',
+      'POST /api/v1/departments',
+      'GET /api/v1/departments/{departmentId}',
+      'PATCH /api/v1/departments/{departmentId}',
+      'DELETE /api/v1/departments/{departmentId}',
+      'GET /api/v1/departments/{departmentId}/members',
+      'POST /api/v1/departments/{departmentId}/members',
+      'DELETE /api/v1/departments/{departmentId}/members/{memberId}',
+    ];
+    expect(
+      operations(doc)
+        .filter((op) => op.tags.includes('policies'))
+        .map((op) => op.key)
+        .sort(),
+    ).toEqual([...policies].sort());
+    expect(
+      operations(doc)
+        .filter((op) => op.tags.includes('departments'))
+        .map((op) => op.key)
+        .sort(),
+    ).toEqual([...departments].sort());
+    for (const key of [...policies, ...departments]) {
+      expect(byKey.get(key)!.security.length, key).toBeGreaterThan(0);
+    }
+    type Op = { responses: Record<string, unknown>; description?: string };
+    const op = (path: string, method: string) => (doc.paths[path] as Record<string, Op>)[method]!;
+    const responses = (path: string, method: string) => JSON.stringify(op(path, method).responses);
+    for (const code of [
+      'policy_definition_invalid',
+      'policy_name_taken',
+      'policy_limit_reached',
+      'inconsistent_read',
+    ]) {
+      expect(responses('/api/v1/policies', 'post')).toContain(code);
+    }
+    for (const code of [
+      'policy_conflict',
+      'policy_version_immutable',
+      'policy_rule_limit_reached',
+    ]) {
+      expect(
+        responses('/api/v1/policies/{policyId}/versions/{versionNo}/publish', 'post'),
+      ).toContain(code);
+    }
+    expect(
+      responses('/api/v1/policies/{policyId}/versions/{versionNo}/activate', 'post'),
+    ).toContain('policy_version_not_published');
+    expect(responses('/api/v1/policies/{policyId}/enable', 'post')).toContain(
+      'policy_no_active_version',
+    );
+    expect(responses('/api/v1/policies/{policyId}/versions', 'post')).toContain(
+      'policy_version_limit_reached',
+    );
+    for (const code of [
+      'message_not_found',
+      'scan_not_found',
+      'scan_round_not_complete',
+      'policy_version_not_found',
+    ]) {
+      expect(
+        responses('/api/v1/messages/{messageId}/scans/{scanId}/policy/dry-run', 'post'),
+      ).toContain(code);
+    }
+    expect(responses('/api/v1/departments/{departmentId}', 'delete')).toContain(
+      'department_in_use',
+    );
+    expect(responses('/api/v1/departments/{departmentId}/members', 'post')).toContain(
+      'member_address_not_tenant',
+    );
+    expect(
+      op('/api/v1/messages/{messageId}/scans/{scanId}/policy/dry-run', 'post').description,
+    ).toContain('Writes nothing');
+    expect(op('/api/v1/policies/test', 'post').description).toContain('Writes nothing');
+    for (const [path, method] of [
+      ['/api/v1/policies/{policyId}/versions/{versionNo}/publish', 'post'],
+      ['/api/v1/policies/{policyId}/versions/{versionNo}/activate', 'post'],
+      ['/api/v1/policy-settings', 'put'],
+    ] as const) {
+      expect(op(path, method).description, path).toContain('next evaluation');
+    }
+    for (const [path, method] of [
+      ['/api/v1/policies/catalog', 'get'],
+      ['/api/v1/policies', 'post'],
+      ['/api/v1/policies/test', 'post'],
+    ] as const) {
+      const description = op(path, method).description ?? '';
+      expect(description, path).toContain('enforces');
+      expect(description, path).toContain('requests');
+      expect(description, path).toContain('step 5.3');
+      expect(description, path).toContain('step 8.1');
+    }
+    expect(responses('/api/v1/messages/{messageId}/scans', 'get')).toContain('snapshotSha256');
   });
 
   it('matches the committed snapshot docs/api/openapi.json', async () => {

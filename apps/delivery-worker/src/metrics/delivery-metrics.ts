@@ -1,10 +1,4 @@
-import type {
-  Counter,
-  Gauge,
-  Histogram,
-  MetricsService,
-  OutboxPollerMetrics,
-} from '@email-gateway/common';
+import type { Counter, Gauge, Histogram, MetricsService } from '@email-gateway/common';
 import type { RecordResult } from '@email-gateway/mail-routing';
 import type { LifecycleMetrics } from '@email-gateway/message-lifecycle';
 
@@ -25,13 +19,16 @@ export type ReconcilerAction =
 
 /**
  * Every series of step 2.3 R14, registered once through MetricsService (served on GET /metrics),
- * plus the counters the design asks for without naming them (invalid outbox rows), the approval
- * outcomes of step 3.3 (L8.3, L8.4) and the shared lifecycle series (L5.5, L9) of the
- * transitions this worker applies (dev pass-through, planner, recorder).
+ * the approval outcomes of step 3.3 (L8.3, L8.4) and the shared lifecycle series (L5.5, L9) of
+ * the transitions this worker applies (planner, recorder). Step 5.2 removed the development
+ * pass-through and its series (`delivery_approvals_skipped_total`, `delivery_risk_holds_total`,
+ * `delivery_dlp_holds_total`, `delivery_dlp_alerts_approved_total`,
+ * `delivery_bec_ai_only_not_held_total`, the outbox poller's `delivery_outbox_poll_lag_seconds`
+ * and `delivery_outbox_invalid_events_total`); policy holds are counted by the policy-engine
+ * (`policy_evaluations_total`).
  */
 export class DeliveryMetrics {
   readonly approvals: Counter<'source' | 'object'>;
-  readonly approvalsSkipped: Counter<'reason'>;
   readonly approvalsRejected: Counter<'reason'>;
   readonly lifecycleTransitions: Counter<'from' | 'to' | 'result'>;
   readonly lifecycleIgnored: Counter<'reason'>;
@@ -44,27 +41,16 @@ export class DeliveryMetrics {
   readonly signals: Counter<'source' | 'result'>;
   readonly transitions: Counter<'direction' | 'status'>;
   readonly statusLogLag: Gauge;
-  readonly outboxPollLag: Gauge<'consumer'>;
   readonly rateLimited: Counter<'scope'>;
   readonly reconcilerActions: Counter<'action'>;
-  readonly outboxInvalid: Counter<'consumer'>;
   readonly inconsistentReads: Counter<'read'>;
   readonly contextMissing: Counter<'result'>;
-  readonly becAiOnlyNotHeld: Counter;
-  readonly dlpHolds: Counter<'action'>;
-  readonly dlpAlertsApproved: Counter;
-  readonly riskHolds: Counter<'action'>;
 
   constructor(metrics: MetricsService) {
     this.approvals = metrics.counter(
       'delivery_approvals_total',
-      "Delivery approvals planned, by approval source and delivered object (rewritten: the URL engine's rewritten copy of the round, org/<org>/rewrite/; original: the stored EML; step 4.3 U20)",
+      "Delivery approvals planned, by approval source (policy, quarantine_release; dev_passthrough only for approvals written before step 5.2) and delivered object (rewritten: the URL engine's rewritten copy of the round, org/<org>/rewrite/, step 4.3 U20; policy_copy: the policy engine's copy with header edits, org/<org>/policy/, step 5.2 P21; original: the stored EML)",
       ['source', 'object'],
-    );
-    this.approvalsSkipped = metrics.counter(
-      'delivery_approvals_skipped_total',
-      'Scanned messages the dev pass-through did not approve: scan_failed (a required engine failed), malicious_verdict (held in scanned, step 4.2 A15), bec_verdict (a suspicious or malicious bec engine result, held in scanned, step 4.4 B17), dlp_action (the round DLP action is require_approval, quarantine or block, or its dlp_scan_results row is missing; held in scanned, step 4.5 D13), risk_recommendation (the round revision-0 risk score recommends require_approval, quarantine or block, has a hard block or is an error row; step 5.1 R17), risk_missing (no revision-0 risk score row; held fail-safe) or the lifecycle refused the approval (lifecycle_<result>)',
-      ['reason'],
     );
     this.approvalsRejected = metrics.counter(
       'delivery_approvals_rejected_total',
@@ -121,11 +107,6 @@ export class DeliveryMetrics {
       'delivery_status_log_lag_seconds',
       'Age of the newest postfix-outbound log line the status tailer has read',
     );
-    this.outboxPollLag = metrics.gauge(
-      'delivery_outbox_poll_lag_seconds',
-      'Age of the oldest outbox row the poller has not yet processed (0 when caught up)',
-      ['consumer'],
-    );
     this.rateLimited = metrics.counter(
       'delivery_rate_limited_total',
       'Outbound reinjections deferred by a worker rate limit, by scope',
@@ -136,52 +117,16 @@ export class DeliveryMetrics {
       'Reconciler and tailer repair actions',
       ['action'],
     );
-    this.outboxInvalid = metrics.counter(
-      'delivery_outbox_invalid_events_total',
-      'Outbox rows that failed envelope or payload validation and were skipped',
-      ['consumer'],
-    );
     this.inconsistentReads = metrics.counter(
       'delivery_inconsistent_reads_total',
-      'Writer reads whose identifying columns did not echo the request: the reinjector (message, deliveries, recipients, approval; the row is rescheduled with the attempt refunded, step 4.2 §6.2) and the dev pass-through (url_rewrite, bec_result, dlp_result, risk_score; the event is redelivered)',
+      'Writer reads of the reinjector whose identifying columns did not echo the request (message, deliveries, recipients, approval; the row is rescheduled with the attempt refunded, step 4.2 §6.2)',
       ['read'],
-    );
-    this.becAiOnlyNotHeld = metrics.counter(
-      'delivery_bec_ai_only_not_held_total',
-      'Dev pass-through: scanned messages whose bec result was raised to suspicious by the AI layer alone (deterministic verdict clean or unknown) and therefore not held (step 4.4 B17, ADR-0034)',
-    );
-    this.dlpHolds = metrics.counter(
-      'delivery_dlp_holds_total',
-      'Dev pass-through: scanned messages not approved because of the round DLP action (require_approval, quarantine, block; missing = no dlp_scan_results row, held fail-safe), step 4.5 D13',
-      ['action'],
-    );
-    this.riskHolds = metrics.counter(
-      'delivery_risk_holds_total',
-      'Dev pass-through: scanned messages not approved because of the round revision-0 risk score (step 5.1 R17), by action: require_approval, quarantine, block (the recommendation), hard_block, error (a scoring error row) or missing (no row, held fail-safe)',
-      ['action'],
-    );
-    this.dlpAlertsApproved = metrics.counter(
-      'delivery_dlp_alerts_approved_total',
-      'Dev pass-through: scanned messages approved although their round DLP action is alert (the incident exists; step 4.5 D13)',
     );
     this.contextMissing = metrics.counter(
       'delivery_reinjection_context_missing_total',
       'Reinjections whose message row was not found: retry (rescheduled with backoff) or failed (final attempt, deliveries failed with message_missing)',
       ['result'],
     );
-  }
-
-  /**
-   * The shared outbox poller's metrics (step 3.1 M2) on this worker's existing series
-   * `delivery_outbox_poll_lag_seconds{consumer}` and `delivery_outbox_invalid_events_total{consumer}`.
-   * Since step 3.2 only the development pass-through polls the outbox; the planner's transport
-   * reports the shared `amqp_consumer_*` series of `email.delivery.pending`.
-   */
-  outboxPoller(): OutboxPollerMetrics {
-    return {
-      pollLag: (consumer, seconds) => this.outboxPollLag.set({ consumer }, seconds),
-      invalid: (consumer) => this.outboxInvalid.inc({ consumer }),
-    };
   }
 
   /** Counts one recorder result and, when applied, the transition. */

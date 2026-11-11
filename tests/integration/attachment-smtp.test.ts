@@ -10,11 +10,7 @@ import {
 import { attachmentSandboxRequestedV1, messageScannedV1 } from '@email-gateway/event-contracts';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { apiSession, type ApiSession } from './support/api-client';
-import {
-  attachmentMessage,
-  deliveryWorkerCounter,
-  type MessageAttachment,
-} from './support/attachment-stack';
+import { attachmentMessage, type MessageAttachment } from './support/attachment-stack';
 import { purgeDormantQueues } from './support/broker';
 import { waitFor } from './support/compose';
 import { waitForAllDeliveries, waitForMessage } from './support/deliveries';
@@ -40,6 +36,7 @@ import {
   sendToMx,
   waitForRoundComplete,
 } from './support/scan-stack';
+import { expectPolicyHeld, floorOf } from './support/policy';
 import { SmtpFixtures, type FixtureDomain } from './support/smtp-fixtures';
 import { assertStackReady } from './support/smtp-stack';
 import { reply } from './support/smtp-tools';
@@ -50,13 +47,13 @@ import { reply } from './support/smtp-tools';
  * smtp-adapter (EML in MinIO) → email-worker MIME role (part objects + `email_attachments`) →
  * `parsed.v1` → `scan.spam` (Rspamd) and `scan.attachment` (the attachment engine: part object
  * from MinIO, clamd INSTREAM ∥ the inspector child, known hashes, mapper) → round completion →
- * dev pass-through → postfix-outbound → mail-sink.
+ * policy-engine (step 5.2: evaluation and approval) → postfix-outbound → mail-sink.
  *
  * - EICAR as a plain attachment: round `completed` with verdict `malicious`, attachment final
- *   `malicious` with `malware.clamav` (ClamAV `Eicar-Test-Signature`); the dev pass-through does
- *   NOT approve it (A15: `delivery_approvals_skipped_total{reason="malicious_verdict"}` +1, the
- *   message stays `scanned`, no approval, no delivery, nothing in any sink); the scans read API
- *   (replica) shows the per-attachment row.
+ *   `malicious` with `malware.clamav` (ClamAV `Eicar-Test-Signature`); the policy-engine
+ *   rejects it (step 5.2: floor `policy.floor.hard_block` → `rejected` / `policy_discard`; before
+ *   5.2 the dev pass-through held it in `scanned`), no approval, no delivery, nothing in any
+ *   sink; the scans read API (replica) shows the per-attachment row.
  * - A clean PDF-like attachment (unique bytes per run, so never a cache hit of another run): clean
  *   attachment row (`clean.no_findings`, ClamAV OK), approved and delivered.
  * - No attachments: attachment final `skipped` with `attachment.none` (rule A0), delivered.
@@ -154,10 +151,7 @@ async function expectNotInAnySink(rcpt: string): Promise<void> {
 }
 
 describe.skipIf(gate.skip)('attachment stack: engine through Postfix', { timeout: 300_000 }, () => {
-  it('EICAR attachment: malicious (malware.clamav), held in scanned by the dev pass-through, never delivered', async () => {
-    const skippedBefore = await deliveryWorkerCounter('delivery_approvals_skipped_total', {
-      reason: 'malicious_verdict',
-    });
+  it('EICAR attachment: malicious (malware.clamav), rejected by policy (hard-block floor), never delivered', async () => {
     const { rcpt, message, round, finals, attachmentFinal, scannedAfterMs } = await send(
       'eicar',
       'Attachment stack: EICAR',
@@ -196,31 +190,20 @@ describe.skipIf(gate.skip)('attachment stack: engine through Postfix', { timeout
       verdict: 'malicious',
     });
 
-    // A15: the pass-through handles the scanned event but never approves malicious.
-    await waitFor(
-      'the dev pass-through to skip the malicious message',
-      async () => {
-        const after = await deliveryWorkerCounter('delivery_approvals_skipped_total', {
-          reason: 'malicious_verdict',
-        });
-        return after !== undefined && skippedBefore !== undefined && after >= skippedBefore + 1;
-      },
-      { timeoutMs: 60_000, intervalMs: 1_000 },
-    );
-    await sleep(10_000);
-    const skippedAfter = await deliveryWorkerCounter('delivery_approvals_skipped_total', {
-      reason: 'malicious_verdict',
-    });
-    expect(skippedAfter).toBe(skippedBefore! + 1);
+    // A15, since step 5.2: the policy-engine evaluates the scanned event and rejects malicious
+    // mail through the hard-block floor (inbound: discarded, no bounce).
+    const evaluation = await expectPolicyHeld(fx.prisma, message, { min: 'reject' });
+    expect(floorOf(evaluation).reasons).toContain('policy.floor.hard_block');
+    await sleep(5_000);
     expect(await lifecycleOf(fx.prisma, message)).toMatchObject({
-      status: 'scanned',
-      statusReason: 'scan_complete',
+      status: 'rejected',
+      statusReason: 'policy_discard',
       lifecycleRound: 0,
     });
-    expect((await pathOf(fx.prisma, message)).at(-1)).toEqual([
-      'scanning',
-      'scanned',
-      'scan_complete',
+    expect((await pathOf(fx.prisma, message)).slice(-3)).toEqual([
+      ['scanning', 'scanned', 'scan_complete'],
+      ['scanned', 'policy_evaluated', 'policy_decided'],
+      ['policy_evaluated', 'rejected', 'policy_discard'],
     ]);
     const approvals = await fx.prisma.messageOutbox.findMany({
       where: { organizationId: org, eventType: 'mail.delivery.approved.v1' },
@@ -260,7 +243,7 @@ describe.skipIf(gate.skip)('attachment stack: engine through Postfix', { timeout
       eicar_cache: row!.cacheResult,
       eicar_engine_ms: attachmentFinal!.durationMs,
       eicar_smtp_to_scanned_ms: scannedAfterMs,
-      malicious_skips_delta: skippedAfter! - skippedBefore!,
+      eicar_policy: `${evaluation.disposition}:${evaluation.decisionSource}`,
     });
   });
 
@@ -337,11 +320,24 @@ describe.skipIf(gate.skip)('attachment stack: engine through Postfix', { timeout
     expect(row!.clamavSignature).toContain(EICAR_CLAMAV_SIGNATURE);
     const archiveInfo = row!.archive as { depthReached: number; entries: number } | null;
     expect(archiveInfo?.depthReached).toBeGreaterThanOrEqual(2);
-    // Held like any malicious verdict.
+    // Held like any malicious verdict (step 5.2: rejected by policy through the hard-block floor,
+    // inbound: discarded, no bounce; before 5.2 the dev pass-through left it in `scanned`).
+    const evaluation = await expectPolicyHeld(fx.prisma, message, { min: 'reject' });
+    expect(floorOf(evaluation).reasons).toContain('policy.floor.hard_block');
     await sleep(5_000);
-    expect((await lifecycleOf(fx.prisma, message)).status).toBe('scanned');
+    expect(await lifecycleOf(fx.prisma, message)).toMatchObject({
+      status: 'rejected',
+      statusReason: 'policy_discard',
+      lifecycleRound: 0,
+    });
+    expect(
+      await fx.prisma.emailDelivery.count({
+        where: { organizationId: org, messageId: message.id },
+      }),
+    ).toBe(0);
     await expectNotInAnySink(rcpt);
     record('attachment-smtp', {
+      nested_policy: `${evaluation.disposition}:${evaluation.decisionSource}`,
       nested_verdict: row!.verdict,
       nested_depth: archiveInfo?.depthReached,
       nested_entries: archiveInfo?.entries,
@@ -420,7 +416,7 @@ describe.skipIf(gate.skip)('attachment stack: engine through Postfix', { timeout
     expect(after).toMatchObject({ scanVerdict: round.scanVerdict, status: 'completed' });
     expect(codes(after.reasonCodes)).toEqual(codes(round.reasonCodes));
 
-    // The round does not wait for the sandbox; the pass-through approves suspicious.
+    // The round does not wait for the sandbox; policy follows the risk row (allowed here).
     await waitForLifecycle(fx.prisma, message, 'delivered', 'delivery_complete');
     expect(await sinkFiles(rcpt)).toHaveLength(1);
     const view = await attachmentEngineView(await messagePublicId(fx.prisma, message));

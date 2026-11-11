@@ -32,12 +32,24 @@
 #
 # Messaging (step 3.2, docs/architecture/messaging-topology.md): `rabbitmq-init` (one-shot,
 # default profile) provisions vhost ${RABBITMQ_VHOST} from infrastructure/rabbitmq/definitions.json
-# (6 exchanges, 14 quorum queues, bindings, policies) and the least-privilege role users, and
-# removes the empty ADR-0005 objects on vhost "/". Every app waits for it. Services never declare
-# topology and each one gets only its own role URL (no RABBITMQ_URL): email-worker
+# (topology v9: 6 exchanges, 20 quorum queues, bindings, policies) and the least-privilege role
+# users, and removes the empty ADR-0005 objects on vhost "/". Every app waits for it. Services
+# never declare topology and each one gets only its own role URL (no RABBITMQ_URL): email-worker
 # RABBITMQ_EMAIL_WORKER_URL, delivery-worker RABBITMQ_DELIVERY_WORKER_URL, api RABBITMQ_OPS_URL,
-# event-relay (outbox relay and reconciler, ADR-0023) RABBITMQ_RELAY_URL. policy-engine,
-# archive-worker and notification-worker consume nothing yet and do not connect to RabbitMQ.
+# event-relay (outbox relay and reconciler, ADR-0023) RABBITMQ_RELAY_URL, policy-engine
+# RABBITMQ_POLICY_ENGINE_URL, notification-worker RABBITMQ_NOTIFICATION_URL. archive-worker
+# consumes nothing yet and does not connect to RabbitMQ.
+#
+# Policy (step 5.2, docs/plan/steps/16-policy-engine.md, ADR-0043/0044/0045, topology v9): the
+# `policy-engine` consumes email.policy.evaluate as eg-policy-engine (RABBITMQ_POLICY_ENGINE_URL)
+# and is the ONLY automatic producer of delivery approvals: the delivery-worker's development
+# pass-through is removed (DELIVERY_DEV_PASSTHROUGH_ENABLED=true is refused), so local and CI
+# delivery follow the production path and need the apps profile's policy-engine running. Policy
+# copies (TAG/WARN header edits) are written to the mail bucket under org/<org>/policy/ (tag
+# eg-object=policy-copy, minio-init lifecycle rule eg-policy-copy-expiry). The
+# `notification-worker` consumes email.notifications as eg-notification (RABBITMQ_NOTIFICATION_URL)
+# and sends policy alerts and sender notices through `postfix-notify`; tests point it at another
+# relay with NOTIFICATION_SMTP_HOST (e.g. the smtp-test mail-sink) and recreate it.
 #
 # Security scanning (step 4.1, docs/plan/steps/09-rspamd.md, ADR-0026/ADR-0027): the email-worker
 # scan role consumes scan.spam as eg-scanner (RABBITMQ_SCANNER_URL) and scans every parsed
@@ -394,7 +406,7 @@ services:
       start_period: 30s
       retries: 10
 
-  # Topology v1 and role users (step 3.2 Q5, Q10). Idempotent: re-running it changes nothing.
+  # Topology (v9 since step 5.2) and role users (step 3.2 Q5, Q10). Idempotent: re-running it changes nothing.
   # The ADR-0005 queues/exchanges on "/" are deleted only when empty (otherwise a warning).
   rabbitmq-init:
     image: node:22-bookworm-slim
@@ -421,6 +433,12 @@ services:
       # Sandbox controller (step 4.6 X11): reads scan.sandbox, publishes task_completed only.
       RABBITMQ_SANDBOX_USER: ${RABBITMQ_SANDBOX_USER:-eg-sandbox}
       RABBITMQ_SANDBOX_PASSWORD: ${RABBITMQ_SANDBOX_PASSWORD:?append the sandbox keys from .env.example}
+      # Policy engine (step 5.2 P15): reads email.policy.evaluate, publishes its own hops only.
+      RABBITMQ_POLICY_ENGINE_USER: ${RABBITMQ_POLICY_ENGINE_USER:-eg-policy-engine}
+      RABBITMQ_POLICY_ENGINE_PASSWORD: ${RABBITMQ_POLICY_ENGINE_PASSWORD:?append the RabbitMQ keys from .env.example}
+      # Notification worker (step 5.2 P15, P25): reads email.notifications, its own hops only.
+      RABBITMQ_NOTIFICATION_USER: ${RABBITMQ_NOTIFICATION_USER:-eg-notification}
+      RABBITMQ_NOTIFICATION_PASSWORD: ${RABBITMQ_NOTIFICATION_PASSWORD:?append the RabbitMQ keys from .env.example}
     volumes: ['./infrastructure/rabbitmq:/rabbitmq:ro']
     depends_on:
       rabbitmq: { condition: service_healthy }
@@ -483,6 +501,8 @@ services:
       S3_BUCKET_ARCHIVE: ${S3_BUCKET_ARCHIVE:?}
       # Step 4.3 U11: lifecycle rule expiring objects tagged eg-object=rewrite.
       URL_REWRITE_OBJECT_RETENTION_DAYS: ${URL_REWRITE_OBJECT_RETENTION_DAYS:-30}
+      # Step 5.2 P21: lifecycle rule eg-policy-copy-expiry for objects tagged eg-object=policy-copy.
+      POLICY_COPY_RETENTION_DAYS: ${POLICY_COPY_RETENTION_DAYS:-30}
       # Step 4.6 X12: the sandbox bucket, its lifecycle and the controller's MinIO user.
       SANDBOX_S3_BUCKET: ${SANDBOX_S3_BUCKET:-email-gateway-sandbox}
       SANDBOX_S3_ACCESS_KEY_ID: ${SANDBOX_S3_ACCESS_KEY_ID:-eg-sandbox-controller}
@@ -1110,6 +1130,14 @@ services:
       # and the version limit per organization.
       RISK_PLATFORM_PROFILE: ${RISK_PLATFORM_PROFILE:-rsk-default/1}
       RISK_PROFILE_MAX_VERSIONS: ${RISK_PROFILE_MAX_VERSIONS:-200}
+      # Policy management, testing and history bounds (step 5.2 §5, P17, P22).
+      POLICY_PLATFORM_DEFAULT: ${POLICY_PLATFORM_DEFAULT:-pol-default/1}
+      POLICY_MAX_POLICIES: ${POLICY_MAX_POLICIES:-100}
+      POLICY_MAX_VERSIONS_PER_POLICY: ${POLICY_MAX_VERSIONS_PER_POLICY:-200}
+      POLICY_MAX_ACTIVE_RULES: ${POLICY_MAX_ACTIVE_RULES:-1000}
+      POLICY_HISTORY_MAX_RANGE_DAYS: ${POLICY_HISTORY_MAX_RANGE_DAYS:-31}
+      DEPARTMENT_MAX_PER_ORG: ${DEPARTMENT_MAX_PER_ORG:-500}
+      DEPARTMENT_MAX_MEMBERS: ${DEPARTMENT_MAX_MEMBERS:-5000}
     ports: ['127.0.0.1:${API_HOST_PORT:-3000}:3000']
     healthcheck:
       <<: *node-healthcheck
@@ -1464,6 +1492,15 @@ services:
     environment:
       <<: *node-env
       HTTP_PORT: 3030
+      # Consumes email.policy.evaluate (step 5.2 P13): role user eg-policy-engine.
+      RABBITMQ_POLICY_ENGINE_URL: amqp://${RABBITMQ_POLICY_ENGINE_USER:-eg-policy-engine}:${RABBITMQ_POLICY_ENGINE_PASSWORD:?append the RabbitMQ keys from .env.example}@rabbitmq:5672/${RABBITMQ_VHOST:-email-gateway}
+      # Policy engine (step 5.2 §5).
+      POLICY_PLATFORM_DEFAULT: ${POLICY_PLATFORM_DEFAULT:-pol-default/1}
+      POLICY_EVALUATE_PREFETCH: ${POLICY_EVALUATE_PREFETCH:-8}
+      POLICY_DB_TX_TIMEOUT_MS: ${POLICY_DB_TX_TIMEOUT_MS:-120000}
+      POLICY_SNAPSHOT_CACHE_MAX_ENTRIES: ${POLICY_SNAPSHOT_CACHE_MAX_ENTRIES:-1000}
+      POLICY_COPY_MAX_MESSAGE_BYTES: ${POLICY_COPY_MAX_MESSAGE_BYTES:-26214400}
+      POLICY_COPY_MAX_HEADER_BYTES: ${POLICY_COPY_MAX_HEADER_BYTES:-262144}
     ports: ['127.0.0.1:${POLICY_ENGINE_HOST_PORT:-3030}:3030']
     healthcheck:
       <<: *node-healthcheck
@@ -1512,18 +1549,11 @@ services:
       DELIVERY_REINJECT_MAX_ATTEMPTS: ${DELIVERY_REINJECT_MAX_ATTEMPTS:-10}
       DELIVERY_DB_TX_TIMEOUT_MS: ${DELIVERY_DB_TX_TIMEOUT_MS:-120000}
       DELIVERY_POLL_INTERVAL_MS: ${DELIVERY_POLL_INTERVAL_MS:-1000}
-      DELIVERY_OUTBOX_POLL_INTERVAL_MS: ${DELIVERY_OUTBOX_POLL_INTERVAL_MS:-1000}
-      DELIVERY_OUTBOX_SAFETY_LAG_MS: ${DELIVERY_OUTBOX_SAFETY_LAG_MS:-120000}
-      DELIVERY_OUTBOX_BATCH_SIZE: ${DELIVERY_OUTBOX_BATCH_SIZE:-500}
       DELIVERY_APPROVALS_ENABLED: ${DELIVERY_APPROVALS_ENABLED:-true}
       DELIVERY_REINJECTION_ENABLED: ${DELIVERY_REINJECTION_ENABLED:-true}
       DELIVERY_STATUS_LOG_ENABLED: ${DELIVERY_STATUS_LOG_ENABLED:-true}
-      # DEVELOPMENT ONLY: delivers mail WITHOUT scanning or policy; refused unless APP_ENV is
-      # local or ci. Off unless the .env turns it on.
-      DELIVERY_DEV_PASSTHROUGH_ENABLED: ${DELIVERY_DEV_PASSTHROUGH_ENABLED:-false}
-      # Step 5.1 R17: the pass-through also holds on the round's revision-0 risk recommendation
-      # (require_approval/quarantine/block, hard block, error row, missing row). Local/ci only.
-      DELIVERY_DEV_PASSTHROUGH_RISK_HOLD: ${DELIVERY_DEV_PASSTHROUGH_RISK_HOLD:-true}
+      # Step 5.2 (ADR-0044): the development pass-through is removed; approvals come from the
+      # policy-engine and the operator release only (DELIVERY_DEV_PASSTHROUGH_* are not passed).
       DELIVERY_STATUS_LOG_PATH: /var/log/postfix-outbound/maillog
       DELIVERY_STATUS_LOG_SOURCE_ID: ${DELIVERY_STATUS_LOG_SOURCE_ID:-out.gateway.local}
       DELIVERY_STATUS_LOG_POLL_MS: ${DELIVERY_STATUS_LOG_POLL_MS:-500}
@@ -1587,7 +1617,7 @@ services:
       RECONCILE_MAX_REDRIVES: ${RECONCILE_MAX_REDRIVES:-3}
       RECONCILE_LOOKBACK_HOURS: ${RECONCILE_LOOKBACK_HOURS:-72}
       RECONCILE_BATCH_SIZE: ${RECONCILE_BATCH_SIZE:-1000}
-      RECONCILE_QUEUES: ${RECONCILE_QUEUES:-email.received,email.delivery.pending,scan.spam,scan.attachment,scan.url,scan.bec,scan.dlp,scan.sandbox.submissions}
+      RECONCILE_QUEUES: ${RECONCILE_QUEUES:-email.received,email.delivery.pending,scan.spam,scan.attachment,scan.url,scan.bec,scan.dlp,scan.sandbox.submissions,email.policy.evaluate,email.notifications}
       RECONCILE_START_POSITION: ${RECONCILE_START_POSITION:-oldest}
       # Message lifecycle jobs (step 3.3 L13, L14; docs/plan/steps/08-message-lifecycle.md §5).
       LIFECYCLE_EXPIRY_ENABLED: ${LIFECYCLE_EXPIRY_ENABLED:-true}
@@ -1632,9 +1662,24 @@ services:
         args: { APP: notification-worker },
       }
     image: email-gateway/notification-worker:local
+    depends_on:
+      <<: *app-deps
+      postfix-notify: { condition: service_healthy }
     environment:
       <<: *node-env
       HTTP_PORT: 3050
+      # Consumes email.notifications (step 5.2 P25): role user eg-notification.
+      RABBITMQ_NOTIFICATION_URL: amqp://${RABBITMQ_NOTIFICATION_USER:-eg-notification}:${RABBITMQ_NOTIFICATION_PASSWORD:?append the RabbitMQ keys from .env.example}@rabbitmq:5672/${RABBITMQ_VHOST:-email-gateway}
+      # Policy alerts and sender notices through the internal smarthost (plaintext local/CI
+      # only). NOTIFICATION_SMTP_HOST overrides the relay (the stack suite points it at mail-sink).
+      NOTIFY_SMTP_HOST: ${NOTIFICATION_SMTP_HOST:-postfix-notify}
+      NOTIFY_SMTP_PORT: ${NOTIFICATION_SMTP_PORT:-25}
+      NOTIFY_SMTP_SECURE: none
+      NOTIFY_SMTP_FROM: ${NOTIFY_SMTP_FROM:-}
+      PORTAL_PUBLIC_URL: ${PORTAL_PUBLIC_URL:-http://localhost:3001}
+      NOTIFICATION_PREFETCH: ${NOTIFICATION_PREFETCH:-4}
+      NOTIFICATION_DB_TX_TIMEOUT_MS: ${NOTIFICATION_DB_TX_TIMEOUT_MS:-120000}
+      NOTIFICATION_MAX_RECIPIENTS: ${NOTIFICATION_MAX_RECIPIENTS:-50}
     ports: ['127.0.0.1:${NOTIFICATION_WORKER_HOST_PORT:-3050}:3050']
     healthcheck:
       <<: *node-healthcheck

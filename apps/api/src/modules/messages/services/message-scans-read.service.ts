@@ -31,7 +31,8 @@ export const DLP_READ_PERMISSION = 'dlp:read';
  * step 4.4 B15: the explainable BEC verdict on the `bec` entry; step 4.5 D20: the masked DLP
  * result on the `dlp` entry, only for callers holding `dlp:read`; step 4.6 X18: the sandbox
  * submissions with their outcome on each attachment and with the analysis report on the
- * `sandbox` entry; step 5.1 R15: the stored risk scores of each round in `risk`): the scan rounds of a message of the caller's organization, newest
+ * `sandbox` entry; step 5.1 R15: the stored risk scores of each round in `risk`; step 5.2 P16: its stored policy
+ * evaluation in `policy`): the scan rounds of a message of the caller's organization, newest
  * round first, from the read replica (a few seconds behind the writer: a round that just
  * completed may still show as running). Every query filters by the scope's organization;
  * another organization's message is `404 message_not_found`.
@@ -58,13 +59,15 @@ export class MessageScansReadService {
     });
     const page = rows.slice(0, query.limit);
     const scanIds = page.map((row) => row.id);
-    const [engineRows, authRows, results, submissions, riskRows] = await Promise.all([
+    const [engineRows, authRows, results, submissions, riskRows, policyRows] = await Promise.all([
       this.rounds.engineResults(scope, message, scanIds),
       this.rounds.authResults(scope, message, scanIds),
       this.rounds.attachmentResults(scope, message, scanIds),
       this.rounds.sandboxSubmissions(scope, message, scanIds),
       // Step 5.1 R15: the stored risk scores (message:read; profile public ids only).
       this.rounds.riskScores(scope, message, scanIds),
+      // Step 5.2 P16: the stored policy evaluation of each round (message:read; ids only).
+      this.rounds.policyEvaluations(scope, message, scanIds),
     ]);
     // Step 4.3 U16: URL rows only when a page round has a url engine row.
     const hasUrl = engineRows.some((row) => row.engine === URL_ENGINE);
@@ -106,7 +109,17 @@ export class MessageScansReadService {
     return {
       messageId: message.publicId,
       data: page.map((scan) =>
-        roundOf(scan, engineRows, authRows, attachments, urlInputs, becInputs, dlpInputs, riskRows),
+        roundOf(
+          scan,
+          engineRows,
+          authRows,
+          attachments,
+          urlInputs,
+          becInputs,
+          dlpInputs,
+          riskRows,
+          policyRows,
+        ),
       ),
       nextCursor: rows.length > query.limit && last ? encodeScanCursor(last.lifecycleRound) : null,
     };

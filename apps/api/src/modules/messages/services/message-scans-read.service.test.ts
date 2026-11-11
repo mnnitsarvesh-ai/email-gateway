@@ -10,6 +10,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Principal } from '../../../auth-contracts/principal';
 import { systemScope } from '../../../auth-contracts/tenant-scope';
 import { NO_DLP_IDS } from '../../dlp/domain/dlp-result';
+import { storedEvaluation } from '../../../../test/support/policy-fixtures';
 import { encodeScanCursor } from '../domain/message-scans';
 import type {
   LifecycleMessageRow,
@@ -68,6 +69,7 @@ function setup(rows: ScanRoundRow[], found = true) {
     dlpEvidence: vi.fn(() => Promise.resolve([] as unknown[])),
     dlpPublicIds: vi.fn(() => Promise.resolve(NO_DLP_IDS)),
     riskScores: vi.fn(() => Promise.resolve([] as unknown[])),
+    policyEvaluations: vi.fn(() => Promise.resolve([] as unknown[])),
   };
   const service = new MessageScansReadService(
     lifecycle as unknown as MessageLifecycleReadRepository,
@@ -496,5 +498,40 @@ describe('MessageScansReadService: risk scores (step 5.1 R15)', () => {
     scans.riskScores.mockResolvedValue([{ ...storedRisk(30n, 0, []), contributions: 'broken' }]);
     const page = await service.list(reader, scope, message.publicId, { limit: 10 });
     expect(page.data[0]!.risk).toEqual([]);
+  });
+});
+
+describe('MessageScansReadService: policy evaluation (step 5.2 P16)', () => {
+  const source = {
+    generation: '3',
+    settings: null,
+    platformDefaultId: 'pol-default/1',
+    policies: [],
+  };
+
+  it("shows each round's stored evaluation (ids and codes only), null without one", async () => {
+    const { service, scans } = setup([round(30n, 1), round(20n, 0)]);
+    const { row } = storedEvaluation({ lifecycleRound: 1, risk: null }, source, { scanId: 30n });
+    scans.policyEvaluations.mockResolvedValue([
+      { ...row, id: 5n, messageId: 1n, receivedAt: new Date(), decisivePolicyVersionId: 99n },
+    ]);
+    const page = await service.list(reader, scope, message.publicId, { limit: 10 });
+    expect(scans.policyEvaluations).toHaveBeenCalledWith(scope, message, [30n, 20n]);
+    expect(page.data[0]!.policy).toMatchObject({
+      disposition: 'quarantine',
+      decisive: { source: 'floor', reason: 'policy.floor.risk_missing' },
+      versions: { generation: '3' },
+      lifecycleRound: 1,
+    });
+    expect(page.data[1]!.policy).toBeNull();
+    expect(JSON.stringify(page.data[0]!.policy)).not.toContain('decisivePolicyVersionId');
+  });
+
+  it('shows null for a stored row whose JSON does not form a valid view', async () => {
+    const { service, scans } = setup([round(30n, 0)]);
+    const { row } = storedEvaluation({}, source, { scanId: 30n });
+    scans.policyEvaluations.mockResolvedValue([{ ...row, floor: 'broken' }]);
+    const page = await service.list(reader, scope, message.publicId, { limit: 10 });
+    expect(page.data[0]!.policy).toBeNull();
   });
 });

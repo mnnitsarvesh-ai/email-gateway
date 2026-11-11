@@ -155,18 +155,21 @@ export async function expectIngestionRows(
 }
 
 /**
- * The dev pass-through path of a delivered message: ingestion → scan (E3, E6; step 4.1) → E27
- * (the pass-through approves only scanned mail; E4 is retired) → E20 → derived final.
+ * The path of a delivered message: ingestion → scan (E3, E6; step 4.1) → policy (step 5.2 P13,
+ * P18: E8 `policy_decided`, then E10 `policy_deliver`, or `policy_tag` when a TAG/WARN applies;
+ * the dev pass-through's E27 is retired) → E20 → derived final.
  */
 export const DELIVERED_PATH = (
   finalState: MessageStatus,
   finalReason: string,
+  approvedReason: 'policy_deliver' | 'policy_tag' = 'policy_deliver',
 ): [MessageStatus | null, MessageStatus, string | null][] => [
   [null, 'received', 'smtp_accepted'],
   ['received', 'persisted', 'committed'],
   ['persisted', 'scanning', 'scan_started'],
   ['scanning', 'scanned', 'scan_complete'],
-  ['scanned', 'approved', 'dev_passthrough'],
+  ['scanned', 'policy_evaluated', 'policy_decided'],
+  ['policy_evaluated', 'approved', approvedReason],
   ['approved', 'delivery_pending', 'delivery_planned'],
   ['delivery_pending', finalState, finalReason],
 ];
@@ -232,11 +235,12 @@ export async function lifecycleProblems(
   prisma: PrismaClient,
   organizationIds: readonly bigint[],
   n: number,
-  // Step 4.1: received, persisted, scanning, scanned, approved, delivery_pending, delivered.
+  // Step 4.1: received, persisted, scanning, scanned, approved, delivery_pending, delivered;
+  // step 5.2 adds policy_evaluated between scanned and approved (E8, E10).
   expected: { state: MessageStatus; reason: string; version: number } = {
     state: 'delivered',
     reason: 'delivery_complete',
-    version: 6,
+    version: 7,
   },
 ): Promise<string[]> {
   const problems: string[] = [];
@@ -321,7 +325,7 @@ const sha256hex = (text: string | Buffer) => createHash('sha256').update(text).d
  * recipients and a matching history (`NULL → received` v0, `received → persisted` v1 as the SMTP
  * commit writes them, then one `persisted → <state>` row v2 for any later state, actor
  * `fixture`). `statusChangedAt` lets a suite backdate the state (expiry). The message is not
- * ingested through SMTP, so the dev pass-through never approves it on its own.
+ * ingested through SMTP, so the policy-engine never evaluates it on its own (no scanned event).
  *
  * Any state after `persisted` also gets the final parse row of the step 3.1 MIME role (`parsed`,
  * one text part, no attachments), as a real message in that state has one: since step 4.2 a

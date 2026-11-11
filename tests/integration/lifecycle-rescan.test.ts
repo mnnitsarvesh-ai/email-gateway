@@ -26,7 +26,7 @@ import {
   waitForRoundComplete,
 } from './support/scan-stack';
 import { messagingStackGate, record } from './support/messaging-stack';
-import { expectPassThroughFollowsRisk, riskHoldCounters } from './support/risk';
+import { expectPolicyFollowsRisk, policyPathOf } from './support/policy';
 import { organizationRef } from './support/routing';
 import { SmtpFixtures } from './support/smtp-fixtures';
 import { assertStackReady } from './support/smtp-stack';
@@ -43,10 +43,10 @@ import { assertStackReady } from './support/smtp-stack';
  * step 4.5 D2) `scan.dlp`. The scan role scans round 1 with the stage-1 engines (Rspamd; the
  * attachment engine `skipped`, `attachment.none`; the URL engine `skipped`, `url.none`: the
  * fixture has no stored body; the DLP engine `skipped`, `dlp.not_inbound`: the fixture is
- * inbound) and completes it (`scanned`) with its step 5.1 risk score, after which the dev
- * pass-through follows that score: it holds round 1 when the score recommends `require_approval`
- * /`quarantine`/`block` (this synthetic fixture scores as spam: held), else approves and delivers
- * it. `scan.auth` lost its event bindings in v3 and receives nothing.
+ * inbound) and completes it (`scanned`) with its step 5.1 risk score, after which the
+ * policy-engine (step 5.2) decides round 1 from that score: it holds round 1 when the score
+ * recommends `require_approval`/`quarantine`/`block` (this synthetic fixture scores as spam:
+ * quarantined), else approves and delivers it. `scan.auth` lost its event bindings in v3 and receives nothing.
  *
  * Step 4.5 (D2): `scan.dlp` was the last dormant scan queue bound to the request and is a work
  * queue now, so the exactly-one-copy assertion moves to where the request still rests without a
@@ -100,8 +100,7 @@ afterAll(async () => {
 }, 300_000);
 
 describe.skipIf(gate.skip)('lifecycle stack: administrative rescan', { timeout: 300_000 }, () => {
-  it('lands one rescan request in the dormant firehose and none in scan.sandbox; the five engines scan round 1 (dlp included) and the pass-through follows its risk score', async () => {
-    const riskBefore = await riskHoldCounters();
+  it('lands one rescan request in the dormant firehose and none in scan.sandbox; the five engines scan round 1 (dlp included) and policy follows its risk score', async () => {
     const message = await insertFixtureMessage(fx, {
       organizationId: scenario.org,
       domainId: scenario.domain.id,
@@ -207,8 +206,8 @@ describe.skipIf(gate.skip)('lifecycle stack: administrative rescan', { timeout: 
 
     // scan.spam and scan.attachment: the scan role consumed both copies (one ledger row per
     // engine consumer for the rescan event), opened
-    // round 1 (`rescan`) and completed it (E19 → E6); the pass-through then follows the round's
-    // risk score (below).
+    // round 1 (`rescan`) and completed it (E19 → E6); the policy-engine then decides the round
+    // from its risk score (below).
     const round = await waitForRoundComplete(fx.prisma, message, 1);
     expect(round).toMatchObject({
       scanKind: 'rescan',
@@ -273,17 +272,12 @@ describe.skipIf(gate.skip)('lifecycle stack: administrative rescan', { timeout: 
     for (const queue of ['scan.spam', 'scan.attachment', 'scan.url', 'scan.bec', 'scan.dlp']) {
       expect((await mgmt.queue(vhost, queue)).messages, queue).toBe(0);
     }
-    // Step 5.1 (R13, R17): round 1 has its revision-0 risk row, and the dev pass-through follows
-    // it. The synthetic fixture EML scores as Rspamd spam with a listed IP, an invalid From and no
-    // authentication (observed: 800, critical, quarantine), so it is held in `scanned`
-    // (`risk_recommendation`) instead of being delivered as in 4.6; a row recommending
-    // `deliver`/`tag` would be delivered (design §12.5).
-    const { row: risk, held } = await expectPassThroughFollowsRisk(
-      fx.prisma,
-      message,
-      1,
-      riskBefore,
-    );
+    // Step 5.1 (R13): round 1 has its revision-0 risk row; since step 5.2 the policy-engine
+    // decides from it (P9). The synthetic fixture EML scores as Rspamd spam with a listed IP, an
+    // invalid From and no authentication (5.1 observed: 800, critical, quarantine), so it is
+    // quarantined (5.1: held in `scanned` by the pass-through); a row recommending `deliver`/`tag`
+    // would be delivered. Both directions are checked against the stored rows.
+    const { risk, evaluation, held } = await expectPolicyFollowsRisk(fx.prisma, message, 1);
     expect(risk).toMatchObject({ scanId: round.id, lifecycleRound: 1, status: 'scored' });
     const scannedPath = [
       [null, 'received', 'smtp_accepted'],
@@ -292,18 +286,19 @@ describe.skipIf(gate.skip)('lifecycle stack: administrative rescan', { timeout: 
       ['scan_failed', 'scanning', 'admin_rescan'],
       ['scanning', 'scanned', 'scan_complete'],
     ];
+    expect(evaluation).toMatchObject({ evaluationSeq: 1, scanId: round.id, trigger: 'scanned' });
     expect(await pathOf(fx.prisma, message)).toEqual(
       held
-        ? scannedPath
+        ? [...scannedPath, ...policyPathOf(evaluation)]
         : [
             ...scannedPath,
-            ['scanned', 'approved', 'dev_passthrough'],
+            ...policyPathOf(evaluation),
             ['approved', 'delivery_pending', 'delivery_planned'],
             ['delivery_pending', 'delivered', 'delivery_complete'],
           ],
     );
     expect((await historyOf(fx.prisma, message)).slice(3).map((h) => h.lifecycleRound)).toEqual(
-      held ? [1, 1] : [1, 1, 1, 1, 1],
+      held ? [1, 1, 1, 1] : [1, 1, 1, 1, 1, 1],
     );
     await expectConsistentHistory(fx.prisma, message);
 
@@ -340,6 +335,7 @@ describe.skipIf(gate.skip)('lifecycle stack: administrative rescan', { timeout: 
       round1_verdict: round.scanVerdict,
       round1_risk: `${risk.score}/${risk.level}/${risk.recommendedAction}`,
       round1_held: held,
+      round1_policy: `${evaluation.disposition}:${evaluation.decisionSource}`,
     });
   });
 });

@@ -248,6 +248,7 @@ describe('step 5.1 risk scoring routes (e2e, dependencies stubbed)', () => {
     attachmentParts: () => Promise.resolve([]),
     sandboxSubmissions: () => Promise.resolve([]),
     riskScores: vi.fn(() => Promise.resolve([storedRow] as unknown[])),
+    policyEvaluations: () => Promise.resolve([]),
   };
 
   const bearer = async () => {

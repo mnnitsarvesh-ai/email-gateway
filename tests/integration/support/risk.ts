@@ -2,12 +2,12 @@ import { createHash } from 'node:crypto';
 import type { PrismaClient } from '@email-gateway/database';
 import { waitFor } from './compose';
 import type { MessageKey } from './lifecycle';
-import { metricValue } from './metrics';
-import { PASSTHROUGH_CONSUMER } from './scan-stage';
 
 /**
  * Readers and checks of the step 5.1 risk scoring results (docs/plan/steps/15-risk-scoring.md
- * §3, R11, R13, R17) for the stack suites. Everything reads the MySQL WRITER.
+ * §3, R11, R13) for the stack suites. Everything reads the MySQL WRITER. Since step 5.2 the
+ * delivery decision that follows the score is the policy-engine's (`expectPolicyFollowsRisk` in
+ * ./policy; the 5.1 pass-through checks of R17 were removed with the pass-through, P14).
  */
 
 /** `message_risk_scores` rows of a message, by round then revision. */
@@ -150,114 +150,4 @@ export async function riskStateChecksums(prisma: PrismaClient, organizationId: b
     auditLogs: { rows: audits.length, sha256: digest(audits) },
     messageOutbox: { rows: outbox },
   };
-}
-
-/** delivery-worker counters of the pass-through risk hold (R17, R19). */
-export const riskHoldCounters = async () => ({
-  riskRecommendation: await metricValue('delivery-worker', 'delivery_approvals_skipped_total', {
-    reason: 'risk_recommendation',
-  }),
-  riskMissing: await metricValue('delivery-worker', 'delivery_approvals_skipped_total', {
-    reason: 'risk_missing',
-  }),
-});
-
-/** `delivery_risk_holds_total{action}` of the delivery-worker. */
-export const riskHolds = (action: string) =>
-  metricValue('delivery-worker', 'delivery_risk_holds_total', { action });
-
-/** R17: a revision-0 row the dev pass-through holds (it approves `deliver` and `tag` only). */
-export const riskRowHolds = (row: RiskRow): boolean =>
-  ['require_approval', 'quarantine', 'block'].includes(row.recommendedAction) ||
-  (row.hardBlocks as unknown[]).length > 0 ||
-  row.status === 'error';
-
-/**
- * Step 5.1 R17 through the stack: the pass-through's decision for round `round` follows the
- * round's revision-0 risk row. A row that recommends `require_approval`/`quarantine`/`block`
- * (or carries a hard block or is an error row) → held: the pass-through handled the round's
- * `scanned.v1` (ledger row), `delivery_approvals_skipped_total{reason="risk_recommendation"}`
- * rose (when `before` is given), no approval of this message exists after a 10 s window and the
- * message stays `scanned`. `deliver`/`tag` → approved and delivered. Only for rounds the 4.x
- * checks approve (no `scan_failed`, `malicious`, bec or dlp hold), which the caller knows.
- */
-export async function expectPassThroughFollowsRisk(
-  prisma: PrismaClient,
-  message: MessageKey,
-  round: number,
-  before?: { riskRecommendation: number },
-): Promise<{ row: RiskRow; held: boolean }> {
-  const scan = await prisma.emailScan.findFirstOrThrow({
-    where: { messageId: message.id, receivedAt: message.receivedAt, lifecycleRound: round },
-    select: { id: true, organizationId: true },
-  });
-  const row = await waitForRiskRow(prisma, message, scan.id, 0);
-  const held = riskRowHolds(row);
-  if (!held) {
-    await waitForLifecycleState(prisma, message, 'delivered', 180_000);
-    return { row, held };
-  }
-  const event = await waitFor(
-    `scanned.v1 of round ${round} of message ${message.id}`,
-    async () =>
-      (
-        await prisma.messageOutbox.findMany({
-          where: {
-            organizationId: scan.organizationId,
-            aggregateId: message.id.toString(),
-            eventType: 'mail.message.scanned.v1',
-          },
-        })
-      ).find((e) => (e.payload as { lifecycleRound?: number }).lifecycleRound === round),
-    { timeoutMs: 30_000, intervalMs: 500 },
-  );
-  await waitFor(
-    `the dev pass-through to hold round ${round} of message ${message.id} (risk_recommendation)`,
-    async () => {
-      const ledger = await prisma.messageIdempotency.count({
-        where: { consumer: PASSTHROUGH_CONSUMER, eventId: event.eventId },
-      });
-      if (ledger !== 1) return false;
-      if (!before) return true;
-      return (await riskHoldCounters()).riskRecommendation >= before.riskRecommendation + 1;
-    },
-    { timeoutMs: 60_000, intervalMs: 1_000 },
-  );
-  await new Promise((r) => setTimeout(r, 10_000));
-  const approvals = await prisma.messageOutbox.findMany({
-    where: { organizationId: scan.organizationId, eventType: 'mail.delivery.approved.v1' },
-    select: { payload: true },
-  });
-  const mine = approvals.filter(
-    (a) => (a.payload as { messageId?: string }).messageId === message.id.toString(),
-  );
-  const state = await prisma.emailMessage.findFirstOrThrow({
-    where: { id: message.id, receivedAt: message.receivedAt },
-    select: { status: true, statusReason: true },
-  });
-  if (mine.length !== 0 || state.status !== 'scanned') {
-    throw new Error(
-      `round ${round} of message ${message.id} recommends ${row.recommendedAction} (level ${row.level}) but was not held: ${mine.length} approval(s), state ${state.status}`,
-    );
-  }
-  return { row, held };
-}
-
-async function waitForLifecycleState(
-  prisma: PrismaClient,
-  message: MessageKey,
-  status: string,
-  timeoutMs: number,
-): Promise<void> {
-  await waitFor(
-    `message ${message.id} in ${status}`,
-    async () =>
-      (
-        await prisma.emailMessage.findFirstOrThrow({
-          where: { id: message.id, receivedAt: message.receivedAt },
-          select: { status: true },
-        })
-      ).status === status,
-    { timeoutMs, intervalMs: 500 },
-  );
 }

@@ -21,7 +21,7 @@ const event: EventEnvelope<DeliveryApprovedV1> = {
     messageId: '100',
     receivedAt: '2026-11-03T11:59:00.000Z',
     deliverySeq: 0,
-    source: 'dev_passthrough',
+    source: 'policy',
     emlS3Key: 'org/7/eml/2026/11/03/abc.eml',
     recipients: [{ recipientId: '500', rcptSeq: 0 }],
     approvedAt: '2026-11-03T12:00:00.000Z',

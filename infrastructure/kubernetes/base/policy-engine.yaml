@@ -1,3 +1,9 @@
+# Policy engine (step 5.2, docs/plan/steps/16-policy-engine.md P13, docs/deployment/policy-engine.md):
+# consumes email.policy.evaluate as the role user eg-policy-engine and is the only automatic
+# producer of delivery approvals (ADR-0044). Writer-only MySQL, the mail bucket (reads the
+# delivered object, writes policy copies under org/<org>/policy/ tagged eg-object=policy-copy;
+# S3 access through the pod's IAM role, IRSA, in production), Redis for readiness. At least two
+# replicas: an outage holds every scanned message (alert PolicyEvaluationsStalled).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -16,7 +22,8 @@ spec:
     spec:
       serviceAccountName: policy-engine
       automountServiceAccountToken: false
-      terminationGracePeriodSeconds: 60
+      # Longer than one evaluation transaction budget (POLICY_DB_TX_TIMEOUT_MS) plus the stop grace.
+      terminationGracePeriodSeconds: 150
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -36,8 +43,19 @@ spec:
             - configMapRef: { name: email-gateway-config }
           env:
             - { name: HTTP_PORT, value: '3030' }
+            # Policy engine (step 5.2 §5); POLICY_PLATFORM_DEFAULT comes from the ConfigMap.
+            - { name: POLICY_EVALUATE_PREFETCH, value: '8' }
+            - { name: POLICY_DB_TX_TIMEOUT_MS, value: '120000' }
+            - { name: POLICY_SNAPSHOT_CACHE_MAX_ENTRIES, value: '1000' }
+            - { name: POLICY_COPY_MAX_MESSAGE_BYTES, value: '26214400' }
+            - { name: POLICY_COPY_MAX_HEADER_BYTES, value: '262144' }
             # Secrets are mounted as files by External Secrets and read via the <KEY>_FILE convention.
             - { name: DATABASE_URL_FILE, value: /var/run/secrets/gateway/database-url }
+            # Role user eg-policy-engine (step 5.2 P15): consumes email.policy.evaluate.
+            - {
+                name: RABBITMQ_POLICY_ENGINE_URL_FILE,
+                value: /var/run/secrets/gateway/rabbitmq-policy-engine-url,
+              }
             - { name: REDIS_URL_FILE, value: /var/run/secrets/gateway/redis-url }
           volumeMounts:
             - { name: secrets, mountPath: /var/run/secrets/gateway, readOnly: true }

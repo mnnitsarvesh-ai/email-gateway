@@ -1,5 +1,5 @@
 {
-  "topology_version": 8,
+  "topology_version": 9,
   "exchanges": [
     {
       "name": "email.ingestion",
@@ -211,6 +211,15 @@
       }
     },
     {
+      "name": "email.notifications",
+      "vhost": "email-gateway",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-queue-type": "quorum"
+      }
+    },
+    {
       "name": "email.analytics",
       "vhost": "email-gateway",
       "durable": true,
@@ -236,6 +245,14 @@
       "destination": "email.events",
       "destination_type": "exchange",
       "routing_key": "org.#",
+      "arguments": {}
+    },
+    {
+      "source": "email.archive",
+      "vhost": "email-gateway",
+      "destination": "email.archive",
+      "destination_type": "queue",
+      "routing_key": "org.*.mail.message.archive_requested.v1",
       "arguments": {}
     },
     {
@@ -377,9 +394,17 @@
     {
       "source": "email.policy",
       "vhost": "email-gateway",
-      "destination": "email.archive",
+      "destination": "email.notifications",
       "destination_type": "queue",
-      "routing_key": "org.*.mail.policy.decided.v1",
+      "routing_key": "org.*.mail.policy.notification_requested.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.policy",
+      "vhost": "email-gateway",
+      "destination": "email.notifications",
+      "destination_type": "queue",
+      "routing_key": "retry.email.notifications.#",
       "arguments": {}
     },
     {
@@ -776,9 +801,12 @@
       "apply-to": "queues",
       "priority": 10,
       "definition": {
-        "delivery-limit": -1,
-        "max-length": 10000,
-        "overflow": "drop-head"
+        "delivery-limit": 20,
+        "dead-letter-exchange": "email.events",
+        "dead-letter-routing-key": "dead-letter.email.policy.evaluate",
+        "dead-letter-strategy": "at-least-once",
+        "overflow": "reject-publish",
+        "max-length": 1000000
       }
     },
     {
@@ -833,6 +861,21 @@
         "delivery-limit": -1,
         "max-length": 10000,
         "overflow": "drop-head"
+      }
+    },
+    {
+      "vhost": "email-gateway",
+      "name": "eg.email.notifications",
+      "pattern": "^email\\.notifications$",
+      "apply-to": "queues",
+      "priority": 10,
+      "definition": {
+        "delivery-limit": 20,
+        "dead-letter-exchange": "email.events",
+        "dead-letter-routing-key": "dead-letter.email.notifications",
+        "dead-letter-strategy": "at-least-once",
+        "overflow": "reject-publish",
+        "max-length": 1000000
       }
     },
     {

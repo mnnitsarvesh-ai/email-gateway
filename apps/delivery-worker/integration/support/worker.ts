@@ -126,7 +126,6 @@ export const FAST = {
   DELIVERY_RATE_TENANT_DOMAIN_RCPT_PER_MINUTE: '300',
   DELIVERY_RATE_DESTINATION_DOMAIN_RCPT_PER_MINUTE: '6000',
   DELIVERY_BATCH_MAX_RECIPIENTS: '100',
-  DELIVERY_DEV_PASSTHROUGH_ENABLED: 'false',
 } as const;
 
 /** Moves a reinjection's next attempt into the past (skip the backoff in tests). */

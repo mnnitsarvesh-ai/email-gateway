@@ -19,10 +19,10 @@ const known = (code: string, meta?: Record<string, unknown>, message = 'failed')
 
 const request: TransitionRequest = {
   message: { id: 1n, receivedAt: new Date('2026-11-04T10:00:00Z'), organizationId: 2n },
-  to: 'approved',
-  reason: 'dev_passthrough',
-  actor: { role: 'dev_passthrough', service: 'delivery-worker', type: 'system' },
-  transitionKey: 'evt:0190f0a0-0000-7000-8000-000000000001:approved',
+  to: 'policy_evaluated',
+  reason: 'policy_decided',
+  actor: { role: 'policy', service: 'policy-engine', type: 'system' },
+  transitionKey: 'evt:0190f0a0-0000-7000-8000-000000000001:policy_evaluated',
   expectedRound: 0,
   expectedFrom: ['scanned'],
 };

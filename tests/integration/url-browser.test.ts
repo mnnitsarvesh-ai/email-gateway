@@ -30,10 +30,10 @@ import { waitForSinkMessage } from './support/mail-sink';
 import { waitForLifecycle } from './support/lifecycle';
 import { apiSession, type ApiSession } from './support/api-client';
 import { organizationRef } from './support/routing';
+import { waitForEvaluation } from './support/policy';
 import {
   hardBlocksOf,
   levelAtLeast,
-  riskRowHolds,
   scanRiskColumns,
   signalsOf,
   waitForRiskRow,
@@ -55,8 +55,8 @@ import {
  *
  * Step 5.1 (docs/plan/steps/15-risk-scoring.md R10, R17): the credential form scores `high` /
  * `quarantine` under the platform default `rsk-default/1` (observed 640: `credential` 450 +
- * `url_structure` 150 + `auth_other` 40), so the dev pass-through would hold the message and no
- * click could follow. The fixture organization therefore publishes a tenant risk profile that
+ * `url_structure` 150 + `auth_other` 40), so policy (step 5.2; in 5.1 the dev pass-through) would
+ * quarantine the message and no click could follow. The fixture organization therefore publishes a tenant risk profile that
  * raises the `high` threshold to its bound (700), under which the same round is `medium` / `tag`
  * and is delivered; the suite asserts the stored row (tenant profile, credential signals) and,
  * through the dry-run, that the platform default would have held it.
@@ -205,7 +205,7 @@ describe.skipIf(base.skip || !profileUp)(
       expect(JSON.stringify(completed.signals)).not.toMatch(/Sign in|<form|password"/);
 
       // Step 5.1: the round's revision-0 risk row, scored with the tenant version: a credential
-      // form, `medium` / `tag` (not held by the pass-through, R17). The platform default would
+      // form, `medium` / `tag` (allowed by policy, step 5.2 P9). The platform default would
       // hold the same round (dry-run, nothing written).
       const columns = await scanRiskColumns(fx.prisma, message, 0);
       expect(columns.riskProfileVersionId).toBe(tenantVersionId);
@@ -220,7 +220,12 @@ describe.skipIf(base.skip || !profileUp)(
       });
       expect(signalsOf(risk)).toEqual(expect.arrayContaining(['credential_form']));
       expect(hardBlocksOf(risk)).toEqual([]);
-      expect(riskRowHolds(risk)).toBe(false);
+      // Step 5.2: the policy-engine allows it (platform default: `tag` → allow + platform TAG).
+      const evaluation = await waitForEvaluation(fx.prisma, message, 0, 120_000);
+      expect(evaluation).toMatchObject({
+        disposition: 'allow',
+        decisionSource: 'platform_default',
+      });
       const publicId = await messagePublicId(fx.prisma, message);
       const platform = await waitFor(
         'the platform-default dry-run (replicated)',

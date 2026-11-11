@@ -28,6 +28,7 @@ import {
   sandboxReportViewSchema,
   urlResultSchema,
 } from '@email-gateway/security-contracts';
+import { policyEvaluationViewSchema } from '@email-gateway/policy-dsl';
 import { riskScoreViewSchema } from '@email-gateway/risk-scoring';
 import { z } from 'zod';
 
@@ -473,6 +474,14 @@ export const ScanRoundSchema = z.object({
         'the late sandbox result); [] while running or for rounds scored before 5.1. A ' +
         'recommendation: 5.1 does not enforce it (policy, step 5.2, decides). The default ' +
         'weights and thresholds are not validated detection accuracy.',
+    ),
+  policy: policyEvaluationViewSchema
+    .nullable()
+    .describe(
+      'The stored policy evaluation of the round (step 5.2): disposition, decisive rule, ' +
+        'actions with the status the policy-engine achieved, floor, recommendation, ' +
+        'explanation and hashes; null while not evaluated (or for rounds before 5.2). Ids, ' +
+        'codes and hashes only.',
     ),
 });
 export type ScanRoundView = z.output<typeof ScanRoundSchema>;

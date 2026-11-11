@@ -22,7 +22,7 @@ sequenceDiagram
   rect rgb(255, 248, 225)
     EW->>DB: internal inspection (feature internal_inspection), policy for direction internal (PLANNED 4.x, 5.2)
   end
-  DW->>DB: approval (today: dev pass-through, local/CI only), plan:<br/>internal recipients grouped per tenant domain (tenant:<domainId>), re-check direction:<br/>changed since ingestion → failed direction_changed (never leaves by the other path)
+  DW->>DB: approval (policy-engine, step 5.2), plan:<br/>internal recipients grouped per tenant domain (tenant:<domainId>), re-check direction:<br/>changed since ingestion → failed direction_changed (never leaves by the other path)
   DW->>PX: XFORWARD IDENT=dw1-<token>, MAIL FROM:<O sender> RET=HDRS ENVID=…,<br/>RCPT NOTIFY=FAILURE,DELAY, DATA: X-Gateway-Trace d=in + EML
   PX->>SM: transport → O's next-hop list
   PX-->>DW: 250 queued as QID
@@ -32,7 +32,7 @@ sequenceDiagram
   Note over T,D: The trace d=in for O stops a loop if O's server sends the copy back<br/>through the inbound MX (554 5.4.6)#59; evaluateHops stops loops alternating directions
 ```
 
-**Legend.** Plain messages: IMPLEMENTED (step 2.3). Shaded block: PLANNED. Approval today is the development-only pass-through (diagram 16).
+**Legend.** Plain messages: IMPLEMENTED (step 2.3). Shaded block: PLANNED. Approval comes from the policy-engine since step 5.2 (diagram 16).
 
 ## Status
 

@@ -10,6 +10,10 @@ import type {
 } from '../../dlp/domain/dlp-result';
 import { resolveDlpIds } from '../../dlp/repositories/dlp-results.repository';
 import type { LifecycleMessageRow } from './message-lifecycle-read.repository';
+import {
+  type EvaluationRow,
+  evaluationSelect,
+} from '../../policies/repositories/policy-facts.repository';
 
 const scanSelect = {
   id: true,
@@ -706,6 +710,28 @@ export class MessageScansReadRepository {
       }),
       select: riskScoreSelect,
       orderBy: [{ scanId: 'desc' }, { revision: 'asc' }],
+      take: MAX_RISK_SCORE_ROWS,
+    });
+  }
+
+  /**
+   * The policy evaluations of the given scans (`policy_execution_logs`, partitioned by
+   * `received_at`; one per round, step 5.2 P16): the columns of the api view, never internal ids.
+   */
+  policyEvaluations(
+    scope: TenantScope,
+    message: LifecycleMessageRow,
+    scanIds: readonly bigint[],
+  ): Promise<EvaluationRow[]> {
+    if (scanIds.length === 0) return Promise.resolve([]);
+    return this.db.policyExecutionLog.findMany({
+      where: tenantWhere(scope, {
+        messageId: message.id,
+        receivedAt: message.receivedAt,
+        scanId: { in: [...scanIds] },
+      }),
+      select: evaluationSelect,
+      orderBy: [{ evaluationSeq: 'desc' }, { id: 'desc' }],
       take: MAX_RISK_SCORE_ROWS,
     });
   }

@@ -37,9 +37,11 @@ const EXPECTED_CHECKS: Record<string, string[]> = {
     'sandbox-bucket',
     'url-engine',
   ],
-  'policy-engine': ['mysql', 'redis'],
+  // Step 5.2: the policy-engine consumes email.policy.evaluate (rabbitmq) and writes policy
+  // copies (s3); the notification-worker consumes email.notifications (rabbitmq).
+  'policy-engine': ['mysql', 'rabbitmq', 'redis', 's3'],
   'delivery-worker': ['mysql', 'rabbitmq', 'redis', 's3'],
-  'notification-worker': ['mysql'],
+  'notification-worker': ['mysql', 'rabbitmq'],
   'archive-worker': ['mysql', 's3'],
   'event-relay': ['mysql', 'rabbitmq'],
 };

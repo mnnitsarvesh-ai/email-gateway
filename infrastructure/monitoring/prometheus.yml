@@ -4,8 +4,8 @@ global:
 
 # Alert rules (step 3.2 Q15: messaging.rules.yml; step 3.3 L14: lifecycle.rules.yml; step 4.1 S17:
 # scanning.rules.yml; step 4.3 U18: click-service.rules.yml, url-scanning.rules.yml; step 4.6 X20:
-# sandbox-controller.rules.yml). Alertmanager routing is step 10.3; until then the alerts are
-# visible on the Prometheus /alerts page.
+# sandbox-controller.rules.yml; step 5.2 P24: policy-engine.rules.yml). Alertmanager routing is
+# step 10.3; until then the alerts are visible on the Prometheus /alerts page.
 rule_files:
   - rules/*.rules.yml
 
@@ -45,6 +45,16 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: ['delivery-worker:3040']
+  # policy-engine (step 5.2 P24): policy_* evaluation series, the shared lifecycle_* and amqp_*.
+  - job_name: policy-engine
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['policy-engine:3030']
+  # notification-worker (step 5.2 P24): notification_policy_messages_total, send duration, amqp_*.
+  - job_name: notification-worker
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['notification-worker:3050']
   # event-relay (step 3.2 §5.3): outbox relay (outbox_relay_*), outbox health (outbox_*),
   # reconciliation (reconcile_*), AMQP client (amqp_*).
   - job_name: event-relay

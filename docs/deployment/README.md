@@ -41,17 +41,17 @@ kubectl apply -k infrastructure/kubernetes/overlays/saas         # apply
 
 The manifests expect an `email-gateway-secrets` Secret (managed by External Secrets), mounted at `/var/run/secrets/gateway` and read through the `<KEY>_FILE` convention, plus per-environment values for the ConfigMap.
 
-| Secret key               | Read as                                                     | Used by       | Points at                                                                                          |
-| ------------------------ | ----------------------------------------------------------- | ------------- | -------------------------------------------------------------------------------------------------- |
-| `database-url`           | `DATABASE_URL_FILE`                                         | every service | MySQL **writer**: the RDS instance endpoint, or the Aurora cluster (writer) endpoint (DML account) |
-| `database-read-url`      | `DATABASE_READ_URL_FILE`                                    | `api` only    | MySQL **reader**: an RDS read replica endpoint, or the Aurora reader endpoint (reader account)     |
-| `migration-database-url` | `MIGRATION_DATABASE_URL` (migration Job, not in `base` yet) | `db-migrate`  | MySQL writer, migrator (DDL) account                                                               |
-| `rabbitmq-url`           | `RABBITMQ_URL_FILE`                                         | every service | Amazon MQ / RabbitMQ                                                                               |
-| `redis-url`              | `REDIS_URL_FILE`                                            | every service | ElastiCache Redis                                                                                  |
-| `auth-jwt-secret`        | `AUTH_JWT_SECRET_FILE`                                      | `api` only    | HMAC key for access tokens (at least 64 characters)                                                |
-| `auth-token-pepper`      | `AUTH_TOKEN_PEPPER_FILE`                                    | `api` only    | HMAC pepper for API-key and recovery-code hashes (at least 64 characters)                          |
-| `data-encryption-key`    | `DATA_ENCRYPTION_KEY_FILE`                                  | `api` only    | AES-256-GCM key, exactly 64 hex characters (application-encrypted columns such as MFA secrets)     |
-| `notify-smtp-password`   | `NOTIFY_SMTP_PASSWORD_FILE`                                 | `api`         | Password of the transactional-email relay (SES SMTP or similar); optional                          |
+| Secret key               | Read as                                                     | Used by                      | Points at                                                                                          |
+| ------------------------ | ----------------------------------------------------------- | ---------------------------- | -------------------------------------------------------------------------------------------------- |
+| `database-url`           | `DATABASE_URL_FILE`                                         | every service                | MySQL **writer**: the RDS instance endpoint, or the Aurora cluster (writer) endpoint (DML account) |
+| `database-read-url`      | `DATABASE_READ_URL_FILE`                                    | `api` only                   | MySQL **reader**: an RDS read replica endpoint, or the Aurora reader endpoint (reader account)     |
+| `migration-database-url` | `MIGRATION_DATABASE_URL` (migration Job, not in `base` yet) | `db-migrate`                 | MySQL writer, migrator (DDL) account                                                               |
+| `rabbitmq-url`           | `RABBITMQ_URL_FILE`                                         | every service                | Amazon MQ / RabbitMQ                                                                               |
+| `redis-url`              | `REDIS_URL_FILE`                                            | every service                | ElastiCache Redis                                                                                  |
+| `auth-jwt-secret`        | `AUTH_JWT_SECRET_FILE`                                      | `api` only                   | HMAC key for access tokens (at least 64 characters)                                                |
+| `auth-token-pepper`      | `AUTH_TOKEN_PEPPER_FILE`                                    | `api` only                   | HMAC pepper for API-key and recovery-code hashes (at least 64 characters)                          |
+| `data-encryption-key`    | `DATA_ENCRYPTION_KEY_FILE`                                  | `api` only                   | AES-256-GCM key, exactly 64 hex characters (application-encrypted columns such as MFA secrets)     |
+| `notify-smtp-password`   | `NOTIFY_SMTP_PASSWORD_FILE`                                 | `api`, `notification-worker` | Password of the transactional-email relay (SES SMTP or similar); optional                          |
 
 `database-read-url` is **required** by the `api` Deployment: a missing file fails startup. An environment without a replica sets it to the writer URL; the api then reports `writer-fallback` (`not a replica`) and reads from the writer. The ConfigMap carries `DATABASE_READ_MAX_LAG_SECONDS` (`'10'`) and `DATABASE_READ_LAG_CHECK_INTERVAL_MS` (`'5000'`). Data-plane Deployments get no reader URL: they are writer-only by design.
 
@@ -90,6 +90,10 @@ Inbound MX (`postfix`), outbound MTA (`postfix-outbound`: submission 587, connec
 ### Security scanning (step 4.1)
 
 The inbound `rspamd` is both the SMTP-time milter of the inbound Postfix (rejects only GTUBE and score >= `RSPAMD_MILTER_REJECT_SCORE`; Postfix **accepts** when it is down, `milter_default_action = accept`, [ADR-0027](../architecture/adr/0027-rspamd-milter-policy.md)) and the post-queue scan engine of the email-worker's scan role (`/checkv2`, [ADR-0026](../architecture/adr/0026-security-scan-pipeline.md)). Topology, every `RSPAMD_*` key, production feeds (Spamhaus DQS, SURBL/URIBL, OpenPhish, bad-URL map) as configuration, the recursive resolver requirement, dedicated Redis and sizing, Bayes/fuzzy operations, memory, local verification and the deviations from the design: [rspamd.md](rspamd.md). New secrets: `RSPAMD_CONTROLLER_PASSWORD` (rspamd, email-worker), `RSPAMD_CONTROLLER_ENABLE_PASSWORD` (rspamd, api), `RABBITMQ_SCANNER_PASSWORD` (rabbitmq-init, email-worker scan role), optional `RSPAMD_SPAMHAUS_DQS_KEY` (rspamd, production).
+
+### Policy engine (step 5.2)
+
+The `policy-engine` (EKS Deployment, ≥ 2 replicas) consumes `email.policy.evaluate` as `eg-policy-engine` and is the **only automatic producer of delivery approvals**; the delivery-worker's development pass-through is removed (`DELIVERY_DEV_PASSTHROUGH_ENABLED=true` is refused). The `notification-worker` consumes `email.notifications` as `eg-notification` and sends policy alerts and sender notices through the transactional relay. Rollout order (migration → topology v9 + broker users → api → policy-engine → delivery-worker → notification-worker), the backlog of held `scanned` messages evaluated at activation, the S3 lifecycle rule `eg-policy-copy-expiry`, IAM, Kubernetes and the new Secret keys `rabbitmq-policy-engine-url` / `rabbitmq-notification-url`: [policy-engine.md](policy-engine.md). Runbook: [policy-engine](../runbooks/policy-engine.md).
 
 ## Terraform
 

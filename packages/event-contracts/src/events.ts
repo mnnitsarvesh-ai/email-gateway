@@ -132,16 +132,270 @@ export const messageScannedV1 = z
   });
 export type MessageScannedV1 = z.infer<typeof messageScannedV1>;
 
-/** Published by the policy engine with the final action for the message. */
-export const policyDecidedV1 = z.object({
+/**
+ * Policy vocabularies (step 5.2, docs/plan/steps/16-policy-engine.md P9, P10, P15, P18). They
+ * mirror `POLICY_DISPOSITIONS`, `POLICY_NON_TERMINAL_ACTIONS` and the rule id pattern of
+ * `@email-gateway/policy-dsl` and the Prisma enums (`MessageAction`, `MessageVerdict`,
+ * `PolicyEvaluationTrigger`, `PolicyDecisionSource`); event-contracts depends on neither.
+ */
+/** `MessageVerdict` (the final verdict of a message). */
+export const MESSAGE_VERDICT_VALUES = [
+  'clean',
+  'spam',
+  'bulk',
+  'phishing',
+  'malware',
+  'bec',
+  'dlp_violation',
+  'suspicious',
+  'unknown',
+] as const;
+/** `MessageAction` incl. the step 5.2 values `reject` and `require_approval` (P18). */
+export const POLICY_FINAL_ACTION_VALUES = [
+  'deliver',
+  'tag',
+  'quarantine',
+  'discard',
+  'reject',
+  'require_approval',
+] as const;
+/** Final dispositions in strictness order (P9). */
+export const POLICY_DISPOSITION_VALUES = [
+  'allow',
+  'require_approval',
+  'quarantine',
+  'reject',
+] as const;
+export const POLICY_TRIGGER_VALUES = ['scanned', 'scan_failed', 'parse_failed'] as const;
+export const POLICY_DECISION_SOURCE_VALUES = ['tenant_rule', 'platform_default', 'floor'] as const;
+/** The non-terminal action types of the DSL (P2), in canonical order. */
+export const POLICY_NON_TERMINAL_ACTION_VALUES = [
+  'TAG',
+  'WARN',
+  'URL_REWRITE',
+  'ARCHIVE',
+  'ALERT',
+] as const;
+/** A rule id of a `policy-dsl/1` definition (P2). */
+export const POLICY_RULE_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,47}$/;
+/** A rule reference `<policyPublicId>#<versionNo>/<ruleId>` (P10). */
+export const POLICY_RULE_REF_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}#[1-9][0-9]{0,9}\/[a-z0-9][a-z0-9_-]{0,47}$/;
+
+/** A BIGINT UNSIGNED counter as a canonical decimal string; unlike an id it may be `0`. */
+const decimalCounter = z.string().regex(/^(0|[1-9][0-9]{0,19})$/, 'Expected a decimal counter');
+const lowerSha256 = z.string().regex(/^[0-9a-f]{64}$/, 'Expected a lower-case hex SHA-256');
+const policyRuleRef = z
+  .string()
+  .max(96)
+  .regex(POLICY_RULE_REF_PATTERN, 'Expected <policyPublicId>#<versionNo>/<ruleId>');
+const policyDisposition = z.enum(POLICY_DISPOSITION_VALUES);
+/**
+ * The decisive source of a decision. A tenant rule names its policy (public id), version and
+ * rule; the platform default and the floor name none.
+ */
+const policyDecisive = z
+  .strictObject({
+    source: z.enum(POLICY_DECISION_SOURCE_VALUES),
+    /** `email_policies.public_id` of the decisive rule's policy. */
+    policyId: z.uuid().nullable(),
+    versionNo: z.number().int().min(1).max(4_294_967_295).nullable(),
+    ruleId: z.string().regex(POLICY_RULE_ID_PATTERN, 'Expected a policy rule id').nullable(),
+  })
+  .superRefine((decisive, ctx) => {
+    const tenant = decisive.source === 'tenant_rule';
+    for (const field of ['policyId', 'versionNo', 'ruleId'] as const) {
+      if (tenant && decisive[field] === null) {
+        ctx.addIssue({
+          code: 'custom',
+          path: [field],
+          message: 'A tenant_rule decision names its policy, version and rule',
+        });
+      }
+      if (!tenant && decisive[field] !== null) {
+        ctx.addIssue({
+          code: 'custom',
+          path: [field],
+          message: 'Only a tenant_rule decision names a policy, version or rule',
+        });
+      }
+    }
+  });
+
+/** P18: the `final_action` values each disposition can produce (direction decides reject). */
+const FINAL_ACTIONS_BY_DISPOSITION: Readonly<
+  Record<(typeof POLICY_DISPOSITION_VALUES)[number], readonly string[]>
+> = {
+  allow: ['deliver', 'tag'],
+  require_approval: ['require_approval'],
+  quarantine: ['quarantine'],
+  reject: ['discard', 'reject'],
+};
+
+/**
+ * The decision of the policy engine for one lifecycle round (step 5.2 P13, P15, ADR-0044).
+ * Written by the policy-engine through `message_outbox` (`aggregate_type = 'message'`,
+ * `aggregate_id` = decimal message id, correlation copied from the triggering
+ * `mail.message.scanned.v1` / `mail.message.parse_failed.v1`) in the evaluation transaction, once
+ * per round. Published to `email.policy`; bound to the dormant `email.quarantine` (consumer: step
+ * 5.3, which filters `disposition ∈ quarantine, require_approval`) and the analytics firehose.
+ *
+ * **Redefined in place by step 5.2**: the step 1.1 placeholder (`action`,
+ * `matchedPolicyVersionIds`, `archive`) never had a producer or a consumer.
+ *
+ * Content rules (§2.0 invariant 8): ids, enums, integers and hashes only; the object is strict,
+ * so a producer cannot add an address, subject or rule description. Consistency (enforced):
+ * `finalAction` follows `disposition` (P18: allow → deliver | tag; reject → discard inbound,
+ * reject outbound/internal); a parse failure has no scan and a scanned/scan-failed round has
+ * one; a scan or parse failure is never allowed (the floor, P9.5); a tenant_rule decision names
+ * its policy, version and rule; `nonTerminalActions` (applied or requested) are unique.
+ */
+export const policyDecidedV1 = z
+  .strictObject({
+    messageId: decimalIdSchema,
+    receivedAt: z.iso.datetime(),
+    direction,
+    /** The lifecycle round evaluated (= `policy_execution_logs.evaluation_seq`). */
+    lifecycleRound: z.number().int().min(0).max(65_535),
+    /** `email_scans.id` of the round; null for a parse failure. */
+    scanId: decimalIdSchema.nullable(),
+    trigger: z.enum(POLICY_TRIGGER_VALUES),
+    disposition: policyDisposition,
+    /** `email_messages.final_action` written with the decision (P18). */
+    finalAction: z.enum(POLICY_FINAL_ACTION_VALUES),
+    finalVerdict: z.enum(MESSAGE_VERDICT_VALUES),
+    /** Max risk score (0–1000) over the round's revisions; null without a risk row. */
+    riskScore: z.number().int().min(0).max(1000).nullable(),
+    /** Non-terminal actions applied or requested for the round (TAG, WARN, …), unique. */
+    nonTerminalActions: z.array(z.enum(POLICY_NON_TERMINAL_ACTION_VALUES)).max(5),
+    decisive: policyDecisive,
+    overrideApplied: z.boolean(),
+    /** `policy_settings.generation` read in the evaluation transaction (0 = no settings row). */
+    policyGeneration: decimalCounter,
+    snapshotSha256: lowerSha256,
+    inputSha256: lowerSha256,
+    evaluatedAt: z.iso.datetime(),
+  })
+  .superRefine((payload, ctx) => {
+    if (!FINAL_ACTIONS_BY_DISPOSITION[payload.disposition].includes(payload.finalAction)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['finalAction'],
+        message: `finalAction ${payload.finalAction} does not follow disposition ${payload.disposition}`,
+      });
+    }
+    if (payload.disposition === 'reject') {
+      const expected = payload.direction === 'inbound' ? 'discard' : 'reject';
+      if (payload.finalAction !== expected) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['finalAction'],
+          message: `A rejected ${payload.direction} message has finalAction ${expected}`,
+        });
+      }
+    }
+    if ((payload.trigger === 'parse_failed') !== (payload.scanId === null)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['scanId'],
+        message: 'scanId is null exactly for a parse_failed evaluation',
+      });
+    }
+    if (
+      payload.trigger !== 'scanned' &&
+      payload.disposition !== 'quarantine' &&
+      payload.disposition !== 'reject'
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['disposition'],
+        message: 'A scan or parse failure is at least quarantined (strictness floor)',
+      });
+    }
+    if (new Set(payload.nonTerminalActions).size !== payload.nonTerminalActions.length) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['nonTerminalActions'],
+        message: 'Duplicate action type',
+      });
+    }
+  });
+export type PolicyDecidedV1 = z.infer<typeof policyDecidedV1>;
+
+/**
+ * An ARCHIVE request of a policy decision (step 5.2 P15, P19, ADR-0045): the round's message is
+ * to be archived. Written by the policy-engine through `message_outbox` (`aggregate_type =
+ * 'message'`) in the evaluation transaction when an ARCHIVE action applies (once per round).
+ * Published to `email.archive`; bound to the **dormant** `email.archive` queue (consumer: step
+ * 8.1, which also reconciles from `policy_execution_logs`, because the dormant queue is lossy).
+ * Ids, the S3 key and hashes only (strict). `emlS3Key` is the ORIGINAL
+ * `email_messages.eml_object_key` (organization-prefixed), never a policy or rewritten copy;
+ * `ruleRef` names the first rule that requested ARCHIVE (null never happens for `source =
+ * policy` in 5.2 but is allowed for a future platform-default archive).
+ */
+export const messageArchiveRequestedV1 = z.strictObject({
   messageId: decimalIdSchema,
   receivedAt: z.iso.datetime(),
-  action: z.enum(['deliver', 'tag', 'quarantine', 'discard']),
-  /** `policy_versions.id` values that matched. */
-  matchedPolicyVersionIds: z.array(decimalIdSchema),
-  archive: z.boolean(),
+  direction,
+  lifecycleRound: z.number().int().min(0).max(65_535),
+  emlS3Key: s3Key,
+  source: z.enum(['policy']),
+  ruleRef: policyRuleRef.nullable(),
+  policyGeneration: decimalCounter,
+  requestedAt: z.iso.datetime(),
 });
-export type PolicyDecidedV1 = z.infer<typeof policyDecidedV1>;
+export type MessageArchiveRequestedV1 = z.infer<typeof messageArchiveRequestedV1>;
+
+/** Notification kinds of a policy decision (P25). */
+export const POLICY_NOTIFICATION_KIND_VALUES = ['policy_alert', 'sender_non_delivery'] as const;
+export const POLICY_ALERT_SEVERITY_VALUES = ['info', 'warning', 'critical'] as const;
+
+/**
+ * A notification requested by a policy decision (step 5.2 P15, P19, P25): an ALERT to the
+ * organization's policy publishers (`policy_alert`) or a non-delivery notice to the sender of a
+ * rejected outbound/internal message (`sender_non_delivery`; inbound never, P9.10). Written by
+ * the policy-engine through `message_outbox` (`aggregate_type = 'message'`) in the evaluation
+ * transaction; published to `email.policy` and consumed from `email.notifications` by the
+ * notification-worker (ledger `notification-worker.policy`, at least once). Ids, enums and rule
+ * references only (strict): the worker reads what it renders from the database, never from the
+ * event, and never renders subject, body, file names or URLs.
+ */
+export const policyNotificationRequestedV1 = z
+  .strictObject({
+    messageId: decimalIdSchema,
+    receivedAt: z.iso.datetime(),
+    direction,
+    lifecycleRound: z.number().int().min(0).max(65_535),
+    kind: z.enum(POLICY_NOTIFICATION_KIND_VALUES),
+    severity: z.enum(POLICY_ALERT_SEVERITY_VALUES),
+    disposition: policyDisposition,
+    decisive: policyDecisive,
+    /** Rules that requested the notification (`<policyPublicId>#<versionNo>/<ruleId>`), unique. */
+    ruleRefs: z.array(policyRuleRef).max(16),
+    requestedAt: z.iso.datetime(),
+  })
+  .superRefine((payload, ctx) => {
+    if (payload.kind === 'sender_non_delivery') {
+      if (payload.direction === 'inbound') {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['direction'],
+          message: 'A sender non-delivery notice is never sent for inbound mail',
+        });
+      }
+      if (payload.disposition !== 'reject') {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['disposition'],
+          message: 'A sender non-delivery notice follows a reject',
+        });
+      }
+    }
+    if (new Set(payload.ruleRefs).size !== payload.ruleRefs.length) {
+      ctx.addIssue({ code: 'custom', path: ['ruleRefs'], message: 'Duplicate rule reference' });
+    }
+  });
+export type PolicyNotificationRequestedV1 = z.infer<typeof policyNotificationRequestedV1>;
 
 /**
  * Published (through `message_outbox`, `aggregate_type = 'domain'`) whenever a domain changes
@@ -1540,4 +1794,6 @@ export const EventTypes = {
   SandboxTaskRequested: 'mail.sandbox.task_requested.v1',
   SandboxTaskCompleted: 'mail.sandbox.task_completed.v1',
   AttachmentSandboxCompleted: 'mail.attachment.sandbox_completed.v1',
+  MessageArchiveRequested: 'mail.message.archive_requested.v1',
+  PolicyNotificationRequested: 'mail.policy.notification_requested.v1',
 } as const;

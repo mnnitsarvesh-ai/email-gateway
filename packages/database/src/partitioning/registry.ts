@@ -68,7 +68,9 @@ export const PARTITION_REGISTRY: readonly PartitionSpec[] = Object.freeze([
   monthly('email_events', 'received_at', 3, 'detail'),
   monthly('email_message_status_history', 'received_at', 3, 'detail'),
   monthly('scan_engine_results', 'received_at', 3, 'detail'),
-  monthly('policy_execution_logs', 'received_at', 3, 'detail'),
+  // Step 5.2 (docs/plan/steps/16-policy-engine.md §3, P16): the policy decision record lives as
+  // long as the scan round it decided (6 months, core; was 3 months, detail).
+  monthly('policy_execution_logs', 'received_at', 6, 'core'),
   monthly('delivery_attempts', 'received_at', 3, 'detail'),
   // Step 2.3 (docs/plan/steps/05-routing.md §3): reinjection groups live as long as the
   // deliveries they carry; the status audit trail is detail data.

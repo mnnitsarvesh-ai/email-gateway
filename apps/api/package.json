@@ -24,6 +24,7 @@
     "@email-gateway/logger": "workspace:*",
     "@email-gateway/mail-routing": "workspace:*",
     "@email-gateway/message-lifecycle": "workspace:*",
+    "@email-gateway/policy-dsl": "workspace:*",
     "@email-gateway/risk-scoring": "workspace:*",
     "@email-gateway/rspamd": "workspace:*",
     "@email-gateway/sandbox": "workspace:*",

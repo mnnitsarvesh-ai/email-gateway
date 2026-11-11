@@ -94,12 +94,14 @@ describe('AppModule wiring', () => {
         'delivery_status_signals_total',
         'delivery_status_transitions_total',
         'delivery_status_log_lag_seconds',
-        'delivery_outbox_poll_lag_seconds',
         'delivery_rate_limited_total',
         'delivery_reconciler_actions_total',
       ]) {
         expect(metrics).toContain(`# TYPE ${name} `);
       }
+      // Step 5.2 P14: the development pass-through and its outbox poller are gone.
+      expect(metrics).not.toContain('delivery_outbox_poll_lag_seconds');
+      expect(metrics).not.toContain('delivery_approvals_skipped_total');
       // The transport's series (step 3.2 §5.3).
       expect(metrics).toContain('# TYPE amqp_connection_up ');
       expect(metrics).toContain('# TYPE amqp_consumer_messages_total ');

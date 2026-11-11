@@ -21,7 +21,7 @@ import { stack } from './support/env';
 /**
  * The provisioned vhost `email-gateway` matches the topology exactly (step 3.2 Q1, Q4, §3; v2:
  * step 3.3 L7; v3: step 4.1 S2; v4: step 4.2 A2; v5: step 4.3 U2; v6: step 4.4 B3; v7: step 4.5
- * D2; v8: step 4.6 X11): checks through the management API. The prune case adds one stray binding to the dormant
+ * D2; v8: step 4.6 X11; v9: step 5.2 P15): checks through the management API. The prune case adds one stray binding to the dormant
  * `scan.auth` and lets `init.mjs` remove it again.
  */
 /**
@@ -30,9 +30,12 @@ import { stack } from './support/env';
  * retry binding), so the count stayed v6's 41 (docs/plan/steps/13-dlp.md §12, WP1 deviation 1).
  * v8 (step 4.6 X11): scan.sandbox keeps two bindings (task_requested.v1 replaces
  * sandbox_requested.v1, the retry key is qualified) and scan.sandbox.submissions /
- * scan.sandbox.results add two each: 45 (40 queue + 5 exchange bindings).
+ * scan.sandbox.results add two each: 45 (40 queue + 5 exchange bindings). v9 (step 5.2 P15):
+ * email.policy.evaluate keeps its three bindings, email.archive keeps two
+ * (archive_requested.v1 on email.archive replaces policy.decided.v1 on email.policy, pruned by
+ * init.mjs) and email.notifications adds two: 47 (42 queue + 5 exchange bindings).
  */
-const TOPOLOGY_BINDINGS = 45;
+const TOPOLOGY_BINDINGS = 47;
 const api = new ManagementApi();
 const vhost = stack.rabbitmqVhost();
 
@@ -64,8 +67,8 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
     }
   });
 
-  it('has exactly the nineteen durable quorum queues, each under its policy eg.<queue>', () => {
-    expect(QUEUE_NAMES).toHaveLength(19);
+  it('has exactly the twenty durable quorum queues, each under its policy eg.<queue>', () => {
+    expect(QUEUE_NAMES).toHaveLength(20);
     expect(queues.map((q) => q.name).sort()).toEqual([...QUEUE_NAMES].sort());
     for (const queue of queues) {
       expect(queue.type, queue.name).toBe('quorum');
@@ -133,10 +136,10 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
     expect(bindings.filter((b) => b.destination_type === 'exchange')).toHaveLength(5);
   });
 
-  it('is topology v8: the vhost description and the rescan bindings (steps 4.1 S2, 4.2 A2, 4.3 U2, 4.4 B3, 4.5 D2, 4.6 X11)', async () => {
-    expect(TOPOLOGY_VERSION).toBe(8);
+  it('is topology v9: the vhost description and the rescan bindings (steps 4.1 S2, 4.2 A2, 4.3 U2, 4.4 B3, 4.5 D2, 4.6 X11, 5.2 P15)', async () => {
+    expect(TOPOLOGY_VERSION).toBe(9);
     const info = await api.get<{ description?: string }>(`/vhosts/${encodeURIComponent(vhost)}`);
-    expect(info.description).toBe('email-gateway topology v8');
+    expect(info.description).toBe('email-gateway topology v9');
     const rescan = bindings
       .filter(
         (b) =>
@@ -509,6 +512,95 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
         .map((b) => b.destination);
     for (const queue of ['scan.sandbox', 'scan.sandbox.submissions', 'scan.sandbox.results']) {
       expect(retry(queue), queue).toEqual([queue]);
+    }
+  });
+
+  it('email.policy.evaluate is a work queue (v9) for the policy-engine (eg-policy-engine) only', async () => {
+    expect(queueDefinition('email.policy.evaluate')).toMatchObject({
+      role: 'work',
+      homeExchange: 'email.policy',
+      consumer: { kind: 'ledger', ledgerName: 'policy-engine.evaluate', service: 'policy-engine' },
+    });
+    expect(queueDefinition('email.policy.evaluate').lossy).toBeUndefined();
+    // Bindings unchanged from the dormant v1–v8 queue.
+    expect(bindingsOf('email.policy.evaluate')).toEqual(
+      [
+        'email.ingestion [org.*.mail.message.parse_failed.v1]',
+        'email.policy [retry.email.policy.evaluate.#]',
+        'email.security [org.*.mail.message.scanned.v1]',
+      ].sort(),
+    );
+    // The delivery gate never drops: work policy (reject-publish), dead letters to email.events.
+    expect(
+      queues.find((q) => q.name === 'email.policy.evaluate')?.effective_policy_definition,
+    ).toEqual(policyFor('work', 'email.policy.evaluate'));
+    // Consumers (from WP3 on): the policy-engine role user only.
+    const engine = process.env.RABBITMQ_POLICY_ENGINE_USER || 'eg-policy-engine';
+    for (const user of await consumerUsers('email.policy.evaluate')) expect(user).toBe(engine);
+  });
+
+  it('email.notifications is a work queue (v9) for the notification-worker (eg-notification) only', async () => {
+    expect(queueDefinition('email.notifications')).toMatchObject({
+      role: 'work',
+      homeExchange: 'email.policy',
+      consumer: {
+        kind: 'ledger',
+        ledgerName: 'notification-worker.policy',
+        service: 'notification-worker',
+      },
+    });
+    expect(bindingsOf('email.notifications')).toEqual(
+      [
+        'email.policy [org.*.mail.policy.notification_requested.v1]',
+        'email.policy [retry.email.notifications.#]',
+      ].sort(),
+    );
+    expect(
+      queues.find((q) => q.name === 'email.notifications')?.effective_policy_definition,
+    ).toEqual(policyFor('work', 'email.notifications'));
+    const worker = process.env.RABBITMQ_NOTIFICATION_USER || 'eg-notification';
+    for (const user of await consumerUsers('email.notifications')) expect(user).toBe(worker);
+  });
+
+  it('routes the policy events on the live bindings (v9): decision → quarantine (5.3), archive request → archive (8.1), notification → email.notifications', () => {
+    const route = (exchange: string, type: string) =>
+      bindings
+        .filter((b) => b.source === exchange && topicMatches(b.routing_key, `org.42.${type}`))
+        .map((b) => `${b.destination_type}:${b.destination}`)
+        .sort();
+    expect(route('email.policy', 'mail.policy.decided.v1')).toEqual([
+      'exchange:email.events',
+      'queue:email.quarantine',
+    ]);
+    expect(route('email.archive', 'mail.message.archive_requested.v1')).toEqual([
+      'exchange:email.events',
+      'queue:email.archive',
+    ]);
+    expect(route('email.policy', 'mail.policy.notification_requested.v1')).toEqual([
+      'exchange:email.events',
+      'queue:email.notifications',
+    ]);
+    // The v1–v8 binding of the decision to email.archive is gone (pruned by init.mjs).
+    expect(bindingsOf('email.archive')).toEqual(
+      [
+        'email.archive [org.*.mail.message.archive_requested.v1]',
+        'email.archive [retry.email.archive.#]',
+      ].sort(),
+    );
+    expect(queueDefinition('email.archive')).toMatchObject({
+      role: 'dormant',
+      consumer: { kind: 'planned', plannedStep: '8.1' },
+    });
+    // Retry hops on email.policy reach exactly their own queue.
+    for (const queue of ['email.policy.evaluate', 'email.notifications', 'email.quarantine']) {
+      const reached = bindings
+        .filter(
+          (b) =>
+            b.source === 'email.policy' &&
+            topicMatches(b.routing_key, `retry.${queue}.org.42.mail.message.scanned.v1`),
+        )
+        .map((b) => b.destination);
+      expect(reached, queue).toEqual([queue]);
     }
   });
 

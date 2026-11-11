@@ -28,14 +28,18 @@ function refusal(value: unknown): { code: ContentGuardCode; path: string } {
 describe('assertMetadataOnly: valid envelopes pass', () => {
   const types = Object.keys(EVENT_REGISTRY) as RegisteredEventType[];
 
-  it('covers all twenty registered event types (two added by step 3.3, one by step 4.2, three by step 4.3, one by step 4.4, one by step 4.5, three by step 4.6)', () => {
-    expect(types).toHaveLength(20);
+  it('covers all twenty-two registered event types (two added by step 3.3, one by step 4.2, three by step 4.3, one by step 4.4, one by step 4.5, three by step 4.6, two by step 5.2)', () => {
+    expect(types).toHaveLength(22);
     expect(types).toContain('mail.message.dlp_incident.v1');
     expect(types).toEqual(
       expect.arrayContaining([
         'mail.sandbox.task_requested.v1',
         'mail.sandbox.task_completed.v1',
         'mail.attachment.sandbox_completed.v1',
+        // Step 5.2 P15 (mail.policy.decided.v1 existed as a placeholder and was redefined).
+        'mail.policy.decided.v1',
+        'mail.message.archive_requested.v1',
+        'mail.policy.notification_requested.v1',
       ]),
     );
   });

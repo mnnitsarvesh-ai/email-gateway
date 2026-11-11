@@ -13,25 +13,15 @@ import {
   ConfirmPublisher,
   type MessagingMetrics,
   MetricsService,
-  OutboxPoller,
   PrismaConsumerProgress,
   PrismaService,
   RedisService,
   S3Service,
   withTransactionDefaults,
 } from '@email-gateway/common';
-import {
-  EventTypes,
-  messageScannedV1,
-  type MessageScannedV1,
-} from '@email-gateway/event-contracts';
 import type { Logger } from '@email-gateway/logger';
 import { createApprovalFeed } from './approvals/approval-feed';
 import { DeliveryApprovalConsumer } from './approvals/delivery-approval.consumer';
-import {
-  DEV_PASSTHROUGH_CONSUMER,
-  DevPassThroughApprover,
-} from './approvals/dev-passthrough.approver';
 import {
   DEFAULT_DELIVERY_DB_TX_TIMEOUT_MS,
   WORKER_CONFIG,
@@ -58,8 +48,6 @@ import { WorkerLifecycle } from './worker-lifecycle';
  */
 export const PLANNING_TX_TIMEOUT_MS = DEFAULT_DELIVERY_DB_TX_TIMEOUT_MS;
 export const RECORDER_TX_TIMEOUT_MS = DEFAULT_DELIVERY_DB_TX_TIMEOUT_MS;
-/** Advisory lock namespace of this worker's outbox poller (dev pass-through): `dw:outbox:<consumer>` (R6). */
-export const OUTBOX_LOCK_PREFIX = 'dw';
 
 /**
  * Runs the lifecycle from Nest's hooks (non-global module: stopped before the DB closes). On
@@ -87,8 +75,9 @@ export class WorkerRuntime implements OnApplicationBootstrap, OnModuleDestroy {
 
 /**
  * The delivery pipeline of step 2.3 (docs/plan/steps/05-routing.md): approvals feed (RabbitMQ
- * queue `email.delivery.pending` since step 3.2 Q13, needs the global `AmqpModule`; the dev
- * pass-through stays on the shared outbox poller) → planner (R7) → reinjection
+ * queue `email.delivery.pending` since step 3.2 Q13, needs the global `AmqpModule`; approvals
+ * are written by the policy-engine and the operator release only: the development pass-through
+ * was removed by step 5.2, ADR-0044) → planner (R7) → reinjection
  * scheduler and reinjector (R8, R10, R11) → Postfix delivery-log tailer (R9) → reconciler (R12),
  * with the metrics of R14. Components are plain classes wired here, so the integration tests
  * build the same graph without Nest.
@@ -152,35 +141,6 @@ export class DeliveryModule {
         ],
       },
       {
-        provide: DevPassThroughApprover,
-        useFactory: (prisma: PrismaService, locks: AdvisoryLocks, metrics: DeliveryMetrics) =>
-          new DevPassThroughApprover(
-            // Step 4.1 S15: approve after the scan (mail.message.scanned.v1), never before it.
-            new OutboxPoller<MessageScannedV1>({
-              prisma,
-              locks,
-              logger,
-              metrics: metrics.outboxPoller(),
-              consumer: DEV_PASSTHROUGH_CONSUMER,
-              eventType: EventTypes.MessageScanned,
-              schema: messageScannedV1,
-              initialPosition: 'latest',
-              pollIntervalMs: config.DELIVERY_OUTBOX_POLL_INTERVAL_MS,
-              safetyLagMs: config.DELIVERY_OUTBOX_SAFETY_LAG_MS,
-              batchSize: config.DELIVERY_OUTBOX_BATCH_SIZE,
-              lockPrefix: OUTBOX_LOCK_PREFIX,
-              concurrency: 1,
-            }),
-            prisma,
-            txBudgetMs,
-            logger,
-            metrics,
-            () => new Date(),
-            { riskHold: config.DELIVERY_DEV_PASSTHROUGH_RISK_HOLD },
-          ),
-        inject: [PrismaService, AdvisoryLocks, DeliveryMetrics],
-      },
-      {
         provide: ReinjectionScheduler,
         useFactory: (
           prisma: PrismaService,
@@ -237,20 +197,14 @@ export class DeliveryModule {
         provide: WorkerLifecycle,
         useFactory: (
           approvals: DeliveryApprovalConsumer,
-          passThrough: DevPassThroughApprover,
           scheduler: ReinjectionScheduler,
           tailer: PostfixLogTailer,
           reconciler: DeliveryReconciler,
           locks: AdvisoryLocks,
         ) =>
-          new WorkerLifecycle(
-            { approvals, passThrough, scheduler, tailer, reconciler, locks },
-            config,
-            logger,
-          ),
+          new WorkerLifecycle({ approvals, scheduler, tailer, reconciler, locks }, config, logger),
         inject: [
           DeliveryApprovalConsumer,
-          DevPassThroughApprover,
           ReinjectionScheduler,
           PostfixLogTailer,
           DeliveryReconciler,

@@ -122,8 +122,9 @@ describe('init.mjs --cleanup-legacy (quorum legacy queues)', () => {
     const exchanges = new Set((await mgmt.exchanges(legacy)).map((e) => e.name));
     expect(exchanges.has('mail.dlx')).toBe(false); // only the deleted .dlq queues were bound
     expect(exchanges.has('mail.events')).toBe(true); // still bound to the kept queue
-    // The topology vhost is untouched (every queue of the current topology, 19 in v8).
-    expect(QUEUE_NAMES).toHaveLength(19);
+    // The topology vhost is untouched (every queue of the current topology, 20 in v9: step 5.2
+    // P15 added `email.notifications`).
+    expect(QUEUE_NAMES).toHaveLength(20);
     expect((await mgmt.queues(vhost.vhost)).length).toBe(QUEUE_NAMES.length);
 
     // Idempotent: a second run changes nothing and still succeeds.

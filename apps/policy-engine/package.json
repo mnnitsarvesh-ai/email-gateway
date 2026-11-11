@@ -7,15 +7,21 @@
     "dev": "nest start --watch --exec \"node --env-file-if-exists=../../.env\"",
     "start": "node dist/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "eslint src",
-    "test": "vitest run --dir src"
+    "lint": "eslint src integration",
+    "test": "vitest run --dir src",
+    "test:integration": "vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.890.0",
+    "@aws-sdk/lib-storage": "^3.1152.0",
     "@email-gateway/common": "workspace:*",
     "@email-gateway/config": "workspace:*",
     "@email-gateway/database": "workspace:*",
     "@email-gateway/event-contracts": "workspace:*",
     "@email-gateway/logger": "workspace:*",
+    "@email-gateway/message-lifecycle": "workspace:*",
+    "@email-gateway/policy-dsl": "workspace:*",
+    "@email-gateway/security-contracts": "workspace:*",
     "@email-gateway/shared-types": "workspace:*",
     "@nestjs/common": "^11.1.6",
     "@nestjs/core": "^11.1.6",

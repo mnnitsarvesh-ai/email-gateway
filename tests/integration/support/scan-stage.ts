@@ -1,16 +1,18 @@
+import { TOPOLOGY_VERSION } from '@email-gateway/event-contracts';
 import { ManagementApi } from './broker';
 import { stack } from './env';
 
 /**
  * Step 4.1 scan stage for the stack suites (docs/plan/steps/09-rspamd.md §9 "Stack", S1, S2,
- * S15). Since step 4.1 the dev pass-through approves only `mail.message.scanned.v1` with
- * `outcome = scanned` (E27), so EVERY stack suite that expects delivery needs:
+ * S15). Since step 4.1 delivery is approved only after the scan; since step 5.2 (docs/plan/steps/
+ * 16-policy-engine.md P13, P14, ADR-0044) the policy-engine approves it (E8/E10, approval
+ * `source = policy`) and the delivery-worker's development pass-through (E27) is removed. So
+ * EVERY stack suite that expects delivery needs:
  *
  * - an email-worker that runs the scan role (`SCAN_ENABLED=true`: the `scan_*` series in
  *   `/metrics`) next to the MIME role;
- * - a delivery-worker whose pass-through reads the scanned feed (its outbox poller reports
- *   `consumer="delivery-worker.dev-passthrough-scanned"`); an older image approves before the
- *   scan (retired E4) and would make the suites pass for the wrong reason;
+ * - a ready policy-engine consuming `email.policy.evaluate` (its `policy_evaluations_total` in
+ *   `/metrics`); without it every message stays `scanned` (held), never delivered;
  * - topology v4 on the broker (step 4.2 A2) with a consumer on `scan.spam` and on
  *   `scan.attachment`: since step 4.2 every round requires the `attachment` engine
  *   (`SCAN_ENGINES=rspamd,attachment`, A1), so a stack without the attachment consumer never
@@ -32,6 +34,8 @@ import { stack } from './env';
  *   `SANDBOX_ENABLED=true`: `scan_sandbox_submissions_total` in `/metrics`). The round never
  *   waits for the sandbox; without these consumers the attachment engine's sandbox requests
  *   would only pile up. The sandbox-controller (`scan.sandbox`) is the sandbox suites' own gate.
+ * - since step 5.2 (P15): topology v9 (`TOPOLOGY_VERSION` of `@email-gateway/event-contracts`)
+ *   with a consumer on `email.policy.evaluate`.
  *
  * `scanStageProblems()` returns what is missing (empty when everything is there); the routing,
  * MIME and scan gates include it.
@@ -57,16 +61,17 @@ export const SCAN_CONSUMED_QUEUES = [
   'scan.sandbox.submissions',
   'scan.sandbox.results',
 ] as const;
-export const TOPOLOGY_VERSION = 8;
+export { TOPOLOGY_VERSION };
 export const TOPOLOGY_DESCRIPTION = `email-gateway topology v${TOPOLOGY_VERSION}`;
-export const PASSTHROUGH_CONSUMER = 'delivery-worker.dev-passthrough-scanned';
+/** Step 5.2: the queue of the delivery gate (policy-engine, ledger `policy-engine.evaluate`). */
+export const POLICY_QUEUE = 'email.policy.evaluate';
 
 export const SCAN_HOW_TO_START = [
-  'The scan stage (step 4.1) needs the email-worker scan role and the scanned pass-through:',
-  '  docker compose --profile apps build email-worker && docker compose --profile apps build delivery-worker',
-  '  docker compose --profile apps up -d --wait email-worker delivery-worker',
+  'The scan stage (step 4.1) needs the email-worker scan role; delivery (step 5.2) needs the policy-engine:',
+  '  docker compose --profile apps build email-worker && docker compose --profile apps build policy-engine',
+  '  docker compose --profile apps up -d --wait email-worker policy-engine delivery-worker',
   '  (or on the host: pnpm --filter @email-gateway/email-worker dev, SCAN_ENABLED=true)',
-  '  pnpm rabbitmq:init   (topology v8 and the eg-scanner user on scan.spam, scan.attachment, scan.url, scan.bec, scan.dlp, scan.sandbox.submissions, scan.sandbox.results)',
+  '  pnpm rabbitmq:init   (topology v9, the eg-scanner user on scan.spam, scan.attachment, scan.url, scan.bec, scan.dlp, scan.sandbox.submissions, scan.sandbox.results and the eg-policy-engine user on email.policy.evaluate)',
   '  (step 4.2: clamav healthy; step 4.5: SCAN_ENGINES=rspamd,attachment,url,bec,dlp and DLP_EVIDENCE_KEY on the email-worker;',
   '   step 4.6: SANDBOX_ENABLED=true with the sandbox bucket and keys on the email-worker)',
 ].join('\n');
@@ -116,11 +121,18 @@ export async function scanStageProblems(): Promise<string[]> {
         '/metrics): an image older than step 4.6, or SANDBOX_ENABLED=false',
     );
   }
-  const delivery = await metricsOf(stack.ports.services['delivery-worker']);
-  if (!delivery || !delivery.includes(`consumer="${PASSTHROUGH_CONSUMER}"`)) {
+  const policy = await metricsOf(stack.ports.services['policy-engine']);
+  if (!policy || !/^# TYPE policy_evaluations_total /m.test(policy)) {
     problems.push(
-      `the delivery-worker pass-through does not read mail.message.scanned.v1 (no ${PASSTHROUGH_CONSUMER} ` +
-        'poller in /metrics): an image older than step 4.1 approves before scanning',
+      'the policy-engine does not evaluate (no policy_evaluations_total in /metrics): an image ' +
+        'older than step 5.2, or the container is not running; nothing is approved for delivery',
+    );
+  }
+  const delivery = await metricsOf(stack.ports.services['delivery-worker']);
+  if (delivery && /^# TYPE delivery_approvals_skipped_total /m.test(delivery)) {
+    problems.push(
+      'the delivery-worker still runs the development pass-through (delivery_approvals_skipped_total ' +
+        'in /metrics): an image older than step 5.2; rebuild it',
     );
   }
   try {
@@ -132,7 +144,7 @@ export async function scanStageProblems(): Promise<string[]> {
         `vhost ${vhost} is "${info.description ?? ''}", not topology v${TOPOLOGY_VERSION}`,
       );
     }
-    for (const queue of SCAN_CONSUMED_QUEUES) {
+    for (const queue of [...SCAN_CONSUMED_QUEUES, POLICY_QUEUE]) {
       if ((await api.queue(vhost, queue)).consumers < 1) problems.push(`${queue} has no consumer`);
     }
   } catch (err) {

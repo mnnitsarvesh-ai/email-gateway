@@ -15,7 +15,9 @@ import { stack } from './support/env';
  * 4.5 D2 (topology v7) extends them to scan.dlp, docs/plan/steps/13-dlp.md; step 4.6 X11
  * (topology v8) extends the scanner to scan.sandbox.submissions and scan.sandbox.results, the
  * ops replay to the three sandbox queues, and adds the sandbox-controller user eg-sandbox,
- * docs/plan/steps/14-sandbox.md). Probes
+ * docs/plan/steps/14-sandbox.md; step 5.2 P15 (topology v9) adds the policy-engine user
+ * eg-policy-engine and the notification-worker user eg-notification and extends the ops replay
+ * to email.policy.evaluate and email.notifications, docs/plan/steps/16-policy-engine.md). Probes
  * never leave a message in a real queue: every publish probe is one the broker refuses (a
  * refused publish routes nothing), and the allowed read is a passive checkQueue. Topic
  * permissions restrict the routing keys each user may publish: an allowed key always matches a
@@ -28,7 +30,15 @@ const ACCESS_REFUSED = 403;
 const api = new ManagementApi();
 
 type Role =
-  'relay' | 'emailWorker' | 'scanner' | 'deliveryWorker' | 'ops' | 'urlBrowser' | 'sandbox';
+  | 'relay'
+  | 'emailWorker'
+  | 'scanner'
+  | 'deliveryWorker'
+  | 'ops'
+  | 'urlBrowser'
+  | 'sandbox'
+  | 'policyEngine'
+  | 'notification';
 const ROLES = [
   'relay',
   'emailWorker',
@@ -37,6 +47,8 @@ const ROLES = [
   'ops',
   'urlBrowser',
   'sandbox',
+  'policyEngine',
+  'notification',
 ] as const;
 const models = new Map<Role, ChannelModel>();
 let countsBefore: number[] = [];
@@ -44,17 +56,23 @@ let countsBefore: number[] = [];
 /**
  * The AMQP URLs of the role users: those of `stack.rabbitmqRoleUrls()` plus (step 4.3 U2) the
  * url-browser user (`RABBITMQ_URL_BROWSER_URL` of `.env`) and (step 4.6 X11) the
- * sandbox-controller user (`RABBITMQ_SANDBOX_URL`); never logged.
+ * sandbox-controller user (`RABBITMQ_SANDBOX_URL`) and (step 5.2 P15) the policy-engine and
+ * notification-worker users (`RABBITMQ_POLICY_ENGINE_URL`, `RABBITMQ_NOTIFICATION_URL`); never
+ * logged.
  */
 function roleUrls(): Record<Role, string> {
   const urlBrowser = process.env.RABBITMQ_URL_BROWSER_URL;
   if (!urlBrowser) throw new Error('RABBITMQ_URL_BROWSER_URL is not set (step 4.3 .env keys)');
   const sandbox = process.env.RABBITMQ_SANDBOX_URL;
   if (!sandbox) throw new Error('RABBITMQ_SANDBOX_URL is not set (step 4.6 .env keys)');
-  return { ...stack.rabbitmqRoleUrls(), urlBrowser, sandbox };
+  const policyEngine = process.env.RABBITMQ_POLICY_ENGINE_URL;
+  if (!policyEngine) throw new Error('RABBITMQ_POLICY_ENGINE_URL is not set (step 5.2 .env keys)');
+  const notification = process.env.RABBITMQ_NOTIFICATION_URL;
+  if (!notification) throw new Error('RABBITMQ_NOTIFICATION_URL is not set (step 5.2 .env keys)');
+  return { ...stack.rabbitmqRoleUrls(), urlBrowser, sandbox, policyEngine, notification };
 }
 
-/** Message counts of the 19 real queues (administrator, passive declares). */
+/** Message counts of the 20 real queues (administrator, passive declares). */
 async function queueCounts(): Promise<number[]> {
   const url = new URL(stack.rabbitmqUrl());
   url.pathname = `/${encodeURIComponent(stack.rabbitmqVhost())}`;
@@ -201,6 +219,24 @@ const EXPECTED_TOPICS: Record<Role, TopicPermission[]> = {
       read: '^$',
     },
   ],
+  // Step 5.2 P15 (v9): the policy-engine and the notification-worker publish only the retry
+  // (email.policy) and dead-letter (email.events) hops of their own queue.
+  policyEngine: [
+    { exchange: 'email.policy', write: '^retry\\.email\\.policy\\.evaluate\\.', read: '^$' },
+    {
+      exchange: 'email.events',
+      write: '^dead-letter\\.email\\.policy\\.evaluate(\\.|$)',
+      read: '^$',
+    },
+  ],
+  notification: [
+    { exchange: 'email.policy', write: '^retry\\.email\\.notifications\\.', read: '^$' },
+    {
+      exchange: 'email.events',
+      write: '^dead-letter\\.email\\.notifications(\\.|$)',
+      read: '^$',
+    },
+  ],
   ops: [
     { exchange: 'email.ingestion', write: '^retry\\.email\\.received\\.', read: '^$' },
     { exchange: 'email.delivery', write: '^retry\\.email\\.delivery\\.pending\\.', read: '^$' },
@@ -212,6 +248,12 @@ const EXPECTED_TOPICS: Record<Role, TopicPermission[]> = {
       exchange: 'email.security',
       write:
         '^retry\\.scan\\.(spam|attachment|url|url\\.inspect|url\\.results|bec|dlp|sandbox|sandbox\\.submissions|sandbox\\.results)\\.',
+      read: '^$',
+    },
+    // Step 5.2 P15 (v9): replay of email.policy.evaluate and email.notifications.
+    {
+      exchange: 'email.policy',
+      write: '^retry\\.email\\.(policy\\.evaluate|notifications)\\.',
       read: '^$',
     },
   ],
@@ -331,7 +373,8 @@ describe('RabbitMQ role permissions on the real vhost', () => {
     await channel.close();
     // Review round 1: write narrowed to the home exchanges of the replayable queues. Step 4.1
     // adds email.security (scan.spam; 4.2 scan.attachment), where the topic permission still
-    // refuses every key but `retry.scan.(spam|attachment).`, so the probe key is refused there.
+    // refuses every key but `retry.scan.(spam|attachment).`, so the probe key is refused there;
+    // step 5.2 adds email.policy (topic permission: the retry hops of the two v9 work queues).
     for (const exchange of ['email.security', 'email.policy', 'email.archive', 'email.events']) {
       expect(await publishRefused('ops', exchange), exchange).toBe(ACCESS_REFUSED);
     }
@@ -360,6 +403,31 @@ describe('RabbitMQ role permissions on the real vhost', () => {
     expect(
       await publishKeyRefused('ops', 'email.security', 'org.1.mail.message.dlp_incident.v1'),
     ).toBe(ACCESS_REFUSED);
+    // v9: replay may never mint a policy decision, archive or notification request, nor replay
+    // into the dormant email.quarantine.
+    for (const key of [
+      'org.1.mail.policy.decided.v1',
+      'org.1.mail.policy.notification_requested.v1',
+      'retry.email.quarantine.org.1.mail.policy.decided.v1',
+      'retry.email.policy.org.1.mail.message.scanned.v1',
+    ]) {
+      expect(await publishKeyRefused('ops', 'email.policy', key), key).toBe(ACCESS_REFUSED);
+    }
+    const ops = await api.get<TopicPermission[]>(
+      `/topic-permissions/${encodeURIComponent(stack.rabbitmqVhost())}/${encodeURIComponent(userOf('ops'))}`,
+    );
+    const policyWrite = new RegExp(ops.find((t) => t.exchange === 'email.policy')?.write ?? '^$');
+    expect(policyWrite.test('retry.email.policy.evaluate.org.1.mail.message.scanned.v1')).toBe(
+      true,
+    );
+    expect(
+      policyWrite.test('retry.email.notifications.org.1.mail.policy.notification_requested.v1'),
+    ).toBe(true);
+    expect(policyWrite.test('retry.email.quarantine.org.1.mail.policy.decided.v1')).toBe(false);
+    const opsPermission = await api.get<{ write: string }>(
+      `/permissions/${encodeURIComponent(stack.rabbitmqVhost())}/${encodeURIComponent(userOf('ops'))}`,
+    );
+    expect(opsPermission.write).toBe('^email\\.(ingestion|delivery|security|policy)$');
   });
 
   it.each(ROLES)('%s cannot declare queues or exchanges, nor bind', async (role) => {
@@ -633,6 +701,139 @@ describe('RabbitMQ role permissions on the real vhost', () => {
       write: '^email\\.(security|events)$',
       read: '^scan\\.url\\.inspect$',
     });
+  });
+
+  it.each([
+    ['policyEngine', 'email.policy.evaluate'],
+    ['notification', 'email.notifications'],
+  ] as const)('%s (step 5.2) reads %s (passive) and nothing else', async (role, own) => {
+    const channel = await model(role).createChannel();
+    await expect(channel.checkQueue(own)).resolves.toMatchObject({ queue: own });
+    await channel.close();
+    for (const queue of QUEUE_NAMES.filter((q) => q !== own)) {
+      expect(await replyCodeOf(role, (ch) => ch.consume(queue, () => undefined)), queue).toBe(
+        ACCESS_REFUSED,
+      );
+    }
+  });
+
+  it('policy-engine publishes only its own hops: decisions and approvals go through the outbox and the relay', async () => {
+    for (const key of [
+      PROBE_KEY,
+      // Event keys are the relay's: never a decision, archive or notification request directly.
+      'org.1.mail.policy.decided.v1',
+      'org.1.mail.policy.notification_requested.v1',
+      // Not the hops of the other email.policy queues.
+      'retry.email.notifications.org.1.mail.policy.notification_requested.v1',
+      'retry.email.quarantine.org.1.mail.policy.decided.v1',
+      'retry.email.policy.org.1.mail.message.scanned.v1',
+    ]) {
+      expect(await publishKeyRefused('policyEngine', 'email.policy', key), key).toBe(
+        ACCESS_REFUSED,
+      );
+    }
+    for (const key of [
+      PROBE_KEY,
+      'dead-letter.email.notifications.org.1.mail.policy.notification_requested.v1',
+      'dead-letter.email.delivery.pending',
+      'org.1.mail.message.state_changed.v1',
+    ]) {
+      expect(await publishKeyRefused('policyEngine', 'email.events', key), key).toBe(
+        ACCESS_REFUSED,
+      );
+    }
+    // Never an approval (email.delivery), an archive request (email.archive) or a scan event.
+    for (const exchange of [
+      'email.ingestion',
+      'email.security',
+      'email.delivery',
+      'email.archive',
+    ]) {
+      expect(await publishRefused('policyEngine', exchange), exchange).toBe(ACCESS_REFUSED);
+    }
+    expect(
+      await publishKeyRefused('policyEngine', 'email.delivery', 'org.1.mail.delivery.approved.v1'),
+    ).toBe(ACCESS_REFUSED);
+    expect(
+      await publishKeyRefused(
+        'policyEngine',
+        'email.archive',
+        'org.1.mail.message.archive_requested.v1',
+      ),
+    ).toBe(ACCESS_REFUSED);
+    const permission = await api.get<{ configure: string; write: string; read: string }>(
+      `/permissions/${encodeURIComponent(stack.rabbitmqVhost())}/${encodeURIComponent(userOf('policyEngine'))}`,
+    );
+    expect(permission).toMatchObject({
+      configure: '^$',
+      write: '^email\\.(policy|events)$',
+      read: '^email\\.policy\\.evaluate$',
+    });
+    // The allowed side (checked against the broker's topic permissions, never published).
+    const actual = await api.get<TopicPermission[]>(
+      `/topic-permissions/${encodeURIComponent(stack.rabbitmqVhost())}/${encodeURIComponent(userOf('policyEngine'))}`,
+    );
+    const write = (exchange: string) =>
+      new RegExp(actual.find((t) => t.exchange === exchange)?.write ?? '^$');
+    expect(
+      write('email.policy').test('retry.email.policy.evaluate.org.1.mail.message.scanned.v1'),
+    ).toBe(true);
+    expect(
+      write('email.events').test(
+        'dead-letter.email.policy.evaluate.org.1.mail.message.parse_failed.v1',
+      ),
+    ).toBe(true);
+    expect(write('email.events').test('dead-letter.email.policy.evaluate')).toBe(true);
+  });
+
+  it('notification-worker publishes only its own hops: no event key, queue or exchange', async () => {
+    for (const key of [
+      PROBE_KEY,
+      'org.1.mail.policy.notification_requested.v1',
+      'org.1.mail.policy.decided.v1',
+      'retry.email.policy.evaluate.org.1.mail.message.scanned.v1',
+      'retry.email.quarantine.org.1.mail.policy.decided.v1',
+    ]) {
+      expect(await publishKeyRefused('notification', 'email.policy', key), key).toBe(
+        ACCESS_REFUSED,
+      );
+    }
+    for (const key of [
+      PROBE_KEY,
+      'dead-letter.email.policy.evaluate.org.1.mail.message.scanned.v1',
+      'org.1.mail.message.state_changed.v1',
+    ]) {
+      expect(await publishKeyRefused('notification', 'email.events', key), key).toBe(
+        ACCESS_REFUSED,
+      );
+    }
+    for (const exchange of [
+      'email.ingestion',
+      'email.security',
+      'email.delivery',
+      'email.archive',
+    ]) {
+      expect(await publishRefused('notification', exchange), exchange).toBe(ACCESS_REFUSED);
+    }
+    const permission = await api.get<{ configure: string; write: string; read: string }>(
+      `/permissions/${encodeURIComponent(stack.rabbitmqVhost())}/${encodeURIComponent(userOf('notification'))}`,
+    );
+    expect(permission).toMatchObject({
+      configure: '^$',
+      write: '^email\\.(policy|events)$',
+      read: '^email\\.notifications$',
+    });
+    const actual = await api.get<TopicPermission[]>(
+      `/topic-permissions/${encodeURIComponent(stack.rabbitmqVhost())}/${encodeURIComponent(userOf('notification'))}`,
+    );
+    const write = (exchange: string) =>
+      new RegExp(actual.find((t) => t.exchange === exchange)?.write ?? '^$');
+    expect(
+      write('email.policy').test(
+        'retry.email.notifications.org.1.mail.policy.notification_requested.v1',
+      ),
+    ).toBe(true);
+    expect(write('email.events').test('dead-letter.email.notifications')).toBe(true);
   });
 
   it('role users cannot open the administrator vhost /', async () => {

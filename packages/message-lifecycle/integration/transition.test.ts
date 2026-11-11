@@ -28,17 +28,20 @@ afterAll(async () => {
   await fx.cleanup();
 });
 
-/** E27 (step 4.1): the dev pass-through approves a scanned message (E4 is retired). */
-const devPassThrough = (m: MessageFixture, eventId = randomUUID()): TransitionRequest => ({
+/**
+ * E10 (step 5.2): the policy engine approves a policy-evaluated message (E4 and E27, the
+ * development pass-through's edges, are retired).
+ */
+const policyApproval = (m: MessageFixture, eventId = randomUUID()): TransitionRequest => ({
   message: m,
   to: 'approved',
-  reason: 'dev_passthrough',
-  actor: { role: 'dev_passthrough', service: 'delivery-worker', type: 'system' },
+  reason: 'policy_deliver',
+  actor: { role: 'policy', service: 'policy-engine', type: 'system' },
   transitionKey: `evt:${eventId}:approved`,
   causationEventId: eventId,
   correlationId: `it-corr-${eventId.slice(0, 8)}`,
   expectedRound: 0,
-  expectedFrom: ['scanned'],
+  expectedFrom: ['policy_evaluated'],
 });
 
 function recordingMetrics() {
@@ -54,30 +57,30 @@ function recordingMetrics() {
 
 describe('transitionMessage: an applied transition (§9 item 7)', () => {
   it('writes the row, one history row with every column, one event and one outbox row', async () => {
-    const m = await fx.message(org, { state: 'scanned' });
+    const m = await fx.message(org, { state: 'policy_evaluated' });
     const eventId = randomUUID();
     const occurredAt = new Date(Date.now() - 5000);
     const { metrics, calls } = recordingMetrics();
     const before = Date.now();
     const outcome = await prisma.$transaction((tx) =>
-      transitionMessage(tx, { ...devPassThrough(m, eventId), occurredAt }, { metrics }),
+      transitionMessage(tx, { ...policyApproval(m, eventId), occurredAt }, { metrics }),
     );
     expect(outcome).toMatchObject({
       result: 'applied',
-      from: 'scanned',
+      from: 'policy_evaluated',
       to: 'approved',
       version: 3,
       round: 0,
     });
     if (outcome.result !== 'applied') throw new Error('not applied');
-    expect(calls).toEqual(['scanned>approved:applied']);
+    expect(calls).toEqual(['policy_evaluated>approved:applied']);
 
     const row = await fx.row(m);
     expect(row).toMatchObject({
       status: 'approved',
       version: 3,
       lifecycleRound: 0,
-      statusReason: 'dev_passthrough',
+      statusReason: 'policy_deliver',
     });
     expect(row.statusChangedAt.getTime()).toBeGreaterThanOrEqual(before - 1000);
 
@@ -87,12 +90,12 @@ describe('transitionMessage: an applied transition (§9 item 7)', () => {
     expect(h).toMatchObject({
       id: outcome.historyId,
       organizationId: org,
-      fromStatus: 'scanned',
+      fromStatus: 'policy_evaluated',
       toStatus: 'approved',
-      reasonCode: 'dev_passthrough',
+      reasonCode: 'policy_deliver',
       lifecycleRound: 0,
-      actorRole: 'dev_passthrough',
-      actorService: 'delivery-worker',
+      actorRole: 'policy',
+      actorService: 'policy-engine',
       actorType: 'system',
       actorId: null,
       eventId,
@@ -107,17 +110,17 @@ describe('transitionMessage: an applied transition (§9 item 7)', () => {
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
       eventType: 'lifecycle.approved',
-      sourceService: 'delivery-worker',
+      sourceService: 'policy-engine',
       eventId,
       actorType: 'system',
       actorId: null,
       details: {
-        from: 'scanned',
+        from: 'policy_evaluated',
         to: 'approved',
         version: 3,
         round: 0,
-        reason: 'dev_passthrough',
-        actorRole: 'dev_passthrough',
+        reason: 'policy_deliver',
+        actorRole: 'policy',
       },
     });
     expect(events[0]!.occurredAt.getTime()).toBe(h.changedAt.getTime());
@@ -137,14 +140,14 @@ describe('transitionMessage: an applied transition (§9 item 7)', () => {
       messageId: m.id.toString(),
       receivedAt: m.receivedAt.toISOString(),
       direction: 'outbound',
-      previousState: 'scanned',
+      previousState: 'policy_evaluated',
       state: 'approved',
       version: 3,
       lifecycleRound: 0,
-      reasonCode: 'dev_passthrough',
-      actorRole: 'dev_passthrough',
+      reasonCode: 'policy_deliver',
+      actorRole: 'policy',
       actorType: 'system',
-      actorService: 'delivery-worker',
+      actorService: 'policy-engine',
       causationEventId: eventId,
       changedAt: h.changedAt.toISOString(),
     });
@@ -182,12 +185,12 @@ describe('transitionMessage: an applied transition (§9 item 7)', () => {
   });
 
   it('is not_found for another organization and for an unknown row (nothing written)', async () => {
-    const m = await fx.message(org, { state: 'scanned' });
+    const m = await fx.message(org, { state: 'policy_evaluated' });
     const foreign = { ...m, organizationId: otherOrg };
-    const outcome = await transitionMessageWithRetry(prisma, devPassThrough(foreign), TX);
+    const outcome = await transitionMessageWithRetry(prisma, policyApproval(foreign), TX);
     expect(outcome).toEqual({ result: 'not_found' });
     const unknown = { ...m, id: m.id + 1_000_000_000n };
-    expect(await transitionMessageWithRetry(prisma, devPassThrough(unknown), TX)).toEqual({
+    expect(await transitionMessageWithRetry(prisma, policyApproval(unknown), TX)).toEqual({
       result: 'not_found',
     });
     expect((await fx.row(m)).version).toBe(2);
@@ -196,8 +199,8 @@ describe('transitionMessage: an applied transition (§9 item 7)', () => {
   });
 
   it('answers duplicate/transition_key for the same key (metric only, nothing written)', async () => {
-    const m = await fx.message(org, { state: 'scanned' });
-    const request = devPassThrough(m);
+    const m = await fx.message(org, { state: 'policy_evaluated' });
+    const request = policyApproval(m);
     await transitionMessageWithRetry(prisma, request, TX);
     const { metrics, calls } = recordingMetrics();
     const again = await transitionMessageWithRetry(prisma, request, TX, { metrics });
@@ -299,7 +302,7 @@ describe('ignored transitions (§9 item 10, L6)', () => {
 
   it('a duplicate/same_state only counts (no event row)', async () => {
     const m = await fx.message(org, { state: 'approved' });
-    expect(await transitionMessageWithRetry(prisma, devPassThrough(m), TX)).toMatchObject({
+    expect(await transitionMessageWithRetry(prisma, policyApproval(m), TX)).toMatchObject({
       result: 'duplicate',
       why: 'same_state',
     });

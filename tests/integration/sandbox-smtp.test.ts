@@ -11,7 +11,8 @@ import { waitFor } from './support/compose';
 import { metricValue } from './support/metrics';
 import { clearSinkDomain, sinkFiles } from './support/mail-sink';
 import { envelopeOfRow, LiveBroker, record } from './support/messaging-stack';
-import { expectPassThroughFollowsRisk, riskRowsOf } from './support/risk';
+import { expectPolicyFollowsRisk } from './support/policy';
+import { riskRowsOf } from './support/risk';
 import { MAIL_SINK_HOST, organizationRef } from './support/routing';
 import {
   benignScript,
@@ -58,12 +59,13 @@ import { assertStackReady } from './support/smtp-stack';
  *   `executed: false`, isolation `process`, and a sealed `static_report` artifact in the
  *   sandbox bucket, opened here with the test-only SANDBOX_ARTIFACT_PRIVATE_KEY.
  *
- * In both: the dev pass-through decides on the ROUND (verdict `suspicious`, never `clean`) and,
- * since step 5.1, on the round's revision-0 risk score, which never includes the sandbox (R13,
- * R17): the synthetic script is a denied type with YARA findings, so with Rspamd's spam score it
- * is held (`risk_recommendation`; observed 890, critical, quarantine), and a `deliver`/`tag`
- * score would be delivered. The sandbox final never changes the round or that decision (the
- * late final adds risk revision 1 only); an identical second attachment reuses the analysis
+ * In both: the delivery decision is made on the ROUND (verdict `suspicious`, never `clean`) and,
+ * since step 5.1, on the round's revision-0 risk score, which never includes the sandbox (R13);
+ * since step 5.2 the policy-engine decides it (P9; the 5.1 dev pass-through was removed): the
+ * synthetic script is a denied type with YARA findings, so with Rspamd's spam score it is held
+ * (5.1 observed 890, critical, quarantine → `quarantined`), and a `deliver`/`tag` score would be
+ * delivered. The sandbox final never changes the round or that decision (the late final adds risk
+ * revision 1 only and never re-evaluates policy, P13); an identical second attachment reuses the analysis
  * (no second task) after a static run, and is dispatched again after `backend_disabled` (an
  * operational reason, never reused); a tenant with the feature but not opted in → `skipped` / `tenant_disabled`;
  * the controller stopped while a task is queued, then started → the result arrives; the task
@@ -173,7 +175,7 @@ describe.skipIf(gate.skip)(
       expect(['disabled', 'static_only', 'local_test_runner']).toContain(view!.execution);
     });
 
-    it('a suspicious script: submission → task on scan.sandbox → controller result → asynchronous sandbox final; the pass-through follows the revision-0 risk score, never clean', async () => {
+    it('a suspicious script: submission → task on scan.sandbox → controller result → asynchronous sandbox final; policy follows the revision-0 risk score, never clean', async () => {
       const tasksBefore = await controllerMetric('sandbox_tasks_total', { backend: BACKEND });
       const sample = script('first');
       const sent = await sendAttachmentMessage(
@@ -287,7 +289,7 @@ describe.skipIf(gate.skip)(
         { timeoutMs: 120_000, intervalMs: 1_000 },
       );
 
-      // Asynchronous (X10): the round is unchanged; the pass-through decided on the round verdict.
+      // Asynchronous (X10): the round is unchanged; policy decided on the round (step 5.2).
       const [scanned] = await scannedEventsOf(fx.prisma, orgA, sent.message);
       expect(messageScannedV1.parse(scanned!.payload)).toMatchObject({ verdict: roundVerdict });
       expect(roundVerdict).not.toBe('clean');
@@ -296,8 +298,8 @@ describe.skipIf(gate.skip)(
       });
       expect(roundAfter.scanVerdict).toBe(roundVerdict);
       expect(codes(roundAfter.reasonCodes).some((c) => c.startsWith('sandbox.'))).toBe(false);
-      // Step 5.1: the pass-through follows the revision-0 risk row (never the sandbox).
-      const decision = await expectPassThroughFollowsRisk(fx.prisma, sent.message, 0);
+      // Step 5.2: policy follows the revision-0 risk row (never the sandbox).
+      const decision = await expectPolicyFollowsRisk(fx.prisma, sent.message, 0);
       expect(await sinkFiles(sent.rcpt)).toHaveLength(decision.held ? 0 : 1);
       // The late sandbox final adds revision 1 (ADR-0042); revision 0 is unchanged by it.
       const revisions = await waitFor(
@@ -309,12 +311,18 @@ describe.skipIf(gate.skip)(
         { timeoutMs: 60_000, intervalMs: 1_000 },
       );
       expect(revisions.map((r) => r.revision)).toEqual([0, 1]);
-      expect(revisions[0]).toEqual(decision.row);
+      expect(revisions[0]).toEqual(decision.risk);
+      // P13: the late revision 1 does not re-evaluate; the message keeps one evaluation.
+      expect(
+        await fx.prisma.policyExecutionLog.count({
+          where: { messageId: sent.message.id, receivedAt: sent.message.receivedAt },
+        }),
+      ).toBe(1);
       expect((revisions[0]!.evidence as { sandbox: unknown }).sandbox).toBeNull();
       expect((revisions[1]!.evidence as { sandbox: { outcome: string } | null }).sandbox).toEqual({
         outcome: final.outcome,
       });
-      riskDecision = `${decision.row.score}/${decision.row.level}/${decision.row.recommendedAction}`;
+      riskDecision = `${decision.risk.score}/${decision.risk.level}/${decision.risk.recommendedAction}/${decision.evaluation.disposition}`;
 
       // The submission's sandbox_completed.v1 (firehose only in 4.6).
       const completed = await fx.prisma.messageOutbox.findMany({
@@ -444,8 +452,8 @@ describe.skipIf(gate.skip)(
           { timeoutMs: 60_000, intervalMs: 1_000 },
         );
         // Nothing completes while the controller is down; the mail flow is unaffected: the
-        // pass-through decides on the revision-0 risk row (step 5.1), not on the sandbox.
-        await expectPassThroughFollowsRisk(fx.prisma, sent.message, 0);
+        // policy-engine decides on the revision-0 risk row (steps 5.1, 5.2), not on the sandbox.
+        await expectPolicyFollowsRisk(fx.prisma, sent.message, 0);
         expect((await sandboxSubmissionsOf(fx.prisma, sent.message))[0]!.status).toBe('submitted');
 
         await controllerService('start');

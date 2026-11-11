@@ -14,7 +14,6 @@ import {
 } from './support/lifecycle';
 import { clearSinkDomain, sinkFiles, SINK_SERVICES } from './support/mail-sink';
 import { buildMessage } from './support/messages';
-import { metricValue } from './support/metrics';
 import { record, sleep } from './support/messaging-stack';
 import { MAIL_SINK_HOST, organizationRef } from './support/routing';
 import {
@@ -23,7 +22,6 @@ import {
   becRuleCodes,
   engineResultsOf,
   messagePublicId,
-  PASSTHROUGH_CONSUMER,
   REQUIRED_ENGINES,
   roundFinalEngines,
   scannedEventsOf,
@@ -32,6 +30,7 @@ import {
   stageReadyEventsOf,
   waitForRoundComplete,
 } from './support/scan-stack';
+import { expectPolicyHeld, floorOf } from './support/policy';
 import { SmtpFixtures, type FixtureDomain } from './support/smtp-fixtures';
 import { assertStackReady } from './support/smtp-stack';
 import { reply } from './support/smtp-tools';
@@ -43,19 +42,20 @@ import { reply } from './support/smtp-tools';
  * `scan.attachment`, `scan.url`) → the transaction that inserts the last of the rspamd/url finals
  * writes `mail.message.scan_stage_ready.v1` → event-relay → `scan.bec` → the bec engine (real
  * auth row of the round, url results, stored text parts, the tenant's executive profile created
- * through the api) → round completion → dev pass-through → postfix-outbound → mail-sink.
+ * through the api) → round completion → policy-engine (step 5.2) → postfix-outbound → mail-sink.
  *
  * - A fixture organization with an executive profile ("Anita Sharma", known address on the
  *   tenant's domain) created through `POST /api/v1/bec/executives`.
  * - CEO fraud, pretext stage (the executive's display name from a free-mail address: "quick
  *   favour, urgent, keep this confidential"): bec `suspicious` (X1, X2, C7, C8: score over the
  *   malicious threshold but no intent-evidence rule, so B6 caps it at suspicious); the read API
- *   explains it (rules with evidence, the profile's public id); the dev pass-through does NOT
- *   approve it (B17: `delivery_approvals_skipped_total{reason="bec_verdict"}` +1, the message
- *   stays `scanned`, nothing in any sink during the observation window).
+ *   explains it (rules with evidence, the profile's public id); it is never approved (B17; since
+ *   step 5.2 the policy-engine holds it: the platform default's rule D2 quarantines a
+ *   deterministic BEC `suspicious` verdict, P9.4; the message ends `quarantined`, nothing in any
+ *   sink during the observation window).
  * - CEO fraud, gift-card stage (adds "buy gift cards, send me the codes"): bec `malicious` (X1
- *   identity + C3 intent evidence); the round verdict is then `malicious`, so the pass-through
- *   holds it under the earlier `malicious_verdict` rule (B17 keeps that reason); never delivered.
+ *   identity + C3 intent evidence); the round verdict is then `malicious` and the risk row
+ *   carries a hard block, so policy rejects it (floor `policy.floor.hard_block`); never delivered.
  * - A legitimate message (no profile match, no cue, authenticated as From): bec `clean`,
  *   approved and delivered.
  * - A Hinglish payment-urgency message ("turant paise transfer karo, kisi ko mat batana"): the
@@ -228,39 +228,26 @@ async function becEngineView(publicId: string): Promise<{ raw: string; engine: B
   );
 }
 
-const skippedCounter = (reason: string) =>
-  metricValue('delivery-worker', 'delivery_approvals_skipped_total', { reason });
-
-/** The pass-through handled the scanned event (ledger row) and did not approve it. */
+/** Held by policy (step 5.2; before it the dev pass-through held it in `scanned`). */
 async function expectHeld(
   message: { id: bigint; receivedAt: Date },
   rcpt: string,
-  reason: string,
-  before: number,
-): Promise<void> {
-  const [scanned] = await scannedEventsOf(fx.prisma, org, message);
-  await waitFor(
-    `the dev pass-through to hold the message (${reason})`,
-    async () => {
-      const ledger = await fx.prisma.messageIdempotency.count({
-        where: { consumer: PASSTHROUGH_CONSUMER, eventId: scanned!.eventId },
-      });
-      return ledger === 1 && (await skippedCounter(reason)) >= before + 1;
-    },
-    { timeoutMs: 60_000, intervalMs: 1_000 },
-  );
+  min: 'quarantine' | 'reject',
+) {
+  const evaluation = await expectPolicyHeld(fx.prisma, message, { min });
   // Observation window: nothing is approved or delivered later.
   await sleep(10_000);
-  expect(await skippedCounter(reason)).toBe(before + 1);
+  const state = evaluation.disposition === 'reject' ? 'rejected' : 'quarantined';
+  const reason = evaluation.disposition === 'reject' ? 'policy_discard' : 'policy_quarantine';
   expect(await lifecycleOf(fx.prisma, message)).toMatchObject({
-    status: 'scanned',
-    statusReason: 'scan_complete',
+    status: state,
+    statusReason: reason,
     lifecycleRound: 0,
   });
-  expect((await pathOf(fx.prisma, message)).at(-1)).toEqual([
-    'scanning',
-    'scanned',
-    'scan_complete',
+  expect((await pathOf(fx.prisma, message)).slice(-3)).toEqual([
+    ['scanning', 'scanned', 'scan_complete'],
+    ['scanned', 'policy_evaluated', 'policy_decided'],
+    ['policy_evaluated', state, reason],
   ]);
   const approvals = await fx.prisma.messageOutbox.findMany({
     where: { organizationId: org, eventType: 'mail.delivery.approved.v1' },
@@ -276,6 +263,7 @@ async function expectHeld(
   ).toBe(0);
   for (const service of SINK_SERVICES) expect(await sinkFiles(rcpt, service), service).toEqual([]);
   await expectConsistentHistory(fx.prisma, message);
+  return evaluation;
 }
 
 describe.skipIf(gate.skip)(
@@ -294,8 +282,7 @@ describe.skipIf(gate.skip)(
       );
     });
 
-    it('CEO fraud pretext from a free-mail address: bec suspicious, explained, held by the dev pass-through (bec_verdict)', async () => {
-      const before = await skippedCounter('bec_verdict');
+    it('CEO fraud pretext from a free-mail address: bec suspicious, explained, held by policy (quarantine)', async () => {
       const { rcpt, message, round, finals, becFinal, becRow, scannedAfterMs } = await send(
         'ceo-pretext',
         `"${EXECUTIVE}" <${FREEMAIL_IMPOSTOR}>`,
@@ -393,18 +380,18 @@ describe.skipIf(gate.skip)(
       expect(view.raw).not.toContain('Keep this confidential');
       expect(view.raw).not.toContain('responseSha256');
 
-      // B17: held by the pass-through under reason bec_verdict; never delivered.
-      await expectHeld(message, rcpt, 'bec_verdict', before);
+      // B17, since step 5.2: held by policy (D2 or a stricter risk recommendation); never delivered.
+      const evaluation = await expectHeld(message, rcpt, 'quarantine');
       record('bec-smtp', {
         pretext_bec: `${becFinal!.outcome}:${becRow!.score}`,
         pretext_rules: fired.length,
         pretext_round_verdict: round.scanVerdict,
         pretext_smtp_to_scanned_ms: scannedAfterMs,
+        pretext_policy: `${evaluation.disposition}:${evaluation.decisionSource}`,
       });
     });
 
     it('CEO fraud asking for gift cards: bec malicious (identity + intent evidence), round malicious, never delivered', async () => {
-      const before = await skippedCounter('malicious_verdict');
       const { rcpt, message, round, becFinal, becRow } = await send(
         'ceo-giftcards',
         `"${EXECUTIVE}" <${FREEMAIL_IMPOSTOR}>`,
@@ -432,9 +419,28 @@ describe.skipIf(gate.skip)(
           { engine: 'bec', required: true, outcome: 'malicious', attempts: 1 },
         ]),
       );
-      // A malicious round is held under the earlier malicious_verdict rule (B17 keeps its reason).
-      await expectHeld(message, rcpt, 'malicious_verdict', before);
-      record('bec-smtp', { giftcard_bec: `${becFinal!.outcome}:${becRow!.score}` });
+      // A malicious round (step 5.2): held by policy through the hard-block floor. The 5.1 hard
+      // block `hb.bec_malicious` carries its default action `quarantine` (risk-scoring
+      // hard-blocks.ts; §12.2 point 9), so the floor is at least quarantine; a stricter risk
+      // recommendation (block) would reject.
+      const [risk] = await fx.prisma.messageRiskScore.findMany({
+        where: { messageId: message.id, receivedAt: message.receivedAt, revision: 0 },
+      });
+      expect(risk!.hardBlocks).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: 'hb.bec_malicious', action: 'quarantine' }),
+        ]),
+      );
+      const evaluation = await expectHeld(message, rcpt, 'quarantine');
+      expect(floorOf(evaluation).reasons).toContain('policy.floor.hard_block');
+      expect(evaluation.disposition).toBe(
+        risk!.recommendedAction === 'block' ? 'reject' : 'quarantine',
+      );
+      record('bec-smtp', {
+        giftcard_bec: `${becFinal!.outcome}:${becRow!.score}`,
+        giftcard_risk: `${risk!.score}/${risk!.level}/${risk!.recommendedAction}`,
+        giftcard_policy: `${evaluation.disposition}:${evaluation.decisionSource}`,
+      });
     });
 
     it('a legitimate message: bec clean (no profile match, no cue, authenticated as From), approved and delivered', async () => {

@@ -9,7 +9,7 @@ import { assertStackReady } from './support/smtp-stack';
  * RabbitMQ restart mid-stream through the live stack (docs/plan/steps/07-rabbitmq.md §10
  * "RabbitMQ restart mid-stream", WP5): 300 messages through postfix:25 while
  * `docker compose restart rabbitmq` runs twice — once while received events flow (relay →
- * `email.received` → email-worker), once while approvals flow (dev pass-through → relay →
+ * `email.received` → email-worker), once while approvals flow (policy-engine, step 5.2 → relay →
  * `email.delivery.pending` → planner). Every client reconnects by itself (no process exits);
  * unconfirmed relay publishes stay unpublished and are republished; unacked deliveries return to
  * their queue. Asserted: every message parsed exactly once (one parse row, one
@@ -54,7 +54,7 @@ describe.skipIf(gate.skip)(
           // While received events are being published and consumed.
           await progress.stored(Math.floor(N / 3));
           await restartBroker('ingestion');
-          // While approvals are being published and planned (after the pass-through's safety lag).
+          // While approvals are being published and planned.
           await progress.planned(Math.floor(N / 4));
           expect((await progress.counts()).plannerLedger).toBeLessThan(N);
           await restartBroker('delivery');

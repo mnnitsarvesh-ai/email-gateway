@@ -457,7 +457,7 @@ export class SmtpFixtures {
     try {
       if (ids.length > 0) {
         const where = { organizationId: { in: ids } };
-        // Step 2.3: with the delivery-worker running (dev pass-through), every ingested message
+        // Step 2.3: with the delivery-worker running (approvals since step 5.2 by the policy-engine), every ingested message
         // of a run is also planned and reinjected; its delivery rows go with the fixtures.
         // Reinjection rows early, so the worker claims nothing more of this run. Consumer
         // ledger rows before them: they are found through the outbox rows deleted below.
@@ -491,6 +491,9 @@ export class SmtpFixtures {
         // order of the api's organization purge, after the score rows of deleteScanRows).
         await this.prisma.riskScoringProfileVersion.deleteMany({ where });
         await this.prisma.riskScoringProfile.deleteMany({ where });
+        // Step 5.2: the policy tenant tables (RESTRICT keys), in the api purge's order
+        // (POLICY_PURGE_ORDER, after the evaluation rows of deleteScanRows).
+        await this.deletePolicyTenantRows(ids);
         await this.prisma.bounceEvent.deleteMany({ where });
         await this.prisma.deliverySuppression.deleteMany({ where });
         await this.prisma.organizationLimit.deleteMany({ where });
@@ -684,6 +687,10 @@ export class SmtpFixtures {
     // Step 5.1 (docs/plan/steps/15-risk-scoring.md §3, R14): one risk row per round and
     // revision, written by the completion (and late sandbox) transaction; no foreign keys.
     await this.prisma.messageRiskScore.deleteMany({ where });
+    // Step 5.2 (docs/plan/steps/16-policy-engine.md §3, P13): one policy evaluation per message
+    // and round, written by the policy-engine (no foreign keys; the policy copies under
+    // `org/<id>/policy/` go with the org prefix in S3).
+    await this.prisma.policyExecutionLog.deleteMany({ where });
     await this.prisma.emailAuthResult.deleteMany({ where });
     await this.prisma.scanEngineResult.deleteMany({ where });
     await this.prisma.emailScan.deleteMany({ where });
@@ -722,6 +729,25 @@ export class SmtpFixtures {
     await this.prisma.dlpCustomPattern.deleteMany({ where });
     await this.prisma.dlpKeywordDictionary.deleteMany({ where });
     await this.prisma.dlpComplianceSettings.deleteMany({ where });
+  }
+
+  /**
+   * Step 5.2 tenant rows (docs/plan/steps/16-policy-engine.md P22 "Organization purge"): the
+   * retired legacy policy rows, versions, policies, the settings row (generation), then
+   * department members and departments (the api's `POLICY_PURGE_ORDER`; every table references
+   * `organizations` with `RESTRICT`). The evaluation rows are scan rows.
+   */
+  private async deletePolicyTenantRows(ids: readonly bigint[]): Promise<void> {
+    const where = { organizationId: { in: [...ids] } };
+    await this.prisma.policyExecutionLog.deleteMany({ where });
+    await this.prisma.policyAction.deleteMany({ where });
+    await this.prisma.policyCondition.deleteMany({ where });
+    await this.prisma.policyVersion.deleteMany({ where });
+    await this.prisma.policyException.deleteMany({ where });
+    await this.prisma.emailPolicy.deleteMany({ where });
+    await this.prisma.policySettings.deleteMany({ where });
+    await this.prisma.tenantDepartmentMember.deleteMany({ where });
+    await this.prisma.tenantDepartment.deleteMany({ where });
   }
 
   /**

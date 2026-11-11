@@ -2,11 +2,7 @@ import { randomInt } from 'node:crypto';
 import { pdfLike } from '@email-gateway/attachment-corpus';
 import { messageScannedV1 } from '@email-gateway/event-contracts';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import {
-  attachmentMessage,
-  clamdResponds,
-  deliveryWorkerCounter,
-} from './support/attachment-stack';
+import { attachmentMessage, clamdResponds } from './support/attachment-stack';
 import { purgeDormantQueues } from './support/broker';
 import { waitFor } from './support/compose';
 import { waitForMessage } from './support/deliveries';
@@ -34,6 +30,7 @@ import {
   stopEngineService,
   waitForRoundComplete,
 } from './support/scan-stack';
+import { expectPolicyHeld, floorOf } from './support/policy';
 import { SmtpFixtures, type FixtureDomain } from './support/smtp-fixtures';
 import { assertStackReady } from './support/smtp-stack';
 import { reply } from './support/smtp-tools';
@@ -48,12 +45,15 @@ import { reply } from './support/smtp-tools';
  *    "reload time"), the next attempt gets a definite answer and the round completes `scanned`,
  *    approved and delivered.
  * 2. Past the budget (`SCAN_ATTACHMENT_MAX_ATTEMPTS`): the attachment engine's last attempt is
- *    final `error`, the round `failed`, the message `scan_failed`, never approved or delivered.
+ *    final `error`, the round `failed`, the message `scan_failed`, never approved or delivered;
+ *    since step 5.2 the policy-engine then quarantines it (E9 `scan_failed_fail_safe`, floor
+ *    `policy.floor.scan_failed`, E11 `policy_quarantine`).
  * 3. Rescan through the admin API job (`POST /api/v1/platform/attachment-rescans`, A13, platform
  *    admin with MFA) after clamd is back: the email-worker's rescan runner selects the message
- *    (window, organization, `scan_failed`, has attachments) and moves it through E19 (`scanner`,
- *    `signature_rescan`) into round 1, which is scanned with new rows (round 0 unchanged), approved
- *    and delivered; the job ends `completed` with one requested message.
+ *    (window, organization, `quarantined` since step 5.2, has attachments) and moves it through
+ *    E19 (`scanner`, `signature_rescan`) into round 1, which is scanned with new rows (round 0
+ *    unchanged), evaluated, approved and delivered; the job ends `completed` with one requested
+ *    message.
  *
  * Every attachment is unique per run (random seed), so no content-cache entry (A10) answers in
  * place of clamd. `afterAll` always starts clamd again and waits for its health check. One clamd
@@ -189,10 +189,7 @@ describe.skipIf(gate.skip)('attachment stack: ClamAV outage', { timeout: 900_000
     }
   });
 
-  it('ends scan_failed (never clean, never approved or delivered) when clamd stays down past the attempt budget', async () => {
-    const skippedBefore = await deliveryWorkerCounter('delivery_approvals_skipped_total', {
-      reason: 'scan_failed',
-    });
+  it('ends scan_failed (never clean, never approved or delivered; quarantined by policy) when clamd stays down past the attempt budget', async () => {
     await stopEngineService('clamav');
     const stoppedAt = Date.now();
     let downForS = 0;
@@ -210,7 +207,6 @@ describe.skipIf(gate.skip)('attachment stack: ClamAV outage', { timeout: 900_000
       expectFailedAttempts(rows);
       // Never clean: no per-attachment row is written for a failed final (A12).
       expect(await attachmentResultsOf(fx.prisma, message)).toEqual([]);
-      await waitForLifecycle(fx.prisma, message, 'scan_failed', 'scan_error');
       const [scanned] = await scannedEventsOf(fx.prisma, org, message);
       const payload = messageScannedV1.parse(scanned!.payload);
       expect(payload).toMatchObject({ outcome: 'scan_failed', verdict: 'error' });
@@ -219,16 +215,16 @@ describe.skipIf(gate.skip)('attachment stack: ClamAV outage', { timeout: 900_000
           { engine: 'attachment', required: true, outcome: 'error', attempts: maxAttempts },
         ]),
       );
-      await waitFor(
-        'the pass-through to skip the scan_failed message',
-        async () => {
-          const after = await deliveryWorkerCounter('delivery_approvals_skipped_total', {
-            reason: 'scan_failed',
-          });
-          return after === undefined || skippedBefore === undefined || after > skippedBefore;
-        },
-        { timeoutMs: 30_000, intervalMs: 1_000 },
-      );
+      // Step 5.2: the policy-engine evaluates the scan_failed round (E9) and holds it: floor
+      // `scan_failed`, at least quarantine (E11), never an approval.
+      const evaluation = await expectPolicyHeld(fx.prisma, message, { min: 'quarantine' });
+      expect(evaluation).toMatchObject({ trigger: 'scan_failed', disposition: 'quarantine' });
+      expect(floorOf(evaluation).reasons).toContain('policy.floor.scan_failed');
+      expect((await pathOf(fx.prisma, message)).slice(3)).toEqual([
+        ['scanning', 'scan_failed', 'scan_error'],
+        ['scan_failed', 'policy_evaluated', 'scan_failed_fail_safe'],
+        ['policy_evaluated', 'quarantined', 'policy_quarantine'],
+      ]);
       await sleep(5_000);
       expect(
         await fx.prisma.emailDelivery.count({
@@ -236,8 +232,8 @@ describe.skipIf(gate.skip)('attachment stack: ClamAV outage', { timeout: 900_000
         }),
       ).toBe(0);
       expect(await lifecycleOf(fx.prisma, message)).toMatchObject({
-        status: 'scan_failed',
-        statusReason: 'scan_error',
+        status: 'quarantined',
+        statusReason: 'policy_quarantine',
         lifecycleRound: 0,
       });
       expect(await sinkFiles(rcpt)).toEqual([]);
@@ -256,8 +252,8 @@ describe.skipIf(gate.skip)('attachment stack: ClamAV outage', { timeout: 900_000
     }
   });
 
-  it('rescans the scan_failed message through an admin rescan job: round 1 is scanned, round 0 unchanged', async () => {
-    expect(failedMessage, 'the previous case left a scan_failed message').toBeDefined();
+  it('rescans the scan_failed (now quarantined) message through an admin rescan job: round 1 is scanned, round 0 unchanged', async () => {
+    expect(failedMessage, 'the previous case left a quarantined scan_failed message').toBeDefined();
     const message = failedMessage!;
     const rcpt = `failed@${domain.name}`;
     const round0Before = await scanRoundsOf(fx.prisma, message);
@@ -265,7 +261,7 @@ describe.skipIf(gate.skip)('attachment stack: ClamAV outage', { timeout: 900_000
 
     const dry = await admin!.call('POST', '/platform/attachment-rescans', {
       windowHours: 1,
-      states: ['scan_failed'],
+      states: ['quarantined'],
       organizationId: orgPublicId,
       reason: 'stack test: clamd recovered (dry run)',
       dryRun: true,
@@ -275,7 +271,7 @@ describe.skipIf(gate.skip)('attachment stack: ClamAV outage', { timeout: 900_000
 
     const created = await admin!.call('POST', '/platform/attachment-rescans', {
       windowHours: 1,
-      states: ['scan_failed'],
+      states: ['quarantined'],
       organizationId: orgPublicId,
       reason: 'stack test: clamd recovered',
     });
@@ -320,9 +316,12 @@ describe.skipIf(gate.skip)('attachment stack: ClamAV outage', { timeout: 900_000
     expect((await pathOf(fx.prisma, message)).slice(2)).toEqual([
       ['persisted', 'scanning', 'scan_started'],
       ['scanning', 'scan_failed', 'scan_error'],
-      ['scan_failed', 'scanning', 'signature_rescan'],
+      ['scan_failed', 'policy_evaluated', 'scan_failed_fail_safe'],
+      ['policy_evaluated', 'quarantined', 'policy_quarantine'],
+      ['quarantined', 'scanning', 'signature_rescan'],
       ['scanning', 'scanned', 'scan_complete'],
-      ['scanned', 'approved', 'dev_passthrough'],
+      ['scanned', 'policy_evaluated', 'policy_decided'],
+      ['policy_evaluated', 'approved', 'policy_deliver'],
       ['approved', 'delivery_pending', 'delivery_planned'],
       ['delivery_pending', 'delivered', 'delivery_complete'],
     ]);

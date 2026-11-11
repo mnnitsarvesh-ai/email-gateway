@@ -32,6 +32,7 @@ import {
   type UrlPlatformSettings,
   urlPlatformSettingsFromEnv,
 } from '@email-gateway/security-contracts';
+import { isPlatformDefaultId, POLICY_PLATFORM_DEFAULTS } from '@email-gateway/policy-dsl';
 import { isPlatformProfileId, RISK_PLATFORM_PROFILE_IDS } from '@email-gateway/risk-scoring';
 import { z } from 'zod';
 import {
@@ -781,6 +782,34 @@ const riskConfigShape = {
   RISK_PROFILE_MAX_VERSIONS: int(10, 1000).default(200),
 };
 
+/**
+ * Policy engine (step 5.2 §5, docs/plan/steps/16-policy-engine.md P4, P16, P17, P22): the
+ * platform default the tenant policies are evaluated with (a key of `POLICY_PLATFORM_DEFAULTS`;
+ * the same key the policy-engine reads), the per-organization bounds of the policy and directory
+ * routes (they may only lower the DSL limits of P4, never raise them) and the widest range of
+ * the execution history.
+ */
+const policyConfigShape = {
+  POLICY_PLATFORM_DEFAULT: z
+    .string()
+    .default('pol-default/1')
+    .refine(isPlatformDefaultId, {
+      message: `must be one of ${Object.keys(POLICY_PLATFORM_DEFAULTS).join(', ')}`,
+    }),
+  /** Most policies (not archived) per organization (`409 policy_limit_reached`). */
+  POLICY_MAX_POLICIES: int(10, 100).default(100),
+  /** Most versions (drafts + published) per policy (`409 policy_version_limit_reached`). */
+  POLICY_MAX_VERSIONS_PER_POLICY: int(10, 1000).default(200),
+  /** Most rules of active versions per organization (`409 policy_rule_limit_reached`). */
+  POLICY_MAX_ACTIVE_RULES: int(100, 5000).default(1000),
+  /** Widest `from`–`to` range of `GET /policies/executions`, in days. */
+  POLICY_HISTORY_MAX_RANGE_DAYS: int(1, 186).default(31),
+  /** Most departments per organization (`409 department_limit_reached`). */
+  DEPARTMENT_MAX_PER_ORG: int(10, 5000).default(500),
+  /** Most members per department (`409 department_member_limit_reached`). */
+  DEPARTMENT_MAX_MEMBERS: int(100, 50_000).default(5000),
+};
+
 /** The validated Rspamd platform settings of the api config (S8). */
 export function rspamdPlatformSettingsOf(
   cfg: Pick<ScanConfigKeys, (typeof RSPAMD_PLATFORM_ENV_KEYS)[keyof RspamdPlatformSettings]>,
@@ -839,6 +868,7 @@ export const apiConfigSchema = baseConfigSchema
   .extend(dlpConfigShape)
   .extend(sandboxConfigShape)
   .extend(riskConfigShape)
+  .extend(policyConfigShape)
   .extend({
     /** Comma-separated allow-list of admin portal origins. */
     CORS_ORIGINS: z

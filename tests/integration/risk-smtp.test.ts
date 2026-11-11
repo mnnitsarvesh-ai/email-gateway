@@ -1,7 +1,6 @@
 import { randomInt } from 'node:crypto';
 import { eicar } from '@email-gateway/attachment-corpus';
 import { Prng, Synthetic } from '@email-gateway/dlp';
-import { messageScannedV1 } from '@email-gateway/event-contracts';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { apiSession, type ApiSession } from './support/api-client';
 import { attachmentMessage, type MessageAttachment } from './support/attachment-stack';
@@ -19,8 +18,6 @@ import {
   contentProblems,
   hardBlocksOf,
   levelAtLeast,
-  riskHoldCounters,
-  riskHolds,
   riskRowsOf,
   riskStateChecksums,
   scanRiskColumns,
@@ -32,9 +29,7 @@ import {
   corpusEml,
   ensureRspamdRunning,
   messagePublicId,
-  PASSTHROUGH_CONSUMER,
   REQUIRED_ENGINES,
-  scannedEventsOf,
   scanStackGate,
   sendToMx,
   stopRspamd,
@@ -43,35 +38,46 @@ import {
 import { SmtpFixtures, type FixtureDomain } from './support/smtp-fixtures';
 import { assertStackReady } from './support/smtp-stack';
 import { reply, swaks } from './support/smtp-tools';
+import {
+  approvalsOf as policyApprovalsOf,
+  expectPolicyHeld,
+  floorOf,
+  policyEvaluations,
+  policyFloorRaises,
+  waitForEvaluation,
+} from './support/policy';
 
 /**
  * Step 5.1 risk scoring end to end through Postfix and the live containers (docs/plan/steps/
  * 15-risk-scoring.md §9.5, R4–R8, R13, R15, R17; ADR-0041, ADR-0042). The email-worker scores
  * every completed round in the completion transaction (revision 0, `message_risk_scores`, and
  * the `email_scans` snapshot columns `verdict`, `risk_score`, `scoring_version`,
- * `risk_profile_version_id`); the dev pass-through (local/ci) holds a round whose
- * recommendation is `require_approval`/`quarantine`/`block` (`risk_recommendation`) after its
- * unchanged 4.x checks.
+ * `risk_profile_version_id`). Since step 5.2 the policy-engine decides every round from that
+ * row (docs/plan/steps/16-policy-engine.md P9: the platform default follows the recommendation,
+ * the floor holds hard blocks, failures and the DLP binding); the 5.1 development pass-through
+ * (R17) was removed with ADR-0044, so the holds below are policy holds (`quarantined`,
+ * `rejected`), asserted through the evaluation rows and `policy_evaluations_total`.
  *
  * 1. A clean, DKIM-signed and aligned inbound message → one revision-0 row, `none`, `clean`,
  *    `deliver`; approved and delivered; the scans read API lists the row.
  * 2. GTUBE through the OUTBOUND path (SASL on postfix-outbound:587, no in-session milter there;
  *    the inbound milter rejects GTUBE, ADR-0027) → `spam.gtube`, `high`, `spam`, `quarantine`,
- *    held by the pass-through with reason `risk_recommendation`.
+ *    quarantined by the platform default (`policy.default.risk_quarantine`).
  * 3. EICAR attachment (inbound) → `hb.malware_attachment`, `critical`, `malware`, `block`
- *    (held by the 4.x `malicious_verdict` check first; the risk row agrees).
+ *    (rejected by policy: floor `hard_block`; the risk row agrees).
  * 4. A card number outbound under the platform default DLP policy (`alert`) → `dlp` group,
  *    `low`, `dlp_violation`, `tag` (approved and delivered); and in a second organization with a
- *    tenant DLP `block` rule → `hb.dlp_block`, `block`, held.
+ *    tenant DLP `block` rule → `hb.dlp_block`, `block`, rejected by policy.
  * 5. Rspamd stopped past its attempt budget (the scan-resilience mechanism) → `scan_failed`
  *    round with a revision-0 row: `risk.engine.rspamd.<error|timeout>`, level ≥ `medium`,
  *    `quarantine`.
  * 6. Administrative rescan of (5) once Rspamd is back → round 1 with its own row; round 0's row
  *    unchanged.
  * 7. Profile change applies to the next round only: a tenant version (`actions.medium =
- *    quarantine`) published through the api; a new message B and a rescan of the EICAR message
- *    A use it (`profile_source = tenant`, `profile_id_text` with the version), A's first row and
- *    its NULL snapshot are unchanged.
+ *    quarantine`) published through the api; a new message B and a rescan of the GTUBE message
+ *    A (quarantined; the EICAR message is `rejected` since step 5.2, a terminal state E19 does
+ *    not leave) use it (`profile_source = tenant`, `profile_id_text` with the version), A's
+ *    first row and its NULL snapshot are unchanged.
  * 8. Dry-run changes nothing (checksums of the organization's risk rows, rounds, profile,
  *    versions, audit rows and the outbox count); `active` reproduces the stored result; a draft
  *    gives another `profileSha256` with the same `inputSha256`.
@@ -103,6 +109,8 @@ const shared: {
   eicar?: Msg;
   outage?: Msg;
   eicarRow0?: RiskRow;
+  gtube?: Msg;
+  gtubeRow0?: RiskRow;
   b?: Msg;
   version?: { id: string; internalId: bigint; versionNo: number; profileSha256: string };
 } = {};
@@ -282,45 +290,18 @@ async function scoredRound(message: Msg, round = 0, timeoutMs = 180_000) {
   return { scan, row, columns };
 }
 
-// --- Pass-through -------------------------------------------------------------------------------
+// --- Policy (step 5.2) ----------------------------------------------------------------------------
 
-async function passThroughHandled(message: Msg, round: number): Promise<void> {
-  const events = await scannedEventsOf(fx.prisma, await orgOf(message), message);
-  const event = events.find((e) => messageScannedV1.parse(e.payload).lifecycleRound === round);
-  expect(event, `scanned.v1 of round ${round}`).toBeDefined();
-  await waitFor(
-    `the dev pass-through to handle round ${round} of message ${message.id}`,
-    async () =>
-      (await fx.prisma.messageIdempotency.count({
-        where: { consumer: PASSTHROUGH_CONSUMER, eventId: event!.eventId },
-      })) === 1,
-    { timeoutMs: 60_000, intervalMs: 500 },
-  );
+/** The policy-engine evaluated round `round` (one `policy_execution_logs` row, P13). */
+async function policyHandled(message: Msg, round: number) {
+  return waitForEvaluation(fx.prisma, message, round, 120_000);
 }
 
-async function orgOf(message: Msg): Promise<bigint> {
-  const row = await fx.prisma.emailMessage.findFirstOrThrow({
-    where: { id: message.id, receivedAt: message.receivedAt },
-    select: { organizationId: true },
-  });
-  return row.organizationId;
-}
-
-async function approvalsOf(message: Msg): Promise<number> {
-  const rows = await fx.prisma.messageOutbox.findMany({
-    where: { organizationId: await orgOf(message), eventType: 'mail.delivery.approved.v1' },
-    select: { payload: true },
-  });
-  return rows.filter(
-    (r) => (r.payload as { messageId?: string }).messageId === message.id.toString(),
-  ).length;
-}
-
-/** Held: handled by the pass-through, never approved or delivered (10 s window). */
-async function expectHeld(message: Msg, rcpt: string, round = 0): Promise<void> {
-  await passThroughHandled(message, round);
-  await sleep(10_000);
-  expect(await approvalsOf(message)).toBe(0);
+/** Held by policy: evaluated, not `allow`, in the disposition's state, never delivered. */
+async function expectHeld(message: Msg, rcpt: string, round = 0) {
+  const evaluation = await expectPolicyHeld(fx.prisma, message, { round });
+  await sleep(5_000);
+  expect(await policyApprovalsOf(fx.prisma, message)).toHaveLength(0);
   expect(
     await fx.prisma.emailDelivery.count({
       where: { messageId: message.id },
@@ -330,6 +311,7 @@ async function expectHeld(message: Msg, rcpt: string, round = 0): Promise<void> 
     expect(await sinkFiles(rcpt, service), `${rcpt} ${service}`).toEqual([]);
   }
   await expectConsistentHistory(fx.prisma, message);
+  return evaluation;
 }
 
 /** The scans read API (replica): the `risk` section of round `round`. */
@@ -400,8 +382,12 @@ describe.skipIf(gate.skip)(
     });
 
     it('(2) GTUBE through the outbound path: spam.gtube, high, spam, quarantine, held (risk_recommendation)', async () => {
-      const before = await riskHoldCounters();
-      const holdsBefore = await riskHolds('quarantine');
+      const quarantinedBefore = await policyEvaluations({
+        trigger: 'scanned',
+        disposition: 'quarantine',
+        source: 'platform_default',
+        direction: 'outbound',
+      });
       const { rcpt, message } = await outboundMessage({
         organizationId: org,
         domain: out,
@@ -424,22 +410,32 @@ describe.skipIf(gate.skip)(
         recommendedAction: 'quarantine',
       });
       expect(hardBlocksOf(row)).toEqual([]);
-      await expectHeld(message, rcpt);
-      const after = await riskHoldCounters();
-      expect(after.riskRecommendation).toBe(before.riskRecommendation + 1);
-      expect(after.riskMissing).toBe(before.riskMissing);
-      expect(await riskHolds('quarantine')).toBe(holdsBefore + 1);
-      expect(await lifecycleOf(fx.prisma, message)).toMatchObject({
-        status: 'scanned',
-        statusReason: 'scan_complete',
+      // Step 5.2: quarantined by the platform default following the recommendation (P9.4).
+      const evaluation = await expectHeld(message, rcpt);
+      expect(evaluation).toMatchObject({
+        disposition: 'quarantine',
+        decisionSource: 'platform_default',
       });
+      expect(floorOf(evaluation).reasons).toEqual([]);
+      expect(
+        await policyEvaluations({
+          trigger: 'scanned',
+          disposition: 'quarantine',
+          source: 'platform_default',
+          direction: 'outbound',
+        }),
+      ).toBe(quarantinedBefore + 1);
+      expect(await lifecycleOf(fx.prisma, message)).toMatchObject({
+        status: 'quarantined',
+        statusReason: 'policy_quarantine',
+      });
+      shared.gtube = message;
+      shared.gtubeRow0 = row;
       record('risk-smtp', { gtube_score: row.score, gtube_level: row.level });
     });
 
     it('(3) EICAR attachment: hb.malware_attachment, critical, malware, block; held', async () => {
-      const malicious = await metricValue('delivery-worker', 'delivery_approvals_skipped_total', {
-        reason: 'malicious_verdict',
-      });
+      const hardBlocks = await policyFloorRaises('hard_block');
       const built = attachmentMessage({
         from: 'alice@clean.scan.test',
         to: [`eicar@${inbound.name}`],
@@ -462,13 +458,15 @@ describe.skipIf(gate.skip)(
       expect(row.score).toBeGreaterThanOrEqual(800);
       expect(row.reasonCodes as string[]).toContain('risk.hard_block.malware_attachment');
       expect(signalsOf(row)).toContain('attachment_malware');
-      // Held by the unchanged 4.x check first (R17 order); the risk row agrees.
-      await expectHeld(message, rcpt);
-      expect(
-        await metricValue('delivery-worker', 'delivery_approvals_skipped_total', {
-          reason: 'malicious_verdict',
-        }),
-      ).toBe(malicious + 1);
+      // Step 5.2: rejected (inbound: discarded, no bounce) with the hard-block floor reason.
+      const evaluation = await expectHeld(message, rcpt);
+      expect(evaluation.disposition).toBe('reject');
+      expect(floorOf(evaluation).reasons).toContain('policy.floor.hard_block');
+      expect(await policyFloorRaises('hard_block')).toBeGreaterThanOrEqual(hardBlocks + 1);
+      expect(await lifecycleOf(fx.prisma, message)).toMatchObject({
+        status: 'rejected',
+        statusReason: 'policy_discard',
+      });
       shared.eicar = message;
       shared.eicarRow0 = row;
       record('risk-smtp', { eicar_score: row.score });
@@ -529,15 +527,15 @@ describe.skipIf(gate.skip)(
         recommendedAction: 'block',
       });
       expect(rowJson(row)).not.toContain(card);
-      // Held by the 4.x dlp_action check first (R17 order).
-      await expectHeld(message, rcpt);
+      // Step 5.2: the DLP binding (floor) rejects it.
+      const evaluation = await expectHeld(message, rcpt);
+      expect(evaluation.disposition).toBe('reject');
+      expect(floorOf(evaluation).reasons).toContain('policy.floor.dlp_block');
       record('risk-smtp', { dlp_block_score: row.score });
     });
 
     it('(5) Rspamd down past its budget: scan_failed round with risk.engine.rspamd.*, level ≥ medium, quarantine', async () => {
-      const scanFailed = await metricValue('delivery-worker', 'delivery_approvals_skipped_total', {
-        reason: 'scan_failed',
-      });
+      const scanFailedBefore = await policyFloorRaises('scan_failed');
       await stopRspamd();
       let message: Msg;
       let rcpt: string;
@@ -572,13 +570,25 @@ describe.skipIf(gate.skip)(
         expect(row.recommendedAction).toBe('quarantine');
         expect(row.verdict).not.toBe('clean');
         expect(row.status).toBe('scored');
-        await waitForLifecycle(fx.prisma, message, 'scan_failed', 'scan_error');
-        await expectHeld(message, rcpt);
-        expect(
-          await metricValue('delivery-worker', 'delivery_approvals_skipped_total', {
-            reason: 'scan_failed',
-          }),
-        ).toBe(scanFailed + 1);
+        // Step 5.2: E9 (scan_failed_fail_safe) then at least quarantine (floor scan_failed).
+        const evaluation = await expectHeld(message, rcpt);
+        expect(evaluation).toMatchObject({ trigger: 'scan_failed' });
+        expect(['quarantine', 'reject']).toContain(evaluation.disposition);
+        expect(floorOf(evaluation).reasons).toContain('policy.floor.scan_failed');
+        expect(await policyFloorRaises('scan_failed')).toBeGreaterThanOrEqual(scanFailedBefore + 1);
+        const path = await fx.prisma.emailMessageStatusHistory.findMany({
+          where: { messageId: message.id, receivedAt: message.receivedAt },
+          orderBy: { version: 'asc' },
+          select: { toStatus: true, reasonCode: true },
+        });
+        expect(path.map((h) => [h.toStatus, h.reasonCode]).slice(3, 6)).toEqual([
+          ['scan_failed', 'scan_error'],
+          ['policy_evaluated', 'scan_failed_fail_safe'],
+          [
+            evaluation.disposition === 'reject' ? 'rejected' : 'quarantined',
+            evaluation.disposition === 'reject' ? 'policy_discard' : 'policy_quarantine',
+          ],
+        ]);
         shared.outage = message;
         record('risk-smtp', {
           outage_score: row.score,
@@ -618,10 +628,12 @@ describe.skipIf(gate.skip)(
     });
 
     it('(7) a published tenant version applies to the next round only (message B and a rescan of A)', async () => {
-      expect(shared.eicar && shared.eicarRow0, 'case 3 left the EICAR message').toBeTruthy();
-      const a = shared.eicar!;
+      // Step 5.2: A is the GTUBE message (quarantined, E19 applies); the EICAR message is
+      // `rejected` (terminal) and can no longer be rescanned.
+      expect(shared.gtube && shared.gtubeRow0, 'case 2 left the GTUBE message').toBeTruthy();
+      const a = shared.gtube!;
       const a0Before = (await riskRowsOf(fx.prisma, a))[0]!;
-      expect(a0Before).toEqual(shared.eicarRow0);
+      expect(a0Before).toEqual(shared.gtubeRow0);
       const a0Columns = await scanRiskColumns(fx.prisma, a, 0);
       expect(a0Columns.riskProfileVersionId).toBeNull();
 
@@ -696,13 +708,13 @@ describe.skipIf(gate.skip)(
         profileVersionId: internal.id,
         profileIdText,
         profileSha256: shared.version.profileSha256,
-        level: 'critical',
-        recommendedAction: 'block',
+        level: 'high',
+        recommendedAction: 'quarantine',
       });
       // Both messages settle before the next case takes its checksums: B is delivered, A's
-      // round 1 is handled (held again by the 4.x malicious check) by the pass-through.
+      // round 1 is evaluated (quarantined again) by the policy-engine.
       await waitForLifecycle(fx.prisma, b, 'delivered', 'delivery_complete', 180_000);
-      await passThroughHandled(a, 1);
+      expect((await policyHandled(a, 1)).disposition).toBe('quarantine');
       const rows = await riskRowsOf(fx.prisma, a);
       expect(rows.filter((r) => r.lifecycleRound === 0)).toEqual([a0Before]);
       expect(a0Before).toMatchObject({ profileSource: 'platform', profileIdText: 'rsk-default/1' });

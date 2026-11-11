@@ -237,11 +237,17 @@ enum MessageVerdict {
   unknown
 }
 
+/// Final action of a message (`email_messages.final_action`, `email_recipients.final_action`,
+/// `policy_execution_logs.action`). Append-only. Step 5.2 (docs/plan/steps/16-policy-engine.md
+/// P18) appended `reject` (an outbound/internal message refused by policy; inbound refusals are
+/// `discard`) and `require_approval` (held for review).
 enum MessageAction {
   deliver
   tag
   quarantine
   discard
+  reject
+  require_approval
 }
 
 enum RecipientStatus {
@@ -705,6 +711,39 @@ enum PolicyVersionStatus {
   rolled_back
 }
 
+/// Final disposition of a policy evaluation (step 5.2 P9), in strictness order.
+enum PolicyDisposition {
+  allow
+  require_approval
+  quarantine
+  reject
+}
+
+/// What started a policy evaluation (step 5.2 P7): a completed round, a failed round or a parse
+/// failure (no round scanned).
+enum PolicyEvaluationTrigger {
+  scanned
+  scan_failed
+  parse_failed
+}
+
+/// Who decided the final disposition (step 5.2 P9): a tenant rule, the platform default
+/// (`pol-default/1`) or the mandatory strictness floor.
+enum PolicyDecisionSource {
+  tenant_rule
+  platform_default
+  floor
+}
+
+/// The object an ALLOW delivered (step 5.2 P20, P21); `none` when nothing is delivered.
+enum PolicyDeliveredObject {
+  original
+  rewritten
+  policy_copy
+  none
+}
+
+/// Legacy (step 1.1) relational policy vocabulary of policy_conditions; retired in step 5.2.
 enum PolicyOperator {
   eq
   neq
@@ -1000,6 +1039,9 @@ model Organization {
   dlpComplianceSettings    DlpComplianceSettings?
   riskScoringProfile       RiskScoringProfile?
   riskScoringVersions      RiskScoringProfileVersion[]
+  policySettings           PolicySettings?
+  tenantDepartments        TenantDepartment[]
+  tenantDepartmentMembers  TenantDepartmentMember[]
 
   @@index([status])
   @@index([status, purgeAfter])
@@ -1125,8 +1167,11 @@ model User {
   mfaRecoveryCodes           UserMfaRecoveryCode[]
   createdApiKeys             ApiKey[]
   updatedYaraRules           YaraRule[]
-  createdEmailPolicies       EmailPolicy[]
-  publishedPolicyVersions    PolicyVersion[]
+  createdEmailPolicies       EmailPolicy[]               @relation("EmailPolicyCreatedBy")
+  updatedEmailPolicies       EmailPolicy[]               @relation("EmailPolicyUpdatedBy")
+  createdPolicyVersions      PolicyVersion[]             @relation("PolicyVersionCreatedBy")
+  updatedPolicyVersions      PolicyVersion[]             @relation("PolicyVersionUpdatedBy")
+  publishedPolicyVersions    PolicyVersion[]             @relation("PolicyVersionPublishedBy")
   createdPolicyExceptions    PolicyException[]
   createdSuppressions        DeliverySuppression[]
   quarantineMessages         QuarantineMessage[]
@@ -1163,6 +1208,11 @@ model User {
   createdRiskVersions        RiskScoringProfileVersion[] @relation("RiskVersionCreatedBy")
   updatedRiskVersions        RiskScoringProfileVersion[] @relation("RiskVersionUpdatedBy")
   publishedRiskVersions      RiskScoringProfileVersion[] @relation("RiskVersionPublishedBy")
+  updatedPolicySettings      PolicySettings[]            @relation("PolicySettingsUpdatedBy")
+  createdDepartments         TenantDepartment[]          @relation("DepartmentCreatedBy")
+  updatedDepartments         TenantDepartment[]          @relation("DepartmentUpdatedBy")
+  departmentMemberships      TenantDepartmentMember[]    @relation("DepartmentMemberUser")
+  createdDepartmentMembers   TenantDepartmentMember[]    @relation("DepartmentMemberCreatedBy")
 
   @@unique([organizationId, email])
   @@index([organizationId, status])
@@ -3421,8 +3471,13 @@ model YaraRule {
 // 3.6 Policy
 // ---------------------------------------------------------------------------------------------
 
-/// `active_version_id` has no FK (it would form a cycle with policy_versions); the service
-/// validates it.
+/// A tenant mail policy (step 5.2 P17, ADR-0043). `status`: `draft` (never activated), `active`
+/// (has an active published version and is evaluated), `disabled` (has versions, not evaluated),
+/// `archived` (soft-deleted: `deleted_at` set, versions kept for history). `direction` and
+/// `priority` are copied from the active version's definition at activation (from the newest
+/// draft while never activated). `row_version` is the compare-and-set counter of metadata and
+/// pointer changes. `active_version_id` has no FK (it would form a cycle with policy_versions);
+/// the service validates it. The name stays unique per organization, archived policies included.
 model EmailPolicy {
   id              BigInt          @id @default(autoincrement()) @db.UnsignedBigInt
   publicId        String          @unique @default(uuid(7)) @map("public_id") @db.Char(36)
@@ -3433,13 +3488,16 @@ model EmailPolicy {
   priority        Int
   status          PolicyStatus    @default(draft)
   activeVersionId BigInt?         @map("active_version_id") @db.UnsignedBigInt
+  rowVersion      Int             @default(1) @map("row_version") @db.UnsignedInt
   createdByUserId BigInt?         @map("created_by_user_id") @db.UnsignedBigInt
+  updatedByUserId BigInt?         @map("updated_by_user_id") @db.UnsignedBigInt
   deletedAt       DateTime?       @map("deleted_at") @db.DateTime(3)
   createdAt       DateTime        @default(now()) @map("created_at") @db.DateTime(3)
   updatedAt       DateTime        @updatedAt @map("updated_at") @db.DateTime(3)
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  createdBy    User?        @relation(fields: [createdByUserId], references: [id], onDelete: SetNull)
+  createdBy    User?        @relation("EmailPolicyCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  updatedBy    User?        @relation("EmailPolicyUpdatedBy", fields: [updatedByUserId], references: [id], onDelete: SetNull)
 
   versions   PolicyVersion[]
   exceptions PolicyException[]
@@ -3449,7 +3507,15 @@ model EmailPolicy {
   @@map("email_policies")
 }
 
-/// `definition` is the compiled snapshot of the version.
+/// A version of a tenant policy (step 5.2 P17). `definition` is the `policy-dsl/1` document
+/// (`policyDefinitionSchema` of @email-gateway/policy-dsl); `definition_sha256` = sha256 of its
+/// canonical JSON. `draft` versions are editable (CAS on `row_version`) and deletable;
+/// **published versions are immutable** (the api updates and deletes only `WHERE status =
+/// 'draft'`). Publishing stores `dsl_version`, `references` (`{ departmentIds, userIds }`, public
+/// ids of the directory objects the definition names), `has_override_rules` and `rule_count`.
+/// `dsl_version` NULL = a legacy (step 1.1) row: the migration `policy_engine` set every such row
+/// to `superseded` and deactivated its policy (nothing deleted). Statuses used: `draft`,
+/// `published`; `superseded` only for retired legacy rows; `rolled_back` is unused.
 model PolicyVersion {
   id                BigInt              @id @default(autoincrement()) @db.UnsignedBigInt
   organizationId    BigInt              @map("organization_id") @db.UnsignedBigInt
@@ -3458,7 +3524,17 @@ model PolicyVersion {
   status            PolicyVersionStatus @default(draft)
   definition        Json
   definitionSha256  String              @map("definition_sha256") @db.Char(64)
+  /// `policy-dsl/1`; NULL = legacy format (retired).
+  dslVersion        String?             @map("dsl_version") @db.VarChar(32)
+  /// `{ departmentIds: string[], userIds: string[] }` (public ids); NULL for legacy rows.
+  /// Note: `references` is a reserved word in MySQL; hand-written SQL must quote it.
+  references        Json?
+  hasOverrideRules  Boolean             @default(false) @map("has_override_rules")
+  ruleCount         Int                 @default(0) @map("rule_count") @db.UnsignedSmallInt
+  rowVersion        Int                 @default(1) @map("row_version") @db.UnsignedInt
   changeNote        String?             @map("change_note") @db.VarChar(512)
+  createdByUserId   BigInt?             @map("created_by_user_id") @db.UnsignedBigInt
+  updatedByUserId   BigInt?             @map("updated_by_user_id") @db.UnsignedBigInt
   publishedAt       DateTime?           @map("published_at") @db.DateTime(3)
   publishedByUserId BigInt?             @map("published_by_user_id") @db.UnsignedBigInt
   createdAt         DateTime            @default(now()) @map("created_at") @db.DateTime(3)
@@ -3466,7 +3542,9 @@ model PolicyVersion {
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
   policy       EmailPolicy  @relation(fields: [policyId], references: [id], onDelete: Cascade)
-  publishedBy  User?        @relation(fields: [publishedByUserId], references: [id], onDelete: SetNull)
+  createdBy    User?        @relation("PolicyVersionCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  updatedBy    User?        @relation("PolicyVersionUpdatedBy", fields: [updatedByUserId], references: [id], onDelete: SetNull)
+  publishedBy  User?        @relation("PolicyVersionPublishedBy", fields: [publishedByUserId], references: [id], onDelete: SetNull)
 
   conditions PolicyCondition[]
   actions    PolicyAction[]
@@ -3476,7 +3554,9 @@ model PolicyVersion {
   @@map("policy_versions")
 }
 
-/// OR-groups (`group_seq`) of AND-ed conditions.
+/// RETIRED in step 5.2 (docs/plan/steps/16-policy-engine.md §3): the step 1.1 relational
+/// decomposition of a policy version (OR-groups `group_seq` of AND-ed conditions). No reader or
+/// writer from 5.2 on; rows of legacy versions are kept and removed only by organization purge.
 model PolicyCondition {
   id              BigInt         @id @default(autoincrement()) @db.UnsignedBigInt
   organizationId  BigInt         @map("organization_id") @db.UnsignedBigInt
@@ -3497,6 +3577,8 @@ model PolicyCondition {
   @@map("policy_conditions")
 }
 
+/// RETIRED in step 5.2 (as policy_conditions): legacy actions of a policy version. No reader or
+/// writer; actions live in the `policy-dsl/1` definition.
 model PolicyAction {
   id              BigInt           @id @default(autoincrement()) @db.UnsignedBigInt
   organizationId  BigInt           @map("organization_id") @db.UnsignedBigInt
@@ -3514,7 +3596,9 @@ model PolicyAction {
   @@map("policy_actions")
 }
 
-/// `policy_id` NULL = organization-wide exception.
+/// RETIRED in step 5.2 (as policy_conditions): legacy organization-wide or per-policy
+/// exceptions (`policy_id` NULL = organization-wide). No reader or writer; exceptions live in the
+/// `policy-dsl/1` definition (`unless`, `exceptions`).
 model PolicyException {
   id              BigInt              @id @default(autoincrement()) @db.UnsignedBigInt
   organizationId  BigInt              @map("organization_id") @db.UnsignedBigInt
@@ -3536,25 +3620,175 @@ model PolicyException {
   @@map("policy_exceptions")
 }
 
-/// PARTITIONED by RANGE COLUMNS(received_at), monthly. `trace` explains the evaluation. No
-/// foreign keys.
+/// Per-organization policy settings and the evaluation snapshot generation (step 5.2 P11, P12).
+/// One row per organization, created lazily by the api. `settings` is the strict
+/// `policyTenantSettingsSchema` document of @email-gateway/policy-dsl (`{}` = defaults);
+/// `settings_sha256` = sha256 of its canonical JSON. **Every api transaction that changes what
+/// evaluation sees** (publish with activation, activate/rollback, enable/disable/delete of a
+/// policy, a settings change) locks this row `FOR UPDATE` (creating it if absent) and increments
+/// `generation`: the single serialization point per organization; the policy-engine reads it in
+/// every evaluation transaction (no row = generation 0). `row_version` is the CAS counter of
+/// settings edits. Deleted explicitly by organization deletion (no cascade).
+model PolicySettings {
+  id              BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId  BigInt   @unique @map("organization_id") @db.UnsignedBigInt
+  generation      BigInt   @default(0) @db.UnsignedBigInt
+  settings        Json
+  settingsSha256  String   @map("settings_sha256") @db.Char(64)
+  rowVersion      Int      @default(1) @map("row_version") @db.UnsignedInt
+  updatedByUserId BigInt?  @map("updated_by_user_id") @db.UnsignedBigInt
+  createdAt       DateTime @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  updatedBy    User?        @relation("PolicySettingsUpdatedBy", fields: [updatedByUserId], references: [id], onDelete: SetNull)
+
+  @@map("policy_settings")
+}
+
+/// A tenant directory department (step 5.2 P5): named group of addresses and users referenced
+/// by policies (`recipient.department`, `sender.department`). Managed by the api under
+/// `user:read` / `user:manage`; a department referenced by an active policy version cannot be
+/// deleted (the api checks `policy_versions.references`). Membership is live data (no publish
+/// needed). Deleted explicitly by organization deletion (no cascade).
+model TenantDepartment {
+  id              BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  /// UUIDv7; the only id the API and policy definitions use.
+  publicId        String   @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId  BigInt   @map("organization_id") @db.UnsignedBigInt
+  name            String   @db.VarChar(128)
+  description     String?  @db.VarChar(512)
+  rowVersion      Int      @default(1) @map("row_version") @db.UnsignedInt
+  createdByUserId BigInt?  @map("created_by_user_id") @db.UnsignedBigInt
+  updatedByUserId BigInt?  @map("updated_by_user_id") @db.UnsignedBigInt
+  createdAt       DateTime @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  createdBy    User?        @relation("DepartmentCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  updatedBy    User?        @relation("DepartmentUpdatedBy", fields: [updatedByUserId], references: [id], onDelete: SetNull)
+
+  members TenantDepartmentMember[]
+
+  @@unique([organizationId, name])
+  @@map("tenant_departments")
+}
+
+/// A member of a department (step 5.2 P5): **exactly one** of a normalized (lower-cased) address
+/// or a `users` id of the organization. A user member resolves through that user's `email` while
+/// the user is active and not deleted; deleting the user deletes the membership (CASCADE).
+/// "Exactly one of" is enforced by the api only: MySQL refuses a CHECK constraint on `user_id`
+/// because the column carries a foreign key referential action (ER 3823; step 5.2 WP1 note).
+model TenantDepartmentMember {
+  id              BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId        String   @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId  BigInt   @map("organization_id") @db.UnsignedBigInt
+  departmentId    BigInt   @map("department_id") @db.UnsignedBigInt
+  /// Normalized address (lower-cased); NULL for a user member.
+  address         String?  @db.VarChar(320)
+  userId          BigInt?  @map("user_id") @db.UnsignedBigInt
+  createdByUserId BigInt?  @map("created_by_user_id") @db.UnsignedBigInt
+  createdAt       DateTime @default(now()) @map("created_at") @db.DateTime(3)
+
+  organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  department   TenantDepartment @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  user         User?            @relation("DepartmentMemberUser", fields: [userId], references: [id], onDelete: Cascade)
+  createdBy    User?            @relation("DepartmentMemberCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([departmentId, address])
+  @@unique([departmentId, userId])
+  @@index([organizationId, address(length: 100)])
+  @@map("tenant_department_members")
+}
+
+/// PARTITIONED by RANGE COLUMNS(received_at), monthly (6 months, core; step 5.2 §3, P10, P16).
+/// One policy evaluation per message and lifecycle round, written by the policy-engine in the
+/// evaluation transaction: **`evaluation_seq` = the lifecycle round** (unique
+/// `(message_id, evaluation_seq, received_at)` is the idempotency backstop). Never updated;
+/// deleted only by retention and organization purge. Ids, codes, enums, integers, hashes and
+/// tenant policy identifiers only: never message content (no subject, body, file name, URL,
+/// header value or address). The JSON columns hold the bounded `PolicyEvaluationResult` fields of
+/// @email-gateway/policy-dsl (mapping `evaluationResultToRow` / `rowToEvaluationView`). No foreign
+/// keys. Note: `trigger` is a reserved word in MySQL; hand-written SQL must quote it.
 model PolicyExecutionLog {
-  id                      BigInt        @default(autoincrement()) @db.UnsignedBigInt
-  receivedAt              DateTime      @map("received_at") @db.DateTime(3)
-  messageId               BigInt        @map("message_id") @db.UnsignedBigInt
-  organizationId          BigInt        @map("organization_id") @db.UnsignedBigInt
-  evaluationSeq           Int           @map("evaluation_seq") @db.UnsignedSmallInt
-  decisivePolicyVersionId BigInt?       @map("decisive_policy_version_id") @db.UnsignedBigInt
+  id                      BigInt                  @default(autoincrement()) @db.UnsignedBigInt
+  receivedAt              DateTime                @map("received_at") @db.DateTime(3)
+  messageId               BigInt                  @map("message_id") @db.UnsignedBigInt
+  organizationId          BigInt                  @map("organization_id") @db.UnsignedBigInt
+  /// The lifecycle round evaluated (email_messages.lifecycle_round of the round).
+  evaluationSeq           Int                     @map("evaluation_seq") @db.UnsignedSmallInt
+  /// email_scans.id of the round; NULL for a parse-failure evaluation (no round scanned).
+  scanId                  BigInt?                 @map("scan_id") @db.UnsignedBigInt
+  trigger                 PolicyEvaluationTrigger
+  /// email_messages.direction (trusted).
+  direction               MessageDirection
+  disposition             PolicyDisposition
+  decisionSource          PolicyDecisionSource    @map("decision_source")
+  /// policy_versions.id of the decisive tenant rule's version; NULL otherwise (no FK).
+  decisivePolicyVersionId BigInt?                 @map("decisive_policy_version_id") @db.UnsignedBigInt
+  /// email_policies.public_id of the decisive tenant rule; NULL otherwise.
+  decisivePolicyPublicId  String?                 @map("decisive_policy_public_id") @db.Char(36)
+  decisiveRuleId          String?                 @map("decisive_rule_id") @db.VarChar(48)
+  /// The final action written to email_messages.final_action (P18).
   action                  MessageAction
-  /// Array of policy version ids (decimal strings).
-  matchedPolicyVersionIds Json          @map("matched_policy_version_ids")
+  finalVerdict            MessageVerdict          @map("final_verdict")
+  /// Max risk score over the round's revisions; NULL without a risk row.
+  riskScore               Int?                    @map("risk_score") @db.UnsignedSmallInt
+  overrideApplied         Boolean                 @default(false) @map("override_applied")
+  /// JSON array of policy_versions.id (decimal strings) of matched rules' versions.
+  matchedPolicyVersionIds Json                    @map("matched_policy_version_ids")
+  /// JSON array (≤ 9) of `{ type, params, origin, ruleRefs, applicability, status }`.
+  actions                 Json
+  /// JSON array (≤ 64) of `{ ref, policyPublicId, versionNo, ruleId, disposition, actionTypes, override }`.
+  matchedRules            Json                    @map("matched_rules")
+  /// JSON array (≤ 200) of `{ ref, result, at, path, field, op }` (P10 trace) plus truncation.
   trace                   Json?
-  durationUs              Int           @map("duration_us") @db.UnsignedInt
-  evaluatedAt             DateTime      @map("evaluated_at") @db.DateTime(3)
-  createdAt               DateTime      @default(now()) @map("created_at") @db.DateTime(3)
+  /// JSON object `{ disposition, tag, reasons }`.
+  floor                   Json
+  /// JSON object `{ disposition, tag, levelOnly, riskAction, revisions }`.
+  recommendation          Json
+  /// JSON object `{ applied, ref, from, to }`; NULL when no override applied.
+  overrideDetail          Json?                   @map("override_detail")
+  /// JSON array (≤ 16) of `{ ref, from, to, reason }`.
+  clamps                  Json
+  /// JSON array (≤ 32) of `policy.*` reason codes.
+  reasonCodes             Json                    @map("reason_codes")
+  /// JSON object `{ headers, subjectPrefix, bodyBanner, urlRewrite }` built from policy data only
+  /// (never message data); NULL when nothing is delivered.
+  delivery                Json?
+  deliveredObject         PolicyDeliveredObject   @map("delivered_object")
+  /// S3 key of the policy copy (`org/<org>/policy/...`) only; NULL otherwise.
+  objectKey               String?                 @map("object_key") @db.VarChar(512)
+  /// JSON array (≤ 24) of explanation lines `{ code, params }`.
+  explanation             Json
+  /// Rendered explanation (fixed templates over codes, ids and integers).
+  explanationText         String                  @map("explanation_text") @db.VarChar(2048)
+  /// policy_settings.generation read in the evaluation transaction (0 = no settings row).
+  policyGeneration        BigInt                  @map("policy_generation") @db.UnsignedBigInt
+  snapshotSha256          String                  @map("snapshot_sha256") @db.Char(64)
+  /// JSON array of `{ policyPublicId, versionNo, definitionSha256 }` of the snapshot (sorted).
+  policyVersions          Json                    @map("policy_versions")
+  /// `pol-default/1`.
+  platformDefaultId       String                  @map("platform_default_id") @db.VarChar(32)
+  /// `policy-dsl/1`.
+  dslVersion              String                  @map("dsl_version") @db.VarChar(32)
+  /// `policy-eval/1`.
+  evaluatorVersion        String                  @map("evaluator_version") @db.VarChar(32)
+  /// `policy-input/1`.
+  inputVersion            String                  @map("input_version") @db.VarChar(32)
+  /// Hex SHA-256 of the canonical evaluation input.
+  inputSha256             String                  @map("input_sha256") @db.Char(64)
+  /// ICU time-zone data version used for time conditions.
+  tzdataVersion           String                  @map("tzdata_version") @db.VarChar(16)
+  durationUs              Int                     @map("duration_us") @db.UnsignedInt
+  evaluatedAt             DateTime                @map("evaluated_at") @db.DateTime(3)
+  createdAt               DateTime                @default(now()) @map("created_at") @db.DateTime(3)
 
   @@id([id, receivedAt])
   @@unique([messageId, evaluationSeq, receivedAt])
+  @@index([organizationId, receivedAt])
+  @@index([organizationId, disposition, receivedAt])
+  @@index([organizationId, decisivePolicyPublicId, receivedAt])
   @@map("policy_execution_logs")
 }
 

@@ -4,10 +4,12 @@
  * the run's Message-ID, a delivery with an outbound queue id, the EML and a part object in the
  * mail bucket; step 4.5: a dlp result and evidence row with its evidence object) is found by
  * its marker and removed: queue id handed to `postsuper -d` (an unknown id is ignored), objects
- * and rows deleted. A message with another Message-ID stays.
+ * and rows deleted. A message with another Message-ID stays. Step 5.2: the round's policy
+ * evaluation row and a policy copy object (`org/<org>/policy/…`) go with it.
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { storedEvaluation } from '../test/support/policy-fixtures';
 import { createIntegrationApp, type IntegrationApp } from './support/app';
 import { createFixtures, type FixtureOrganization, type Fixtures } from './support/fixtures';
 import { deleteLifecycleFixtures } from './support/lifecycle';
@@ -123,6 +125,25 @@ async function insertDlpRows(message: { id: bigint; receivedAt: Date; organizati
   return objectKey;
 }
 
+/** A stored policy evaluation of round 0 (as the policy-engine writes it, step 5.2 P10). */
+async function insertEvaluation(message: { id: bigint; receivedAt: Date }) {
+  const { row } = storedEvaluation(
+    { direction: 'inbound' },
+    { generation: '0', settings: null, platformDefaultId: 'pol-default/1', policies: [] },
+  );
+  await ctx.prisma.policyExecutionLog.create({
+    data: {
+      ...row,
+      receivedAt: message.receivedAt,
+      messageId: message.id,
+      organizationId: org.id,
+      scanId: null,
+      delivery: row.delivery ?? undefined,
+      overrideDetail: row.overrideDetail ?? undefined,
+    } as never,
+  });
+}
+
 beforeAll(async () => {
   ctx = await createIntegrationApp();
   fx = createFixtures(ctx);
@@ -147,9 +168,11 @@ describe('cleanupProbeMessages (L16)', () => {
     const { s3, bucket } = mailBucketClient();
     const { PutObjectCommand, ListObjectsV2Command } = s3Commands();
     const partKey = `${partPrefix(probe)}0.text`;
+    const copyKey = `${partPrefix(probe, 'policy')}r0-${sha('copy').slice(0, 32)}.eml`;
     const evidenceKey = await insertDlpRows(probe);
+    await insertEvaluation(probe);
     try {
-      for (const key of [probe.emlObjectKey, partKey, evidenceKey, other.emlObjectKey]) {
+      for (const key of [probe.emlObjectKey, partKey, copyKey, evidenceKey, other.emlObjectKey]) {
         await s3.send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: 'probe' }));
       }
       expect(
@@ -166,13 +189,15 @@ describe('cleanupProbeMessages (L16)', () => {
         messageIds: [marker],
         waitMs: 2000,
       });
-      expect(result).toMatchObject({ messages: 1, objects: 3 });
+      expect(result).toMatchObject({ messages: 1, objects: 4 });
 
       const list = async (prefix: string) =>
         (await s3.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix }))).Contents ??
         [];
       expect(await list(partPrefix(probe))).toEqual([]);
+      expect(await list(partPrefix(probe, 'policy'))).toEqual([]);
       expect(await list(probe.emlObjectKey)).toEqual([]);
+      expect(await ctx.prisma.policyExecutionLog.count({ where: { messageId: probe.id } })).toBe(0);
       expect(await list(evidenceKey)).toEqual([]);
       expect(await ctx.prisma.dlpEvidence.count({ where: { messageId: probe.id } })).toBe(0);
       expect(await ctx.prisma.dlpScanResult.count({ where: { messageId: probe.id } })).toBe(0);

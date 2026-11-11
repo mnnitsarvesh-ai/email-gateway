@@ -626,6 +626,9 @@ export interface DemoUserDef {
   organization: 'platform' | 'demo';
 }
 
+/** `POLICY_DSL_VERSION` of @email-gateway/policy-dsl (not a dependency of this package). */
+export const DEMO_POLICY_DSL_VERSION = 'policy-dsl/1';
+
 /**
  * Demo data (local, dev and CI only). The domain matches POSTFIX_RELAY_DOMAINS and is seeded
  * `active` (step 2.1), so it resolves on the mail path.
@@ -655,11 +658,31 @@ export const DEMO = Object.freeze({
       organization: 'platform',
     },
   ] as readonly DemoUserDef[],
+  /**
+   * The demo policy (step 5.2 §3): a `policy-dsl/1` definition (validated by
+   * `policyDefinitionSchema` of @email-gateway/policy-dsl), published and activated by the seed.
+   * `direction` and `priority` of the email_policies row are copied from the definition.
+   */
   policy: {
     name: 'Quarantine malware and phishing',
     description: 'Sample organization-wide inbound policy',
-    priority: 100,
-    condition: { field: 'verdict', operator: 'in' as const, value: ['malware', 'phishing'] },
-    action: { action: 'quarantine' as const, params: { notify_recipient: true } },
+    dslVersion: DEMO_POLICY_DSL_VERSION,
+    definition: {
+      dslVersion: DEMO_POLICY_DSL_VERSION,
+      direction: 'inbound' as const,
+      priority: 100,
+      rules: [
+        {
+          id: 'quarantine-malware-phishing',
+          priority: 10,
+          when: { field: 'risk.verdict', op: 'in', value: ['malware', 'phishing'] },
+          actions: [{ type: 'QUARANTINE' }, { type: 'TAG', label: 'sample-policy' }],
+        },
+      ],
+    },
+    /** Directory ids the definition names (`policy_versions.references`). */
+    references: { departmentIds: [], userIds: [] },
+    ruleCount: 1,
+    hasOverrideRules: false,
   },
 });

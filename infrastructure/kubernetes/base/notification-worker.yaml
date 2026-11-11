@@ -37,8 +37,22 @@ spec:
             - configMapRef: { name: email-gateway-config }
           env:
             - { name: HTTP_PORT, value: '3050' }
+            # Policy notifications (step 5.2 §5, P25). NOTIFY_SMTP_HOST/PORT/SECURE/FROM/USER and
+            # PORTAL_PUBLIC_URL come from the ConfigMap and the overlay (TLS in production).
+            - { name: NOTIFICATION_PREFETCH, value: '4' }
+            - { name: NOTIFICATION_DB_TX_TIMEOUT_MS, value: '120000' }
+            - { name: NOTIFICATION_MAX_RECIPIENTS, value: '50' }
             # Secrets are mounted as files by External Secrets and read via the <KEY>_FILE convention.
             - { name: DATABASE_URL_FILE, value: /var/run/secrets/gateway/database-url }
+            # Role user eg-notification (step 5.2 P15): consumes email.notifications.
+            - {
+                name: RABBITMQ_NOTIFICATION_URL_FILE,
+                value: /var/run/secrets/gateway/rabbitmq-notification-url,
+              }
+            - {
+                name: NOTIFY_SMTP_PASSWORD_FILE,
+                value: /var/run/secrets/gateway/notify-smtp-password,
+              }
             - { name: REDIS_URL_FILE, value: /var/run/secrets/gateway/redis-url }
           volumeMounts:
             - { name: secrets, mountPath: /var/run/secrets/gateway, readOnly: true }

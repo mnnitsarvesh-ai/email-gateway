@@ -21,8 +21,9 @@ import { stack } from './support/env';
  * and URL protection tables of steps 4.1–4.3 (docs/plan/steps/09-rspamd.md,
  * 10-attachment-scanning.md, 11-url-protection.md, §3 each), the phishing/BEC tables of step 4.4
  * (12-phishing-bec.md §3), the DLP tables of step 4.5 (13-dlp.md §3), the sandbox engine
- * tables and columns of step 4.6 (14-sandbox.md §3) and the risk scoring tables and column of
- * step 5.1 (15-risk-scoring.md §3).
+ * tables and columns of step 4.6 (14-sandbox.md §3), the risk scoring tables and column of
+ * step 5.1 (15-risk-scoring.md §3) and the policy engine tables and columns of step 5.2
+ * (16-policy-engine.md §3).
  */
 const prisma = new PrismaClient({ datasourceUrl: stack.databaseUrl() });
 
@@ -183,6 +184,10 @@ const TENANT_OWNED = [
   'policy_actions',
   'policy_exceptions',
   'policy_execution_logs',
+  // Step 5.2 §3: policy settings/generation and the tenant directory.
+  'policy_settings',
+  'tenant_departments',
+  'tenant_department_members',
   'delivery_routes',
   'email_deliveries',
   'delivery_attempts',
@@ -207,12 +212,12 @@ const TENANT_OWNED = [
 const ALL_TABLES = [...NOT_TENANT_OWNED, ...TENANT_OWNED];
 
 describe('MySQL schema', () => {
-  it('has exactly the 104 data-model tables plus _prisma_migrations', async () => {
+  it('has exactly the 107 data-model tables plus _prisma_migrations', async () => {
     const rows = await prisma.$queryRaw<{ name: string }[]>`
       SELECT TABLE_NAME AS name FROM information_schema.TABLES
       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'`;
-    expect(ALL_TABLES).toHaveLength(104);
-    expect(new Set(ALL_TABLES).size).toBe(104);
+    expect(ALL_TABLES).toHaveLength(107);
+    expect(new Set(ALL_TABLES).size).toBe(107);
     expect(rows.map((r) => r.name).sort()).toEqual([...ALL_TABLES, '_prisma_migrations'].sort());
   });
 
@@ -3627,5 +3632,426 @@ describe('risk scoring schema (step 5.1, docs/plan/steps/15-risk-scoring.md §3)
       await prisma.organization.deleteMany({ where: { id: organizationId } });
       await prisma.organizationPlan.deleteMany({ where: { id: plan.id } });
     }
+  });
+});
+
+describe('policy engine schema (step 5.2, docs/plan/steps/16-policy-engine.md §3)', () => {
+  const uniqueSets = async (table: string) =>
+    [...(await indexes(table)).values()]
+      .filter((i) => i.unique)
+      .map((i) => i.columns.join(','))
+      .sort();
+  const indexSets = async (table: string) =>
+    [...(await indexes(table)).values()].map((i) => i.columns.join(','));
+  const foreignKeys = async (table: string) =>
+    prisma.$queryRaw<{ columnName: string; referenced: string; onDelete: string }[]>`
+      SELECT k.COLUMN_NAME AS columnName, k.REFERENCED_TABLE_NAME AS referenced,
+             r.DELETE_RULE AS onDelete
+      FROM information_schema.KEY_COLUMN_USAGE k
+      JOIN information_schema.REFERENTIAL_CONSTRAINTS r
+        ON r.CONSTRAINT_SCHEMA = k.TABLE_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+      WHERE k.TABLE_SCHEMA = DATABASE() AND k.TABLE_NAME = ${table}
+        AND k.REFERENCED_TABLE_NAME IS NOT NULL
+      ORDER BY k.COLUMN_NAME`;
+  const MESSAGE_ACTION_ENUM =
+    "enum('deliver','tag','quarantine','discard','reject','require_approval')";
+  const VERDICT_ENUM =
+    "enum('clean','spam','bulk','phishing','malware','bec','dlp_violation','suspicious','unknown')";
+  const DISPOSITION_ENUM = "enum('allow','require_approval','quarantine','reject')";
+  const NOT_NULL_JSON = [
+    'matched_policy_version_ids',
+    'actions',
+    'matched_rules',
+    'floor',
+    'recommendation',
+    'clamps',
+    'reason_codes',
+    'explanation',
+    'policy_versions',
+  ];
+
+  /** Expected [COLUMN_TYPE, IS_NULLABLE] of every column of a table. */
+  const expectColumns = async (table: string, expected: Record<string, [string, string]>) => {
+    const cols = await columns([table]);
+    expect([...cols.keys()].map((k) => k.split('.')[1]!).sort()).toEqual(
+      Object.keys(expected).sort(),
+    );
+    for (const [column, [columnType, nullable]] of Object.entries(expected)) {
+      expect(cols.get(`${table}.${column}`), column).toMatchObject({ columnType, nullable });
+    }
+    return cols;
+  };
+
+  const withOrganization = async (
+    label: string,
+    body: (organizationId: bigint) => Promise<void>,
+  ) => {
+    const suffix = randomUUID().slice(0, 8);
+    const plan = await prisma.organizationPlan.create({
+      data: { code: `it-${label}-${suffix}`, name: label, defaultLimits: {}, defaultFeatures: {} },
+    });
+    const organization = await prisma.organization.create({
+      data: {
+        slug: `it-${label}-${suffix}`,
+        name: label,
+        planId: plan.id,
+        dataRegion: 'ap-south-1',
+      },
+    });
+    try {
+      await body(organization.id);
+    } finally {
+      const organizationId = organization.id;
+      await prisma.tenantDepartmentMember.deleteMany({ where: { organizationId } });
+      await prisma.tenantDepartment.deleteMany({ where: { organizationId } });
+      await prisma.policySettings.deleteMany({ where: { organizationId } });
+      await prisma.policyVersion.deleteMany({ where: { organizationId } });
+      await prisma.emailPolicy.deleteMany({ where: { organizationId } });
+      await prisma.user.deleteMany({ where: { organizationId } });
+      await prisma.organization.deleteMany({ where: { id: organizationId } });
+      await prisma.organizationPlan.deleteMany({ where: { id: plan.id } });
+    }
+  };
+
+  it('appends reject and require_approval to MessageAction on every final-action column (P18)', async () => {
+    const cols = await columns(['email_messages', 'email_recipients', 'policy_execution_logs']);
+    expect(cols.get('email_messages.final_action')).toMatchObject({
+      columnType: MESSAGE_ACTION_ENUM,
+      nullable: 'YES',
+    });
+    expect(cols.get('email_recipients.final_action')).toMatchObject({
+      columnType: MESSAGE_ACTION_ENUM,
+      nullable: 'YES',
+    });
+    expect(cols.get('policy_execution_logs.action')).toMatchObject({
+      columnType: MESSAGE_ACTION_ENUM,
+      nullable: 'NO',
+    });
+  });
+
+  it('adds the CAS counter and editor to email_policies and the publish facts to policy_versions', async () => {
+    const cols = await columns(['email_policies', 'policy_versions']);
+    expect(cols.get('email_policies.row_version')).toMatchObject({
+      columnType: 'int unsigned',
+      nullable: 'NO',
+      columnDefault: '1',
+    });
+    expect(cols.get('email_policies.updated_by_user_id')).toMatchObject({
+      columnType: 'bigint unsigned',
+      nullable: 'YES',
+    });
+    const expected: Record<string, [string, string, string | null]> = {
+      row_version: ['int unsigned', 'NO', '1'],
+      dsl_version: ['varchar(32)', 'YES', null],
+      references: ['json', 'YES', null],
+      has_override_rules: ['tinyint(1)', 'NO', '0'],
+      rule_count: ['smallint unsigned', 'NO', '0'],
+      created_by_user_id: ['bigint unsigned', 'YES', null],
+      updated_by_user_id: ['bigint unsigned', 'YES', null],
+    };
+    for (const [column, [columnType, nullable, columnDefault]] of Object.entries(expected)) {
+      expect(cols.get(`policy_versions.${column}`), column).toMatchObject({
+        columnType,
+        nullable,
+        columnDefault,
+      });
+    }
+    expect(await foreignKeys('email_policies')).toEqual([
+      { columnName: 'created_by_user_id', referenced: 'users', onDelete: 'SET NULL' },
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+      { columnName: 'updated_by_user_id', referenced: 'users', onDelete: 'SET NULL' },
+    ]);
+    expect(await foreignKeys('policy_versions')).toEqual([
+      { columnName: 'created_by_user_id', referenced: 'users', onDelete: 'SET NULL' },
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+      { columnName: 'policy_id', referenced: 'email_policies', onDelete: 'CASCADE' },
+      { columnName: 'published_by_user_id', referenced: 'users', onDelete: 'SET NULL' },
+      { columnName: 'updated_by_user_id', referenced: 'users', onDelete: 'SET NULL' },
+    ]);
+    // The name stays unique per organization (archived policies keep theirs).
+    expect(await uniqueSets('email_policies')).toEqual(
+      ['id', 'organization_id,name', 'public_id'].sort(),
+    );
+  });
+
+  it('leaves no legacy (pre-DSL) policy version active (legacy retirement, §3 item 3)', async () => {
+    const legacyActive = await prisma.$queryRaw<{ n: bigint }[]>`
+      SELECT COUNT(*) AS n FROM email_policies p
+      JOIN policy_versions v ON v.id = p.active_version_id
+      WHERE v.dsl_version IS NULL`;
+    expect(Number(legacyActive[0]!.n)).toBe(0);
+    const legacyLive = await prisma.policyVersion.count({
+      where: { dslVersion: null, status: { not: 'superseded' } },
+    });
+    expect(legacyLive).toBe(0);
+  });
+
+  it('has policy_settings: one row per organization with the generation (P11, P12)', async () => {
+    const cols = await expectColumns('policy_settings', {
+      id: ['bigint unsigned', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      generation: ['bigint unsigned', 'NO'],
+      settings: ['json', 'NO'],
+      settings_sha256: ['char(64)', 'NO'],
+      row_version: ['int unsigned', 'NO'],
+      updated_by_user_id: ['bigint unsigned', 'YES'],
+      created_at: ['datetime(3)', 'NO'],
+      updated_at: ['datetime(3)', 'NO'],
+    });
+    expect(cols.get('policy_settings.generation')?.columnDefault).toBe('0');
+    expect(cols.get('policy_settings.row_version')?.columnDefault).toBe('1');
+    expect(await uniqueSets('policy_settings')).toEqual(['id', 'organization_id'].sort());
+    expect(await foreignKeys('policy_settings')).toEqual([
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+      { columnName: 'updated_by_user_id', referenced: 'users', onDelete: 'SET NULL' },
+    ]);
+  });
+
+  it('has tenant_departments and tenant_department_members (P5)', async () => {
+    await expectColumns('tenant_departments', {
+      id: ['bigint unsigned', 'NO'],
+      public_id: ['char(36)', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      name: ['varchar(128)', 'NO'],
+      description: ['varchar(512)', 'YES'],
+      row_version: ['int unsigned', 'NO'],
+      created_by_user_id: ['bigint unsigned', 'YES'],
+      updated_by_user_id: ['bigint unsigned', 'YES'],
+      created_at: ['datetime(3)', 'NO'],
+      updated_at: ['datetime(3)', 'NO'],
+    });
+    expect(await uniqueSets('tenant_departments')).toEqual(
+      ['id', 'organization_id,name', 'public_id'].sort(),
+    );
+    expect(await foreignKeys('tenant_departments')).toEqual([
+      { columnName: 'created_by_user_id', referenced: 'users', onDelete: 'SET NULL' },
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+      { columnName: 'updated_by_user_id', referenced: 'users', onDelete: 'SET NULL' },
+    ]);
+    await expectColumns('tenant_department_members', {
+      id: ['bigint unsigned', 'NO'],
+      public_id: ['char(36)', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      department_id: ['bigint unsigned', 'NO'],
+      address: ['varchar(320)', 'YES'],
+      user_id: ['bigint unsigned', 'YES'],
+      created_by_user_id: ['bigint unsigned', 'YES'],
+      created_at: ['datetime(3)', 'NO'],
+    });
+    expect(await uniqueSets('tenant_department_members')).toEqual(
+      ['department_id,address', 'department_id,user_id', 'id', 'public_id'].sort(),
+    );
+    expect(await indexSets('tenant_department_members')).toEqual(
+      expect.arrayContaining(['organization_id,address']),
+    );
+    expect(await foreignKeys('tenant_department_members')).toEqual([
+      { columnName: 'created_by_user_id', referenced: 'users', onDelete: 'SET NULL' },
+      { columnName: 'department_id', referenced: 'tenant_departments', onDelete: 'RESTRICT' },
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+      { columnName: 'user_id', referenced: 'users', onDelete: 'CASCADE' },
+    ]);
+  });
+
+  it('alters the partitioned policy_execution_logs with exactly the §3 columns and indexes', async () => {
+    const cols = await expectColumns('policy_execution_logs', {
+      id: ['bigint unsigned', 'NO'],
+      received_at: ['datetime(3)', 'NO'],
+      message_id: ['bigint unsigned', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      evaluation_seq: ['smallint unsigned', 'NO'],
+      scan_id: ['bigint unsigned', 'YES'],
+      trigger: ["enum('scanned','scan_failed','parse_failed')", 'NO'],
+      direction: ["enum('inbound','outbound','internal')", 'NO'],
+      disposition: [DISPOSITION_ENUM, 'NO'],
+      decision_source: ["enum('tenant_rule','platform_default','floor')", 'NO'],
+      decisive_policy_version_id: ['bigint unsigned', 'YES'],
+      decisive_policy_public_id: ['char(36)', 'YES'],
+      decisive_rule_id: ['varchar(48)', 'YES'],
+      action: [MESSAGE_ACTION_ENUM, 'NO'],
+      final_verdict: [VERDICT_ENUM, 'NO'],
+      risk_score: ['smallint unsigned', 'YES'],
+      override_applied: ['tinyint(1)', 'NO'],
+      ...Object.fromEntries(NOT_NULL_JSON.map((c) => [c, ['json', 'NO'] as [string, string]])),
+      trace: ['json', 'YES'],
+      override_detail: ['json', 'YES'],
+      delivery: ['json', 'YES'],
+      delivered_object: ["enum('original','rewritten','policy_copy','none')", 'NO'],
+      object_key: ['varchar(512)', 'YES'],
+      explanation_text: ['varchar(2048)', 'NO'],
+      policy_generation: ['bigint unsigned', 'NO'],
+      snapshot_sha256: ['char(64)', 'NO'],
+      platform_default_id: ['varchar(32)', 'NO'],
+      dsl_version: ['varchar(32)', 'NO'],
+      evaluator_version: ['varchar(32)', 'NO'],
+      input_version: ['varchar(32)', 'NO'],
+      input_sha256: ['char(64)', 'NO'],
+      tzdata_version: ['varchar(16)', 'NO'],
+      duration_us: ['int unsigned', 'NO'],
+      evaluated_at: ['datetime(3)', 'NO'],
+      created_at: ['datetime(3)', 'NO'],
+    });
+    expect(cols.get('policy_execution_logs.override_applied')?.columnDefault).toBe('0');
+    expect(await uniqueSets('policy_execution_logs')).toEqual(
+      ['id,received_at', 'message_id,evaluation_seq,received_at'].sort(),
+    );
+    expect((await indexSets('policy_execution_logs')).sort()).toEqual(
+      [
+        'id,received_at',
+        'message_id,evaluation_seq,received_at',
+        'organization_id,received_at',
+        'organization_id,disposition,received_at',
+        'organization_id,decisive_policy_public_id,received_at',
+      ].sort(),
+    );
+    expect(await foreignKeys('policy_execution_logs')).toEqual([]);
+  });
+
+  it('stores no content-like column: no TEXT/BLOB in the policy and directory tables', async () => {
+    const rows = await prisma.$queryRaw<{ tableName: string; columnName: string }[]>`
+      SELECT TABLE_NAME AS tableName, COLUMN_NAME AS columnName
+      FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME IN ('policy_execution_logs', 'policy_settings', 'tenant_departments',
+                           'tenant_department_members', 'email_policies', 'policy_versions')
+        AND DATA_TYPE IN ('text', 'mediumtext', 'longtext', 'blob', 'mediumblob', 'longblob')`;
+    expect(rows).toEqual([]);
+  });
+
+  it('keeps one evaluation per (message, lifecycle round, received_at) (§2.0-7)', async () => {
+    const messageId = BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000));
+    const receivedAt = new Date();
+    const row = {
+      receivedAt,
+      messageId,
+      organizationId: 1n,
+      evaluationSeq: 0,
+      scanId: 1n,
+      trigger: 'scanned' as const,
+      direction: 'inbound' as const,
+      disposition: 'require_approval' as const,
+      decisionSource: 'tenant_rule' as const,
+      decisivePolicyPublicId: randomUUID(),
+      decisiveRuleId: 'hold-wire-transfers',
+      action: 'require_approval' as const,
+      finalVerdict: 'suspicious' as const,
+      riskScore: 420,
+      matchedPolicyVersionIds: ['7'],
+      actions: [],
+      matchedRules: [],
+      trace: [],
+      floor: { disposition: null, tag: false, reasons: [] },
+      recommendation: {
+        disposition: 'allow',
+        tag: false,
+        levelOnly: true,
+        riskAction: 'deliver',
+        revisions: [0],
+      },
+      clamps: [],
+      reasonCodes: ['policy.rule.matched'],
+      deliveredObject: 'none' as const,
+      explanation: [{ code: 'summary', params: { disposition: 'require_approval' } }],
+      explanationText: 'Held for approval by rule hold-wire-transfers.',
+      policyGeneration: 3n,
+      snapshotSha256: 'a'.repeat(64),
+      policyVersions: [],
+      platformDefaultId: 'pol-default/1',
+      dslVersion: 'policy-dsl/1',
+      evaluatorVersion: 'policy-eval/1',
+      inputVersion: 'policy-input/1',
+      inputSha256: 'b'.repeat(64),
+      tzdataVersion: '2025b',
+      durationUs: 180,
+      evaluatedAt: receivedAt,
+    };
+    try {
+      const stored = await prisma.policyExecutionLog.create({ data: row });
+      expect(stored).toMatchObject({
+        overrideApplied: false,
+        overrideDetail: null,
+        delivery: null,
+      });
+      await expect(prisma.policyExecutionLog.create({ data: row })).rejects.toMatchObject({
+        code: 'P2002',
+      });
+      // The next lifecycle round (rescan, release) is a new row.
+      await prisma.policyExecutionLog.create({
+        data: { ...row, evaluationSeq: 1, scanId: 2n, action: 'reject', disposition: 'reject' },
+      });
+      // A parse-failure evaluation has no scan.
+      await prisma.policyExecutionLog.create({
+        data: { ...row, evaluationSeq: 2, scanId: null, trigger: 'parse_failed' },
+      });
+      expect(await prisma.policyExecutionLog.count({ where: { messageId, receivedAt } })).toBe(3);
+    } finally {
+      await prisma.policyExecutionLog.deleteMany({ where: { messageId } });
+    }
+  });
+
+  it('keeps department names and members unique, cascades user deletes and blocks other deletes', async () => {
+    await withOrganization('policy', async (organizationId) => {
+      const user = await prisma.user.create({
+        data: { organizationId, email: `member-${randomUUID()}@example.test`, displayName: 'M' },
+      });
+      const department = await prisma.tenantDepartment.create({
+        data: { organizationId, name: 'Finance' },
+      });
+      expect(department.publicId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-/);
+      expect(department.rowVersion).toBe(1);
+      await expect(
+        prisma.tenantDepartment.create({ data: { organizationId, name: 'Finance' } }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+
+      const base = { organizationId, departmentId: department.id };
+      await prisma.tenantDepartmentMember.create({
+        data: { ...base, address: 'cfo@example.test' },
+      });
+      await expect(
+        prisma.tenantDepartmentMember.create({ data: { ...base, address: 'cfo@example.test' } }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+      const userMember = await prisma.tenantDepartmentMember.create({
+        data: { ...base, userId: user.id },
+      });
+      await expect(
+        prisma.tenantDepartmentMember.create({ data: { ...base, userId: user.id } }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+
+      // RESTRICT: a department with members and an organization with departments stay.
+      await expect(
+        prisma.tenantDepartment.delete({ where: { id: department.id } }),
+      ).rejects.toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+      await expect(
+        prisma.organization.delete({ where: { id: organizationId } }),
+      ).rejects.toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+
+      // CASCADE: deleting the user removes its membership, the address member stays.
+      await prisma.user.delete({ where: { id: user.id } });
+      expect(
+        await prisma.tenantDepartmentMember.findUnique({ where: { id: userMember.id } }),
+      ).toBeNull();
+      expect(await prisma.tenantDepartmentMember.count({ where: { organizationId } })).toBe(1);
+    });
+  });
+
+  it('keeps one policy_settings row per organization and blocks deleting the organization', async () => {
+    await withOrganization('polset', async (organizationId) => {
+      const settings = await prisma.policySettings.create({
+        data: { organizationId, settings: {}, settingsSha256: 'e'.repeat(64) },
+      });
+      expect(settings).toMatchObject({ generation: 0n, rowVersion: 1 });
+      await expect(
+        prisma.policySettings.create({
+          data: { organizationId, settings: {}, settingsSha256: 'e'.repeat(64) },
+        }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+      const bumped = await prisma.policySettings.update({
+        where: { organizationId },
+        data: { generation: { increment: 1 } },
+      });
+      expect(bumped.generation).toBe(1n);
+      await expect(
+        prisma.organization.delete({ where: { id: organizationId } }),
+      ).rejects.toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+    });
   });
 });

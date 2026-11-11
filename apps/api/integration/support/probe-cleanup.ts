@@ -3,7 +3,8 @@
  * goes through the real mail plane (Postfix → smtp-adapter → delivery-worker → postfix-outbound)
  * and used to stay deferred in postfix-outbound with its S3 objects. `cleanupProbeMessages`
  * finds the message(s) of this run by their unique Message-ID and removes their outbound queue
- * files, their S3 objects (EML, parts, rewritten copies, DLP evidence) and their rows (the run
+ * files, their S3 objects (EML, parts, rewritten copies, policy copies, DLP evidence) and their
+ * rows, including the policy evaluations (the run
  * marker proves the test owns them).
  */
 import { execFile } from 'node:child_process';
@@ -91,7 +92,10 @@ export function mailBucketClient(): { s3: InstanceType<S3Commands['S3Client']>; 
 const pad = (n: number, width = 2) => String(n).padStart(width, '0');
 
 /** `org/{organizationId}/part/{yyyy}/{mm}/{dd}/{messageId}/` (step 3.1 M11 part keys). */
-export function partPrefix(message: ProbeMessage, kind: 'part' | 'rewrite' = 'part'): string {
+export function partPrefix(
+  message: ProbeMessage,
+  kind: 'part' | 'rewrite' | 'policy' = 'part',
+): string {
   const at = message.receivedAt;
   return (
     `org/${message.organizationId.toString()}/${kind}/${pad(at.getUTCFullYear(), 4)}/` +
@@ -191,8 +195,9 @@ export async function cleanupProbeMessages(
       if (message.emlObjectKey.startsWith(`org/${message.organizationId.toString()}/`)) {
         keys.add(message.emlObjectKey);
       }
-      // Part objects (3.1) and rewritten copies of the URL engine (4.3, same date/message path).
-      for (const kind of ['part', 'rewrite'] as const) {
+      // Part objects (3.1), rewritten copies of the URL engine (4.3) and policy copies of the
+      // policy-engine (5.2 P21: TAG/WARN header edits), all on the same date/message path.
+      for (const kind of ['part', 'rewrite', 'policy'] as const) {
         let token: string | undefined;
         do {
           const page = await s3.send(
@@ -239,6 +244,8 @@ export async function cleanupProbeMessages(
   await prisma.attachmentScanResult.deleteMany({ where: byMessage });
   // Step 5.1: the round's risk scores (no foreign keys; written with the round's completion).
   await prisma.messageRiskScore.deleteMany({ where: byMessage });
+  // Step 5.2: the policy-engine's evaluation of each round (no foreign keys).
+  await prisma.policyExecutionLog.deleteMany({ where: byMessage });
   await prisma.emailAuthResult.deleteMany({ where: byMessage });
   await prisma.scanEngineResult.deleteMany({ where: byMessage });
   await prisma.emailScan.deleteMany({ where: byMessage });

@@ -8,7 +8,7 @@ import { smtpStackGate, type SmtpStackGate } from './smtp-stack';
  * ready email-worker on EMAIL_WORKER_HOST_PORT (the apps-profile container or a host process)
  * that actually runs the MIME ingestion stage. A phase-0 email-worker image is also "ready", so
  * the gate checks that `/metrics` exports the step 3.1 series (`MIME_INGESTION_ENABLED=true`).
- * Since step 4.1 every parsed message is scanned and then approved by the pass-through, so the
+ * Since step 4.1 every parsed message is scanned and (step 5.2) then decided by the policy-engine, so the
  * gate also requires the scan stage (`scanStageProblems`, docs/plan/steps/09-rspamd.md S15).
  * Missing pieces FAIL the suite with an explanation; only `SMTP_STACK_TESTS=skip` skips it.
  */

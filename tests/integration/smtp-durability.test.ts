@@ -162,7 +162,7 @@ describe.skipIf(gate.skip)(
       const bytes = await fx.object(original.emlObjectKey);
       expect(sha256(bytes)).toBe(original.emlSha256);
       // Step 2.3 (docs/plan/steps/05-routing.md R5, R9.1): with the delivery-worker running, the
-      // development pass-through and the delivery recorder add their own email_events
+      // policy-engine (step 5.2; before it the development pass-through) and the delivery recorder add their own email_events
       // (`delivery.*`, source delivery-worker) and outbox rows (`mail.delivery.*`) for this message;
       // this suite checks what INGESTION wrote, so it counts only those rows.
       const ingestionEvents = { organizationId: org, sourceService: 'smtp-adapter' };

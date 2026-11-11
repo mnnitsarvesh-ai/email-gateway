@@ -60,7 +60,7 @@ sequenceDiagram
     EW->>DB: email_scans, scan_engine_results (malware, URL, DLP for lateral movement)
     PE->>DB: policies with direction internal or any#59; mail.delivery.approved.v1 (PLANNED 5.2)
   end
-  Note over DW: today: development-only pass-through approval (local/CI)
+  Note over DW: approval by the policy-engine (step 5.2)
   DW->>DB: plan: internal recipients per tenant domain (destination tenant:<domainId>),<br/>direction re-checked
   DW->>PX: reinject with token, XFORWARD, NOTIFY=FAILURE,DELAY, X-Gateway-Trace d=in
   PX->>UD: transport socketmap → next-hop list, tls_policy (verify for provider presets)
@@ -81,5 +81,5 @@ sequenceDiagram
 | Listeners and connector authentication                           | IMPLEMENTED 2.2  | `infrastructure/postfix-outbound/master.cf`, smtp-adapter connectors; `smtp-outbound.test.ts`                                   |
 | Reinjection to the tenant's own servers, loop prevention         | IMPLEMENTED 2.3  | diagram 18; `routing-loops.test.ts`, `hops.test.ts`                                                                             |
 | Internal inspection (engines, policies) and its feature flag     | PLANNED 4.x, 5.2 | `organization_features.feature_key = internal_inspection` (table exists)                                                        |
-| Approval by policy                                               | PLANNED 5.2      | `deliveryApprovedV1` contract; dev pass-through today (local/CI only)                                                           |
+| Approval by policy                                               | IMPLEMENTED 5.2  | `deliveryApprovedV1` `source = policy` (`policy-smtp.test.ts`); the dev pass-through was removed                                |
 | M365 / Google connector types (SMTP connector side)              | PLANNED 8.2      | destination presets exist (step 2.3)                                                                                            |

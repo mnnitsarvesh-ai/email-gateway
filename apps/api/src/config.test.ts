@@ -899,3 +899,74 @@ describe('loadApiConfig: risk scoring (step 5.1 R16)', () => {
     expect(rejection({ ...valid, ...env })).toContain(key);
   });
 });
+
+describe('loadApiConfig: policy engine (step 5.2 §5)', () => {
+  it('defaults the platform default and every bound', () => {
+    const cfg = loadApiConfig(valid);
+    expect(cfg.POLICY_PLATFORM_DEFAULT).toBe('pol-default/1');
+    expect(cfg.POLICY_MAX_POLICIES).toBe(100);
+    expect(cfg.POLICY_MAX_VERSIONS_PER_POLICY).toBe(200);
+    expect(cfg.POLICY_MAX_ACTIVE_RULES).toBe(1000);
+    expect(cfg.POLICY_HISTORY_MAX_RANGE_DAYS).toBe(31);
+    expect(cfg.DEPARTMENT_MAX_PER_ORG).toBe(500);
+    expect(cfg.DEPARTMENT_MAX_MEMBERS).toBe(5000);
+  });
+
+  it('reads every key at its lower and upper bound', () => {
+    const low = loadApiConfig({
+      ...valid,
+      POLICY_PLATFORM_DEFAULT: 'pol-default/1',
+      POLICY_MAX_POLICIES: '10',
+      POLICY_MAX_VERSIONS_PER_POLICY: '10',
+      POLICY_MAX_ACTIVE_RULES: '100',
+      POLICY_HISTORY_MAX_RANGE_DAYS: '1',
+      DEPARTMENT_MAX_PER_ORG: '10',
+      DEPARTMENT_MAX_MEMBERS: '100',
+    });
+    expect([
+      low.POLICY_MAX_POLICIES,
+      low.POLICY_MAX_VERSIONS_PER_POLICY,
+      low.POLICY_MAX_ACTIVE_RULES,
+      low.POLICY_HISTORY_MAX_RANGE_DAYS,
+      low.DEPARTMENT_MAX_PER_ORG,
+      low.DEPARTMENT_MAX_MEMBERS,
+    ]).toEqual([10, 10, 100, 1, 10, 100]);
+    const high = loadApiConfig({
+      ...valid,
+      POLICY_MAX_POLICIES: '100',
+      POLICY_MAX_VERSIONS_PER_POLICY: '1000',
+      POLICY_MAX_ACTIVE_RULES: '5000',
+      POLICY_HISTORY_MAX_RANGE_DAYS: '186',
+      DEPARTMENT_MAX_PER_ORG: '5000',
+      DEPARTMENT_MAX_MEMBERS: '50000',
+    });
+    expect([
+      high.POLICY_MAX_POLICIES,
+      high.POLICY_MAX_VERSIONS_PER_POLICY,
+      high.POLICY_MAX_ACTIVE_RULES,
+      high.POLICY_HISTORY_MAX_RANGE_DAYS,
+      high.DEPARTMENT_MAX_PER_ORG,
+      high.DEPARTMENT_MAX_MEMBERS,
+    ]).toEqual([100, 1000, 5000, 186, 5000, 50000]);
+  });
+
+  it.each([
+    [{ POLICY_PLATFORM_DEFAULT: 'pol-default/2' }, 'POLICY_PLATFORM_DEFAULT'],
+    [{ POLICY_PLATFORM_DEFAULT: 'custom' }, 'POLICY_PLATFORM_DEFAULT'],
+    [{ POLICY_MAX_POLICIES: '9' }, 'POLICY_MAX_POLICIES'],
+    [{ POLICY_MAX_POLICIES: '101' }, 'POLICY_MAX_POLICIES'],
+    [{ POLICY_MAX_VERSIONS_PER_POLICY: '9' }, 'POLICY_MAX_VERSIONS_PER_POLICY'],
+    [{ POLICY_MAX_VERSIONS_PER_POLICY: '1001' }, 'POLICY_MAX_VERSIONS_PER_POLICY'],
+    [{ POLICY_MAX_ACTIVE_RULES: '99' }, 'POLICY_MAX_ACTIVE_RULES'],
+    [{ POLICY_MAX_ACTIVE_RULES: '5001' }, 'POLICY_MAX_ACTIVE_RULES'],
+    [{ POLICY_HISTORY_MAX_RANGE_DAYS: '0' }, 'POLICY_HISTORY_MAX_RANGE_DAYS'],
+    [{ POLICY_HISTORY_MAX_RANGE_DAYS: '187' }, 'POLICY_HISTORY_MAX_RANGE_DAYS'],
+    [{ DEPARTMENT_MAX_PER_ORG: '9' }, 'DEPARTMENT_MAX_PER_ORG'],
+    [{ DEPARTMENT_MAX_PER_ORG: '5001' }, 'DEPARTMENT_MAX_PER_ORG'],
+    [{ DEPARTMENT_MAX_MEMBERS: '99' }, 'DEPARTMENT_MAX_MEMBERS'],
+    [{ DEPARTMENT_MAX_MEMBERS: '50001' }, 'DEPARTMENT_MAX_MEMBERS'],
+    [{ DEPARTMENT_MAX_MEMBERS: 'lots' }, 'DEPARTMENT_MAX_MEMBERS'],
+  ])('refuses %o naming %s', (env, key) => {
+    expect(rejection({ ...valid, ...env })).toContain(key);
+  });
+});

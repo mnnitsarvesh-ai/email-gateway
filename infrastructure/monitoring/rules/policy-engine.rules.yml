@@ -1,0 +1,90 @@
+# Policy engine alerts (step 5.2 P24, docs/plan/steps/16-policy-engine.md; ADR-0043/0044/0045).
+# Series: the policy-engine's evaluation counters (policy_*; labels trigger, disposition, source,
+# direction, reason, result, type, status, read: bounded enums only, never a tenant id, message id
+# or rule id), the scan stage's scan_rounds_completed_total and the notification-worker's
+# notification_policy_messages_total. Since step 5.2 the policy-engine is the only automatic
+# producer of delivery approvals: when it stops, mail is held (not lost) until it recovers or the
+# lifecycle deadline expires it. Every alert links its section of docs/runbooks/policy-engine.md.
+# Validate with `promtool check rules` and `promtool test rules tests/policy-engine.rules.test.yml`.
+groups:
+  - name: policy-engine
+    rules:
+      - alert: PolicyEvaluationsStalled
+        # Rounds complete but none is evaluated: the engine is down, cannot reach the broker or
+        # the writer, or dead-letters everything. `or vector(0)` keeps the alert alive when the
+        # policy series never appeared (engine never started).
+        expr: >-
+          sum(increase(scan_rounds_completed_total[30m])) > 0
+          and
+          (sum(increase(policy_evaluations_total{trigger=~"scanned|scan_failed"}[30m])) or vector(0)) == 0
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: Scan rounds complete but no policy evaluation happens
+          description: >-
+            For 45 minutes scan rounds completed while the policy-engine evaluated none. No mail
+            is approved for delivery: messages wait in scanned / scan_failed (held, not lost)
+            until the engine recovers or their lifecycle deadline expires them. Check the
+            policy-engine pods, readiness (mysql, rabbitmq, redis, s3), the depth of
+            email.policy.evaluate and email.dead-letter.
+          runbook_url: docs/runbooks/policy-engine.md#policyevaluationsstalled
+      - alert: PolicyInputErrors
+        expr: sum(increase(policy_input_errors_total[15m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Rounds that cannot be evaluated (dead-lettered)
+          description: >-
+            The policy-engine dead-lettered rounds in the last 15 minutes because their stored
+            facts could not be turned into a policy input (policy_input_invalid). Those messages
+            stay held (scanned / scan_failed / persisted). This is a defect of an earlier stage
+            or of the engine: inspect the dead letters of email.policy.evaluate, fix, replay.
+          runbook_url: docs/runbooks/policy-engine.md#policyinputerrors
+      - alert: PolicySnapshotInvalidVersion
+        expr: sum(increase(policy_snapshot_invalid_versions_total[30m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Active policy versions excluded from evaluation
+          description: >-
+            Compiled policy snapshots excluded active versions that no longer validate (retired
+            DSL version, hash mismatch, malformed reference). Their rules are NOT applied (the
+            platform default and the strictness floor still are). Find the version with the api
+            (GET /api/v1/policies/{id}/versions/{n} shows the violations) and publish a fixed one
+            or roll back.
+          runbook_url: docs/runbooks/policy-engine.md#policysnapshotinvalidversion
+      - alert: PolicyInconsistentReads
+        expr: sum by (read) (increase(policy_inconsistent_reads_total[15m])) > 10
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Policy engine inconsistent writer reads ({{ $labels.read }})'
+          description: >-
+            More than 10 writer reads of {{ $labels.read }} did not echo their request in 15
+            minutes (the Prisma wrong-read defect, step 4.2 §6). Each one is retried, nothing is
+            decided from a wrong row, but evaluations are delayed. Check writer stalls, transaction
+            budgets and the database socket settings.
+          runbook_url: docs/runbooks/policy-engine.md#policyinconsistentreads
+      - alert: PolicyRiskMissing
+        expr: sum(increase(policy_risk_missing_total[30m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Rounds evaluated without a revision-0 risk score
+          description: >-
+            Scanned or scan-failed rounds reached policy without their revision-0 risk row (a
+            step 5.1 defect; the row is written with scanned.v1). The floor quarantines them
+            (policy.floor.risk_missing). Check the email-worker scan replicas and RiskScoreMissing.
+          runbook_url: docs/runbooks/policy-engine.md#policyriskmissing
+      - alert: PolicyNotificationFailures
+        expr: sum(increase(notification_policy_messages_total{result="failed"}[30m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Policy notifications failed
+          description: >-
+            The notification-worker failed to send policy alerts or sender notices in the last 30
+            minutes (retried, then dead-lettered). Check the transactional relay (postfix-notify /
+            NOTIFY_SMTP_*) and the dead letters of email.notifications.
+          runbook_url: docs/runbooks/policy-engine.md#policynotificationfailures

@@ -75,6 +75,11 @@ import type {
   UrlResultRow,
   UrlRewriteRow,
 } from '../repositories/message-scans-read.repository';
+import type { PolicyEvaluationView } from '@email-gateway/policy-dsl';
+import {
+  evaluationViewOf,
+  type SelectedEvaluationRow,
+} from '../../policies/domain/evaluation-view';
 
 /**
  * Pure mapping of the scan rows to the read API (step 4.1 S16) and its round cursor. Stored
@@ -733,6 +738,19 @@ export function riskOf(scanId: bigint, rows: readonly RiskScoreRow[]): RiskScore
   return views.sort((a, b) => a.revision - b.revision);
 }
 
+/**
+ * The stored policy evaluation of one round (step 5.2 P16) through the shared row mapping of
+ * `@email-gateway/policy-dsl` (ids, codes and hashes only); null when none is stored (yet) or the
+ * stored JSON does not form a valid view.
+ */
+export function policyOf(
+  scanId: bigint,
+  rows: readonly SelectedEvaluationRow[],
+): PolicyEvaluationView | null {
+  const row = rows.find((r) => r.scanId === scanId);
+  return row === undefined ? null : evaluationViewOf(row);
+}
+
 const catalogRank = (engine: string): number => {
   const index = ENGINE_CATALOG.findIndex((entry) => entry.name === engine);
   return index === -1 ? ENGINE_CATALOG.length : index;
@@ -747,7 +765,7 @@ const byCatalog = (a: string, b: string): number =>
  * explainable verdict (step 4.4 B15) and on the `dlp` engine entry its masked result (step 4.5
  * D20, only for callers holding `dlp:read`; no symbols: the engine's evidence is not shown) and
  * on the asynchronous `sandbox` engine entry its submissions with their reports (step 4.6 X18),
- * and its stored risk scores (step 5.1 R15).
+ * and its stored risk scores (step 5.1 R15) and policy evaluation (step 5.2 P16).
  */
 export function roundOf(
   scan: ScanRoundRow,
@@ -758,6 +776,7 @@ export function roundOf(
   bec: BecInputs = NO_BEC,
   dlp: DlpInputs = NO_DLP,
   risk: readonly RiskScoreRow[] = [],
+  policy: readonly SelectedEvaluationRow[] = [],
 ): ScanRoundView {
   const byEngine = new Map<string, EngineResultRow[]>();
   for (const row of engineRows) {
@@ -803,6 +822,7 @@ export function roundOf(
       return view;
     }),
     risk: riskOf(scan.id, risk),
+    policy: policyOf(scan.id, policy),
   };
 }
 

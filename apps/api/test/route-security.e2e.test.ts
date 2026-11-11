@@ -426,6 +426,67 @@ describe('route security (e2e, dependencies stubbed)', () => {
     }
   });
 
+  it('the step 5.2 policy and department routes require exactly their permissions (P22)', () => {
+    const expected: Record<string, string[]> = {
+      'get /api/v1/policies/catalog': ['policy:read'],
+      'get /api/v1/policies': ['policy:read'],
+      'post /api/v1/policies': ['policy:manage'],
+      'get /api/v1/policies/:policyId': ['policy:read'],
+      'patch /api/v1/policies/:policyId': ['policy:manage'],
+      'post /api/v1/policies/:policyId/disable': ['policy:publish'],
+      'post /api/v1/policies/:policyId/enable': ['policy:publish'],
+      'delete /api/v1/policies/:policyId': ['policy:publish'],
+      'get /api/v1/policies/:policyId/versions': ['policy:read'],
+      'post /api/v1/policies/:policyId/versions': ['policy:manage'],
+      'get /api/v1/policies/:policyId/versions/:versionNo': ['policy:read'],
+      'put /api/v1/policies/:policyId/versions/:versionNo': ['policy:manage'],
+      'delete /api/v1/policies/:policyId/versions/:versionNo': ['policy:manage'],
+      'post /api/v1/policies/:policyId/versions/:versionNo/publish': ['policy:publish'],
+      'post /api/v1/policies/:policyId/versions/:versionNo/activate': ['policy:publish'],
+      'get /api/v1/policy-settings': ['policy:read'],
+      'put /api/v1/policy-settings': ['policy:publish'],
+      'post /api/v1/policies/test': ['policy:manage'],
+      'get /api/v1/policies/executions': ['policy:read'],
+      'post /api/v1/messages/:messageId/scans/:scanId/policy/dry-run': [
+        'policy:manage',
+        'message:read',
+      ],
+      'get /api/v1/messages/:messageId/policy-evaluations': ['message:read'],
+      'get /api/v1/departments': ['user:read'],
+      'post /api/v1/departments': ['user:manage'],
+      'get /api/v1/departments/:departmentId': ['user:read'],
+      'patch /api/v1/departments/:departmentId': ['user:manage'],
+      'delete /api/v1/departments/:departmentId': ['user:manage'],
+      'get /api/v1/departments/:departmentId/members': ['user:read'],
+      'post /api/v1/departments/:departmentId/members': ['user:manage'],
+      'delete /api/v1/departments/:departmentId/members/:memberId': ['user:manage'],
+    };
+    const policyRoutes = routes.filter(
+      (r) =>
+        r.path.startsWith('/api/v1/policies') ||
+        r.path.startsWith('/api/v1/policy-settings') ||
+        r.path.startsWith('/api/v1/departments') ||
+        r.path.endsWith('/policy/dry-run') ||
+        r.path.endsWith('/policy-evaluations'),
+    );
+    expect(policyRoutes.map((r) => `${r.method} ${r.path}`).sort()).toEqual(
+      Object.keys(expected).sort(),
+    );
+    for (const [key, permissions] of Object.entries(expected)) {
+      const route = routes.find((r) => `${r.method} ${r.path}` === key);
+      expect(route?.isPublic, key).toBe(false);
+      expect(route?.requirement, key).toEqual({ mode: 'all', permissions });
+      expect(route?.requireMfa, key).toBe(false);
+      expect(route?.userOnly, key).toBe(false);
+      expect(route?.rateLimits, key).toEqual([]);
+    }
+    // The static /policies routes are registered before /policies/:policyId.
+    const order = routes.map((r) => `${r.method} ${r.path}`);
+    expect(order.indexOf('get /api/v1/policies/catalog')).toBeLessThan(
+      order.indexOf('get /api/v1/policies/:policyId'),
+    );
+  });
+
   it('non-public routes also reject a junk bearer token and a junk API key', async () => {
     const route = routes.find((r) => !r.isPublic)!;
     const path = route.path.replace(/:[A-Za-z0-9_]+/g, randomUUID());

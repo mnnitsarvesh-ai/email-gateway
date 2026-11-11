@@ -7,6 +7,7 @@ import {
   domainRoutingChangedV1,
   domainStatusChangedV1,
   EventTypes,
+  messageArchiveRequestedV1,
   messageDlpIncidentV1,
   messageParsedV1,
   messageParseFailedV1,
@@ -16,6 +17,7 @@ import {
   messageScanStageReadyV1,
   messageStateChangedV1,
   policyDecidedV1,
+  policyNotificationRequestedV1,
   sandboxTaskCompletedV1,
   sandboxTaskRequestedV1,
   urlClickedV1,
@@ -113,10 +115,28 @@ export const EVENT_REGISTRY = {
     messageScannedV1,
     'message',
   ),
+  // Step 5.2 P15: redefined in place; producer policy-engine through the outbox; bound to the
+  // dormant email.quarantine (5.3).
   [EventTypes.PolicyDecided]: define(
     EventTypes.PolicyDecided,
     'email.policy',
     policyDecidedV1,
+    'message',
+  ),
+  // Step 5.2 P15: producer policy-engine through the outbox; bound to the dormant email.archive
+  // (consumer: step 8.1).
+  [EventTypes.MessageArchiveRequested]: define(
+    EventTypes.MessageArchiveRequested,
+    'email.archive',
+    messageArchiveRequestedV1,
+    'message',
+  ),
+  // Step 5.2 P15: producer policy-engine through the outbox; bound to email.notifications
+  // (consumer: notification-worker).
+  [EventTypes.PolicyNotificationRequested]: define(
+    EventTypes.PolicyNotificationRequested,
+    'email.policy',
+    policyNotificationRequestedV1,
     'message',
   ),
   [EventTypes.DeliveryApproved]: define(

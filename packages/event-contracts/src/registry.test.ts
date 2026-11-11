@@ -55,6 +55,10 @@ describe('EVENT_REGISTRY', () => {
       'mail.sandbox.task_requested.v1': ['email.security', 'sandbox_analysis'],
       'mail.sandbox.task_completed.v1': ['email.security', 'sandbox_analysis'],
       'mail.attachment.sandbox_completed.v1': ['email.security', 'attachment'],
+      // Step 5.2 P15: the policy decision (redefined), its archive request (to email.archive)
+      // and its notification request.
+      'mail.message.archive_requested.v1': ['email.archive', 'message'],
+      'mail.policy.notification_requested.v1': ['email.policy', 'message'],
     });
     for (const definition of Object.values(EVENT_REGISTRY)) {
       expect(EXCHANGE_NAMES).toContain(definition.exchange);

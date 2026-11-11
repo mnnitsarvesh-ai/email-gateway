@@ -14,9 +14,13 @@ import { findEdge, LIFECYCLE_REASON_CODES, TRANSITIONS } from './transitions';
 /**
  * The L3 table of the design, written out (edge, from, to, roles, reasons, new round, producer),
  * with step 4.1's changes: E4 (`persisted → approved`, dev pass-through) is retired and E27
- * (`scanned → approved`) added (docs/plan/steps/09-rspamd.md S15).
+ * (`scanned → approved`) added (docs/plan/steps/09-rspamd.md S15); step 5.2 retires E27 as well
+ * (docs/plan/steps/16-policy-engine.md P14, ADR-0044).
  */
-const RETIRED_EDGE_IDS = ['E4'];
+const RETIRED_EDGE_IDS = ['E4', 'E27'];
+/** Kept for history rows written before the retirements (no edge accepts them). */
+const HISTORY_ONLY_ROLES = ['dev_passthrough'];
+const HISTORY_ONLY_REASONS = ['dev_passthrough', 'lifecycle_backfill'];
 const L3 = `
 E1  - received ingestion smtp_accepted - 3.3
 E2  received persisted ingestion committed - 3.3
@@ -43,11 +47,10 @@ E23 delivery_pending,delivery_retry delivered delivery,recovery delivery_complet
 E24 delivery_pending,delivery_retry rejected delivery,recovery delivery_failed - 3.3
 E25 delivered,rejected archived archive archived - 8.1
 E26 persisted,scanning,scanned,scan_failed,policy_evaluated,approved,quarantined,held_for_review,delivery_pending,delivery_retry expired sweeper deadline_exceeded - 3.3
-E27 scanned approved dev_passthrough dev_passthrough - 4.1
 `;
 
 describe('TRANSITIONS', () => {
-  it('is the L3 table verbatim (E1–E26) without the retired E4, plus step 4.1 E27', () => {
+  it('is the L3 table verbatim (E1–E26) without the retired E4 (E27 of step 4.1 retired by 5.2)', () => {
     const expected = L3.trim()
       .split('\n')
       .map((line) => {
@@ -69,7 +72,7 @@ describe('TRANSITIONS', () => {
     expect(TRANSITIONS.map((e) => ({ ...e, from: [...e.from] }))).toEqual(expected);
   });
 
-  it('uses exactly the fifteen states and only known roles; every role and state is used', () => {
+  it('uses exactly the fifteen states and only known roles; every role but the history-only ones is used', () => {
     const states = new Set<MessageState>();
     const roles = new Set<string>();
     for (const edge of TRANSITIONS) {
@@ -78,7 +81,9 @@ describe('TRANSITIONS', () => {
       for (const r of edge.roles) roles.add(r);
     }
     expect([...states].sort()).toEqual([...MESSAGE_STATES].sort());
-    expect([...roles].sort()).toEqual([...ACTOR_ROLES].sort());
+    expect([...roles].sort()).toEqual(
+      ACTOR_ROLES.filter((r) => !HISTORY_ONLY_ROLES.includes(r)).sort(),
+    );
     expect(Object.keys(STATE_RANK).sort()).toEqual([...MESSAGE_STATES].sort());
   });
 
@@ -92,7 +97,7 @@ describe('TRANSITIONS', () => {
         expect(findEdge(from, edge.to)).toBe(edge);
       }
     }
-    // Ids are E1, E2, … in order; a retired id (E4) is never reused.
+    // Ids are E1, E2, … in order; a retired id (E4, E27) is never reused.
     const ids = Array.from({ length: 27 }, (_, i) => `E${i + 1}`).filter(
       (id) => !RETIRED_EDGE_IDS.includes(id),
     );
@@ -108,20 +113,28 @@ describe('TRANSITIONS', () => {
     expect(out('rejected')).toEqual(['archived']);
   });
 
-  it('lets the dev pass-through approve only a scanned message (E27; E4 retired)', () => {
-    const passThrough = TRANSITIONS.filter((e) => e.roles.includes('dev_passthrough'));
-    expect(passThrough.map((e) => [e.id, [...e.from], e.to])).toEqual([
-      ['E27', ['scanned'], 'approved'],
-    ]);
-    expect(TRANSITIONS.some((e) => e.id === 'E4')).toBe(false);
+  it('approves only through policy (E10) and the operator release (E14/E15); E4 and E27 retired (step 5.2)', () => {
+    expect(TRANSITIONS.some((e) => e.roles.includes('dev_passthrough'))).toBe(false);
+    expect(TRANSITIONS.some((e) => e.reasons.includes('dev_passthrough'))).toBe(false);
+    expect(TRANSITIONS.some((e) => e.id === 'E4' || e.id === 'E27')).toBe(false);
     expect(findEdge('persisted', 'approved')).toBeUndefined();
-    for (const edge of passThrough) {
-      expect(edge.roles).toEqual(['dev_passthrough']);
-      expect(edge.reasons).toEqual(['dev_passthrough']);
-      expect(edge.newRound).toBeUndefined();
-    }
-    expect(findEdge('scanned', 'approved')?.id).toBe('E27');
+    expect(findEdge('scanned', 'approved')).toBeUndefined();
     expect(findEdge('scan_failed', 'approved')).toBeUndefined();
+    const approving = TRANSITIONS.filter((e) => e.to === 'approved');
+    expect(approving.map((e) => [e.id, [...e.from], [...e.roles]])).toEqual([
+      ['E10', ['policy_evaluated'], ['policy']],
+      ['E14', ['quarantined'], ['operator', 'quarantine']],
+      ['E15', ['held_for_review'], ['operator', 'quarantine']],
+    ]);
+    // The policy edges (E5, E8–E13) are produced by the policy-engine from step 5.2 on.
+    for (const id of ['E5', 'E8', 'E9', 'E10', 'E11', 'E12', 'E13']) {
+      const edge = TRANSITIONS.find((e) => e.id === id)!;
+      expect(edge.roles).toEqual(['policy']);
+      expect(edge.producedBy).toBe('5.2');
+    }
+    // History rows of the retired edges stay readable: the role and reason remain known values.
+    expect(ACTOR_ROLES).toContain('dev_passthrough');
+    expect(LIFECYCLE_REASON_CODES).toContain('dev_passthrough');
   });
 
   it('opens new rounds only for operator/quarantine actors, and the scanner for signature rescans', () => {
@@ -185,7 +198,7 @@ describe('TRANSITIONS', () => {
     }
   });
 
-  it('reason codes match the pattern, are unique per edge and are exactly the union + lifecycle_backfill', () => {
+  it('reason codes match the pattern, are unique per edge and are exactly the union + the history-only codes', () => {
     const union = new Set<string>();
     for (const edge of TRANSITIONS) {
       expect(new Set(edge.reasons).size).toBe(edge.reasons.length);
@@ -195,8 +208,8 @@ describe('TRANSITIONS', () => {
       }
     }
     expect(new Set(LIFECYCLE_REASON_CODES).size).toBe(LIFECYCLE_REASON_CODES.length);
-    expect([...LIFECYCLE_REASON_CODES].sort()).toEqual([...union, 'lifecycle_backfill'].sort());
-    expect(union.has('lifecycle_backfill')).toBe(false);
+    expect([...LIFECYCLE_REASON_CODES].sort()).toEqual([...union, ...HISTORY_ONLY_REASONS].sort());
+    for (const reason of HISTORY_ONLY_REASONS) expect(union.has(reason)).toBe(false);
   });
 
   it('expires exactly the EXPIRABLE_STATES; final states and received are not expirable', () => {

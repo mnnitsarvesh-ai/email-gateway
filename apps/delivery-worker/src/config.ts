@@ -37,6 +37,10 @@ export const DEFAULT_DELIVERY_DB_TX_TIMEOUT_MS = 120_000;
 /** Lower bound of `DELIVERY_DB_TX_TIMEOUT_MS` (above `innodb_lock_wait_timeout` 50 s). */
 export const MIN_DELIVERY_DB_TX_TIMEOUT_MS = 60_000;
 
+/** The text of the startup refusal of the removed pass-through key (asserted by the tests, P14). */
+export const DEV_PASSTHROUGH_REMOVED =
+  'removed in step 5.2 (ADR-0044): delivery is approved by the policy-engine; remove the key';
+
 /**
  * Delivery-worker configuration (step 2.3 §5; `.env.example` section "Mail routing and delivery
  * (step 2.3)"). Every key is validated here; the cross-field rules are in `validateWorkerConfig`.
@@ -80,25 +84,25 @@ export const deliveryConfigShape = {
   // (= approvals planned at the same time by one replica).
   DELIVERY_APPROVAL_PREFETCH: positiveInt.max(64).default(4),
 
-  // Scheduler (R8) and the dev pass-through's outbox poller (R6; since step 3.2 the poller
-  // serves only the development pass-through, the planner consumes from RabbitMQ).
+  // Scheduler (R8). The outbox poller keys (DELIVERY_OUTBOX_*) served only the development
+  // pass-through and were removed with it by step 5.2 (ignored when still set).
   DELIVERY_POLL_INTERVAL_MS: z.coerce.number().int().min(10).default(1000),
-  DELIVERY_OUTBOX_POLL_INTERVAL_MS: z.coerce.number().int().min(10).default(1000),
-  DELIVERY_OUTBOX_SAFETY_LAG_MS: nonNegativeInt.default(120_000),
-  DELIVERY_OUTBOX_BATCH_SIZE: positiveInt.max(5000).default(500),
 
   // Roles of this process.
   DELIVERY_APPROVALS_ENABLED: flag.default(true),
   DELIVERY_REINJECTION_ENABLED: flag.default(true),
   DELIVERY_STATUS_LOG_ENABLED: flag.default(true),
-  /** DEVELOPMENT ONLY (R5): refused unless APP_ENV is local or ci. */
-  DELIVERY_DEV_PASSTHROUGH_ENABLED: flag.default(false),
   /**
-   * Step 5.1 R16/R17: the pass-through also holds on the round's revision-0 risk recommendation
-   * (require_approval, quarantine, block), a hard block, an error row or a missing row. Only
-   * read when the pass-through is enabled; `false` restores the step 4.6 behaviour (diagnosis).
+   * REMOVED by step 5.2 (ADR-0044, docs/plan/steps/16-policy-engine.md P14): the development
+   * pass-through no longer exists; delivery is approved by the policy-engine. Kept in the shape
+   * only so that a leftover `true` fails startup loudly instead of being silently ignored (absent
+   * or `false` is accepted and ignored). `DELIVERY_DEV_PASSTHROUGH_RISK_HOLD` is not read at all.
    */
-  DELIVERY_DEV_PASSTHROUGH_RISK_HOLD: flag.default(true),
+  DELIVERY_DEV_PASSTHROUGH_ENABLED: z
+    .enum(['true', 'false', '1', '0'])
+    .optional()
+    .refine((value) => value !== 'true' && value !== '1', { message: DEV_PASSTHROUGH_REMOVED })
+    .transform(() => undefined),
 
   // Postfix delivery log (R9) and reconciler (R12).
   DELIVERY_STATUS_LOG_PATH: z.string().min(1).default('/var/log/postfix-outbound/maillog'),
@@ -138,16 +142,9 @@ export const deliveryConfigShape = {
   INGEST_HEADER_MAX_BYTES: z.coerce.number().int().min(1024).max(1_048_576).default(65_536),
 };
 
-/** The text of the startup refusal (also asserted by the tests). */
-export const DEV_PASSTHROUGH_REFUSAL =
-  'true is allowed only when APP_ENV is local or ci: the dev pass-through delivers scanned mail without policy';
-
 /** Cross-field rules. */
 export function validateWorkerConfig(
   cfg: {
-    APP_ENV: string;
-    DELIVERY_DEV_PASSTHROUGH_ENABLED: boolean;
-    DELIVERY_APPROVALS_ENABLED: boolean;
     DELIVERY_REINJECT_RETRY_BASE_SECONDS: number;
     DELIVERY_REINJECT_RETRY_MAX_SECONDS: number;
     DELIVERY_REINJECT_INBOUND_PORT: number;
@@ -166,20 +163,6 @@ export function validateWorkerConfig(
       message:
         'must be longer than DATABASE_SOCKET_TIMEOUT_SECONDS: a transaction must never expire ' +
         'while one of its statements is in flight (step 4.2 §6.2)',
-    });
-  }
-  if (cfg.DELIVERY_DEV_PASSTHROUGH_ENABLED && cfg.APP_ENV !== 'local' && cfg.APP_ENV !== 'ci') {
-    ctx.addIssue({
-      code: 'custom',
-      path: ['DELIVERY_DEV_PASSTHROUGH_ENABLED'],
-      message: DEV_PASSTHROUGH_REFUSAL,
-    });
-  }
-  if (cfg.DELIVERY_DEV_PASSTHROUGH_ENABLED && !cfg.DELIVERY_APPROVALS_ENABLED) {
-    ctx.addIssue({
-      code: 'custom',
-      path: ['DELIVERY_DEV_PASSTHROUGH_ENABLED'],
-      message: 'requires DELIVERY_APPROVALS_ENABLED=true (it writes approvals for the planner)',
     });
   }
   if (cfg.DELIVERY_REINJECT_RETRY_MAX_SECONDS < cfg.DELIVERY_REINJECT_RETRY_BASE_SECONDS) {

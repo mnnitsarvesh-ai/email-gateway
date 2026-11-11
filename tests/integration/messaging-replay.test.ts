@@ -37,7 +37,7 @@ import { assertStackReady } from './support/smtp-stack';
  * (`mail.delivery.approved.v1`) the relay published (outbox row marked) and the planner
  * dead-lettered after `maxAttempts` (the dead letter carries exactly the headers the library's
  * QueueConsumer writes for `max_attempts_exceeded`). The message is not ingested through SMTP,
- * so the dev pass-through never approves it on its own.
+ * so the policy-engine never evaluates it on its own (no scanned event).
  *
  * An MFA platform administrator replays it with `POST /api/v1/platform/dead-letters/replay`
  * (filters: source queue, organization public id, failure reason): the copy goes back to
@@ -74,8 +74,10 @@ afterAll(async () => {
 
 /**
  * A stored inbound message with one pending recipient whose delivery was approved (step 3.3:
- * the planner plans approvals of `approved` messages only, L8.4), as the dev pass-through leaves
- * it: state `approved`, version 2, round 0, with its history.
+ * the planner plans approvals of `approved` messages only, L8.4): state `approved`, version 2,
+ * round 0, with its fixture history. The fixture approval keeps the historical source
+ * `dev_passthrough` (still a valid `deliveryApprovedV1.source` for old events, step 5.2 P14):
+ * the replay path does not depend on the producer.
  */
 async function pendingMessage() {
   const message = await insertFixtureMessage(fx, {

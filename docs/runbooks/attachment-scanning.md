@@ -132,9 +132,9 @@ redis-cli --scan --pattern 'eg:scan:att:v2:*' | xargs -r -n 500 redis-cli unlink
 
 One file only: `redis-cli --scan --pattern 'eg:scan:att:v2:<sha256>:*' | xargs -r redis-cli unlink`. Keys of the former unauthenticated format (`eg:scan:att:v1:*`) are never read; they expire by their TTL or can be unlinked the same way.
 
-## The dev pass-through malicious hold
+## Malicious attachments and policy
 
-Locally (no policy engine yet), the delivery-worker's development pass-through approves scanned messages except `malicious` ones (A15): those stay `scanned` and are never delivered by it (`delivery_approvals_skipped_total{reason="malicious_verdict"}`); they expire after `LIFECYCLE_DEADLINE_SCANNED_HOURS`. This is a local stand-in for policy (5.2), not a quarantine.
+Since step 5.2 the development pass-through is gone: the policy-engine decides every scanned round ([policy-engine runbook](policy-engine.md)). A `malicious` attachment fires a risk hard block, and the policy strictness floor (`policy.floor.hard_block`) never lets it be delivered: EICAR ends `rejected` / `policy_discard` (inbound: no bounce), counted in `policy_evaluations_total{disposition="reject"}` and `policy_floor_raises_total{reason="hard_block"}`. The quarantine store is step 5.3.
 
 ## Checking the alert rules
 

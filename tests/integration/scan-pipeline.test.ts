@@ -31,7 +31,6 @@ import {
   DLP_LEDGER,
   dlpResultsOf,
   messagePublicId,
-  PASSTHROUGH_CONSUMER,
   REQUIRED_ENGINES,
   RSPAMD_LEDGER,
   scannedEventsOf,
@@ -44,6 +43,7 @@ import {
   waitForRoundComplete,
   URL_LEDGER,
 } from './support/scan-stack';
+import { expectPolicyHeld } from './support/policy';
 import { SmtpFixtures, type FixtureDomain } from './support/smtp-fixtures';
 import { assertStackReady } from './support/smtp-stack';
 import { reply } from './support/smtp-tools';
@@ -54,11 +54,11 @@ import { reply } from './support/smtp-tools';
  * MinIO) → event-relay → `email.received` → email-worker MIME role (`parsed.v1`) → event-relay →
  * `scan.spam` → email-worker scan role (Rspamd `/checkv2` with the trusted envelope; round 0
  * opened with E3, completed with E6 and `mail.message.scanned.v1` in the same transaction) →
- * dev pass-through (outbox feed of `scanned.v1`, E27) → planner → postfix-outbound → mail-sink.
+ * policy-engine (`scanned.v1` on `email.policy.evaluate`, E8/E10, step 5.2) → planner → postfix-outbound → mail-sink.
  *
  * - A clean, DKIM-signed and SPF/DMARC-aligned message ends `scanned` with a `clean` Rspamd
  *   result (`email_scans`, one final `scan_engine_results` row, `email_auth_results`, one
- *   `scanned.v1` outbox row, one scan ledger row), is approved by the pass-through and delivered.
+ *   `scanned.v1` outbox row, one scan ledger row), is approved by the policy-engine and delivered.
  * - A message spoofing `spoof.scan.test` from the mailtest network (not in its SPF; DMARC
  *   p=reject) is accepted at SMTP time (DMARC reject is not enforced there by default, ADR-0027)
  *   and scanned with `auth.spf_fail` and `auth.dmarc_reject`; a forged `Authentication-Results`
@@ -79,8 +79,8 @@ import { reply } from './support/smtp-tools';
  * transaction that inserts the last of the rspamd/url finals writes one
  * `mail.message.scan_stage_ready.v1`, which the relay routes to `scan.bec`. The clean message
  * ends with a `clean` bec final (authenticated as From, no cue); the spoofed one (DMARC fail,
- * "urgent wire transfer") with a bec verdict ≥ suspicious, which the dev pass-through holds
- * (B17): it stays `scanned` instead of being delivered.
+ * "urgent wire transfer") with a bec verdict ≥ suspicious, which is never approved (B17; since
+ * step 5.2 the policy-engine holds it in `quarantined` or `rejected` instead of delivering it).
  *
  * Since step 4.2 every round also requires the `attachment` engine (A1): the messages of this
  * suite have no attachments, so its final is `skipped` with `attachment.none` (rule A0), which
@@ -133,7 +133,7 @@ async function scansApi(publicId: string, rounds: number) {
 }
 
 describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 300_000 }, () => {
-  it('scans a clean message (clean, SPF/DKIM/DMARC pass), then the pass-through approves and delivers it', async () => {
+  it('scans a clean message (clean, SPF/DKIM/DMARC pass), then the policy-engine approves and delivers it', async () => {
     const rcpt = `clean@${domain.name}`;
     const started = Date.now();
     const sent = await sendToMx({
@@ -323,7 +323,7 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
     });
     expect(becRuleCodes(bec!.rules)).toEqual([]);
 
-    // Approved by the pass-through only after the scan (E27), then delivered.
+    // Approved by the policy-engine only after the scan (step 5.2: E8, E10), then delivered.
     const [delivery] = await waitForAllDeliveries(fx.prisma, org, message.id, ['delivered'], 1);
     expect(delivery!.address).toBe(rcpt.toLowerCase());
     await waitForLifecycle(fx.prisma, message, 'delivered', 'delivery_complete');
@@ -331,21 +331,23 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
       DELIVERED_PATH('delivered', 'delivery_complete'),
     );
     const history = await historyOf(fx.prisma, message);
-    expect(history.slice(2, 5).map((h) => [h.toStatus, h.actorRole, h.actorService])).toEqual([
+    expect(history.slice(2, 6).map((h) => [h.toStatus, h.actorRole, h.actorService])).toEqual([
       ['scanning', 'scanner', 'email-worker'],
       ['scanned', 'scanner', 'email-worker'],
-      ['approved', 'dev_passthrough', 'delivery-worker'],
+      ['policy_evaluated', 'policy', 'policy-engine'],
+      ['approved', 'policy', 'policy-engine'],
     ]);
     // Causation (`event_id`): the parsed event opens the round; the trigger of the final that
     // completed the round causes `scanned` — since step 4.4 normally the bec final (stage 2,
     // after rspamd and url), so its stage trigger; a stage-1 final only if it was the last one;
-    // the scanned event causes the approval.
+    // the scanned event causes the policy decision and the approval (step 5.2).
     const lastFinal = [...results].sort(
       (a, b) => a.completedAt.getTime() - b.completedAt.getTime() || Number(a.id - b.id),
     )[results.length - 1]!;
-    expect(history.slice(2, 5).map((h) => h.eventId)).toEqual([
+    expect(history.slice(2, 6).map((h) => h.eventId)).toEqual([
       parsed.eventId,
       lastFinal.engine === 'bec' ? stage[0]!.eventId : parsed.eventId,
+      scanned[0]!.eventId,
       scanned[0]!.eventId,
     ]);
     await expectConsistentHistory(fx.prisma, message);
@@ -354,7 +356,7 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
       where: { organizationId: org, eventType: 'mail.delivery.approved.v1' },
     });
     expect(approvals).toHaveLength(1);
-    expect(approvals[0]!.payload).toMatchObject({ source: 'dev_passthrough', lifecycleRound: 0 });
+    expect(approvals[0]!.payload).toMatchObject({ source: 'policy', lifecycleRound: 0 });
     const deliveredAfterMs = Date.now() - started;
 
     // The delivered copy carries exactly one Authentication-Results of ours.
@@ -449,7 +451,7 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
     });
   });
 
-  it('accepts a spoofed message at SMTP time, scans it with auth.spf_fail and auth.dmarc_reject, and the pass-through holds its bec verdict', async () => {
+  it('accepts a spoofed message at SMTP time, scans it with auth.spf_fail and auth.dmarc_reject, and policy holds it', async () => {
     const rcpt = `spoofed@${domain.name}`;
     const text = [
       // A forged pass under our authserv-id: removed at SMTP time, never trusted post-queue.
@@ -525,24 +527,12 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
       expect.arrayContaining(['bec.auth.dmarc_fail', 'bec.auth.spf_fail']),
     );
 
-    // The development pass-through approves every scanned verdict (it stands in for a "deliver
-    // everything scanned" policy, S15) except a malicious round and, since step 4.4 B17, a bec
-    // result of suspicious or malicious: this message stays `scanned` (policy 5.2 decides).
-    const held = await waitFor(
-      'the pass-through ledger row of the scanned event (held, not approved)',
-      async () =>
-        (await fx.prisma.messageIdempotency.findFirst({
-          where: { consumer: PASSTHROUGH_CONSUMER, eventId: scanned[0]!.eventId },
-        })) ?? undefined,
-      { timeoutMs: 60_000, intervalMs: 500 },
-    );
-    expect(held).toBeTruthy();
+    // Never approved: before step 5.2 the development pass-through held a bec result of
+    // suspicious or malicious (step 4.4 B17) in `scanned`; since step 5.2 the policy-engine holds
+    // it (the platform default's D2 for a deterministic bec `suspicious`, or a stricter risk
+    // recommendation / hard block), so the message ends `quarantined` or `rejected`.
+    const evaluation = await expectPolicyHeld(fx.prisma, message, { min: 'quarantine' });
     await sleep(3_000);
-    const state = await fx.prisma.emailMessage.findFirstOrThrow({
-      where: { id: message.id, receivedAt: message.receivedAt },
-      select: { status: true },
-    });
-    expect(state.status).toBe('scanned');
     expect(
       await fx.prisma.messageOutbox.count({
         where: {
@@ -557,6 +547,7 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
       spoofed_score: Number(final!.score),
       spoofed_reasons: (final!.reasonCodes as string[]).join(','),
       spoofed_bec: `${becFinal!.outcome}:${bec!.score}`,
+      spoofed_policy: `${evaluation.disposition}:${evaluation.decisionSource}`,
     });
   });
 
@@ -660,7 +651,7 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
     }
   });
 
-  it('runs topology v8: scan.spam, scan.attachment, scan.url, scan.url.results, scan.bec, scan.dlp, scan.sandbox.submissions and scan.sandbox.results consumed by the scanner user, scan.auth without event bindings', async () => {
+  it('runs topology v9 (scan queues of v8 unchanged): scan.spam, scan.attachment, scan.url, scan.url.results, scan.bec, scan.dlp, scan.sandbox.submissions and scan.sandbox.results consumed by the scanner user, scan.auth without event bindings', async () => {
     const scanner = process.env.RABBITMQ_SCANNER_USER || 'eg-scanner';
     for (const queue of SCAN_CONSUMED_QUEUES) {
       const details = await mgmt.get<{
@@ -678,6 +669,15 @@ describe.skipIf(gate.skip)('scan stack: pipeline through Postfix', { timeout: 30
     );
     expect(auth.map((b) => b.routing_key)).toEqual(['retry.scan.auth.#']);
     expect((await mgmt.queue(vhost, 'scan.auth')).consumers).toBe(0);
+    // Step 5.2: the delivery gate's queue is consumed by the policy-engine's own user.
+    const policy = await mgmt.get<{
+      consumers?: number;
+      consumer_details?: { channel_details?: { user?: string } }[];
+    }>(`/queues/${encodeURIComponent(vhost)}/email.policy.evaluate`);
+    expect(policy.consumers).toBeGreaterThanOrEqual(1);
+    expect(new Set((policy.consumer_details ?? []).map((c) => c.channel_details?.user))).toEqual(
+      new Set([process.env.RABBITMQ_POLICY_ENGINE_USER || 'eg-policy-engine']),
+    );
     // Every round of this suite was completed by the live consumer: nothing is left behind.
     const rounds = await fx.prisma.emailScan.findMany({ where: { organizationId: org } });
     expect(rounds).toHaveLength(2);

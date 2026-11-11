@@ -101,15 +101,20 @@ describe.skipIf(gate.skip)('SMTP stack: inbound delivery (suite 1)', { timeout: 
       mtaQueueId: queueId,
     });
     // Step 3.3 (L5.2): the commit records `received` and `persisted` (versions 0 and 1) in the
-    // same transaction; the scan role (E3, E6, step 4.1), the dev pass-through (E27) and the
-    // planner (E20) may already have moved the message on by the time this row is read. This
-    // destination-less domain's recipient is deferred by the reinjection refusal, so the derived
-    // state is `delivery_retry`.
+    // same transaction; the scan role (E3, E6, step 4.1), the policy-engine (E8 and the
+    // disposition edge, step 5.2; before it the dev pass-through's E27) and the planner (E20) may
+    // already have moved the message on by the time this row is read. This destination-less
+    // domain's recipient is deferred by the reinjection refusal, so the derived state is
+    // `delivery_retry` when policy allows it (a policy hold ends in its own state).
     expect([
       'persisted',
       'scanning',
       'scanned',
+      'policy_evaluated',
       'approved',
+      'quarantined',
+      'held_for_review',
+      'rejected',
       'delivery_pending',
       'delivery_retry',
     ]).toContain(message.status);
@@ -143,14 +148,15 @@ describe.skipIf(gate.skip)('SMTP stack: inbound delivery (suite 1)', { timeout: 
     expect(['pending', 'deferred']).toContain(recipients[0]!.status);
 
     // Step 2.3 (docs/plan/steps/05-routing.md R5, R9.1): with the delivery-worker running, the
-    // development pass-through and the delivery recorder add their own email_events
-    // (`delivery.*`, source delivery-worker) and outbox rows (`mail.delivery.*`) for this message;
+    // policy-engine (step 5.2; before it the development pass-through) and the delivery recorder
+    // add their own email_events and outbox rows (`mail.delivery.*`) for this message;
     // this suite checks what INGESTION wrote, so it counts only those rows. Step 3.1
     // (docs/plan/steps/06-mime-ingestion.md M3.9) adds the email-worker's `parsed` event and its
     // `mail.message.parsed.v1` / `parse_failed.v1` outbox row, excluded the same way. Step 3.3
     // (L5.1, L5.2): the creation writes no `mail.message.state_changed.v1`; the later transitions
-    // of the pass-through and the planner do, so those rows are excluded too. Step 4.1 adds the
-    // scan role's `mail.message.scanned.v1` (and its transitions' `state_changed` rows).
+    // of the policy-engine and the planner do, so those rows are excluded too. Step 4.1 adds the
+    // scan role's `mail.message.scanned.v1` (and its transitions' `state_changed` rows); step 5.2
+    // the policy-engine's `mail.policy.*` and `mail.message.archive_requested.v1` rows.
     const events = await fx.prisma.emailEvent.findMany({
       where: { messageId: message.id, organizationId: orgA, sourceService: 'smtp-adapter' },
     });
@@ -164,6 +170,9 @@ describe.skipIf(gate.skip)('SMTP stack: inbound delivery (suite 1)', { timeout: 
         aggregateId: message.id.toString(),
         AND: [
           { eventType: { not: { startsWith: 'mail.delivery.' } } },
+          // Step 5.2: the policy-engine's decision, notification requests and archive requests.
+          { eventType: { not: { startsWith: 'mail.policy.' } } },
+          { eventType: { not: 'mail.message.archive_requested.v1' } },
           {
             eventType: {
               notIn: [

@@ -1,0 +1,182 @@
+# promtool unit tests of rules/policy-engine.rules.yml (step 5.2 P24):
+#   docker run --rm -v "$PWD/infrastructure/monitoring:/m:ro" --entrypoint promtool \
+#     prom/prometheus:v3.6.0 test rules /m/tests/policy-engine.rules.test.yml
+rule_files:
+  - ../rules/policy-engine.rules.yml
+evaluation_interval: 1m
+tests:
+  - name: rounds complete but nothing is evaluated - critical after 15 minutes
+    interval: 1m
+    input_series:
+      - series: 'scan_rounds_completed_total{job="email-worker",instance="a",outcome="scanned"}'
+        values: '0+5x80'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: PolicyEvaluationsStalled
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: PolicyEvaluationsStalled
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: 'Scan rounds complete but no policy evaluation happens'
+              description: 'For 45 minutes scan rounds completed while the policy-engine evaluated none. No mail is approved for delivery: messages wait in scanned / scan_failed (held, not lost) until the engine recovers or their lifecycle deadline expires them. Check the policy-engine pods, readiness (mysql, rabbitmq, redis, s3), the depth of email.policy.evaluate and email.dead-letter.'
+              runbook_url: 'docs/runbooks/policy-engine.md#policyevaluationsstalled'
+
+  - name: rounds complete and are evaluated - quiet
+    interval: 1m
+    input_series:
+      - series: 'scan_rounds_completed_total{job="email-worker",instance="a",outcome="scanned"}'
+        values: '0+5x80'
+      - series: 'policy_evaluations_total{job="policy-engine",instance="p",trigger="scanned",disposition="allow",source="platform_default",direction="inbound"}'
+        values: '0+5x80'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: PolicyEvaluationsStalled
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: PolicyEvaluationsStalled
+        exp_alerts: []
+
+  - name: an outage stalls evaluations; parse failures alone are not progress
+    interval: 1m
+    input_series:
+      - series: 'scan_rounds_completed_total{job="email-worker",instance="a",outcome="scanned"}'
+        values: '0+5x80'
+      - series: 'policy_evaluations_total{job="policy-engine",instance="p",trigger="scanned",disposition="allow",source="platform_default",direction="inbound"}'
+        values: '0+5x10 50x70'
+      - series: 'policy_evaluations_total{job="policy-engine",instance="p",trigger="parse_failed",disposition="quarantine",source="floor",direction="inbound"}'
+        values: '0+1x80'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: PolicyEvaluationsStalled
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: PolicyEvaluationsStalled
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: 'Scan rounds complete but no policy evaluation happens'
+              description: 'For 45 minutes scan rounds completed while the policy-engine evaluated none. No mail is approved for delivery: messages wait in scanned / scan_failed (held, not lost) until the engine recovers or their lifecycle deadline expires them. Check the policy-engine pods, readiness (mysql, rabbitmq, redis, s3), the depth of email.policy.evaluate and email.dead-letter.'
+              runbook_url: 'docs/runbooks/policy-engine.md#policyevaluationsstalled'
+
+  - name: no traffic at all - quiet
+    interval: 1m
+    input_series:
+      - series: 'scan_rounds_completed_total{job="email-worker",instance="a",outcome="scanned"}'
+        values: '0x80'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: PolicyEvaluationsStalled
+        exp_alerts: []
+
+  - name: a dead-lettered input error warns and clears
+    interval: 1m
+    input_series:
+      - series: 'policy_input_errors_total{job="policy-engine",instance="p"}'
+        values: '0x5 1x60'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PolicyInputErrors
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: PolicyInputErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'Rounds that cannot be evaluated (dead-lettered)'
+              description: 'The policy-engine dead-lettered rounds in the last 15 minutes because their stored facts could not be turned into a policy input (policy_input_invalid). Those messages stay held (scanned / scan_failed / persisted). This is a defect of an earlier stage or of the engine: inspect the dead letters of email.policy.evaluate, fix, replay.'
+              runbook_url: 'docs/runbooks/policy-engine.md#policyinputerrors'
+      - eval_time: 40m
+        alertname: PolicyInputErrors
+        exp_alerts: []
+
+  - name: an invalid active version warns and clears
+    interval: 1m
+    input_series:
+      - series: 'policy_snapshot_invalid_versions_total{job="policy-engine",instance="p"}'
+        values: '0x5 1x60'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PolicySnapshotInvalidVersion
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: PolicySnapshotInvalidVersion
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'Active policy versions excluded from evaluation'
+              description: 'Compiled policy snapshots excluded active versions that no longer validate (retired DSL version, hash mismatch, malformed reference). Their rules are NOT applied (the platform default and the strictness floor still are). Find the version with the api (GET /api/v1/policies/{id}/versions/{n} shows the violations) and publish a fixed one or roll back.'
+              runbook_url: 'docs/runbooks/policy-engine.md#policysnapshotinvalidversion'
+      - eval_time: 50m
+        alertname: PolicySnapshotInvalidVersion
+        exp_alerts: []
+
+  - name: more than 10 inconsistent reads in 15 minutes warn per read; a few stay quiet
+    interval: 1m
+    input_series:
+      - series: 'policy_inconsistent_reads_total{job="policy-engine",instance="p",read="risk"}'
+        values: '0+1x60'
+      - series: 'policy_inconsistent_reads_total{job="policy-engine",instance="p",read="scan"}'
+        values: '0x5 3x55'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: PolicyInconsistentReads
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              read: risk
+            exp_annotations:
+              summary: 'Policy engine inconsistent writer reads (risk)'
+              description: "More than 10 writer reads of risk did not echo their request in 15 minutes (the Prisma wrong-read defect, step 4.2 \u00a76). Each one is retried, nothing is decided from a wrong row, but evaluations are delayed. Check writer stalls, transaction budgets and the database socket settings."
+              runbook_url: 'docs/runbooks/policy-engine.md#policyinconsistentreads'
+
+  - name: a round without a risk row warns and clears
+    interval: 1m
+    input_series:
+      - series: 'policy_risk_missing_total{job="policy-engine",instance="p"}'
+        values: '0x5 1x60'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PolicyRiskMissing
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: PolicyRiskMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'Rounds evaluated without a revision-0 risk score'
+              description: 'Scanned or scan-failed rounds reached policy without their revision-0 risk row (a step 5.1 defect; the row is written with scanned.v1). The floor quarantines them (policy.floor.risk_missing). Check the email-worker scan replicas and RiskScoreMissing.'
+              runbook_url: 'docs/runbooks/policy-engine.md#policyriskmissing'
+      - eval_time: 50m
+        alertname: PolicyRiskMissing
+        exp_alerts: []
+
+  - name: a failed notification warns; sent ones do not
+    interval: 1m
+    input_series:
+      - series: 'notification_policy_messages_total{job="notification-worker",instance="n",kind="policy_alert",result="failed"}'
+        values: '0x5 1x60'
+      - series: 'notification_policy_messages_total{job="notification-worker",instance="n",kind="policy_alert",result="sent"}'
+        values: '0+3x65'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PolicyNotificationFailures
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: PolicyNotificationFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'Policy notifications failed'
+              description: 'The notification-worker failed to send policy alerts or sender notices in the last 30 minutes (retried, then dead-lettered). Check the transactional relay (postfix-notify / NOTIFY_SMTP_*) and the dead letters of email.notifications.'
+              runbook_url: 'docs/runbooks/policy-engine.md#policynotificationfailures'
+      - eval_time: 50m
+        alertname: PolicyNotificationFailures
+        exp_alerts: []

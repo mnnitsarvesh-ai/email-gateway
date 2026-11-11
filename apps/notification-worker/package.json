@@ -7,8 +7,9 @@
     "dev": "nest start --watch --exec \"node --env-file-if-exists=../../.env\"",
     "start": "node dist/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "eslint src",
-    "test": "vitest run --dir src"
+    "lint": "eslint src integration",
+    "test": "vitest run --dir src",
+    "test:integration": "vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
     "@email-gateway/common": "workspace:*",
@@ -20,6 +21,7 @@
     "@nestjs/common": "^11.1.6",
     "@nestjs/core": "^11.1.6",
     "@nestjs/platform-express": "^11.1.6",
+    "nodemailer": "^10.3.1",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
     "zod": "^4.1.5"
@@ -29,6 +31,7 @@
     "@nestjs/testing": "^11.1.6",
     "@swc/core": "^1.13.5",
     "@types/express": "^5.0.3",
+    "@types/nodemailer": "^8.0.2",
     "unplugin-swc": "^1.5.7"
   }
 }

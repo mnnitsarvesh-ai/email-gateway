@@ -9,10 +9,10 @@ profile cache, row writes, metrics), `apps/api/src/modules/risk-scoring/` (profi
 
 Three facts frame every step below:
 
-- **5.1 recommends; it never enforces.** A score row carries a `recommended_action`. Policy (step
-  5.2) decides and quarantine (5.3) acts. Until then the only consumer that acts on it is the
-  **development pass-through** of the delivery-worker (local/ci only,
-  `DELIVERY_DEV_PASSTHROUGH_RISK_HOLD=true`), which may only hold more mail than in 4.6.
+- **5.1 recommends; it never enforces.** A score row carries a `recommended_action`. Since step
+  5.2 the policy-engine decides from it (platform default `pol-default/1` and the strictness floor,
+  [policy-engine runbook](policy-engine.md)); the quarantine store (5.3) is not built yet. The
+  development pass-through and `DELIVERY_DEV_PASSTHROUGH_RISK_HOLD` were removed in 5.2.
 - **The defaults are not validated accuracy.** The weights and thresholds of the platform profile
   `rsk-default/1` are engineering defaults calibrated on a synthetic, self-constructed dataset. No
   detection accuracy, precision or recall is claimed. Tune per tenant within the bounds, with the
@@ -264,9 +264,10 @@ email-worker (labels are bounded enums; never tenant ids):
 | `scan_risk_skipped_total`                | revision, reason (message_gone)                         | completed rounds without a row                         |
 | `scan_risk_inconsistent_reads_total`     | read                                                    | wrong reads (retried)                                  |
 
-api: `risk_dry_runs_total{result}`, `risk_profile_changes_total{operation}`. delivery-worker
-(local/ci pass-through): `delivery_risk_holds_total{action}` and
-`delivery_approvals_skipped_total{reason="risk_recommendation"|"risk_missing"}`.
+api: `risk_dry_runs_total{result}`, `risk_profile_changes_total{operation}`. What policy does with
+the score is counted by the policy-engine (`policy_evaluations_total`, `policy_floor_raises_total`,
+step 5.2); the 5.1 pass-through series `delivery_risk_holds_total` and
+`delivery_approvals_skipped_total` were removed with the pass-through.
 
 Every metric is recorded after the transaction commits, so a rolled-back completion is never
 counted. The measured cost (package integration, local stack) is a few milliseconds per round
@@ -274,12 +275,11 @@ counted. The measured cost (package integration, local stack) is a few milliseco
 
 ## Configuration
 
-| Key                                  | Service                    | Default         | Bounds                                  |
-| ------------------------------------ | -------------------------- | --------------- | --------------------------------------- |
-| `RISK_PLATFORM_PROFILE`              | email-worker, api          | `rsk-default/1` | a shipped id (`RISK_PLATFORM_PROFILES`) |
-| `RISK_PROFILE_CACHE_MAX_ENTRIES`     | email-worker               | `10000`         | 100–100000                              |
-| `RISK_PROFILE_MAX_VERSIONS`          | api                        | `200`           | 10–1000                                 |
-| `DELIVERY_DEV_PASSTHROUGH_RISK_HOLD` | delivery-worker (local/ci) | `true`          | boolean                                 |
+| Key                              | Service           | Default         | Bounds                                  |
+| -------------------------------- | ----------------- | --------------- | --------------------------------------- |
+| `RISK_PLATFORM_PROFILE`          | email-worker, api | `rsk-default/1` | a shipped id (`RISK_PLATFORM_PROFILES`) |
+| `RISK_PROFILE_CACHE_MAX_ENTRIES` | email-worker      | `10000`         | 100–100000                              |
+| `RISK_PROFILE_MAX_VERSIONS`      | api               | `200`           | 10–1000                                 |
 
 A changed platform default is a new id (`rsk-default/2`), never an edit; stored rows keep the
 version they were scored with. Kubernetes sets the first two on every scan-role email-worker

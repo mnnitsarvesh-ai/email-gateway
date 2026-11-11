@@ -1,8 +1,9 @@
 #!/usr/bin/env node
-// RabbitMQ provisioning for topology v8 (step 3.2 Q5, Q10, ADR-0024; v2: step 3.3 L7; v3: step
+// RabbitMQ provisioning for topology v9 (step 3.2 Q5, Q10, ADR-0024; v2: step 3.3 L7; v3: step
 // 4.1 S2, ADR-0026; v4: step 4.2 A2, ADR-0028; v5: step 4.3 U2, ADR-0029; v6: step 4.4 B3,
-// ADR-0033; v7: step 4.5 D2, ADR-0036; v8: step 4.6 X11, ADR-0040). The only code that declares
-// broker objects: services verify passively and their users cannot configure.
+// ADR-0033; v7: step 4.5 D2, ADR-0036; v8: step 4.6 X11, ADR-0040; v9: step 5.2 P15, ADR-0044).
+// The only code that declares broker objects: services verify passively and their users cannot
+// configure.
 //
 //   node init.mjs [--vhost <name>] [--mgmt-url <url>] [--definitions <path>]
 //                 [--users] [--cleanup-legacy] [--legacy-vhost <name>]
@@ -18,7 +19,8 @@
 //   4. prune bindings: an import only adds, so a binding that an earlier topology version
 //      declared and this one does not (v3: the two event bindings of scan.auth; v5: the
 //      unqualified retry binding retry.scan.url.# of scan.url; v8: scan.sandbox's
-//      sandbox_requested.v1 binding and its unqualified retry.scan.sandbox.#) is removed. Only
+//      sandbox_requested.v1 binding and its unqualified retry.scan.sandbox.#; v9: email.archive's
+//      mail.policy.decided.v1 binding on email.policy) is removed. Only
 //      bindings whose destination is a queue or exchange of the definitions are touched; objects
 //      outside the topology are never changed. Logs binding names and counts only;
 //   5. --users: create/update the role users (no tags) with exactly their Q10 permissions and
@@ -27,7 +29,7 @@
 //   6. --cleanup-legacy: delete the ADR-0005 objects on vhost "/" only when empty (queues with
 //      no messages and no consumers; RabbitMQ 4.x refuses `if-empty` deletes of quorum queues,
 //      so emptiness is checked first); --legacy-vhost points it at another vhost (tests only);
-//   7. verify: exactly the 6 exchanges and 19 quorum queues, exactly the bindings of the
+//   7. verify: exactly the 6 exchanges and 20 quorum queues, exactly the bindings of the
 //      definitions (no missing and no extra binding), every policy applied, and (--users) each
 //      role user's permissions and topic permissions exactly.
 // Exits non-zero on any failure. Logs object names and counts only: never a password, never a
@@ -89,6 +91,16 @@ const topic = (exchange, write) => ({ exchange, write, read: '^$' });
  * `retry.scan.sandbox.org.`, its dead-letter keys `dead-letter.scan.sandbox[.org.…]`, so it can
  * never publish into the email-worker's sandbox queues); it configures nothing. ops may replay
  * the three sandbox work queues. The relay needs nothing new.
+ *
+ * Topology v9 (step 5.2 P15, ADR-0044) adds two users. policy-engine (the delivery gate) reads
+ * only email.policy.evaluate and publishes only the retry hops of that queue on email.policy and
+ * its dead-letter hops on email.events: its decisions, approvals, archive and notification
+ * requests all go through the outbox and the relay (the relay already publishes `org.` keys to
+ * every exchange, so it needs nothing new: EVENT_KEYS covers the three new event types).
+ * notification-worker reads only email.notifications and publishes only that queue's retry
+ * (email.policy) and dead-letter (email.events) hops. Neither configures anything. ops may replay
+ * the two new work queues (home exchange email.policy). Neither new queue name is a dot-prefix of
+ * another, so the plain `retry.<queue>.` prefix cannot reach another queue.
  */
 const SCANNER_QUEUES =
   '(spam|attachment|url|url\\.results|bec|dlp|sandbox\\.submissions|sandbox\\.results)';
@@ -179,6 +191,33 @@ const ROLE_USERS = [
     ],
   },
   {
+    // Step 5.2 P13, P15 (v9): the policy-engine, the delivery gate. Reads its one queue; every
+    // event it produces goes through the outbox (the relay publishes it).
+    role: 'policy-engine',
+    userKey: 'RABBITMQ_POLICY_ENGINE_USER',
+    passwordKey: 'RABBITMQ_POLICY_ENGINE_PASSWORD',
+    configure: '^$',
+    write: '^email\\.(policy|events)$',
+    read: '^email\\.policy\\.evaluate$',
+    topics: [
+      topic('email.policy', '^retry\\.email\\.policy\\.evaluate\\.'),
+      topic('email.events', '^dead-letter\\.email\\.policy\\.evaluate(\\.|$)'),
+    ],
+  },
+  {
+    // Step 5.2 P15, P25 (v9): the notification-worker (policy alerts and sender notices).
+    role: 'notification-worker',
+    userKey: 'RABBITMQ_NOTIFICATION_USER',
+    passwordKey: 'RABBITMQ_NOTIFICATION_PASSWORD',
+    configure: '^$',
+    write: '^email\\.(policy|events)$',
+    read: '^email\\.notifications$',
+    topics: [
+      topic('email.policy', '^retry\\.email\\.notifications\\.'),
+      topic('email.events', '^dead-letter\\.email\\.notifications(\\.|$)'),
+    ],
+  },
+  {
     role: 'ops',
     userKey: 'RABBITMQ_OPS_USER',
     passwordKey: 'RABBITMQ_OPS_PASSWORD',
@@ -186,8 +225,9 @@ const ROLE_USERS = [
     // Replay republishes only to the home exchanges of the replayable work queues (Q9); v3 adds
     // scan.spam, v4 scan.attachment, v5 scan.url, scan.url.inspect and scan.url.results, v6
     // scan.bec, v7 scan.dlp, v8 scan.sandbox, scan.sandbox.submissions and scan.sandbox.results
-    // (home exchange email.security).
-    write: '^email\\.(ingestion|delivery|security)$',
+    // (home exchange email.security), v9 email.policy.evaluate and email.notifications (home
+    // exchange email.policy).
+    write: '^email\\.(ingestion|delivery|security|policy)$',
     read: '^email\\.dead-letter$',
     topics: [
       topic('email.ingestion', '^retry\\.email\\.received\\.'),
@@ -196,6 +236,7 @@ const ROLE_USERS = [
         'email.security',
         '^retry\\.scan\\.(spam|attachment|url|url\\.inspect|url\\.results|bec|dlp|sandbox|sandbox\\.submissions|sandbox\\.results)\\.',
       ),
+      topic('email.policy', '^retry\\.email\\.(policy\\.evaluate|notifications)\\.'),
     ],
   },
 ];

@@ -4,7 +4,6 @@ import { apiSession, type ApiSession } from './support/api-client';
 import { purgeDormantQueues } from './support/broker';
 import { waitFor } from './support/compose';
 import { waitForMessage } from './support/deliveries';
-import { stack } from './support/env';
 import {
   expectConsistentHistory,
   lifecycleOf,
@@ -31,6 +30,7 @@ import {
   waitForEngineRows,
   waitForRoundComplete,
 } from './support/scan-stack';
+import { expectPolicyHeld, floorOf, policyFloorRaises } from './support/policy';
 import { SmtpFixtures, type FixtureDomain } from './support/smtp-fixtures';
 import { assertStackReady } from './support/smtp-stack';
 import { reply } from './support/smtp-tools';
@@ -42,12 +42,14 @@ import { reply } from './support/smtp-tools';
  * 1. Within the attempt budget: SMTP still accepts (`milter_default_action = accept`, ADR-0027),
  *    the post-queue scan records failed attempts (`error`/`timeout`, never final, never clean)
  *    and retries with backoff; Rspamd is started again before the budget is spent, the next
- *    attempt gets a real result, the round ends `scanned`, the pass-through approves and the
- *    message is delivered.
+ *    attempt gets a real result, the round ends `scanned`, the policy-engine approves it (step
+ *    5.2) and the message is delivered.
  * 2. Past the budget (`SCAN_RSPAMD_MAX_ATTEMPTS`, about a minute with the defaults): the last
  *    attempt is final `error`, the round `failed` with verdict `error`, the message
- *    `scan_failed/scan_error`, `scanned.v1` says `scan_failed`, and the pass-through never
- *    approves it (no approval, no delivery). Rspamd is started again afterwards.
+ *    `scan_failed/scan_error`, `scanned.v1` says `scan_failed`, and it is never approved (no
+ *    approval, no delivery): since step 5.2 the policy-engine quarantines it (E9
+ *    `scan_failed_fail_safe`, floor `policy.floor.scan_failed`, E11). Rspamd is started again
+ *    afterwards.
  * 3. Administrative rescan of that message through the api (E19): round 1 is scanned with a new
  *    result, round 0's rows stay exactly as they were, and round 1 is approved and delivered.
  *
@@ -134,24 +136,6 @@ async function approvalsOf(messageId: bigint): Promise<number> {
   ).length;
 }
 
-async function skippedScanFailed(): Promise<number | undefined> {
-  try {
-    const res = await fetch(
-      `http://${stack.host}:${stack.ports.services['delivery-worker']}/metrics`,
-      { signal: AbortSignal.timeout(5_000) },
-    );
-    const line = (await res.text())
-      .split('\n')
-      .find(
-        (l) =>
-          l.startsWith('delivery_approvals_skipped_total{') && l.includes('reason="scan_failed"'),
-      );
-    return line ? Number(line.split(' ').at(-1)) : 0;
-  } catch {
-    return undefined;
-  }
-}
-
 describe.skipIf(gate.skip)('scan stack: Rspamd outage', { timeout: 600_000 }, () => {
   it('accepts at SMTP time while Rspamd is down, retries, and scans once Rspamd is back within the budget', async () => {
     const rcpt = `recover@${domain.name}`;
@@ -222,10 +206,11 @@ describe.skipIf(gate.skip)('scan stack: Rspamd outage', { timeout: 600_000 }, ()
       );
 
       await waitForLifecycle(fx.prisma, message, 'delivered', 'delivery_complete');
-      expect((await pathOf(fx.prisma, message)).slice(2, 5)).toEqual([
+      expect((await pathOf(fx.prisma, message)).slice(2, 6)).toEqual([
         ['persisted', 'scanning', 'scan_started'],
         ['scanning', 'scanned', 'scan_complete'],
-        ['scanned', 'approved', 'dev_passthrough'],
+        ['scanned', 'policy_evaluated', 'policy_decided'],
+        ['policy_evaluated', 'approved', 'policy_deliver'],
       ]);
       expect(await sinkFiles(rcpt)).toHaveLength(1);
       record('scan-resilience', {
@@ -242,7 +227,7 @@ describe.skipIf(gate.skip)('scan stack: Rspamd outage', { timeout: 600_000 }, ()
 
   it('ends scan_failed (never clean, never approved or delivered) when Rspamd stays down past the attempt budget', async () => {
     const rcpt = `failed@${domain.name}`;
-    const skippedBefore = await skippedScanFailed();
+    const floorBefore = await policyFloorRaises('scan_failed');
     await stopRspamd();
     let downForS = 0;
     const stoppedAt = Date.now();
@@ -264,7 +249,6 @@ describe.skipIf(gate.skip)('scan stack: Rspamd outage', { timeout: 600_000 }, ()
       expect(rows.every((r) => r.outcome === 'error' || r.outcome === 'timeout')).toBe(true);
       expect(rows.every((r) => r.errorCode !== null)).toBe(true);
       await expectAttachmentSkipped(message, 1);
-      await waitForLifecycle(fx.prisma, message, 'scan_failed', 'scan_error');
       const [scanned] = await scannedEventsOf(fx.prisma, org, message);
       const failedPayload = messageScannedV1.parse(scanned!.payload);
       expect(failedPayload).toMatchObject({ outcome: 'scan_failed', verdict: 'error' });
@@ -293,15 +277,12 @@ describe.skipIf(gate.skip)('scan stack: Rspamd outage', { timeout: 600_000 }, ()
       expect(becFinal!.reasonCodes as string[]).toContain('bec.input_unavailable.auth');
       expect(becRuleCodes(becRow!.rules)).not.toContain('bec.auth.dmarc_fail');
 
-      // The pass-through skips it: no approval, no delivery, the state stays scan_failed.
-      await waitFor(
-        'the pass-through to skip the scan_failed message',
-        async () => {
-          const after = await skippedScanFailed();
-          return after === undefined || skippedBefore === undefined || after > skippedBefore;
-        },
-        { timeoutMs: 30_000, intervalMs: 1_000 },
-      );
+      // Never approved: since step 5.2 the policy-engine evaluates the scan_failed round (E9) and
+      // quarantines it (floor `scan_failed`, E11); no approval, no delivery.
+      const evaluation = await expectPolicyHeld(fx.prisma, message, { min: 'quarantine' });
+      expect(evaluation).toMatchObject({ trigger: 'scan_failed', disposition: 'quarantine' });
+      expect(floorOf(evaluation).reasons).toContain('policy.floor.scan_failed');
+      expect(await policyFloorRaises('scan_failed')).toBeGreaterThanOrEqual(floorBefore + 1);
       await sleep(10_000);
       expect(await approvalsOf(message.id)).toBe(0);
       expect(
@@ -310,10 +291,15 @@ describe.skipIf(gate.skip)('scan stack: Rspamd outage', { timeout: 600_000 }, ()
         }),
       ).toBe(0);
       expect(await lifecycleOf(fx.prisma, message)).toMatchObject({
-        status: 'scan_failed',
-        statusReason: 'scan_error',
+        status: 'quarantined',
+        statusReason: 'policy_quarantine',
         lifecycleRound: 0,
       });
+      expect((await pathOf(fx.prisma, message)).slice(3)).toEqual([
+        ['scanning', 'scan_failed', 'scan_error'],
+        ['scan_failed', 'policy_evaluated', 'scan_failed_fail_safe'],
+        ['policy_evaluated', 'quarantined', 'policy_quarantine'],
+      ]);
       expect(await sinkFiles(rcpt)).toEqual([]);
       await expectConsistentHistory(fx.prisma, message);
       failedMessage = {
@@ -325,16 +311,15 @@ describe.skipIf(gate.skip)('scan stack: Rspamd outage', { timeout: 600_000 }, ()
         attempts_until_scan_failed: rows.length,
         scan_failed_after_s: downForS.toFixed(1),
         final_error_code: rows.at(-1)!.errorCode,
-        skipped_scan_failed_delta:
-          skippedBefore === undefined ? 'n/a' : ((await skippedScanFailed()) ?? 0) - skippedBefore,
+        policy: `${evaluation.disposition}:${evaluation.decisionSource}`,
       });
     } finally {
       await ensureRspamdRunning();
     }
   });
 
-  it('rescans the scan_failed message through the api: round 1 gets a new result, round 0 is unchanged', async () => {
-    expect(failedMessage, 'the previous case left a scan_failed message').toBeDefined();
+  it('rescans the scan_failed (now quarantined) message through the api: round 1 gets a new result, round 0 is unchanged', async () => {
+    expect(failedMessage, 'the previous case left a quarantined scan_failed message').toBeDefined();
     const message = failedMessage!;
     const rcpt = `failed@${domain.name}`;
     const round0Before = await scanRoundsOf(fx.prisma, message);
@@ -386,14 +371,18 @@ describe.skipIf(gate.skip)('scan stack: Rspamd outage', { timeout: 600_000 }, ()
       [1, 'scanned'],
     ]);
 
-    // Round 1 is approved (E27 with expectedRound 1) and delivered.
+    // Round 1 is evaluated and approved by the policy-engine (E8/E10, round 1) and delivered;
+    // round 0's evaluation is unchanged (step 5.2).
     await waitForLifecycle(fx.prisma, message, 'delivered', 'delivery_complete');
     expect((await pathOf(fx.prisma, message)).slice(2)).toEqual([
       ['persisted', 'scanning', 'scan_started'],
       ['scanning', 'scan_failed', 'scan_error'],
-      ['scan_failed', 'scanning', 'admin_rescan'],
+      ['scan_failed', 'policy_evaluated', 'scan_failed_fail_safe'],
+      ['policy_evaluated', 'quarantined', 'policy_quarantine'],
+      ['quarantined', 'scanning', 'admin_rescan'],
       ['scanning', 'scanned', 'scan_complete'],
-      ['scanned', 'approved', 'dev_passthrough'],
+      ['scanned', 'policy_evaluated', 'policy_decided'],
+      ['policy_evaluated', 'approved', 'policy_deliver'],
       ['approved', 'delivery_pending', 'delivery_planned'],
       ['delivery_pending', 'delivered', 'delivery_complete'],
     ]);

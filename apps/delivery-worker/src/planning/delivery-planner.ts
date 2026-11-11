@@ -30,6 +30,22 @@ export const SOURCE_SERVICE = 'delivery-worker';
  */
 export const PROVENANCE_SKEW_MS = 5 * 60_000;
 
+/** The delivered-object label of `delivery_approvals_total{object}` (step 4.3 U20, step 5.2 P14). */
+export type ApprovalObjectLabel = 'rewritten' | 'policy_copy' | 'original';
+
+/**
+ * Classifies an approval's object by its organization-prefixed key: `org/<org>/rewrite/` → the
+ * URL engine's rewritten copy, `org/<org>/policy/` → the policy engine's policy copy (header
+ * edits, step 5.2 P21), anything else → the original EML. A label only: the planner already
+ * refuses keys outside the organization's prefix.
+ */
+export function approvalObjectLabel(key: string, organizationId: bigint): ApprovalObjectLabel {
+  const org = `org/${organizationId.toString()}/`;
+  if (key.startsWith(`${org}rewrite/`)) return 'rewritten';
+  if (key.startsWith(`${org}policy/`)) return 'policy_copy';
+  return 'original';
+}
+
 /** Dead-letter reasons of an approval the gateway never issued (`NonRetryableError` codes). */
 export const APPROVAL_NOT_ISSUED = 'approval_not_issued';
 export const APPROVAL_MISMATCH = 'approval_mismatch';
@@ -410,9 +426,7 @@ export class DeliveryPlanner {
 
     this.deps.metrics.approvals.inc({
       source: payload.source,
-      object: payload.emlS3Key.startsWith(`org/${organizationId.toString()}/rewrite/`)
-        ? 'rewritten'
-        : 'original',
+      object: approvalObjectLabel(payload.emlS3Key, organizationId),
     });
     this.logger.info(
       {

@@ -8,6 +8,12 @@
 # lifecycle configuration is owned by this script: `mc ilm import` replaces it as a whole, so
 # re-running is idempotent. Production S3: the same rule (Terraform / docs/deployment/url-protection.md).
 #
+# Step 5.2 (docs/plan/steps/16-policy-engine.md P21): the same lifecycle configuration also holds
+# eg-policy-copy-expiry, expiring policy copies (objects tagged eg-object=policy-copy, written by
+# the policy-engine under org/<org>/policy/…; orphans of rolled-back evaluations included) after
+# POLICY_COPY_RETENTION_DAYS (1..365, default 30) and their noncurrent versions one day later.
+# Production S3: docs/deployment/policy-engine.md.
+#
 # Step 4.6 (docs/plan/steps/14-sandbox.md X12, ADR-0040): the restricted sandbox bucket
 # SANDBOX_S3_BUCKET (versioning OFF so a purge is a real delete, anonymous none) with lifecycle
 # backstops for samples/ (SANDBOX_SAMPLE_RETENTION_HOURS rounded up to whole days, >= 1) and
@@ -32,9 +38,18 @@ if [ "$days" -lt 1 ] || [ "$days" -gt 3650 ]; then
   echo "URL_REWRITE_OBJECT_RETENTION_DAYS must be 1..3650" >&2
   exit 1
 fi
-printf '{"Rules":[{"ID":"eg-rewrite-expiry","Status":"Enabled","Filter":{"Tag":{"Key":"eg-object","Value":"rewrite"}},"Expiration":{"Days":%s},"NoncurrentVersionExpiration":{"NoncurrentDays":1}}]}' "$days" \
+policy_days="${POLICY_COPY_RETENTION_DAYS:-30}"
+case "$policy_days" in
+  '' | *[!0-9]*) echo "POLICY_COPY_RETENTION_DAYS must be a positive integer" >&2; exit 1 ;;
+esac
+if [ "$policy_days" -lt 1 ] || [ "$policy_days" -gt 365 ]; then
+  echo "POLICY_COPY_RETENTION_DAYS must be 1..365" >&2
+  exit 1
+fi
+printf '{"Rules":[{"ID":"eg-rewrite-expiry","Status":"Enabled","Filter":{"Tag":{"Key":"eg-object","Value":"rewrite"}},"Expiration":{"Days":%s},"NoncurrentVersionExpiration":{"NoncurrentDays":1}},{"ID":"eg-policy-copy-expiry","Status":"Enabled","Filter":{"Tag":{"Key":"eg-object","Value":"policy-copy"}},"Expiration":{"Days":%s},"NoncurrentVersionExpiration":{"NoncurrentDays":1}}]}' "$days" "$policy_days" \
   | mc ilm import "local/${S3_BUCKET_MAIL}" >/dev/null
 echo "lifecycle: ${S3_BUCKET_MAIL} objects tagged eg-object=rewrite expire after ${days} days"
+echo "lifecycle: ${S3_BUCKET_MAIL} objects tagged eg-object=policy-copy expire after ${policy_days} days"
 
 # ---------------------------------------------------------------- sandbox bucket (step 4.6)
 fail() {

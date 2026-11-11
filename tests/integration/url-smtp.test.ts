@@ -51,7 +51,7 @@ import {
  * smtp-tools → postfix:25 → smtp-adapter (EML in MinIO) → email-worker MIME role (body objects)
  * → `parsed.v1` → `scan.spam`, `scan.attachment` and `scan.url` (the URL engine: extraction,
  * reputation through dns-sink, the guarded fetcher against url-test, the rewritten copy in
- * MinIO and the `url_rewrites` row) → round completion → dev pass-through (the rewritten copy of
+ * MinIO and the `url_rewrites` row) → round completion → policy-engine (step 5.2; the rewritten copy of
  * the round, U20) → postfix-outbound → mail-sink; then the click-service on its published port.
  *
  * - A message with a clean link (a per-run host under `clean-site.test`), a shortener link, a
@@ -252,7 +252,7 @@ describe.skipIf(gate.skip)(
       );
       expect(tags.TagSet).toEqual(expect.arrayContaining([{ Key: 'eg-object', Value: 'rewrite' }]));
 
-      // Delivered (dev pass-through approved the rewritten copy, U20) with protected links.
+      // Delivered (the policy-engine approved the rewritten copy, U20/P20) with protected links.
       await waitForLifecycle(fx.prisma, message, 'delivered', 'delivery_complete', 180_000);
       const [approval] = (
         await fx.prisma.messageOutbox.findMany({

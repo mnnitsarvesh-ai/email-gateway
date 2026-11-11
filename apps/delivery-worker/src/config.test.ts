@@ -1,6 +1,6 @@
 import { ConfigValidationError } from '@email-gateway/config';
 import { describe, expect, it } from 'vitest';
-import { DEV_PASSTHROUGH_REFUSAL, loadWorkerConfig } from './config';
+import { DEV_PASSTHROUGH_REMOVED, loadWorkerConfig } from './config';
 
 const base = {
   DATABASE_URL: 'mysql://test:test@localhost:3306/test',
@@ -42,14 +42,9 @@ describe('delivery-worker config', () => {
       RABBITMQ_DELIVERY_WORKER_URL: ['amqp://dw:dw-secret@localhost:5672/email-gateway'],
       DELIVERY_APPROVAL_PREFETCH: 4,
       DELIVERY_POLL_INTERVAL_MS: 1000,
-      DELIVERY_OUTBOX_POLL_INTERVAL_MS: 1000,
-      DELIVERY_OUTBOX_SAFETY_LAG_MS: 120_000,
-      DELIVERY_OUTBOX_BATCH_SIZE: 500,
       DELIVERY_APPROVALS_ENABLED: true,
       DELIVERY_REINJECTION_ENABLED: true,
       DELIVERY_STATUS_LOG_ENABLED: true,
-      DELIVERY_DEV_PASSTHROUGH_ENABLED: false,
-      DELIVERY_DEV_PASSTHROUGH_RISK_HOLD: true,
       DELIVERY_STATUS_LOG_PATH: '/var/log/postfix-outbound/maillog',
       DELIVERY_STATUS_LOG_SOURCE_ID: 'out.gateway.local',
       DELIVERY_STATUS_LOG_POLL_MS: 500,
@@ -101,49 +96,41 @@ describe('delivery-worker config', () => {
     expect(issues({ [key]: value }).join()).toContain(key);
   });
 
-  it('accepts the dev pass-through in local and ci', () => {
-    for (const APP_ENV of ['local', 'ci']) {
-      const config = loadWorkerConfig({
-        ...base,
-        APP_ENV,
-        DELIVERY_DEV_PASSTHROUGH_ENABLED: 'true',
-      });
-      expect(config.DELIVERY_DEV_PASSTHROUGH_ENABLED).toBe(true);
-    }
+  it.each(['local', 'ci', 'staging', 'production'])(
+    'refuses DELIVERY_DEV_PASSTHROUGH_ENABLED=true with APP_ENV=%s: removed in step 5.2 (P14)',
+    (APP_ENV) => {
+      for (const value of ['true', '1']) {
+        expect(issues({ APP_ENV, DELIVERY_DEV_PASSTHROUGH_ENABLED: value })).toEqual([
+          `DELIVERY_DEV_PASSTHROUGH_ENABLED: ${DEV_PASSTHROUGH_REMOVED}`,
+        ]);
+      }
+      // Absent or false: accepted and ignored.
+      expect(issues({ APP_ENV })).toEqual([]);
+      expect(issues({ APP_ENV, DELIVERY_DEV_PASSTHROUGH_ENABLED: 'false' })).toEqual([]);
+      expect(issues({ APP_ENV, DELIVERY_DEV_PASSTHROUGH_ENABLED: '0' })).toEqual([]);
+    },
+  );
+
+  it('states the exact P14 refusal and keeps no pass-through setting in the config', () => {
+    expect(DEV_PASSTHROUGH_REMOVED).toBe(
+      'removed in step 5.2 (ADR-0044): delivery is approved by the policy-engine; remove the key',
+    );
+    const config = loadWorkerConfig({ ...base, DELIVERY_DEV_PASSTHROUGH_ENABLED: 'false' });
+    expect(config.DELIVERY_DEV_PASSTHROUGH_ENABLED).toBeUndefined();
+    expect(Object.keys(config).filter((k) => k.startsWith('DELIVERY_OUTBOX_'))).toEqual([]);
   });
 
-  it.each(['staging', 'production'])('refuses the dev pass-through with APP_ENV=%s', (APP_ENV) => {
-    expect(issues({ APP_ENV, DELIVERY_DEV_PASSTHROUGH_ENABLED: 'true' })).toEqual([
-      `DELIVERY_DEV_PASSTHROUGH_ENABLED: ${DEV_PASSTHROUGH_REFUSAL}`,
-    ]);
-    expect(issues({ APP_ENV, DELIVERY_DEV_PASSTHROUGH_ENABLED: 'false' })).toEqual([]);
-  });
-
-  it('reads DELIVERY_DEV_PASSTHROUGH_RISK_HOLD (default true; false restores step 4.6)', () => {
-    expect(loadWorkerConfig(base).DELIVERY_DEV_PASSTHROUGH_RISK_HOLD).toBe(true);
-    const off = loadWorkerConfig({
+  it('ignores DELIVERY_DEV_PASSTHROUGH_RISK_HOLD and the removed outbox poller keys', () => {
+    const config = loadWorkerConfig({
       ...base,
-      APP_ENV: 'local',
-      DELIVERY_DEV_PASSTHROUGH_ENABLED: 'true',
-      DELIVERY_DEV_PASSTHROUGH_RISK_HOLD: 'false',
+      APP_ENV: 'production',
+      DELIVERY_DEV_PASSTHROUGH_RISK_HOLD: 'yes',
+      DELIVERY_OUTBOX_POLL_INTERVAL_MS: 'not-a-number',
+      DELIVERY_OUTBOX_SAFETY_LAG_MS: '120000',
+      DELIVERY_OUTBOX_BATCH_SIZE: '500',
     });
-    expect(off.DELIVERY_DEV_PASSTHROUGH_RISK_HOLD).toBe(false);
-    expect(loadWorkerConfig({ ...base, DELIVERY_DEV_PASSTHROUGH_RISK_HOLD: '1' })).toMatchObject({
-      DELIVERY_DEV_PASSTHROUGH_RISK_HOLD: true,
-    });
-    // Only meaningful with the pass-through: never a reason to refuse staging or production.
-    expect(issues({ APP_ENV: 'production', DELIVERY_DEV_PASSTHROUGH_RISK_HOLD: 'true' })).toEqual(
-      [],
-    );
-    expect(issues({ DELIVERY_DEV_PASSTHROUGH_RISK_HOLD: 'yes' }).join()).toContain(
-      'DELIVERY_DEV_PASSTHROUGH_RISK_HOLD',
-    );
-  });
-
-  it('refuses the pass-through without the approvals role', () => {
-    expect(
-      issues({ DELIVERY_DEV_PASSTHROUGH_ENABLED: 'true', DELIVERY_APPROVALS_ENABLED: 'false' }),
-    ).toEqual([expect.stringContaining('requires DELIVERY_APPROVALS_ENABLED=true')]);
+    expect(config).not.toHaveProperty('DELIVERY_DEV_PASSTHROUGH_RISK_HOLD');
+    expect(config).not.toHaveProperty('DELIVERY_OUTBOX_POLL_INTERVAL_MS');
   });
 
   it('parses the role flags', () => {

@@ -1,7 +1,6 @@
 import type { AdvisoryLocks } from '@email-gateway/common';
 import type { Logger } from '@email-gateway/logger';
 import type { DeliveryApprovalConsumer } from './approvals/delivery-approval.consumer';
-import type { DevPassThroughApprover } from './approvals/dev-passthrough.approver';
 import type { DeliveryReconciler } from './reconciler/delivery-reconciler';
 import type { ReinjectionScheduler } from './reinjection/reinjection-scheduler';
 import type { PostfixLogTailer } from './status/postfix-log-tailer';
@@ -10,19 +9,17 @@ export interface WorkerRoles {
   DELIVERY_APPROVALS_ENABLED: boolean;
   DELIVERY_REINJECTION_ENABLED: boolean;
   DELIVERY_STATUS_LOG_ENABLED: boolean;
-  DELIVERY_DEV_PASSTHROUGH_ENABLED: boolean;
 }
 
 export interface WorkerComponents {
   approvals: DeliveryApprovalConsumer;
-  passThrough: DevPassThroughApprover;
   scheduler: ReinjectionScheduler;
   tailer: PostfixLogTailer;
   reconciler: DeliveryReconciler;
   locks: AdvisoryLocks;
 }
 
-type Role = 'approvals' | 'dev_passthrough' | 'reinjection' | 'status_log' | 'reconciler';
+type Role = 'approvals' | 'reinjection' | 'status_log' | 'reconciler';
 
 /**
  * Starts the background loops of the enabled roles (after the application bootstrapped, so the
@@ -30,8 +27,9 @@ type Role = 'approvals' | 'dev_passthrough' | 'reinjection' | 'status_log' | 're
  * consumers first (no new work), then the scheduler (in-flight sessions get the shutdown grace,
  * leases are released), then the tailer and the reconciler, then the lock connection.
  *
- * Roles: approvals (planner, plus the dev pass-through when enabled), reinjection (scheduler and
- * reconciler), status log (tailer). The production log sidecar runs only the status log role.
+ * Roles: approvals (planner of the policy-engine's and the release's approvals; the development
+ * pass-through was removed by step 5.2), reinjection (scheduler and reconciler), status log
+ * (tailer). The production log sidecar runs only the status log role.
  */
 export class WorkerLifecycle {
   private readonly started = new Set<Role>();
@@ -51,10 +49,6 @@ export class WorkerLifecycle {
     if (this.roles.DELIVERY_APPROVALS_ENABLED) {
       c.approvals.start();
       this.started.add('approvals');
-      if (this.roles.DELIVERY_DEV_PASSTHROUGH_ENABLED) {
-        c.passThrough.start();
-        this.started.add('dev_passthrough');
-      }
     }
     if (this.roles.DELIVERY_REINJECTION_ENABLED) {
       c.scheduler.start();
@@ -79,7 +73,6 @@ export class WorkerLifecycle {
         this.logger.warn({ err, role }, 'role did not stop cleanly');
       }
     };
-    await step('dev_passthrough', () => c.passThrough.stop());
     await step('approvals', () => c.approvals.stop());
     await step('reinjection', () => c.scheduler.stop());
     await step('status_log', () => c.tailer.stop());

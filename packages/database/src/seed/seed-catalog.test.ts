@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   DEMO,
+  DEMO_POLICY_DSL_VERSION,
   FEATURE_KEYS,
   LIMIT_KEYS,
   MAIL_DESTINATION_PRESETS,
@@ -543,6 +544,29 @@ describe('seed catalog', () => {
       port: 25,
       provider: 'custom',
     });
+  });
+
+  it('defines the demo policy as the policy-dsl/1 document of step 5.2 §3', () => {
+    expect(DEMO_POLICY_DSL_VERSION).toBe('policy-dsl/1');
+    expect(DEMO.policy.name).toBe('Quarantine malware and phishing');
+    expect(DEMO.policy.dslVersion).toBe(DEMO_POLICY_DSL_VERSION);
+    expect(DEMO.policy.definition).toEqual({
+      dslVersion: 'policy-dsl/1',
+      direction: 'inbound',
+      priority: 100,
+      rules: [
+        {
+          id: 'quarantine-malware-phishing',
+          priority: 10,
+          when: { field: 'risk.verdict', op: 'in', value: ['malware', 'phishing'] },
+          actions: [{ type: 'QUARANTINE' }, { type: 'TAG', label: 'sample-policy' }],
+        },
+      ],
+    });
+    // The publish facts stored with the version match the document.
+    expect(DEMO.policy.ruleCount).toBe(DEMO.policy.definition.rules.length);
+    expect(DEMO.policy.hasOverrideRules).toBe(false);
+    expect(DEMO.policy.references).toEqual({ departmentIds: [], userIds: [] });
   });
 
   it('has unique system setting keys', () => {

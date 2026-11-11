@@ -94,21 +94,22 @@ describe('parseEvent', () => {
     expect(event.payload.engines[0]?.engine).toBe('rspamd');
   });
 
-  it('accepts a valid policy.decided event', () => {
-    const event = parseEvent(
-      envelope(
-        {
-          messageId: '7',
-          receivedAt,
-          action: 'quarantine',
-          matchedPolicyVersionIds: ['3'],
-          archive: true,
-        },
-        { eventType: EventTypes.PolicyDecided },
+  it('refuses the step 1.1 placeholder shape of policy.decided (redefined by step 5.2)', () => {
+    expect(() =>
+      parseEvent(
+        envelope(
+          {
+            messageId: '7',
+            receivedAt,
+            action: 'quarantine',
+            matchedPolicyVersionIds: ['3'],
+            archive: true,
+          },
+          { eventType: EventTypes.PolicyDecided },
+        ),
+        policyDecidedV1,
       ),
-      policyDecidedV1,
-    );
-    expect(event.payload.matchedPolicyVersionIds).toEqual(['3']);
+    ).toThrow();
   });
 
   it('rejects a UUID organization id', () => {

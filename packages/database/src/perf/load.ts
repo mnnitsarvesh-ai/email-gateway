@@ -399,6 +399,8 @@ export async function loadSyntheticData(client: SqlClient, opts: LoadOptions): P
     const idempotencyRows: Row[] = [];
     const headerRows: Row[] = [];
     const policyLogRows: Row[] = [];
+    /** Message index of each policy_execution_logs row (scan_id is known after the scans). */
+    const policyLogOwners: number[] = [];
     const archiveRows: Row[] = [];
     const webhookRows: Row[] = [];
 
@@ -573,18 +575,92 @@ export async function loadSyntheticData(client: SqlClient, opts: LoadOptions): P
           m.received,
         ]);
       });
+      // Step 5.2 (§3, P10): one evaluation per message and lifecycle round (evaluation_seq =
+      // round 0). Ids, enums, codes and hashes only; scan_id is filled once the scans exist.
+      const disposition = allQuarantined ? 'quarantine' : 'allow';
+      const decisionSource =
+        m.verdict === 'malware'
+          ? 'floor'
+          : m.verdict === 'clean'
+            ? 'platform_default'
+            : 'tenant_rule';
+      const tagged = action === 'tag';
+      policyLogOwners.push(k);
       policyLogRows.push([
         m.received,
         id,
         m.orgId,
-        1,
+        0,
         null,
         action,
         JSON.stringify(m.verdict === 'clean' ? [] : [String(1 + (k % 7))]),
-        null,
+        JSON.stringify({ entries: [], truncated: false }),
         200 + Math.floor(rand() * 1800),
         sqlTime(m.receivedMs + 1800),
         m.received,
+        'scanned',
+        k % 8 === 0 ? 'outbound' : 'inbound',
+        disposition,
+        decisionSource,
+        null,
+        null,
+        m.verdict,
+        risk,
+        false,
+        JSON.stringify(
+          tagged
+            ? [
+                {
+                  type: 'TAG',
+                  params: { labels: ['risk-low'] },
+                  origin: 'platform_default',
+                  ruleRefs: [],
+                  applicability: 'applies',
+                  status: 'enforced',
+                },
+              ]
+            : [],
+        ),
+        JSON.stringify([]),
+        JSON.stringify({
+          disposition: decisionSource === 'floor' ? 'reject' : null,
+          tag: false,
+          reasons: decisionSource === 'floor' ? ['policy.floor.hard_block'] : [],
+        }),
+        JSON.stringify({
+          disposition,
+          tag: tagged,
+          levelOnly: decisionSource !== 'floor',
+          riskAction: allQuarantined ? 'quarantine' : tagged ? 'tag' : 'deliver',
+          revisions: [0],
+        }),
+        null,
+        JSON.stringify([]),
+        JSON.stringify([`policy.disposition.${disposition}`]),
+        disposition === 'allow'
+          ? JSON.stringify({
+              headers: tagged ? [{ name: 'X-EG-Policy-Tag', value: 'risk-low' }] : [],
+              subjectPrefix: null,
+              bodyBanner: null,
+              urlRewrite: { required: false, rewritten: false, skipReason: null },
+            })
+          : null,
+        disposition === 'allow' ? (tagged ? 'policy_copy' : 'original') : 'none',
+        disposition === 'allow' && tagged
+          ? `org/${m.orgId}/policy/${day}/${id}/r0-${hex64().slice(0, 32)}.eml`
+          : null,
+        JSON.stringify([{ code: 'summary', params: { disposition } }]),
+        `Final disposition ${disposition} (synthetic perf data).`,
+        1,
+        hex64(),
+        JSON.stringify([]),
+        'pol-default/1',
+        'policy-dsl/1',
+        'policy-eval/1',
+        'policy-input/1',
+        hex64(),
+        '2025b',
+        null,
       ]);
       if (featured(m.org)) {
         archiveRows.push([
@@ -712,6 +788,14 @@ export async function loadSyntheticData(client: SqlClient, opts: LoadOptions): P
       scanRows,
       true,
     );
+    // The first scan of a message is its round-0 scan (rows are pushed in round order).
+    const roundZeroScan = new Map<number, bigint>();
+    scanIds.forEach((scanId, s) => {
+      if (!roundZeroScan.has(scanOwners[s]!)) roundZeroScan.set(scanOwners[s]!, scanId);
+    });
+    policyLogRows.forEach((row, r) => {
+      row[row.length - 1] = roundZeroScan.get(policyLogOwners[r]!) ?? null;
+    });
     const engineRows: Row[] = [];
     scanIds.forEach((scanId, s) => {
       const m = msgs[scanOwners[s]!]!;
@@ -1001,6 +1085,37 @@ export async function loadSyntheticData(client: SqlClient, opts: LoadOptions): P
         'duration_us',
         'evaluated_at',
         'created_at',
+        'trigger',
+        'direction',
+        'disposition',
+        'decision_source',
+        'decisive_policy_public_id',
+        'decisive_rule_id',
+        'final_verdict',
+        'risk_score',
+        'override_applied',
+        'actions',
+        'matched_rules',
+        'floor',
+        'recommendation',
+        'override_detail',
+        'clamps',
+        'reason_codes',
+        'delivery',
+        'delivered_object',
+        'object_key',
+        'explanation',
+        'explanation_text',
+        'policy_generation',
+        'snapshot_sha256',
+        'policy_versions',
+        'platform_default_id',
+        'dsl_version',
+        'evaluator_version',
+        'input_version',
+        'input_sha256',
+        'tzdata_version',
+        'scan_id',
       ],
       policyLogRows,
     );

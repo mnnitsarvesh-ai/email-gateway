@@ -294,8 +294,10 @@ export const DORMANT_QUEUES = [
   // 4.3 U2, the URL engine), `scan.dlp` since v7 (step 4.5 D2, the DLP engine), `scan.sandbox`
   // since v8 (step 4.6 X11: the sandbox-controller's lossy work queue; with the controller
   // stopped its tasks wait there and analyses expire — suites remove only their own tasks).
+  // `email.policy.evaluate` is a work queue since v9 (step 5.2 P15: the policy-engine, the
+  // delivery gate); until its consumer exists (WP3) its messages wait there and are evaluated
+  // (or skipped as stale by the lifecycle) once it runs — never purged.
   'scan.auth',
-  'email.policy.evaluate',
   'email.quarantine',
   'email.archive',
   'email.analytics',

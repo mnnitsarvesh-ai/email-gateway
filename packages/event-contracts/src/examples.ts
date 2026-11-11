@@ -10,6 +10,7 @@ const messageId = '9007199254740993';
 const emlS3Key = 'org/42/eml/2026/11/01/9007199254740993.eml';
 const partPrefix = 'org/42/part/2026/11/01/9007199254740993';
 const sandboxTaskId = '01890a5d-ac96-774b-bcce-b302099a8070';
+const policyPublicId = '01890a5d-ac96-774b-bcce-b302099a8090';
 
 export const EXAMPLE_EVENT_PAYLOADS: Readonly<Record<RegisteredEventType, unknown>> = {
   'mail.message.received.v1': {
@@ -65,9 +66,54 @@ export const EXAMPLE_EVENT_PAYLOADS: Readonly<Record<RegisteredEventType, unknow
   'mail.policy.decided.v1': {
     messageId,
     receivedAt,
-    action: 'quarantine',
-    matchedPolicyVersionIds: ['3'],
-    archive: true,
+    direction: 'inbound',
+    lifecycleRound: 0,
+    scanId: '11',
+    trigger: 'scanned',
+    disposition: 'quarantine',
+    finalAction: 'quarantine',
+    finalVerdict: 'phishing',
+    riskScore: 720,
+    nonTerminalActions: ['ARCHIVE', 'ALERT'],
+    decisive: {
+      source: 'tenant_rule',
+      policyId: policyPublicId,
+      versionNo: 3,
+      ruleId: 'quarantine-malware-phishing',
+    },
+    overrideApplied: false,
+    policyGeneration: '7',
+    snapshotSha256: 'd'.repeat(64),
+    inputSha256: 'e'.repeat(64),
+    evaluatedAt: '2026-11-01T10:15:31.789Z',
+  },
+  'mail.message.archive_requested.v1': {
+    messageId,
+    receivedAt,
+    direction: 'inbound',
+    lifecycleRound: 0,
+    emlS3Key,
+    source: 'policy',
+    ruleRef: `${policyPublicId}#3/archive-legal`,
+    policyGeneration: '7',
+    requestedAt: '2026-11-01T10:15:31.789Z',
+  },
+  'mail.policy.notification_requested.v1': {
+    messageId,
+    receivedAt,
+    direction: 'outbound',
+    lifecycleRound: 0,
+    kind: 'sender_non_delivery',
+    severity: 'warning',
+    disposition: 'reject',
+    decisive: {
+      source: 'tenant_rule',
+      policyId: policyPublicId,
+      versionNo: 3,
+      ruleId: 'block-card-numbers',
+    },
+    ruleRefs: [`${policyPublicId}#3/block-card-numbers`],
+    requestedAt: '2026-11-01T10:15:31.789Z',
   },
   'mail.delivery.approved.v1': {
     messageId,

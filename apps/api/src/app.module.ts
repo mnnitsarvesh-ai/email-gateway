@@ -27,6 +27,8 @@ import { LoginAuditModule } from './modules/login-audit/login-audit.module';
 import { MessagesModule } from './modules/messages/messages.module';
 import { OrganizationsModule } from './modules/organizations/organizations.module';
 import { RiskScoringModule } from './modules/risk-scoring/risk-scoring.module';
+import { PoliciesModule } from './modules/policies/policies.module';
+import { DirectoryModule } from './modules/directory/directory.module';
 import { RolesModule } from './modules/roles/roles.module';
 import { ScansModule } from './modules/scans/scans.module';
 import { SmtpConnectorsModule } from './modules/smtp-connectors/smtp-connectors.module';
@@ -86,6 +88,9 @@ export class AppModule {
         DlpModule,
         // Step 5.1: risk scoring profiles (versioned, audited) and the no-write dry-run.
         RiskScoringModule,
+        // Step 5.2: policies (versioned, audited), settings, test, dry-run, history; departments.
+        PoliciesModule,
+        DirectoryModule,
       ],
       providers: [{ provide: API_CONFIG, useValue: config }],
       exports: [API_CONFIG],

@@ -15,8 +15,8 @@ import type { SmtpStackGate } from './smtp-stack';
  * profile: smtp-tools → postfix:25 → smtp-adapter (EML in MinIO, `mail.message.received.v1` in
  * the outbox) → event-relay (confirmed publish) → `email.received` → email-worker (MIME parse,
  * `mail.message.parsed.v1`) → event-relay → `scan.spam` → email-worker scan role (Rspamd,
- * `mail.message.scanned.v1`, step 4.1) → the DEVELOPMENT-ONLY dev pass-through approval of
- * scanned mail (outbox feed) → event-relay → `email.delivery.pending` →
+ * `mail.message.scanned.v1`, step 4.1) → event-relay → `email.policy.evaluate` → policy-engine
+ * (evaluation and approval, step 5.2) → event-relay → `email.delivery.pending` →
  * delivery-worker planner → reinjection → postfix-outbound → mail-sink. Chaos is applied to the
  * real containers (`docker compose restart|pause|kill`), so the suites need the containers, not
  * host processes.
@@ -39,6 +39,8 @@ export const DLP_SCAN_LEDGER = 'email-worker.scan.dlp';
  */
 export const REQUIRED_ENGINE_COUNT = 5;
 export const PLANNER_LEDGER = 'delivery-worker.planner';
+/** Step 5.2: the policy-engine's ledger consumer on `email.policy.evaluate` (P13). */
+export const POLICY_LEDGER = 'policy-engine.evaluate';
 export const QUEUES = {
   received: 'email.received',
   pending: 'email.delivery.pending',
@@ -64,15 +66,21 @@ export function silentLogger(): Logger {
 
 const silent = silentLogger();
 
-const REQUIRED_CONTAINERS = ['event-relay', 'email-worker', 'delivery-worker', 'api', 'rabbitmq'];
+const REQUIRED_CONTAINERS = [
+  'event-relay',
+  'email-worker',
+  'policy-engine',
+  'delivery-worker',
+  'api',
+  'rabbitmq',
+];
 
 const HOW_TO_START = [
   'The messaging stack suites need the apps profile as CONTAINERS built from this tree',
-  '(images one at a time on an 8 GB Docker VM), the smtp-test profile and the dev pass-through:',
+  '(images one at a time), the smtp-test profile and (step 5.2) the policy-engine:',
   '  docker compose --profile apps build <service>   (one at a time)',
   '  docker compose --profile apps up -d --wait',
   '  docker compose --profile smtp-test up -d --wait',
-  '  DELIVERY_DEV_PASSTHROUGH_ENABLED=true in .env (local/CI only)',
 ].join('\n');
 
 async function ready(service: 'event-relay' | 'api'): Promise<boolean> {
@@ -235,6 +243,10 @@ export interface PipelineCounts {
   dlpResults: number;
   /** `mail.message.scanned.v1` outbox rows (one per completed round). */
   scannedEvents: number;
+  /** Step 5.2: `message_idempotency` rows of `policy-engine.evaluate` for the scanned events. */
+  policyLedger: number;
+  /** Step 5.2: `policy_execution_logs` rows (one per message and round by a unique key). */
+  policyEvaluations: number;
   approvals: number;
   /** `message_idempotency` rows of `delivery-worker.planner` for the approvals. */
   plannerLedger: number;
@@ -278,6 +290,10 @@ export async function pipelineCounts(
   });
   const stage = await prisma.messageOutbox.findMany({
     where: { ...where, eventType: EventTypes.MessageScanStageReady },
+    select: { eventId: true },
+  });
+  const scanned = await prisma.messageOutbox.findMany({
+    where: { ...where, eventType: EventTypes.MessageScanned },
     select: { eventId: true },
   });
   const perRecipient = await prisma.emailDelivery.groupBy({
@@ -334,9 +350,13 @@ export async function pipelineCounts(
       parsed.map((p) => p.eventId),
     ),
     dlpResults: await prisma.dlpScanResult.count({ where }),
-    scannedEvents: await prisma.messageOutbox.count({
-      where: { ...where, eventType: EventTypes.MessageScanned },
-    }),
+    scannedEvents: scanned.length,
+    policyLedger: await ledgerCount(
+      prisma,
+      POLICY_LEDGER,
+      scanned.map((e) => e.eventId),
+    ),
+    policyEvaluations: await prisma.policyExecutionLog.count({ where }),
     approvals: approvals.length,
     plannerLedger: await ledgerCount(
       prisma,
@@ -398,7 +418,8 @@ export async function waitForPipeline(
  * row, one MIME ledger row and one parse event per message; one scan round, one final result per
  * required engine (Rspamd, step 4.1, the attachment engine, step 4.2, the URL engine, step 4.3,
  * the BEC engine, step 4.4, and the DLP engine, step 4.5), one ledger row per engine consumer,
- * one stage trigger, one bec result, one dlp result and one `scanned.v1` per message; one approval, one
+ * one stage trigger, one bec result, one dlp result and one `scanned.v1` per message; one policy
+ * ledger row and one policy evaluation (step 5.2) per message; one approval, one
  * planner ledger row, one delivery and one reinjection group per message; nothing unpublished.
  */
 export function exactlyOnceProblems(c: PipelineCounts, n: number): string[] {
@@ -421,6 +442,8 @@ export function exactlyOnceProblems(c: PipelineCounts, n: number): string[] {
     ['dlpLedger', n],
     ['dlpResults', n],
     ['scannedEvents', n],
+    ['policyLedger', n],
+    ['policyEvaluations', n],
     ['approvals', n],
     ['plannerLedger', n],
     ['deliveries', n],

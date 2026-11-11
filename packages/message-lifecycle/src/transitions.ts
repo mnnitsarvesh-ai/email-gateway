@@ -1,9 +1,10 @@
 import { EXPIRABLE_STATES, type ActorRole, type MessageState } from './states';
 
 /**
- * Reason codes of the transition table (L3) plus `lifecycle_backfill`, which only the step 3.3
- * migration writes: no edge lists it, so `decideTransition` never accepts it. Codes match
- * `/^[a-z0-9_]{1,64}$/`.
+ * Reason codes of the transition table (L3) plus the history-only codes no edge lists, so
+ * `decideTransition` never accepts them: `lifecycle_backfill` (only the step 3.3 migration writes
+ * it) and `dev_passthrough` (the retired E4/E27, step 5.2; rows written before stay readable).
+ * Codes match `/^[a-z0-9_]{1,64}$/`.
  */
 export const LIFECYCLE_REASON_CODES = [
   'smtp_accepted',
@@ -71,7 +72,8 @@ export interface TransitionEdge {
 
 /**
  * The transition table (step 3.3 L3, edges E1–E26; step 4.1 S15 adds E27 and retires E4; step
- * 4.2 A13 gives E19 the scanner role with the reason signature_rescan), as data. Every allowed change of `email_messages.status` is one of these edges; everything else is
+ * 4.2 A13 gives E19 the scanner role with the reason signature_rescan; step 5.2 retires E27 and
+ * gives E5, E8–E13 their producer, the policy-engine, ADR-0044), as data. Every allowed change of `email_messages.status` is one of these edges; everything else is
  * stale or invalid (L4). Retired ids are never reused.
  * At most one edge exists per `(from, to)` pair (`transitions.test.ts`).
  */
@@ -292,16 +294,10 @@ export const TRANSITIONS: readonly TransitionEdge[] = [
     reasons: ['deadline_exceeded'],
     producedBy: '3.3',
   },
-  {
-    // Step 4.1 S15: the development pass-through (local/ci only) approves after the scan instead
-    // of after persistence; it replaces the retired E4.
-    id: 'E27',
-    from: ['scanned'],
-    to: 'approved',
-    roles: ['dev_passthrough'],
-    reasons: ['dev_passthrough'],
-    producedBy: '4.1',
-  },
+  // E27 (`scanned → approved`, the development pass-through after the scan, step 4.1 S15) is
+  // retired by step 5.2 (ADR-0044): delivery is approved only by the policy engine (E8 → E10) and
+  // the operator release (E14/E15). The id is never reused; `dev_passthrough` stays a valid actor
+  // role and reason code for the history rows written before, but no edge accepts it.
 ];
 
 /** The edge from `from` to `to` in `table`, if any (at most one exists per pair). */

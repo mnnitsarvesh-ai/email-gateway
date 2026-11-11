@@ -132,11 +132,13 @@ describe('decideTransition: examples of the classification', () => {
     ['persisted', 'rejected', 'policy', 'invalid', 'edge_not_allowed'],
     // E4 is retired (step 4.1): the dev pass-through never approves an unscanned message.
     ['persisted', 'approved', 'dev_passthrough', 'invalid', 'edge_not_allowed'],
-    // Step 4.1 E27: only the dev pass-through approves a scanned message; a failed scan is never
-    // approved by it.
-    ['scanned', 'approved', 'policy', 'invalid', 'actor_not_allowed'],
-    ['scanned', 'approved', 'scanner', 'invalid', 'actor_not_allowed'],
+    // E27 (step 4.1, scanned → approved by the dev pass-through) is retired by step 5.2: a scanned
+    // message is approved only through policy (E8 then E10), never directly.
+    ['scanned', 'approved', 'dev_passthrough', 'invalid', 'edge_not_allowed'],
+    ['scanned', 'approved', 'policy', 'invalid', 'edge_not_allowed'],
+    ['scanned', 'approved', 'scanner', 'invalid', 'edge_not_allowed'],
     ['scan_failed', 'approved', 'dev_passthrough', 'invalid', 'edge_not_allowed'],
+    ['policy_evaluated', 'approved', 'dev_passthrough', 'invalid', 'actor_not_allowed'],
     ['scanning', 'approved', 'dev_passthrough', 'invalid', 'edge_not_allowed'],
   ] as const)('%s → %s as %s is %s/%s', (from, to, role, result, why) => {
     const edge = findEdge(from, to);
@@ -149,16 +151,25 @@ describe('decideTransition: examples of the classification', () => {
     ).toEqual({ result, why });
   });
 
-  it('E27 applies scanned → approved for the dev pass-through and keeps the round', () => {
-    const d = decideTransition(current('scanned', 4, 2), {
-      to: 'approved',
-      reason: 'dev_passthrough',
-      actor: { role: 'dev_passthrough' },
+  it('E8 then E10 approve a scanned message for policy and keep the round (step 5.2)', () => {
+    const e8 = decideTransition(current('scanned', 4, 2), {
+      to: 'policy_evaluated',
+      reason: 'policy_decided',
+      actor: { role: 'policy' },
       expectedRound: 2,
       expectedFrom: ['scanned'],
     });
-    expect(d).toMatchObject({ result: 'apply', nextRound: 2 });
-    expect(d.result === 'apply' && d.edge.id).toBe('E27');
+    expect(e8).toMatchObject({ result: 'apply', nextRound: 2 });
+    expect(e8.result === 'apply' && e8.edge.id).toBe('E8');
+    const e10 = decideTransition(current('policy_evaluated', 5, 2), {
+      to: 'approved',
+      reason: 'policy_deliver',
+      actor: { role: 'policy' },
+      expectedRound: 2,
+      expectedFrom: ['policy_evaluated'],
+    });
+    expect(e10).toMatchObject({ result: 'apply', nextRound: 2 });
+    expect(e10.result === 'apply' && e10.edge.id).toBe('E10');
   });
 
   it('a re-entry edge applies from the same state and opens a new round (E19 scanning → scanning)', () => {

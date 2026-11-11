@@ -5,6 +5,7 @@ import { DlpTenantDataRepository } from './dlp-tenant-data.repository';
 import { DomainsRepository } from './domains.repository';
 import { MessagesRepository } from './messages.repository';
 import { PoliciesRepository } from './policies.repository';
+import { PolicyTenantDataRepository } from './policy-tenant-data.repository';
 import { QuarantineRepository } from './quarantine.repository';
 import { RiskTenantDataRepository } from './risk-tenant-data.repository';
 
@@ -14,7 +15,8 @@ import { RiskTenantDataRepository } from './risk-tenant-data.repository';
  * query takes a `TenantScope` first) and are covered by the isolation tests. Step 4.4:
  * BecTenantDataRepository deletes an organization's BEC rows for the organization purge; step
  * 4.5: DlpTenantDataRepository its DLP rows and evidence objects; step 5.1:
- * RiskTenantDataRepository its risk scores and risk scoring profiles.
+ * RiskTenantDataRepository its risk scores and risk scoring profiles; step 5.2:
+ * PolicyTenantDataRepository its policy evaluations, policies, settings and departments.
  */
 @Module({
   providers: [
@@ -26,6 +28,7 @@ import { RiskTenantDataRepository } from './risk-tenant-data.repository';
     DlpEvidenceStore,
     DlpTenantDataRepository,
     RiskTenantDataRepository,
+    PolicyTenantDataRepository,
   ],
   exports: [
     DomainsRepository,
@@ -35,6 +38,7 @@ import { RiskTenantDataRepository } from './risk-tenant-data.repository';
     BecTenantDataRepository,
     DlpTenantDataRepository,
     RiskTenantDataRepository,
+    PolicyTenantDataRepository,
   ],
 })
 export class TenantDataModule {}

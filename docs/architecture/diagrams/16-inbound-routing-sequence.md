@@ -2,14 +2,13 @@
 
 What happens to an inbound message **after** ingestion (diagram 6 ends with the commit): approval, planning into reinjection groups, reinjection into `postfix-outbound` 10026 with the reinjection token, `XFORWARD` and the gateway trace, Postfix's delivery to the organization's destination servers (customer server, Microsoft 365 or Google Workspace preset, next-hop list with failover) and the per-recipient status read from Postfix's own delivery log (step 2.3, [design R1–R10](../../plan/steps/05-routing.md), [ADR-0021](../adr/0021-mail-routing-and-delivery-status.md), [operations](../../deployment/mail-routing.md)).
 
-**Approval today is the development-only pass-through** (`DELIVERY_DEV_PASSTHROUGH_ENABLED=true`, refused unless `APP_ENV` is `local` or `ci`): it approves every pending recipient without scanning or policy. The real producers of `mail.delivery.approved.v1` (policy engine 5.x, quarantine release 5.3/6.1) are planned; the contract they will use exists.
+**Since step 5.2 the approval comes from the policy-engine** ([design P13, P14, P20](../../plan/steps/16-policy-engine.md), [ADR-0044](../adr/0044-policy-evaluation-placement-and-delivery-gating.md)): it evaluates the scanned round and writes `mail.delivery.approved.v1` (`source = policy`) only for an `allow` disposition, naming the round's rewritten copy, the original EML or a policy copy (TAG/WARN headers). The development-only pass-through of steps 2.3–5.1 (`DELIVERY_DEV_PASSTHROUGH_ENABLED=true`, `source = dev_passthrough`) was removed; the delivery-worker refuses the key. The api operator release (`source = quarantine_release`) is the other producer.
 
 ```mermaid
 sequenceDiagram
   autonumber
   participant DB as MySQL writer (outbox, deliveries)
-  participant PE as policy-engine (PLANNED 5.2)
-  participant DP as delivery-worker dev pass-through (local/CI only)
+  participant PE as policy-engine (5.2)
   participant PL as delivery-worker planner
   participant RJ as delivery-worker reinjector
   participant S3 as S3 mail bucket
@@ -20,14 +19,8 @@ sequenceDiagram
   participant ST as delivery-worker status tailer
 
   Note over DB: ingestion committed email_messages, email_recipients,<br/>outbox mail.message.received.v1 (diagram 6)
-  alt today (development and CI only)
-    DP->>DB: poll outbox (cursor in stream_cursors, safety lag), processOnce
-    DP->>DB: outbox mail.delivery.approved.v1 source=dev_passthrough,<br/>email_events delivery.approved (one transaction)
-  else production
-    rect rgb(255, 248, 225)
-      PE->>DB: mail.delivery.approved.v1 source=policy (PLANNED 5.2)
-    end
-  end
+  Note over DB: scan round completed: outbox mail.message.scanned.v1 (diagram 23)
+  PE->>DB: evaluation txn (step 5.2): policy_execution_logs, E8 + E10,<br/>outbox mail.delivery.approved.v1 source=policy (allow only),<br/>email_events delivery.approved
   PL->>DB: poll outbox approvals (consumer delivery-worker.planner), processOnce
   PL->>DB: load message + approved recipients (organization from the row, never the payload)
   Note over PL: re-check direction (R1): inbound recipient domain still owned by the<br/>same organization? suspended → hold (gateway_hold), other owner → failed
@@ -67,16 +60,16 @@ sequenceDiagram
 
 ## Status
 
-| Step in the sequence                                              | Status                 | Evidence or delivering step                                                                                                                                                              |
-| ----------------------------------------------------------------- | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Dev pass-through approval (local/CI only, refused elsewhere)      | IMPLEMENTED            | `dev-passthrough.approver.test.ts`, `config.test.ts` (refusal outside local/ci), `apps/delivery-worker/integration/approvals.test.ts`; every `tests/integration/routing-*.test.ts` suite |
-| Outbox poller (cursor, safety lag, processOnce, lock)             | IMPLEMENTED            | `outbox-poller.test.ts`, `approvals.test.ts`                                                                                                                                             |
-| Policy approvals                                                  | PLANNED 5.2            | contract `deliveryApprovedV1` (`packages/event-contracts`)                                                                                                                               |
-| Planning, groups per destination, direction re-check              | IMPLEMENTED            | `route-plan.test.ts`, `delivery-planner.test.ts`, `planning.test.ts`; `routing-inbound.test.ts` (two domains → two groups)                                                               |
-| Reinjection session (token, XFORWARD, ENVID, NOTIFY=NEVER)        | IMPLEMENTED            | `smtp-client.test.ts`, `reinjection.test.ts`; `routing-inbound.test.ts` (binding line with `orig_queue_id=dw1-…`)                                                                        |
-| Headers preserved, one trace, `Received: by out.gateway.local`    | IMPLEMENTED            | `routing-inbound.test.ts` (stored EML is a byte-identical suffix of the delivered copy; no tenant name or id in added headers)                                                           |
-| Next-hop list, failover, provider TLS names                       | IMPLEMENTED            | `socketmap-lookup.service.test.ts`, `apps/smtp-adapter/integration/socketmap.test.ts`; `routing-retry.test.ts` (failover to alt1), `routing-mixed.test.ts` (verified TLS to M365)        |
-| No destination → `450 4.4.1` → deferred `no_destination`          | IMPLEMENTED            | `reinjector.test.ts`; `routing-loops.test.ts` (self-referencing destination)                                                                                                             |
-| Status from the delivery log, recorder, message aggregate         | IMPLEMENTED            | `postfix-log-parser.test.ts`, `status-signal-applier.test.ts`, `status-tailer.test.ts`, `packages/mail-routing/integration/recorder.test.ts`; `routing-inbound.test.ts`                  |
-| Inbound bounce without DSN to the sender                          | IMPLEMENTED            | `routing-bounces.test.ts`                                                                                                                                                                |
-| Real Microsoft 365 / Google Workspace connectors and certificates | not verifiable locally | test-CA sinks with the providers' SAN sets stand in for them ([mail-routing.md](../../deployment/mail-routing.md) V3)                                                                    |
+| Step in the sequence                                              | Status                                                    | Evidence or delivering step                                                                                                                                                       |
+| ----------------------------------------------------------------- | --------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Dev pass-through approval                                         | REMOVED in 5.2                                            | the delivery-worker refuses `DELIVERY_DEV_PASSTHROUGH_ENABLED=true` (`config.test.ts`)                                                                                            |
+| Outbox poller (cursor, safety lag, processOnce, lock)             | IMPLEMENTED in `@email-gateway/common`; no user since 5.2 | `outbox-poller.test.ts`                                                                                                                                                           |
+| Policy approvals                                                  | IMPLEMENTED 5.2                                           | `apps/policy-engine` (`evaluation.service.test.ts`, `integration/evaluation.test.ts`); `policy-smtp.test.ts` and every routing stack suite                                        |
+| Planning, groups per destination, direction re-check              | IMPLEMENTED                                               | `route-plan.test.ts`, `delivery-planner.test.ts`, `planning.test.ts`; `routing-inbound.test.ts` (two domains → two groups)                                                        |
+| Reinjection session (token, XFORWARD, ENVID, NOTIFY=NEVER)        | IMPLEMENTED                                               | `smtp-client.test.ts`, `reinjection.test.ts`; `routing-inbound.test.ts` (binding line with `orig_queue_id=dw1-…`)                                                                 |
+| Headers preserved, one trace, `Received: by out.gateway.local`    | IMPLEMENTED                                               | `routing-inbound.test.ts` (stored EML is a byte-identical suffix of the delivered copy; no tenant name or id in added headers)                                                    |
+| Next-hop list, failover, provider TLS names                       | IMPLEMENTED                                               | `socketmap-lookup.service.test.ts`, `apps/smtp-adapter/integration/socketmap.test.ts`; `routing-retry.test.ts` (failover to alt1), `routing-mixed.test.ts` (verified TLS to M365) |
+| No destination → `450 4.4.1` → deferred `no_destination`          | IMPLEMENTED                                               | `reinjector.test.ts`; `routing-loops.test.ts` (self-referencing destination)                                                                                                      |
+| Status from the delivery log, recorder, message aggregate         | IMPLEMENTED                                               | `postfix-log-parser.test.ts`, `status-signal-applier.test.ts`, `status-tailer.test.ts`, `packages/mail-routing/integration/recorder.test.ts`; `routing-inbound.test.ts`           |
+| Inbound bounce without DSN to the sender                          | IMPLEMENTED                                               | `routing-bounces.test.ts`                                                                                                                                                         |
+| Real Microsoft 365 / Google Workspace connectors and certificates | not verifiable locally                                    | test-CA sinks with the providers' SAN sets stand in for them ([mail-routing.md](../../deployment/mail-routing.md) V3)                                                             |

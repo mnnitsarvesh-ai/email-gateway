@@ -30,8 +30,7 @@ flowchart LR
   OK["E6 scanned, email_scans completed<br/>scanned.v1 outcome scanned"]:::impl
   FAIL["E7 scan_failed (scan_error / scan_timeout / eml_unavailable)<br/>email_scans failed | timed_out, scanned.v1 outcome scan_failed"]:::impl
   SW["deadline sweeper (advisory lock scan:deadline)<br/>running rounds past deadline_at → final timeout rows"]:::impl
-  DP["dev pass-through (local/ci): E27 scanned → approved<br/>emlS3Key = the round's rewritten copy, else the original (U20);<br/>held: malicious round, bec suspicious/malicious (B17),<br/>dlp require_approval / quarantine / block or missing row (D13)"]:::impl
-  PE["policy-engine via email.policy.evaluate<br/>PLANNED 5.2"]:::planned
+  DP["policy-engine (5.2) on email.policy.evaluate: E8/E9 → E10–E13<br/>allow: approval, emlS3Key = the round's rewritten copy, else the original (U20),<br/>or a policy copy for TAG/WARN; floor holds hard blocks, failures, DLP"]
 
   CAT --> REG
   REG --> Q1
@@ -53,8 +52,7 @@ flowchart LR
   DONE -->|"no required failure"| OK
   DONE -->|"a required engine timeout/error"| FAIL
   OK --> DP
-  OK -.-> PE
-  FAIL -.-> PE
+  FAIL --> DP
 ```
 
 **Legend.** Green: IMPLEMENTED (4.1 orchestrator and Rspamd; 4.2 attachment engine; 4.3 URL engine with its child rows and the rewritten copy, [11-url-protection.md](../../plan/steps/11-url-protection.md) U1, U3, U16, U20; 4.4 stage-2 dependencies and the BEC engine, [12-phishing-bec.md](../../plan/steps/12-phishing-bec.md) B1, B2, B14, B17; 4.5 the stage-1 DLP engine with its child rows, evidence and incident, [13-dlp.md](../../plan/steps/13-dlp.md) D1, D3, D13, D16, D19). 4.6 the asynchronous sandbox engine and the sandbox-controller, [14-sandbox.md](../../plan/steps/14-sandbox.md) X10–X16: implemented with execution **disabled** — the controller's default backend answers `not_executed`, so analysed submissions end `unknown`). Amber dashed: PLANNED (a VM-class detonation runner — not implemented, the `vm` backend refuses; policy 5.2). The sandbox is **not** in `required_engines`, not in `ENGINE_REGISTRY` and not triggered by `parsed.v1`/`rescan_requested.v1`/`scan_stage_ready.v1`: its final row may be written before or after the round completes, `aggregateRound` ignores it, and it never touches `email_scans` or the lifecycle (ADR-0040). Since step 4.5 `required_engines = ["rspamd", "attachment", "url", "bec", "dlp"]`: the round completes when all five have a final row. `dlp` is a stage-1 engine (no dependency; inbound rounds finish fast with `skipped`), so outbound approval always waits for the DLP final, which carries the tenant policy's action; the engine records the action, the delivery stage applies it (D13). `bec` is a **stage-2** engine: it is never triggered by `parsed.v1`/`rescan_requested.v1`, only by the round's `scan_stage_ready.v1`, which exactly one transaction writes (the one that inserts the last of the rspamd/url finals, under the message → scan locks); a failed dependency still triggers it (the input is recorded `failed`, never clean). The deadline sweeper writes no trigger: it finalizes every missing required engine, stage 2 included, as `timeout`. The URL engine's dynamic inspection never delays the round (its result acts at click time). In 4.1 the registry held only `rspamd`.

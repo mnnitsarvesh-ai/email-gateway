@@ -61,6 +61,9 @@ flowchart LR
   end
   subgraph policy[Policy]
     email_policies
+    policy_settings
+    tenant_departments[tenant_departments, tenant_department_members]
+    policy_execution_logs[(policy_execution_logs P)]
   end
   subgraph delivery[Delivery]
     email_deliveries[(email_deliveries P)]
@@ -124,6 +127,9 @@ flowchart LR
   email_messages -.-> email_archives
   email_messages -.-> message_outbox
   email_policies -.-> email_messages
+  organizations --> policy_settings
+  organizations --> tenant_departments
+  email_messages -.-> policy_execution_logs
   organizations -.-> audit_logs
   organizations -.-> api_idempotency_keys
 ```
@@ -867,27 +873,59 @@ Step 4.5 ([§3](../plan/steps/13-dlp.md#3-data-model-one-forward-migration-dlp_e
 
 Step 5.1 ([§3](../plan/steps/15-risk-scoring.md#3-data-model-one-forward-migration-risk_scoring-wp1)): the email-worker writes one `message_risk_scores` row per scan round and revision (partitioned, copies the message's `received_at`, no foreign keys): revision 0 in the transaction that completes the round, revision 1 (the round's inputs plus the late sandbox final) once, both under the `email_scans` row lock. Each organization has at most one `risk_scoring_profiles` row (`RESTRICT` to `organizations`), whose versions are `risk_scoring_profile_versions` rows (`RESTRICT` to the profile and the organization, `SET NULL` to the three user columns). The active version is the profile's `active_version_id` (a logical reference, no foreign key: it would form a cycle with `profile_id`). When a round opens, the email-worker copies that pointer into `email_scans.risk_profile_version_id` (n rounds to one version, logical), and `message_risk_scores.profile_version_id` records the version actually used (NULL = the platform default).
 
+Step 5.2 ([§3](../plan/steps/16-policy-engine.md#3-data-model-one-forward-migration-policy_engine-wp1)): a policy's versions hold `policy-dsl/1` documents (`dsl_version`; legacy rows without it are `superseded` and their relational `policy_conditions` / `policy_actions` / `policy_exceptions` rows are retired: no reader or writer). Each organization has at most one `policy_settings` row (`RESTRICT`), whose `generation` every effective policy change increments. The tenant directory is `tenant_departments` (`RESTRICT` to `organizations`) with `tenant_department_members` (`RESTRICT` to the department and the organization; `user_id` `CASCADE` to `users`; exactly one of address / user, api-enforced); versions name the departments and users they reference in `references` (public ids, logical). The policy-engine writes one `policy_execution_logs` row per message and lifecycle round (partitioned, copies the message's `received_at`, no foreign keys; `scan_id` and `decisive_policy_version_id` are logical references, `decisive_policy_public_id` the decisive policy's public id).
+
 ```mermaid
 erDiagram
-  organizations ||--o{ email_policies : ""
+  organizations ||--o{ email_policies : "RESTRICT"
   email_policies ||--o{ policy_versions : "CASCADE"
   email_policies |o..o| policy_versions : "active_version_id, no FK (cycle)"
-  policy_versions ||--o{ policy_conditions : "CASCADE"
-  policy_versions ||--o{ policy_actions : "CASCADE"
-  email_policies |o--o{ policy_exceptions : "NULL = organization-wide"
-  email_messages ||..o{ policy_execution_logs : "message_id + received_at"
-  policy_versions |o..o{ policy_execution_logs : "decisive_policy_version_id"
+  policy_versions ||--o{ policy_conditions : "CASCADE (retired)"
+  policy_versions ||--o{ policy_actions : "CASCADE (retired)"
+  email_policies |o--o{ policy_exceptions : "NULL = organization-wide (retired)"
+  users |o--o{ email_policies : "created_by, updated_by, SET NULL"
+  users |o--o{ policy_versions : "created_by, updated_by, published_by, SET NULL"
+  organizations ||--o| policy_settings : "RESTRICT, one per organization"
+  users |o--o{ policy_settings : "updated_by, SET NULL"
+  organizations ||--o{ tenant_departments : "RESTRICT, unique (organization_id, name)"
+  tenant_departments ||--o{ tenant_department_members : "RESTRICT"
+  users |o--o{ tenant_department_members : "user_id CASCADE"
+  policy_versions |o..o{ tenant_departments : "references.departmentIds (logical)"
+  email_messages ||..o{ policy_execution_logs : "message_id + received_at, one per round"
+  email_scans |o..o{ policy_execution_logs : "scan_id (logical; NULL for parse failures)"
+  policy_versions |o..o{ policy_execution_logs : "decisive_policy_version_id (logical)"
   email_policies {
     bigint id PK
     char public_id UK
     bigint organization_id FK
     bigint active_version_id "no FK"
+    int row_version "CAS"
   }
   policy_versions {
     bigint id PK
     bigint policy_id FK
     int version "UQ with policy_id"
-    json definition
+    json definition "policy-dsl/1"
+    varchar dsl_version "NULL = legacy, superseded"
+    json references "departmentIds, userIds"
+  }
+  policy_settings {
+    bigint id PK
+    bigint organization_id FK "UK"
+    bigint generation "incremented per effective change"
+    json settings
+  }
+  tenant_departments {
+    bigint id PK
+    char public_id UK
+    bigint organization_id FK
+    varchar name "UK with organization_id"
+  }
+  tenant_department_members {
+    bigint id PK
+    bigint department_id FK
+    varchar address "nullable, xor user_id"
+    bigint user_id FK "nullable, CASCADE"
   }
   policy_conditions {
     bigint id PK
@@ -907,7 +945,10 @@ erDiagram
     bigint id PK
     datetime received_at PK "PARTITIONED month"
     bigint message_id
-    smallint evaluation_seq
+    smallint evaluation_seq "lifecycle round, UQ with message_id"
+    enum disposition
+    enum decision_source
+    bigint policy_generation
   }
 ```
 

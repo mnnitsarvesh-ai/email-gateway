@@ -63,7 +63,7 @@ sequenceDiagram
     Note over W: scanning (diagram 9) incl. DLP 4.5, then policy: deliver, tag, quarantine or discard
     W->>DW: mail.delivery.approved.v1 source=policy (PLANNED 4.x, 5.2)
   end
-  Note over DW: today: development-only pass-through approval (local/CI)#59;<br/>plan per recipient domain, outbound rate limits (diagram 17)
+  Note over DW: approval by the policy-engine (step 5.2)#59;<br/>plan per recipient domain, outbound rate limits (diagram 17)
   DW->>PR: SMTP reinject from POSTFIX_REINJECT_NETWORKS: XFORWARD (IDENT = token),<br/>MAIL … RET=HDRS ENVID=token, RCPT NOTIFY=FAILURE,DELAY, X-Gateway-Trace d=out
   PR->>SA: policy_context=reinject-outbound: sender tenant + outbound-enabled,<br/>suppression, HEXISTS dkim_selectors (fail closed: 4.7.0)
   PR->>RO: milter: sign with the domain's active RSA key (keys published by the api)
@@ -99,5 +99,5 @@ sequenceDiagram
 | Connector types for M365 / Google                             | PLANNED 8.2             |                                                                                                                                                                                            |
 | Outbound scanning and policy                                  | PLANNED 4.5, 5.2        | `organization_features` (`outbound_filtering`, `dlp`)                                                                                                                                      |
 | delivery-worker reinjection, `email_deliveries` tracking      | IMPLEMENTED 2.3         | diagrams 17 and 19; `routing-mixed.test.ts`, `routing-bounces.test.ts`, `routing-rate-limit.test.ts`; [contracts.md §15](../contracts.md#15-reinjection-delivery-worker--postfix-outbound) |
-| Approval by scanning and policy                               | PLANNED 4.x, 5.2        | contract `mail.delivery.approved.v1`; development-only pass-through today                                                                                                                  |
+| Approval by scanning and policy                               | IMPLEMENTED 4.1–5.2     | policy-engine approvals after the scan (`policy-smtp.test.ts`); the development-only pass-through was removed in 5.2                                                                       |
 | Ed25519 dual signing, MTA-STS / DANE                          | PLANNED (not scheduled) | design §10                                                                                                                                                                                 |

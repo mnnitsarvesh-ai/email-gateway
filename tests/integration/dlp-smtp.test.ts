@@ -12,7 +12,6 @@ import { waitForAllDeliveries, waitForMessage } from './support/deliveries';
 import { stack } from './support/env';
 import { expectConsistentHistory, lifecycleOf, pathOf } from './support/lifecycle';
 import { clearSinkDomain, sinkFiles, SINK_SERVICES } from './support/mail-sink';
-import { metricValue } from './support/metrics';
 import { record, sleep } from './support/messaging-stack';
 import { deleteQueued, involving, listQueue } from './support/postfix';
 import { MAIL_SINK_HOST, organizationRef, sendingDomain } from './support/routing';
@@ -24,7 +23,6 @@ import {
   dlpResultsOf,
   engineResultsOf,
   messagePublicId,
-  PASSTHROUGH_CONSUMER,
   REQUIRED_ENGINES,
   roundFinalEngines,
   scannedEventsOf,
@@ -32,6 +30,14 @@ import {
   sendToMx,
   waitForRoundComplete,
 } from './support/scan-stack';
+import {
+  actionsOf,
+  DISPOSITION_STATE,
+  expectPolicyHeld,
+  floorOf,
+  policyFloorRaises,
+  waitForEvaluation,
+} from './support/policy';
 import { SmtpFixtures, type FixtureDomain } from './support/smtp-fixtures';
 import { assertStackReady } from './support/smtp-stack';
 import { reply, swaks } from './support/smtp-tools';
@@ -44,8 +50,10 @@ import { reply, swaks } from './support/smtp-tools';
  * and `scan.dlp`: the DLP engine reads the stored text parts and extracts the attachments in its
  * isolated extractor child, detects, classifies and evaluates the tenant's policy, seals the
  * evidence into MinIO and writes `dlp_scan_results`, `dlp_evidence` and the
- * `mail.message.dlp_incident.v1` outbox row with its final) → round completion → dev
- * pass-through (D13: `allow`/`alert` approved, `require_approval`/`quarantine`/`block` held) →
+ * `mail.message.dlp_incident.v1` outbox row with its final) → round completion → policy-engine
+ * (D13, since step 5.2 the DLP binding of the policy floor, P9.5: `allow`/`alert` approved,
+ * `alert` with the mandatory `dlp-alert` TAG; `require_approval` → `held_for_review`,
+ * `quarantine` → `quarantined`, `block` → `rejected` with a sender notice requested) →
  * planner → postfix-outbound → mail-sink.
  *
  * Fixture organization, policies and rules created through the api with a `security_analyst`
@@ -56,9 +64,9 @@ import { reply, swaks } from './support/smtp-tools';
  * alert; and a recipient-domain exception for a partner domain. Then:
  *
  * 1. card numbers in the body and in a DOCX → `suspicious`, `quarantine` (rule A), one incident,
- *    evidence stored, NOT approved (`delivery_approvals_skipped_total{reason="dlp_action"}`
- *    exactly +1, nothing in any sink during a 10 s window);
- * 2. a PEM private key inside a ZIP → `block` (rule B), held;
+ *    evidence stored, NOT approved (policy quarantine with floor reason `policy.floor.dlp_quarantine`,
+ *    nothing in any sink during a 10 s window);
+ * 2. a PEM private key inside a ZIP → `block` (rule B), rejected by policy;
  * 3. a CONFIDENTIAL board memo → `alert` (rule C), approved and delivered, incident;
  * 4. a card message to the partner domain → `allow` with the exception applied, delivered;
  * 5. an encrypted ZIP → `unknown` with `dlp.not_extracted.encrypted`, never clean;
@@ -67,7 +75,7 @@ import { reply, swaks } from './support/smtp-tools';
  *    for a read_only_user;
  * 7. the scans read API shows masked values only (no 13–19 digit run, no private key text);
  *    a read_only_user gets no dlp section;
- * 8. a PAN in prose → `require_approval` (rule D), held;
+ * 8. a PAN in prose → `require_approval` (rule D), held for review by policy;
  * 9. internal mail (sender and recipient on the tenant's domains) with a card number → dlp runs
  *    with direction `internal` and rule E's `alert`, delivered;
  * 10. an inbound message with a card number → dlp `skipped` / `dlp.not_inbound`.
@@ -331,43 +339,48 @@ async function incidentsOf(message: { id: bigint; receivedAt: Date }) {
   return rows.map((row) => messageDlpIncidentV1.parse(row.payload));
 }
 
-const skipped = (reason: string) =>
-  metricValue('delivery-worker', 'delivery_approvals_skipped_total', { reason });
-const holds = (action: string) =>
-  metricValue('delivery-worker', 'delivery_dlp_holds_total', { action });
+/** The disposition the DLP binding of the policy floor gives each held DLP action (P9.5). */
+const DLP_DISPOSITION = {
+  require_approval: 'require_approval',
+  quarantine: 'quarantine',
+  block: 'reject',
+} as const;
 
-/** The pass-through handled the scanned event (ledger row) and did not approve it (D13). */
+/**
+ * Held by policy (D13; since step 5.2 the DLP binding of the policy floor, before it the dev
+ * pass-through): evaluated with the DLP floor reason, in the disposition's state, never approved.
+ */
 async function expectHeld(
   message: { id: bigint; receivedAt: Date },
   rcpts: readonly string[],
-  action: string,
-  before: { skipped: number; holds: number },
+  action: keyof typeof DLP_DISPOSITION,
+  before: { floor: number },
 ): Promise<void> {
   const [scannedEvent] = await scannedEventsOf(fx.prisma, org, message);
   expect(messageScannedV1.parse(scannedEvent!.payload)).toMatchObject({ outcome: 'scanned' });
-  await waitFor(
-    `the dev pass-through to hold the message (dlp_action, ${action})`,
-    async () => {
-      const ledger = await fx.prisma.messageIdempotency.count({
-        where: { consumer: PASSTHROUGH_CONSUMER, eventId: scannedEvent!.eventId },
-      });
-      return ledger === 1 && (await skipped('dlp_action')) >= before.skipped + 1;
-    },
-    { timeoutMs: 60_000, intervalMs: 1_000 },
-  );
+  const evaluation = await expectPolicyHeld(fx.prisma, message, {
+    min: DLP_DISPOSITION[action],
+  });
+  expect(floorOf(evaluation).reasons).toContain(`policy.floor.dlp_${action}`);
   // Observation window: nothing is approved or delivered later.
   await sleep(10_000);
-  expect(await skipped('dlp_action')).toBe(before.skipped + 1);
-  expect(await holds(action)).toBe(before.holds + 1);
+  expect(await policyFloorRaises(`dlp_${action}`)).toBeGreaterThanOrEqual(before.floor + 1);
+  const state = DISPOSITION_STATE[evaluation.disposition];
+  const reason = {
+    require_approval: 'policy_hold',
+    quarantine: 'policy_quarantine',
+    reject: 'policy_reject',
+    allow: 'policy_deliver',
+  }[evaluation.disposition];
   expect(await lifecycleOf(fx.prisma, message)).toMatchObject({
-    status: 'scanned',
-    statusReason: 'scan_complete',
+    status: state,
+    statusReason: reason,
     lifecycleRound: 0,
   });
-  expect((await pathOf(fx.prisma, message)).at(-1)).toEqual([
-    'scanning',
-    'scanned',
-    'scan_complete',
+  expect((await pathOf(fx.prisma, message)).slice(-3)).toEqual([
+    ['scanning', 'scanned', 'scan_complete'],
+    ['scanned', 'policy_evaluated', 'policy_decided'],
+    ['policy_evaluated', state, reason],
   ]);
   const approvals = await fx.prisma.messageOutbox.findMany({
     where: { organizationId: org, eventType: 'mail.delivery.approved.v1' },
@@ -390,7 +403,7 @@ async function expectHeld(
 }
 
 async function heldCounters(action: string) {
-  return { skipped: await skipped('dlp_action'), holds: await holds(action) };
+  return { floor: await policyFloorRaises(`dlp_${action}`) };
 }
 
 interface DlpEngineView {
@@ -600,10 +613,6 @@ describe.skipIf(gate.skip)(
     });
 
     it('(3) a CONFIDENTIAL board memo: alert, approved and delivered, incident', async () => {
-      const alertsBefore = await metricValue(
-        'delivery-worker',
-        'delivery_dlp_alerts_approved_total',
-      );
       const rcpt = `director@${extDomain()}`;
       const { message, dlpFinal, dlpRow, started } = await scanned(
         [rcpt],
@@ -627,13 +636,32 @@ describe.skipIf(gate.skip)(
       const incidents = await incidentsOf(message);
       expect(incidents.map((i) => [i.action, i.ruleId])).toEqual([['alert', ruleIds.C]]);
       expect(incidents[0]!.categories.map((c) => c.category)).toContain('confidential');
-      // D13: alert is approved (E27) and counted; the message is delivered.
+      // D13, since step 5.2: alert is allowed by policy with the mandatory `dlp-alert` TAG
+      // (P9.5; outbound platform tag headers are suppressed by default: status `recorded`, P9.11)
+      // and delivered.
+      const evaluation = await waitForEvaluation(fx.prisma, message, 0);
+      expect(evaluation.disposition).toBe('allow');
+      expect(floorOf(evaluation)).toMatchObject({ tag: true });
+      // A round may carry one TAG per origin (the platform risk TAG of a `tag` recommendation and
+      // the floor's mandatory `dlp-alert` TAG, P10): select the DLP one; every TAG is `recorded`
+      // (outbound headers suppressed).
+      const tags = actionsOf(evaluation).filter((a) => a.type === 'TAG');
+      const dlpTag = tags.find((a) =>
+        ((a.params as { labels?: string[] }).labels ?? []).includes('dlp-alert'),
+      );
+      expect(dlpTag, JSON.stringify(tags)).toMatchObject({
+        origin: 'floor',
+        applicability: 'applies',
+        status: 'recorded',
+      });
+      for (const t of tags) expect(t.status).toBe('recorded');
+      record('dlp-smtp', {
+        alert_policy: `${evaluation.disposition}:${evaluation.decisionSource}:${evaluation.action}`,
+        alert_tags: tags.map((t) => `${t.origin}/${t.status}`).join(','),
+      });
       const [delivery] = await waitForAllDeliveries(fx.prisma, org, message.id, ['delivered'], 1);
       expect(delivery!.address).toBe(rcpt);
       expect(await sinkFiles(rcpt)).toHaveLength(1);
-      expect(
-        await metricValue('delivery-worker', 'delivery_dlp_alerts_approved_total'),
-      ).toBeGreaterThanOrEqual(alertsBefore + 1);
       record('dlp-smtp', { alert_smtp_to_delivered_ms: Date.now() - started });
     });
 

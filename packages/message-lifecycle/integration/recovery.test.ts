@@ -41,13 +41,13 @@ function approve(m: MessageFixture, eventId: string): TransitionRequest {
   return {
     message: m,
     to: 'approved',
-    reason: 'dev_passthrough',
-    actor: { role: 'dev_passthrough', service: 'delivery-worker', type: 'system' },
+    reason: 'policy_deliver',
+    actor: { role: 'policy', service: 'policy-engine', type: 'system' },
     transitionKey: `evt:${eventId}:approved`,
     causationEventId: eventId,
     expectedRound: 0,
-    // E27 (step 4.1): the dev pass-through approves a scanned message (E4 is retired).
-    expectedFrom: ['scanned'],
+    // E10 (step 5.2): the policy engine approves a policy-evaluated message (E4 and E27 retired).
+    expectedFrom: ['policy_evaluated'],
   };
 }
 
@@ -59,7 +59,7 @@ async function keyRows(m: MessageFixture, key: string): Promise<number> {
 
 describe('failure recovery (§9 item 9)', () => {
   it('(a) a consumer crash between transition and commit leaves nothing; the re-run applies once', async () => {
-    const m = await fx.message(org, { state: 'scanned' });
+    const m = await fx.message(org, { state: 'policy_evaluated' });
     const consumer = fx.consumer('crash');
     const eventId = randomUUID();
     const event: EventEnvelope<{ messageId: string }> = {
@@ -83,7 +83,7 @@ describe('failure recovery (§9 item 9)', () => {
     );
 
     await expect(handler(event)).rejects.toThrow('crash after the transition');
-    expect(await fx.row(m)).toMatchObject({ status: 'scanned', version: 2 });
+    expect(await fx.row(m)).toMatchObject({ status: 'policy_evaluated', version: 2 });
     expect(await fx.history(m)).toHaveLength(3);
     expect(await fx.outbox(m)).toHaveLength(0);
     expect(await fx.events(m)).toHaveLength(0);
@@ -101,7 +101,7 @@ describe('failure recovery (§9 item 9)', () => {
   });
 
   it('(b) a writer outage after SELECT … FOR UPDATE fails the call, releases the lock, and the retry applies once', async () => {
-    const m = await fx.message(org, { state: 'scanned' });
+    const m = await fx.message(org, { state: 'policy_evaluated' });
     const target = writerTarget();
     const proxy = await TcpProxy.start(target.host, target.port);
     proxies.push(proxy);
@@ -150,7 +150,7 @@ describe('failure recovery (§9 item 9)', () => {
     expect(proxy.cutActive).toBe(true);
 
     // Nothing committed, and the row is not left locked: another session locks it in time.
-    expect(await fx.row(m)).toMatchObject({ status: 'scanned', version: 2 });
+    expect(await fx.row(m)).toMatchObject({ status: 'policy_evaluated', version: 2 });
     const direct = new PrismaClient({
       datasourceUrl: (() => {
         const url = new URL(requireEnv('DATABASE_URL'));

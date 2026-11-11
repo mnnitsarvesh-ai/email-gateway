@@ -43,7 +43,7 @@ async function partitionNames(table: string): Promise<string[]> {
 }
 
 describe('partition maintenance', () => {
-  it('manages the 31 partitioned tables, including the step 2.3, 3.1, 4.1, 4.2, 4.3, 4.4, 4.5 and 5.1 tables', () => {
+  it('manages the 31 partitioned tables, including the step 2.3, 3.1, 4.1, 4.2, 4.3, 4.4, 4.5, 5.1 and 5.2 tables', () => {
     // Step 4.6 §3 adds sandbox_analyses and sandbox_artifacts unpartitioned; step 5.1 §3 adds
     // message_risk_scores (partitioned) and the unpartitioned risk_scoring_profiles and
     // risk_scoring_profile_versions.
@@ -79,6 +79,19 @@ describe('partition maintenance', () => {
         'message_risk_scores',
       ]),
     );
+    // Step 5.2 §3 (P16): the policy decision record lives as long as the scan rounds (was 3
+    // months, detail); policy_settings and the tenant directory tables are unpartitioned.
+    expect(PARTITION_REGISTRY.find((s) => s.table === 'policy_execution_logs')).toEqual({
+      table: 'policy_execution_logs',
+      column: 'received_at',
+      granularity: 'month',
+      retention: 6,
+      drop: true,
+      tier: 'core',
+    });
+    for (const table of ['policy_settings', 'tenant_departments', 'tenant_department_members']) {
+      expect(PARTITION_REGISTRY.map((s) => s.table)).not.toContain(table);
+    }
   });
 
   it('creates partitions ahead for every registered table, and a second apply is a no-op', async () => {

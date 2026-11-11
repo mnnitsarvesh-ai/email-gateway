@@ -124,6 +124,20 @@ The future job (a scheduled worker, one instance at a time under a lock) must ap
    UNION ALL SELECT 'risk_scoring_profiles', COUNT(*) FROM risk_scoring_profiles WHERE organization_id = ?;
    ```
 
+   **Policy engine and directory tables (step 5.2).** `PolicyTenantDataRepository` (api `tenant-data`, `POLICY_PURGE_ORDER`) deletes, in batches of 500, in this RESTRICT-safe order: `policy_execution_logs` (partitioned, no foreign keys; `LIMIT` without `ORDER BY`, on its `(organization_id, received_at)` index), `policy_actions` and `policy_conditions` (retired legacy rows; they reference versions), `policy_versions`, `policy_exceptions`, `email_policies` (`active_version_id` has no foreign key), `policy_settings`, `tenant_department_members` (they reference departments with `RESTRICT`), `tenant_departments`. Every one of these tables references the organization with `RESTRICT`. The rows hold ids, codes, hashes and policy definitions (tenant configuration); member addresses are tenant directory data; no message content and no S3 object (policy copies under `org/<org>/policy/` are mail-bucket objects written by the policy-engine; they expire after `POLICY_COPY_RETENTION_DAYS` through the `eg-policy-copy-expiry` lifecycle rule). Verify with:
+
+   ```sql
+   SELECT 'policy_execution_logs' t, COUNT(*) FROM policy_execution_logs WHERE organization_id = ?
+   UNION ALL SELECT 'policy_actions', COUNT(*) FROM policy_actions WHERE organization_id = ?
+   UNION ALL SELECT 'policy_conditions', COUNT(*) FROM policy_conditions WHERE organization_id = ?
+   UNION ALL SELECT 'policy_versions', COUNT(*) FROM policy_versions WHERE organization_id = ?
+   UNION ALL SELECT 'policy_exceptions', COUNT(*) FROM policy_exceptions WHERE organization_id = ?
+   UNION ALL SELECT 'email_policies', COUNT(*) FROM email_policies WHERE organization_id = ?
+   UNION ALL SELECT 'policy_settings', COUNT(*) FROM policy_settings WHERE organization_id = ?
+   UNION ALL SELECT 'tenant_department_members', COUNT(*) FROM tenant_department_members WHERE organization_id = ?
+   UNION ALL SELECT 'tenant_departments', COUNT(*) FROM tenant_departments WHERE organization_id = ?;
+   ```
+
 5. **Free verified domain names:** deleting the organization's `domains` rows releases `domains.verified_name` (the generated unique column), so the domain can be verified by another organization. This must happen only in the purge, never at confirmation, so a cancelled deletion keeps its domains.
 6. Keep `audit_logs` (append-only, retained by policy) and `login_audit_logs` until their own retention ends; write `organization.purged` with counts, then hard-delete or tombstone the `organizations` row (keep the slug reserved for a period to avoid confusion).
 7. Make every step resumable: a crash mid-purge must leave the organization `deleted` and be safe to re-run.
