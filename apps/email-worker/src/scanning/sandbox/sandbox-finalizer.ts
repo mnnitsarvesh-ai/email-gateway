@@ -39,7 +39,8 @@ import {
  *    (`aggregateSubmissions`; a final written earlier is kept by the unique key).
  *
  * The final never touches `email_scans` or the lifecycle (X10): the round's verdict is decided
- * by the synchronous engines only.
+ * by the synchronous engines only. Step 5.1 R13 (a): when the round already completed, the same
+ * transaction writes the round's risk score revision 1 (the round's inputs plus the sandbox).
  */
 
 /** Most linked submissions completed in one transaction (X13 results step 4; the sweeper does the rest). */
@@ -241,6 +242,12 @@ export async function writeRoundFinal(
   });
   if (!written) return null;
   ctx.metrics.final(aggregate.outcome);
+  // Step 5.1 R13 (a): a non-skipped sandbox final of a round that already completed adds risk
+  // revision 1 here; a round still running gets it from its completion (whichever transaction
+  // comes second writes it, both under this scan row lock; the unique key is the backstop).
+  if (aggregate.outcome !== 'skipped' && scan.status !== 'running') {
+    await tx.scoreRiskRevision(scan);
+  }
   return aggregate.outcome;
 }
 

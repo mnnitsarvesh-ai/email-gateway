@@ -38,6 +38,7 @@ import type { CircuitBreaker } from '../../src/scanning/circuit-breaker';
 import { DeadlineSweeper } from '../../src/scanning/deadline-sweeper';
 import { createEngineConsumer } from '../../src/scanning/engine-consumer';
 import { rspamdRegistration } from '../../src/scanning/engines/rspamd/registration';
+import { createRiskScorer } from '../../src/scanning/risk/risk-scorer';
 import type { ScanTriggerPayload } from '../../src/scanning/round-service';
 import { ScanMetrics } from '../../src/scanning/scan-metrics';
 import { ScanRepository } from '../../src/scanning/scan-repository';
@@ -351,6 +352,10 @@ export class ScanFixtures {
       if (ids.length > 0) {
         const where = { organizationId: { in: ids } };
         await this.prisma.messageOutbox.deleteMany({ where });
+        // Step 5.1: every completed round has risk rows; profiles before the organization (FK).
+        await this.prisma.messageRiskScore.deleteMany({ where });
+        await this.prisma.riskScoringProfileVersion.deleteMany({ where });
+        await this.prisma.riskScoringProfile.deleteMany({ where });
         await this.prisma.emailAuthResult.deleteMany({ where });
         await this.prisma.scanEngineResult.deleteMany({ where });
         await this.prisma.emailScan.deleteMany({ where });
@@ -626,7 +631,12 @@ export async function withScanPipeline<R>(
 /** The deadline sweeper on the suite's writer, with a per-run lock name. */
 export function sweeper(fx: ScanFixtures, metrics: ScanMetrics, config: Readonly<WorkerConfig>) {
   const locks = new AdvisoryLocks(requireEnv('DATABASE_URL'));
-  const store = new ScanRepository(fx.prisma, config.SCAN_DB_TIMEOUT_MS, metrics.lifecycle);
+  const store = new ScanRepository(
+    fx.prisma,
+    config.SCAN_DB_TIMEOUT_MS,
+    createRiskScorer({ config, metrics: metrics.risk, logger: silentLogger }),
+    metrics.lifecycle,
+  );
   const instance = new DeadlineSweeper({
     store,
     locks,

@@ -306,6 +306,7 @@ describe('step 4.5 DLP routes (e2e, dependencies stubbed)', () => {
     attachmentResults: () => Promise.resolve([]),
     attachmentParts: () => Promise.resolve([]),
     sandboxSubmissions: () => Promise.resolve([]),
+    riskScores: () => Promise.resolve([]),
     dlpResults: vi.fn(() =>
       Promise.resolve([
         {

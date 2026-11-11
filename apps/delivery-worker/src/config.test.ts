@@ -49,6 +49,7 @@ describe('delivery-worker config', () => {
       DELIVERY_REINJECTION_ENABLED: true,
       DELIVERY_STATUS_LOG_ENABLED: true,
       DELIVERY_DEV_PASSTHROUGH_ENABLED: false,
+      DELIVERY_DEV_PASSTHROUGH_RISK_HOLD: true,
       DELIVERY_STATUS_LOG_PATH: '/var/log/postfix-outbound/maillog',
       DELIVERY_STATUS_LOG_SOURCE_ID: 'out.gateway.local',
       DELIVERY_STATUS_LOG_POLL_MS: 500,
@@ -116,6 +117,27 @@ describe('delivery-worker config', () => {
       `DELIVERY_DEV_PASSTHROUGH_ENABLED: ${DEV_PASSTHROUGH_REFUSAL}`,
     ]);
     expect(issues({ APP_ENV, DELIVERY_DEV_PASSTHROUGH_ENABLED: 'false' })).toEqual([]);
+  });
+
+  it('reads DELIVERY_DEV_PASSTHROUGH_RISK_HOLD (default true; false restores step 4.6)', () => {
+    expect(loadWorkerConfig(base).DELIVERY_DEV_PASSTHROUGH_RISK_HOLD).toBe(true);
+    const off = loadWorkerConfig({
+      ...base,
+      APP_ENV: 'local',
+      DELIVERY_DEV_PASSTHROUGH_ENABLED: 'true',
+      DELIVERY_DEV_PASSTHROUGH_RISK_HOLD: 'false',
+    });
+    expect(off.DELIVERY_DEV_PASSTHROUGH_RISK_HOLD).toBe(false);
+    expect(loadWorkerConfig({ ...base, DELIVERY_DEV_PASSTHROUGH_RISK_HOLD: '1' })).toMatchObject({
+      DELIVERY_DEV_PASSTHROUGH_RISK_HOLD: true,
+    });
+    // Only meaningful with the pass-through: never a reason to refuse staging or production.
+    expect(issues({ APP_ENV: 'production', DELIVERY_DEV_PASSTHROUGH_RISK_HOLD: 'true' })).toEqual(
+      [],
+    );
+    expect(issues({ DELIVERY_DEV_PASSTHROUGH_RISK_HOLD: 'yes' }).join()).toContain(
+      'DELIVERY_DEV_PASSTHROUGH_RISK_HOLD',
+    );
   });
 
   it('refuses the pass-through without the approvals role', () => {

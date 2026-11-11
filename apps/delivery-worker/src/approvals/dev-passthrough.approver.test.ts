@@ -29,7 +29,10 @@ import {
   InconsistentBecResultReadError,
   InconsistentDlpResultReadError,
   InconsistentRewriteReadError,
+  InconsistentRiskReadError,
   isRewriteKeyOf,
+  riskHoldAction,
+  riskHoldDecision,
 } from './dev-passthrough.approver';
 
 vi.mock('@email-gateway/message-lifecycle', async (original) => ({
@@ -127,6 +130,24 @@ const dlpRow = (action: string, overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
+/** The round's revision-0 `message_risk_scores` row as the email-worker writes it (echo columns). */
+const riskRow = (
+  recommendedAction: string,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> => ({
+  scanId: 900n,
+  receivedAt: new Date('2026-11-03T11:59:00.000Z'),
+  messageId: 100n,
+  organizationId: 7n,
+  lifecycleRound: 0,
+  revision: 0,
+  status: 'scored',
+  level: recommendedAction === 'deliver' ? 'none' : 'high',
+  recommendedAction,
+  hardBlocks: [],
+  ...overrides,
+});
+
 function fakeTx(options: {
   recipients?: number;
   maxDeliverySeq?: number | null;
@@ -135,6 +156,8 @@ function fakeTx(options: {
   bec?: Record<string, unknown> | null;
   /** Default: an `allow` row of the round. */
   dlp?: Record<string, unknown> | null;
+  /** Default: a revision-0 `deliver` risk score of the round asked for (step 5.1). */
+  risk?: Record<string, unknown> | null;
 }) {
   const outbox: { data: Record<string, unknown> }[] = [];
   const events: { data: Record<string, unknown> }[] = [];
@@ -150,6 +173,14 @@ function fakeTx(options: {
     dlpScanResult: {
       findFirst: vi.fn((_args: unknown) =>
         Promise.resolve(options.dlp === undefined ? dlpRow('allow') : options.dlp),
+      ),
+    },
+    messageRiskScore: {
+      // Default: the `deliver` row of exactly the round asked for (any round of the test).
+      findFirst: vi.fn((args: { where: Record<string, unknown> }) =>
+        Promise.resolve(
+          options.risk === undefined ? riskRow('deliver', { ...args.where }) : options.risk,
+        ),
       ),
     },
     emailDelivery: {
@@ -562,6 +593,8 @@ describe('DevPassThroughApprover (R5, step 4.1 S15, development only)', () => {
     expect(DEV_PASSTHROUGH_WARNING).toContain('malicious verdicts are held in scanned');
     expect(DEV_PASSTHROUGH_WARNING).toContain('suspicious or malicious BEC results');
     expect(DEV_PASSTHROUGH_WARNING).toContain('DLP actions require_approval, quarantine and block');
+    expect(DEV_PASSTHROUGH_WARNING).toContain('risk recommendations require_approval');
+    expect(DEV_PASSTHROUGH_WARNING).toContain('missing risk scores');
   });
 });
 
@@ -961,6 +994,228 @@ describe('DevPassThroughApprover: DLP actions (step 4.5 D13)', () => {
     expect(await f.handler!(held)).toBe('handled');
     expect(writer.ledger).toEqual([{ consumer: DEV_PASSTHROUGH_CONSUMER, eventId: held.eventId }]);
     expect(outbox).toHaveLength(0);
+  });
+});
+
+describe('DevPassThroughApprover: risk recommendation (step 5.1 R17)', () => {
+  const approverWith = (
+    service = metricsService(),
+    logger: Logger = createLogger({ service: 't', level: 'silent' }),
+    riskHold = true,
+  ) =>
+    new DevPassThroughApprover(
+      feed(),
+      noWriter,
+      RECORDER_TX_TIMEOUT_MS,
+      logger,
+      newMetrics(service),
+      () => NOW,
+      { riskHold },
+    );
+
+  it('decides on the recommendation, hard blocks and error rows (decision table)', () => {
+    const row = (recommendedAction: string, extra: Record<string, unknown> = {}) => ({
+      status: 'scored',
+      level: 'high',
+      recommendedAction,
+      hardBlocks: [],
+      ...extra,
+    });
+    expect(riskHoldDecision(null)).toBe('missing');
+    expect(riskHoldAction(null)).toBe('missing');
+    for (const action of ['deliver', 'tag']) {
+      expect(riskHoldDecision(row(action)), action).toBe('approve');
+    }
+    for (const action of ['require_approval', 'quarantine', 'block']) {
+      expect(riskHoldDecision(row(action)), action).toBe('held');
+      expect(riskHoldAction(row(action)), action).toBe(action);
+    }
+    const hardBlock = row('tag', {
+      hardBlocks: [{ id: 'hb.known_phishing', verdict: 'phishing', action: 'quarantine' }],
+    });
+    expect(riskHoldDecision(hardBlock)).toBe('held');
+    expect(riskHoldAction(hardBlock)).toBe('hard_block');
+    const error = row('quarantine', { status: 'error' });
+    expect(riskHoldDecision(error)).toBe('held');
+    expect(riskHoldAction(error)).toBe('error');
+    expect(riskHoldDecision(row('deliver', { status: 'error' }))).toBe('held');
+    // A malformed hard_blocks value is not a hard block; the action still decides.
+    expect(riskHoldDecision(row('deliver', { hardBlocks: 'x' }))).toBe('approve');
+  });
+
+  it('approves deliver and tag, reading the revision-0 row of the round only', async () => {
+    for (const action of ['deliver', 'tag']) {
+      const t = fakeTx({ recipients: 1, risk: riskRow(action) });
+      const result = await approverWith().approve(event, t.tx as never);
+      expect(result.approvals, action).toHaveLength(1);
+      expect(t.tx.messageRiskScore.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            scanId: 900n,
+            receivedAt: new Date('2026-11-03T11:59:00.000Z'),
+            messageId: 100n,
+            organizationId: 7n,
+            lifecycleRound: 0,
+            revision: 0,
+          },
+        }),
+      );
+    }
+    expect(transition).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['require_approval', 'quarantine', 'block'])(
+    'holds a %s recommendation (counted, info log with ids, level and action only)',
+    async (action) => {
+      const service = metricsService();
+      const info = vi.fn();
+      const logger = { child: () => ({ info, warn: vi.fn() }) } as unknown as Logger;
+      const t = fakeTx({ risk: riskRow(action) });
+      expect(await approverWith(service, logger).approve(event, t.tx as never)).toEqual({
+        approvals: [],
+        recipients: 0,
+      });
+      expect(transition).not.toHaveBeenCalled();
+      expect(t.outbox).toHaveLength(0);
+      const text = await service.metrics();
+      expect(text).toContain(
+        'delivery_approvals_skipped_total{reason="risk_recommendation",service="t"} 1',
+      );
+      expect(text).toContain(`delivery_risk_holds_total{action="${action}",service="t"} 1`);
+      const [fields] = info.mock.calls.at(-1)! as [Record<string, unknown>];
+      expect(fields).toEqual({
+        eventId: event.eventId,
+        messageId: '100',
+        scanId: '900',
+        round: 0,
+        riskLevel: 'high',
+        riskAction: action,
+      });
+    },
+  );
+
+  it('holds a hard block and an error row; holds a missing row with a warning', async () => {
+    const service = metricsService();
+    const warn = vi.fn();
+    const logger = { child: () => ({ info: vi.fn(), warn }) } as unknown as Logger;
+    const approver = approverWith(service, logger);
+    await approver.approve(
+      event,
+      fakeTx({
+        risk: riskRow('tag', {
+          hardBlocks: [{ id: 'hb.dmarc_reject', verdict: 'phishing', action: 'quarantine' }],
+        }),
+      }).tx as never,
+    );
+    await approver.approve(
+      event,
+      fakeTx({ risk: riskRow('quarantine', { status: 'error' }) }).tx as never,
+    );
+    const missing = fakeTx({ risk: null });
+    expect(await approver.approve(event, missing.tx as never)).toEqual({
+      approvals: [],
+      recipients: 0,
+    });
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ messageId: '100', scanId: '900' }),
+      expect.stringContaining('fail-safe'),
+    );
+    expect(transition).not.toHaveBeenCalled();
+    const text = await service.metrics();
+    expect(text).toContain('delivery_risk_holds_total{action="hard_block",service="t"} 1');
+    expect(text).toContain('delivery_risk_holds_total{action="error",service="t"} 1');
+    expect(text).toContain('delivery_risk_holds_total{action="missing",service="t"} 1');
+    expect(text).toContain(
+      'delivery_approvals_skipped_total{reason="risk_recommendation",service="t"} 2',
+    );
+    expect(text).toContain('delivery_approvals_skipped_total{reason="risk_missing",service="t"} 1');
+  });
+
+  it.each([
+    ['organization', { organizationId: 8n }],
+    ['message', { messageId: 101n }],
+    ['scan', { scanId: 901n }],
+    ['round', { lifecycleRound: 1 }],
+    ['revision', { revision: 1 }],
+    ['receivedAt', { receivedAt: new Date('2026-11-03T11:59:00.001Z') }],
+  ])('throws on a shifted read (%s): redelivered, nothing approved', async (_label, shift) => {
+    const service = metricsService();
+    const t = fakeTx({ risk: riskRow('deliver', shift) });
+    await expect(approverWith(service).approve(event, t.tx as never)).rejects.toThrow(
+      InconsistentRiskReadError,
+    );
+    expect(transition).not.toHaveBeenCalled();
+    expect(t.outbox).toHaveLength(0);
+    expect(await service.metrics()).toContain(
+      'delivery_inconsistent_reads_total{read="risk_score",service="t"} 1',
+    );
+  });
+
+  it('keeps the order: every 4.x hold keeps its reason and skips the risk read', async () => {
+    const service = metricsService();
+    const approver = approverWith(service);
+    const dlpEvent = {
+      ...event,
+      payload: scannedPayload({
+        verdict: 'suspicious',
+        engines: [
+          { engine: 'rspamd', required: true, outcome: 'clean', attempts: 1 },
+          { engine: 'bec', required: true, outcome: 'suspicious', attempts: 1 },
+          { engine: 'dlp', required: true, outcome: 'suspicious', attempts: 1 },
+        ],
+      }),
+    };
+    const cases = [
+      { e: scanFailedEvent, t: fakeTx({ risk: riskRow('block') }) },
+      {
+        e: { ...event, payload: scannedPayload({ verdict: 'malicious' }) },
+        t: fakeTx({ risk: riskRow('block') }),
+      },
+      { e: dlpEvent, t: fakeTx({ risk: riskRow('block') }) },
+      {
+        e: dlpEvent,
+        t: fakeTx({ risk: riskRow('block'), bec: becRow('clean'), dlp: dlpRow('quarantine') }),
+      },
+    ];
+    for (const { e, t } of cases) {
+      await approver.approve(e, t.tx as never);
+      expect(t.tx.messageRiskScore.findFirst).not.toHaveBeenCalled();
+    }
+    const text = await service.metrics();
+    for (const reason of ['scan_failed', 'malicious_verdict', 'bec_verdict', 'dlp_action']) {
+      expect(text).toContain(`delivery_approvals_skipped_total{reason="${reason}",service="t"} 1`);
+    }
+    expect(text).not.toContain('reason="risk_recommendation"');
+    // After the 4.x checks pass (an AI-only BEC raise, a DLP alert), the risk row decides.
+    const after = fakeTx({
+      risk: riskRow('quarantine'),
+      bec: becRow('clean'),
+      dlp: dlpRow('alert'),
+    });
+    expect((await approver.approve(dlpEvent, after.tx as never)).approvals).toEqual([]);
+    expect(after.tx.messageRiskScore.findFirst).toHaveBeenCalledTimes(1);
+  });
+
+  it('with DELIVERY_DEV_PASSTHROUGH_RISK_HOLD=false behaves as step 4.6 (no risk read)', async () => {
+    const t = fakeTx({ recipients: 1, risk: riskRow('block') });
+    const result = await approverWith(metricsService(), undefined, false).approve(
+      event,
+      t.tx as never,
+    );
+    expect(result.approvals).toHaveLength(1);
+    expect(t.tx.messageRiskScore.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('defaults to holding on risk when constructed without options', async () => {
+    const t = fakeTx({ risk: riskRow('quarantine') });
+    const approver = new DevPassThroughApprover(
+      feed(),
+      noWriter,
+      RECORDER_TX_TIMEOUT_MS,
+      createLogger({ service: 't', level: 'silent' }),
+      newMetrics(),
+    );
+    expect((await approver.approve(event, t.tx as never)).approvals).toEqual([]);
   });
 });
 

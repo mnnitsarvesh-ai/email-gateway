@@ -55,6 +55,9 @@ flowchart LR
     dlp_policies[dlp_policies, dlp_policy_rules]
     dlp_exceptions
     dlp_config[dlp_custom_patterns, dlp_keyword_dictionaries, dlp_compliance_settings]
+    message_risk_scores[(message_risk_scores P)]
+    risk_scoring_profiles
+    risk_scoring_profile_versions
   end
   subgraph policy[Policy]
     email_policies
@@ -110,6 +113,10 @@ flowchart LR
   organizations --> dlp_exceptions
   organizations --> dlp_config
   dlp_policies --> dlp_exceptions
+  email_scans -.-> message_risk_scores
+  organizations --> risk_scoring_profiles
+  risk_scoring_profiles --> risk_scoring_profile_versions
+  risk_scoring_profile_versions -.-> email_scans
   email_messages -.-> email_deliveries
   delivery_reinjections -.-> email_deliveries
   email_deliveries -.-> delivery_status_events
@@ -505,6 +512,15 @@ erDiagram
   users |o--o{ dlp_custom_patterns : "created_by, updated_by, SET NULL"
   users |o--o{ dlp_keyword_dictionaries : "created_by, updated_by, SET NULL"
   users |o--o{ dlp_compliance_settings : "aadhaar_recorded_by, SET NULL"
+  email_scans ||..o{ message_risk_scores : "scan_id + received_at, one per revision (0, 1)"
+  organizations ||--o| risk_scoring_profiles : "RESTRICT, one per organization"
+  organizations ||--o{ risk_scoring_profile_versions : "RESTRICT"
+  risk_scoring_profiles ||--o{ risk_scoring_profile_versions : "RESTRICT, unique (profile_id, version_no)"
+  risk_scoring_profiles |o..o| risk_scoring_profile_versions : "active_version_id, no FK (cycle)"
+  risk_scoring_profile_versions |o..o{ email_scans : "risk_profile_version_id snapshot (logical)"
+  risk_scoring_profile_versions |o..o{ message_risk_scores : "profile_version_id (logical)"
+  users |o--o{ risk_scoring_profiles : "updated_by, SET NULL"
+  users |o--o{ risk_scoring_profile_versions : "created_by, updated_by, published_by, SET NULL"
   organizations |o--o{ yara_rules : "NULL = platform rule"
   users |o--o{ yara_rules : "updated_by"
   email_scans {
@@ -518,6 +534,7 @@ erDiagram
     json required_engines
     json reason_codes
     datetime deadline_at
+    bigint risk_profile_version_id "nullable, no FK, snapshot at open"
   }
   scan_engine_results {
     bigint id PK
@@ -729,6 +746,32 @@ erDiagram
     bigint aadhaar_recorded_by_user_id FK "nullable"
     datetime aadhaar_review_due_at "nullable"
   }
+  message_risk_scores {
+    bigint id PK
+    datetime received_at PK "PARTITIONED month"
+    bigint scan_id "UK with revision, received_at"
+    tinyint revision "0 round, 1 with sandbox"
+    bigint message_id
+    enum level "none .. critical"
+    enum recommended_action "deliver .. block"
+    bigint profile_version_id "nullable, no FK"
+  }
+  risk_scoring_profiles {
+    bigint id PK
+    char public_id UK
+    bigint organization_id FK "UK"
+    bigint active_version_id "nullable, no FK"
+    int version "CAS"
+  }
+  risk_scoring_profile_versions {
+    bigint id PK
+    char public_id UK
+    bigint organization_id FK
+    bigint profile_id FK "UK with version_no"
+    int version_no
+    enum status "draft, published"
+    json overrides
+  }
   ip_reputation {
     bigint id PK
     varchar ip_address UK
@@ -821,6 +864,8 @@ Step 4.4 ([§3](../plan/steps/12-phishing-bec.md#3-data-model-one-forward-migrat
 Step 4.6 ([§3](../plan/steps/14-sandbox.md#3-data-model-one-forward-migration-sandbox_engine-wp1)): the sandbox engine of the email-worker links each `sandbox_submissions` row (partitioned) to one content-addressed `sandbox_analyses` row by `analysis_id` (a logical reference: no foreign key from a partitioned table); several submissions of different tenants and rounds can share one analysis (`dedupe_key`). `sandbox_analyses` and `sandbox_artifacts` are not partitioned and platform-level (no foreign key to `organizations`); `sandbox_artifacts` references its analysis (`RESTRICT`: the sweeper deletes artifacts first). Sample and artifact bytes live only in the sandbox bucket, sealed.
 
 Step 4.5 ([§3](../plan/steps/13-dlp.md#3-data-model-one-forward-migration-dlp_engine-wp1)): the DLP engine (a stage-1 engine on `scan.dlp`) writes, in the finalize transaction of its final `scan_engine_results` row, one `dlp_scan_results` row per round and, when a reportable finding was sealed into an encrypted S3 evidence object, one `dlp_evidence` row (both partitioned, copy the message's `received_at`, no foreign keys; `matched_policy_id` / `matched_rule_id` are logical references). The six tenant tables are not partitioned and reference `organizations` (`RESTRICT`, deleted explicitly by organization deletion) and `users` (`SET NULL`); rules reference their policy and exceptions their target policy or rule (`RESTRICT`).
+
+Step 5.1 ([§3](../plan/steps/15-risk-scoring.md#3-data-model-one-forward-migration-risk_scoring-wp1)): the email-worker writes one `message_risk_scores` row per scan round and revision (partitioned, copies the message's `received_at`, no foreign keys): revision 0 in the transaction that completes the round, revision 1 (the round's inputs plus the late sandbox final) once, both under the `email_scans` row lock. Each organization has at most one `risk_scoring_profiles` row (`RESTRICT` to `organizations`), whose versions are `risk_scoring_profile_versions` rows (`RESTRICT` to the profile and the organization, `SET NULL` to the three user columns). The active version is the profile's `active_version_id` (a logical reference, no foreign key: it would form a cycle with `profile_id`). When a round opens, the email-worker copies that pointer into `email_scans.risk_profile_version_id` (n rounds to one version, logical), and `message_risk_scores.profile_version_id` records the version actually used (NULL = the platform default).
 
 ```mermaid
 erDiagram

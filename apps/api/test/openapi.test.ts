@@ -340,7 +340,8 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
         !op.key.includes('/deliveries') &&
         !op.key.endsWith('/scans') &&
         !op.key.endsWith('/bec-feedback') &&
-        !op.key.endsWith('/dlp-evidence'),
+        !op.key.endsWith('/dlp-evidence') &&
+        !op.key.endsWith('/risk/dry-run'),
     );
     expect(messageOps.map((op) => op.key).sort()).toEqual([...expected].sort());
 
@@ -494,6 +495,79 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     expect(JSON.stringify(op('/api/v1/scan-settings', 'get').responses)).toContain(
       'freemailExtraDomains',
     );
+  });
+
+  it('documents the step 5.1 risk scoring endpoints (R15) with their errors and disclaimers', () => {
+    const byKey = new Map(operations(doc).map((op) => [op.key, op]));
+    const expected = [
+      'GET /api/v1/risk-scoring/platform-profile',
+      'GET /api/v1/risk-scoring/profile',
+      'GET /api/v1/risk-scoring/profile/versions',
+      'POST /api/v1/risk-scoring/profile/versions',
+      'GET /api/v1/risk-scoring/profile/versions/{versionId}',
+      'PUT /api/v1/risk-scoring/profile/versions/{versionId}',
+      'DELETE /api/v1/risk-scoring/profile/versions/{versionId}',
+      'POST /api/v1/risk-scoring/profile/versions/{versionId}/publish',
+      'POST /api/v1/risk-scoring/profile/versions/{versionId}/activate',
+      'POST /api/v1/risk-scoring/profile/reset',
+      'POST /api/v1/messages/{messageId}/scans/{scanId}/risk/dry-run',
+    ];
+    const riskOps = operations(doc).filter((op) => op.tags.includes('risk-scoring'));
+    expect(riskOps.map((op) => op.key).sort()).toEqual([...expected].sort());
+    for (const key of expected) {
+      expect(byKey.get(key)?.tags, key).toEqual(['risk-scoring']);
+      expect(byKey.get(key)!.security.length, key).toBeGreaterThan(0);
+    }
+    type Op = { responses: Record<string, unknown>; description?: string };
+    const op = (path: string, method: string) => (doc.paths[path] as Record<string, Op>)[method]!;
+    const create = op('/api/v1/risk-scoring/profile/versions', 'post');
+    for (const code of [
+      'risk_profile_invalid',
+      'risk_profile_limit_reached',
+      'inconsistent_read',
+    ]) {
+      expect(JSON.stringify(create.responses)).toContain(code);
+    }
+    const update = op('/api/v1/risk-scoring/profile/versions/{versionId}', 'put');
+    for (const code of ['risk_profile_version_conflict', 'risk_profile_version_immutable']) {
+      expect(JSON.stringify(update.responses)).toContain(code);
+    }
+    const activate = op('/api/v1/risk-scoring/profile/versions/{versionId}/activate', 'post');
+    expect(JSON.stringify(activate.responses)).toContain('risk_profile_version_not_published');
+    const dryRun = op('/api/v1/messages/{messageId}/scans/{scanId}/risk/dry-run', 'post');
+    for (const code of [
+      'message_not_found',
+      'scan_not_found',
+      'risk_profile_version_not_found',
+      'scan_round_not_complete',
+      'risk_revision_unavailable',
+      'risk_profile_invalid',
+    ]) {
+      expect(JSON.stringify(dryRun.responses)).toContain(code);
+    }
+    expect(dryRun.description).toContain('Writes nothing');
+    for (const [path, method] of [
+      ['/api/v1/risk-scoring/platform-profile', 'get'],
+      ['/api/v1/risk-scoring/profile', 'get'],
+      ['/api/v1/risk-scoring/profile/versions/{versionId}/publish', 'post'],
+      ['/api/v1/messages/{messageId}/scans/{scanId}/risk/dry-run', 'post'],
+    ] as const) {
+      const description = op(path, method).description ?? '';
+      expect(description, path).toContain('recommends and does not enforce');
+      expect(description, path).toContain('not validated detection accuracy');
+    }
+    for (const [path, method] of [
+      ['/api/v1/risk-scoring/profile/versions/{versionId}/publish', 'post'],
+      ['/api/v1/risk-scoring/profile/versions/{versionId}/activate', 'post'],
+      ['/api/v1/risk-scoring/profile/reset', 'post'],
+    ] as const) {
+      expect(op(path, method).description, path).toContain('next scan round only');
+    }
+    // The risk section of the scans read API.
+    const scans = op('/api/v1/messages/{messageId}/scans', 'get');
+    expect(JSON.stringify(scans.responses)).toContain('recommendedAction');
+    expect(JSON.stringify(scans.responses)).toContain('inputSha256');
+    expect(scans.description).toContain('risk');
   });
 
   it('matches the committed snapshot docs/api/openapi.json', async () => {

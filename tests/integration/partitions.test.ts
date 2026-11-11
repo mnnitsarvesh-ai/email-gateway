@@ -43,9 +43,17 @@ async function partitionNames(table: string): Promise<string[]> {
 }
 
 describe('partition maintenance', () => {
-  it('manages the 30 partitioned tables, including the step 2.3, 3.1, 4.1, 4.2, 4.3, 4.4 and 4.5 tables', () => {
-    // Step 4.6 §3 adds sandbox_analyses and sandbox_artifacts unpartitioned (count unchanged).
-    expect(PARTITION_REGISTRY).toHaveLength(30);
+  it('manages the 31 partitioned tables, including the step 2.3, 3.1, 4.1, 4.2, 4.3, 4.4, 4.5 and 5.1 tables', () => {
+    // Step 4.6 §3 adds sandbox_analyses and sandbox_artifacts unpartitioned; step 5.1 §3 adds
+    // message_risk_scores (partitioned) and the unpartitioned risk_scoring_profiles and
+    // risk_scoring_profile_versions.
+    expect(PARTITION_REGISTRY).toHaveLength(31);
+    expect(PARTITION_REGISTRY.map((s) => s.table)).not.toEqual(
+      expect.arrayContaining(['risk_scoring_profiles']),
+    );
+    expect(PARTITION_REGISTRY.map((s) => s.table)).not.toEqual(
+      expect.arrayContaining(['risk_scoring_profile_versions']),
+    );
     expect(PARTITION_REGISTRY.map((s) => s.table)).not.toEqual(
       expect.arrayContaining(['sandbox_analyses']),
     );
@@ -68,6 +76,7 @@ describe('partition maintenance', () => {
         'bec_scan_results',
         'dlp_scan_results',
         'dlp_evidence',
+        'message_risk_scores',
       ]),
     );
   });

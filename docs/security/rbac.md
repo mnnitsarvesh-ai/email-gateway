@@ -251,6 +251,22 @@ Catalog 45 → 49 (seed data only, `pnpm db:seed`; [design](../plan/steps/13-dlp
 - API keys may hold `dlp:read` and `dlp:manage` (configuration is integration data); evidence reads and the Aadhaar basis need a user, and the evidence purges an MFA session, so API keys are refused there (`403`).
 - The `dlp` scan settings use the existing keys: `policy:read` (`GET /scan-settings`) and `scan:settings_manage` (`PUT`/`DELETE /scan-settings/dlp`).
 
+## Risk scoring (step 5.1)
+
+No new permission ([design](../plan/steps/15-risk-scoring.md) R15, §7: profiles are policy configuration). Every route takes the organization from the authenticated scope only (another organization's id → `404`); API keys may call them within their scopes.
+
+| Permission                       | Routes                                                                                                                                                    |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `policy:read`                    | `GET /risk-scoring/platform-profile`, `GET /risk-scoring/profile`, `GET /risk-scoring/profile/versions`, `GET /risk-scoring/profile/versions/{versionId}` |
+| `policy:manage`                  | `POST /risk-scoring/profile/versions`, `PUT` and `DELETE /risk-scoring/profile/versions/{versionId}` (drafts only)                                        |
+| `policy:publish`                 | `POST /risk-scoring/profile/versions/{versionId}/publish`, `POST /risk-scoring/profile/versions/{versionId}/activate`, `POST /risk-scoring/profile/reset` |
+| `policy:manage` + `message:read` | `POST /messages/{messageId}/scans/{scanId}/risk/dry-run` (reads a stored round; writes nothing)                                                           |
+| `message:read`                   | The `risk` section of `GET /messages/{messageId}/scans`                                                                                                   |
+
+- With the default roles: `organization_admin` holds all of them; `security_analyst` reads, edits drafts and runs dry-runs but **cannot publish** (no `policy:publish`, verified in the stack suite `risk-smtp`); `platform_admin`, `domain_admin`, `compliance_auditor` and `read_only_user` read profiles (`policy:read`; `quarantine_reviewer` does not); every system role sees the `risk` section (`message:read`).
+- **The `risk` section and DLP facts.** A score's `evidence.dlp` carries the round's DLP action, coverage and maximum severity, and its contributions name `dlp:action.*` / `dlp:severity.*` assertions. These are the same facts the `dlp` engine entry already shows to every `message:read` holder (outcome and `dlp.action.*` / detector reason codes); findings, masked samples and policy or rule ids stay behind `dlp:read`. This is deliberate (step 5.1 WP4 §12).
+- **Audit.** Every profile change is audited in its transaction (`risk_profile.draft_created`, `draft_updated`, `draft_deleted`, `published`, `activated`, `reset`) with public ids, version numbers, hashes, the base profile and the changed override paths only (never values or the change note). The dry-run is not audited because it writes nothing.
+
 ## Custom roles
 
 Organizations with `role:manage` can define their own roles (`POST /roles`, `PUT /roles/{key}`, `DELETE /roles/{key}`; user principals only, not API keys):

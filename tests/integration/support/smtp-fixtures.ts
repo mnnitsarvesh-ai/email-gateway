@@ -487,6 +487,10 @@ export class SmtpFixtures {
         await this.deleteBecTenantRows(ids);
         // Step 4.5: the DLP tenant tables (foreign keys to organizations, Restrict).
         await this.deleteDlpTenantRows(ids);
+        // Step 5.1: risk scoring profile versions, then the profile row (RESTRICT keys; the
+        // order of the api's organization purge, after the score rows of deleteScanRows).
+        await this.prisma.riskScoringProfileVersion.deleteMany({ where });
+        await this.prisma.riskScoringProfile.deleteMany({ where });
         await this.prisma.bounceEvent.deleteMany({ where });
         await this.prisma.deliverySuppression.deleteMany({ where });
         await this.prisma.organizationLimit.deleteMany({ where });
@@ -677,6 +681,9 @@ export class SmtpFixtures {
     // org prefix in S3).
     await this.prisma.dlpEvidence.deleteMany({ where });
     await this.prisma.dlpScanResult.deleteMany({ where });
+    // Step 5.1 (docs/plan/steps/15-risk-scoring.md §3, R14): one risk row per round and
+    // revision, written by the completion (and late sandbox) transaction; no foreign keys.
+    await this.prisma.messageRiskScore.deleteMany({ where });
     await this.prisma.emailAuthResult.deleteMany({ where });
     await this.prisma.scanEngineResult.deleteMany({ where });
     await this.prisma.emailScan.deleteMany({ where });

@@ -32,6 +32,7 @@ import {
   type UrlPlatformSettings,
   urlPlatformSettingsFromEnv,
 } from '@email-gateway/security-contracts';
+import { isPlatformProfileId, RISK_PLATFORM_PROFILE_IDS } from '@email-gateway/risk-scoring';
 import { z } from 'zod';
 import {
   checkDohUrl,
@@ -763,6 +764,23 @@ export function validateSandboxConfig(
   }
 }
 
+/**
+ * Risk scoring (step 5.1 R16, docs/plan/steps/15-risk-scoring.md §5): the shipped platform
+ * profile tenants' overrides apply to (validated against `RISK_PLATFORM_PROFILES`; the same key
+ * the email-worker reads) and the per-organization cap on profile versions (drafts and
+ * published).
+ */
+const riskConfigShape = {
+  RISK_PLATFORM_PROFILE: z
+    .string()
+    .default('rsk-default/1')
+    .refine(isPlatformProfileId, {
+      message: `must be one of ${RISK_PLATFORM_PROFILE_IDS.join(', ')}`,
+    }),
+  /** Most risk profile versions (drafts + published) per organization (R15). */
+  RISK_PROFILE_MAX_VERSIONS: int(10, 1000).default(200),
+};
+
 /** The validated Rspamd platform settings of the api config (S8). */
 export function rspamdPlatformSettingsOf(
   cfg: Pick<ScanConfigKeys, (typeof RSPAMD_PLATFORM_ENV_KEYS)[keyof RspamdPlatformSettings]>,
@@ -820,6 +838,7 @@ export const apiConfigSchema = baseConfigSchema
   .extend(becConfigShape)
   .extend(dlpConfigShape)
   .extend(sandboxConfigShape)
+  .extend(riskConfigShape)
   .extend({
     /** Comma-separated allow-list of admin portal origins. */
     CORS_ORIGINS: z

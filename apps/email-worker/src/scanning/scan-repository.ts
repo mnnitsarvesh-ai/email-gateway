@@ -30,6 +30,8 @@ import type {
   UrlChildRows,
 } from './engine';
 import type { EngineSettingsRow } from './registry';
+import { RISK_FINAL_SELECT, toRiskFinal } from './risk/risk-reader';
+import type { RiskScorer, RiskScoreRecord } from './risk/risk-scorer';
 import {
   type AttemptInput,
   type CompletionContext,
@@ -103,6 +105,7 @@ interface ScanRow {
   required_engines: unknown;
   started_at: Date | null;
   deadline_at: Date | null;
+  risk_profile_version_id: bigint | number | null;
 }
 
 function stringArray(value: unknown): string[] {
@@ -122,6 +125,8 @@ function toRound(row: ScanRow): ScanRound {
     requiredEngines: stringArray(row.required_engines),
     startedAt,
     deadlineAt: row.deadline_at ?? startedAt,
+    riskProfileVersionId:
+      row.risk_profile_version_id === null ? null : BigInt(row.risk_profile_version_id),
   };
 }
 
@@ -133,7 +138,10 @@ const decimal = (value: number | null): Prisma.Decimal | number | null =>
  * 6). Every statement is scoped by the writer row's `(message_id, received_at)` and its
  * organization. Lock order in every transaction: message row (`lockLifecycle`) → scan row
  * (`SELECT … FOR UPDATE`) → result rows. The lifecycle is changed only through
- * `@email-gateway/message-lifecycle` (one-door rule).
+ * `@email-gateway/message-lifecycle` (one-door rule). Step 5.1 (R13, ADR-0042): the round
+ * snapshots the organization's active risk profile version when it opens, and its completion
+ * writes the revision-0 risk score (and revision 1 when a sandbox final is already present)
+ * before the lifecycle transition, in the same transaction.
  */
 export class ScanRepository implements ScanStore {
   private readonly txPrisma: PrismaClient;
@@ -142,6 +150,8 @@ export class ScanRepository implements ScanStore {
     private readonly prisma: PrismaClient,
     /** SCAN_DB_TIMEOUT_MS: timeout and maxWait of every writer transaction. */
     txTimeoutMs: number,
+    /** The worker's risk scorer (step 5.1 R13): completion scores every round. */
+    private readonly risk: RiskScorer,
     private readonly lifecycleMetrics?: LifecycleMetrics,
     private readonly hooks: ScanRepositoryHooks = {},
   ) {
@@ -268,6 +278,8 @@ export class ScanRepository implements ScanStore {
       }
 
       const deadlineAt = new Date(input.now.getTime() + input.deadlineSeconds * 1000);
+      // Step 5.1 R13: the profile snapshot (the first opener's value is kept by INSERT IGNORE).
+      const riskProfileVersionId = await this.risk.profileSnapshot(tx, message.organizationId);
       await tx.emailScan.createMany({
         data: [
           {
@@ -281,6 +293,7 @@ export class ScanRepository implements ScanStore {
             deadlineAt,
             requiredEngines: json(input.requiredEngines),
             triggerEventId: input.eventId,
+            riskProfileVersionId,
           },
         ],
         // INSERT IGNORE: the round's row exists when another engine (or a redelivery) opened it.
@@ -344,7 +357,9 @@ export class ScanRepository implements ScanStore {
   }
 
   private async finalizeOnce(input: FinalizeInput): Promise<FinalizeResult> {
+    const risk: RiskScoreRecord[] = [];
     const result = await processOnce(this.txPrisma, input.consumer, input.eventId, async (tx) => {
+      risk.length = 0;
       const snapshot = await this.lockMessage(tx, input.round);
       const scan = await this.lockScan(tx, input.round);
       let inserted = false;
@@ -369,10 +384,12 @@ export class ScanRepository implements ScanStore {
             input.completion,
             inserted && input.final ? input.final.engine : null,
             stageTriggers,
+            risk,
           )
         : ({ kind: 'already_completed' } as const);
       return { inserted, completion, stageTriggers };
     });
+    if (result.status !== 'duplicate') this.risk.record(risk);
     return result.status === 'duplicate'
       ? { kind: 'duplicate' }
       : { kind: 'handled', ...result.result };
@@ -404,8 +421,10 @@ export class ScanRepository implements ScanStore {
     }));
   }
 
-  sweepRound(candidate: SweepCandidate, now: Date): Promise<SweepResult> {
-    return this.txPrisma.$transaction(async (tx): Promise<SweepResult> => {
+  async sweepRound(candidate: SweepCandidate, now: Date): Promise<SweepResult> {
+    const risk: RiskScoreRecord[] = [];
+    const result = await this.txPrisma.$transaction(async (tx): Promise<SweepResult> => {
+      risk.length = 0;
       const ref = { ...candidate, scanId: candidate.scanId };
       const snapshot = await lockLifecycle(tx, {
         id: ref.messageId,
@@ -442,13 +461,23 @@ export class ScanRepository implements ScanStore {
         });
         finalized.push(engine);
       }
-      const completion = await this.complete(tx, round, snapshot, {
-        causationEventId: null,
-        correlationId: `message:${round.messageId.toString()}`,
-        now,
-      });
+      const completion = await this.complete(
+        tx,
+        round,
+        snapshot,
+        {
+          causationEventId: null,
+          correlationId: `message:${round.messageId.toString()}`,
+          now,
+        },
+        null,
+        [],
+        risk,
+      );
       return { finalized, completion };
     });
+    this.risk.record(risk);
+    return result;
   }
 
   // -------------------------------------------------------------------------------------------
@@ -471,7 +500,7 @@ export class ScanRepository implements ScanStore {
   ): Promise<ScanRow | null> {
     const rows = await tx.$queryRaw<ScanRow[]>`
       SELECT id, received_at, message_id, organization_id, status, lifecycle_round, scan_kind,
-             required_engines, started_at, deadline_at
+             required_engines, started_at, deadline_at, risk_profile_version_id
       FROM email_scans
       WHERE id = ${scanId} AND received_at = ${receivedAt}
       FOR UPDATE`;
@@ -510,6 +539,7 @@ export class ScanRepository implements ScanStore {
         requiredEngines: true,
         startedAt: true,
         deadlineAt: true,
+        riskProfileVersionId: true,
       },
     });
     if (!row) return null;
@@ -524,6 +554,7 @@ export class ScanRepository implements ScanStore {
       required_engines: row.requiredEngines,
       started_at: row.startedAt,
       deadline_at: row.deadlineAt,
+      risk_profile_version_id: row.riskProfileVersionId,
     });
   }
 
@@ -1104,8 +1135,11 @@ export class ScanRepository implements ScanStore {
 
   /**
    * S5 step 6 / S6 in the caller's transaction (message and scan rows locked): when every
-   * required engine has its final row, aggregate, complete the `email_scans` row, apply E6/E7
-   * and write `mail.message.scanned.v1` (only when the transition applied).
+   * required engine has its final row, aggregate, complete the `email_scans` row, write the
+   * round's risk score (step 5.1 R13: revision 0, and revision 1 when a non-skipped sandbox
+   * final is already present; written whether or not the transition applies, the score belongs
+   * to the round), apply E6/E7 and write `mail.message.scanned.v1` (only when the transition
+   * applied). `risk` receives what was scored, recorded by the caller after the commit.
    */
   private async complete(
     tx: Prisma.TransactionClient,
@@ -1114,13 +1148,14 @@ export class ScanRepository implements ScanStore {
     ctx: CompletionContext,
     insertedEngine: string | null = null,
     stageTriggers: string[] = [],
+    risk: RiskScoreRecord[] = [],
   ): Promise<CompletionResult> {
     const row = await this.lockScanRow(tx, scan.scanId, scan.receivedAt);
     if (!row || row.status !== 'running') return { kind: 'already_completed' };
     const round = toRound(row);
     const finals = await tx.scanEngineResult.findMany({
       where: { scanId: round.scanId, receivedAt: round.receivedAt, isFinal: true },
-      select: { engine: true, outcome: true, errorCode: true, reasonCodes: true, attempt: true },
+      select: RISK_FINAL_SELECT,
     });
     const required = round.requiredEngines;
     // Step 4.4 B2: before the "not complete" return, trigger the stage-2 engines whose last
@@ -1154,6 +1189,17 @@ export class ScanRepository implements ScanStore {
         completedAt: ctx.now,
       },
     });
+
+    // Step 5.1 R13: the round's risk score, before the transition and the scanned.v1 row (its
+    // consumers can rely on the row). The sandbox never enters revision 0 (order independence);
+    // a sandbox final written before completion gives revision 1 here, else the sandbox
+    // finalizer writes it when its final arrives (whichever transaction comes second).
+    const riskFinals = finals.map(toRiskFinal);
+    const scored = { scanStatus: aggregate.scanStatus, finals: riskFinals };
+    risk.push(await this.risk.scoreRound(tx, round, 0, scored));
+    if (finals.some((f) => f.engine === 'sandbox' && f.outcome !== 'skipped')) {
+      risk.push(await this.risk.scoreRound(tx, round, 1, scored));
+    }
 
     const outcome = await transitionMessage(
       tx,

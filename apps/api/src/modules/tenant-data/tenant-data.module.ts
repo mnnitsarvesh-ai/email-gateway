@@ -6,13 +6,15 @@ import { DomainsRepository } from './domains.repository';
 import { MessagesRepository } from './messages.repository';
 import { PoliciesRepository } from './policies.repository';
 import { QuarantineRepository } from './quarantine.repository';
+import { RiskTenantDataRepository } from './risk-tenant-data.repository';
 
 /**
  * Read-only, tenant-scoped repositories (D9, §10) for later steps (domains in 2.1, policies,
  * messages and quarantine afterwards). No controllers: they establish the scoping rule (every
  * query takes a `TenantScope` first) and are covered by the isolation tests. Step 4.4:
  * BecTenantDataRepository deletes an organization's BEC rows for the organization purge; step
- * 4.5: DlpTenantDataRepository its DLP rows and evidence objects.
+ * 4.5: DlpTenantDataRepository its DLP rows and evidence objects; step 5.1:
+ * RiskTenantDataRepository its risk scores and risk scoring profiles.
  */
 @Module({
   providers: [
@@ -23,6 +25,7 @@ import { QuarantineRepository } from './quarantine.repository';
     BecTenantDataRepository,
     DlpEvidenceStore,
     DlpTenantDataRepository,
+    RiskTenantDataRepository,
   ],
   exports: [
     DomainsRepository,
@@ -31,6 +34,7 @@ import { QuarantineRepository } from './quarantine.repository';
     QuarantineRepository,
     BecTenantDataRepository,
     DlpTenantDataRepository,
+    RiskTenantDataRepository,
   ],
 })
 export class TenantDataModule {}

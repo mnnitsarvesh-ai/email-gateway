@@ -53,6 +53,7 @@ export class DeliveryMetrics {
   readonly becAiOnlyNotHeld: Counter;
   readonly dlpHolds: Counter<'action'>;
   readonly dlpAlertsApproved: Counter;
+  readonly riskHolds: Counter<'action'>;
 
   constructor(metrics: MetricsService) {
     this.approvals = metrics.counter(
@@ -62,7 +63,7 @@ export class DeliveryMetrics {
     );
     this.approvalsSkipped = metrics.counter(
       'delivery_approvals_skipped_total',
-      'Scanned messages the dev pass-through did not approve: scan_failed (a required engine failed), malicious_verdict (held in scanned, step 4.2 A15), bec_verdict (a suspicious or malicious bec engine result, held in scanned, step 4.4 B17), dlp_action (the round DLP action is require_approval, quarantine or block, or its dlp_scan_results row is missing; held in scanned, step 4.5 D13) or the lifecycle refused the approval (lifecycle_<result>)',
+      'Scanned messages the dev pass-through did not approve: scan_failed (a required engine failed), malicious_verdict (held in scanned, step 4.2 A15), bec_verdict (a suspicious or malicious bec engine result, held in scanned, step 4.4 B17), dlp_action (the round DLP action is require_approval, quarantine or block, or its dlp_scan_results row is missing; held in scanned, step 4.5 D13), risk_recommendation (the round revision-0 risk score recommends require_approval, quarantine or block, has a hard block or is an error row; step 5.1 R17), risk_missing (no revision-0 risk score row; held fail-safe) or the lifecycle refused the approval (lifecycle_<result>)',
       ['reason'],
     );
     this.approvalsRejected = metrics.counter(
@@ -142,7 +143,7 @@ export class DeliveryMetrics {
     );
     this.inconsistentReads = metrics.counter(
       'delivery_inconsistent_reads_total',
-      'Writer reads whose identifying columns did not echo the request: the reinjector (message, deliveries, recipients, approval; the row is rescheduled with the attempt refunded, step 4.2 §6.2) and the dev pass-through (url_rewrite, bec_result, dlp_result; the event is redelivered)',
+      'Writer reads whose identifying columns did not echo the request: the reinjector (message, deliveries, recipients, approval; the row is rescheduled with the attempt refunded, step 4.2 §6.2) and the dev pass-through (url_rewrite, bec_result, dlp_result, risk_score; the event is redelivered)',
       ['read'],
     );
     this.becAiOnlyNotHeld = metrics.counter(
@@ -152,6 +153,11 @@ export class DeliveryMetrics {
     this.dlpHolds = metrics.counter(
       'delivery_dlp_holds_total',
       'Dev pass-through: scanned messages not approved because of the round DLP action (require_approval, quarantine, block; missing = no dlp_scan_results row, held fail-safe), step 4.5 D13',
+      ['action'],
+    );
+    this.riskHolds = metrics.counter(
+      'delivery_risk_holds_total',
+      'Dev pass-through: scanned messages not approved because of the round revision-0 risk score (step 5.1 R17), by action: require_approval, quarantine, block (the recommendation), hard_block, error (a scoring error row) or missing (no row, held fail-safe)',
       ['action'],
     );
     this.dlpAlertsApproved = metrics.counter(

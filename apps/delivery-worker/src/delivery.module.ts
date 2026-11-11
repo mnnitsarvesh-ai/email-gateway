@@ -175,6 +175,8 @@ export class DeliveryModule {
             txBudgetMs,
             logger,
             metrics,
+            () => new Date(),
+            { riskHold: config.DELIVERY_DEV_PASSTHROUGH_RISK_HOLD },
           ),
         inject: [PrismaService, AdvisoryLocks, DeliveryMetrics],
       },

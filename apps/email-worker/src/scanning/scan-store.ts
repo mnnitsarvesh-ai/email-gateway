@@ -46,6 +46,11 @@ export interface ScanRound {
   requiredEngines: string[];
   startedAt: Date;
   deadlineAt: Date;
+  /**
+   * `email_scans.risk_profile_version_id` (step 5.1 R13): the organization's active risk profile
+   * version when the round opened; null = the platform default. Completion scores with it.
+   */
+  riskProfileVersionId: bigint | null;
 }
 
 export interface OpenRoundInput {

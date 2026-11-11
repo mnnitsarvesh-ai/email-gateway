@@ -15,6 +15,8 @@ import type { Logger } from '@email-gateway/logger';
 import type { WorkerConfig } from '../../config';
 import type { LeaderLock } from '../deadline-sweeper';
 import { S3PartReader } from '../parts/part-reader';
+import { RiskMetrics } from '../risk/risk-metrics';
+import { createRiskScorer, type RiskScorer } from '../risk/risk-scorer';
 import { createSandboxDispatchConsumer, SandboxDispatcher } from './sandbox-dispatcher';
 import { sandboxPlatformFromConfig } from './sandbox-config';
 import { SandboxMetrics } from './sandbox-metrics';
@@ -60,12 +62,17 @@ export function createSandboxJobs(options: {
   lockName?: string;
   organizationIds?: readonly bigint[];
   now?: () => Date;
+  /** The worker's risk scorer (step 5.1 R13 (a)); default: one on this registry. */
+  risk?: RiskScorer;
 }): SandboxJobs {
   const { config, logger } = options;
   const metrics = SandboxMetrics.for(options.registry);
   const store = new PrismaSandboxStore(options.prisma, {
     txTimeoutMs: config.SCAN_DB_TIMEOUT_MS,
     ...(options.organizationIds ? { organizationIds: options.organizationIds } : {}),
+    risk:
+      options.risk ??
+      createRiskScorer({ config, metrics: RiskMetrics.for(options.registry), logger }),
   });
   const objects = new S3SandboxObjects(
     options.s3.client,

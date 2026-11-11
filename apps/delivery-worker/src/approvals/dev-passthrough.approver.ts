@@ -21,7 +21,7 @@ import type { ApprovalFeed } from './approval-feed';
 export const DEV_PASSTHROUGH_CONSUMER = 'delivery-worker.dev-passthrough-scanned';
 
 export const DEV_PASSTHROUGH_WARNING =
-  'DEV PASS-THROUGH ENABLED: mail is delivered after scanning without policy; malicious verdicts are held in scanned, and so are suspicious or malicious BEC results and DLP actions require_approval, quarantine and block (not production behaviour)';
+  'DEV PASS-THROUGH ENABLED: mail is delivered after scanning without policy; malicious verdicts are held in scanned, and so are suspicious or malicious BEC results, DLP actions require_approval, quarantine and block, and (DELIVERY_DEV_PASSTHROUGH_RISK_HOLD) risk recommendations require_approval, quarantine and block, hard blocks, risk scoring errors and missing risk scores (not production behaviour)';
 
 /** The phishing/BEC engine (step 4.4 B1); its result is held by the pass-through (B17). */
 export const BEC_ENGINE = 'bec';
@@ -104,6 +104,66 @@ export class InconsistentDlpResultReadError extends Error {
   }
 }
 
+/** Risk recommendations the pass-through never approves (step 5.1 R17). */
+const HELD_RISK_ACTIONS: ReadonlySet<string> = new Set(['require_approval', 'quarantine', 'block']);
+
+/** The revision-0 `message_risk_scores` columns the pass-through decides on (R11 mapping). */
+export interface RiskRoundScore {
+  status: string;
+  level: string;
+  recommendedAction: string;
+  hardBlocks: unknown;
+}
+
+const hasHardBlocks = (value: unknown): boolean => Array.isArray(value) && value.length > 0;
+
+/**
+ * The pass-through decision for the round's revision-0 risk score (step 5.1 R17, ADR-0042
+ * decision 6): held when the recommendation is `require_approval`, `quarantine` or `block`, when
+ * a hard block fired, or for a scoring error row; `missing` (held, fail-safe) without a row;
+ * `deliver` and `tag` are approved. The risk result can only add holds to the 4.x checks.
+ */
+export function riskHoldDecision(row: RiskRoundScore | null): 'approve' | 'held' | 'missing' {
+  if (row === null) return 'missing';
+  if (row.status === 'error') return 'held';
+  if (HELD_RISK_ACTIONS.has(row.recommendedAction)) return 'held';
+  return hasHardBlocks(row.hardBlocks) ? 'held' : 'approve';
+}
+
+/**
+ * The `action` label of `delivery_risk_holds_total` for a held round (R19): `error` for a
+ * scoring error row, the recommended action when it holds, `hard_block` for a hard block whose
+ * action did not (defence in depth: a hard block always recommends at least quarantine),
+ * `missing` without a row.
+ */
+export function riskHoldAction(row: RiskRoundScore | null): string {
+  if (row === null) return 'missing';
+  if (row.status === 'error') return 'error';
+  if (HELD_RISK_ACTIONS.has(row.recommendedAction)) return row.recommendedAction;
+  return 'hard_block';
+}
+
+/**
+ * A writer read of `message_risk_scores` returned a row other than the one asked for (Prisma 6
+ * wrong read, step 4.2 §6, step 5.1 §6). Thrown inside the ledger transaction: nothing is
+ * approved, the event is redelivered.
+ */
+export class InconsistentRiskReadError extends Error {
+  constructor() {
+    super('inconsistent read of message_risk_scores');
+    this.name = 'InconsistentRiskReadError';
+  }
+}
+
+/** Options of the pass-through (step 5.1 R16). */
+export interface DevPassThroughOptions {
+  /**
+   * DELIVERY_DEV_PASSTHROUGH_RISK_HOLD (default true): also hold on the round's revision-0 risk
+   * recommendation (R17). False restores the step 4.6 behaviour (diagnosis only).
+   */
+  riskHold: boolean;
+}
+
 /**
  * A writer read of `url_rewrites` returned a row other than the one asked for (Prisma 6 wrong
  * read, step 4.2 §6). Thrown inside the ledger transaction: nothing is approved, the event is
@@ -140,7 +200,8 @@ export interface PassThroughResult {
  * `outcome = scanned` into `mail.delivery.approved.v1` (`source = dev_passthrough`) for every
  * recipient of the message whose `email_recipients.status` is `pending`, so the stack can be
  * tested end to end before policy (5.2) exists. **This is not production behaviour: it delivers
- * every scanned message without policy, except a `malicious` verdict.** Config validation refuses it
+ * every scanned message without policy, except the holds listed below (a `malicious` verdict,
+ * BEC and DLP holds, and the step 5.1 risk holds).** Config validation refuses it
  * unless `APP_ENV` is `local` or `ci`; it starts from the outbox position at its first start
  * (never replays old mail). Step 5.2 replaces it with the policy engine's approvals.
  *
@@ -181,6 +242,20 @@ export interface PassThroughResult {
  *   exists). The row is read in this transaction and echo-checked (organization, message,
  *   `received_at`, scan, round; a shifted read throws `InconsistentDlpResultReadError`,
  *   `delivery_inconsistent_reads_total{read="dlp_result"}`, the event is redelivered);
+ * - with DELIVERY_DEV_PASSTHROUGH_RISK_HOLD (default true; step 5.1 R17, checked after the four
+ *   cases above, whose order, reasons, metrics and logs are unchanged): `outcome = scanned`
+ *   whose round's **revision-0** `message_risk_scores` row recommends `require_approval`,
+ *   `quarantine` or `block`, has a non-empty `hard_blocks` list or is a scoring error row
+ *   (`status = error`): ledger row only, `delivery_approvals_skipped_total{reason=
+ *   "risk_recommendation"}`, `delivery_risk_holds_total{action}` (the recommended action, or
+ *   `hard_block` / `error`), an info log with the ids, level and action only; held in
+ *   `scanned`. A missing row is held too (fail-safe; `reason="risk_missing"`,
+ *   `delivery_risk_holds_total{action="missing"}`, warn). `deliver` and `tag` are approved. The
+ *   row is read in this transaction and echo-checked (organization, message, `received_at`,
+ *   scan, round, revision; a shifted read throws `InconsistentRiskReadError`,
+ *   `delivery_inconsistent_reads_total{read="risk_score"}`, the event is redelivered). Revision 1
+ *   (the late sandbox result) is never read: the sandbox never changes delivery (ADR-0040). 5.1
+ *   only recommends; this hold exists in local/ci only;
  * - a message that is not `scanned` in that round (another stage or an operator moved it, a
  *   rescan superseded the round) or that does not exist for the envelope's organization
  *   (`delivery_approvals_skipped_total{reason="lifecycle_<result>"}`);
@@ -210,6 +285,7 @@ export class DevPassThroughApprover {
     logger: Logger,
     private readonly metrics: DeliveryMetrics,
     private readonly now: () => Date = () => new Date(),
+    private readonly options: DevPassThroughOptions = { riskHold: true },
   ) {
     this.logger = logger.child({ component: 'dev-passthrough' });
   }
@@ -343,6 +419,36 @@ export class DevPassThroughApprover {
           { ...ids, outcome: payload.outcome, verdict: payload.verdict, dlpAction: action },
           'DLP alert (incident recorded); the dev pass-through approves the message',
         );
+      }
+    }
+    if (this.options.riskHold) {
+      // Step 5.1 R17: the round's revision-0 risk recommendation, after every 4.x check.
+      const risk = await this.riskScore(tx, {
+        messageId,
+        receivedAt,
+        organizationId,
+        round,
+        scanId: BigInt(payload.scanId),
+      });
+      const decision = riskHoldDecision(risk);
+      if (decision !== 'approve') {
+        const action = riskHoldAction(risk);
+        this.metrics.riskHolds.inc({ action });
+        if (decision === 'missing') {
+          this.metrics.approvalsSkipped.inc({ reason: 'risk_missing' });
+          this.logger.warn(
+            { ...ids, outcome: payload.outcome, verdict: payload.verdict },
+            'risk score of the round not found; held by the dev pass-through (fail-safe)',
+          );
+        } else {
+          this.metrics.approvalsSkipped.inc({ reason: 'risk_recommendation' });
+          this.logger.info(
+            { ...ids, riskLevel: risk!.level, riskAction: action },
+            'risk recommendation holds the message; the dev pass-through does not approve it ' +
+              '(held in scanned until policy or its deadline)',
+          );
+        }
+        return { approvals: [], recipients: 0 };
       }
     }
     // E27 first, in the same transaction as the approvals: they exist iff the message is approved.
@@ -616,6 +722,63 @@ export class DevPassThroughApprover {
       throw new InconsistentDlpResultReadError();
     }
     return row.action;
+  }
+
+  /**
+   * The round's **revision-0** `message_risk_scores` row (written in the completion transaction
+   * that wrote `scanned.v1`, ADR-0042), or null. Echo-checked writer read in the ledger
+   * transaction (step 5.1 §6): every key column must match. Revision 1 is never read.
+   */
+  private async riskScore(
+    tx: Prisma.TransactionClient,
+    input: {
+      messageId: bigint;
+      receivedAt: Date;
+      organizationId: bigint;
+      round: number;
+      scanId: bigint;
+    },
+  ): Promise<RiskRoundScore | null> {
+    const row = await tx.messageRiskScore.findFirst({
+      where: {
+        scanId: input.scanId,
+        receivedAt: input.receivedAt,
+        messageId: input.messageId,
+        organizationId: input.organizationId,
+        lifecycleRound: input.round,
+        revision: 0,
+      },
+      select: {
+        scanId: true,
+        receivedAt: true,
+        messageId: true,
+        organizationId: true,
+        lifecycleRound: true,
+        revision: true,
+        status: true,
+        level: true,
+        recommendedAction: true,
+        hardBlocks: true,
+      },
+    });
+    if (row === null) return null;
+    if (
+      row.scanId !== input.scanId ||
+      row.messageId !== input.messageId ||
+      row.organizationId !== input.organizationId ||
+      row.receivedAt.getTime() !== input.receivedAt.getTime() ||
+      row.lifecycleRound !== input.round ||
+      row.revision !== 0
+    ) {
+      this.metrics.inconsistentReads.inc({ read: 'risk_score' });
+      throw new InconsistentRiskReadError();
+    }
+    return {
+      status: row.status,
+      level: row.level,
+      recommendedAction: row.recommendedAction,
+      hardBlocks: row.hardBlocks,
+    };
   }
 
   private async nextDeliverySeq(

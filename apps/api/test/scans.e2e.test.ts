@@ -494,6 +494,8 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
         attachmentParts: () =>
           Promise.resolve([{ partIndex: 1, filename: 'invoice.pdf', declaredContentType: null }]),
         sandboxSubmissions: () => Promise.resolve(sandboxState.submissions),
+        // Step 5.1 R15: no stored risk score for this round (rounds scored before 5.1).
+        riskScores: () => Promise.resolve([]),
         sandboxAnalyses: (ids: bigint[]) => sandboxReads.analyses(ids),
         sandboxArtifacts: (ids: bigint[]) => sandboxReads.artifacts(ids),
         authResults: () =>
@@ -745,6 +747,7 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
                 },
               },
             ],
+            risk: [],
           },
         ],
       });

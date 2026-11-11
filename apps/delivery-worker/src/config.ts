@@ -93,6 +93,12 @@ export const deliveryConfigShape = {
   DELIVERY_STATUS_LOG_ENABLED: flag.default(true),
   /** DEVELOPMENT ONLY (R5): refused unless APP_ENV is local or ci. */
   DELIVERY_DEV_PASSTHROUGH_ENABLED: flag.default(false),
+  /**
+   * Step 5.1 R16/R17: the pass-through also holds on the round's revision-0 risk recommendation
+   * (require_approval, quarantine, block), a hard block, an error row or a missing row. Only
+   * read when the pass-through is enabled; `false` restores the step 4.6 behaviour (diagnosis).
+   */
+  DELIVERY_DEV_PASSTHROUGH_RISK_HOLD: flag.default(true),
 
   // Postfix delivery log (R9) and reconciler (R12).
   DELIVERY_STATUS_LOG_PATH: z.string().min(1).default('/var/log/postfix-outbound/maillog'),

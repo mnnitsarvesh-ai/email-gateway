@@ -1106,6 +1106,10 @@ services:
       ATTACHMENT_TYPE_MISMATCH_VERDICT: ${ATTACHMENT_TYPE_MISMATCH_VERDICT:-suspicious}
       ATTACHMENT_ENCRYPTED_VERDICT: ${ATTACHMENT_ENCRYPTED_VERDICT:-suspicious}
       ATTACHMENT_RESCAN_MAX_MESSAGES: ${ATTACHMENT_RESCAN_MAX_MESSAGES:-5000}
+      # Risk scoring (step 5.1 R15, R16): the platform profile of the profile and dry-run routes
+      # and the version limit per organization.
+      RISK_PLATFORM_PROFILE: ${RISK_PLATFORM_PROFILE:-rsk-default/1}
+      RISK_PROFILE_MAX_VERSIONS: ${RISK_PROFILE_MAX_VERSIONS:-200}
     ports: ['127.0.0.1:${API_HOST_PORT:-3000}:3000']
     healthcheck:
       <<: *node-healthcheck
@@ -1428,6 +1432,10 @@ services:
       SANDBOX_ANALYSIS_RETENTION_DAYS: ${SANDBOX_ANALYSIS_RETENTION_DAYS:-180}
       SANDBOX_SAMPLE_RETENTION_HOURS: ${SANDBOX_SAMPLE_RETENTION_HOURS:-24}
       SANDBOX_PUBLISH_HASHES: ${SANDBOX_PUBLISH_HASHES:-false}
+      # Risk scoring (step 5.1 R13, R16, docs/plan/steps/15-risk-scoring.md §5): every completed
+      # round is scored in its completion transaction (revision 1 with a late sandbox final).
+      RISK_PLATFORM_PROFILE: ${RISK_PLATFORM_PROFILE:-rsk-default/1}
+      RISK_PROFILE_CACHE_MAX_ENTRIES: ${RISK_PROFILE_CACHE_MAX_ENTRIES:-10000}
     networks:
       default: {}
       mailtest: {}
@@ -1513,6 +1521,9 @@ services:
       # DEVELOPMENT ONLY: delivers mail WITHOUT scanning or policy; refused unless APP_ENV is
       # local or ci. Off unless the .env turns it on.
       DELIVERY_DEV_PASSTHROUGH_ENABLED: ${DELIVERY_DEV_PASSTHROUGH_ENABLED:-false}
+      # Step 5.1 R17: the pass-through also holds on the round's revision-0 risk recommendation
+      # (require_approval/quarantine/block, hard block, error row, missing row). Local/ci only.
+      DELIVERY_DEV_PASSTHROUGH_RISK_HOLD: ${DELIVERY_DEV_PASSTHROUGH_RISK_HOLD:-true}
       DELIVERY_STATUS_LOG_PATH: /var/log/postfix-outbound/maillog
       DELIVERY_STATUS_LOG_SOURCE_ID: ${DELIVERY_STATUS_LOG_SOURCE_ID:-out.gateway.local}
       DELIVERY_STATUS_LOG_POLL_MS: ${DELIVERY_STATUS_LOG_POLL_MS:-500}

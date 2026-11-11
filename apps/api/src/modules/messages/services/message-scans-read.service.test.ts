@@ -1,4 +1,11 @@
 import { HttpException } from '@nestjs/common';
+import {
+  buildScoringInput,
+  platformProfile,
+  riskResultToRowJson,
+  type RoundRows,
+  scoreRisk,
+} from '@email-gateway/risk-scoring';
 import { describe, expect, it, vi } from 'vitest';
 import type { Principal } from '../../../auth-contracts/principal';
 import { systemScope } from '../../../auth-contracts/tenant-scope';
@@ -60,6 +67,7 @@ function setup(rows: ScanRoundRow[], found = true) {
     dlpResults: vi.fn(() => Promise.resolve([] as unknown[])),
     dlpEvidence: vi.fn(() => Promise.resolve([] as unknown[])),
     dlpPublicIds: vi.fn(() => Promise.resolve(NO_DLP_IDS)),
+    riskScores: vi.fn(() => Promise.resolve([] as unknown[])),
   };
   const service = new MessageScansReadService(
     lifecycle as unknown as MessageLifecycleReadRepository,
@@ -403,5 +411,90 @@ describe('MessageScansReadService: sandbox (step 4.6 X18)', () => {
       }),
       expect.objectContaining({ submissionId: '503', status: 'submitted', executed: null }),
     ]);
+  });
+});
+
+/** A stored score row as the email-worker writes it (the library's own mapping). */
+function storedRisk(scanId: bigint, revision: 0 | 1, rspamdCodes: string[]) {
+  const rows: RoundRows = {
+    scan: {
+      requiredEngines: ['rspamd'],
+      scanKind: 'initial',
+      lifecycleRound: 0,
+      status: 'completed',
+    },
+    message: { direction: 'inbound', attachmentCount: 0, recipientCount: 1 },
+    finals: [
+      {
+        engine: 'rspamd',
+        outcome: rspamdCodes.length > 0 ? 'spam' : 'clean',
+        errorCode: null,
+        reasonCodes: rspamdCodes.length > 0 ? rspamdCodes : ['clean.below_threshold'],
+        score: '9.5',
+        engineVersion: 'rspamd/3.13.2',
+        settingsVersion: 'rspamd-map/2;p=000000000000;t=none',
+        attempt: 1,
+        completedAt: new Date('2026-11-05T08:00:05Z'),
+      },
+      ...(revision === 1
+        ? [
+            {
+              engine: 'sandbox',
+              outcome: 'clean' as const,
+              errorCode: null,
+              reasonCodes: ['sandbox.clean'],
+              score: null,
+              engineVersion: 'sandbox/1',
+              settingsVersion: null,
+              attempt: 1,
+              completedAt: new Date('2026-11-05T08:01:00Z'),
+            },
+          ]
+        : []),
+    ],
+    auth: { spf: 'pass', dkim: 'pass', dmarc: 'pass', dmarcPolicy: 'reject', arc: 'none' },
+    bec: null,
+    dlp: null,
+  };
+  const result = scoreRisk(buildScoringInput(rows, revision), platformProfile('rsk-default/1'));
+  return {
+    scanId,
+    revision,
+    ...riskResultToRowJson(result),
+    createdAt: new Date('2026-11-05T08:00:06Z'),
+  };
+}
+
+describe('MessageScansReadService: risk scores (step 5.1 R15)', () => {
+  it("lists each round's stored scores, revisions ascending, [] for rounds without one", async () => {
+    const { service, scans } = setup([round(30n, 1), round(20n, 0)]);
+    scans.riskScores.mockResolvedValue([
+      storedRisk(30n, 1, ['spam.gtube']),
+      storedRisk(30n, 0, ['spam.gtube']),
+    ]);
+    const page = await service.list(reader, scope, message.publicId, { limit: 10 });
+    expect(scans.riskScores).toHaveBeenCalledWith(scope, message, [30n, 20n]);
+    const [newest, oldest] = page.data;
+    expect(newest!.risk.map((r) => r.revision)).toEqual([0, 1]);
+    expect(newest!.risk[0]).toMatchObject({
+      status: 'scored',
+      level: 'high',
+      verdict: 'spam',
+      recommendedAction: 'quarantine',
+      versions: { scorer: 'risk-score/1', profile: { source: 'platform', id: 'rsk-default/1' } },
+      createdAt: '2026-11-05T08:00:06.000Z',
+    });
+    expect(newest!.risk[0]!.reasonCodes).toContain('risk.signal.spam_gtube');
+    expect(oldest!.risk).toEqual([]);
+    // Never an internal id: the row's scan id and profile version id are not in the view.
+    expect(JSON.stringify(newest!.risk)).not.toContain('profileVersionId');
+    expect(newest!.risk[0]).not.toHaveProperty('scanId');
+  });
+
+  it('leaves out a stored row whose JSON does not form a valid view', async () => {
+    const { service, scans } = setup([round(30n, 0)]);
+    scans.riskScores.mockResolvedValue([{ ...storedRisk(30n, 0, []), contributions: 'broken' }]);
+    const page = await service.list(reader, scope, message.publicId, { limit: 10 });
+    expect(page.data[0]!.risk).toEqual([]);
   });
 });

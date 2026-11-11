@@ -1,0 +1,84 @@
+# Risk scoring alerts of the email-worker (step 5.1 R19, docs/plan/steps/15-risk-scoring.md;
+# ADR-0041/0042). Series: the email-worker's risk scorer (scan_risk_*; labels revision, level,
+# action, direction, status, indicator, engine, reason, read: bounded enums only, never a tenant
+# id, a message id or a reason code outside the vocabularies) and the generic round series
+# scan_rounds_completed_total of the scan stage. Step 5.1 RECOMMENDS only (policy 5.2 decides);
+# these alerts are about the scorer working, not about detection accuracy. Every alert links its
+# section of docs/runbooks/risk-scoring.md. Validate with `promtool check rules` and
+# `promtool test rules tests/risk-scoring.rules.test.yml`.
+groups:
+  - name: risk-scoring
+    rules:
+      - alert: RiskScoringErrors
+        # Any fail-safe error row (status error: high, quarantine): input the builder refused, an
+        # exception of the scorer or a malformed profile version row.
+        expr: sum by (reason) (increase(scan_risk_errors_total[15m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Risk scoring errors ({{ $labels.reason }})'
+          description: >-
+            The email-worker wrote fail-safe risk error rows in the last 15 minutes (reason
+            {{ $labels.reason }}). Those rounds are recommended for quarantine (high, verdict
+            unknown) whatever their engines found; the development pass-through holds them.
+            Find the rows (message_risk_scores.status = error) and the email-worker error logs.
+          runbook_url: docs/runbooks/risk-scoring.md#riskscoringerrors
+      - alert: RiskScoringErrors
+        # The same condition for an hour: a systematic defect, not a single bad row.
+        expr: sum by (reason) (increase(scan_risk_errors_total[15m])) > 0
+        for: 1h
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Risk scoring errors for an hour ({{ $labels.reason }})'
+          description: >-
+            Risk scoring has produced fail-safe error rows (reason {{ $labels.reason }}) for more
+            than an hour: every affected round is recommended for quarantine. Likely a release
+            defect or a broken profile version; roll back the release or reset the tenant
+            profile (see the runbook).
+          runbook_url: docs/runbooks/risk-scoring.md#riskscoringerrors
+      - alert: RiskProfileFallback
+        expr: sum by (reason) (increase(scan_risk_profile_fallback_total[30m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Risk profile fallback to the platform default ({{ $labels.reason }})'
+          description: >-
+            Rounds of the last 30 minutes were scored with the platform default because their
+            tenant profile version snapshot was unusable (reason {{ $labels.reason }}: invalid =
+            fails the current bounds, missing = absent or not published, foreign = another
+            organization's version). The scores are valid but ignore the tenant's settings.
+          runbook_url: docs/runbooks/risk-scoring.md#riskprofilefallback
+      - alert: RiskScoreMissing
+        # Every completed round gets a revision-0 row in its completion transaction; rounds whose
+        # message row was purged while open are counted as skipped. `or vector(0)` keeps the alert
+        # alive when the risk series never appeared (scoring entirely absent). Threshold 1, not 0:
+        # increase() extrapolates each series separately.
+        expr: >-
+          (
+            sum(increase(scan_rounds_completed_total[30m]))
+            - (sum(increase(scan_risk_scores_total{revision="0"}[30m])) or vector(0))
+            - (sum(increase(scan_risk_skipped_total{revision="0"}[30m])) or vector(0))
+          ) >= 1
+        for: 30m
+        labels:
+          severity: critical
+        annotations:
+          summary: Completed scan rounds without a risk score
+          description: >-
+            For 30 minutes more scan rounds completed than revision-0 risk score rows were
+            written. Policy (5.2) and the development pass-through treat a missing row as a hold.
+            Check that every scan replica runs a release with step 5.1 (mixed versions during a
+            rollout), the email-worker logs, and scan_risk_duplicates_total.
+          runbook_url: docs/runbooks/risk-scoring.md#riskscoremissing
+      - alert: RiskUnmappedCodes
+        expr: sum by (engine) (increase(scan_risk_unmapped_codes_total[1h])) > 0
+        labels:
+          severity: info
+        annotations:
+          summary: 'Engine reason codes unknown to the risk signal map ({{ $labels.engine }})'
+          description: >-
+            The {{ $labels.engine }} engine emitted reason codes the risk signal map does not
+            know in the last hour (risk.signal.unmapped_code, 0 points; such a round is never
+            clean). A newer engine release added codes: map them in a new signal map version.
+          runbook_url: docs/runbooks/risk-scoring.md#riskunmappedcodes

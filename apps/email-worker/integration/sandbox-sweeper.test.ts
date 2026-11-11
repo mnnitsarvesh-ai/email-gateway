@@ -1,5 +1,7 @@
 import { MetricsService } from '@email-gateway/common';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { RiskMetrics } from '../src/scanning/risk/risk-metrics';
+import { createRiskScorer } from '../src/scanning/risk/risk-scorer';
 import { buildResult } from '../src/scanning/sandbox/result-builder.test-support';
 import { SandboxMetrics } from '../src/scanning/sandbox/sandbox-metrics';
 import { PrismaSandboxStore } from '../src/scanning/sandbox/sandbox-store';
@@ -72,6 +74,11 @@ function sweeperAt(offsetMs: number) {
     store: new PrismaSandboxStore(fx.prisma, {
       txTimeoutMs: sfx.config.SCAN_DB_TIMEOUT_MS,
       organizationIds: fx.organizationIds,
+      risk: createRiskScorer({
+        config: sfx.config,
+        metrics: RiskMetrics.for(registry),
+        logger: silentLogger,
+      }),
     }),
     objects,
     locks,

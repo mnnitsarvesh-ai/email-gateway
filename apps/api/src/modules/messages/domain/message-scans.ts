@@ -26,6 +26,7 @@ import {
   urlReputationAnswerSchema,
   type UrlReasonCode,
 } from '@email-gateway/security-contracts';
+import { type RiskScoreView, rowJsonToRiskView } from '@email-gateway/risk-scoring';
 import { z } from 'zod';
 import {
   appliedAssessmentsOf,
@@ -64,6 +65,7 @@ import type {
   DlpResultRow,
   EngineResultRow,
   MessageUrlRow,
+  RiskScoreRow,
   SandboxAnalysisRow,
   SandboxArtifactRow,
   SandboxSubmissionRow,
@@ -713,6 +715,24 @@ export function dlpOf(scanId: bigint, inputs: DlpInputs): ScanEngineResultView['
   return dlpResultViewOf(row, evidence, inputs.ids);
 }
 
+/**
+ * The stored risk scores of one round (step 5.1 R11, R15), revisions ascending, through the
+ * shared row mapping of `@email-gateway/risk-scoring` (profile public ids only). A row that does
+ * not form a valid view (malformed JSON) is left out, never passed through raw.
+ */
+export function riskOf(scanId: bigint, rows: readonly RiskScoreRow[]): RiskScoreView[] {
+  const views: RiskScoreView[] = [];
+  for (const row of rows) {
+    if (row.scanId !== scanId) continue;
+    try {
+      views.push(rowJsonToRiskView(row));
+    } catch {
+      // Malformed stored JSON: shown as absent (the email-worker validates on write).
+    }
+  }
+  return views.sort((a, b) => a.revision - b.revision);
+}
+
 const catalogRank = (engine: string): number => {
   const index = ENGINE_CATALOG.findIndex((entry) => entry.name === engine);
   return index === -1 ? ENGINE_CATALOG.length : index;
@@ -726,7 +746,8 @@ const byCatalog = (a: string, b: string): number =>
  * entry its per-URL results and rewrite (step 4.3 U16) and on the `bec` engine entry its
  * explainable verdict (step 4.4 B15) and on the `dlp` engine entry its masked result (step 4.5
  * D20, only for callers holding `dlp:read`; no symbols: the engine's evidence is not shown) and
- * on the asynchronous `sandbox` engine entry its submissions with their reports (step 4.6 X18).
+ * on the asynchronous `sandbox` engine entry its submissions with their reports (step 4.6 X18),
+ * and its stored risk scores (step 5.1 R15).
  */
 export function roundOf(
   scan: ScanRoundRow,
@@ -736,6 +757,7 @@ export function roundOf(
   urls: UrlInputs = NO_URLS,
   bec: BecInputs = NO_BEC,
   dlp: DlpInputs = NO_DLP,
+  risk: readonly RiskScoreRow[] = [],
 ): ScanRoundView {
   const byEngine = new Map<string, EngineResultRow[]>();
   for (const row of engineRows) {
@@ -780,6 +802,7 @@ export function roundOf(
       }
       return view;
     }),
+    risk: riskOf(scan.id, risk),
   };
 }
 

@@ -14,7 +14,7 @@
 // - Timestamps are DATETIME(3) UTC. Append-only tables have no `updated_at`.
 // - snake_case table and column names via @@map / @map. Enum values are only ever appended.
 // - No email bodies or attachment content: only S3 object keys, sizes and hashes.
-// - Partitioned tables (30, marked PARTITIONED below) use a composite primary key
+// - Partitioned tables (31, marked PARTITIONED below) use a composite primary key
 //   (id, <partition column>), have no foreign keys in either direction, and every unique key
 //   ends with the partition column. The PARTITION BY clause is hand-written in the migration
 //   SQL; Prisma does not model partitions. Child rows of a message copy the message's
@@ -643,6 +643,47 @@ enum DlpAadhaarBasis {
   other
 }
 
+/// Risk level of a scored round (step 5.1 R4; RISK_LEVELS of @email-gateway/risk-scoring, in
+/// ascending order).
+enum RiskLevel {
+  none
+  low
+  medium
+  high
+  critical
+}
+
+/// Recommended action of a risk score (step 5.1 R4; RISK_ACTIONS, order = strictness). 5.1
+/// recommends only; policy (step 5.2) decides.
+enum RiskAction {
+  deliver
+  tag
+  require_approval
+  quarantine
+  block
+}
+
+/// Status of a risk score row (step 5.1 R13): `error` = the fail-safe error row (scoring itself
+/// failed; treated as high risk).
+enum RiskScoreStatus {
+  scored
+  error
+}
+
+/// Source of the effective risk profile of a score (step 5.1 R10): the shipped platform default
+/// or a published tenant version.
+enum RiskProfileSource {
+  platform
+  tenant
+}
+
+/// Lifecycle of a tenant risk profile version (step 5.1 R10): `draft` (editable, deletable) →
+/// `published` (immutable).
+enum RiskProfileVersionStatus {
+  draft
+  published
+}
+
 enum PolicyDirection {
   inbound
   outbound
@@ -957,6 +998,8 @@ model Organization {
   dlpCustomPatterns        DlpCustomPattern[]
   dlpKeywordDictionaries   DlpKeywordDictionary[]
   dlpComplianceSettings    DlpComplianceSettings?
+  riskScoringProfile       RiskScoringProfile?
+  riskScoringVersions      RiskScoringProfileVersion[]
 
   @@index([status])
   @@index([status, purgeAfter])
@@ -1074,11 +1117,11 @@ model User {
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
 
-  userRoles                  UserRole[]               @relation("UserRoleUser")
-  grantedUserRoles           UserRole[]               @relation("UserRoleGrantedBy")
+  userRoles                  UserRole[]                  @relation("UserRoleUser")
+  grantedUserRoles           UserRole[]                  @relation("UserRoleGrantedBy")
   sessions                   UserSession[]
-  tokens                     UserToken[]              @relation("UserTokenUser")
-  createdTokens              UserToken[]              @relation("UserTokenCreatedBy")
+  tokens                     UserToken[]                 @relation("UserTokenUser")
+  createdTokens              UserToken[]                 @relation("UserTokenCreatedBy")
   mfaRecoveryCodes           UserMfaRecoveryCode[]
   createdApiKeys             ApiKey[]
   updatedYaraRules           YaraRule[]
@@ -1088,8 +1131,8 @@ model User {
   createdSuppressions        DeliverySuppression[]
   quarantineMessages         QuarantineMessage[]
   quarantineActions          QuarantineAction[]
-  createdLegalHolds          ArchiveLegalHold[]       @relation("LegalHoldCreatedBy")
-  releasedLegalHolds         ArchiveLegalHold[]       @relation("LegalHoldReleasedBy")
+  createdLegalHolds          ArchiveLegalHold[]          @relation("LegalHoldCreatedBy")
+  releasedLegalHolds         ArchiveLegalHold[]          @relation("LegalHoldReleasedBy")
   createdWebhooks            WebhookSubscription[]
   updatedSystemSettings      SystemSetting[]
   createdSmtpConnectors      SmtpConnector[]
@@ -1098,24 +1141,28 @@ model User {
   addedMalwareSignatures     MalwareSignature[]
   requestedAttachmentRescans AttachmentRescanJob[]
   addedThreatIndicators      ThreatIndicator[]
-  createdBecExecutives       BecExecutiveProfile[]    @relation("BecExecutiveCreatedBy")
-  updatedBecExecutives       BecExecutiveProfile[]    @relation("BecExecutiveUpdatedBy")
-  createdBecVendors          BecVendorProfile[]       @relation("BecVendorCreatedBy")
-  updatedBecVendors          BecVendorProfile[]       @relation("BecVendorUpdatedBy")
-  createdBecTrustedSenders   BecTrustedSender[]       @relation("BecTrustedSenderCreatedBy")
-  createdBecFeedback         BecFeedback[]            @relation("BecFeedbackCreatedBy")
-  createdBecSuppressions     BecSuppressionRule[]     @relation("BecSuppressionCreatedBy")
-  createdDlpPolicies         DlpPolicy[]              @relation("DlpPolicyCreatedBy")
-  updatedDlpPolicies         DlpPolicy[]              @relation("DlpPolicyUpdatedBy")
-  createdDlpRules            DlpPolicyRule[]          @relation("DlpRuleCreatedBy")
-  updatedDlpRules            DlpPolicyRule[]          @relation("DlpRuleUpdatedBy")
-  createdDlpExceptions       DlpException[]           @relation("DlpExceptionCreatedBy")
-  updatedDlpExceptions       DlpException[]           @relation("DlpExceptionUpdatedBy")
-  createdDlpPatterns         DlpCustomPattern[]       @relation("DlpPatternCreatedBy")
-  updatedDlpPatterns         DlpCustomPattern[]       @relation("DlpPatternUpdatedBy")
-  createdDlpDictionaries     DlpKeywordDictionary[]   @relation("DlpDictionaryCreatedBy")
-  updatedDlpDictionaries     DlpKeywordDictionary[]   @relation("DlpDictionaryUpdatedBy")
-  recordedDlpAadhaarSettings DlpComplianceSettings[]  @relation("DlpAadhaarRecordedBy")
+  createdBecExecutives       BecExecutiveProfile[]       @relation("BecExecutiveCreatedBy")
+  updatedBecExecutives       BecExecutiveProfile[]       @relation("BecExecutiveUpdatedBy")
+  createdBecVendors          BecVendorProfile[]          @relation("BecVendorCreatedBy")
+  updatedBecVendors          BecVendorProfile[]          @relation("BecVendorUpdatedBy")
+  createdBecTrustedSenders   BecTrustedSender[]          @relation("BecTrustedSenderCreatedBy")
+  createdBecFeedback         BecFeedback[]               @relation("BecFeedbackCreatedBy")
+  createdBecSuppressions     BecSuppressionRule[]        @relation("BecSuppressionCreatedBy")
+  createdDlpPolicies         DlpPolicy[]                 @relation("DlpPolicyCreatedBy")
+  updatedDlpPolicies         DlpPolicy[]                 @relation("DlpPolicyUpdatedBy")
+  createdDlpRules            DlpPolicyRule[]             @relation("DlpRuleCreatedBy")
+  updatedDlpRules            DlpPolicyRule[]             @relation("DlpRuleUpdatedBy")
+  createdDlpExceptions       DlpException[]              @relation("DlpExceptionCreatedBy")
+  updatedDlpExceptions       DlpException[]              @relation("DlpExceptionUpdatedBy")
+  createdDlpPatterns         DlpCustomPattern[]          @relation("DlpPatternCreatedBy")
+  updatedDlpPatterns         DlpCustomPattern[]          @relation("DlpPatternUpdatedBy")
+  createdDlpDictionaries     DlpKeywordDictionary[]      @relation("DlpDictionaryCreatedBy")
+  updatedDlpDictionaries     DlpKeywordDictionary[]      @relation("DlpDictionaryUpdatedBy")
+  recordedDlpAadhaarSettings DlpComplianceSettings[]     @relation("DlpAadhaarRecordedBy")
+  updatedRiskProfiles        RiskScoringProfile[]        @relation("RiskProfileUpdatedBy")
+  createdRiskVersions        RiskScoringProfileVersion[] @relation("RiskVersionCreatedBy")
+  updatedRiskVersions        RiskScoringProfileVersion[] @relation("RiskVersionUpdatedBy")
+  publishedRiskVersions      RiskScoringProfileVersion[] @relation("RiskVersionPublishedBy")
 
   @@unique([organizationId, email])
   @@index([organizationId, status])
@@ -1937,35 +1984,46 @@ model EmailMessageStatusHistory {
 /// One row per scan round `(message_id, lifecycle_round, received_at)` (step 4.1 S3); old rounds'
 /// rows are never updated or deleted by a newer round.
 model EmailScan {
-  id              BigInt          @default(autoincrement()) @db.UnsignedBigInt
-  receivedAt      DateTime        @map("received_at") @db.DateTime(3)
-  messageId       BigInt          @map("message_id") @db.UnsignedBigInt
-  organizationId  BigInt          @map("organization_id") @db.UnsignedBigInt
-  scanKind        ScanKind        @default(initial) @map("scan_kind")
+  id                   BigInt          @default(autoincrement()) @db.UnsignedBigInt
+  receivedAt           DateTime        @map("received_at") @db.DateTime(3)
+  messageId            BigInt          @map("message_id") @db.UnsignedBigInt
+  organizationId       BigInt          @map("organization_id") @db.UnsignedBigInt
+  scanKind             ScanKind        @default(initial) @map("scan_kind")
   /// Unused since step 4.1 (always 1): a round is identified by `lifecycle_round`; engine attempts
   /// are rows of scan_engine_results.
-  attempt         Int             @default(1) @db.UnsignedSmallInt
-  status          ScanStatus      @default(pending)
-  /// Risk scoring (step 5.1); not written by the scan stage.
-  verdict         MessageVerdict?
-  riskScore       Int?            @map("risk_score") @db.UnsignedSmallInt
-  scoringVersion  String?         @map("scoring_version") @db.VarChar(32)
-  startedAt       DateTime?       @map("started_at") @db.DateTime(3)
-  completedAt     DateTime?       @map("completed_at") @db.DateTime(3)
-  createdAt       DateTime        @default(now()) @map("created_at") @db.DateTime(3)
-  updatedAt       DateTime        @updatedAt @map("updated_at") @db.DateTime(3)
+  attempt              Int             @default(1) @db.UnsignedSmallInt
+  status               ScanStatus      @default(pending)
+  /// Risk verdict of the round: written at round completion by the email-worker from the
+  /// revision-0 risk score (message_risk_scores; step 5.1 R13). NULL while running and for rounds
+  /// completed before step 5.1.
+  verdict              MessageVerdict?
+  /// Risk score 0-1000 of the round: written at round completion by the email-worker from the
+  /// revision-0 risk score (step 5.1 R13).
+  riskScore            Int?            @map("risk_score") @db.UnsignedSmallInt
+  /// Scorer version of that score (`risk-score/1`): written at round completion by the
+  /// email-worker from the revision-0 risk score (step 5.1 R13).
+  scoringVersion       String?         @map("scoring_version") @db.VarChar(32)
+  startedAt            DateTime?       @map("started_at") @db.DateTime(3)
+  completedAt          DateTime?       @map("completed_at") @db.DateTime(3)
+  createdAt            DateTime        @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt            DateTime        @updatedAt @map("updated_at") @db.DateTime(3)
   /// email_messages.lifecycle_round of the round this row scans (step 4.1 S3).
-  lifecycleRound  Int             @default(0) @map("lifecycle_round") @db.UnsignedSmallInt
+  lifecycleRound       Int             @default(0) @map("lifecycle_round") @db.UnsignedSmallInt
   /// Aggregate verdict of the round (S6); NULL while running.
-  scanVerdict     ScanVerdict?    @map("scan_verdict")
+  scanVerdict          ScanVerdict?    @map("scan_verdict")
   /// JSON array of engine names required when the round opened (snapshot, S4).
-  requiredEngines Json?           @map("required_engines")
+  requiredEngines      Json?           @map("required_engines")
   /// JSON array of reason codes (≤ 32), set at completion (S6).
-  reasonCodes     Json?           @map("reason_codes")
+  reasonCodes          Json?           @map("reason_codes")
   /// Event id of the event that opened the round (parsed.v1 or rescan_requested.v1).
-  triggerEventId  String?         @map("trigger_event_id") @db.Char(36)
+  triggerEventId       String?         @map("trigger_event_id") @db.Char(36)
   /// The deadline sweeper finalizes a round still running after this instant (S10).
-  deadlineAt      DateTime?       @map("deadline_at") @db.DateTime(3)
+  deadlineAt           DateTime?       @map("deadline_at") @db.DateTime(3)
+  /// Snapshot of risk_scoring_profiles.active_version_id of the organization when the round
+  /// opened (step 5.1 R13): the round is scored with this profile version even if the pointer
+  /// changes later. NULL = the platform default profile. A risk_scoring_profile_versions.id; no
+  /// foreign key (partitioned table).
+  riskProfileVersionId BigInt?         @map("risk_profile_version_id") @db.UnsignedBigInt
 
   @@id([id, receivedAt])
   @@unique([messageId, lifecycleRound, receivedAt])
@@ -3056,6 +3114,153 @@ model DlpComplianceSettings {
   aadhaarRecordedBy User?        @relation("DlpAadhaarRecordedBy", fields: [aadhaarRecordedByUserId], references: [id], onDelete: SetNull)
 
   @@map("dlp_compliance_settings")
+}
+
+/// Risk scoring profile pointer of one organization (step 5.1 R10, R15), created lazily by the
+/// api. `active_version_id` is the risk_scoring_profile_versions.id of the active **published**
+/// version, or NULL = the platform default profile (RISK_PLATFORM_PROFILE). No foreign key on
+/// `active_version_id` (it would form a cycle with the versions' `profile_id`): the api checks
+/// that it names a published version of the same organization, and the email-worker echo-checks
+/// it (organization, status) when it resolves the snapshot. Deleted explicitly by organization
+/// deletion, after its versions (no cascade).
+model RiskScoringProfile {
+  id              BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  /// UUIDv7; the only id the API exposes.
+  publicId        String   @unique @map("public_id") @db.Char(36)
+  organizationId  BigInt   @unique @map("organization_id") @db.UnsignedBigInt
+  /// risk_scoring_profile_versions.id of the active published version; NULL = platform default.
+  activeVersionId BigInt?  @map("active_version_id") @db.UnsignedBigInt
+  /// Compare-and-set counter of pointer changes (publish with activation, activate, reset).
+  version         Int      @default(1) @db.UnsignedInt
+  updatedByUserId BigInt?  @map("updated_by_user_id") @db.UnsignedBigInt
+  createdAt       DateTime @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization Organization                @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  updatedBy    User?                       @relation("RiskProfileUpdatedBy", fields: [updatedByUserId], references: [id], onDelete: SetNull)
+  versions     RiskScoringProfileVersion[]
+
+  @@map("risk_scoring_profiles")
+}
+
+/// A version of an organization's risk scoring profile (step 5.1 R10, R15): bounded tenant
+/// overrides (`riskProfileOverridesSchema` of @email-gateway/risk-scoring) on a shipped platform
+/// profile (`base_profile`, e.g. `rsk-default/1`). `draft` versions are editable (CAS on
+/// `row_version`) and deletable; **published versions are immutable**: the api updates and
+/// deletes only `WHERE status = 'draft'`, and no route changes a published row. Activation is a
+/// pointer change on risk_scoring_profiles. Deleted explicitly by organization deletion (no
+/// cascade).
+model RiskScoringProfileVersion {
+  id                BigInt                   @id @default(autoincrement()) @db.UnsignedBigInt
+  /// UUIDv7; the only id the API exposes.
+  publicId          String                   @unique @map("public_id") @db.Char(36)
+  organizationId    BigInt                   @map("organization_id") @db.UnsignedBigInt
+  profileId         BigInt                   @map("profile_id") @db.UnsignedBigInt
+  /// 1, 2, ... per profile (assigned by the api under the profile row lock).
+  versionNo         Int                      @map("version_no") @db.UnsignedInt
+  status            RiskProfileVersionStatus @default(draft)
+  /// Platform profile id the overrides apply to (`rsk-default/1` at creation).
+  baseProfile       String                   @map("base_profile") @db.VarChar(32)
+  /// JSON object: the tenant overrides document (every key optional, bounded, R10).
+  overrides         Json
+  /// Hex SHA-256 of the canonical JSON of `overrides`.
+  overridesSha256   String                   @map("overrides_sha256") @db.Char(64)
+  /// Hex SHA-256 of the canonical effective profile; set at publish.
+  profileSha256     String?                  @map("profile_sha256") @db.Char(64)
+  changeNote        String?                  @map("change_note") @db.VarChar(512)
+  /// Compare-and-set counter of draft edits and publish.
+  rowVersion        Int                      @default(1) @map("row_version") @db.UnsignedInt
+  createdByUserId   BigInt?                  @map("created_by_user_id") @db.UnsignedBigInt
+  updatedByUserId   BigInt?                  @map("updated_by_user_id") @db.UnsignedBigInt
+  publishedByUserId BigInt?                  @map("published_by_user_id") @db.UnsignedBigInt
+  publishedAt       DateTime?                @map("published_at") @db.DateTime(3)
+  createdAt         DateTime                 @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt         DateTime                 @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization Organization       @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  profile      RiskScoringProfile @relation(fields: [profileId], references: [id], onDelete: Restrict)
+  createdBy    User?              @relation("RiskVersionCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  updatedBy    User?              @relation("RiskVersionUpdatedBy", fields: [updatedByUserId], references: [id], onDelete: SetNull)
+  publishedBy  User?              @relation("RiskVersionPublishedBy", fields: [publishedByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([profileId, versionNo])
+  @@index([organizationId, status, versionNo])
+  @@map("risk_scoring_profile_versions")
+}
+
+/// PARTITIONED by RANGE COLUMNS(received_at), monthly (6 months, core; step 5.1 §3, R11, R13,
+/// R14). One risk score per scan round and revision: revision 0 is written by the email-worker
+/// in the transaction that completes the round, revision 1 (the round's inputs plus the late
+/// sandbox final) once, by whichever of completion and the sandbox finalizer comes second; both
+/// under the email_scans row lock, the unique key is the backstop. Never updated; deleted only
+/// by retention and organization purge. Engine names, outcomes, reason codes, signal ids,
+/// integers and versions only: never message content (no addresses, domains, URLs, subjects,
+/// file names). The JSON columns hold the bounded `RiskResult` fields of
+/// @email-gateway/risk-scoring (mapping fixed in R11). No foreign keys.
+model MessageRiskScore {
+  id                BigInt            @default(autoincrement()) @db.UnsignedBigInt
+  receivedAt        DateTime          @map("received_at") @db.DateTime(3)
+  messageId         BigInt            @map("message_id") @db.UnsignedBigInt
+  organizationId    BigInt            @map("organization_id") @db.UnsignedBigInt
+  /// email_scans.id of the round.
+  scanId            BigInt            @map("scan_id") @db.UnsignedBigInt
+  lifecycleRound    Int               @map("lifecycle_round") @db.UnsignedSmallInt
+  /// 0 = the round; 1 = the round with the late sandbox final (ADR-0042).
+  revision          Int               @db.UnsignedTinyInt
+  /// email_messages.direction at scan time (trusted).
+  direction         MessageDirection
+  status            RiskScoreStatus
+  /// 0-1000.
+  score             Int               @db.UnsignedSmallInt
+  level             RiskLevel
+  verdict           MessageVerdict
+  recommendedAction RiskAction        @map("recommended_action")
+  /// JSON array (≤ 9) of `{ id, verdict, action }`.
+  hardBlocks        Json              @map("hard_blocks")
+  /// JSON array (≤ 32) of reason codes.
+  reasonCodes       Json              @map("reason_codes")
+  /// JSON array (≤ 64) of `{ signal, group, weight, codes, applied }` (fired signals only).
+  contributions     Json
+  /// JSON array of `{ group, rule, raw, multiplierPermille, trustFactorPermille, cap, total }`.
+  groups            Json
+  /// JSON array (≤ 8) of `{ engine, required, status, outcome, errorCode, engineVersion, settingsVersion, attempts }`.
+  engines           Json
+  /// JSON array of `{ engine, status, weight }`.
+  failures          Json
+  /// JSON array of `{ source, level }`.
+  floors            Json
+  /// JSON object `{ status, factorPermille, reducedGroups, pointsRemoved }` (R7).
+  trust             Json
+  /// JSON object `{ auth, dlp, bec, sandbox, unmappedCodes, aiRaiseOnly }` (outcomes only).
+  evidence          Json
+  /// JSON array (≤ 20) of explanation lines `{ code, params }`.
+  explanation       Json
+  /// Rendered explanation (fixed templates over codes and integers).
+  explanationText   String            @map("explanation_text") @db.VarChar(2048)
+  profileSource     RiskProfileSource @map("profile_source")
+  /// risk_scoring_profile_versions.id of the profile used; NULL = platform default (no FK).
+  profileVersionId  BigInt?           @map("profile_version_id") @db.UnsignedBigInt
+  /// `rsk-default/1` or `rsk-default/1+t:<version public id>#<versionNo>`.
+  profileIdText     String            @map("profile_id_text") @db.VarChar(96)
+  /// Hex SHA-256 of the canonical effective profile.
+  profileSha256     String            @map("profile_sha256") @db.Char(64)
+  /// Hex SHA-256 of the canonical scoring input (`risk-input/1`).
+  inputSha256       String            @map("input_sha256") @db.Char(64)
+  /// `risk-score/1`.
+  scorerVersion     String            @map("scorer_version") @db.VarChar(32)
+  /// `risk-signals/1`.
+  signalMapVersion  String            @map("signal_map_version") @db.VarChar(32)
+  /// `risk-input/1`.
+  inputVersion      String            @map("input_version") @db.VarChar(32)
+  durationUs        Int               @map("duration_us") @db.UnsignedInt
+  createdAt         DateTime          @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@id([id, receivedAt])
+  @@unique([scanId, revision, receivedAt])
+  @@index([messageId, receivedAt])
+  @@index([organizationId, receivedAt])
+  @@index([organizationId, level, receivedAt])
+  @@map("message_risk_scores")
 }
 
 /// `organization_id` NULL = platform-wide intelligence. Step 4.3 (U6, U16) writes platform rows

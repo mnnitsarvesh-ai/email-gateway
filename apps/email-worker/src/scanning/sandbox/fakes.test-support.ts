@@ -81,6 +81,10 @@ interface State {
   artifacts: Map<bigint, FakeArtifact>;
   scans: Map<string, ScanLockRow>;
   finals: Map<string, FinalRow>;
+  /** Risk revision-1 rows by scan key (step 5.1 R13 (a); the unique key of message_risk_scores). */
+  riskRevisions: Map<string, number>;
+  /** Revision-1 attempts that found the row already written (counted no-ops). */
+  riskDuplicates: number;
   outbox: OutboxRow[];
   ledger: Set<string>;
   hashes: Map<string, { publicId: string; expiresAt: Date }>;
@@ -105,6 +109,8 @@ export class FakeSandboxStore implements SandboxStore {
     artifacts: new Map(),
     scans: new Map(),
     finals: new Map(),
+    riskRevisions: new Map(),
+    riskDuplicates: 0,
     outbox: [],
     ledger: new Set(),
     hashes: new Map(),
@@ -130,8 +136,17 @@ export class FakeSandboxStore implements SandboxStore {
     return id;
   }
 
-  addScan(scan: ScanLockRow): void {
-    this.state.scans.set(scanKey(scan.scanId, scan.receivedAt), scan);
+  addScan(scan: Omit<ScanLockRow, 'status'> & { status?: string }): void {
+    this.state.scans.set(scanKey(scan.scanId, scan.receivedAt), {
+      ...scan,
+      status: scan.status ?? 'running',
+    });
+  }
+
+  /** Marks a round completed (as `ScanRepository.complete` does under the scan row lock). */
+  setScanStatus(scanId: bigint, receivedAt: Date, status: string): void {
+    const row = this.state.scans.get(scanKey(scanId, receivedAt));
+    if (row) row.status = status;
   }
 
   addSubmission(
@@ -525,6 +540,15 @@ class FakeTx implements SandboxTx {
     if (this.s.finals.has(key)) return Promise.resolve(false);
     this.s.finals.set(key, { ...final });
     return Promise.resolve(true);
+  }
+
+  scoreRiskRevision(scan: ScanLockRow): Promise<void> {
+    const key = scanKey(scan.scanId, scan.receivedAt);
+    const current = this.s.scans.get(key);
+    if (!current || current.status === 'running') return Promise.resolve();
+    if (this.s.riskRevisions.has(key)) this.s.riskDuplicates += 1;
+    else this.s.riskRevisions.set(key, 1);
+    return Promise.resolve();
   }
 
   writeOutbox(row: OutboxRow): Promise<void> {

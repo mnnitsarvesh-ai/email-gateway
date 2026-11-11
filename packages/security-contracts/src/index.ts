@@ -13,7 +13,9 @@
  * (step 4.6 docs/plan/steps/14-sandbox.md §4, X10, X14, X17, ADR-0039/0040) the sandbox
  * vocabularies (verdicts, backends, isolation classes, profiles, not-executed reasons, error
  * codes, skip reasons, finding codes with fixed severities, reason codes of `sandbox-map/1`),
- * artifact kinds, the observation and stored report schemas, the task limits and the settings.
+ * artifact kinds, the observation and stored report schemas, the task limits and the settings,
+ * and (step 5.1 docs/plan/steps/15-risk-scoring.md R18) the `rspamd-map/2` reason codes as a
+ * contract list.
  *
  * Engines classify, policy decides (§2.0 invariant 8): nothing here rejects, quarantines or
  * delivers. The adapter interface itself lives with the adapters (email-worker
@@ -29,3 +31,4 @@ export * from './url';
 export * from './bec';
 export * from './dlp';
 export * from './sandbox';
+export * from './rspamd';

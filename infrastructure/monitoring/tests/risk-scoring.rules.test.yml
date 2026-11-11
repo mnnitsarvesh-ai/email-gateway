@@ -1,0 +1,210 @@
+# promtool unit tests of rules/risk-scoring.rules.yml (step 5.1 R19):
+#   docker run --rm -v "$PWD/infrastructure/monitoring:/m:ro" --entrypoint promtool \
+#     prom/prometheus:v3.6.0 test rules /m/tests/risk-scoring.rules.test.yml
+rule_files:
+  - ../rules/risk-scoring.rules.yml
+evaluation_interval: 1m
+tests:
+  - name: a single error row warns and clears; other reasons stay quiet
+    interval: 1m
+    input_series:
+      # One input_invalid error row at minute 5; scorer_exception never.
+      - series: 'scan_risk_errors_total{job="email-worker",instance="a",reason="input_invalid"}'
+        values: '0x5 1x115'
+      - series: 'scan_risk_errors_total{job="email-worker",instance="a",reason="scorer_exception"}'
+        values: '0x120'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: RiskScoringErrors
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: RiskScoringErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              reason: input_invalid
+            exp_annotations:
+              summary: 'Risk scoring errors (input_invalid)'
+              description: >-
+                The email-worker wrote fail-safe risk error rows in the last 15 minutes (reason
+                input_invalid). Those rounds are recommended for quarantine (high, verdict
+                unknown) whatever their engines found; the development pass-through holds them.
+                Find the rows (message_risk_scores.status = error) and the email-worker error
+                logs.
+              runbook_url: docs/runbooks/risk-scoring.md#riskscoringerrors
+      - eval_time: 30m
+        alertname: RiskScoringErrors
+        exp_alerts: []
+
+  - name: errors for an hour become critical
+    interval: 1m
+    input_series:
+      # A profile_error row every minute (a broken profile version used by every round).
+      - series: 'scan_risk_errors_total{job="email-worker",instance="a",reason="profile_error"}'
+        values: '0+1x120'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: RiskScoringErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              reason: profile_error
+            exp_annotations:
+              summary: 'Risk scoring errors (profile_error)'
+              description: >-
+                The email-worker wrote fail-safe risk error rows in the last 15 minutes (reason
+                profile_error). Those rounds are recommended for quarantine (high, verdict
+                unknown) whatever their engines found; the development pass-through holds them.
+                Find the rows (message_risk_scores.status = error) and the email-worker error
+                logs.
+              runbook_url: docs/runbooks/risk-scoring.md#riskscoringerrors
+      - eval_time: 75m
+        alertname: RiskScoringErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              reason: profile_error
+            exp_annotations:
+              summary: 'Risk scoring errors (profile_error)'
+              description: >-
+                The email-worker wrote fail-safe risk error rows in the last 15 minutes (reason
+                profile_error). Those rounds are recommended for quarantine (high, verdict
+                unknown) whatever their engines found; the development pass-through holds them.
+                Find the rows (message_risk_scores.status = error) and the email-worker error
+                logs.
+              runbook_url: docs/runbooks/risk-scoring.md#riskscoringerrors
+          - exp_labels:
+              severity: critical
+              reason: profile_error
+            exp_annotations:
+              summary: 'Risk scoring errors for an hour (profile_error)'
+              description: >-
+                Risk scoring has produced fail-safe error rows (reason profile_error) for more
+                than an hour: every affected round is recommended for quarantine. Likely a
+                release defect or a broken profile version; roll back the release or reset the
+                tenant profile (see the runbook).
+              runbook_url: docs/runbooks/risk-scoring.md#riskscoringerrors
+
+  - name: profile fallbacks and unmapped codes
+    interval: 1m
+    input_series:
+      # One round scored with a foreign version's fallback at minute 10; invalid never.
+      - series: 'scan_risk_profile_fallback_total{job="email-worker",instance="a",reason="foreign"}'
+        values: '0x10 1x110'
+      - series: 'scan_risk_profile_fallback_total{job="email-worker",instance="a",reason="invalid"}'
+        values: '0x120'
+      # Three url codes unknown to the signal map at minute 20; rspamd none.
+      - series: 'scan_risk_unmapped_codes_total{job="email-worker",instance="a",engine="url"}'
+        values: '0x20 3x100'
+      - series: 'scan_risk_unmapped_codes_total{job="email-worker",instance="a",engine="rspamd"}'
+        values: '0x120'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: RiskProfileFallback
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: RiskProfileFallback
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              reason: foreign
+            exp_annotations:
+              summary: 'Risk profile fallback to the platform default (foreign)'
+              description: >-
+                Rounds of the last 30 minutes were scored with the platform default because
+                their tenant profile version snapshot was unusable (reason foreign: invalid =
+                fails the current bounds, missing = absent or not published, foreign = another
+                organization's version). The scores are valid but ignore the tenant's settings.
+              runbook_url: docs/runbooks/risk-scoring.md#riskprofilefallback
+      - eval_time: 50m
+        alertname: RiskProfileFallback
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: RiskUnmappedCodes
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: RiskUnmappedCodes
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              engine: url
+            exp_annotations:
+              summary: 'Engine reason codes unknown to the risk signal map (url)'
+              description: >-
+                The url engine emitted reason codes the risk signal map does not know in the
+                last hour (risk.signal.unmapped_code, 0 points; such a round is never clean). A
+                newer engine release added codes: map them in a new signal map version.
+              runbook_url: docs/runbooks/risk-scoring.md#riskunmappedcodes
+      - eval_time: 90m
+        alertname: RiskUnmappedCodes
+        exp_alerts: []
+
+  - name: every completed round has a revision-0 score (skipped rounds included)
+    interval: 1m
+    input_series:
+      # 10 rounds per minute, scored 9 + skipped 1 (message purged while open): no alert.
+      - series: 'scan_rounds_completed_total{job="email-worker",instance="a",outcome="scanned",verdict="clean",scan_kind="initial"}'
+        values: '0+10x120'
+      - series: 'scan_risk_scores_total{job="email-worker",instance="a",revision="0",level="none",action="deliver",direction="inbound",status="scored"}'
+        values: '0+9x120'
+      - series: 'scan_risk_skipped_total{job="email-worker",instance="a",revision="0",reason="message_gone"}'
+        values: '0+1x120'
+      # Revision 1 rows never count for the round total.
+      - series: 'scan_risk_scores_total{job="email-worker",instance="a",revision="1",level="critical",action="block",direction="inbound",status="scored"}'
+        values: '0+5x120'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: RiskScoreMissing
+        exp_alerts: []
+
+  - name: rounds stop being scored
+    interval: 1m
+    input_series:
+      # 10 rounds per minute; the revision-0 scores stop at minute 30.
+      - series: 'scan_rounds_completed_total{job="email-worker",instance="a",outcome="scanned",verdict="clean",scan_kind="initial"}'
+        values: '0+10x120'
+      - series: 'scan_risk_scores_total{job="email-worker",instance="a",revision="0",level="none",action="deliver",direction="inbound",status="scored"}'
+        values: '0+10x30 300x90'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: RiskScoreMissing
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: RiskScoreMissing
+        exp_alerts: []
+      - eval_time: 75m
+        alertname: RiskScoreMissing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: Completed scan rounds without a risk score
+              description: >-
+                For 30 minutes more scan rounds completed than revision-0 risk score rows were
+                written. Policy (5.2) and the development pass-through treat a missing row as a
+                hold. Check that every scan replica runs a release with step 5.1 (mixed versions
+                during a rollout), the email-worker logs, and scan_risk_duplicates_total.
+              runbook_url: docs/runbooks/risk-scoring.md#riskscoremissing
+
+  - name: no risk series at all (an old release completes the rounds)
+    interval: 1m
+    input_series:
+      - series: 'scan_rounds_completed_total{job="email-worker",instance="a",outcome="scan_failed",verdict="timeout",scan_kind="initial"}'
+        values: '0+2x90'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: RiskScoreMissing
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: RiskScoreMissing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: Completed scan rounds without a risk score
+              description: >-
+                For 30 minutes more scan rounds completed than revision-0 risk score rows were
+                written. Policy (5.2) and the development pass-through treat a missing row as a
+                hold. Check that every scan replica runs a release with step 5.1 (mixed versions
+                during a rollout), the email-worker logs, and scan_risk_duplicates_total.
+              runbook_url: docs/runbooks/risk-scoring.md#riskscoremissing

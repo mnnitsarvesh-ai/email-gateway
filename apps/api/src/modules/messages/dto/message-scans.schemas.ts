@@ -28,6 +28,7 @@ import {
   sandboxReportViewSchema,
   urlResultSchema,
 } from '@email-gateway/security-contracts';
+import { riskScoreViewSchema } from '@email-gateway/risk-scoring';
 import { z } from 'zod';
 
 /**
@@ -53,7 +54,11 @@ import { z } from 'zod';
  * engine entry lists its submissions with the bounded analysis report (findings, indicator host
  * names and IPs, process image basenames, dropped-file hashes, limits, artifact metadata) — never
  * sample or artifact content, file names, paths, URLs, analysis ids, analysis timings or whether
- * an earlier analysis was reused (cross-tenant signal, 4.2 A16). No artifact download.
+ * an earlier analysis was reused (cross-tenant signal, 4.2 A16). No artifact download. Step 5.1
+ * R15: each round lists its stored risk scores (`message_risk_scores`, revision 0 = the round,
+ * revision 1 = with the late sandbox result): score, level, verdict, recommended action, hard
+ * blocks, contributions, groups, engine evidence, trust, explanation and every version, with
+ * profile public ids only (never internal ids). A recommendation, not an enforced decision.
  */
 
 /** Rounds per page (S16: at most 20). */
@@ -461,6 +466,14 @@ export const ScanRoundSchema = z.object({
   deadlineAt: IsoDate.nullable(),
   auth: ScanAuthSchema.nullable().describe('SPF/DKIM/DMARC/ARC; null before the engine reported'),
   engines: z.array(ScanEngineResultSchema),
+  risk: z
+    .array(riskScoreViewSchema)
+    .describe(
+      'Stored risk scores of the round (step 5.1), revisions ascending (0 = the round, 1 = with ' +
+        'the late sandbox result); [] while running or for rounds scored before 5.1. A ' +
+        'recommendation: 5.1 does not enforce it (policy, step 5.2, decides). The default ' +
+        'weights and thresholds are not validated detection accuracy.',
+    ),
 });
 export type ScanRoundView = z.output<typeof ScanRoundSchema>;
 

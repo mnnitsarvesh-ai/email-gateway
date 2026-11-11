@@ -5,6 +5,11 @@ import { DomainsRepository } from './domains.repository';
 import { MessagesRepository } from './messages.repository';
 import { PoliciesRepository } from './policies.repository';
 import { QuarantineRepository } from './quarantine.repository';
+import {
+  RISK_PURGE_BATCH,
+  RISK_PURGE_ORDER,
+  RiskTenantDataRepository,
+} from './risk-tenant-data.repository';
 
 interface Call {
   client: 'writer' | 'reader';
@@ -135,5 +140,55 @@ describe('tenant-scoped repositories (D9)', () => {
       ],
     });
     expect(calls[0]!.args.orderBy).toEqual([{ receivedAt: 'desc' }, { id: 'desc' }]);
+  });
+});
+
+describe('organization purge: risk scoring (step 5.1 §3)', () => {
+  /** A writer stand-in whose `$executeRaw` records each statement and answers from `answers`. */
+  function rawWriter(answers: number[]) {
+    const statements: Array<{ sql: string; values: unknown[] }> = [];
+    const writer = {
+      $executeRaw: (strings: TemplateStringsArray, ...values: unknown[]) => {
+        statements.push({ sql: strings.join('?').replace(/\s+/g, ' ').trim(), values });
+        return Promise.resolve(answers.shift() ?? 0);
+      },
+    } as unknown as PrismaService;
+    return { writer, statements };
+  }
+
+  it('deletes scores, then versions, then the profile, in batches of the organization only', async () => {
+    // Scores: a full batch then a short one; versions: one short batch; profile: one row.
+    const { writer, statements } = rawWriter([2, 1, 1, 1]);
+    const counts = await new RiskTenantDataRepository(writer).purgeOrganization(SCOPE, 2);
+    expect(counts).toEqual({
+      message_risk_scores: 3,
+      risk_scoring_profile_versions: 1,
+      risk_scoring_profiles: 1,
+    });
+    expect(statements.map((s) => s.sql)).toEqual([
+      'DELETE FROM message_risk_scores WHERE organization_id = ? LIMIT ?',
+      'DELETE FROM message_risk_scores WHERE organization_id = ? LIMIT ?',
+      'DELETE FROM risk_scoring_profile_versions WHERE organization_id = ? ORDER BY id LIMIT ?',
+      'DELETE FROM risk_scoring_profiles WHERE organization_id = ? ORDER BY id LIMIT ?',
+    ]);
+    for (const statement of statements) expect(statement.values).toEqual([42n, 2]);
+    expect(RISK_PURGE_ORDER).toEqual([
+      'message_risk_scores',
+      'risk_scoring_profile_versions',
+      'risk_scoring_profiles',
+    ]);
+  });
+
+  it('is a no-op for an organization without risk rows, and refuses a non-positive batch', async () => {
+    const { writer, statements } = rawWriter([]);
+    const repo = new RiskTenantDataRepository(writer);
+    expect(await repo.purgeOrganization(SCOPE)).toEqual({
+      message_risk_scores: 0,
+      risk_scoring_profile_versions: 0,
+      risk_scoring_profiles: 0,
+    });
+    expect(statements).toHaveLength(3);
+    expect(statements[0]!.values).toEqual([42n, RISK_PURGE_BATCH]);
+    await expect(repo.purgeOrganization(SCOPE, 0)).rejects.toThrow('batch must be positive');
   });
 });

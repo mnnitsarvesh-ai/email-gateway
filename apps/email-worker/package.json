@@ -27,6 +27,7 @@
     "@email-gateway/logger": "workspace:*",
     "@email-gateway/message-lifecycle": "workspace:*",
     "@email-gateway/mime-parser": "workspace:*",
+    "@email-gateway/risk-scoring": "workspace:*",
     "@email-gateway/rspamd": "workspace:*",
     "@email-gateway/sandbox": "workspace:*",
     "@email-gateway/security-contracts": "workspace:*",

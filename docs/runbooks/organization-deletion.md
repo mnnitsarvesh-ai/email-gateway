@@ -116,6 +116,14 @@ The future job (a scheduled worker, one instance at a time under a lock) must ap
 
    and list `org/<org>/dlp-evidence/` in the mail bucket (expected empty). A tenant can purge its DLP evidence at any time without deleting the organization (`DELETE /api/v1/dlp/evidence`, `dlp:manage` + MFA, audited `dlp_evidence.purged`); evidence also expires by the tenant's retention (≤ 180 days, swept by the email-worker).
 
+   **Risk scoring tables (step 5.1).** `RiskTenantDataRepository` (api `tenant-data`, `RISK_PURGE_ORDER`) deletes, in batches of 500: `message_risk_scores` (partitioned, no foreign keys; `LIMIT` without `ORDER BY`, matched on its `(organization_id, received_at)` index), then `risk_scoring_profile_versions` (they reference the profile with `RESTRICT`), then the `risk_scoring_profiles` row (`organization_id` `RESTRICT`; its `active_version_id` has no foreign key). The rows hold codes, integers, versions and ids only (no message content, no S3 object). Verify with:
+
+   ```sql
+   SELECT 'message_risk_scores' t, COUNT(*) FROM message_risk_scores WHERE organization_id = ?
+   UNION ALL SELECT 'risk_scoring_profile_versions', COUNT(*) FROM risk_scoring_profile_versions WHERE organization_id = ?
+   UNION ALL SELECT 'risk_scoring_profiles', COUNT(*) FROM risk_scoring_profiles WHERE organization_id = ?;
+   ```
+
 5. **Free verified domain names:** deleting the organization's `domains` rows releases `domains.verified_name` (the generated unique column), so the domain can be verified by another organization. This must happen only in the purge, never at confirmation, so a cancelled deletion keeps its domains.
 6. Keep `audit_logs` (append-only, retained by policy) and `login_audit_logs` until their own retention ends; write `organization.purged` with counts, then hard-delete or tombstone the `organizations` row (keep the slug reserved for a period to avoid confusion).
 7. Make every step resumable: a crash mid-purge must leave the organization `deleted` and be safe to re-run.

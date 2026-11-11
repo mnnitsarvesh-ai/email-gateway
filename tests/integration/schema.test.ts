@@ -20,8 +20,9 @@ import { stack } from './support/env';
  * docs/plan/steps/08-message-lifecycle.md (§3.1, §3.2), the scan pipeline, attachment scanning
  * and URL protection tables of steps 4.1–4.3 (docs/plan/steps/09-rspamd.md,
  * 10-attachment-scanning.md, 11-url-protection.md, §3 each), the phishing/BEC tables of step 4.4
- * (12-phishing-bec.md §3), the DLP tables of step 4.5 (13-dlp.md §3) and the sandbox engine
- * tables and columns of step 4.6 (14-sandbox.md §3).
+ * (12-phishing-bec.md §3), the DLP tables of step 4.5 (13-dlp.md §3), the sandbox engine
+ * tables and columns of step 4.6 (14-sandbox.md §3) and the risk scoring tables and column of
+ * step 5.1 (15-risk-scoring.md §3).
  */
 const prisma = new PrismaClient({ datasourceUrl: stack.databaseUrl() });
 
@@ -66,6 +67,8 @@ const PARTITIONED: Record<string, string> = {
   // Step 4.5 §3: the DLP result of a scan round and its evidence metadata.
   dlp_scan_results: 'received_at',
   dlp_evidence: 'received_at',
+  // Step 5.1 §3: the risk scores of a scan round (per revision).
+  message_risk_scores: 'received_at',
 };
 
 /** Tables with no `organization_id`: platform catalogs, the root, a join table, the ledger and
@@ -168,6 +171,10 @@ const TENANT_OWNED = [
   // Step 4.6 §3: platform-level, content-addressed analyses; organization_id (NOT NULL) is the
   // dispatching organization (task/result routing only; tenants read through their submissions).
   'sandbox_analyses',
+  // Step 5.1 §3.
+  'message_risk_scores',
+  'risk_scoring_profiles',
+  'risk_scoring_profile_versions',
   'threat_indicators',
   'yara_rules',
   'email_policies',
@@ -200,17 +207,17 @@ const TENANT_OWNED = [
 const ALL_TABLES = [...NOT_TENANT_OWNED, ...TENANT_OWNED];
 
 describe('MySQL schema', () => {
-  it('has exactly the 101 data-model tables plus _prisma_migrations', async () => {
+  it('has exactly the 104 data-model tables plus _prisma_migrations', async () => {
     const rows = await prisma.$queryRaw<{ name: string }[]>`
       SELECT TABLE_NAME AS name FROM information_schema.TABLES
       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'`;
-    expect(ALL_TABLES).toHaveLength(101);
-    expect(new Set(ALL_TABLES).size).toBe(101);
+    expect(ALL_TABLES).toHaveLength(104);
+    expect(new Set(ALL_TABLES).size).toBe(104);
     expect(rows.map((r) => r.name).sort()).toEqual([...ALL_TABLES, '_prisma_migrations'].sort());
   });
 
-  it('partitions the 30 high-volume tables by RANGE COLUMNS with a pmax partition', async () => {
-    expect(Object.keys(PARTITIONED)).toHaveLength(30);
+  it('partitions the 31 high-volume tables by RANGE COLUMNS with a pmax partition', async () => {
+    expect(Object.keys(PARTITIONED)).toHaveLength(31);
     const rows = await prisma.$queryRaw<
       { tableName: string; method: string; expression: string; partitionName: string }[]
     >`
@@ -3295,6 +3302,330 @@ describe('sandbox engine schema (step 4.6, docs/plan/steps/14-sandbox.md §3)', 
       expect(skipped).toMatchObject({ status: 'skipped', skipReason: 'tenant_disabled' });
     } finally {
       await prisma.sandboxSubmission.deleteMany({ where: { scanId } });
+    }
+  });
+});
+
+describe('risk scoring schema (step 5.1, docs/plan/steps/15-risk-scoring.md §3)', () => {
+  const uniqueSets = async (table: string) =>
+    [...(await indexes(table)).values()]
+      .filter((i) => i.unique)
+      .map((i) => i.columns.join(','))
+      .sort();
+  const indexSets = async (table: string) =>
+    [...(await indexes(table)).values()].map((i) => i.columns.join(','));
+  const foreignKeys = async (table: string) =>
+    prisma.$queryRaw<{ columnName: string; referenced: string; onDelete: string }[]>`
+      SELECT k.COLUMN_NAME AS columnName, k.REFERENCED_TABLE_NAME AS referenced,
+             r.DELETE_RULE AS onDelete
+      FROM information_schema.KEY_COLUMN_USAGE k
+      JOIN information_schema.REFERENTIAL_CONSTRAINTS r
+        ON r.CONSTRAINT_SCHEMA = k.TABLE_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+      WHERE k.TABLE_SCHEMA = DATABASE() AND k.TABLE_NAME = ${table}
+        AND k.REFERENCED_TABLE_NAME IS NOT NULL
+      ORDER BY k.COLUMN_NAME`;
+  const uniqueId = () => BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000));
+  const LEVEL_ENUM = "enum('none','low','medium','high','critical')";
+  const ACTION_ENUM = "enum('deliver','tag','require_approval','quarantine','block')";
+  const VERDICT_ENUM =
+    "enum('clean','spam','bulk','phishing','malware','bec','dlp_violation','suspicious','unknown')";
+  const RESULT_JSON = [
+    'hard_blocks',
+    'reason_codes',
+    'contributions',
+    'groups',
+    'engines',
+    'failures',
+    'floors',
+    'trust',
+    'evidence',
+    'explanation',
+  ];
+
+  /** Expected [COLUMN_TYPE, IS_NULLABLE] of every column of a table. */
+  const expectColumns = async (table: string, expected: Record<string, [string, string]>) => {
+    const cols = await columns([table]);
+    expect([...cols.keys()].map((k) => k.split('.')[1]!).sort()).toEqual(
+      Object.keys(expected).sort(),
+    );
+    for (const [column, [columnType, nullable]] of Object.entries(expected)) {
+      expect(cols.get(`${table}.${column}`), column).toMatchObject({ columnType, nullable });
+    }
+    return cols;
+  };
+
+  it('has message_risk_scores with exactly the §3 columns, types and nullability', async () => {
+    const cols = await expectColumns('message_risk_scores', {
+      id: ['bigint unsigned', 'NO'],
+      received_at: ['datetime(3)', 'NO'],
+      message_id: ['bigint unsigned', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      scan_id: ['bigint unsigned', 'NO'],
+      lifecycle_round: ['smallint unsigned', 'NO'],
+      revision: ['tinyint unsigned', 'NO'],
+      direction: ["enum('inbound','outbound','internal')", 'NO'],
+      status: ["enum('scored','error')", 'NO'],
+      score: ['smallint unsigned', 'NO'],
+      level: [LEVEL_ENUM, 'NO'],
+      verdict: [VERDICT_ENUM, 'NO'],
+      recommended_action: [ACTION_ENUM, 'NO'],
+      ...Object.fromEntries(RESULT_JSON.map((c) => [c, ['json', 'NO'] as [string, string]])),
+      explanation_text: ['varchar(2048)', 'NO'],
+      profile_source: ["enum('platform','tenant')", 'NO'],
+      profile_version_id: ['bigint unsigned', 'YES'],
+      profile_id_text: ['varchar(96)', 'NO'],
+      profile_sha256: ['char(64)', 'NO'],
+      input_sha256: ['char(64)', 'NO'],
+      scorer_version: ['varchar(32)', 'NO'],
+      signal_map_version: ['varchar(32)', 'NO'],
+      input_version: ['varchar(32)', 'NO'],
+      duration_us: ['int unsigned', 'NO'],
+      created_at: ['datetime(3)', 'NO'],
+    });
+    expect(cols.get('message_risk_scores.created_at')?.columnDefault).toMatch(/CURRENT_TIMESTAMP/i);
+    expect(await uniqueSets('message_risk_scores')).toEqual(
+      ['id,received_at', 'scan_id,revision,received_at'].sort(),
+    );
+    expect((await indexSets('message_risk_scores')).sort()).toEqual(
+      [
+        'id,received_at',
+        'scan_id,revision,received_at',
+        'message_id,received_at',
+        'organization_id,received_at',
+        'organization_id,level,received_at',
+      ].sort(),
+    );
+    expect(await foreignKeys('message_risk_scores')).toEqual([]);
+  });
+
+  it('has risk_scoring_profiles: one pointer row per organization, no FK on active_version_id', async () => {
+    await expectColumns('risk_scoring_profiles', {
+      id: ['bigint unsigned', 'NO'],
+      public_id: ['char(36)', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      active_version_id: ['bigint unsigned', 'YES'],
+      version: ['int unsigned', 'NO'],
+      updated_by_user_id: ['bigint unsigned', 'YES'],
+      created_at: ['datetime(3)', 'NO'],
+      updated_at: ['datetime(3)', 'NO'],
+    });
+    const cols = await columns(['risk_scoring_profiles']);
+    expect(cols.get('risk_scoring_profiles.version')?.columnDefault).toBe('1');
+    expect(await uniqueSets('risk_scoring_profiles')).toEqual(
+      ['id', 'organization_id', 'public_id'].sort(),
+    );
+    expect(await foreignKeys('risk_scoring_profiles')).toEqual([
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+      { columnName: 'updated_by_user_id', referenced: 'users', onDelete: 'SET NULL' },
+    ]);
+  });
+
+  it('has risk_scoring_profile_versions: draft/published versions unique per (profile, version_no)', async () => {
+    const cols = await expectColumns('risk_scoring_profile_versions', {
+      id: ['bigint unsigned', 'NO'],
+      public_id: ['char(36)', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      profile_id: ['bigint unsigned', 'NO'],
+      version_no: ['int unsigned', 'NO'],
+      status: ["enum('draft','published')", 'NO'],
+      base_profile: ['varchar(32)', 'NO'],
+      overrides: ['json', 'NO'],
+      overrides_sha256: ['char(64)', 'NO'],
+      profile_sha256: ['char(64)', 'YES'],
+      change_note: ['varchar(512)', 'YES'],
+      row_version: ['int unsigned', 'NO'],
+      created_by_user_id: ['bigint unsigned', 'YES'],
+      updated_by_user_id: ['bigint unsigned', 'YES'],
+      published_by_user_id: ['bigint unsigned', 'YES'],
+      published_at: ['datetime(3)', 'YES'],
+      created_at: ['datetime(3)', 'NO'],
+      updated_at: ['datetime(3)', 'NO'],
+    });
+    expect(cols.get('risk_scoring_profile_versions.status')?.columnDefault).toBe('draft');
+    expect(cols.get('risk_scoring_profile_versions.row_version')?.columnDefault).toBe('1');
+    expect(await uniqueSets('risk_scoring_profile_versions')).toEqual(
+      ['id', 'profile_id,version_no', 'public_id'].sort(),
+    );
+    expect(await indexSets('risk_scoring_profile_versions')).toEqual(
+      expect.arrayContaining(['organization_id,status,version_no']),
+    );
+    expect(await foreignKeys('risk_scoring_profile_versions')).toEqual([
+      { columnName: 'created_by_user_id', referenced: 'users', onDelete: 'SET NULL' },
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+      { columnName: 'profile_id', referenced: 'risk_scoring_profiles', onDelete: 'RESTRICT' },
+      { columnName: 'published_by_user_id', referenced: 'users', onDelete: 'SET NULL' },
+      { columnName: 'updated_by_user_id', referenced: 'users', onDelete: 'SET NULL' },
+    ]);
+  });
+
+  it('adds the nullable profile snapshot email_scans.risk_profile_version_id (R13)', async () => {
+    const cols = await columns(['email_scans']);
+    expect(cols.get('email_scans.risk_profile_version_id')).toMatchObject({
+      columnType: 'bigint unsigned',
+      nullable: 'YES',
+      columnDefault: null,
+    });
+    // The step 1.1 risk columns the email-worker now writes are unchanged.
+    expect(cols.get('email_scans.verdict')).toMatchObject({
+      columnType: VERDICT_ENUM,
+      nullable: 'YES',
+    });
+    expect(cols.get('email_scans.risk_score')).toMatchObject({
+      columnType: 'smallint unsigned',
+      nullable: 'YES',
+    });
+    expect(cols.get('email_scans.scoring_version')).toMatchObject({
+      columnType: 'varchar(32)',
+      nullable: 'YES',
+    });
+    expect(
+      [...(await indexes('email_scans')).values()].map((i) => i.columns.join(',')),
+    ).not.toEqual(expect.arrayContaining([expect.stringContaining('risk_profile_version_id')]));
+  });
+
+  it('stores no content-like column: no TEXT/BLOB in the risk tables', async () => {
+    const rows = await prisma.$queryRaw<{ tableName: string; columnName: string }[]>`
+      SELECT TABLE_NAME AS tableName, COLUMN_NAME AS columnName
+      FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME IN ('message_risk_scores', 'risk_scoring_profiles', 'risk_scoring_profile_versions')
+        AND DATA_TYPE IN ('text', 'mediumtext', 'longtext', 'blob', 'mediumblob', 'longblob')`;
+    expect(rows).toEqual([]);
+  });
+
+  it('keeps one message_risk_scores row per (scan, revision, received_at)', async () => {
+    const scanId = uniqueId();
+    const receivedAt = new Date();
+    const row = {
+      receivedAt,
+      messageId: 1n,
+      organizationId: 1n,
+      scanId,
+      lifecycleRound: 0,
+      revision: 0,
+      direction: 'inbound' as const,
+      status: 'scored' as const,
+      score: 0,
+      level: 'none' as const,
+      verdict: 'clean' as const,
+      recommendedAction: 'deliver' as const,
+      hardBlocks: [],
+      reasonCodes: ['risk.level.none'],
+      contributions: [],
+      groups: [],
+      engines: [],
+      failures: [],
+      floors: [],
+      trust: { status: 'not_trusted', factorPermille: 1000, reducedGroups: [], pointsRemoved: 0 },
+      evidence: { auth: null, dlp: null, bec: null, sandbox: null, unmappedCodes: [] },
+      explanation: [{ code: 'summary', params: { score: 0 } }],
+      explanationText: 'Risk 0/1000 (none): recommended deliver.',
+      profileSource: 'platform' as const,
+      profileIdText: 'rsk-default/1',
+      profileSha256: 'a'.repeat(64),
+      inputSha256: 'b'.repeat(64),
+      scorerVersion: 'risk-score/1',
+      signalMapVersion: 'risk-signals/1',
+      inputVersion: 'risk-input/1',
+      durationUs: 250,
+    };
+    try {
+      await prisma.messageRiskScore.create({ data: row });
+      await expect(prisma.messageRiskScore.create({ data: row })).rejects.toMatchObject({
+        code: 'P2002',
+      });
+      // A duplicate through createMany ... skipDuplicates is a no-op (R13).
+      const dup = await prisma.messageRiskScore.createMany({ data: [row], skipDuplicates: true });
+      expect(dup.count).toBe(0);
+      // Revision 1 (the late sandbox final) and a rescan round (new scan id) are new rows.
+      await prisma.messageRiskScore.create({ data: { ...row, revision: 1 } });
+      await prisma.messageRiskScore.create({ data: { ...row, scanId: scanId + 1n } });
+      const stored = await prisma.messageRiskScore.findMany({
+        where: { scanId, receivedAt },
+        orderBy: { revision: 'asc' },
+      });
+      expect(stored.map((r) => r.revision)).toEqual([0, 1]);
+      expect(stored[0]).toMatchObject({ profileVersionId: null, level: 'none' });
+    } finally {
+      await prisma.messageRiskScore.deleteMany({
+        where: { scanId: { in: [scanId, scanId + 1n] } },
+      });
+    }
+  });
+
+  it('keeps one profile per organization, unique version numbers, and blocks deletes (RESTRICT, no cascade)', async () => {
+    const suffix = randomUUID().slice(0, 8);
+    const plan = await prisma.organizationPlan.create({
+      data: {
+        code: `it-risk-${suffix}`,
+        name: 'Risk schema test',
+        defaultLimits: {},
+        defaultFeatures: {},
+      },
+    });
+    const organization = await prisma.organization.create({
+      data: {
+        slug: `it-risk-${suffix}`,
+        name: 'Risk schema test',
+        planId: plan.id,
+        dataRegion: 'ap-south-1',
+      },
+    });
+    const organizationId = organization.id;
+    try {
+      const profile = await prisma.riskScoringProfile.create({
+        data: { publicId: randomUUID(), organizationId },
+      });
+      expect(profile).toMatchObject({ activeVersionId: null, version: 1 });
+      await expect(
+        prisma.riskScoringProfile.create({ data: { publicId: randomUUID(), organizationId } }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+      const version = {
+        organizationId,
+        profileId: profile.id,
+        versionNo: 1,
+        baseProfile: 'rsk-default/1',
+        overrides: { thresholds: { medium: 350 } },
+        overridesSha256: 'c'.repeat(64),
+      };
+      const draft = await prisma.riskScoringProfileVersion.create({
+        data: { ...version, publicId: randomUUID() },
+      });
+      expect(draft).toMatchObject({ status: 'draft', rowVersion: 1, profileSha256: null });
+      await expect(
+        prisma.riskScoringProfileVersion.create({ data: { ...version, publicId: randomUUID() } }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+      // Publish, then the api's draft-only update matches nothing (published is immutable).
+      await prisma.riskScoringProfileVersion.update({
+        where: { id: draft.id },
+        data: {
+          status: 'published',
+          profileSha256: 'd'.repeat(64),
+          publishedAt: new Date(),
+          rowVersion: { increment: 1 },
+        },
+      });
+      const edited = await prisma.riskScoringProfileVersion.updateMany({
+        where: { id: draft.id, status: 'draft' },
+        data: { overrides: {} },
+      });
+      expect(edited.count).toBe(0);
+      await prisma.riskScoringProfile.update({
+        where: { id: profile.id },
+        data: { activeVersionId: draft.id, version: { increment: 1 } },
+      });
+      // RESTRICT: the version blocks its profile, both block the organization.
+      await expect(
+        prisma.riskScoringProfile.delete({ where: { id: profile.id } }),
+      ).rejects.toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+      await expect(
+        prisma.organization.delete({ where: { id: organizationId } }),
+      ).rejects.toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+    } finally {
+      await prisma.riskScoringProfileVersion.deleteMany({ where: { organizationId } });
+      await prisma.riskScoringProfile.deleteMany({ where: { organizationId } });
+      await prisma.organization.deleteMany({ where: { id: organizationId } });
+      await prisma.organizationPlan.deleteMany({ where: { id: plan.id } });
     }
   });
 });

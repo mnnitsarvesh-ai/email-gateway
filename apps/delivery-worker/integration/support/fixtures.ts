@@ -436,6 +436,7 @@ export class Fixtures {
         await this.prisma.urlRewrite.deleteMany({ where });
         await this.prisma.becScanResult.deleteMany({ where });
         await this.prisma.dlpScanResult.deleteMany({ where });
+        await this.prisma.messageRiskScore.deleteMany({ where });
         await this.prisma.emailRecipient.deleteMany({ where });
         await this.prisma.emailMessage.deleteMany({ where });
         await this.prisma.messageIdentity.deleteMany({ where });

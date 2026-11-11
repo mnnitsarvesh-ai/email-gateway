@@ -1,0 +1,29 @@
+{
+  "name": "@email-gateway/risk-scoring",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src scripts",
+    "test": "vitest run",
+    "test:integration": "echo 'no infrastructure suites in @email-gateway/risk-scoring (unit, dataset:check and calibrate:check run in test)'",
+    "dataset": "tsx scripts/generate-dataset.ts write",
+    "dataset:check": "tsx scripts/generate-dataset.ts check",
+    "calibrate": "tsx scripts/calibrate.ts write",
+    "calibrate:check": "tsx scripts/calibrate.ts check"
+  },
+  "dependencies": {
+    "@email-gateway/security-contracts": "workspace:*",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "prettier": "^3.6.2",
+    "tsx": "4.23.15"
+  }
+}

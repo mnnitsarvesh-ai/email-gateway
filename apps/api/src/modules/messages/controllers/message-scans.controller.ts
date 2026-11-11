@@ -64,7 +64,13 @@ export class MessageScansController {
       'ids, the evidence state) **only for callers also holding `dlp:read`**; otherwise `dlp` ' +
       'is null and only the standard engine fields are shown. Matched values are never shown ' +
       'here: decrypted evidence is only in the audited ' +
-      '`GET /messages/{messageId}/scans/{scanId}/dlp-evidence`. From the read replica: a round ' +
+      '`GET /messages/{messageId}/scans/{scanId}/dlp-evidence`. Each round lists its stored ' +
+      'risk scores in `risk` (step 5.1; revision 0 = the round, 1 = with the late sandbox ' +
+      'result): score 0–1000, level, verdict, recommended action, hard blocks, contributions ' +
+      'by signal and group, engine evidence, trust decision, explanation and every version ' +
+      '(profile public ids only); `[]` while running. Step 5.1 recommends and does not ' +
+      'enforce (policy, step 5.2, decides); the default weights and thresholds are not ' +
+      'validated detection accuracy. From the read replica: a round ' +
       'that just completed may still show as running. Symbol options can contain addresses or URLs of the ' +
       'message; filenames are attacker-controlled text.',
   })

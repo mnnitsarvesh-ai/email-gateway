@@ -298,8 +298,47 @@ export type DlpResultRow = Prisma.DlpScanResultGetPayload<{ select: typeof dlpRe
   DlpResultRowInput;
 
 /**
+ * The stored risk score columns the read API shows (step 5.1 R11, R15): the result fields, the
+ * revision and creation time. Not `id`, `profile_version_id` (internal ids), `duration_us` or
+ * the message keys.
+ */
+const riskScoreSelect = {
+  scanId: true,
+  revision: true,
+  status: true,
+  score: true,
+  level: true,
+  verdict: true,
+  recommendedAction: true,
+  hardBlocks: true,
+  reasonCodes: true,
+  contributions: true,
+  groups: true,
+  engines: true,
+  failures: true,
+  floors: true,
+  trust: true,
+  evidence: true,
+  explanation: true,
+  explanationText: true,
+  scorerVersion: true,
+  signalMapVersion: true,
+  inputVersion: true,
+  profileSource: true,
+  profileIdText: true,
+  profileSha256: true,
+  inputSha256: true,
+  createdAt: true,
+} satisfies Prisma.MessageRiskScoreSelect;
+
+export type RiskScoreRow = Prisma.MessageRiskScoreGetPayload<{ select: typeof riskScoreSelect }>;
+
+/** Most score rows one page reads: ≤ 20 rounds × 2 revisions. */
+const MAX_RISK_SCORE_ROWS = 64;
+
+/**
  * Read-only, tenant-scoped scan reads (step 4.1 S16; 4.2 attachments; 4.3 URLs; 4.4 BEC; 4.5 DLP;
- * 4.6 sandbox submissions and the analyses/artifacts they reference) on the replica (`PrismaReadService`, with
+ * 4.6 sandbox submissions and the analyses/artifacts they reference; 5.1 risk scores) on the replica (`PrismaReadService`, with
  * the writer fallback above the lag threshold; ADR-0014, §2.0 invariant 6). Every query matches
  * the organization of the caller's scope and the message's `(message_id, received_at)`, so the
  * partitioned tables are pruned and another tenant's rows are never read.
@@ -646,6 +685,28 @@ export class MessageScansReadRepository {
       }),
       select: { scanId: true, expiresAt: true, purgedAt: true },
       take: scanIds.length,
+    });
+  }
+
+  /**
+   * The risk scores of the given scans (`message_risk_scores`, partitioned by `received_at`;
+   * one row per scan and revision, step 5.1 R14), by round and revision.
+   */
+  riskScores(
+    scope: TenantScope,
+    message: LifecycleMessageRow,
+    scanIds: readonly bigint[],
+  ): Promise<RiskScoreRow[]> {
+    if (scanIds.length === 0) return Promise.resolve([]);
+    return this.db.messageRiskScore.findMany({
+      where: tenantWhere(scope, {
+        messageId: message.id,
+        receivedAt: message.receivedAt,
+        scanId: { in: [...scanIds] },
+      }),
+      select: riskScoreSelect,
+      orderBy: [{ scanId: 'desc' }, { revision: 'asc' }],
+      take: MAX_RISK_SCORE_ROWS,
     });
   }
 

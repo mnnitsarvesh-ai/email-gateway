@@ -393,6 +393,39 @@ describe('route security (e2e, dependencies stubbed)', () => {
     );
   });
 
+  it('the step 5.1 risk scoring routes require exactly their permissions (R15)', () => {
+    const expected: Record<string, string[]> = {
+      'get /api/v1/risk-scoring/platform-profile': ['policy:read'],
+      'get /api/v1/risk-scoring/profile': ['policy:read'],
+      'get /api/v1/risk-scoring/profile/versions': ['policy:read'],
+      'get /api/v1/risk-scoring/profile/versions/:versionId': ['policy:read'],
+      'post /api/v1/risk-scoring/profile/versions': ['policy:manage'],
+      'put /api/v1/risk-scoring/profile/versions/:versionId': ['policy:manage'],
+      'delete /api/v1/risk-scoring/profile/versions/:versionId': ['policy:manage'],
+      'post /api/v1/risk-scoring/profile/versions/:versionId/publish': ['policy:publish'],
+      'post /api/v1/risk-scoring/profile/versions/:versionId/activate': ['policy:publish'],
+      'post /api/v1/risk-scoring/profile/reset': ['policy:publish'],
+      'post /api/v1/messages/:messageId/scans/:scanId/risk/dry-run': [
+        'policy:manage',
+        'message:read',
+      ],
+    };
+    const riskRoutes = routes.filter(
+      (r) => r.path.includes('/api/v1/risk-scoring/') || r.path.endsWith('/risk/dry-run'),
+    );
+    expect(riskRoutes.map((r) => `${r.method} ${r.path}`).sort()).toEqual(
+      Object.keys(expected).sort(),
+    );
+    for (const [key, permissions] of Object.entries(expected)) {
+      const route = routes.find((r) => `${r.method} ${r.path}` === key);
+      expect(route?.isPublic, key).toBe(false);
+      expect(route?.requirement, key).toEqual({ mode: 'all', permissions });
+      expect(route?.requireMfa, key).toBe(false);
+      expect(route?.userOnly, key).toBe(false);
+      expect(route?.rateLimits, key).toEqual([]);
+    }
+  });
+
   it('non-public routes also reject a junk bearer token and a junk API key', async () => {
     const route = routes.find((r) => !r.isPublic)!;
     const path = route.path.replace(/:[A-Za-z0-9_]+/g, randomUUID());

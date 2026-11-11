@@ -869,3 +869,33 @@ describe('loadApiConfig: sandbox (step 4.6 X17)', () => {
     expect(rejection({ ...valid, ...env })).toContain(key);
   });
 });
+
+describe('loadApiConfig: risk scoring (step 5.1 R16)', () => {
+  it('defaults the platform profile and the version cap', () => {
+    const cfg = loadApiConfig(valid);
+    expect(cfg.RISK_PLATFORM_PROFILE).toBe('rsk-default/1');
+    expect(cfg.RISK_PROFILE_MAX_VERSIONS).toBe(200);
+  });
+
+  it('reads RISK_PLATFORM_PROFILE and RISK_PROFILE_MAX_VERSIONS within bounds', () => {
+    const cfg = loadApiConfig({
+      ...valid,
+      RISK_PLATFORM_PROFILE: 'rsk-default/1',
+      RISK_PROFILE_MAX_VERSIONS: '10',
+    });
+    expect(cfg.RISK_PROFILE_MAX_VERSIONS).toBe(10);
+    expect(
+      loadApiConfig({ ...valid, RISK_PROFILE_MAX_VERSIONS: '1000' }).RISK_PROFILE_MAX_VERSIONS,
+    ).toBe(1000);
+  });
+
+  it.each([
+    [{ RISK_PLATFORM_PROFILE: 'rsk-default/2' }, 'RISK_PLATFORM_PROFILE'],
+    [{ RISK_PLATFORM_PROFILE: 'rsk-custom' }, 'RISK_PLATFORM_PROFILE'],
+    [{ RISK_PROFILE_MAX_VERSIONS: '9' }, 'RISK_PROFILE_MAX_VERSIONS'],
+    [{ RISK_PROFILE_MAX_VERSIONS: '1001' }, 'RISK_PROFILE_MAX_VERSIONS'],
+    [{ RISK_PROFILE_MAX_VERSIONS: 'many' }, 'RISK_PROFILE_MAX_VERSIONS'],
+  ])('refuses %o naming %s', (env, key) => {
+    expect(rejection({ ...valid, ...env })).toContain(key);
+  });
+});

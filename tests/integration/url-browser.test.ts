@@ -7,7 +7,12 @@ import { stack } from './support/env';
 import { clearSinkDomain } from './support/mail-sink';
 import { record } from './support/messaging-stack';
 import { MAIL_SINK_HOST } from './support/routing';
-import { scanStackGate, sendToMx, waitForRoundComplete } from './support/scan-stack';
+import {
+  messagePublicId,
+  scanStackGate,
+  sendToMx,
+  waitForRoundComplete,
+} from './support/scan-stack';
 import { SmtpFixtures, type FixtureDomain } from './support/smtp-fixtures';
 import { assertStackReady } from './support/smtp-stack';
 import { reply } from './support/smtp-tools';
@@ -23,6 +28,16 @@ import {
 } from './support/url-stack';
 import { waitForSinkMessage } from './support/mail-sink';
 import { waitForLifecycle } from './support/lifecycle';
+import { apiSession, type ApiSession } from './support/api-client';
+import { organizationRef } from './support/routing';
+import {
+  hardBlocksOf,
+  levelAtLeast,
+  riskRowHolds,
+  scanRiskColumns,
+  signalsOf,
+  waitForRiskRow,
+} from './support/risk';
 
 /**
  * Focused suite of the step 4.3 dynamic inspection THROUGH THE PIPELINE (docs/plan/steps/
@@ -37,6 +52,14 @@ import { waitForLifecycle } from './support/lifecycle';
  * The link `http://probe@phish-login.test/` is a scan-time fetch candidate (userinfo, S7); its
  * landing page has a password form posting to `collector-site.test` (S8). The browser receives
  * the URL without userinfo (U5 identity form).
+ *
+ * Step 5.1 (docs/plan/steps/15-risk-scoring.md R10, R17): the credential form scores `high` /
+ * `quarantine` under the platform default `rsk-default/1` (observed 640: `credential` 450 +
+ * `url_structure` 150 + `auth_other` 40), so the dev pass-through would hold the message and no
+ * click could follow. The fixture organization therefore publishes a tenant risk profile that
+ * raises the `high` threshold to its bound (700), under which the same round is `medium` / `tag`
+ * and is delivered; the suite asserts the stored row (tenant profile, credential signals) and,
+ * through the dry-run, that the platform default would have held it.
  *
  * Skipped (with the reason) unless the `url-browser` profile runs (`docker compose --profile
  * smtp-test --profile url-browser up -d --no-deps url-egress-proxy url-browser-worker`); not part
@@ -69,6 +92,8 @@ if (!base.skip) {
 const fx = new SmtpFixtures();
 let org = 0n;
 let domain: FixtureDomain;
+let admin: ApiSession | undefined;
+let tenantVersionId = 0n;
 const LINK = 'http://probe@phish-login.test/';
 const INSPECTED = 'http://phish-login.test/';
 
@@ -78,10 +103,32 @@ beforeAll(async () => {
   org = await fx.organization('url-browser');
   domain = await fx.domain(org, 'url-browser');
   await fx.destinations(domain, [{ host: MAIL_SINK_HOST, tlsMode: 'opportunistic' }]);
+
+  // Step 5.1: a tenant risk profile under which the credential-form round is `medium` / `tag`
+  // (see the suite comment), published before the first message so its round snapshots it.
+  admin = await apiSession(fx.prisma, await organizationRef(fx, org), 'organization_admin');
+  const draft = await admin.post('/risk-scoring/profile/versions', {
+    overrides: { thresholds: { high: 700 } },
+    changeNote: 'stack test: tag medium-risk links so the click path is exercised',
+  });
+  expect(draft.status, JSON.stringify(draft.body)).toBe(201);
+  const created = draft.body as { id: string; rowVersion: number };
+  const published = await admin.post(`/risk-scoring/profile/versions/${created.id}/publish`, {
+    activate: true,
+    expectedRowVersion: created.rowVersion,
+  });
+  expect(published.status, JSON.stringify(published.body)).toBe(200);
+  tenantVersionId = (
+    await fx.prisma.riskScoringProfileVersion.findFirstOrThrow({
+      where: { publicId: created.id, organizationId: org },
+      select: { id: true },
+    })
+  ).id;
 }, 120_000);
 
 afterAll(async () => {
   if (!profileUp) return;
+  await admin?.remove();
   if (domain) await clearSinkDomain(domain.name, 'all').catch(() => undefined);
   await fx.cleanup();
   await purgeDormantQueues();
@@ -157,6 +204,45 @@ describe.skipIf(base.skip || !profileUp)(
       // No page content stored: signals are counts, booleans, hosts and brand ids only.
       expect(JSON.stringify(completed.signals)).not.toMatch(/Sign in|<form|password"/);
 
+      // Step 5.1: the round's revision-0 risk row, scored with the tenant version: a credential
+      // form, `medium` / `tag` (not held by the pass-through, R17). The platform default would
+      // hold the same round (dry-run, nothing written).
+      const columns = await scanRiskColumns(fx.prisma, message, 0);
+      expect(columns.riskProfileVersionId).toBe(tenantVersionId);
+      const risk = await waitForRiskRow(fx.prisma, message, round.id, 0);
+      expect(risk).toMatchObject({
+        status: 'scored',
+        profileSource: 'tenant',
+        profileVersionId: tenantVersionId,
+        verdict: 'phishing',
+        level: 'medium',
+        recommendedAction: 'tag',
+      });
+      expect(signalsOf(risk)).toEqual(expect.arrayContaining(['credential_form']));
+      expect(hardBlocksOf(risk)).toEqual([]);
+      expect(riskRowHolds(risk)).toBe(false);
+      const publicId = await messagePublicId(fx.prisma, message);
+      const platform = await waitFor(
+        'the platform-default dry-run (replicated)',
+        async () => {
+          const res = await admin!.post(
+            `/messages/${publicId}/scans/${round.id.toString()}/risk/dry-run`,
+            { profile: 'platform' },
+          );
+          return res.status === 409 ? undefined : res;
+        },
+        { timeoutMs: 30_000, intervalMs: 500 },
+      );
+      expect(platform.status, JSON.stringify(platform.body)).toBe(200);
+      const platformResult = (
+        platform.body as { result: { score: number; level: string; recommendedAction: string } }
+      ).result;
+      expect(platformResult.score).toBe(risk.score);
+      expect(levelAtLeast(platformResult.level, 'high')).toBe(true);
+      expect(['require_approval', 'quarantine', 'block']).toContain(
+        platformResult.recommendedAction,
+      );
+
       // Delivered with the protected link; the click uses the dynamic result (never allowed).
       await waitForLifecycle(fx.prisma, message, 'delivered', 'delivery_complete', 180_000);
       const [token] = clickTokensIn((await waitForSinkMessage(rcpt)).toString('utf8'));
@@ -181,6 +267,8 @@ describe.skipIf(base.skip || !profileUp)(
         dynamic_verdict: completed.verdict,
         dynamic_codes: JSON.stringify(completed.reasonCodes),
         click_decision: event.decision,
+        risk: `${risk.score}/${risk.level}/${risk.recommendedAction}`,
+        risk_platform: `${platformResult.level}/${platformResult.recommendedAction}`,
       });
     });
   },

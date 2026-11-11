@@ -52,10 +52,11 @@ const monthly = (
 });
 
 /**
- * The 28 partitioned tables: the 16 of D3, the two delivery tables of step 2.3 (§3), the parse
+ * The 31 partitioned tables: the 16 of D3, the two delivery tables of step 2.3 (§3), the parse
  * stage table of step 3.1 (§3), the authentication results table of step 4.1 (§3), the
  * per-attachment results and sandbox submissions of step 4.2 (§3), the five URL tables of
- * step 4.3 (§3) and the BEC results table of step 4.4 (§3).
+ * step 4.3 (§3), the BEC results table of step 4.4 (§3), the two DLP tables of step 4.5 (§3)
+ * and the risk scores table of step 5.1 (§3).
  */
 export const PARTITION_REGISTRY: readonly PartitionSpec[] = Object.freeze([
   monthly('email_messages', 'received_at', 6, 'core'),
@@ -103,6 +104,9 @@ export const PARTITION_REGISTRY: readonly PartitionSpec[] = Object.freeze([
   // tables are configuration (deleted with the organization).
   monthly('dlp_scan_results', 'received_at', 6, 'core'),
   monthly('dlp_evidence', 'received_at', 7, 'core'),
+  // Step 5.1 (docs/plan/steps/15-risk-scoring.md §3, R14): the risk scores of a scan round
+  // (revision 0 and the sandbox revision 1) live as long as the scan rounds (email_scans).
+  monthly('message_risk_scores', 'received_at', 6, 'core'),
   // Legal hold and per-tenant archive retention are row-level (step 8.1).
   monthly('email_archives', 'received_at', null, 'compliance'),
   monthly('bounce_events', 'occurred_at', 6, 'core'),

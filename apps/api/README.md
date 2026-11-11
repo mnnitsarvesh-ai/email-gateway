@@ -18,17 +18,18 @@ UPDATE_OPENAPI=1 pnpm --filter @email-gateway/api test:e2e -- openapi   # after 
 
 ## Layout (`src/`)
 
-| Path                 | What                                                                                                                                                       |
-| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `app.module.ts`      | Root module: database (writer + reader), Redis, S3, health, metrics, the shared building blocks, the feature modules                                       |
-| `auth-contracts/`    | `Principal`, `TenantScope` + `tenantWhere`, `@RequirePermissions`, `@CurrentScope`, `@CurrentPrincipal`                                                    |
-| `audit/`             | `AuditService`: `audit_logs` rows in the caller's transaction (metadata scrubbed of credentials)                                                           |
-| `database/`          | `TransactionRunner`: interactive writer transactions owned by services                                                                                     |
-| `http/`              | prefix and proxy setup, OpenAPI document, pagination, `CodedHttpException` + `CodedExceptionFilter` (errors with a stable `code`), `idempotency/`          |
-| `http/idempotency/`  | The Idempotency-Key store (step 3.3 L11): header validation, request fingerprint, `IdempotencyService` (`api_idempotency_keys`), `ApiIdempotencyKey()`     |
-| `modules/<feature>/` | Controller (translation only) → service (logic, transactions) → repositories (queries); `dto/` zod schemas (validation and OpenAPI), `api-docs.ts` helpers |
-| `modules/messages/`  | Message lifecycle (step 3.3) and scan results (step 4.1): see below                                                                                        |
-| `modules/scans/`     | Scan settings and platform training (step 4.1): see below                                                                                                  |
+| Path                    | What                                                                                                                                                       |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `app.module.ts`         | Root module: database (writer + reader), Redis, S3, health, metrics, the shared building blocks, the feature modules                                       |
+| `auth-contracts/`       | `Principal`, `TenantScope` + `tenantWhere`, `@RequirePermissions`, `@CurrentScope`, `@CurrentPrincipal`                                                    |
+| `audit/`                | `AuditService`: `audit_logs` rows in the caller's transaction (metadata scrubbed of credentials)                                                           |
+| `database/`             | `TransactionRunner`: interactive writer transactions owned by services                                                                                     |
+| `http/`                 | prefix and proxy setup, OpenAPI document, pagination, `CodedHttpException` + `CodedExceptionFilter` (errors with a stable `code`), `idempotency/`          |
+| `http/idempotency/`     | The Idempotency-Key store (step 3.3 L11): header validation, request fingerprint, `IdempotencyService` (`api_idempotency_keys`), `ApiIdempotencyKey()`     |
+| `modules/<feature>/`    | Controller (translation only) → service (logic, transactions) → repositories (queries); `dto/` zod schemas (validation and OpenAPI), `api-docs.ts` helpers |
+| `modules/messages/`     | Message lifecycle (step 3.3) and scan results (step 4.1): see below                                                                                        |
+| `modules/scans/`        | Scan settings and platform training (step 4.1): see below                                                                                                  |
+| `modules/risk-scoring/` | Risk scoring profiles and the dry-run (step 5.1): see below                                                                                                |
 
 ## Message lifecycle (step 3.3)
 
@@ -65,6 +66,29 @@ Design: [09-rspamd.md](../../docs/plan/steps/09-rspamd.md) S8, S13, S14, S16, [A
 - `modules/messages/`: `controllers/message-scans.controller.ts`, `services/message-scans-read.service.ts`, `repositories/message-scans-read.repository.ts` (`email_scans`, `scan_engine_results`, `email_auth_results` with the message's `(message_id, received_at)` and the scope's organization), `domain/message-scans.ts` (pure mapping: final row = result, every row = attempt, `evidence.signals` = symbols; round cursor).
 - `modules/scans/`: `domain/engine-settings.ts` (per catalog engine: `resolveRspamdSettings` against the platform settings `SCAN_RSPAMD_*` of `config.ts`; a stored override that no longer fits is shown with its violations and not applied), `services/scan-settings.service.ts` (CAS on `scan_engine_settings.version`, `409 version_conflict`, `422 scan_settings_invalid`, audit `scan_settings.updated` / `scan_settings.reset` with before/after in the same transaction; a reset keeps the row with `{}` and a new version), `services/scan-training.service.ts` (organization by public id, message within it, EML key prefix, `@email-gateway/rspamd` learn/fuzzy with flags 11/12 and `SCAN_FUZZY_WEIGHT`, audit `scan_training.<operation>` for every call that found its message, `email_events` `scan.training` on success), `services/eml-store.ts` (S3 stream; the `GetObjectCommand` class is resolved from `@email-gateway/common`'s SDK), `services/rspamd-controller.ts` (`RSPAMD_CONTROLLER_URL`, `RSPAMD_CONTROLLER_ENABLE_PASSWORD`; without them training answers `503 rspamd_unavailable`).
 - `scan:settings_manage` is held by `organization_admin` and `security_analyst` (and grantable to API keys); `platform:scan_training` by `platform_admin` (and `super_admin`); never by API keys or override sessions.
+
+## Risk scoring (step 5.1)
+
+Design: [15-risk-scoring.md](../../docs/plan/steps/15-risk-scoring.md) R10, R12, R15–R17, [ADR-0041](../../docs/architecture/adr/0041-risk-scoring-model.md), [ADR-0042](../../docs/architecture/adr/0042-risk-scoring-placement-and-policy-handoff.md). **5.1 recommends and never enforces** (policy 5.2 decides, quarantine 5.3 acts); the default weights and thresholds are engineering defaults calibrated on a synthetic dataset, **not validated detection accuracy**. Scores are computed by the email-worker at round completion (`message_risk_scores`); the api manages the tenant profile and reads scores.
+
+| Route                                                             | Permission                         | Store                                                                          |
+| ----------------------------------------------------------------- | ---------------------------------- | ------------------------------------------------------------------------------ |
+| `GET /api/v1/risk-scoring/platform-profile`                       | `policy:read`                      | none (library data: profile, bounds, signal map, hard blocks)                  |
+| `GET /api/v1/risk-scoring/profile`                                | `policy:read`                      | replica                                                                        |
+| `GET /api/v1/risk-scoring/profile/versions[/{versionId}]`         | `policy:read`                      | replica                                                                        |
+| `POST /api/v1/risk-scoring/profile/versions`                      | `policy:manage`                    | writer, organization lock, version cap, audited `risk_profile.draft_created`   |
+| `PUT /api/v1/risk-scoring/profile/versions/{versionId}`           | `policy:manage`                    | writer, drafts only, `row_version` CAS, audited `risk_profile.draft_updated`   |
+| `DELETE /api/v1/risk-scoring/profile/versions/{versionId}`        | `policy:manage`                    | writer, drafts only, audited `risk_profile.draft_deleted`                      |
+| `POST /api/v1/risk-scoring/profile/versions/{versionId}/publish`  | `policy:publish`                   | writer, immutable afterwards, audited `risk_profile.published` (+ `activated`) |
+| `POST /api/v1/risk-scoring/profile/versions/{versionId}/activate` | `policy:publish`                   | writer, pointer CAS, audited `risk_profile.activated`                          |
+| `POST /api/v1/risk-scoring/profile/reset`                         | `policy:publish`                   | writer, pointer → NULL, audited `risk_profile.reset`                           |
+| `POST /api/v1/messages/{messageId}/scans/{scanId}/risk/dry-run`   | `policy:manage` and `message:read` | replica, **writes nothing**                                                    |
+| `GET /api/v1/messages/{messageId}/scans` (`risk` per round)       | `message:read`                     | replica                                                                        |
+
+- `modules/risk-scoring/`: `domain/risk-profile.ts` (overrides validation through `validateOverrides`, changed override paths for audit metadata, the active-profile resolution the email-worker also applies, views), `domain/risk-dry-run.ts` (the round's rows → `RoundRows` exactly as the email-worker passes them, then `buildScoringInput` + `scoreRisk` with the worker's fail-safe error result), `services/risk-profiles.service.ts`, `services/risk-dry-run.service.ts` (no writer, audit or cache dependency), `services/risk-writer.ts` (120 s transactions, one retry on an echo-check mismatch, then `503 inconsistent_read`; `risk_profile_changes_total{operation}`, `risk_dry_runs_total{result}`), `repositories/risk-profiles.repository.ts` (drafts change only `WHERE status = 'draft'`), `repositories/risk-dry-run.repository.ts` (read only).
+- Errors: `400 risk_profile_invalid` (`violations` by path), `404 risk_profile_version_not_found` / `message_not_found` / `scan_not_found`, `409 risk_profile_limit_reached` (`RISK_PROFILE_MAX_VERSIONS`, default 200, 10–1000), `409 risk_profile_version_conflict` (`currentRowVersion` / `currentProfileVersion`), `409 risk_profile_version_immutable`, `409 risk_profile_version_not_published`, `409 scan_round_not_complete`, `409 risk_revision_unavailable`, `503 inconsistent_read`.
+- `RISK_PLATFORM_PROFILE` (default `rsk-default/1`, a key of `RISK_PLATFORM_PROFILES`) is the platform profile drafts are based on and resolved against. A profile change applies to the **next round only** (each round snapshots the active version when it opens).
+- Organization purge: `modules/tenant-data/risk-tenant-data.repository.ts` deletes `message_risk_scores`, then `risk_scoring_profile_versions`, then `risk_scoring_profiles` in batches.
 
 ### Idempotency semantics (L11)
 

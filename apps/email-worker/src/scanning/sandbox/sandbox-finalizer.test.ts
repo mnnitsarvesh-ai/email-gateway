@@ -7,7 +7,9 @@ import {
   outcomeFromAnalysis,
   SANDBOX_ENGINE_VERSION,
   type SubmissionOutcome,
+  writeRoundFinal,
 } from './sandbox-finalizer';
+import { scanKey } from './sandbox-store';
 
 const NOW = new Date('2026-11-08T10:00:00.000Z');
 const RECEIVED = new Date('2026-11-08T09:00:00.000Z');
@@ -228,5 +230,82 @@ describe('sandbox finalizer (X15)', () => {
     expect(() =>
       outcomeFromAnalysis(t.store.addAnalysis({ ...base, status: 'dispatched' })),
     ).toThrow();
+  });
+});
+
+describe('risk revision 1 from the sandbox final (step 5.1 R13 (a), ADR-0042)', () => {
+  const key = (t: ReturnType<typeof setup>) => scanKey(t.scan.scanId, RECEIVED);
+
+  it('a round still running gets no revision 1 here (its completion writes it)', async () => {
+    const t = setup();
+    const sub = t.sub(1);
+    const analysis = malicious(t.store);
+    await t.store.transaction((tx) =>
+      finishSubmissions(tx, [{ submission: sub, outcome: outcomeFromAnalysis(analysis) }], t.ctx),
+    );
+    expect(t.store.final(t.scan.scanId, RECEIVED)?.outcome).toBe('malicious');
+    expect(t.store.state.riskRevisions.size).toBe(0);
+  });
+
+  it('a round that completed first gets revision 1 from the final, exactly once', async () => {
+    const t = setup();
+    t.store.setScanStatus(t.scan.scanId, RECEIVED, 'completed');
+    const sub = t.sub(1);
+    const analysis = malicious(t.store);
+    await t.store.transaction((tx) =>
+      finishSubmissions(tx, [{ submission: sub, outcome: outcomeFromAnalysis(analysis) }], t.ctx),
+    );
+    expect(t.store.state.riskRevisions.get(key(t))).toBe(1);
+    // Re-checks (sweeper, redelivery): the final exists, nothing is scored again.
+    const again = await t.store.transaction(async (tx) => {
+      const scans = await tx.lockScans([{ scanId: t.scan.scanId, receivedAt: RECEIVED }]);
+      return writeRoundFinal(tx, scans.get(key(t))!, t.ctx);
+    });
+    expect(again).toBeNull();
+    expect(t.store.state.riskRevisions.size).toBe(1);
+    expect(t.store.state.riskDuplicates).toBe(0);
+  });
+
+  it('failed and timed-out rounds are scored too; a skipped final never is', async () => {
+    for (const status of ['failed', 'timed_out']) {
+      const t = setup();
+      t.store.setScanStatus(t.scan.scanId, RECEIVED, status);
+      const sub = t.sub(1);
+      await t.store.transaction((tx) =>
+        finishSubmissions(tx, [{ submission: sub, outcome: expiredOutcome() }], t.ctx),
+      );
+      expect(t.store.final(t.scan.scanId, RECEIVED)?.outcome).toBe('timeout');
+      expect(t.store.state.riskRevisions.size).toBe(1);
+    }
+    const s = setup();
+    s.store.setScanStatus(s.scan.scanId, RECEIVED, 'completed');
+    const only = s.sub(1, 'pending');
+    await s.store.transaction((tx) =>
+      finishSubmissions(
+        tx,
+        [
+          {
+            submission: only,
+            outcome: { status: 'skipped', skipReason: 'feature_disabled', settingsVersion: 'v' },
+          },
+        ],
+        s.ctx,
+      ),
+    );
+    expect(s.store.final(s.scan.scanId, RECEIVED)?.outcome).toBe('skipped');
+    expect(s.store.state.riskRevisions.size).toBe(0);
+  });
+
+  it('a scoring failure rolls the final back with it (one transaction)', async () => {
+    const t = setup();
+    t.store.setScanStatus(t.scan.scanId, RECEIVED, 'completed');
+    const sub = t.sub(1);
+    const failing = (tx: Parameters<typeof finishSubmissions>[0]) => {
+      tx.scoreRiskRevision = () => Promise.reject(new Error('lock wait timeout'));
+      return finishSubmissions(tx, [{ submission: sub, outcome: expiredOutcome() }], t.ctx);
+    };
+    await expect(t.store.transaction(failing)).rejects.toThrow('lock wait timeout');
+    expect(t.store.final(t.scan.scanId, RECEIVED)).toBeUndefined();
+    expect(t.store.submission(sub.id).status).toBe('submitted');
   });
 });

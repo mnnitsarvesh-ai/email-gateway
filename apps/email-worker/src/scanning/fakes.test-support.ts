@@ -64,6 +64,8 @@ export class FakeScanStore implements ScanStore {
     dependencies: Array<{ engine: string; outcome: string }>;
   }> = [];
   readonly settings = new Map<string, EngineSettingsRow>();
+  /** `risk_scoring_profiles.active_version_id` by organization (step 5.1 R13 snapshot). */
+  readonly activeRiskProfiles = new Map<bigint, bigint>();
   settingsLoads = 0;
   failNext: { op: 'loadMessage' | 'openRound' | 'finalize'; error: Error } | null = null;
   private nextScanId = 1n;
@@ -168,6 +170,7 @@ export class FakeScanStore implements ScanStore {
         requiredEngines: [...input.requiredEngines],
         startedAt: input.now,
         deadlineAt: new Date(input.now.getTime() + input.deadlineSeconds * 1000),
+        riskProfileVersionId: this.activeRiskProfiles.get(input.message.organizationId) ?? null,
         status: 'running',
         verdict: null,
         reasonCodes: null,

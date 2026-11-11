@@ -8,6 +8,7 @@ import type {
   SandboxSubmissionStatus,
   SandboxVerdict,
 } from '@email-gateway/security-contracts';
+import type { RiskScorer, RiskScoreRecord } from '../risk/risk-scorer';
 import type { SandboxRead } from './sandbox-metrics';
 
 /**
@@ -109,6 +110,8 @@ export interface ScanLockRow {
   organizationId: bigint;
   messageId: bigint;
   lifecycleRound: number;
+  /** `email_scans.status` under the lock (step 5.1 R13: revision 1 once the round completed). */
+  status: string;
 }
 
 export interface NewAnalysis {
@@ -254,6 +257,12 @@ export interface SandboxTx {
   analysisSummaries(ids: readonly bigint[]): Promise<Map<bigint, AnalysisSummary>>;
   /** The round's `sandbox` final; false when it exists (unique `(scan, final_engine)`). */
   insertFinal(scan: ScanLockRow, final: FinalRow): Promise<boolean>;
+  /**
+   * Step 5.1 R13 (a): the round's risk score revision 1 (its inputs plus the sandbox final just
+   * inserted), for a round that is no longer running, under the scan row lock the caller holds.
+   * A row written earlier is kept (unique key; counted as a duplicate).
+   */
+  scoreRiskRevision(scan: ScanLockRow): Promise<void>;
   writeOutbox(row: OutboxRow): Promise<void>;
   publishHash(sha256: string, publicId: string, now: Date, expiresAt: Date): Promise<boolean>;
 
@@ -400,9 +409,13 @@ export const scanKey = (scanId: bigint, receivedAt: Date): string =>
   `${scanId.toString()}@${receivedAt.getTime()}`;
 
 class PrismaSandboxTx implements SandboxTx {
+  /** Risk scorings of this transaction, recorded after it committed. */
+  readonly risk: RiskScoreRecord[] = [];
+
   constructor(
     private readonly tx: Prisma.TransactionClient,
     private readonly organizationIds: readonly bigint[] | undefined,
+    private readonly scorer: RiskScorer,
   ) {}
 
   private orgSql(column: Prisma.Sql): Prisma.Sql {
@@ -629,7 +642,7 @@ class PrismaSandboxTx implements SandboxTx {
     const result = new Map<string, ScanLockRow>();
     for (const ref of ordered) {
       const rows = await this.tx.$queryRaw<RawRow[]>`
-        SELECT id, received_at, organization_id, message_id, lifecycle_round
+        SELECT id, received_at, organization_id, message_id, lifecycle_round, status
         FROM email_scans WHERE id = ${ref.scanId} AND received_at = ${ref.receivedAt} FOR UPDATE`;
       const row = rows[0];
       if (!row) continue;
@@ -639,6 +652,7 @@ class PrismaSandboxTx implements SandboxTx {
         organizationId: BigInt(row.organization_id as bigint),
         messageId: BigInt(row.message_id as bigint),
         lifecycleRound: Number(row.lifecycle_round),
+        status: String(row.status),
       };
       if (lock.scanId !== ref.scanId || !sameTime(lock.receivedAt, ref.receivedAt)) {
         throw new InconsistentSandboxReadError('scan', 'identity echo');
@@ -726,6 +740,11 @@ class PrismaSandboxTx implements SandboxTx {
       skipDuplicates: true,
     });
     return created.count === 1;
+  }
+
+  async scoreRiskRevision(scan: ScanLockRow): Promise<void> {
+    const record = await this.scorer.scoreSandboxRevision(this.tx, scan);
+    if (record) this.risk.push(record);
   }
 
   async writeOutbox(row: OutboxRow): Promise<void> {
@@ -873,6 +892,8 @@ export interface PrismaSandboxStoreOptions {
   txTimeoutMs: number;
   /** Restricts the sweeper reads to these organizations (integration tests on the shared writer). */
   organizationIds?: readonly bigint[];
+  /** The worker's risk scorer (step 5.1 R13 (a): revision 1 of a late sandbox final). */
+  risk: RiskScorer;
 }
 
 export class PrismaSandboxStore implements SandboxStore {
@@ -904,10 +925,15 @@ export class PrismaSandboxStore implements SandboxStore {
   }
 
   async transaction<T>(fn: (tx: SandboxTx) => Promise<T>): Promise<T | typeof DUPLICATE> {
+    let current: PrismaSandboxTx | null = null;
     try {
-      return await this.txPrisma.$transaction((tx) =>
-        fn(new PrismaSandboxTx(tx, this.options.organizationIds)),
-      );
+      const result = await this.txPrisma.$transaction((tx) => {
+        current = new PrismaSandboxTx(tx, this.options.organizationIds, this.options.risk);
+        return fn(current);
+      });
+      // Committed: the risk scorings of this transaction count now (never a rolled-back one).
+      if (current) this.options.risk.record((current as PrismaSandboxTx).risk);
+      return result;
     } catch (error) {
       if (error instanceof DuplicateLedgerError) return DUPLICATE;
       throw error;

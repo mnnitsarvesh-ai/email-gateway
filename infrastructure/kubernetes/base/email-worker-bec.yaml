@@ -100,6 +100,10 @@ spec:
             - { name: SCAN_RETRY_MAX_MS, value: '60000' }
             - { name: SCAN_S3_TIMEOUT_MS, value: '30000' }
             - { name: SCAN_DB_TIMEOUT_MS, value: '120000' }
+            # Risk scoring (step 5.1 R13, R16): this replica completes rounds (or writes late
+            # sandbox finals), so it scores them; the profile cache is per process.
+            - { name: RISK_PLATFORM_PROFILE, value: rsk-default/1 }
+            - { name: RISK_PROFILE_CACHE_MAX_ENTRIES, value: '10000' }
             - { name: SCAN_ROUND_DEADLINE_SECONDS, value: '1800' }
             - { name: SCAN_SETTINGS_CACHE_TTL_MS, value: '30000' }
             - { name: SCAN_BREAKER_FAILURE_THRESHOLD, value: '5' }

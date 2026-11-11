@@ -26,6 +26,7 @@ import { DomainsModule } from './modules/domains/domains.module';
 import { LoginAuditModule } from './modules/login-audit/login-audit.module';
 import { MessagesModule } from './modules/messages/messages.module';
 import { OrganizationsModule } from './modules/organizations/organizations.module';
+import { RiskScoringModule } from './modules/risk-scoring/risk-scoring.module';
 import { RolesModule } from './modules/roles/roles.module';
 import { ScansModule } from './modules/scans/scans.module';
 import { SmtpConnectorsModule } from './modules/smtp-connectors/smtp-connectors.module';
@@ -83,6 +84,8 @@ export class AppModule {
         BecModule,
         // Step 4.5: DLP tenant data, incidents and the audited evidence door.
         DlpModule,
+        // Step 5.1: risk scoring profiles (versioned, audited) and the no-write dry-run.
+        RiskScoringModule,
       ],
       providers: [{ provide: API_CONFIG, useValue: config }],
       exports: [API_CONFIG],

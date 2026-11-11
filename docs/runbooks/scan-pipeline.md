@@ -6,6 +6,8 @@ Step 4.1 ([design](../plan/steps/09-rspamd.md), [ADR-0026](../architecture/adr/0
 
 **Sandbox (step 4.6):** the asynchronous `sandbox` engine and the `sandbox-controller` have their own runbooks, [sandbox-engine.md](sandbox-engine.md) (dispatch, dedup/reuse, results rejected, expiry, purge, tenant opt-in) and [sandbox-controller.md](sandbox-controller.md) (backends, refusing execution, self-test and reaper, suspected escape, key rotation). The sandbox is **not** a required engine: its final row never changes a round (`aggregateRound` ignores asynchronous finals), so the procedures below never wait for it, and a sandbox outage never causes `scan_failed`. **Execution of unknown files is disabled** (backend `disabled`).
 
+**Risk scoring (step 5.1):** the completion transaction of every round also writes the round's risk score (`message_risk_scores` revision 0 and `email_scans.verdict`, `risk_score`, `scoring_version`; revision 1 with a late sandbox final), using the tenant profile snapshotted when the round opened (`email_scans.risk_profile_version_id`). Reading scores and explanations, the dry-run, profile rollback and the alerts `RiskScoringErrors`, `RiskProfileFallback`, `RiskScoreMissing` and `RiskUnmappedCodes` are in their own runbook, [risk-scoring.md](risk-scoring.md). A failed round is scored too (failures are risk: at least `medium` / `quarantine`); rescanning it scores the new round, and the old rows stay.
+
 **Rules that hold in every procedure below:**
 
 - **Never clean by accident.** A timeout, error, open breaker, missing EML, unparseable reply or deadline is never `clean`. A round whose required engine failed ends `scan_failed` and waits for policy (the 5.2 fail-safe). Do not "fix" a failed round by editing rows: rescan it.

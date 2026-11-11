@@ -42,3 +42,25 @@ describe('DeliveryMetrics lifecycle series (step 3.3)', () => {
     }
   });
 });
+
+describe('DeliveryMetrics risk holds (step 5.1 R17, R19)', () => {
+  it('counts the pass-through risk holds by action and the new skip reasons', async () => {
+    const service = new MetricsService({ service: 'test' });
+    const metrics = new DeliveryMetrics(service);
+    metrics.riskHolds.inc({ action: 'quarantine' });
+    metrics.riskHolds.inc({ action: 'missing' });
+    metrics.approvalsSkipped.inc({ reason: 'risk_recommendation' });
+    metrics.approvalsSkipped.inc({ reason: 'risk_missing' });
+    metrics.inconsistentReads.inc({ read: 'risk_score' });
+    const text = await service.metrics();
+    for (const line of [
+      'delivery_risk_holds_total{action="quarantine",service="test"} 1',
+      'delivery_risk_holds_total{action="missing",service="test"} 1',
+      'delivery_approvals_skipped_total{reason="risk_recommendation",service="test"} 1',
+      'delivery_approvals_skipped_total{reason="risk_missing",service="test"} 1',
+      'delivery_inconsistent_reads_total{read="risk_score",service="test"} 1',
+    ]) {
+      expect(text).toContain(line);
+    }
+  });
+});

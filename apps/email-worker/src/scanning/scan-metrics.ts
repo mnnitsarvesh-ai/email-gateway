@@ -3,6 +3,7 @@ import type { LifecycleMetrics } from '@email-gateway/message-lifecycle';
 import { engineCatalogEntry, isStage2Engine } from '@email-gateway/security-contracts';
 import { CIRCUIT_STATE_VALUE, type CircuitState } from './circuit-breaker';
 import type { FailureMetricReason } from './engine';
+import { RiskMetrics } from './risk/risk-metrics';
 
 const ENGINE_BUCKETS = [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 30, 60];
 const ROUND_BUCKETS = [0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 900, 1800, 3600];
@@ -49,6 +50,8 @@ export class ScanMetrics {
   readonly ignoredTotal: Counter<'reason'>;
   readonly versionConflicts: Counter;
   readonly derivedSkipped: Counter<'state'>;
+  /** The risk scorer's series (step 5.1 R19), on the same registry. */
+  readonly risk: RiskMetrics;
   private readonly versions = new Map<string, string>();
 
   constructor(metrics: MetricsService) {
@@ -153,6 +156,7 @@ export class ScanMetrics {
       'Derived delivery states not applied because the message is outside the delivery phase, by its state',
       ['state'],
     );
+    this.risk = RiskMetrics.for(metrics);
   }
 
   /** The transition service's metrics interface on this registry. */

@@ -237,6 +237,8 @@ export async function cleanupProbeMessages(
   await prisma.messageUrl.deleteMany({ where: byMessage });
   await prisma.sandboxSubmission.deleteMany({ where: byMessage });
   await prisma.attachmentScanResult.deleteMany({ where: byMessage });
+  // Step 5.1: the round's risk scores (no foreign keys; written with the round's completion).
+  await prisma.messageRiskScore.deleteMany({ where: byMessage });
   await prisma.emailAuthResult.deleteMany({ where: byMessage });
   await prisma.scanEngineResult.deleteMany({ where: byMessage });
   await prisma.emailScan.deleteMany({ where: byMessage });

@@ -22,6 +22,7 @@ import {
 import { z } from 'zod';
 import { becConfigShape, validateBecConfig } from './bec-config';
 import { dlpConfigShape, validateDlpConfig } from './dlp-config';
+import { riskConfigShape } from './risk/risk-config';
 import { sandboxConfigShape, validateSandboxConfig } from './sandbox/sandbox-config';
 import { urlConfigShape, validateUrlConfig } from './url-config';
 
@@ -292,6 +293,7 @@ export const scanConfigShape = {
   ...becConfigShape(),
   ...dlpConfigShape(),
   ...sandboxConfigShape(),
+  ...riskConfigShape(),
 };
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars -- only its type is used

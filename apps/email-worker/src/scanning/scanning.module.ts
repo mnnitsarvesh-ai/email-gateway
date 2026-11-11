@@ -67,6 +67,7 @@ import {
   type ScanTriggerPayload,
   type SettingsLookup,
 } from './round-service';
+import { createRiskScorer, type RiskScorer } from './risk/risk-scorer';
 import { ScanMetrics } from './scan-metrics';
 import { ScanRepository } from './scan-repository';
 import { createSandboxJobs, type SandboxJobs } from './sandbox/sandbox-engine';
@@ -82,6 +83,11 @@ export const SCANNER_MESSAGING_METRICS = Symbol('SCANNER_MESSAGING_METRICS');
 /** The advisory-lock connection of the deadline sweeper's leader lock. */
 export const SCAN_LOCKS = Symbol('SCAN_LOCKS');
 export const SCAN_ENGINES = Symbol('SCAN_ENGINES');
+/**
+ * The risk scorer (step 5.1 R13), one per process: shared by every engine's completion, the
+ * deadline sweeper and the sandbox path, so the profile cache is one LRU.
+ */
+export const RISK_SCORER = Symbol('RISK_SCORER');
 /** The attachment engine's background jobs (A13), or null on replicas without its consumer. */
 export const ATTACHMENT_JOBS = Symbol('ATTACHMENT_JOBS');
 
@@ -465,8 +471,11 @@ export function createScanInfrastructure(options: {
   logger: Logger;
   /** The worker's registry (child-row metrics: `bec_history_updates_total`). */
   registry?: MetricsService;
+  /** The process's risk scorer (step 5.1 R13); default: a new one on `metrics.risk`. */
+  risk?: RiskScorer;
 }): { store: ScanRepository; settings: SettingsResolver; openEml: EmlOpener } {
   const { config, metrics, logger } = options;
+  const risk = options.risk ?? createRiskScorer({ config, metrics: metrics.risk, logger });
   // Stage-2 engines are triggered by any replica's stage-1 finals: zero series everywhere.
   for (const engine of stage2Engines()) {
     if (config.SCAN_ENGINES.includes(engine)) metrics.stageTriggers.inc({ engine }, 0);
@@ -479,24 +488,32 @@ export function createScanInfrastructure(options: {
     options.s3.mailBucket,
     config.SCAN_S3_TIMEOUT_MS,
   );
-  const store = new ScanRepository(options.prisma, config.SCAN_DB_TIMEOUT_MS, metrics.lifecycle, {
-    ...(registry ? { becHistory: (result) => BecMetrics.for(registry).historyUpdate(result) } : {}),
-    dlpEvidenceUncommitted: async (key, organizationId) => {
-      const deleted = await deleteUncommittedEvidence(
-        evidenceObjects,
-        (result) => (registry ? DlpMetrics.for(registry).evidence(result) : undefined),
-        key,
-        organizationId,
-      );
-      if (!deleted) {
-        logger.warn(
-          { organizationId: organizationId.toString() },
-          'dlp evidence object without a committed row was left (undecryptable)',
+  const store = new ScanRepository(
+    options.prisma,
+    config.SCAN_DB_TIMEOUT_MS,
+    risk,
+    metrics.lifecycle,
+    {
+      ...(registry
+        ? { becHistory: (result) => BecMetrics.for(registry).historyUpdate(result) }
+        : {}),
+      dlpEvidenceUncommitted: async (key, organizationId) => {
+        const deleted = await deleteUncommittedEvidence(
+          evidenceObjects,
+          (result) => (registry ? DlpMetrics.for(registry).evidence(result) : undefined),
+          key,
+          organizationId,
         );
-      }
+        if (!deleted) {
+          logger.warn(
+            { organizationId: organizationId.toString() },
+            'dlp evidence object without a committed row was left (undecryptable)',
+          );
+        }
+      },
+      dlpIncidentSkipped: () => logger.warn('dlp incident not written: the message row is gone'),
     },
-    dlpIncidentSkipped: () => logger.warn('dlp incident not written: the message row is gone'),
-  });
+  );
   const settings = new SettingsResolver({
     source: store,
     config,
@@ -716,6 +733,12 @@ export class ScanningModule {
           useFactory: () => new AdvisoryLocks(config.DATABASE_URL),
         },
         {
+          provide: RISK_SCORER,
+          useFactory: (metrics: ScanMetrics): RiskScorer =>
+            createRiskScorer({ config, metrics: metrics.risk, logger: scanLogger }),
+          inject: [ScanMetrics],
+        },
+        {
           provide: SCAN_ENGINES,
           useFactory: (
             prisma: PrismaService,
@@ -726,6 +749,7 @@ export class ScanningModule {
             connection: AmqpConnection,
             publisher: ConfirmPublisher,
             messaging: MessagingMetrics,
+            risk: RiskScorer,
           ): EngineRuntime[] => {
             const infra = createScanInfrastructure({
               config,
@@ -734,6 +758,7 @@ export class ScanningModule {
               metrics,
               logger: scanLogger,
               registry,
+              risk,
             });
             const progress = new PrismaConsumerProgress(prisma);
             for (const warning of runsAttachmentConsumer(config)
@@ -771,13 +796,20 @@ export class ScanningModule {
             SCANNER_AMQP_CONNECTION,
             SCANNER_PUBLISHER,
             SCANNER_MESSAGING_METRICS,
+            RISK_SCORER,
           ],
         },
         {
           provide: DeadlineSweeper,
-          useFactory: (prisma: PrismaService, metrics: ScanMetrics, locks: LeaderLock) =>
+          useFactory: (
+            prisma: PrismaService,
+            metrics: ScanMetrics,
+            locks: LeaderLock,
+            risk: RiskScorer,
+          ) =>
             new DeadlineSweeper({
-              store: new ScanRepository(prisma, config.SCAN_DB_TIMEOUT_MS, metrics.lifecycle),
+              // Step 5.1 R13: swept rounds are completed by the same function, so they are scored.
+              store: new ScanRepository(prisma, config.SCAN_DB_TIMEOUT_MS, risk, metrics.lifecycle),
               locks,
               metrics,
               logger: scanLogger,
@@ -785,7 +817,7 @@ export class ScanningModule {
               lookbackHours: config.SCAN_SWEEP_LOOKBACK_HOURS,
               batchSize: config.SCAN_SWEEP_BATCH_SIZE,
             }),
-          inject: [PrismaService, ScanMetrics, SCAN_LOCKS],
+          inject: [PrismaService, ScanMetrics, SCAN_LOCKS, RISK_SCORER],
         },
         {
           provide: ATTACHMENT_JOBS,
@@ -881,6 +913,7 @@ export class ScanningModule {
             connection: AmqpConnection,
             publisher: ConfirmPublisher,
             messaging: MessagingMetrics,
+            risk: RiskScorer,
           ): SandboxJobs | null => {
             if (!runsSandboxConsumers(config)) return null;
             return createSandboxJobs({
@@ -894,6 +927,7 @@ export class ScanningModule {
               publisher,
               messaging,
               logger: scanLogger,
+              risk,
             });
           },
           inject: [
@@ -905,6 +939,7 @@ export class ScanningModule {
             SCANNER_AMQP_CONNECTION,
             SCANNER_PUBLISHER,
             SCANNER_MESSAGING_METRICS,
+            RISK_SCORER,
           ],
         },
         ScannerBrokerHealth,

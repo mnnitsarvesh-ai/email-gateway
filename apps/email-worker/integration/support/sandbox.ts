@@ -32,6 +32,7 @@ import {
 } from '@email-gateway/event-contracts';
 import type { WorkerConfig } from '../../src/config';
 import { classifyScanFailure } from '../../src/scanning/engine-consumer';
+import { createRiskScorer } from '../../src/scanning/risk/risk-scorer';
 import { createSandboxJobs, type SandboxJobs } from '../../src/scanning/sandbox/sandbox-engine';
 import { ScanMetrics } from '../../src/scanning/scan-metrics';
 import { ScanRepository } from '../../src/scanning/scan-repository';
@@ -92,7 +93,12 @@ export class SandboxFixtures {
     this.att = new AttachmentFixtures(fx);
     this.config = workerConfig({ ...SANDBOX_IT, ...overrides });
     const metrics = new ScanMetrics(new MetricsService({ service: `it-sbx-${fx.suffix}` }));
-    this.repo = new ScanRepository(fx.prisma, this.config.SCAN_DB_TIMEOUT_MS, metrics.lifecycle);
+    this.repo = new ScanRepository(
+      fx.prisma,
+      this.config.SCAN_DB_TIMEOUT_MS,
+      createRiskScorer({ config: this.config, metrics: metrics.risk, logger: silentLogger }),
+      metrics.lifecycle,
+    );
     this.lockName = `scan:sandbox:it-${fx.suffix}`;
   }
 

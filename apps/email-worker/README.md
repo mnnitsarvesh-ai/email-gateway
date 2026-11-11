@@ -465,6 +465,65 @@ step and the shredding order, config refusals) and `src/scanning/aggregate.test.
 finals excluded); package integration `integration/sandbox-{dispatch,results,sweeper}.test.ts`
 (real MySQL writer, MinIO and a topology v8 vhost; MinIO paused during staging).
 
+## Risk scoring (step 5.1)
+
+Design [15-risk-scoring.md](../../docs/plan/steps/15-risk-scoring.md) (R12, R13, R16, R18, R19),
+[ADR-0041](../../docs/architecture/adr/0041-risk-scoring-model.md),
+[ADR-0042](../../docs/architecture/adr/0042-risk-scoring-placement-and-policy-handoff.md), runbook
+[risk-scoring.md](../../docs/runbooks/risk-scoring.md). The scorer itself is the pure library
+[`@email-gateway/risk-scoring`](../../packages/risk-scoring); this package reads the rows, resolves
+the profile, writes the result and counts it. Code: `src/scanning/risk/`.
+
+**5.1 recommends, it never enforces**, and the default weights are engineering defaults calibrated
+on synthetic data, not validated accuracy. Every completed round gets one `message_risk_scores`
+row:
+
+- **Snapshot at open:** `ScanRepository.openRound` stores the organization's active profile version
+  (`risk_scoring_profiles.active_version_id`, echo-checked) in `email_scans.risk_profile_version_id`
+  with the round insert (the first opener's value is kept). A profile change applies to the next
+  round only.
+- **Revision 0 at completion:** `ScanRepository.complete()` (engine finalize and the deadline
+  sweeper) scores after the `email_scans` update and **before** the lifecycle transition and
+  `scanned.v1`, in the same transaction, whether or not the transition applies; it also sets
+  `email_scans.verdict`, `risk_score`, `scoring_version`.
+- **Revision 1 (sandbox):** written once by whichever comes second: completion finding a
+  non-skipped sandbox final, or `writeRoundFinal` of the sandbox finalizer for a round that is no
+  longer running (both under the `email_scans` row lock; `createMany … skipDuplicates` on
+  `(scan_id, revision, received_at)` makes a repeat a counted no-op).
+- **Fail-safe:** an input the builder refuses, a scorer exception or a malformed profile row writes
+  the error row (`status = error`, high, quarantine); database errors and wrong reads
+  (`InconsistentRiskReadError`) roll the transaction back and are retried. Metrics and logs are
+  recorded only after the commit.
+
+| File                  | Purpose                                                                                                                                                                                        |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `risk-config.ts`      | `RISK_PLATFORM_PROFILE` (a shipped id) and `RISK_PROFILE_CACHE_MAX_ENTRIES` (100–100000)                                                                                                       |
+| `risk-reader.ts`      | `RiskRoundReader`: the round row (`FOR UPDATE`), finals, `email_auth_results`, `bec_scan_results`, `dlp_scan_results` (`FOR SHARE`, echo-checked) and the message → `RoundRows` (R12)          |
+| `profile-provider.ts` | The open snapshot read and `RiskProfileProvider`: LRU of resolved **published** versions by id; foreign → `foreign`, draft or absent → `missing`, invalid → `invalid` (platform default)       |
+| `risk-scorer.ts`      | `RiskScorer.scoreRound` (build, score, map, insert, round columns), `scoreSandboxRevision`, `record` (post-commit metrics and logs); `createRiskScorer` (one per process, `RISK_SCORER` token) |
+| `risk-metrics.ts`     | The R19 series (below)                                                                                                                                                                         |
+
+Metrics (bounded labels, no tenant ids; alert rules `infrastructure/monitoring/rules/risk-scoring.rules.yml`):
+`scan_risk_scores_total{revision,level,action,direction,status}`, `scan_risk_score{revision}`
+(histogram 100…1000), `scan_risk_hard_blocks_total{indicator}`,
+`scan_risk_engine_failures_total{engine,status}`, `scan_risk_trust_total{status}`,
+`scan_risk_profile_fallback_total{reason}`, `scan_risk_errors_total{reason}`,
+`scan_risk_unmapped_codes_total{engine}`, `scan_risk_duplicates_total{revision}`,
+`scan_risk_duration_seconds`, `scan_risk_skipped_total{revision,reason}` (message purged while its
+round was open) and `scan_risk_inconsistent_reads_total{read}`.
+
+**Tests:** unit tests in `src/scanning/risk/*.test.ts` (config bounds; the provider's cache, LRU
+and foreign/missing/draft/invalid fallbacks; every echo check of the reader; the scorer's rows,
+error rows on input errors, exceptions and profile errors, duplicates; completion ordering — the
+row before the transition, also when it is stale — the deadline sweeper path and the snapshot at
+open, against an in-memory Prisma fake), `src/scanning/sandbox/sandbox-finalizer.test.ts`
+(revision 1 in both orders, exactly once) and the R18 contract test
+`src/scanning/engines/rspamd/rspamd-contract.test.ts` (the mapper emits exactly
+`RSPAMD_REASON_CODES`; the mapping versions are equal); package integration
+`integration/risk-scoring.test.ts` (real MySQL writer: platform and tenant profiles, the snapshot
+after a pointer change, rescans, revision 1 before and after completion, the error row, redelivery
+and the sweeper).
+
 ## Message lifecycle (step 3.3 L8.2)
 
 The MIME stage **does not change the message lifecycle state** (the scan stage does, through
@@ -574,6 +633,10 @@ SCAN_RETRY_MAX_MS) / 1000` (480 s with the defaults) or above 6 hours;
 - platform thresholds that `rspamdPlatformSettingsSchema` refuses (`0 < MIN < MAX ≤ 100`,
   `MIN ≤ SUSPICIOUS < SPAM ≤ MAX`, two decimals, the allowed verdict values);
 - a breaker window below 10 calls, a ratio outside (0, 1], a settings TTL above 300 000.
+
+Risk scoring (`.env.example` section "Risk scoring (step 5.1 …)", `src/scanning/risk/risk-config.ts`):
+`RISK_PLATFORM_PROFILE` (default `rsk-default/1`; refused unless it names a shipped platform
+profile) and `RISK_PROFILE_CACHE_MAX_ENTRIES` (default 10000, 100–100000).
 
 ## Metrics (design M16)
 

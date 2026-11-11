@@ -286,6 +286,14 @@ async function outboxScanned(
   return eventId;
 }
 
+/**
+ * The step 4.x pass-through cases below exercise the 4.x holds and approvals exactly as before
+ * step 5.1: DELIVERY_DEV_PASSTHROUGH_RISK_HOLD=false (R17: restores the 4.6 behaviour), because
+ * their fixtures carry no risk score rows. The 5.1 risk hold (default true) is covered by its
+ * own case, which writes the round's revision-0 `message_risk_scores` rows.
+ */
+const STEP_4_6 = { riskHold: false } as const;
+
 const approvalRows = (message: MessageFixture) =>
   fx.prisma.messageOutbox.findMany({
     where: { aggregateId: message.messageId.toString(), eventType: EventTypes.DeliveryApproved },
@@ -306,6 +314,8 @@ describe('development pass-through after scanning (R5, step 4.1 S15) end to end'
       RECORDER_TX_TIMEOUT_MS,
       silentLogger,
       worker.metrics,
+      undefined,
+      STEP_4_6,
     );
     const ptHandler = ours<MessageScannedV1>(
       ptConsumer,
@@ -402,6 +412,8 @@ describe('development pass-through after scanning (R5, step 4.1 S15) end to end'
       RECORDER_TX_TIMEOUT_MS,
       silentLogger,
       worker.metrics,
+      undefined,
+      STEP_4_6,
     );
     // Round 2: the operator rescanned twice (E19) and the scan stage completed round 2.
     const message = await fx.message(org, {
@@ -463,6 +475,8 @@ describe('development pass-through after scanning (R5, step 4.1 S15) end to end'
       RECORDER_TX_TIMEOUT_MS,
       silentLogger,
       worker.metrics,
+      undefined,
+      STEP_4_6,
     );
     const approveOnce = async (message: MessageFixture, correlation: string) => {
       const payload = scannedPayload(message, { verdict: 'clean' });
@@ -569,6 +583,8 @@ describe('development pass-through after scanning (R5, step 4.1 S15) end to end'
       RECORDER_TX_TIMEOUT_MS,
       silentLogger,
       worker.metrics,
+      undefined,
+      STEP_4_6,
     );
     const ptHandler = ours<MessageScannedV1>(
       ptConsumer,
@@ -611,6 +627,8 @@ describe('development pass-through after scanning (R5, step 4.1 S15) end to end'
       RECORDER_TX_TIMEOUT_MS,
       silentLogger,
       worker.metrics,
+      undefined,
+      STEP_4_6,
     );
     const ptHandler = ours<MessageScannedV1>(
       ptConsumer,
@@ -735,6 +753,8 @@ describe('development pass-through after scanning (R5, step 4.1 S15) end to end'
       RECORDER_TX_TIMEOUT_MS,
       silentLogger,
       worker.metrics,
+      undefined,
+      STEP_4_6,
     );
     const ptHandler = ours<MessageScannedV1>(
       ptConsumer,
@@ -940,6 +960,251 @@ describe('development pass-through after scanning (R5, step 4.1 S15) end to end'
     await pt.stop();
   });
 
+  it('holds on the round revision-0 risk recommendation (require_approval/quarantine/block, hard block, error, missing) and approves deliver/tag, after the 4.x checks, never reading revision 1; a shifted read is redelivered (step 5.1 R17)', async () => {
+    const ptConsumer = fx.consumer('dev-passthrough-risk');
+    const pt = poller<MessageScannedV1>(ptConsumer, EventTypes.MessageScanned, messageScannedV1, 0);
+    // Default options: DELIVERY_DEV_PASSTHROUGH_RISK_HOLD=true.
+    const approver = new DevPassThroughApprover(
+      pt,
+      fx.prisma,
+      RECORDER_TX_TIMEOUT_MS,
+      silentLogger,
+      worker.metrics,
+    );
+    const ptHandler = ours<MessageScannedV1>(
+      ptConsumer,
+      async (event, tx) => {
+        await approver.approve(event, tx);
+      },
+      RECORDER_TX_TIMEOUT_MS,
+    );
+    await pt.pollOnce(ptHandler);
+    const valueOf = async (
+      counterOf: { get(): Promise<{ values: Array<{ value: number; labels: object }> }> },
+      labels: Record<string, string> = {},
+    ) =>
+      (await counterOf.get()).values.find((v) =>
+        Object.entries(labels).every(
+          ([k, want]) => (v.labels as Record<string, string>)[k] === want,
+        ),
+      )?.value ?? 0;
+    const m = worker.metrics;
+    // One scan per message: message_risk_scores is unique per (scan_id, revision, received_at).
+    const payloadOf = (message: MessageFixture, overrides: Partial<MessageScannedV1> = {}) =>
+      messageScannedV1.parse({
+        ...scannedPayload(message),
+        scanId: message.messageId.toString(),
+        ...overrides,
+      });
+    // The round's message_risk_scores row as the email-worker writes it at completion (R11).
+    const riskScore = (
+      message: MessageFixture,
+      recommendedAction: 'deliver' | 'tag' | 'require_approval' | 'quarantine' | 'block',
+      options: {
+        revision?: number;
+        lifecycleRound?: number;
+        status?: 'scored' | 'error';
+        hardBlocks?: Array<{ id: string; verdict: string; action: string }>;
+      } = {},
+    ) =>
+      fx.prisma.messageRiskScore.create({
+        data: {
+          receivedAt: message.receivedAt,
+          messageId: message.messageId,
+          organizationId: message.organizationId,
+          scanId: message.messageId,
+          lifecycleRound: options.lifecycleRound ?? 0,
+          revision: options.revision ?? 0,
+          direction: 'outbound',
+          status: options.status ?? 'scored',
+          score: recommendedAction === 'deliver' ? 0 : 600,
+          level: recommendedAction === 'deliver' ? 'none' : 'high',
+          verdict: recommendedAction === 'deliver' ? 'clean' : 'spam',
+          recommendedAction,
+          hardBlocks: options.hardBlocks ?? [],
+          reasonCodes: [],
+          contributions: [],
+          groups: [],
+          engines: [],
+          failures: [],
+          floors: [],
+          trust: {
+            status: 'not_trusted',
+            factorPermille: 1000,
+            reducedGroups: [],
+            pointsRemoved: 0,
+          },
+          evidence: {
+            auth: null,
+            dlp: null,
+            bec: null,
+            sandbox: null,
+            unmappedCodes: [],
+            aiRaiseOnly: false,
+          },
+          explanation: [],
+          explanationText: 'fixture',
+          profileSource: 'platform',
+          profileIdText: 'rsk-default/1',
+          profileSha256: 'a'.repeat(64),
+          inputSha256: 'b'.repeat(64),
+          scorerVersion: 'risk-score/1',
+          signalMapVersion: 'risk-signals/1',
+          inputVersion: 'risk-input/1',
+          durationUs: 120,
+        },
+      });
+    const newMessage = (tag: string) =>
+      fx.message(org, { state: 'scanned', recipients: [{ address: `risk-${tag}@ext-pt.test` }] });
+
+    const before = {
+      recommendation: await valueOf(m.approvalsSkipped, { reason: 'risk_recommendation' }),
+      missing: await valueOf(m.approvalsSkipped, { reason: 'risk_missing' }),
+      malicious: await valueOf(m.approvalsSkipped, { reason: 'malicious_verdict' }),
+      inconsistent: await valueOf(m.inconsistentReads, { read: 'risk_score' }),
+      holds: {} as Record<string, number>,
+    };
+    const holdLabels = [
+      'require_approval',
+      'quarantine',
+      'block',
+      'hard_block',
+      'error',
+      'missing',
+    ];
+    for (const action of holdLabels) before.holds[action] = await valueOf(m.riskHolds, { action });
+
+    const held: Array<{ message: MessageFixture; eventId: string }> = [];
+    for (const [i, action] of (['require_approval', 'quarantine', 'block'] as const).entries()) {
+      const message = await newMessage(`held-${i}`);
+      await riskScore(message, action);
+      held.push({
+        message,
+        eventId: await outboxScanned(message, payloadOf(message), `it-risk-h${i}`),
+      });
+    }
+    const hardBlocked = await newMessage('hard-block');
+    await riskScore(hardBlocked, 'block', {
+      hardBlocks: [{ id: 'hb.malware_attachment', verdict: 'malware', action: 'block' }],
+    });
+    held.push({
+      message: hardBlocked,
+      eventId: await outboxScanned(hardBlocked, payloadOf(hardBlocked), 'it-risk-hb'),
+    });
+    const errored = await newMessage('error');
+    await riskScore(errored, 'quarantine', { status: 'error' });
+    held.push({
+      message: errored,
+      eventId: await outboxScanned(errored, payloadOf(errored), 'it-risk-he'),
+    });
+    const noRow = await newMessage('missing');
+    held.push({
+      message: noRow,
+      eventId: await outboxScanned(noRow, payloadOf(noRow), 'it-risk-hn'),
+    });
+    // Order: a malicious verdict keeps its 4.x reason although the risk row would deliver.
+    const malicious = await newMessage('malicious');
+    await riskScore(malicious, 'deliver');
+    held.push({
+      message: malicious,
+      eventId: await outboxScanned(
+        malicious,
+        payloadOf(malicious, { verdict: 'malicious' }),
+        'it-risk-om',
+      ),
+    });
+
+    const approved: MessageFixture[] = [];
+    for (const [i, action] of (['deliver', 'tag'] as const).entries()) {
+      const message = await newMessage(`ok-${i}`);
+      await riskScore(message, action);
+      await outboxScanned(message, payloadOf(message), `it-risk-a${i}`);
+      approved.push(message);
+    }
+    // Revision 1 (the late sandbox result) is never read: a revision-1 block does not hold.
+    const sandboxed = await newMessage('revision1');
+    await riskScore(sandboxed, 'deliver');
+    await riskScore(sandboxed, 'block', { revision: 1 });
+    await outboxScanned(sandboxed, payloadOf(sandboxed), 'it-risk-r1');
+    approved.push(sandboxed);
+
+    await eventually(
+      async () => {
+        await pt.pollOnce(ptHandler);
+        const counts = await Promise.all(approved.map(async (x) => (await approvalRows(x)).length));
+        return counts.every((count) => count === 1);
+      },
+      15_000,
+      'approvals of the deliver/tag risk recommendations',
+    );
+    for (const { message, eventId } of held) {
+      expect(await approvalRows(message)).toHaveLength(0);
+      expect(await fx.lifecycle(message)).toMatchObject({ status: 'scanned', version: 3 });
+      expect(
+        await fx.prisma.messageIdempotency.count({ where: { consumer: ptConsumer, eventId } }),
+      ).toBe(1);
+    }
+    for (const message of approved) {
+      expect(await fx.lifecycle(message)).toMatchObject({ status: 'approved' });
+    }
+    expect(await valueOf(m.approvalsSkipped, { reason: 'risk_recommendation' })).toBe(
+      before.recommendation + 5,
+    );
+    expect(await valueOf(m.approvalsSkipped, { reason: 'risk_missing' })).toBe(before.missing + 1);
+    expect(await valueOf(m.approvalsSkipped, { reason: 'malicious_verdict' })).toBe(
+      before.malicious + 1,
+    );
+    // The hard-blocked row recommends block: counted by its recommendation.
+    const expectedHolds: Record<string, number> = {
+      require_approval: 1,
+      quarantine: 1,
+      block: 2,
+      hard_block: 0,
+      error: 1,
+      missing: 1,
+    };
+    for (const action of holdLabels) {
+      expect(await valueOf(m.riskHolds, { action }), action).toBe(
+        before.holds[action]! + expectedHolds[action]!,
+      );
+    }
+
+    // A row of another round under the event's scan id does not echo: inconsistent read, the
+    // ledger transaction rolls back (nothing approved) and the event is redelivered.
+    const shifted = await newMessage('shifted');
+    await riskScore(shifted, 'deliver', { lifecycleRound: 1 });
+    const forged = await fx.prisma.messageRiskScore.findFirstOrThrow({
+      where: { messageId: shifted.messageId, receivedAt: shifted.receivedAt },
+    });
+    const envelope: EventEnvelope<MessageScannedV1> = {
+      eventId: uuidv7(),
+      eventType: EventTypes.MessageScanned,
+      occurredAt: new Date().toISOString(),
+      correlationId: 'it-risk-shift',
+      organizationId: org.toString(),
+      payload: payloadOf(shifted),
+    };
+    await expect(
+      fx.prisma.$transaction(async (tx) => {
+        const proxy = new Proxy(tx, {
+          get(target, prop, receiver) {
+            if (prop === 'messageRiskScore') {
+              return { findFirst: () => Promise.resolve(forged) };
+            }
+            return Reflect.get(target, prop, receiver) as unknown;
+          },
+        });
+        await approver.approve(envelope, proxy);
+      }),
+    ).rejects.toThrow('inconsistent read of message_risk_scores');
+    expect(await approvalRows(shifted)).toHaveLength(0);
+    expect(await fx.lifecycle(shifted)).toMatchObject({ status: 'scanned', version: 3 });
+    expect(await valueOf(m.inconsistentReads, { read: 'risk_score' })).toBe(
+      before.inconsistent + 1,
+    );
+    await pt.stop();
+  });
+
   it('approves nothing for a message that is not scanned (ignored, counted, no approval)', async () => {
     const approver = new DevPassThroughApprover(
       { start: () => undefined, stop: () => Promise.resolve() },
@@ -947,6 +1212,8 @@ describe('development pass-through after scanning (R5, step 4.1 S15) end to end'
       RECORDER_TX_TIMEOUT_MS,
       silentLogger,
       worker.metrics,
+      undefined,
+      STEP_4_6,
     );
     const skipped = async () =>
       (await worker.metrics.approvalsSkipped.get()).values.find(
