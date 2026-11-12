@@ -7,7 +7,7 @@ import {
   ApiSecurity,
   ApiTags,
 } from '@nestjs/swagger';
-import { CurrentScope, RequirePermissions } from '../../auth-contracts/decorators';
+import { CurrentScope, CursorList, RequirePermissions } from '../../auth-contracts/decorators';
 import type { TenantScope } from '../../auth-contracts/tenant-scope';
 import { ACCESS_TOKEN_SCHEME, API_KEY_SCHEME } from '../../http/openapi';
 import type { Page } from '../../http/pagination';
@@ -32,6 +32,7 @@ export class LoginEventsController {
   constructor(private readonly events: LoginEventsService) {}
 
   @Get()
+  @CursorList('v0')
   @RequirePermissions('audit:read')
   @ApiOperation({
     summary: 'List login events',

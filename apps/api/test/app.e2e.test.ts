@@ -1,3 +1,8 @@
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers get /api/v1/meta
+// @covers get /health/live
+// @covers get /health/ready
+// ---- end of route coverage ----
 import { randomBytes } from 'node:crypto';
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';

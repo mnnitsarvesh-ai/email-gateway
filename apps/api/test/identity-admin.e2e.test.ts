@@ -4,6 +4,29 @@
  * MFA step-up) and that the tenant scope comes from the principal, never from a header. The full
  * flows run against MySQL/Redis in integration/identity-admin.test.ts.
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers delete /api/v1/api-keys/:id
+// @covers delete /api/v1/roles/:key
+// @covers delete /api/v1/users/:id
+// @covers delete /api/v1/users/:id/sessions
+// @covers delete /api/v1/users/:id/sessions/:sessionId
+// @covers get /api/v1/api-keys
+// @covers get /api/v1/audit/login-events
+// @covers get /api/v1/roles
+// @covers get /api/v1/roles/:key
+// @covers get /api/v1/users
+// @covers get /api/v1/users/:id
+// @covers get /api/v1/users/:id/sessions
+// @covers patch /api/v1/users/:id
+// @covers patch /api/v1/users/:id/status
+// @covers post /api/v1/api-keys
+// @covers post /api/v1/roles
+// @covers post /api/v1/users/:id/invitation
+// @covers post /api/v1/users/:id/mfa/reset
+// @covers post /api/v1/users/invitations
+// @covers put /api/v1/roles/:key
+// @covers put /api/v1/users/:id/roles
+// ---- end of route coverage ----
 import { randomBytes, randomUUID } from 'node:crypto';
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
@@ -34,6 +57,8 @@ import { type AuthMethod, TokenService } from '../src/modules/auth/services/toke
 import { LoginEventsService } from '../src/modules/login-audit/login-events.service';
 import { RolesService } from '../src/modules/roles/roles.service';
 import { UsersService } from '../src/modules/users/users.service';
+import { idem, withIdempotencyStore } from './legacy-idempotency-support';
+import { InMemoryIdempotencyStore } from './support/api-test-app';
 import { InMemoryKeyValueStore } from './support/in-memory-key-value-store';
 import { RecordingEmailSender } from './support/recording-email-sender';
 import { TEST_DOMAIN_ENV } from './support/test-env';
@@ -127,7 +152,7 @@ describe('identity administration (e2e, services stubbed)', () => {
 
   beforeAll(async () => {
     const stub = (healthName: string) => ({ healthName, checkHealth: () => Promise.resolve() });
-    const moduleRef = await Test.createTestingModule({ imports: [AppModule.forRoot(config)] })
+    const builder = Test.createTestingModule({ imports: [AppModule.forRoot(config)] })
       .overrideProvider(PrismaService)
       .useValue(stub('mysql'))
       .overrideProvider(PrismaReadService)
@@ -155,8 +180,9 @@ describe('identity administration (e2e, services stubbed)', () => {
       .overrideProvider(ApiKeysService)
       .useValue(apiKeys)
       .overrideProvider(LoginEventsService)
-      .useValue(loginEvents)
-      .compile();
+      .useValue(loginEvents);
+    // Step 6.1 §3.5: invite, invitation resend and MFA reset take an Idempotency-Key.
+    const moduleRef = await withIdempotencyStore(builder, new InMemoryIdempotencyStore()).compile();
     app = moduleRef.createNestApplication({ logger: false });
     configureHttpApp(app, createLogger({ service: 'api-test', level: 'silent' }));
     configureApiApp(app, config);
@@ -215,6 +241,7 @@ describe('identity administration (e2e, services stubbed)', () => {
       const res = await http()
         [method](path)
         .set(await bearer(['pwd', 'otp']))
+        .set(idem())
         .send(body)
         .expect(400);
       expect(Array.isArray(res.body.message)).toBe(true);
@@ -250,6 +277,7 @@ describe('identity administration (e2e, services stubbed)', () => {
     it('does not echo invalid input', async () => {
       const res = await http()
         .post('/api/v1/users/invitations')
+        .set(idem())
         .set(await bearer())
         .send({ email: 'secret-looking-value', displayName: 'X', roleKeys: ['read_only_user'] })
         .expect(400);
@@ -263,6 +291,7 @@ describe('identity administration (e2e, services stubbed)', () => {
       const headers = await bearer(['pwd', 'otp']);
       await http()
         .post('/api/v1/users/invitations')
+        .set(idem())
         .set(headers)
         .send({ email: 'a@example.test', displayName: 'A', roleKeys: ['read_only_user'] })
         .expect(403);
@@ -283,11 +312,13 @@ describe('identity administration (e2e, services stubbed)', () => {
     it('MFA reset needs an MFA-authenticated session', async () => {
       const res = await http()
         .post(`/api/v1/users/${ID}/mfa/reset`)
+        .set(idem())
         .set(await bearer(['pwd']))
         .expect(403);
       expect(res.body.message).toBe('MFA required');
       await http()
         .post(`/api/v1/users/${ID}/mfa/reset`)
+        .set(idem())
         .set(await bearer(['pwd', 'otp']))
         .expect(204);
       expect(users.resetMfa).toHaveBeenCalledTimes(1);
@@ -300,6 +331,7 @@ describe('identity administration (e2e, services stubbed)', () => {
       await http().get('/api/v1/audit/login-events').set(key).expect(200);
       await http()
         .post('/api/v1/users/invitations')
+        .set(idem())
         .set(key)
         .send({ email: 'a@example.test', displayName: 'A', roleKeys: ['read_only_user'] })
         .expect(201);
@@ -336,6 +368,7 @@ describe('identity administration (e2e, services stubbed)', () => {
     it('passes validated, normalized bodies and the client IP to the services', async () => {
       await http()
         .post('/api/v1/users/invitations')
+        .set(idem())
         .set(await bearer())
         .set('X-Forwarded-For', '198.51.100.20')
         .send({
@@ -360,7 +393,7 @@ describe('identity administration (e2e, services stubbed)', () => {
       await http().delete(`/api/v1/users/${ID}/sessions/${randomUUID()}`).set(headers).expect(204);
       await http().delete('/api/v1/roles/mail_ops').set(headers).expect(204);
       await http().delete(`/api/v1/api-keys/${ID}`).set(headers).expect(204);
-      await http().post(`/api/v1/users/${ID}/invitation`).set(headers).expect(202);
+      await http().post(`/api/v1/users/${ID}/invitation`).set(headers).set(idem()).expect(202);
     });
   });
 });

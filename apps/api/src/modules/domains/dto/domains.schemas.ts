@@ -62,7 +62,7 @@ export const ListDomainsQuerySchema = PageQuerySchema.extend({
     .regex(/^[a-z0-9.-]+$/, 'must be a prefix of an ASCII (punycode) domain name')
     .optional()
     .describe('Prefix of the ASCII (punycode) domain name'),
-});
+}).strict();
 export type ListDomainsQuery = z.output<typeof ListDomainsQuerySchema>;
 
 const ReasonSchema = z.string().trim().min(1).max(512);

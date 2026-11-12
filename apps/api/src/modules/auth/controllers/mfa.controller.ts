@@ -8,6 +8,7 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import type { z } from 'zod';
+import { ReturnsSecret } from '../../../rate-limit/rate-class.decorator';
 import {
   AllowDuringMfaEnrollment,
   AuthenticatedOnly,
@@ -40,6 +41,7 @@ export class MfaController {
   constructor(private readonly mfa: MfaService) {}
 
   @Post('totp/setup')
+  @ReturnsSecret()
   @AllowDuringMfaEnrollment()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
@@ -96,6 +98,7 @@ export class MfaController {
   }
 
   @Post('recovery-codes')
+  @ReturnsSecret()
   @RateLimit({ bucket: 'auth-recovery-codes', limit: 10, windowSeconds: 900, by: 'ip' })
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Replace all recovery codes (TOTP code required)' })

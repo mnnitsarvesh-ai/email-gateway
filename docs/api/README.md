@@ -1,12 +1,12 @@
 # API conventions and endpoints
 
-The control-plane REST API (`apps/api`). Decisions: [ADR-0015](../architecture/adr/0015-api-base-path.md) (base path), [ADR-0016](../architecture/adr/0016-authentication-sessions-rbac.md) (authentication, sessions, RBAC, platform override) and the step design [docs/plan/steps/02-tenants-auth-rbac.md](../plan/steps/02-tenants-auth-rbac.md). Details of authentication: [docs/security/authentication.md](../security/authentication.md); roles and permissions: [docs/security/rbac.md](../security/rbac.md).
+The control-plane REST API (`apps/api`). Decisions: [ADR-0015](../architecture/adr/0015-api-base-path.md) (base path), [ADR-0016](../architecture/adr/0016-authentication-sessions-rbac.md) (authentication, sessions, RBAC, platform override), [ADR-0050](../architecture/adr/0050-api-conventions.md)–[ADR-0053](../architecture/adr/0053-public-internal-api-boundary.md) (step 6.1 conventions, pagination, rate limits and idempotency, public/internal boundary; summarized under [Conventions](#conventions-step-61)) and the step design [docs/plan/steps/02-tenants-auth-rbac.md](../plan/steps/02-tenants-auth-rbac.md). Details of authentication: [docs/security/authentication.md](../security/authentication.md); roles and permissions: [docs/security/rbac.md](../security/rbac.md).
 
 ## Versioning and the OpenAPI document
 
 - Business routes live under the `/api` prefix and are versioned in the URI: `/api/v1/...` ([ADR-0015](../architecture/adr/0015-api-base-path.md)). Breaking changes ship as `/api/v2` alongside `/api/v1` until clients migrate. The old unprefixed `/v1/...` paths return `404`.
-- Operational routes stay unprefixed and unversioned: `GET /health/live`, `GET /health/ready` (probes and Compose health checks do not change). `/api/health/*` is a `404`.
-- In non-production environments, OpenAPI is served at `/docs` (Swagger UI) and `/docs-json`. The document declares two security schemes: `access-token` (HTTP bearer, JWT) and `api-key` (`X-API-Key` header). Every protected operation names the schemes it accepts and carries a tag; every request and response schema is generated from the zod schemas that validate it.
+- Operational routes stay unprefixed and unversioned: `GET /health/live`, `GET /health/ready` (probes and Compose health checks do not change) and `GET /metrics`. They are **internal** ([ADR-0053](../architecture/adr/0053-public-internal-api-boundary.md)): never routed by the Ingress (which routes only `Prefix /api/v1/`) and not in the public OpenAPI document. `/api/health/*`, `/api/metrics`, `/api/docs` and `/api/v1/metrics` are `404 route_not_found`.
+- In non-production environments, OpenAPI is served at `/docs` (Swagger UI) and `/docs-json`; never in production (`NODE_ENV=production`). The document lists only `/api/v1/*` (249 operations at step 6.1), describes every tag (the step that built it and its deferrals) and carries the portal extensions `x-eg-permissions`, `x-eg-rate-class`, `x-eg-idempotency`, `x-eg-cursor`, `x-eg-returns-secret`. The document declares two security schemes: `access-token` (HTTP bearer, JWT) and `api-key` (`X-API-Key` header). Every protected operation names the schemes it accepts and carries a tag; every request and response schema is generated from the zod schemas that validate it.
 - A snapshot of the document is committed as [docs/api/openapi.json](openapi.json). `apps/api/test/openapi.test.ts` fails when the running API and the snapshot differ; after an intended change regenerate it with `UPDATE_OPENAPI=1 pnpm --filter @email-gateway/api test:e2e -- openapi` and review the diff.
 - `API_INTERNAL_URL` (portal → api) is the api **origin**; callers append `/api/v1/...`.
 
@@ -37,16 +37,16 @@ The tenant of a request is always derived from the authenticated principal: the 
 
 ## Endpoints
 
-All paths are under `/api/v1`. Access: **P** = public (no credentials); **U** = users only (API keys get `403`); **K** = API keys accepted; **MFA** = MFA session required; **enroll** = reachable during MFA enrollment; **RL** = rate limited (`429` with `Retry-After`). Permission keys are listed in [docs/security/rbac.md](../security/rbac.md).
+All paths are under `/api/v1`. Access: **P** = public (no credentials); **U** = users only (API keys get `403`); **K** = API keys accepted; **MFA** = MFA session required; **enroll** = reachable during MFA enrollment; **RL** = rate limited by a route-specific limit (`429` with `Retry-After`). Since step 6.1 every authenticated route is also subject to the [global rate limits](#rate-limits). Permission keys are listed in [docs/security/rbac.md](../security/rbac.md).
 
 ### Operational
 
-| Method | Path            | Access | Description                                                                                                                                                                                                                                                |
-| ------ | --------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| GET    | `/health/live`  | P      | Process liveness (unprefixed). No dependency checks                                                                                                                                                                                                        |
-| GET    | `/health/ready` | P      | Dependency readiness (unprefixed). `200` when ok, else `503`                                                                                                                                                                                               |
-| GET    | `/api/v1/meta`  | P      | API build/version information                                                                                                                                                                                                                              |
-| GET    | `/metrics`      | P      | Prometheus series (unprefixed, step 3.2 §5.3, e.g. `dead_letter_replay_total{source_queue,outcome}`, step 3.3 `api_message_lifecycle_operations_total{operation,outcome}`). Internal port only: the ingress must not route it. Not in the OpenAPI document |
+| Method | Path            | Access | Description                                                                                                                                                                                                                                                                                                                                                     |
+| ------ | --------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/health/live`  | P      | Process liveness (unprefixed). No dependency checks                                                                                                                                                                                                                                                                                                             |
+| GET    | `/health/ready` | P      | Dependency readiness (unprefixed). `200` when ok, else `503`                                                                                                                                                                                                                                                                                                    |
+| GET    | `/api/v1/meta`  | P      | API build/version information                                                                                                                                                                                                                                                                                                                                   |
+| GET    | `/metrics`      | P      | Prometheus series (unprefixed; e.g. step 3.2 `dead_letter_replay_total`, step 3.3 `api_message_lifecycle_operations_total`, step 6.1 `api_http_requests_total{method,route,status_class}`, `api_rate_limited_total{scope}`, `api_idempotency_total{outcome}`, `api_report_*`). **Internal** port only: never routed by the Ingress. Not in the OpenAPI document |
 
 ### Authentication and self-service (`auth`, `platform` tags)
 
@@ -688,31 +688,166 @@ curl -s -X POST http://127.0.0.1:${API_HOST_PORT}/api/v1/platform/dead-letters/r
 
 **Audit.** Every replay writes one `audit_logs` row (`action: platform.dead_letters_replayed`, `resource_type: queue`, `resource_id: <sourceQueue>`, the platform user as actor) with `metadata: { replayId, dryRun, filters, scanned, matched, replayed, skipped, reason, outcome, eventIds (≤ 100) }`, also when nothing matched. When the broker fails half-way the row says `outcome: partial` and the request answers `503 dead_letter_replay_unavailable`; what was replayed before stays replayed, the rest is back in the queue.
 
+### Messages (`messages` tag, step 6.1)
+
+The message metadata of your organization, from the read replica (a few seconds behind the writer). Subjects, addresses and filenames are attacker-controlled text returned as JSON strings; bodies, attachment content and the S3 object keys are never returned (content is reachable only through the step 5.3 quarantine preview and download grants). Every list follows the [list contract](#pagination-and-lists) with signed v1 cursors.
+
+| Method | Path                               | Permission        | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ------ | ---------------------------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/messages`                        | `message:read`, K | `from`/`to` (default the last 24 h, at most `API_MESSAGES_MAX_RANGE_DAYS`, 31), `sort=-receivedAt` (default) or `receivedAt`; filters `direction`, `status`, `verdict`, `action` (comma lists, ≤ 5), `domainId`, `sender` (exact envelope sender), `headerFrom`, `recipient`, `internetMessageId` (exact), `riskScore` / `riskScore.gte\|lte\|gt\|lt` (0–1000), `hasAttachments`. Item: id, `receivedAt`, direction, status, subject, senders, counts, size, final verdict/action, risk score, domain id |
+| GET    | `/messages/{messageId}`            | `message:read`, K | The list fields plus `internetMessageId`, `lifecycleRound`, `version` (the token of rescan/release), `statusReason`, `clientIp`, `clientHelo`, `mtaQueueId`. `404 message_not_found`. Not audited (metadata behind `message:read`)                                                                                                                                                                                                                                                                       |
+| GET    | `/messages/{messageId}/recipients` | `message:read`, K | RCPT order (`rcptSeq`): address, status, final action, direction, matched user, latest delivery `{ status, finalSmtpCode, deliveredAt }` or null                                                                                                                                                                                                                                                                                                                                                         |
+
+How the list is read: no filter besides the range and sort → the `(organization_id, received_at, id)` index; exactly one `verdict` → `(organization_id, final_verdict, received_at, id)`; only `recipient` → the recipient index; any other filter or combination is scan-bounded (at most `API_LIST_SCAN_BUDGET_ROWS` index entries per request, short pages possible). A search with `sender`, `headerFrom`, `recipient` or `internetMessageId` is audited (`message.searched`, first page only, values as SHA-256).
+
+```bash
+# Phishing messages of the last 7 days, newest first; then the next page with the same filters.
+curl -s "$API/api/v1/messages?verdict=phishing&from=2026-11-05T00:00:00Z&to=2026-11-12T00:00:00Z&limit=50" \
+  -H "Authorization: Bearer $TOKEN"
+# → {"data":[{"id":"0192…","receivedAt":"2026-11-11T09:14:03.120Z","direction":"inbound",…}],"nextCursor":"eyJ2Ijox….Qm9…"}
+curl -s "$API/api/v1/messages?verdict=phishing&from=2026-11-05T00:00:00Z&to=2026-11-12T00:00:00Z&limit=50&cursor=$NEXT" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+### Attachments and URLs (`attachments`, `url-protection` tags, step 6.1)
+
+| Method | Path                                | Permission        | Notes                                                                                                                                                                                                                                                                                                                                                                                           |
+| ------ | ----------------------------------- | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/messages/{messageId}/attachments` | `message:read`, K | Part order (`partIndex`): sanitized filename, declared/detected type, size, SHA-256, disposition, depth and the latest round's result as in `GET …/scans` (verdict, reason codes, ClamAV signature, YARA rules, archive inspection, known-hash hit). Never content, original filenames or archive entry names; no download                                                                      |
+| GET    | `/attachments?sha256=`              | `message:read`, K | Required 64-hex `sha256`, range (default 24 h, ≤ 31 days); every attachment of your organization with that hash: message id, `receivedAt`, part index, filename, size, detected type, verdict. Read in index order (`(organization_id, sha256, received_at, id)`), so a page costs about `limit` rows however common the hash; no short pages. Class `expensive`; audited `attachment.searched` |
+| GET    | `/messages/{messageId}/urls`        | `message:read`, K | URL order (`urlSeq`): normalized URL fields of the tenant URL view (never cache outcomes), the latest verdict and reason codes, rewrite status of the latest round, click counts by decision                                                                                                                                                                                                    |
+| GET    | `/url-protection/clicks`            | `message:read`, K | Time-of-click events (`(clickedAt, id)` keyset; range default 24 h, ≤ 31 days); filters `decision`, `verdict` (comma lists), `messageId` (one of your messages, else `404 message_not_found`); item: click id, time, decision, verdict, reason codes, message id, URL sequence, host, registrable domain, client network. Never token material                                                  |
+
+```bash
+curl -s "$API/api/v1/attachments?sha256=$(sha256sum invoice.pdf | cut -d' ' -f1)&from=2026-11-01T00:00:00Z" \
+  -H "X-API-Key: $API_KEY"
+```
+
+### Recipient suppressions (`recipients` tag, step 6.1)
+
+The addresses outbound mail of your organization is not delivered to (`delivery_suppressions`, enforced by the smtp-adapter since step 2.2: hard bounces, complaints, and manual or unsubscribe entries created here).
+
+| Method | Path                                       | Permission                       | Notes                                                                                                                                                                                                                                                                                                                     |
+| ------ | ------------------------------------------ | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/recipients/suppressions`                 | `delivery:read`, K               | Newest first (`id`); filters `address` (exact, the unique key), `reason`, `active` (scan-bounded)                                                                                                                                                                                                                         |
+| GET    | `/recipients/suppressions/{suppressionId}` | `delivery:read`, K               | Decimal id; `404 suppression_not_found` (also right after a create, until the replica has it)                                                                                                                                                                                                                             |
+| POST   | `/recipients/suppressions`                 | `delivery:suppression_manage`, K | **Idempotency-Key required** (transactional), class `sensitive`. `{ address, reason?: manual \| unsubscribe, expiresAt? (≤ 3650 days) }` → `201`. `409 suppression_exists` (with `id`), `409 suppression_limit_reached` (`RECIPIENT_SUPPRESSIONS_MAX_MANUAL`). Audit `recipient_suppression.created` (address as SHA-256) |
+| DELETE | `/recipients/suppressions/{suppressionId}` | `delivery:suppression_manage`, K | **Idempotency-Key required**, `sensitive`. Removes any entry, including bounces and complaints (unsuppress) → `204`; a replay answers `204` again. Audit `recipient_suppression.deleted` with the former reason and source                                                                                                |
+
+```bash
+curl -s -X POST "$API/api/v1/recipients/suppressions" -H "Authorization: Bearer $TOKEN" \
+  -H "Idempotency-Key: suppress-2026-11-12-0001" -H 'Content-Type: application/json' \
+  -d '{"address":"former.customer@example.org","reason":"unsubscribe"}'
+# → 201 {"id":"4711","address":"former.customer@example.org","reason":"unsubscribe","source":"api","active":true,…}
+```
+
+### Audit logs (`audit`, `platform` tags, step 6.1)
+
+| Method | Path                   | Permission                                   | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ------ | ---------------------- | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/audit/logs`          | `audit:read`, K                              | Your organization's `audit_logs` (mutations, audited reads, override requests into it). Range default 7 days, at most `API_AUDIT_MAX_RANGE_DAYS` (90); `sort=-createdAt\|createdAt`; filters `action` or `actionPrefix` (`[a-z_]+.`), `resourceType`, `resourceId`, `actorType`, `actorId` (scan-bounded; exact and case-sensitive: `resourceId=0192ABC…` does not match the stored lower-case id). Each search's first page is audited (`audit.searched`) |
+| GET    | `/platform/audit/logs` | `platform:operations` + `audit:read`, U, MFA | Platform organization users only (API keys, override sessions and customer users are refused). Exactly one target: `organizationId` (`404 organization_not_found` when unknown) or `scope=platform` (rows without an organization). Audited `platform.audit_searched` in the searched trail                                                                                                                                                                |
+
+Items: `id`, `createdAt`, `actor { type, id }`, `action`, `resourceType`, `resourceId`, `correlationId`, `sourceIp`, `metadata` (already scrubbed of credential-like keys when written).
+
+```bash
+curl -s "$API/api/v1/audit/logs?actionPrefix=quarantine.&from=2026-11-01T00:00:00Z" -H "Authorization: Bearer $TOKEN"
+```
+
+### Reports (`reports` tag, step 6.1)
+
+Computed on the read replica from recorded rows (no estimates, no rollup tables) over a bounded UTC window aligned to bucket boundaries; every bucket is listed (empty ones with zeros); cached per organization and normalized query for `REPORTS_CACHE_TTL_SECONDS` (`generatedAt` shows when). Class `expensive`. A query stopped by `REPORTS_QUERY_TIMEOUT_MS` (`MAX_EXECUTION_TIME`) is `503 report_timeout`: narrow the range.
+
+| Method | Path                  | Permission       | Notes                                                                                                                                                                                                           |
+| ------ | --------------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/reports/traffic`    | `report:read`, K | `granularity=hour` (≤ 7 days, default the last 24 h) or `day` (≤ `REPORTS_MAX_RANGE_DAYS`, default 7 days), `direction?`; buckets `{ start, total, inbound, outbound, internal, verdicts: {…, none} }` + totals |
+| GET    | `/reports/threats`    | `report:read`, K | Messages by final verdict and final action, quarantine entries by reason and primary engine (default 7 days)                                                                                                    |
+| GET    | `/reports/url-clicks` | `report:read`, K | Clicks per bucket by decision (`allowed`, `warned`, `blocked`, `continued`, `expired`, `not_found`); window rules of the traffic report                                                                         |
+
+```bash
+curl -s "$API/api/v1/reports/traffic?granularity=day&from=2026-11-01T00:00:00Z&to=2026-11-12T00:00:00Z" -H "X-API-Key: $API_KEY"
+# → {"from":"2026-11-01T00:00:00.000Z","to":"2026-11-12T00:00:00.000Z","granularity":"day","buckets":[…],"totals":{…},"generatedAt":"…"}
+```
+
+### Usage and billing (`usage`, `billing` tags, step 6.1)
+
+| Method | Path                    | Permission             | Notes                                                                                                                                                                                                                                                                                         |
+| ------ | ----------------------- | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/usage`                | `organization:read`, K | Exactly `GET /organizations/{id}/usage` for the caller's organization (the key's, the user's, or the override target): users, domains, messages by direction, active quarantine entries, API keys, sessions, limits and their use. Default 30 days, ≤ 31 days                                 |
+| GET    | `/billing/plan`         | `billing:read`, K      | `{ plan: { code, name, description }, limits: [{ key, value, source: plan \| override }], features: [{ key, enabled, source }], pricing: null, note }`. No prices, invoices or payments exist                                                                                                 |
+| GET    | `/billing/usage?month=` | `billing:read`, K      | `month=YYYY-MM` (default the current UTC month, counted up to now): messages by direction, current users, domains, active API keys, limits. Future months or months older than the message retention (6 months + the current one) → `400 usage_period_unavailable`. Cached; class `expensive` |
+
+### Threat-intelligence lookup (`threat-intelligence` tag, step 6.1)
+
+| Method | Path                          | Permission             | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ------ | ----------------------------- | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/threat-intelligence/lookup` | `threat_intel:read`, K | `type=sha256\|url\|domain\|ip`, `value`. Normalized exactly as the engines do; matched by `value_sha256` against the platform indicators the URL engine and click-service use (`org_scope = 0`, not expired; a domain also matches its parent domains down to the registrable domain) and, for `sha256`, the known-threat hash catalogue. `{ type, valueSha256, known, matches: [{ source, severity, category, firstSeenAt, lastSeenAt, expiresAt }] }`; never analyst reasons or user ids. Class `expensive`; audited `threat_intel.looked_up` (the value as SHA-256) |
+
+```bash
+curl -s "$API/api/v1/threat-intelligence/lookup?type=domain&value=login.evil-example.test" -H "X-API-Key: $API_KEY"
+# → {"type":"domain","valueSha256":"…","known":true,"matches":[{"source":"platform_indicator","severity":"high","category":"phishing",…}]}
+```
+
+Tenant-managed indicators are not offered: no engine reads tenant-owned `threat_indicators` rows, so managing them would change nothing (step 6.1 §1.2). Your own allow-lists are BEC trusted senders, DLP exceptions and policy conditions.
+
+## Conventions (step 6.1)
+
+Binding decisions: [ADR-0050](../architecture/adr/0050-api-conventions.md) (resources, status codes, envelope, errors, Request-Id, strict validation, deprecation, OpenAPI), [ADR-0051](../architecture/adr/0051-pagination-cursor-filtering-sorting.md) (pagination, filters, sorting, scan budget), [ADR-0052](../architecture/adr/0052-rate-limiting-and-idempotency.md) (rate limits, idempotency), [ADR-0053](../architecture/adr/0053-public-internal-api-boundary.md) (public/internal boundary); design [docs/plan/steps/18-rest-api.md](../plan/steps/18-rest-api.md). `apps/api/test/route-inventory.e2e.test.ts` enforces them for every route.
+
+- **Resources:** plural kebab-case nouns, at most two levels of nesting; commands are `POST /…/{id}/<verb>`.
+- **Status codes:** `GET` 200; `POST` create 201 with the resource; synchronous command 200, asynchronous command 202; `PUT`/`PATCH` 200; `DELETE` 204 (a few older `DELETE`s answer 200).
+- **Success bodies:** a single resource is returned bare; a collection is `{ "data": [...], "nextCursor": string | null }` (the three quarantine lists of step 5.3 keep `{ "items": [...], "nextCursor" }`).
+- **Representation:** ids are strings (public UUIDv7 or decimal strings), timestamps ISO 8601 UTC with milliseconds, enums lower-snake; never message content, secrets or S3 keys.
+- **OpenAPI extensions** for the portal: `x-eg-permissions`, `x-eg-rate-class`, `x-eg-idempotency`, `x-eg-cursor`, `x-eg-returns-secret`.
+
+### Headers
+
+| Header                                                          | Direction | Rule                                                                                               |
+| --------------------------------------------------------------- | --------- | -------------------------------------------------------------------------------------------------- |
+| `X-Request-Id`                                                  | response  | Every response (success, error, unknown route, probes): a server-minted UUID, never taken from you |
+| `x-correlation-id`                                              | both      | Yours if well formed (8–128 chars of `[A-Za-z0-9._:-]`), otherwise a new one; echoed and audited   |
+| `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`     | response  | Every authenticated response: the most restrictive counter applied to the request                  |
+| `Retry-After`                                                   | response  | `429`, `409 idempotency_request_in_progress`                                                       |
+| `Idempotency-Key`                                               | request   | Required on the [sensitive mutations](#idempotency)                                                |
+| `Idempotency-Replayed: true`                                    | response  | A stored response returned again                                                                   |
+| `Deprecation: true`, `Link: <…#idempotency>; rel="deprecation"` | response  | A legacy sensitive route called without a key while `API_IDEMPOTENCY_LEGACY_MODE=warn`             |
+| `Cache-Control: no-store`                                       | response  | Every `/api/v1` response unless the route sets its own                                             |
+
+Quote `X-Request-Id` (or the body's `requestId`) when reporting a problem: it finds the request's log lines and its `audit_logs.metadata.requestId`.
+
 ## Errors
 
-Every error uses one shape, produced by the global exception filter:
+Every error of the api has one shape, rendered by the global `ApiExceptionFilter`:
 
 ```json
 {
-  "statusCode": 404,
-  "error": "NOT_FOUND",
-  "message": "Organization not found",
-  "correlationId": "..."
+  "statusCode": 429,
+  "error": "TOO_MANY_REQUESTS",
+  "code": "rate_limited",
+  "message": "Too many requests",
+  "scope": "tenant",
+  "correlationId": "…",
+  "requestId": "0b9c6a2e-…"
 }
 ```
 
-| Status | Meaning                                                                                                                                                                                                                                                                            |
-| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `400`  | Validation failed: `message` lists every issue as `"<path>: <issue>"` (input values are never echoed). Also malformed ids, unknown feature/limit keys, invalid or used tokens                                                                                                      |
-| `401`  | Missing, invalid, expired or revoked credentials (`Invalid credentials` on login, `Unauthorized` elsewhere). Also: user or organization no longer active, override ended                                                                                                           |
-| `403`  | Authenticated but not allowed: missing permission, user-only route called with an API key, `MFA required`, `MFA enrollment required`, four-eyes violation                                                                                                                          |
-| `404`  | Not found, **including resources of another tenant** and soft-deleted resources                                                                                                                                                                                                    |
-| `409`  | Conflicts with the current state: duplicates (slug, email, domain), limit reached (`Organization limit reached: <key>`), invalid state transitions, active legal hold, a check or rotation already in progress; message lifecycle conflicts (coded, step 3.3)                      |
-| `422`  | A valid request for a feature that is not implemented (`Not implemented`, e.g. `smtp_callout`/`ldap` recipient validation); a refused destination server (with `reason` and `field`, step 2.3); an Idempotency-Key reused for another request (`idempotency_key_reused`, step 3.3) |
-| `429`  | Rate limited, with `Retry-After` (seconds)                                                                                                                                                                                                                                         |
-| `503`  | Authentication, rate-limit or domain-verification backend (Redis) unavailable: these paths fail closed                                                                                                                                                                             |
+`code` is a stable snake_case machine code (branch on it, not on `message`); `message` is a string, or a list of `"<path>: <issue>"` strings for validation errors (input values are never echoed); coded errors may add detail fields (ids, states, versions, limits; never content). Default codes:
 
-**Coded errors (step 3.3, 4.1, 4.2, 4.4, 4.5).** The message lifecycle routes, the step 4.1 scan routes (`scan_engine_not_found`, `scan_settings_invalid` with `violations`, `version_conflict` with `currentVersion`, `organization_not_found`, `content_unavailable`, `scan_training_not_applicable`, `rspamd_unavailable`) and the step 4.2 platform routes (`hash_exists`, `threat_hash_not_found`, `rescan_job_not_found`, `rescan_job_not_cancellable` with `status`) and the step 4.4 BEC routes (`bec_executive_not_found`, `bec_vendor_not_found`, `bec_trusted_sender_not_found`, `bec_suppression_not_found`, `scan_not_found`, `bec_result_not_found`, `executive_exists` / `vendor_exists` / `trusted_sender_exists` with `id`, `version_conflict` with `currentVersion`, `bec_limit_reached` with `resource` and `limit`, `feedback_exists`, `vendor_domain_freemail` with `index`, `trusted_domain_freemail`, `feedback_codes_invalid` with `reasonCode`, `suppression_not_allowed` with `reason`, `inconsistent_read` (503)) and the step 4.5 DLP routes (`dlp_policy_not_found`, `dlp_rule_not_found`, `dlp_exception_not_found`, `dlp_pattern_not_found`, `dlp_dictionary_not_found`, `scan_not_found`, `dlp_evidence_not_found`, `dlp_policy_exists` / `dlp_rule_exists` / `dlp_exception_exists` / `dlp_pattern_exists` / `dlp_dictionary_exists` with `id`, `dlp_policy_in_use` / `dlp_rule_in_use` / `dlp_pattern_in_use` / `dlp_dictionary_in_use` with `references`, `version_conflict`, `dlp_limit_reached` with `resource` and `limit`, `dlp_reference_invalid` (400, `field`, `index`), `dlp_directions_invalid` (400), the D9 pattern codes `pattern_syntax` … `pattern_invalid_options` (400, `repetitionProduct`, `length`), `dictionary_terms_count` / `dictionary_term_invalid` (400, `index`), `evidence_purged` / `evidence_expired` (410), `evidence_unreadable` (500), `evidence_unavailable` and `inconsistent_read` (503); never a pattern, sample, term, address or value) add a stable machine-readable `code` to the body (and, for `409`, the message's `currentState` and `currentVersion`); `message` stays human-readable:
+| Status | Default `code`           | Specific codes and notes                                                                                                                                                          |
+| ------ | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `400`  | `validation_failed`      | `cursor_invalid`, `idempotency_key_required`, `idempotency_key_invalid`, `usage_period_unavailable`; malformed ids, unknown fields, invalid or used tokens                        |
+| `401`  | `unauthorized`           | Missing, invalid, expired or revoked credentials (`Invalid credentials` on login); user or organization no longer active; override ended                                          |
+| `403`  | `forbidden`              | `mfa_required`, `mfa_enrollment_required`, `user_required` (API key on a user-only route); module codes such as `quarantine_approval_forbidden`                                   |
+| `404`  | `not_found`              | `route_not_found` (unknown path); module codes (`message_not_found`, `suppression_not_found`, …). **Resources of another tenant answer exactly like missing ones**                |
+| `409`  | `conflict`               | `idempotency_request_in_progress` (+ `Retry-After`), `suppression_exists`, `suppression_limit_reached`, duplicates, limits, state conflicts, version conflicts (`currentVersion`) |
+| `413`  | `payload_too_large`      |                                                                                                                                                                                   |
+| `415`  | `unsupported_media_type` |                                                                                                                                                                                   |
+| `422`  | `unprocessable`          | `idempotency_key_reused`; a refused destination server (`reason`, `field`); `Not implemented` recipient validation modes                                                          |
+| `429`  | `rate_limited`           | `scope`: `principal`, `tenant`, `sensitive`, `expensive` or `route` (and module codes such as `quarantine_bulk_rate_limited`); `Retry-After` in seconds                           |
+| `500`  | `internal_error`         | Generic message only; details in the logs under `requestId` / `correlationId`                                                                                                     |
+| `503`  | `service_unavailable`    | A dependency failed closed (rate-limit store, authentication store, domain-verification backend); `inconsistent_read`, `report_timeout`                                           |
+
+**Coded errors (step 3.3, 4.1, 4.2, 4.4, 4.5).** The message lifecycle routes, the step 4.1 scan routes (`scan_engine_not_found`, `scan_settings_invalid` with `violations`, `version_conflict` with `currentVersion`, `organization_not_found`, `content_unavailable`, `scan_training_not_applicable`, `rspamd_unavailable`) and the step 4.2 platform routes (`hash_exists`, `threat_hash_not_found`, `rescan_job_not_found`, `rescan_job_not_cancellable` with `status`) and the step 4.4 BEC routes (`bec_executive_not_found`, `bec_vendor_not_found`, `bec_trusted_sender_not_found`, `bec_suppression_not_found`, `scan_not_found`, `bec_result_not_found`, `executive_exists` / `vendor_exists` / `trusted_sender_exists` with `id`, `version_conflict` with `currentVersion`, `bec_limit_reached` with `resource` and `limit`, `feedback_exists`, `vendor_domain_freemail` with `index`, `trusted_domain_freemail`, `feedback_codes_invalid` with `reasonCode`, `suppression_not_allowed` with `reason`, `inconsistent_read` (503)) and the step 4.5 DLP routes (`dlp_policy_not_found`, `dlp_rule_not_found`, `dlp_exception_not_found`, `dlp_pattern_not_found`, `dlp_dictionary_not_found`, `scan_not_found`, `dlp_evidence_not_found`, `dlp_policy_exists` / `dlp_rule_exists` / `dlp_exception_exists` / `dlp_pattern_exists` / `dlp_dictionary_exists` with `id`, `dlp_policy_in_use` / `dlp_rule_in_use` / `dlp_pattern_in_use` / `dlp_dictionary_in_use` with `references`, `version_conflict`, `dlp_limit_reached` with `resource` and `limit`, `dlp_reference_invalid` (400, `field`, `index`), `dlp_directions_invalid` (400), the D9 pattern codes `pattern_syntax` … `pattern_invalid_options` (400, `repetitionProduct`, `length`), `dictionary_terms_count` / `dictionary_term_invalid` (400, `index`), `evidence_purged` / `evidence_expired` (410), `evidence_unreadable` (500), `evidence_unavailable` and `inconsistent_read` (503); never a pattern, sample, term, address or value) carry their own stable `code` (since step 6.1 every other error carries a default one) (and, for `409`, the message's `currentState` and `currentVersion`); `message` stays human-readable:
 
 ```json
 {
@@ -726,34 +861,103 @@ Every error uses one shape, produced by the global exception filter:
 }
 ```
 
-Unexpected errors return a generic `500` message. Details go to the logs only, and can be found there by `correlationId`.
-
 ### Validation errors
 
-Request bodies, queries and params are validated with zod schemas (the same schemas generate the OpenAPI shapes). Unknown body fields are rejected where the schema is strict (all organization bodies):
+Request bodies, queries and path parameters are validated with zod schemas (the same schemas generate the OpenAPI shapes) before any database access. Since step 6.1 **every** body and query schema is strict at every object node: an unknown field is rejected (it used to be silently dropped on many routes; see the [changelog](#changelog)):
 
 ```json
 {
   "statusCode": 400,
   "error": "BAD_REQUEST",
-  "message": ["slug: is reserved", "deployment: is required for a dedicated deployment"],
-  "correlationId": "..."
+  "code": "validation_failed",
+  "message": ["slug: is reserved", "colour: Unrecognized key"],
+  "correlationId": "…",
+  "requestId": "…"
 }
 ```
 
-## Pagination
+## Pagination and lists
 
-List endpoints use cursor pagination, ordered newest first:
+- `?limit=` 1–100 (default 25; quarantine search keeps its configured cap) and `?cursor=` (the opaque `nextCursor` of the previous page). Keyset order, newest first by default. The response is `{ "data": [...], "nextCursor": "…" | null }`; `null` means the last page.
+- **No totals and no offsets** (counting is unbounded at a million messages a day; use the reports for aggregates).
+- **Short pages.** Lists that filter on a non-indexed column examine at most `API_LIST_SCAN_BUDGET_ROWS` (5 000) index entries per request: a page may hold fewer rows than `limit`, even none, while `nextCursor` is non-null. **Follow `nextCursor` until it is `null`**; do not stop at an empty page.
+- **Cursor v1** (`x-eg-cursor: v1`, every list added in 6.1): signed (HMAC) and bound to your organization, the resource, the filters, the sort and the first page's resolved time window, and valid for `API_CURSOR_TTL_SECONDS` (24 h). Repeat the same filters with it (you may omit `from`/`to`); anything else, a tampered or expired cursor or another tenant's cursor is `400 cursor_invalid` (restart the list without a cursor).
+- **Cursor v0** (`x-eg-cursor: v0`, the lists of steps 1.2–5.3): unsigned, unchanged; an invalid one is a `400` (the quarantine search: `quarantine_cursor_invalid`). They never widen access: the tenant scope is always re-applied.
+- Lists, details, usage and reports read the replica (ADR-0014): a row created a moment ago can appear after a short delay. Every create returns the created resource from the writer.
 
-- `?limit=`: 1–100, default 25. `?cursor=`: the opaque `nextCursor` from the previous page. An invalid cursor is a `400`.
-- The response is `{ "data": [...], "nextCursor": "..." | null }`. `nextCursor` is `null` on the last page.
-- Lists and usage read the replica (ADR-0014): a row created a moment ago can appear after a short delay. Every create endpoint returns the created resource from the writer.
+### Filtering and sorting
 
-Ids in responses are strings (public ids or decimal strings), never JSON numbers. Timestamps are ISO 8601 UTC strings.
+Each list documents its own allow-list of filters; anything else is `400 validation_failed`.
 
-## Correlation
+| Syntax                                                  | Meaning                                                                                             |
+| ------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `field=value`                                           | equals                                                                                              |
+| `field=a,b,c`                                           | one of (at most 10 values unless the list says fewer)                                               |
+| `field.gte=` / `field.lte=` / `field.gt=` / `field.lt=` | typed range (numbers, timestamps)                                                                   |
+| `field=true\|false`                                     | booleans                                                                                            |
+| `from=` / `to=`                                         | ISO 8601 window `[from, to)`; required bounds on partitioned tables (defaults and maximum per list) |
+| `sort=-receivedAt` / `sort=receivedAt`                  | descending (default) or ascending on the list's leading keyset key                                  |
 
-Send `x-correlation-id` (8–128 chars of `[A-Za-z0-9._:-]`) to trace a request across services. If it is missing or invalid, a new id is generated. Either way, the id is returned in the response header and stored in the `audit_logs` rows the request writes.
+Ids in filters (`domainId`, `messageId`) are resolved inside your organization: another tenant's id answers like a missing one (`404`).
+
+**Which lists use this vocabulary.** Only the 9 lists added in step 6.1 (`x-eg-cursor: v1`: `/messages`, `/messages/{id}/recipients`, `/messages/{id}/attachments`, `/attachments`, `/messages/{id}/urls`, `/url-protection/clicks`, `/recipients/suppressions`, `/audit/logs`, `/platform/audit/logs`) take `sort` and the operators above. The 33 lists of steps 1.2–5.3 (`x-eg-cursor: v0`, e.g. `/users`, `/domains`, `/deliveries`, `/policies`, `/dlp/incidents`, `/quarantine/entries`, `/organizations`, `/api-keys`) take **no `sort` parameter** (a fixed keyset order, documented per operation) and keep their own module-specific filters as documented in their OpenAPI operations; unknown parameters are still `400 validation_failed`. Converging them is a follow-up (see below).
+
+## Rate limits
+
+Every authenticated request counts against fixed 60-second windows in Redis ([ADR-0052](../architecture/adr/0052-rate-limiting-and-idempotency.md)):
+
+| Counter     | Applies to                                                                                        | Limit                                                                                                                                                                                                                                       |
+| ----------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `principal` | each user or API key (override sessions count as the user)                                        | `API_RATE_PRINCIPAL_PER_MINUTE` (600)                                                                                                                                                                                                       |
+| `tenant`    | each organization (under an override: the target)                                                 | the organization's `api_requests_per_minute` (plan: 60 / 300 / 1 200 / 3 000; platform overrides possible), clamped to `[API_RATE_TENANT_MIN_PER_MINUTE, …_MAX_…]` (10, 10 000); `API_RATE_TENANT_DEFAULT_PER_MINUTE` (300) without a value |
+| `sensitive` | per principal, the [sensitive mutations](#idempotency) and secret-bearing routes                  | `API_RATE_SENSITIVE_PER_MINUTE` (30)                                                                                                                                                                                                        |
+| `expensive` | per principal: reports, `/billing/usage`, threat lookup, `/attachments`, policy test and dry-runs | `API_RATE_EXPENSIVE_PER_MINUTE` (20)                                                                                                                                                                                                        |
+| `route`     | route-specific limits (authentication, BEC feedback, DLP tests, domain checks, quarantine, …)     | per route, unchanged                                                                                                                                                                                                                        |
+
+Every authenticated response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset` of the most restrictive counter. Over a limit: `429 rate_limited` with `scope` and `Retry-After`; wait that long. Public routes (login and the other **P** routes, `GET /meta`) keep their per-IP limits. When the rate-limit store is unreachable the api answers `503 service_unavailable` (fail closed). Operations: [runbook](../runbooks/api-rate-limits-and-reports.md).
+
+## Idempotency
+
+Send `Idempotency-Key: <1–128 chars of [A-Za-z0-9._:-]>` (unique per organization) on the sensitive mutations below. The first successful (2xx) response is stored for 24 hours; repeating the same request with the same key returns it again with `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`; while the first request is still running, `409 idempotency_request_in_progress` with `Retry-After`. Errors are not stored: fix the request and retry with the same key. Without the header: `400 idempotency_key_required`.
+
+| Mechanism (`x-eg-idempotency`)                                                                                       | Routes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| -------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `required` — exactly once (effect, audit row and stored response in one transaction)                                 | `POST /messages/{id}/rescan`, `POST /messages/{id}/release`; quarantine `POST /quarantine/bulk`, `POST /quarantine/entries`, `POST /quarantine/entries/{id}/release`, `…/request-release`, `…/reject`, `…/delete`, `POST /quarantine/approvals/{id}/approve`, `…/deny`, `…/cancel`, `POST /quarantine/me/entries/{id}/release`, `…/request-release`; `POST /recipients/suppressions`, `DELETE /recipients/suppressions/{id}`                                                                                                                                                                                                                                                                                                                                                      |
+| `legacy` — at most once per key (a reservation row before the handler, the response stored after it; since step 6.1) | `POST /domains/{id}/dkim/rotate`; `PATCH /organizations/{id}/status`, `POST /organizations/{id}/deletion`, `POST /organizations/{id}/deletion/confirm`; `POST /users/invitations`, `POST /users/{id}/invitation`, `POST /users/{id}/mfa/reset`; `POST /policies/{id}/versions/{n}/publish`, `…/activate`; `POST /risk-scoring/profile/versions/{id}/publish`, `…/activate`, `POST /risk-scoring/profile/reset`; `DELETE /bec/history`; `DELETE /dlp/evidence`, `DELETE /messages/{id}/scans/{scanId}/dlp-evidence`, `PUT` and `DELETE /dlp/compliance/aadhaar`; `POST /platform/dead-letters/replay`, `POST /platform/attachment-rescans`, `POST /platform/organizations/{orgId}/messages/{id}/scan-training`, `POST /platform/threat-hashes`, `POST /platform/threat-indicators` |
+
+- The `legacy` routes accepted no key before step 6.1. While the deprecation switch `API_IDEMPOTENCY_LEGACY_MODE=warn` is set (default `enforce`), a keyless call is processed as before and answered with `Deprecation: true` and `Link: <…/docs/api/README.md#idempotency>; rel="deprecation"`. A `legacy` request whose process crashed between the effect and the stored response blocks the key for `API_IDEMPOTENCY_PENDING_TTL_SECONDS` (300 s); a retry after that may repeat the effect.
+- **Secret-bearing responses are never stored**, so these routes take no key: `POST /api-keys`, `POST /smtp-connectors`, `POST /smtp-connectors/{id}/rotate-secret`, `POST /platform/overrides`, `POST /auth/mfa/totp/setup`, `POST /auth/mfa/recovery-codes` (`x-eg-returns-secret: true`, class `sensitive`) and the public authentication routes (single-use tokens, uniqueness and their rate limits protect them).
+- `POST /quarantine/entries/{id}/download-grants` (a single-use grant) and `PUT /quarantine/settings` (a replace with `expectedRowVersion`) take no key.
+
+## Audit of sensitive reads
+
+Every mutation writes an `audit_logs` row in its transaction. Since step 6.1 these **searches** are audited too, one row per search on its first page (without `cursor`): `message.searched` (when `sender`, `headerFrom`, `recipient` or `internetMessageId` is used), `attachment.searched`, `audit.searched`, `platform.audit_searched` (with the target) and `threat_intel.looked_up`. The rows hold the filter names, the filter hash, SHA-256 hashes of identifying values and the result count; never addresses, subjects, hashes in the clear or content. Earlier audited reads are unchanged (quarantine search/preview/download, DLP evidence, BEC export). Detail reads (`GET /messages/{id}`, recipients, attachments, URLs) are not audited: they are metadata behind `message:read`. Every audit row carries `metadata.requestId`.
+
+## Not offered, and deferred
+
+| Area                                                               | Status                                                                                                                                              |
+| ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Archive, journal search, retention policies, legal holds, export   | Step 8.1 (the `archive:*` permissions and tables exist; no route)                                                                                   |
+| Webhooks, notification preferences                                 | Step 6.2                                                                                                                                            |
+| Microsoft 365 / Google Workspace connectors                        | Step 8.2. **Integration surfaces today:** organization API keys (`/api-keys`) and SMTP connectors (`/smtp-connectors`)                              |
+| Deployment manager                                                 | Step 8.3                                                                                                                                            |
+| `delivery_routes` management                                       | Not offered: no service reads the table (inbound destinations are `/domains/{id}/destinations`, outbound relay is SMTP connectors)                  |
+| Tenant threat indicators, IP/domain/URL reputation, brand lists    | Not offered: no engine reads tenant rows; brand lists are code constants. Use the lookup, BEC trusted senders, DLP exceptions and policy conditions |
+| Prices, invoices, payments, subscriptions                          | Not offered: no such data exists (`pricing: null`)                                                                                                  |
+| Total counts, offsets, field selection, ETags, bulk message export | Not offered (unbounded at scale; field selection and ETags may come with the portal, 7.x)                                                           |
+| Signing the v0 cursors                                             | Follow-up (14.1 or a 7.x need)                                                                                                                      |
+| `sort` and the shared filter operators on the 33 v0 lists          | Not offered in 6.1: fixed order and module-specific filters ([Filtering and sorting](#filtering-and-sorting)); follow-up with the portal (7.x)      |
+
+## Changelog
+
+### Step 6.1 (2026-11-12)
+
+Two contract changes for existing clients (pre-GA; no `/api/v2`):
+
+1. **Unknown request fields are rejected.** Every body and query schema is strict: a field the documented schema does not define is `400 validation_failed` (`"<path>: Unrecognized key"`) instead of being silently dropped. Nothing that was accepted changes meaning.
+2. **`Idempotency-Key` is required** on the 22 `legacy` sensitive mutations listed under [Idempotency](#idempotency) (`400 idempotency_key_required` without it). `API_IDEMPOTENCY_LEGACY_MODE=warn` keeps the old keyless behaviour with `Deprecation` headers during the transition.
+
+Additive: every error carries `code` and `requestId`; every response carries `X-Request-Id`, authenticated responses `RateLimit-*`; per-principal, per-tenant and class rate limits (`429 rate_limited` with `scope`); 20 new operations (messages, recipients, attachments, URLs and clicks, suppressions, audit logs, reports, usage, billing, threat lookup); the probes left the public OpenAPI document (they keep working); `/api/metrics`, `/api/health/*`, `/api/docs` are `404`.
 
 ## Readiness response
 

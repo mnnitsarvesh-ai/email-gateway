@@ -1,5 +1,5 @@
 import { hash } from 'argon2';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import type { PrismaClient } from '@email-gateway/database';
 import { stack } from './env';
 import { secretBoxEncrypt } from './smtp-fixtures';
@@ -43,6 +43,15 @@ export interface ApiSession {
   reauth(): Promise<{ password: string; totpCode?: string }>;
   remove(): Promise<void>;
 }
+
+/**
+ * A fresh `Idempotency-Key` header: the step 6.1 §3.5 sensitive mutations (risk profile publish,
+ * dead-letter replay, attachment rescans, threat indicators, …) refuse a request without one
+ * (`400 idempotency_key_required`) unless the api runs with `API_IDEMPOTENCY_LEGACY_MODE=warn`.
+ */
+export const idempotencyKey = (): { 'Idempotency-Key': string } => ({
+  'Idempotency-Key': `it-${randomUUID()}`,
+});
 
 export const apiBaseUrl = () => `http://${stack.host}:${stack.ports.services.api}`;
 

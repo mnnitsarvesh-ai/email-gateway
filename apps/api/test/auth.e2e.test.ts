@@ -3,6 +3,15 @@
  * Redis): request validation, rate limiting with the in-memory store, credential handling and
  * JWT rejection. The full flows run against real MySQL/Redis in integration/auth.test.ts.
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers delete /api/v1/auth/sessions/:sessionId
+// @covers get /api/v1/auth/me
+// @covers post /api/v1/auth/login
+// @covers post /api/v1/auth/mfa/verify
+// @covers post /api/v1/auth/password/forgot
+// @covers post /api/v1/auth/password/reset
+// @covers post /api/v1/auth/refresh
+// ---- end of route coverage ----
 import { randomBytes, randomUUID } from 'node:crypto';
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';

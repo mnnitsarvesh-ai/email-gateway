@@ -7,6 +7,7 @@ import {
 } from '@email-gateway/event-contracts';
 import type { MessageProperties } from 'amqplib';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { idempotencyKey } from './support/api-client';
 import { waitFor } from './support/compose';
 import { waitForAllDeliveries } from './support/deliveries';
 import {
@@ -164,14 +165,19 @@ async function deadLetter(envelope: EventEnvelope): Promise<void> {
 }
 
 const replay = (dryRun = false) =>
-  admin!.call('POST', '/platform/dead-letters/replay', {
-    sourceQueue: QUEUES.pending,
-    limit: 10,
-    organizationId: organizationPublicId,
-    failureReason: 'max_attempts_exceeded',
-    dryRun,
-    reason: 'WP5 stack replay of a genuine pending approval',
-  });
+  admin!.call(
+    'POST',
+    '/platform/dead-letters/replay',
+    {
+      sourceQueue: QUEUES.pending,
+      limit: 10,
+      organizationId: organizationPublicId,
+      failureReason: 'max_attempts_exceeded',
+      dryRun,
+      reason: 'WP5 stack replay of a genuine pending approval',
+    },
+    idempotencyKey(),
+  );
 
 const plannerDuplicates = () =>
   metricValue('delivery-worker', 'amqp_consumer_messages_total', {

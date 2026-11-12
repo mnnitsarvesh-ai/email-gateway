@@ -7,6 +7,19 @@
  * connector creation and secret rotation. The full flows run against MySQL and Redis in the
  * integration suites.
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers delete /api/v1/smtp-connectors/:id
+// @covers get /api/v1/domains/:id/recipient-validation
+// @covers get /api/v1/domains/:id/recipients
+// @covers get /api/v1/smtp-connectors
+// @covers get /api/v1/smtp-connectors/:id
+// @covers patch /api/v1/smtp-connectors/:id
+// @covers post /api/v1/domains/:id/recipients
+// @covers post /api/v1/domains/:id/recipients/remove
+// @covers post /api/v1/smtp-connectors
+// @covers post /api/v1/smtp-connectors/:id/rotate-secret
+// @covers put /api/v1/domains/:id/recipient-validation
+// ---- end of route coverage ----
 import { randomBytes, randomUUID } from 'node:crypto';
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';

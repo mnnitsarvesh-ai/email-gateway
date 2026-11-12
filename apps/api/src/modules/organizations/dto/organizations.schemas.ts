@@ -181,12 +181,12 @@ export const ListOrganizationsQuerySchema = PageQuerySchema.extend({
   deploymentMode: DeploymentModeSchema.optional(),
   /** Prefix of the slug or the name. */
   q: z.string().trim().min(1).max(63).optional(),
-});
+}).strict();
 export type ListOrganizationsQuery = z.output<typeof ListOrganizationsQuerySchema>;
 
 const IsoDateTimeSchema = z.iso.datetime({ offset: true }).transform((value) => new Date(value));
 
-export const UsageQuerySchema = z.object({
+export const UsageQuerySchema = z.strictObject({
   from: IsoDateTimeSchema.optional(),
   to: IsoDateTimeSchema.optional(),
 });

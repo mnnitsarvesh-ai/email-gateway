@@ -10,6 +10,29 @@
  * query validation and the message evaluations. The same routes run against the real MySQL
  * writer and replica in integration/policies.test.ts.
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers delete /api/v1/policies/:policyId
+// @covers delete /api/v1/policies/:policyId/versions/:versionNo
+// @covers get /api/v1/messages/:messageId/policy-evaluations
+// @covers get /api/v1/policies
+// @covers get /api/v1/policies/:policyId
+// @covers get /api/v1/policies/:policyId/versions
+// @covers get /api/v1/policies/:policyId/versions/:versionNo
+// @covers get /api/v1/policies/catalog
+// @covers get /api/v1/policies/executions
+// @covers get /api/v1/policy-settings
+// @covers patch /api/v1/policies/:policyId
+// @covers post /api/v1/messages/:messageId/scans/:scanId/policy/dry-run
+// @covers post /api/v1/policies
+// @covers post /api/v1/policies/:policyId/disable
+// @covers post /api/v1/policies/:policyId/enable
+// @covers post /api/v1/policies/:policyId/versions
+// @covers post /api/v1/policies/:policyId/versions/:versionNo/activate
+// @covers post /api/v1/policies/:policyId/versions/:versionNo/publish
+// @covers post /api/v1/policies/test
+// @covers put /api/v1/policies/:policyId/versions/:versionNo
+// @covers put /api/v1/policy-settings
+// ---- end of route coverage ----
 import { randomUUID } from 'node:crypto';
 import {
   buildPolicyInput,
@@ -19,6 +42,7 @@ import {
 } from '@email-gateway/policy-dsl';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { policyRoundRowsOf, snapshotSource } from '../src/modules/policies/domain/policy-round';
+import { idem, installIdempotencyStore } from './legacy-idempotency-support';
 import { createPolicyApp, MESSAGE_ID, type PolicyApp, roleOf, SCAN } from './support/policy-app';
 import { quarantineDomainDefinition, tagAllDefinition } from './support/policy-fixtures';
 
@@ -37,6 +61,8 @@ describe('step 5.2 policy routes (e2e, dependencies stubbed)', () => {
       POLICY_MAX_POLICIES: '10',
       POLICY_MAX_VERSIONS_PER_POLICY: '10',
     });
+    // Step 6.1 §3.5: version publish and activate take an Idempotency-Key.
+    installIdempotencyStore(ctx.app);
   });
   afterAll(async () => {
     await ctx?.close();
@@ -116,11 +142,13 @@ describe('step 5.2 policy routes (e2e, dependencies stubbed)', () => {
     // policy:manage cannot publish, activate, enable, disable, delete or change settings.
     await http()
       .post(`${P}/${id}/versions/1/publish`)
+      .set(idem())
       .set(await ctx.as(ANALYST))
       .send({ expectedRowVersion: 1 })
       .expect(403);
     await http()
       .post(`${P}/${id}/versions/1/activate`)
+      .set(idem())
       .set(await ctx.as(ANALYST))
       .send({})
       .expect(403);
@@ -140,6 +168,7 @@ describe('step 5.2 policy routes (e2e, dependencies stubbed)', () => {
       .expect(403);
     const published = await http()
       .post(`${P}/${id}/versions/1/publish`)
+      .set(idem())
       .set(await ctx.as(ADMIN))
       .send({ expectedRowVersion: 1 })
       .expect(200);
@@ -176,23 +205,27 @@ describe('step 5.2 policy routes (e2e, dependencies stubbed)', () => {
     expect(stale.body).toMatchObject({ code: 'policy_conflict', currentRowVersion: 1 });
     await http()
       .post(`${P}/${id}/versions/2/activate`)
+      .set(idem())
       .set(await ctx.as(ADMIN))
       .send({})
       .expect(409)
       .expect((res) => expect(res.body.code).toBe('policy_version_not_published'));
     await http()
       .post(`${P}/${id}/versions/2/publish`)
+      .set(idem())
       .set(await ctx.as(ADMIN))
       .send({ expectedRowVersion: 1 })
       .expect(200);
     const back = await http()
       .post(`${P}/${id}/versions/1/activate`)
+      .set(idem())
       .set(await ctx.as(ADMIN))
       .send({})
       .expect(200);
     expect(back.body.generation).toBe('3');
     const same = await http()
       .post(`${P}/${id}/versions/1/activate`)
+      .set(idem())
       .set(await ctx.as(ADMIN))
       .send({})
       .expect(200);
@@ -309,6 +342,7 @@ describe('step 5.2 policy routes (e2e, dependencies stubbed)', () => {
       .expect(404);
     await http()
       .post(`${P}/${id}/versions/1/publish`)
+      .set(idem())
       .set(await ctx.as(ADMIN, 'B'))
       .send({ expectedRowVersion: 1 })
       .expect(404);
@@ -371,6 +405,7 @@ describe('step 5.2 policy routes (e2e, dependencies stubbed)', () => {
     const id = (await create(await ctx.as(ADMIN)).expect(201)).body.policy.id as string;
     await http()
       .post(`${P}/${id}/versions/1/publish`)
+      .set(idem())
       .set(await ctx.as(ADMIN))
       .send({ expectedRowVersion: 1 })
       .expect(200);
@@ -420,6 +455,7 @@ describe('step 5.2 policy routes (e2e, dependencies stubbed)', () => {
     ).body.policy.id as string;
     await http()
       .post(`${P}/${id}/versions/1/publish`)
+      .set(idem())
       .set(await ctx.as(ADMIN))
       .send({ expectedRowVersion: 1 })
       .expect(200);

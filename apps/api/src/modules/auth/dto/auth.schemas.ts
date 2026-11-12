@@ -21,14 +21,14 @@ const DisplayNameSchema = z.string().trim().min(1).max(255);
 
 // ---- Requests ----------------------------------------------------------------------------
 
-export const LoginRequestSchema = z.object({
+export const LoginRequestSchema = z.strictObject({
   email: EmailSchema,
   password: PresentedPasswordSchema,
   organization: OrganizationSlugSchema.optional(),
 });
 
 export const MfaVerifyRequestSchema = z
-  .object({
+  .strictObject({
     mfaToken: OpaqueTokenSchema,
     code: TotpCodeSchema.optional(),
     recoveryCode: z.string().min(10).max(32).optional(),
@@ -37,39 +37,39 @@ export const MfaVerifyRequestSchema = z
     message: 'provide exactly one of code or recoveryCode',
   });
 
-export const RefreshRequestSchema = z.object({ refreshToken: OpaqueTokenSchema });
+export const RefreshRequestSchema = z.strictObject({ refreshToken: OpaqueTokenSchema });
 
-export const PasswordForgotRequestSchema = z.object({
+export const PasswordForgotRequestSchema = z.strictObject({
   email: EmailSchema,
   organization: OrganizationSlugSchema.optional(),
 });
 
-export const PasswordResetRequestSchema = z.object({
+export const PasswordResetRequestSchema = z.strictObject({
   token: OpaqueTokenSchema,
   newPassword: PasswordSchema,
 });
 
-export const PasswordChangeRequestSchema = z.object({
+export const PasswordChangeRequestSchema = z.strictObject({
   currentPassword: PresentedPasswordSchema,
   newPassword: PasswordSchema,
 });
 
-export const TokenRequestSchema = z.object({ token: OpaqueTokenSchema });
+export const TokenRequestSchema = z.strictObject({ token: OpaqueTokenSchema });
 
-export const InvitationAcceptRequestSchema = z.object({
+export const InvitationAcceptRequestSchema = z.strictObject({
   token: OpaqueTokenSchema,
   password: PasswordSchema,
   displayName: DisplayNameSchema.optional(),
 });
 
-export const TotpCodeRequestSchema = z.object({ code: TotpCodeSchema });
+export const TotpCodeRequestSchema = z.strictObject({ code: TotpCodeSchema });
 
-export const MfaDisableRequestSchema = z.object({
+export const MfaDisableRequestSchema = z.strictObject({
   password: PresentedPasswordSchema,
   code: TotpCodeSchema,
 });
 
-export const OverrideStartRequestSchema = z.object({
+export const OverrideStartRequestSchema = z.strictObject({
   organizationId: z.uuid(),
   reason: z.string().trim().min(10).max(500),
   durationMinutes: z.number().int().min(5).max(240).default(30),

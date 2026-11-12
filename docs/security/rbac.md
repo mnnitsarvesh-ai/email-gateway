@@ -72,8 +72,11 @@ The `permissions` table is seeded from `PERMISSIONS` in `packages/database/src/s
 | `quarantine:manage`            | Manually quarantine held-for-review or policy-rejected messages (step 5.3)                               |
 | `quarantine:download`          | Download quarantined messages and attachments through single-use grants (step 5.3)                       |
 | `quarantine:self`              | View, preview and request the release of quarantined mail addressed to oneself (step 5.3)                |
+| `threat_intel:read`            | Look up platform threat intelligence (hash catalogue, indicators) (step 6.1)                             |
+| `billing:read`                 | View the plan, entitlements and metered usage (step 6.1)                                                 |
+| `delivery:suppression_manage`  | Add and remove recipient suppressions (step 6.1)                                                         |
 
-The catalog has **55** permissions (49 before step 5.3).
+The catalog has **58** permissions (55 before step 6.1, 49 before step 5.3).
 
 `GET /permissions` lists `platform:*` keys only to users of the platform organization who are not under an override; customer users and API keys see the tenant permissions only.
 
@@ -153,6 +156,9 @@ Generated from the seed catalog (`SYSTEM_ROLES`); if the catalog changes, regene
 | `quarantine:manage`            |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |
 | `quarantine:download`          |  ✓  |     |  ✓  |     |     |     |     |     |     |
 | `quarantine:self`              |  ✓  |     |  ✓  |     |     |     |     |     |  ✓  |
+| `threat_intel:read`            |  ✓  |  ✓  |  ✓  |     |  ✓  |     |     |     |     |
+| `billing:read`                 |  ✓  |     |  ✓  |     |     |     |  ✓  |     |     |
+| `delivery:suppression_manage`  |  ✓  |     |  ✓  |  ✓  |     |     |     |     |     |
 
 **Platform roles** are the roles that hold any `platform:*` permission: `super_admin` and `platform_admin` (`PLATFORM_ROLE_KEYS`). They can be assigned only to users of the platform organization (`kind = platform`); assigning one in a customer organization is `400`. Customer organizations never see platform roles in `GET /roles` or `GET /roles/{key}` (`404`). Domain Admin is organization-wide; per-domain scoping of roles is out of scope for now.
 
@@ -337,6 +343,25 @@ Six new tenant permissions ([design](../plan/steps/17-quarantine.md) Q25, ADR-00
 - **Audit.** Every route writes an audit row (`quarantine.*`, Q21) with ids, enums, counts and hashes only; the operator's typed reason is stored in `quarantine_actions.reason`, never in audit metadata. Previews and downloads are audited before content is read.
 
 The routes are implemented by step 5.3 WP4; this section is the authorization contract they follow.
+
+## REST API (step 6.1)
+
+Three new tenant permissions ([design](../plan/steps/18-rest-api.md) §3.6, D7); none is part of `TENANT_READ_PERMISSIONS`, so read-only roles do not gain them implicitly. `organization_admin` holds them through the tenant set and `super_admin` through the full catalog; the other grants are explicit in `SYSTEM_ROLES`. API keys may carry them as scopes (they are tenant permissions).
+
+| Permission                     | Routes                                                                                                                                                       | System roles                                                                          |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
+| `threat_intel:read`            | `GET /threat-intelligence/lookup` (class `expensive`, audited `threat_intel.looked_up`)                                                                      | super_admin, platform_admin, organization_admin, security_analyst                     |
+| `billing:read`                 | `GET /billing/plan`, `GET /billing/usage` (`expensive`)                                                                                                      | super_admin, organization_admin, compliance_auditor                                   |
+| `delivery:suppression_manage`  | `POST /recipients/suppressions`, `DELETE /recipients/suppressions/{suppressionId}` (Idempotency-Key, class `sensitive`)                                      | super_admin, organization_admin, domain_admin                                         |
+| `report:read` (existing)       | `GET /reports/traffic`, `GET /reports/threats`, `GET /reports/url-clicks` (`expensive`) — the first routes gated by it                                       | every system role except mailbox_user                                                 |
+| `audit:read` (existing)        | `GET /audit/login-events` (step 1.3), `GET /audit/logs` (step 6.1; audited `audit.searched`)                                                                 | super_admin, platform_admin, organization_admin, security_analyst, compliance_auditor |
+| `delivery:read` (existing)     | also `GET /recipients/suppressions`, `GET /recipients/suppressions/{suppressionId}`                                                                          | every system role except mailbox_user                                                 |
+| `message:read` (existing)      | also `GET /messages`, `GET /messages/{messageId}`, `…/recipients`, `…/attachments`, `…/urls`, `GET /attachments` (`expensive`), `GET /url-protection/clicks` | every system role except mailbox_user                                                 |
+| `organization:read` (existing) | also `GET /usage` (the caller's organization)                                                                                                                | every system role except mailbox_user                                                 |
+
+**Platform audit access.** `GET /platform/audit/logs` requires `platform:operations` **and** `audit:read`, a user principal (`@UserOnly`: API keys are refused) and an MFA session (`@RequireMfa`). Only users of the platform organization can hold `platform:*`; override sessions carry tenant permissions only, so they are refused too. The caller names exactly one target (`organizationId` or `scope=platform`); each search is audited as `platform.audit_searched` in the searched organization's trail (platform rows for `scope=platform`). Every other cross-tenant read stays behind the audited override.
+
+**Self-service routes without a permission** (`@AuthenticatedOnly()`, an explicit allow-list enforced by `test/route-inventory.e2e.test.ts`): `GET /auth/me`, `POST /auth/logout`, `POST /auth/logout-all`, `POST /auth/password/change`, `POST /auth/email/verification`, `GET /auth/sessions`, `DELETE /auth/sessions/{sessionId}`, the four `/auth/mfa/*` enrollment routes and `DELETE /platform/overrides/{overrideId}` (ending one's own override). Every other non-public route names a permission.
 
 ## Custom roles
 

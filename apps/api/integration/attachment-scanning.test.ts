@@ -12,6 +12,15 @@
  * The live email-worker may run the rescan runner: real (non-dry-run) jobs are only created for an
  * organization without candidates and cancelled at once, and every row is removed afterwards.
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers delete /api/v1/platform/threat-hashes/:sha256
+// @covers get /api/v1/platform/attachment-rescans
+// @covers get /api/v1/platform/attachment-rescans/:jobId
+// @covers get /api/v1/platform/threat-hashes
+// @covers post /api/v1/platform/attachment-rescans
+// @covers post /api/v1/platform/attachment-rescans/:jobId/cancel
+// @covers post /api/v1/platform/threat-hashes
+// ---- end of route coverage ----
 import { randomBytes, randomUUID } from 'node:crypto';
 import { PrismaReadService } from '@email-gateway/common';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -22,7 +31,7 @@ import {
   type Fixtures,
   type FixtureUser,
 } from './support/fixtures';
-import { apiKeyHeader, bearer, loginWithMfa, uniqueIp } from './support/http';
+import { apiKeyHeader, bearer, idem, loginWithMfa, uniqueIp } from './support/http';
 import {
   deleteLifecycleFixtures,
   insertLifecycleMessage,
@@ -346,6 +355,7 @@ describe('platform known-threat hashes (A16, A17)', () => {
     const sha256 = runHash('add');
     const res = await ctx.http
       .post(url)
+      .set(idem())
       .set(headers(platformAdmin))
       .send({ sha256, severity: 'critical', family: 'Win.Test.Run', reason: 'integration run' })
       .expect(201);
@@ -371,6 +381,7 @@ describe('platform known-threat hashes (A16, A17)', () => {
 
     const again = await ctx.http
       .post(url)
+      .set(idem())
       .set(headers(platformAdmin))
       .send({ sha256, severity: 'low', reason: 'twice' })
       .expect(409);
@@ -381,6 +392,7 @@ describe('platform known-threat hashes (A16, A17)', () => {
     const sha256 = runHash('remove');
     await ctx.http
       .post(url)
+      .set(idem())
       .set(headers(platformAdmin))
       .send({ sha256, severity: 'medium', reason: 'to be removed' })
       .expect(201);
@@ -418,11 +430,11 @@ describe('platform known-threat hashes (A16, A17)', () => {
     const sha256 = runHash('rbac');
     const body = { sha256, severity: 'high', reason: 'x' };
     const tenantAdmin = await tokenOf(await fx.createUser(orgA, { roles: ['organization_admin'] }));
-    await ctx.http.post(url).set(headers(tenantAdmin)).send(body).expect(403);
+    await ctx.http.post(url).set(idem()).set(headers(tenantAdmin)).send(body).expect(403);
     const key = apiKeyHeader(await fx.createApiKey(orgA, ['message:read', 'policy:read']));
     await ctx.http.get(url).set(headers(key)).expect(403);
     const noMfa = await tokenOf(await fx.createPlatformUser(['platform_admin'], { mfa: false }));
-    await ctx.http.post(url).set(headers(noMfa)).send(body).expect(403);
+    await ctx.http.post(url).set(idem()).set(headers(noMfa)).send(body).expect(403);
     expect(await ctx.prisma.malwareSignature.findUnique({ where: { sha256 } })).toBeNull();
   });
 });
@@ -456,6 +468,7 @@ describe('platform attachment rescan jobs (A13)', () => {
       (
         await ctx.http
           .post(url)
+          .set(idem())
           .set(headers(platformAdmin))
           .send({
             windowHours: 1,
@@ -477,6 +490,7 @@ describe('platform attachment rescan jobs (A13)', () => {
     const empty = await fx.createOrganization();
     const created = await ctx.http
       .post(url)
+      .set(idem())
       .set(headers(platformAdmin))
       .send({
         windowHours: 1,
@@ -544,6 +558,7 @@ describe('platform attachment rescan jobs (A13)', () => {
     expect(missing.body.code).toBe('rescan_job_not_found');
     const unknownOrg = await ctx.http
       .post(url)
+      .set(idem())
       .set(headers(platformAdmin))
       .send({ windowHours: 1, organizationId: randomUUID(), reason: 'x' })
       .expect(404);
@@ -557,6 +572,7 @@ describe('platform attachment rescan jobs (A13)', () => {
     const tenantAdmin = await tokenOf(await fx.createUser(orgA, { roles: ['organization_admin'] }));
     await ctx.http
       .post(url)
+      .set(idem())
       .set(headers(tenantAdmin))
       .send({ windowHours: 1, reason: 'x', dryRun: true })
       .expect(403);

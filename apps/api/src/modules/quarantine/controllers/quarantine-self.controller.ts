@@ -22,13 +22,13 @@ import type {
 import {
   CurrentPrincipal,
   CurrentScope,
+  CursorList,
   RequirePermissions,
   UserOnly,
 } from '../../../auth-contracts/decorators';
 import type { Principal } from '../../../auth-contracts/principal';
 import type { TenantScope } from '../../../auth-contracts/tenant-scope';
 import { ApiCodedError } from '../../../http/coded-exception';
-import { ApiIdempotencyKey } from '../../../http/idempotency/idempotency-key';
 import { zodToOpenApi } from '../../../validation/zod-openapi';
 import { ZodValidationPipe } from '../../../validation/zod-validation.pipe';
 import { ApiErrors } from '../../auth/api-docs';
@@ -64,7 +64,8 @@ import {
   type SelfSearchQuery,
   SelfSearchQuerySchema,
 } from '../dto/quarantine.schemas';
-import { NO_STORE, Q } from '../quarantine.constants';
+import { NO_STORE, Q, QUARANTINE_OPERATIONS } from '../quarantine.constants';
+import { TransactionalIdempotency } from '../../messages/api-docs';
 import { QuarantineRateLimit } from '../quarantine-rate-limit';
 import { QuarantinePreviewService } from '../services/quarantine-preview.service';
 import { QuarantineQueryService } from '../services/quarantine-query.service';
@@ -92,6 +93,7 @@ export class QuarantineSelfController {
   ) {}
 
   @Get('entries')
+  @CursorList('v0')
   @RequirePermissions(Q.self)
   @UserOnly()
   @Header('Cache-Control', NO_STORE)
@@ -173,6 +175,7 @@ export class QuarantineSelfController {
   }
 
   @Post('entries/:entryId/release')
+  @TransactionalIdempotency(QUARANTINE_OPERATIONS.selfRelease)
   @RequirePermissions(Q.self)
   @UserOnly()
   @HttpCode(HttpStatus.ACCEPTED)
@@ -188,7 +191,6 @@ export class QuarantineSelfController {
       SELF_NOTE,
   })
   @ApiEntryId()
-  @ApiIdempotencyKey()
   @ApiBody({ schema: zodToOpenApi(ReleaseBodySchema, { io: 'input' }) })
   @ApiAcceptedResponse({ schema: zodToOpenApi(ReleaseOutcomeSchema) })
   @ApiErrors(400, 401, 403, 422)
@@ -212,6 +214,7 @@ export class QuarantineSelfController {
   }
 
   @Post('entries/:entryId/request-release')
+  @TransactionalIdempotency(QUARANTINE_OPERATIONS.selfRequestRelease)
   @RequirePermissions(Q.self)
   @UserOnly()
   @HttpCode(HttpStatus.ACCEPTED)
@@ -224,7 +227,6 @@ export class QuarantineSelfController {
       SELF_NOTE,
   })
   @ApiEntryId()
-  @ApiIdempotencyKey()
   @ApiBody({ schema: zodToOpenApi(ReasonBodySchema, { io: 'input' }) })
   @ApiAcceptedResponse({ schema: zodToOpenApi(ReleaseOutcomeSchema) })
   @ApiErrors(400, 401, 403, 422)

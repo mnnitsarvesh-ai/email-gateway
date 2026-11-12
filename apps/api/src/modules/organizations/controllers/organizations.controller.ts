@@ -8,7 +8,9 @@ import {
   ApiSecurity,
   ApiTags,
 } from '@nestjs/swagger';
+import { LegacyIdempotent } from '../../../legacy-idempotency/legacy-idempotent';
 import {
+  CursorList,
   RequireAnyPermission,
   RequirePermissions,
   UserOnly,
@@ -92,6 +94,7 @@ export class OrganizationsController {
   }
 
   @Get()
+  @CursorList('v0')
   @RequireAnyPermission(ORGANIZATION_READ, PLATFORM_ORGANIZATIONS)
   @ApiSecurity(API_KEY_SCHEME)
   @ApiOperation({
@@ -148,6 +151,11 @@ export class OrganizationsController {
   }
 
   @Patch(':id/status')
+  @LegacyIdempotent({
+    operation: 'organization.status_change',
+    legacy: true,
+    publicFields: ['code'],
+  })
   @RequirePermissions(PLATFORM_ORGANIZATIONS)
   @UserOnly()
   @ApiOperation({

@@ -8,6 +8,27 @@
  * scans read API `dlp` section withheld without `dlp:read` and the `dlp` scan settings. The same
  * routes against the real MySQL and MinIO run in integration/dlp.test.ts.
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers delete /api/v1/dlp/evidence
+// @covers delete /api/v1/dlp/patterns/:id
+// @covers delete /api/v1/dlp/policies/:id
+// @covers delete /api/v1/messages/:messageId/scans/:scanId/dlp-evidence
+// @covers get /api/v1/dlp/compliance
+// @covers get /api/v1/dlp/dictionaries
+// @covers get /api/v1/dlp/exceptions
+// @covers get /api/v1/dlp/incidents
+// @covers get /api/v1/dlp/patterns
+// @covers get /api/v1/dlp/policies
+// @covers get /api/v1/dlp/policies/:id
+// @covers get /api/v1/messages/:messageId/scans/:scanId/dlp-evidence
+// @covers patch /api/v1/dlp/policies/:id
+// @covers post /api/v1/dlp/dictionaries
+// @covers post /api/v1/dlp/patterns
+// @covers post /api/v1/dlp/patterns/test
+// @covers post /api/v1/dlp/policies
+// @covers post /api/v1/dlp/policies/:id/rules
+// @covers put /api/v1/dlp/compliance/aadhaar
+// ---- end of route coverage ----
 import { randomBytes, randomUUID } from 'node:crypto';
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
@@ -44,6 +65,8 @@ import { MessageLifecycleReadRepository } from '../src/modules/messages/reposito
 import { MessageScansReadRepository } from '../src/modules/messages/repositories/message-scans-read.repository';
 import { ScanSettingsRepository } from '../src/modules/scans/repositories/scan-settings.repository';
 import { OrganizationFeaturesService } from '../src/tenancy/organization-features.service';
+import { idem, withIdempotencyStore } from './legacy-idempotency-support';
+import { InMemoryIdempotencyStore } from './support/api-test-app';
 import { InMemoryKeyValueStore } from './support/in-memory-key-value-store';
 import { RecordingEmailSender } from './support/recording-email-sender';
 import { TEST_DOMAIN_ENV } from './support/test-env';
@@ -392,7 +415,7 @@ describe('step 4.5 DLP routes (e2e, dependencies stubbed)', () => {
   beforeAll(async () => {
     const cfg = loadApiConfig(env);
     const stub = (healthName: string) => ({ healthName, checkHealth: () => Promise.resolve() });
-    const moduleRef = await Test.createTestingModule({ imports: [AppModule.forRoot(cfg)] })
+    const builder = Test.createTestingModule({ imports: [AppModule.forRoot(cfg)] })
       .overrideProvider(PrismaService)
       .useValue(stub('mysql'))
       .overrideProvider(PrismaReadService)
@@ -446,8 +469,11 @@ describe('step 4.5 DLP routes (e2e, dependencies stubbed)', () => {
       .useValue(settingsRows)
       // Plan features (step 4.6 X17: the scan-settings views state attachment_sandbox).
       .overrideProvider(OrganizationFeaturesService)
-      .useValue({ isEnabled: () => Promise.resolve(false) })
-      .compile();
+      .useValue({ isEnabled: () => Promise.resolve(false) });
+    // Step 6.1 §3.5: evidence purges and the Aadhaar switch take an Idempotency-Key.
+    const moduleRef = await withIdempotencyStore(builder, new InMemoryIdempotencyStore(), {
+      runner: false,
+    }).compile();
     // Production logging: the Nest logger on pino (every service log line and the exception
     // filter), captured in memory so the pattern-test markers can be searched for.
     const destination = { write: (line: string) => void logLines.push(line) };
@@ -883,10 +909,12 @@ describe('step 4.5 DLP routes (e2e, dependencies stubbed)', () => {
     principalWith([MANAGE]);
     await http()
       .delete(evidenceUrl)
+      .set(idem())
       .set(await bearer(['pwd']))
       .expect(403);
     await http()
       .delete(evidenceUrl)
+      .set(idem())
       .set(await bearer())
       .expect(204);
     expect(results.shred).toHaveBeenCalledTimes(1);
@@ -898,6 +926,7 @@ describe('step 4.5 DLP routes (e2e, dependencies stubbed)', () => {
     audit.record.mockClear();
     const all = await http()
       .delete('/api/v1/dlp/evidence')
+      .set(idem())
       .set(await bearer())
       .expect(202);
     expect(all.body).toEqual({ purged: 0, objectsDeleted: 0, objectsPending: 0 });
@@ -917,12 +946,14 @@ describe('step 4.5 DLP routes (e2e, dependencies stubbed)', () => {
     principalWith([READ, MANAGE]);
     await http()
       .put('/api/v1/dlp/compliance/aadhaar')
+      .set(idem())
       .set(await bearer())
       .send(body)
       .expect(403);
     principalWith([COMPLIANCE]);
     await http()
       .put('/api/v1/dlp/compliance/aadhaar')
+      .set(idem())
       .set(await bearer(['pwd']))
       .send(body)
       .expect(403);
@@ -936,6 +967,7 @@ describe('step 4.5 DLP routes (e2e, dependencies stubbed)', () => {
     ]) {
       await http()
         .put('/api/v1/dlp/compliance/aadhaar')
+        .set(idem())
         .set(await bearer())
         .send(bad)
         .expect(400);
@@ -948,6 +980,7 @@ describe('step 4.5 DLP routes (e2e, dependencies stubbed)', () => {
     } as never);
     const conflict = await http()
       .put('/api/v1/dlp/compliance/aadhaar')
+      .set(idem())
       .set(await bearer())
       .send(body)
       .expect(409);

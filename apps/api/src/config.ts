@@ -846,6 +846,70 @@ const quarantineConfigShape = {
   QUARANTINE_BULK_DEADLINE_MS: int(5000, 60_000).default(25_000),
 };
 
+/**
+ * REST API conventions (step 6.1 §3.7, docs/plan/steps/18-rest-api.md D3, D6, D8, D9, D12): the
+ * HMAC key of the signed v1 list cursors (64 hex characters, required, `_FILE` accepted; the
+ * previous key is accepted for verification only while rotating), the global rate limits
+ * (per principal, per tenant with the clamp of `organization_limits.api_requests_per_minute`,
+ * and the sensitive / expensive classes), the deprecation switch and reservation lifetime of the
+ * idempotency interceptor, the list scan budget and range bounds, the report bounds and the
+ * per-organization cap on manual recipient suppressions. Start-up errors name the key, never
+ * the value.
+ */
+export const restApiConfigShape = {
+  /** HMAC-SHA256 key of the v1 cursors (D3): exactly 64 hex characters, required. */
+  API_CURSOR_KEY: aesKey,
+  /** Accepted for verification only while rotating API_CURSOR_KEY; empty = none. */
+  API_CURSOR_KEY_PREVIOUS: aesKey.optional(),
+  API_CURSOR_TTL_SECONDS: int(300, 604_800).default(86_400),
+  API_RATE_PRINCIPAL_PER_MINUTE: int(10, 10_000).default(600),
+  API_RATE_TENANT_DEFAULT_PER_MINUTE: int(10, 100_000).default(300),
+  API_RATE_TENANT_MIN_PER_MINUTE: int(1, 100_000).default(10),
+  API_RATE_TENANT_MAX_PER_MINUTE: int(10, 1_000_000).default(10_000),
+  API_RATE_SENSITIVE_PER_MINUTE: int(1, 600).default(30),
+  API_RATE_EXPENSIVE_PER_MINUTE: int(1, 600).default(20),
+  API_RATE_LIMIT_CACHE_SECONDS: int(5, 300).default(60),
+  API_IDEMPOTENCY_LEGACY_MODE: z.enum(['enforce', 'warn']).default('enforce'),
+  API_IDEMPOTENCY_PENDING_TTL_SECONDS: int(30, 3600).default(300),
+  API_LIST_SCAN_BUDGET_ROWS: int(1000, 50_000).default(5000),
+  API_MESSAGES_MAX_RANGE_DAYS: int(1, 92).default(31),
+  API_AUDIT_MAX_RANGE_DAYS: int(1, 366).default(90),
+  REPORTS_MAX_RANGE_DAYS: int(1, 92).default(31),
+  REPORTS_CACHE_TTL_SECONDS: int(10, 900).default(60),
+  REPORTS_QUERY_TIMEOUT_MS: int(1000, 30_000).default(10_000),
+  RECIPIENT_SUPPRESSIONS_MAX_MANUAL: int(1, 1_000_000).default(100_000),
+};
+
+export type RestApiConfigKeys = {
+  [K in keyof typeof restApiConfigShape]: z.output<(typeof restApiConfigShape)[K]>;
+};
+
+/** `API_RATE_TENANT_MIN_PER_MINUTE <= API_RATE_TENANT_DEFAULT_PER_MINUTE <= …_MAX_PER_MINUTE`. */
+export function validateRestApiConfig(
+  cfg: Pick<
+    RestApiConfigKeys,
+    | 'API_RATE_TENANT_MIN_PER_MINUTE'
+    | 'API_RATE_TENANT_DEFAULT_PER_MINUTE'
+    | 'API_RATE_TENANT_MAX_PER_MINUTE'
+  >,
+  ctx: z.RefinementCtx,
+): void {
+  if (cfg.API_RATE_TENANT_MIN_PER_MINUTE > cfg.API_RATE_TENANT_DEFAULT_PER_MINUTE) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['API_RATE_TENANT_MIN_PER_MINUTE'],
+      message: 'must be less than or equal to API_RATE_TENANT_DEFAULT_PER_MINUTE',
+    });
+  }
+  if (cfg.API_RATE_TENANT_DEFAULT_PER_MINUTE > cfg.API_RATE_TENANT_MAX_PER_MINUTE) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['API_RATE_TENANT_MAX_PER_MINUTE'],
+      message: 'must be greater than or equal to API_RATE_TENANT_DEFAULT_PER_MINUTE',
+    });
+  }
+}
+
 export type QuarantineConfigKeys = {
   [K in keyof typeof quarantineConfigShape]: z.output<(typeof quarantineConfigShape)[K]>;
 };
@@ -944,6 +1008,7 @@ export const apiConfigSchema = baseConfigSchema
   .extend(riskConfigShape)
   .extend(policyConfigShape)
   .extend(quarantineConfigShape)
+  .extend(restApiConfigShape)
   .extend({
     /** Comma-separated allow-list of admin portal origins. */
     CORS_ORIGINS: z
@@ -966,6 +1031,7 @@ export const apiConfigSchema = baseConfigSchema
     validateDlpConfig(cfg, ctx);
     validateSandboxConfig(cfg, ctx);
     validateQuarantineConfig(cfg, ctx);
+    validateRestApiConfig(cfg, ctx);
     if (cfg.AUTH_SESSION_MAX_AGE_SECONDS < cfg.AUTH_REFRESH_TOKEN_TTL_SECONDS) {
       ctx.addIssue({
         code: 'custom',

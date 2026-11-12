@@ -7,6 +7,15 @@
  * credential), the 422 refusal body with its `reason` and the per-caller write limit. The full
  * flows run against MySQL in the integration suites.
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers delete /api/v1/domains/:id/destinations
+// @covers get /api/v1/deliveries
+// @covers get /api/v1/destination-providers
+// @covers get /api/v1/domains/:id/destinations
+// @covers get /api/v1/messages/:messageId/deliveries
+// @covers get /api/v1/messages/:messageId/deliveries/events
+// @covers put /api/v1/domains/:id/destinations
+// ---- end of route coverage ----
 import { randomBytes, randomUUID } from 'node:crypto';
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';

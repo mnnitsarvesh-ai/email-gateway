@@ -11,6 +11,35 @@
  * `QUARANTINE_PERF_ROWS` (default 50 000) sets the size of the seeded organization of the plan
  * check; the 1 000 000-row run is opt-in (`QUARANTINE_PERF_ROWS=1000000`).
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers get /api/v1/quarantine/approvals
+// @covers get /api/v1/quarantine/approvals/:approvalId
+// @covers get /api/v1/quarantine/catalog
+// @covers get /api/v1/quarantine/downloads/:token
+// @covers get /api/v1/quarantine/entries
+// @covers get /api/v1/quarantine/entries/:entryId
+// @covers get /api/v1/quarantine/entries/:entryId/history
+// @covers get /api/v1/quarantine/entries/:entryId/preview
+// @covers get /api/v1/quarantine/me/entries
+// @covers get /api/v1/quarantine/me/entries/:entryId
+// @covers get /api/v1/quarantine/me/preferences
+// @covers get /api/v1/quarantine/releases/:releaseId
+// @covers get /api/v1/quarantine/settings
+// @covers post /api/v1/quarantine/approvals/:approvalId/approve
+// @covers post /api/v1/quarantine/approvals/:approvalId/cancel
+// @covers post /api/v1/quarantine/approvals/:approvalId/deny
+// @covers post /api/v1/quarantine/bulk
+// @covers post /api/v1/quarantine/entries
+// @covers post /api/v1/quarantine/entries/:entryId/delete
+// @covers post /api/v1/quarantine/entries/:entryId/download-grants
+// @covers post /api/v1/quarantine/entries/:entryId/reject
+// @covers post /api/v1/quarantine/entries/:entryId/release
+// @covers post /api/v1/quarantine/entries/:entryId/request-release
+// @covers post /api/v1/quarantine/me/entries/:entryId/release
+// @covers post /api/v1/quarantine/me/entries/:entryId/request-release
+// @covers put /api/v1/quarantine/me/preferences
+// @covers put /api/v1/quarantine/settings
+// ---- end of route coverage ----
 import { randomUUID } from 'node:crypto';
 import { type PrismaReadService } from '@email-gateway/common';
 import { loadQuarantineEntries, PrismaClient } from '@email-gateway/database';

@@ -5,6 +5,11 @@
  * filter, pagination), the tenant-wide list (filters, the 31-day range limit, keyset
  * pagination) and the permission.
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers get /api/v1/deliveries
+// @covers get /api/v1/messages/:messageId/deliveries
+// @covers get /api/v1/messages/:messageId/deliveries/events
+// ---- end of route coverage ----
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createIntegrationApp, type IntegrationApp } from './support/app';
 import {

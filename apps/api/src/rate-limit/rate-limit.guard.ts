@@ -1,17 +1,19 @@
 import {
   type CanActivate,
   type ExecutionContext,
-  HttpException,
   HttpStatus,
   Injectable,
   Logger,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import type { Request, Response } from 'express';
 import type { AuthenticatedRequest } from '../auth-contracts/request';
 import { sha256Hex } from '../crypto/tokens';
+import { ApiConventionMetrics } from '../http/api-metrics';
 import { clientIp } from '../http/client-ip';
+import { CodedHttpException } from '../http/coded-exception';
 import { KeyValueStore } from '../kv/key-value-store';
 import { RATE_LIMIT_KEY, type RateLimitOptions } from './rate-limit.options';
 
@@ -54,7 +56,8 @@ export function rateLimitIdentifier(req: Request, options: RateLimitOptions): st
 
 /**
  * Fixed-window counters in the key-value store (`rl:<bucket>:<identifier>`), applied by
- * `@RateLimit()`. Over the limit: `429` with `Retry-After`. Store unavailable: `503` (fail closed).
+ * `@RateLimit()`. Over the limit: `429 rate_limited` (`scope: route`) with `Retry-After`. Store
+ * unavailable: `503` (fail closed). Applies in addition to the global ApiRateLimitGuard (6.1 D8).
  */
 @Injectable()
 export class RateLimitGuard implements CanActivate {
@@ -63,6 +66,7 @@ export class RateLimitGuard implements CanActivate {
   constructor(
     private readonly reflector: Reflector,
     private readonly kv: KeyValueStore,
+    @Optional() private readonly metrics?: ApiConventionMetrics,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -82,6 +86,7 @@ export class RateLimitGuard implements CanActivate {
       try {
         count = await this.kv.incrWithTtl(key, options.windowSeconds);
       } catch (err) {
+        this.metrics?.rateLimitStoreErrors.inc();
         this.logger.error({ message: 'Rate-limit store unavailable', err, bucket: options.bucket });
         throw new ServiceUnavailableException('Service temporarily unavailable');
       }
@@ -89,7 +94,14 @@ export class RateLimitGuard implements CanActivate {
         const retryAfter = await this.retryAfter(key, options.windowSeconds);
         context.switchToHttp().getResponse<Response>().setHeader('Retry-After', String(retryAfter));
         this.logger.warn({ message: 'Rate limit exceeded', bucket: options.bucket });
-        throw new HttpException('Too many requests', HttpStatus.TOO_MANY_REQUESTS);
+        this.metrics?.rateLimited.inc({ scope: 'route' });
+        // Step 6.1 D8: coded like the global limiter (`scope: route`), same message.
+        throw new CodedHttpException(
+          HttpStatus.TOO_MANY_REQUESTS,
+          'rate_limited',
+          'Too many requests',
+          { scope: 'route' },
+        );
       }
     }
     return true;

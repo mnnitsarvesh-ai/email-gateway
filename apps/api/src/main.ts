@@ -4,7 +4,7 @@ import helmet from 'helmet';
 import { AppModule, SERVICE_NAME } from './app.module';
 import { loadApiConfig } from './config';
 import { configureApiApp } from './http/configure-api-app';
-import { setupOpenApi } from './http/openapi';
+import { setupOpenApiOutsideProduction } from './http/openapi';
 
 const config = loadApiConfig();
 
@@ -20,6 +20,7 @@ void bootstrapService({
     configureApiApp(app, config);
     app.use(helmet());
     app.enableCors({ origin: config.CORS_ORIGINS, credentials: true });
-    if (config.NODE_ENV !== 'production') setupOpenApi(app);
+    // Step 6.1 D13: /docs and /docs-json are never served in production.
+    setupOpenApiOutsideProduction(app, config);
   },
 });

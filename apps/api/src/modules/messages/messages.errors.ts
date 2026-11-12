@@ -79,3 +79,9 @@ export const noReleasableRecipients = (snapshot: ConflictSnapshot): CodedHttpExc
     'The message has no pending or quarantined recipient to release',
     current(snapshot),
   );
+
+/** Step 6.1: a `domainId` filter of another organization or an unknown id (D4). */
+export const DOMAIN_NOT_FOUND = 'domain_not_found';
+
+export const domainNotFound = (): CodedHttpException =>
+  new CodedHttpException(HttpStatus.NOT_FOUND, DOMAIN_NOT_FOUND, 'Domain not found');

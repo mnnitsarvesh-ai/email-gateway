@@ -75,6 +75,34 @@ spec:
                 name: QUARANTINE_DOWNLOAD_TOKEN_KEY_FILE,
                 value: /var/run/secrets/quarantine-download/key,
               }
+            # REST API conventions (step 6.1 §3.7, ADR-0050..0053): global limiter (per principal,
+            # per tenant clamped, sensitive/expensive classes; Redis, fail closed), Idempotency-Key
+            # reservations, v1 list bounds, reports and the manual suppression cap.
+            - { name: API_CURSOR_TTL_SECONDS, value: '86400' }
+            - { name: API_RATE_PRINCIPAL_PER_MINUTE, value: '600' }
+            - { name: API_RATE_TENANT_DEFAULT_PER_MINUTE, value: '300' }
+            - { name: API_RATE_TENANT_MIN_PER_MINUTE, value: '10' }
+            - { name: API_RATE_TENANT_MAX_PER_MINUTE, value: '10000' }
+            - { name: API_RATE_SENSITIVE_PER_MINUTE, value: '30' }
+            - { name: API_RATE_EXPENSIVE_PER_MINUTE, value: '20' }
+            - { name: API_RATE_LIMIT_CACHE_SECONDS, value: '60' }
+            - { name: API_IDEMPOTENCY_LEGACY_MODE, value: enforce }
+            - { name: API_IDEMPOTENCY_PENDING_TTL_SECONDS, value: '300' }
+            - { name: API_LIST_SCAN_BUDGET_ROWS, value: '5000' }
+            - { name: API_MESSAGES_MAX_RANGE_DAYS, value: '31' }
+            - { name: API_AUDIT_MAX_RANGE_DAYS, value: '90' }
+            - { name: REPORTS_MAX_RANGE_DAYS, value: '31' }
+            - { name: REPORTS_CACHE_TTL_SECONDS, value: '60' }
+            - { name: REPORTS_QUERY_TIMEOUT_MS, value: '10000' }
+            - { name: RECIPIENT_SUPPRESSIONS_MAX_MANUAL, value: '100000' }
+            # HMAC key of the signed v1 list cursors (step 6.1 D3; 64 hex characters): the api is
+            # its only holder; its own Secret, mounted here only. The previous key (rotation,
+            # verification only) is optional; see docs/runbooks/api-rate-limits-and-reports.md.
+            - { name: API_CURSOR_KEY_FILE, value: /var/run/secrets/api-cursor/key }
+            - name: API_CURSOR_KEY_PREVIOUS
+              valueFrom:
+                secretKeyRef:
+                  { name: email-gateway-api-cursor-key, key: previous-key, optional: true }
             - { name: REDIS_URL_FILE, value: /var/run/secrets/gateway/redis-url }
             # Authentication (steps 1.2/1.3) and the transactional-email relay password.
             - { name: AUTH_JWT_SECRET_FILE, value: /var/run/secrets/gateway/auth-jwt-secret }
@@ -103,6 +131,7 @@ spec:
                 mountPath: /var/run/secrets/quarantine-download,
                 readOnly: true,
               }
+            - { name: api-cursor-key, mountPath: /var/run/secrets/api-cursor, readOnly: true }
             - { name: tmp, mountPath: /tmp }
           readinessProbe:
             httpGet: { path: /health/ready, port: http }
@@ -134,6 +163,10 @@ spec:
           secret:
             secretName: email-gateway-quarantine-download-key
             items: [{ key: key, path: key }]
+        - name: api-cursor-key
+          secret:
+            secretName: email-gateway-api-cursor-key
+            items: [{ key: key, path: key }]
         - name: tmp
           emptyDir: {}
 ---
@@ -151,6 +184,39 @@ spec:
   selector: { app.kubernetes.io/name: api }
   ports:
     - { name: http, port: 80, targetPort: http }
+---
+# Public/internal boundary (step 6.1 D13, ADR-0053): api.<domain> routes ONLY the Prefix /api/v1/
+# to the api. The same port also serves /health/live, /health/ready (kubelet probes) and /metrics
+# (Prometheus, in-cluster): they are never routed here, nor /docs (never served in production).
+# nginx matches on the normalized URI, so /api/v1/../metrics does not reach the api as /metrics.
+# TLS is terminated at the ingress controller (certificate per environment, e.g. cert-manager).
+# Rate limiting is per principal and per tenant in the api (Redis); no per-IP ingress limit, since
+# many API clients share NAT addresses. Request bodies are small JSON (the api's parser refuses
+# larger ones with 413); proxy timeouts cover the longest synchronous transaction budget
+# (QUARANTINE_TX_TIMEOUT_MS, 120 s) and the quarantine download stream.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api
+  labels: { app.kubernetes.io/name: api }
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: 'true'
+    nginx.ingress.kubernetes.io/proxy-body-size: 1m
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: '5'
+    nginx.ingress.kubernetes.io/proxy-send-timeout: '60'
+    nginx.ingress.kubernetes.io/proxy-read-timeout: '130'
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [api.replace-per-environment.invalid]
+      secretName: api-tls
+  rules:
+    - host: api.replace-per-environment.invalid
+      http:
+        paths:
+          - path: /api/v1/
+            pathType: Prefix
+            backend: { service: { name: api, port: { name: http } } }
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler

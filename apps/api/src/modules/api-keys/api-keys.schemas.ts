@@ -5,9 +5,9 @@ import { PageQuerySchema } from '../../http/pagination';
 
 export const ApiKeyIdParamSchema = z.uuid();
 
-export const ApiKeyListQuerySchema = PageQuerySchema;
+export const ApiKeyListQuerySchema = PageQuerySchema.strict();
 
-export const CreateApiKeyRequestSchema = z.object({
+export const CreateApiKeyRequestSchema = z.strictObject({
   name: z.string().trim().min(1).max(255),
   scopes: z
     .array(z.string().min(1).max(100))

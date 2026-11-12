@@ -5,6 +5,26 @@
  * limit overrides, usage counters, and the deletion workflow (four-eyes, legal hold, archives,
  * cancellation). Every mutation is checked for its audit row.
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers delete /api/v1/organizations/:id/features/:featureKey
+// @covers delete /api/v1/organizations/:id/limits/:limitKey
+// @covers get /api/v1/organizations
+// @covers get /api/v1/organizations/:id
+// @covers get /api/v1/organizations/:id/deletion
+// @covers get /api/v1/organizations/:id/features
+// @covers get /api/v1/organizations/:id/limits
+// @covers get /api/v1/organizations/:id/settings
+// @covers get /api/v1/organizations/:id/usage
+// @covers patch /api/v1/organizations/:id/status
+// @covers post /api/v1/organizations
+// @covers post /api/v1/organizations/:id/deletion
+// @covers post /api/v1/organizations/:id/deletion/cancel
+// @covers post /api/v1/organizations/:id/deletion/confirm
+// @covers put /api/v1/organizations/:id
+// @covers put /api/v1/organizations/:id/features/:featureKey
+// @covers put /api/v1/organizations/:id/limits/:limitKey
+// @covers put /api/v1/organizations/:id/settings
+// ---- end of route coverage ----
 import { randomBytes, randomInt } from 'node:crypto';
 import { LIMIT_KEYS, PLANS } from '@email-gateway/database';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -20,6 +40,7 @@ import {
 import {
   apiKeyHeader,
   bearer,
+  idem,
   login,
   loginWithMfa,
   type TokenResponseBody,
@@ -382,11 +403,13 @@ describe('status', () => {
 
     await ctx.http
       .patch(orgPath(org, '/status'))
+      .set(idem())
       .set(asA())
       .send({ status: 'suspended' })
       .expect(400);
     const suspended = await ctx.http
       .patch(orgPath(org, '/status'))
+      .set(idem())
       .set(asA())
       .send({ status: 'suspended', reason: 'Unpaid invoices' })
       .expect(200);
@@ -411,19 +434,26 @@ describe('status', () => {
     }).expect(401);
     await ctx.http
       .patch(orgPath(org, '/status'))
+      .set(idem())
       .set(asA())
       .send({ status: 'suspended', reason: 'Again' })
       .expect(409);
 
-    await ctx.http.patch(orgPath(org, '/status')).set(asA()).send({ status: 'active' }).expect(200);
+    await ctx.http
+      .patch(orgPath(org, '/status'))
+      .set(idem())
+      .set(asA())
+      .send({ status: 'active' })
+      .expect(200);
     await ctx.http.get(orgPath(org)).set(apiKeyHeader(key)).expect(200);
     const again = await memberLogin(member);
     await ctx.http.get(orgPath(org)).set(bearer(again.accessToken)).expect(200);
 
     const audit = await auditRows('organization.status_changed', org.publicId);
     expect(audit.map((r) => r.metadata)).toEqual([
-      { from: 'active', to: 'suspended', reason: 'Unpaid invoices' },
-      { from: 'suspended', to: 'active', reason: null },
+      // Step 6.1 D11: every row carries the X-Request-Id of its request.
+      { from: 'active', to: 'suspended', reason: 'Unpaid invoices', requestId: expect.any(String) },
+      { from: 'suspended', to: 'active', reason: null, requestId: expect.any(String) },
     ]);
   });
 
@@ -431,6 +461,7 @@ describe('status', () => {
     const platform = await fx.platformOrg();
     const res = await ctx.http
       .patch(orgPath(platform, '/status'))
+      .set(idem())
       .set(asA())
       .send({ status: 'suspended', reason: 'Should not work' })
       .expect(409);
@@ -470,6 +501,7 @@ describe('settings', () => {
     expect(audit).toHaveLength(1);
     expect(audit[0]!.metadata).toEqual({
       changedFields: ['timezone', 'digestSchedule', 'notificationEmail', 'preferences'],
+      requestId: expect.any(String),
     });
     expect(JSON.stringify(audit[0]!.metadata)).not.toContain('soc@example.test');
 
@@ -525,7 +557,11 @@ describe('settings', () => {
     const res = await ctx.http.get(orgPath(org)).set(bearer(accessToken)).expect(403);
     expect(res.body.message).toBe('MFA enrollment required');
     const audit = await auditRows('organization.settings_updated', org.publicId);
-    expect(audit.at(-1)?.metadata).toEqual({ changedFields: ['mfaRequired'], mfaRequired: true });
+    expect(audit.at(-1)?.metadata).toEqual({
+      changedFields: ['mfaRequired'],
+      mfaRequired: true,
+      requestId: expect.any(String),
+    });
   });
 
   it('keeps MFA mandatory for the platform organization', async () => {
@@ -735,6 +771,7 @@ describe('deletion workflow', () => {
     const key = await createApiKey(org, ['organization:read']);
     await ctx.http
       .patch(orgPath(org, '/status'))
+      .set(idem())
       .set(asA())
       .send({ status: 'suspended', reason: 'Offboarding' })
       .expect(200);
@@ -762,11 +799,13 @@ describe('deletion workflow', () => {
 
     await ctx.http
       .post(orgPath(org, '/deletion'))
+      .set(idem())
       .set(asA())
       .send({ reason, confirmSlug: 'not-the-slug' })
       .expect(400);
     const requested = await ctx.http
       .post(orgPath(org, '/deletion'))
+      .set(idem())
       .set(asA())
       .send({ reason, confirmSlug: org.slug })
       .expect(200);
@@ -780,16 +819,23 @@ describe('deletion workflow', () => {
     });
     // Frozen while pending.
     await ctx.http.put(orgPath(org)).set(asA()).send({ name: 'Nope' }).expect(409);
-    await ctx.http.patch(orgPath(org, '/status')).set(asA()).send({ status: 'active' }).expect(409);
+    await ctx.http
+      .patch(orgPath(org, '/status'))
+      .set(idem())
+      .set(asA())
+      .send({ status: 'active' })
+      .expect(409);
 
     // Four eyes: the requester cannot confirm.
     await ctx.http
       .post(orgPath(org, '/deletion/confirm'))
+      .set(idem())
       .set(asA())
       .send({ confirmSlug: org.slug })
       .expect(403);
     const confirmed = await ctx.http
       .post(orgPath(org, '/deletion/confirm'))
+      .set(idem())
       .set(asB())
       .send({ confirmSlug: org.slug })
       .expect(200);
@@ -873,12 +919,14 @@ describe('deletion workflow', () => {
     const { org } = await suspendedOrg();
     await ctx.http
       .post(orgPath(org, '/deletion'))
+      .set(idem())
       .set(asA())
       .send({ reason, confirmSlug: org.slug })
       .expect(200);
     const before = Date.now();
     const confirmed = await ctx.http
       .post(orgPath(org, '/deletion/confirm'))
+      .set(idem())
       .set(asB())
       .send({ confirmSlug: org.slug })
       .expect(200);
@@ -903,6 +951,7 @@ describe('deletion workflow', () => {
     const active = await fx.createOrganization();
     await ctx.http
       .post(orgPath(active, '/deletion'))
+      .set(idem())
       .set(asA())
       .send({ reason, confirmSlug: active.slug })
       .expect(409);
@@ -918,6 +967,7 @@ describe('deletion workflow', () => {
     });
     const blocked = await ctx.http
       .post(orgPath(org, '/deletion'))
+      .set(idem())
       .set(asA())
       .send({ reason, confirmSlug: org.slug })
       .expect(409);
@@ -930,6 +980,7 @@ describe('deletion workflow', () => {
     });
     await ctx.http
       .post(orgPath(org, '/deletion'))
+      .set(idem())
       .set(asA())
       .send({ reason, confirmSlug: org.slug })
       .expect(200);
@@ -939,6 +990,7 @@ describe('deletion workflow', () => {
     });
     const confirmBlocked = await ctx.http
       .post(orgPath(org, '/deletion/confirm'))
+      .set(idem())
       .set(asB())
       .send({ confirmSlug: org.slug })
       .expect(409);
@@ -949,6 +1001,7 @@ describe('deletion workflow', () => {
     const { org } = await suspendedOrg();
     await ctx.http
       .post(orgPath(org, '/deletion'))
+      .set(idem())
       .set(asA())
       .send({ reason, confirmSlug: org.slug })
       .expect(200);
@@ -959,6 +1012,7 @@ describe('deletion workflow', () => {
     });
     const res = await ctx.http
       .post(orgPath(org, '/deletion/confirm'))
+      .set(idem())
       .set(asB())
       .send({ confirmSlug: org.slug })
       .expect(409);
@@ -971,6 +1025,7 @@ describe('deletion workflow', () => {
       .expect(200);
     await ctx.http
       .post(orgPath(org, '/deletion'))
+      .set(idem())
       .set(asA())
       .send({ reason, confirmSlug: org.slug })
       .expect(200);
@@ -980,6 +1035,7 @@ describe('deletion workflow', () => {
     const platform = await fx.platformOrg();
     await ctx.http
       .post(orgPath(platform, '/deletion'))
+      .set(idem())
       .set(asA())
       .send({ reason, confirmSlug: platform.slug })
       .expect(409);

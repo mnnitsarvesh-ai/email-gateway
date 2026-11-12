@@ -5,9 +5,10 @@
  * added by later modules are covered automatically.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
-import { type INestApplication, RequestMethod, VERSION_NEUTRAL } from '@nestjs/common';
-import { METHOD_METADATA, PATH_METADATA, VERSION_METADATA } from '@nestjs/common/constants';
-import { DiscoveryModule, DiscoveryService, MetadataScanner, Reflector } from '@nestjs/core';
+import type { INestApplication } from '@nestjs/common';
+import { ROUTE_ARGS_METADATA } from '@nestjs/common/constants';
+import { RouteParamtypes } from '@nestjs/common/enums/route-paramtypes.enum';
+import { DiscoveryModule, DiscoveryService } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
 import {
   configureHttpApp,
@@ -19,21 +20,18 @@ import {
 import { createLogger } from '@email-gateway/logger';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { z } from 'zod';
 import { AppModule } from '../src/app.module';
-import {
-  AUTHZ_KEY,
-  IS_PUBLIC_KEY,
-  REQUIRE_MFA_KEY,
-  USER_ONLY_KEY,
-} from '../src/auth-contracts/decorators';
 import { loadApiConfig } from '../src/config';
-import { RATE_LIMIT_KEY, type RateLimitOptions } from '../src/rate-limit/rate-limit.options';
-import { QUARANTINE_RATE_LIMIT_KEY } from '../src/modules/quarantine/quarantine-rate-limit';
 import { EmailSender } from '../src/email/email-sender';
-import { API_GLOBAL_PREFIX, configureApiApp } from '../src/http/configure-api-app';
+import { configureApiApp } from '../src/http/configure-api-app';
 import { KeyValueStore } from '../src/kv/key-value-store';
+import { BulkBodySchema } from '../src/modules/quarantine/dto/quarantine.schemas';
+import { isStrictRequestSchema } from '../src/validation/strict-schema';
+import { ZodValidationPipe } from '../src/validation/zod-validation.pipe';
 import { InMemoryKeyValueStore } from './support/in-memory-key-value-store';
 import { RecordingEmailSender } from './support/recording-email-sender';
+import { type DiscoveredRoute, discoverRoutes, expressRoutes } from './support/route-discovery';
 import { TEST_DOMAIN_ENV } from './support/test-env';
 
 const config = loadApiConfig({
@@ -51,97 +49,168 @@ const config = loadApiConfig({
   AUTH_BACKGROUND_JOBS_ENABLED: 'false',
 });
 
-/** Probes and the Prometheus scrape stay outside the `/api` prefix (configureApiApp). */
-const PREFIX_EXCLUDED = new Set(['health/live', 'health/ready', 'metrics']);
-const DEFAULT_VERSION = '1';
+/** Step 6.1 §3.5: the legacy sensitive mutations and their operation names. */
+const LEGACY_SENSITIVE: Record<string, string> = {
+  'post /api/v1/domains/:id/dkim/rotate': 'domain.dkim_rotate',
+  'patch /api/v1/organizations/:id/status': 'organization.status_change',
+  'post /api/v1/organizations/:id/deletion': 'organization.deletion_request',
+  'post /api/v1/organizations/:id/deletion/confirm': 'organization.deletion_confirm',
+  'post /api/v1/users/invitations': 'user.invite',
+  'post /api/v1/users/:id/invitation': 'user.invitation_resend',
+  'post /api/v1/users/:id/mfa/reset': 'user.mfa_reset',
+  'post /api/v1/policies/:policyId/versions/:versionNo/publish': 'policy.version_publish',
+  'post /api/v1/policies/:policyId/versions/:versionNo/activate': 'policy.version_activate',
+  'post /api/v1/risk-scoring/profile/versions/:versionId/publish': 'risk_profile.publish',
+  'post /api/v1/risk-scoring/profile/versions/:versionId/activate': 'risk_profile.activate',
+  'post /api/v1/risk-scoring/profile/reset': 'risk_profile.reset',
+  'delete /api/v1/bec/history': 'bec.history_purge',
+  'delete /api/v1/dlp/evidence': 'dlp.evidence_purge_all',
+  'delete /api/v1/messages/:messageId/scans/:scanId/dlp-evidence': 'dlp.evidence_purge',
+  'put /api/v1/dlp/compliance/aadhaar': 'dlp.aadhaar_enable',
+  'delete /api/v1/dlp/compliance/aadhaar': 'dlp.aadhaar_disable',
+  'post /api/v1/platform/dead-letters/replay': 'platform.dead_letter_replay',
+  'post /api/v1/platform/attachment-rescans': 'platform.attachment_rescan',
+  'post /api/v1/platform/organizations/:organizationId/messages/:messageId/scan-training':
+    'platform.scan_training',
+  'post /api/v1/platform/threat-hashes': 'platform.threat_hash_add',
+  'post /api/v1/platform/threat-indicators': 'platform.threat_indicator_add',
+};
 
-interface DiscoveredRoute {
-  method: string;
-  path: string;
-  name: string;
-  isPublic: boolean;
-  hasRequirement: boolean;
-  requirement: unknown;
-  requireMfa: boolean;
-  userOnly: boolean;
-  rateLimits: RateLimitOptions[];
-  /** Config-driven quarantine rate limit kind (step 5.3), if any. */
-  quarantineRate: string | null;
-}
+/** Step 6.1 §3.5: keyed by IdempotencyService (transactional) since step 5.3. */
+const KEYED_QUARANTINE = [
+  'post /api/v1/quarantine/bulk',
+  'post /api/v1/quarantine/entries',
+  'post /api/v1/quarantine/entries/:entryId/release',
+  'post /api/v1/quarantine/entries/:entryId/request-release',
+  'post /api/v1/quarantine/entries/:entryId/reject',
+  'post /api/v1/quarantine/entries/:entryId/delete',
+  'post /api/v1/quarantine/approvals/:approvalId/approve',
+  'post /api/v1/quarantine/approvals/:approvalId/deny',
+  'post /api/v1/quarantine/approvals/:approvalId/cancel',
+  'post /api/v1/quarantine/me/entries/:entryId/release',
+  'post /api/v1/quarantine/me/entries/:entryId/request-release',
+];
 
-const asArray = (value: unknown): string[] =>
-  Array.isArray(value) ? (value as string[]) : [typeof value === 'string' ? value : ''];
-const join = (...parts: string[]) =>
-  `/${parts
-    .flatMap((p) => p.split('/'))
-    .filter(Boolean)
-    .join('/')}`;
+/** Step 6.1 D9: secret-bearing responses (never stored under an Idempotency-Key). */
+const SECRET_BEARING = [
+  'post /api/v1/api-keys',
+  'post /api/v1/smtp-connectors',
+  'post /api/v1/smtp-connectors/:id/rotate-secret',
+  'post /api/v1/platform/overrides',
+  'post /api/v1/auth/mfa/totp/setup',
+  'post /api/v1/auth/mfa/recovery-codes',
+];
 
-function discoverRoutes(app: INestApplication): DiscoveredRoute[] {
-  const discovery = app.get(DiscoveryService);
-  const scanner = app.get(MetadataScanner);
-  const reflector = app.get(Reflector);
-  const routes: DiscoveredRoute[] = [];
-  for (const wrapper of discovery.getControllers()) {
-    const controller = wrapper.metatype as (new (...args: never[]) => object) | null;
-    if (!controller || !wrapper.instance) continue;
-    const prototype = Object.getPrototypeOf(wrapper.instance) as Record<string, unknown>;
-    for (const name of scanner.getAllMethodNames(prototype)) {
-      const handler = prototype[name] as (...args: unknown[]) => unknown;
-      const methodPath = Reflect.getMetadata(PATH_METADATA, handler) as unknown;
-      if (methodPath === undefined) continue;
-      const verb = RequestMethod[Reflect.getMetadata(METHOD_METADATA, handler) as number];
-      const version =
-        (Reflect.getMetadata(VERSION_METADATA, handler) as string | symbol | undefined) ??
-        (Reflect.getMetadata(VERSION_METADATA, controller) as string | symbol | undefined) ??
-        DEFAULT_VERSION;
-      for (const base of asArray(Reflect.getMetadata(PATH_METADATA, controller))) {
-        for (const sub of asArray(methodPath)) {
-          const relative = join(base, sub).slice(1);
-          const prefix = PREFIX_EXCLUDED.has(relative) ? '' : API_GLOBAL_PREFIX;
-          const versionSegment = version === VERSION_NEUTRAL ? '' : `v${String(version)}`;
-          routes.push({
-            method: verb!.toLowerCase(),
-            path: join(prefix, versionSegment, relative),
-            name: `${controller.name}.${name}`,
-            isPublic: !!reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [handler, controller]),
-            hasRequirement:
-              reflector.getAllAndOverride<unknown>(AUTHZ_KEY, [handler, controller]) !== undefined,
-            requirement: reflector.getAllAndOverride<unknown>(AUTHZ_KEY, [handler, controller]),
-            requireMfa: !!reflector.getAllAndOverride<boolean>(REQUIRE_MFA_KEY, [
-              handler,
-              controller,
-            ]),
-            userOnly: !!reflector.getAllAndOverride<boolean>(USER_ONLY_KEY, [handler, controller]),
-            rateLimits: (Reflect.getMetadata(RATE_LIMIT_KEY, handler) as RateLimitOptions[]) ?? [],
-            quarantineRate:
-              (Reflect.getMetadata(QUARANTINE_RATE_LIMIT_KEY, handler) as string | undefined) ??
-              null,
-          });
-        }
-      }
-    }
+/** Step 6.1 §3.5: the legacy routes of the expensive class (reports etc. are WP3's). */
+const EXPENSIVE_LEGACY = [
+  'post /api/v1/policies/test',
+  'post /api/v1/messages/:messageId/scans/:scanId/policy/dry-run',
+  'post /api/v1/messages/:messageId/scans/:scanId/risk/dry-run',
+];
+
+/** Step 6.1 D3: the pre-6.1 cursor lists (unsigned v0 cursors, unchanged). */
+const V0_LISTS = [
+  'get /api/v1/users',
+  'get /api/v1/api-keys',
+  'get /api/v1/audit/login-events',
+  'get /api/v1/organizations',
+  'get /api/v1/domains',
+  'get /api/v1/domains/:id/recipients',
+  'get /api/v1/smtp-connectors',
+  'get /api/v1/deliveries',
+  'get /api/v1/messages/:messageId/deliveries/events',
+  'get /api/v1/platform/threat-hashes',
+  'get /api/v1/platform/threat-indicators',
+  'get /api/v1/platform/attachment-rescans',
+  'get /api/v1/bec/executives',
+  'get /api/v1/bec/vendors',
+  'get /api/v1/bec/trusted-senders',
+  'get /api/v1/bec/feedback',
+  'get /api/v1/bec/suppressions',
+  'get /api/v1/dlp/policies',
+  'get /api/v1/dlp/exceptions',
+  'get /api/v1/dlp/patterns',
+  'get /api/v1/dlp/dictionaries',
+  'get /api/v1/dlp/incidents',
+  'get /api/v1/risk-scoring/profile/versions',
+  'get /api/v1/policies',
+  'get /api/v1/policies/:policyId/versions',
+  'get /api/v1/policies/executions',
+  'get /api/v1/departments',
+  'get /api/v1/departments/:departmentId/members',
+  'get /api/v1/quarantine/entries',
+  'get /api/v1/quarantine/me/entries',
+  'get /api/v1/quarantine/approvals',
+];
+
+/** Controllers of the pre-6.1 modules converged by WP4 (the messages module is WP2's). */
+const LEGACY_CONTROLLERS = new Set([
+  'AuthController',
+  'MfaController',
+  'SessionsController',
+  'PlatformOverrideController',
+  'MetaController',
+  'UsersController',
+  'PermissionsController',
+  'RolesController',
+  'ApiKeysController',
+  'LoginEventsController',
+  'OrganizationsController',
+  'OrganizationConfigurationController',
+  'OrganizationDeletionController',
+  'DomainsController',
+  'DomainDnsController',
+  'DomainRecipientsController',
+  'SmtpConnectorsController',
+  'DestinationProvidersController',
+  'DomainDestinationsController',
+  'DeliveriesController',
+  'DeadLettersController',
+  'ScanSettingsController',
+  'ScanTrainingController',
+  'ThreatHashesController',
+  'ThreatIndicatorsController',
+  'AttachmentRescansController',
+  'BecExecutivesController',
+  'BecVendorsController',
+  'BecTrustedSendersController',
+  'BecFeedbackController',
+  'BecMessageFeedbackController',
+  'DlpPoliciesController',
+  'DlpExceptionsController',
+  'DlpPatternsController',
+  'DlpDictionariesController',
+  'DlpComplianceController',
+  'DlpIncidentsController',
+  'DlpMessageEvidenceController',
+  'DlpEvidenceController',
+  'RiskProfilesController',
+  'RiskDryRunController',
+  'PolicyToolsController',
+  'PolicyManagementController',
+  'PolicySettingsController',
+  'PolicyMessagesController',
+  'DepartmentsController',
+  'QuarantineToolsController',
+  'QuarantineSelfController',
+  'QuarantineApprovalsController',
+  'QuarantineEntriesController',
+]);
+
+const BODY: number = RouteParamtypes.BODY;
+const QUERY: number = RouteParamtypes.QUERY;
+
+type RouteArg = { pipes?: unknown[] };
+const routeArgs = (controller: object): Record<string, Record<string, RouteArg>> => {
+  const out: Record<string, Record<string, RouteArg>> = {};
+  const prototype = (controller as { prototype: object }).prototype;
+  for (const name of Object.getOwnPropertyNames(prototype)) {
+    const args = Reflect.getMetadata(ROUTE_ARGS_METADATA, controller, name) as
+      Record<string, RouteArg> | undefined;
+    if (args) out[name] = args;
   }
-  return routes;
-}
-
-/**
- * Controller routes registered on the Express router. Middleware applied with `forRoutes()` (the
- * correlation-id middleware) is mounted for every HTTP verb; such catch-all layers are not
- * controller routes and are skipped.
- */
-function expressRoutes(app: INestApplication): string[] {
-  const instance = app.getHttpAdapter().getInstance() as {
-    router: { stack: Array<{ route?: { path: string; methods: Record<string, boolean> } }> };
-  };
-  return instance.router.stack.flatMap((layer) => {
-    const route = layer.route;
-    if (!route) return [];
-    const methods = Object.keys(route.methods).filter((m) => m !== '_all');
-    if (route.methods._all || methods.length > 5) return [];
-    return methods.map((m) => `${m} ${route.path}`);
-  });
-}
+  return out;
+};
 
 describe('route security (e2e, dependencies stubbed)', () => {
   let app: INestApplication;
@@ -579,6 +648,104 @@ describe('route security (e2e, dependencies stubbed)', () => {
       routes.find((r) => `${r.method} ${r.path}` === 'post /api/v1/messages/:messageId/release')
         ?.requirement,
     ).toEqual({ mode: 'all', permissions: ['quarantine:release'] });
+  });
+
+  it('every §3.5 legacy sensitive mutation is @Idempotent (legacy) in the sensitive class (step 6.1 D9, D10)', () => {
+    for (const [key, operation] of Object.entries(LEGACY_SENSITIVE)) {
+      const route = routes.find((r) => `${r.method} ${r.path}` === key);
+      expect(route, key).toBeDefined();
+      expect(route?.idempotency, key).toEqual({ operation, legacy: true });
+      expect(route?.rateClass, key).toBe('sensitive');
+      expect(route?.returnsSecret, key).toBe(false);
+    }
+    // Operation names are unique (one key space per organization, bound to the operation).
+    expect(new Set(Object.values(LEGACY_SENSITIVE)).size).toBe(22);
+  });
+
+  it('the already-keyed quarantine mutations are in the sensitive class, transactional (step 6.1 §3.5)', () => {
+    for (const key of KEYED_QUARANTINE) {
+      const route = routes.find((r) => `${r.method} ${r.path}` === key);
+      expect(route?.rateClass, key).toBe('sensitive');
+      // Their IdempotencyService transaction stays; no reservation interceptor on top.
+      expect(route?.idempotency, key).toBeNull();
+    }
+    expect(KEYED_QUARANTINE).toHaveLength(11);
+  });
+
+  it('the secret-bearing routes are @ReturnsSecret, sensitive and never idempotency-stored (D9)', () => {
+    for (const key of SECRET_BEARING) {
+      const route = routes.find((r) => `${r.method} ${r.path}` === key);
+      expect(route?.returnsSecret, key).toBe(true);
+      expect(route?.idempotency, key).toBeNull();
+      expect(route?.rateClass, key).toBe('sensitive');
+    }
+    expect(
+      routes
+        .filter((r) => r.returnsSecret)
+        .map((r) => `${r.method} ${r.path}`)
+        .sort(),
+    ).toEqual([...SECRET_BEARING].sort());
+    expect(routes.filter((r) => r.returnsSecret && r.idempotency !== null)).toEqual([]);
+  });
+
+  it('the policy test and the two dry-runs are in the expensive class (D8)', () => {
+    for (const key of EXPENSIVE_LEGACY) {
+      const route = routes.find((r) => `${r.method} ${r.path}` === key);
+      expect(route?.rateClass, key).toBe('expensive');
+      expect(route?.idempotency, key).toBeNull();
+    }
+  });
+
+  it('GET /meta is limited per IP (120 per minute, D8)', () => {
+    const meta = routes.find((r) => `${r.method} ${r.path}` === 'get /api/v1/meta');
+    expect(meta?.rateLimits).toEqual([{ bucket: 'meta', limit: 120, windowSeconds: 60, by: 'ip' }]);
+  });
+
+  it('every legacy cursor list declares the v0 encoding (D3)', () => {
+    for (const key of V0_LISTS) {
+      const route = routes.find((r) => `${r.method} ${r.path}` === key);
+      expect(route?.cursor, key).toBe('v0');
+    }
+  });
+
+  it('every body and query schema of the legacy routes is strict at every object node (D1)', () => {
+    const offenders: string[] = [];
+    let checked = 0;
+    for (const wrapper of app.get(DiscoveryService).getControllers()) {
+      const controller = wrapper.metatype as (new (...args: never[]) => object) | null;
+      if (!controller || !wrapper.instance) continue;
+      for (const [name, args] of Object.entries(routeArgs(controller))) {
+        const route = routes.find((r) => r.name === `${controller.name}.${name}`);
+        if (!route || !LEGACY_CONTROLLERS.has(controller.name)) continue;
+        for (const [key, arg] of Object.entries(args)) {
+          const type = Number(key.split(':')[0]);
+          if (type !== BODY && type !== QUERY) continue;
+          const schemas = (arg.pipes ?? []).flatMap((pipe) =>
+            pipe instanceof ZodValidationPipe
+              ? [(pipe as unknown as { schema: z.ZodType }).schema]
+              : [],
+          );
+          // `@Body() body: unknown` is parsed (strictly) in the service: quarantine bulk only.
+          if (
+            schemas.length === 0 &&
+            `${controller.name}.${name}` !== 'QuarantineToolsController.bulk'
+          ) {
+            offenders.push(`${route.method} ${route.path}: no schema`);
+          }
+          for (const schema of schemas) {
+            checked += 1;
+            for (const path of isStrictRequestSchema(schema)) {
+              offenders.push(
+                `${route.method} ${route.path} ${type === BODY ? 'body' : 'query'} ${path}`,
+              );
+            }
+          }
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+    expect(checked).toBeGreaterThan(130);
+    expect(isStrictRequestSchema(BulkBodySchema)).toEqual([]);
   });
 
   it('non-public routes also reject a junk bearer token and a junk API key', async () => {

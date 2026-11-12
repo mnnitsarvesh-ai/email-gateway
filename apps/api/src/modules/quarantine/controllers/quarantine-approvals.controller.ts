@@ -15,6 +15,7 @@ import type { Page, QuarantineApprovalView } from '@email-gateway/quarantine';
 import {
   CurrentPrincipal,
   CurrentScope,
+  CursorList,
   RequireAnyPermission,
   RequireMfa,
   RequirePermissions,
@@ -22,7 +23,6 @@ import {
 } from '../../../auth-contracts/decorators';
 import type { Principal } from '../../../auth-contracts/principal';
 import type { TenantScope } from '../../../auth-contracts/tenant-scope';
-import { ApiIdempotencyKey } from '../../../http/idempotency/idempotency-key';
 import { zodToOpenApi } from '../../../validation/zod-openapi';
 import { ZodValidationPipe } from '../../../validation/zod-validation.pipe';
 import { ApiErrors } from '../../auth/api-docs';
@@ -49,7 +49,8 @@ import {
   ReasonBodySchema,
   type ReasonBody,
 } from '../dto/quarantine.schemas';
-import { Q } from '../quarantine.constants';
+import { Q, QUARANTINE_OPERATIONS } from '../quarantine.constants';
+import { TransactionalIdempotency } from '../../messages/api-docs';
 import { QuarantineApprovalsService } from '../services/quarantine-approvals.service';
 import { QuarantineQueryService } from '../services/quarantine-query.service';
 import { reply } from './quarantine-entries.controller';
@@ -73,6 +74,7 @@ export class QuarantineApprovalsController {
   ) {}
 
   @Get()
+  @CursorList('v0')
   @RequirePermissions(Q.read)
   @ApiOperation({
     summary: 'List approval requests',
@@ -106,6 +108,7 @@ export class QuarantineApprovalsController {
   }
 
   @Post(':approvalId/approve')
+  @TransactionalIdempotency(QUARANTINE_OPERATIONS.approve)
   @RequirePermissions(Q.approve)
   @UserOnly()
   @RequireMfa()
@@ -124,7 +127,6 @@ export class QuarantineApprovalsController {
       'Idempotency-Key header.',
   })
   @ApiApprovalId()
-  @ApiIdempotencyKey()
   @ApiBody({ schema: zodToOpenApi(ReasonBodySchema, { io: 'input' }) })
   @ApiAcceptedResponse({ schema: zodToOpenApi(ApprovalDecisionResponseSchema) })
   @ApiErrors(400, 401, 403, 422)
@@ -152,6 +154,7 @@ export class QuarantineApprovalsController {
   }
 
   @Post(':approvalId/deny')
+  @TransactionalIdempotency(QUARANTINE_OPERATIONS.deny)
   @RequirePermissions(Q.approve)
   @UserOnly()
   @RequireMfa()
@@ -165,7 +168,6 @@ export class QuarantineApprovalsController {
       'Requires the Idempotency-Key header.',
   })
   @ApiApprovalId()
-  @ApiIdempotencyKey()
   @ApiBody({ schema: zodToOpenApi(ReasonBodySchema, { io: 'input' }) })
   @ApiOkResponse({ schema: zodToOpenApi(ApprovalDecisionResponseSchema) })
   @ApiErrors(400, 401, 403, 422)
@@ -189,6 +191,7 @@ export class QuarantineApprovalsController {
   }
 
   @Post(':approvalId/cancel')
+  @TransactionalIdempotency(QUARANTINE_OPERATIONS.cancel)
   @RequireAnyPermission(Q.approve, Q.release, Q.requestRelease, Q.self)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
@@ -199,7 +202,6 @@ export class QuarantineApprovalsController {
       '`quarantine.approval_cancelled`. Requires the Idempotency-Key header.',
   })
   @ApiApprovalId()
-  @ApiIdempotencyKey()
   @ApiBody({ schema: zodToOpenApi(ReasonBodySchema, { io: 'input' }) })
   @ApiOkResponse({ schema: zodToOpenApi(ApprovalDecisionResponseSchema) })
   @ApiErrors(400, 401, 403, 422)

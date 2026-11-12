@@ -17,6 +17,7 @@ import {
   ApiSecurity,
   ApiTags,
 } from '@nestjs/swagger';
+import { LegacyIdempotent } from '../../../legacy-idempotency/legacy-idempotent';
 import {
   CurrentPrincipal,
   CurrentScope,
@@ -130,6 +131,7 @@ export class DomainDnsController {
   }
 
   @Post(':id/dkim/rotate')
+  @LegacyIdempotent({ operation: 'domain.dkim_rotate', legacy: true, publicFields: ['key'] })
   @RequirePermissions(DOMAIN_DKIM_ROTATE)
   @RateLimit({ bucket: 'domains-dkim-rotate', limit: 30, windowSeconds: 60, by: 'principal' })
   @UseInterceptors(RetryAfterInterceptor)

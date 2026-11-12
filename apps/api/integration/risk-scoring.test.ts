@@ -9,6 +9,18 @@
  * organization purge of the three risk tables. Score rows are inserted as the email-worker
  * writes them (the library's `riskResultToRowJson`).
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers delete /api/v1/risk-scoring/profile/versions/:versionId
+// @covers get /api/v1/risk-scoring/profile
+// @covers get /api/v1/risk-scoring/profile/versions
+// @covers get /api/v1/risk-scoring/profile/versions/:versionId
+// @covers post /api/v1/messages/:messageId/scans/:scanId/risk/dry-run
+// @covers post /api/v1/risk-scoring/profile/reset
+// @covers post /api/v1/risk-scoring/profile/versions
+// @covers post /api/v1/risk-scoring/profile/versions/:versionId/activate
+// @covers post /api/v1/risk-scoring/profile/versions/:versionId/publish
+// @covers put /api/v1/risk-scoring/profile/versions/:versionId
+// ---- end of route coverage ----
 import {
   buildScoringInput,
   resolveProfile,
@@ -30,7 +42,7 @@ import {
   type Fixtures,
   type FixtureUser,
 } from './support/fixtures';
-import { bearer, loginWithMfa, uniqueIp } from './support/http';
+import { bearer, idem, loginWithMfa, uniqueIp } from './support/http';
 import {
   deleteLifecycleFixtures,
   insertLifecycleMessage,
@@ -245,11 +257,13 @@ describe('risk scoring profile lifecycle (R10, R15)', () => {
       .expect(200);
     await ctx.http
       .post(`${VERSIONS}/${v1}/publish`)
+      .set(idem())
       .set(headers(analystA))
       .send({ expectedRowVersion: 2 })
       .expect(403);
     const published = await ctx.http
       .post(`${VERSIONS}/${v1}/publish`)
+      .set(idem())
       .set(headers(adminA))
       .send({ expectedRowVersion: 2 })
       .expect(200);
@@ -300,16 +314,19 @@ describe('risk scoring profile lifecycle (R10, R15)', () => {
       .id as string;
     await ctx.http
       .post(`${VERSIONS}/${v2}/activate`)
+      .set(idem())
       .set(headers(adminA))
       .expect(409)
       .expect((res) => expect(res.body.code).toBe('risk_profile_version_not_published'));
     await ctx.http
       .post(`${VERSIONS}/${v2}/publish`)
+      .set(idem())
       .set(headers(adminA))
       .send({ expectedRowVersion: 1 })
       .expect(200);
     const rollback = await ctx.http
       .post(`${VERSIONS}/${v1}/activate`)
+      .set(idem())
       .set(headers(adminA))
       .send({ expectedProfileVersion: 3 })
       .expect(200);
@@ -320,6 +337,7 @@ describe('risk scoring profile lifecycle (R10, R15)', () => {
     });
     const stale = await ctx.http
       .post('/api/v1/risk-scoring/profile/reset')
+      .set(idem())
       .set(headers(adminA))
       .send({ expectedProfileVersion: 1 })
       .expect(409);
@@ -327,6 +345,7 @@ describe('risk scoring profile lifecycle (R10, R15)', () => {
     // Re-activate v1 for the dry-run below after checking reset.
     const reset = await ctx.http
       .post('/api/v1/risk-scoring/profile/reset')
+      .set(idem())
       .set(headers(adminA))
       .expect(200);
     expect(reset.body.active.source).toBe('platform');
@@ -339,7 +358,7 @@ describe('risk scoring profile lifecycle (R10, R15)', () => {
         where: { organizationId: orgA.id, action: 'risk_profile.reset' },
       }),
     ).toBeTruthy();
-    await ctx.http.post(`${VERSIONS}/${v1}/activate`).set(headers(adminA)).expect(200);
+    await ctx.http.post(`${VERSIONS}/${v1}/activate`).set(idem()).set(headers(adminA)).expect(200);
 
     // Replica reads.
     await expect
@@ -361,7 +380,7 @@ describe('risk scoring profile lifecycle (R10, R15)', () => {
     expect(capped.body).toMatchObject({ code: 'risk_profile_limit_reached', limit: 10 });
 
     await ctx.http.get(`${VERSIONS}/${v1}`).set(headers(adminB)).expect(404);
-    await ctx.http.post(`${VERSIONS}/${v1}/activate`).set(headers(adminB)).expect(404);
+    await ctx.http.post(`${VERSIONS}/${v1}/activate`).set(idem()).set(headers(adminB)).expect(404);
     await ctx.http.delete(`${VERSIONS}/${v2}`).set(headers(adminB)).expect(404);
     const b = await ctx.http.post(VERSIONS).set(headers(adminB)).send({}).expect(201);
     expect(b.body.versionNo).toBe(1);
@@ -492,6 +511,7 @@ describe('organization purge (step 5.1 §3)', () => {
       .id as string;
     await ctx.http
       .post(`${VERSIONS}/${v}/publish`)
+      .set(idem())
       .set(headers(adminC))
       .send({ expectedRowVersion: 1 })
       .expect(200);

@@ -462,7 +462,7 @@ const SOURCES: ReadonlySet<string> = new Set(URL_SOURCES);
 const SKIP_REASONS: ReadonlySet<string> = new Set(REWRITE_SKIP_REASONS);
 
 /** URL reason codes of a JSON array (unknown and engine-level codes dropped, unique). */
-function urlCodes(value: unknown, max: number): UrlReasonCode[] {
+export function urlCodes(value: unknown, max: number): UrlReasonCode[] {
   if (!Array.isArray(value)) return [];
   const out = new Set<UrlReasonCode>();
   for (const code of value) {
@@ -498,7 +498,7 @@ function entries<T>(
   return out;
 }
 
-function sourcesOf(value: unknown): UrlScanView['sources'] {
+export function sourcesOf(value: unknown): UrlScanView['sources'] {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return {};
   const out: Record<string, number> = {};
   for (const [key, count] of Object.entries(value as Record<string, unknown>)) {

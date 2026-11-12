@@ -20,6 +20,7 @@ import {
 import {
   CurrentPrincipal,
   CurrentScope,
+  CursorList,
   RequirePermissions,
 } from '../../../auth-contracts/decorators';
 import type { Principal } from '../../../auth-contracts/principal';
@@ -69,6 +70,7 @@ export class BecTrustedSendersController {
   constructor(private readonly trusted: BecTrustedSendersService) {}
 
   @Get()
+  @CursorList('v0')
   @RequirePermissions(BEC_READ)
   @ApiOperation({
     summary: 'List the trusted senders',

@@ -1925,6 +1925,11 @@ model EmailMessage {
   @@id([id, receivedAt])
   @@index([organizationId, receivedAt, id])
   @@index([status, statusChangedAt])
+  /// Step 6.1 D5 plan 2: verdict-filtered message list.
+  @@index([organizationId, finalVerdict, receivedAt, id], map: "email_messages_org_verdict_received_idx")
+  /// Step 6.1 D12: index-only report counts (traffic, directions, and the threats outcomes by
+  /// verdict and action; final_action since migration rest_api_index_coverage).
+  @@index([organizationId, receivedAt, direction, finalVerdict, finalAction], map: "email_messages_org_received_dir_verdict_idx")
   @@map("email_messages")
 }
 
@@ -2021,7 +2026,9 @@ model EmailAttachment {
 
   @@id([id, receivedAt])
   @@unique([messageId, partIndex, receivedAt])
-  @@index([organizationId, sha256])
+  /// Hash lookups and the step 6.1 `GET /attachments?sha256=` keyset (received_at DESC, id DESC
+  /// from the index, no filesort; received_at and id since migration rest_api_index_coverage).
+  @@index([organizationId, sha256, receivedAt, id], map: "email_attachments_organization_id_sha256_idx")
   @@map("email_attachments")
 }
 
@@ -4128,6 +4135,8 @@ model DeliverySuppression {
 
   @@unique([organizationId, address])
   @@index([expiresAt])
+  /// Step 6.1: keyset list newest first per organization.
+  @@index([organizationId, id], map: "delivery_suppressions_organization_id_id_idx")
   @@map("delivery_suppressions")
 }
 
@@ -4679,26 +4688,35 @@ model MessageIdempotency {
 /// request under the same key is refused (422). Owned by the api; purged by db:partitions one day
 /// after expiry. No message content: ids, codes and the response body of the operation only.
 model ApiIdempotencyKey {
-  id             BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
-  organizationId BigInt   @map("organization_id") @db.UnsignedBigInt
+  id             BigInt              @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId BigInt              @map("organization_id") @db.UnsignedBigInt
   /// The client's Idempotency-Key header (1–128 characters); collation utf8mb4_bin (case-sensitive).
-  idempotencyKey String   @map("idempotency_key") @db.VarChar(128)
+  idempotencyKey String              @map("idempotency_key") @db.VarChar(128)
   /// Operation name, e.g. `message.rescan`, `message.release`.
-  operation      String   @db.VarChar(64)
+  operation      String              @db.VarChar(64)
   /// `user:<publicId>` | `api_key:<publicId>`.
-  principal      String   @db.VarChar(80)
+  principal      String              @db.VarChar(80)
   /// Hex SHA-256 of the canonical JSON { operation, resourceId, body }.
-  requestSha256  String   @map("request_sha256") @db.Char(64)
+  requestSha256  String              @map("request_sha256") @db.Char(64)
   /// Public id of the addressed resource.
-  resourceId     String   @map("resource_id") @db.VarChar(64)
-  statusCode     Int      @map("status_code") @db.UnsignedSmallInt
+  resourceId     String              @map("resource_id") @db.VarChar(64)
+  statusCode     Int                 @map("status_code") @db.UnsignedSmallInt
   response       Json
-  createdAt      DateTime @default(now()) @map("created_at") @db.DateTime(3)
-  expiresAt      DateTime @map("expires_at") @db.DateTime(3)
+  /// `completed` (a stored 2xx response) or `pending` (a reservation of the step 6.1 interceptor,
+  /// D9: status_code 0, response JSON null, short expiry).
+  state          ApiIdempotencyState @default(completed)
+  createdAt      DateTime            @default(now()) @map("created_at") @db.DateTime(3)
+  expiresAt      DateTime            @map("expires_at") @db.DateTime(3)
 
   @@unique([organizationId, idempotencyKey])
   @@index([expiresAt])
   @@map("api_idempotency_keys")
+}
+
+/// Reservation state of an `api_idempotency_keys` row (step 6.1 D9).
+enum ApiIdempotencyState {
+  completed
+  pending
 }
 
 /// Where a RabbitMQ consumer left an event it has not handled (step 3.2, review round 1): the

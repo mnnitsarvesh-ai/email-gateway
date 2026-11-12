@@ -14,6 +14,34 @@
  * evidence rows are inserted as the email-worker writes them; evidence objects are sealed with
  * `@email-gateway/dlp` `sealEvidence` and stored in MinIO by the test (no worker involved).
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers delete /api/v1/dlp/compliance/aadhaar
+// @covers delete /api/v1/dlp/evidence
+// @covers delete /api/v1/dlp/exceptions/:id
+// @covers delete /api/v1/dlp/patterns/:id
+// @covers delete /api/v1/dlp/policies/:id
+// @covers delete /api/v1/dlp/policies/:id/rules/:ruleId
+// @covers delete /api/v1/messages/:messageId/scans/:scanId/dlp-evidence
+// @covers get /api/v1/dlp/compliance
+// @covers get /api/v1/dlp/dictionaries
+// @covers get /api/v1/dlp/dictionaries/:id
+// @covers get /api/v1/dlp/exceptions
+// @covers get /api/v1/dlp/incidents
+// @covers get /api/v1/dlp/policies
+// @covers get /api/v1/dlp/policies/:id
+// @covers get /api/v1/messages/:messageId/scans/:scanId/dlp-evidence
+// @covers patch /api/v1/dlp/dictionaries/:id
+// @covers patch /api/v1/dlp/exceptions/:id
+// @covers patch /api/v1/dlp/policies/:id
+// @covers patch /api/v1/dlp/policies/:id/rules/:ruleId
+// @covers post /api/v1/dlp/dictionaries
+// @covers post /api/v1/dlp/exceptions
+// @covers post /api/v1/dlp/patterns
+// @covers post /api/v1/dlp/patterns/test
+// @covers post /api/v1/dlp/policies
+// @covers post /api/v1/dlp/policies/:id/rules
+// @covers put /api/v1/dlp/compliance/aadhaar
+// ---- end of route coverage ----
 import { randomBytes, randomUUID } from 'node:crypto';
 import { sealEvidence } from '@email-gateway/dlp';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -29,7 +57,7 @@ import {
   type Fixtures,
   type FixtureUser,
 } from './support/fixtures';
-import { apiKeyHeader, bearer, loginWithMfa, uniqueIp } from './support/http';
+import { apiKeyHeader, bearer, idem, loginWithMfa, uniqueIp } from './support/http';
 import {
   deleteLifecycleFixtures,
   insertLifecycleMessage,
@@ -814,16 +842,19 @@ describe('Aadhaar compliance (D17)', () => {
     };
     await ctx.http
       .put('/api/v1/dlp/compliance/aadhaar')
+      .set(idem())
       .set(headers(analystA))
       .send(body)
       .expect(403);
     await ctx.http
       .put('/api/v1/dlp/compliance/aadhaar')
+      .set(idem())
       .set(headers(noMfaAdminA))
       .send(body)
       .expect(403);
     const enabled = await ctx.http
       .put('/api/v1/dlp/compliance/aadhaar')
+      .set(idem())
       .set(headers(adminA))
       .send(body)
       .expect(200);
@@ -833,6 +864,7 @@ describe('Aadhaar compliance (D17)', () => {
     });
     const conflict = await ctx.http
       .put('/api/v1/dlp/compliance/aadhaar')
+      .set(idem())
       .set(headers(adminA))
       .send(body)
       .expect(409);
@@ -850,6 +882,7 @@ describe('Aadhaar compliance (D17)', () => {
       .toBe(1);
     const disabled = await ctx.http
       .delete('/api/v1/dlp/compliance/aadhaar?expectedVersion=1')
+      .set(idem())
       .set(headers(adminA))
       .expect(200);
     expect(disabled.body).toMatchObject({
@@ -888,6 +921,8 @@ describe('evidence, incidents and the scans read API (D16, D20, D21)', () => {
       messageId: message.publicId,
       scanId: scanId.toString(),
       matchCount: 1,
+      // Step 6.1 D11: the X-Request-Id of the request.
+      requestId: expect.any(String),
     });
     expect(JSON.stringify(audit?.metadata)).not.toContain('ABCPD1234E');
     expect(ctx.logs.join('\n')).not.toContain('ABCPD1234E');
@@ -909,6 +944,7 @@ describe('evidence, incidents and the scans read API (D16, D20, D21)', () => {
       messageId: broken.publicId,
       scanId: failed.scanId.toString(),
       reason: 'decrypt',
+      requestId: expect.any(String),
     });
 
     // Expired: 410 and nothing fetched or audited.
@@ -922,8 +958,8 @@ describe('evidence, incidents and the scans read API (D16, D20, D21)', () => {
     expect(await auditOf(orgA, 'dlp_evidence.read', old.publicId)).toHaveLength(0);
 
     // Purge one round: crypto-shred, object deleted, 410 afterwards; analysts cannot purge without MFA.
-    await ctx.http.delete(url).set(headers(noMfaAdminA)).expect(403);
-    await ctx.http.delete(url).set(headers(analystA)).expect(204);
+    await ctx.http.delete(url).set(idem()).set(headers(noMfaAdminA)).expect(403);
+    await ctx.http.delete(url).set(idem()).set(headers(analystA)).expect(204);
     const row = await ctx.prisma.dlpEvidence.findFirstOrThrow({
       where: { scanId, receivedAt: message.receivedAt },
     });
@@ -935,7 +971,7 @@ describe('evidence, incidents and the scans read API (D16, D20, D21)', () => {
     );
     expect(await auditOf(orgA, 'dlp_evidence.purged', message.publicId)).toHaveLength(1);
     // Idempotent.
-    await ctx.http.delete(url).set(headers(analystA)).expect(204);
+    await ctx.http.delete(url).set(idem()).set(headers(analystA)).expect(204);
     expect(await auditOf(orgA, 'dlp_evidence.purged', message.publicId)).toHaveLength(1);
   });
 
@@ -1074,8 +1110,12 @@ describe('evidence, incidents and the scans read API (D16, D20, D21)', () => {
     const b = await insertDlpRound(two);
     const kept = await outbound(orgB);
     const c = await insertDlpRound(kept);
-    await ctx.http.delete('/api/v1/dlp/evidence').set(headers(noMfaAdminA)).expect(403);
-    const res = await ctx.http.delete('/api/v1/dlp/evidence').set(headers(adminA)).expect(202);
+    await ctx.http.delete('/api/v1/dlp/evidence').set(idem()).set(headers(noMfaAdminA)).expect(403);
+    const res = await ctx.http
+      .delete('/api/v1/dlp/evidence')
+      .set(idem())
+      .set(headers(adminA))
+      .expect(202);
     expect(res.body.purged).toBeGreaterThanOrEqual(2);
     expect(res.body.objectsPending).toBe(0);
     expect(await objectExists(a.objectKey!)).toBe(false);
@@ -1176,6 +1216,7 @@ describe('organization deletion (D21)', () => {
       .expect(201);
     await ctx.http
       .put('/api/v1/dlp/compliance/aadhaar')
+      .set(idem())
       .set(headers(adminC))
       .send({
         expectedVersion: 0,

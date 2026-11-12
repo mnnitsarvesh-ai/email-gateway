@@ -28,7 +28,7 @@ import {
 } from './support/url-stack';
 import { waitForSinkMessage } from './support/mail-sink';
 import { waitForLifecycle } from './support/lifecycle';
-import { apiSession, type ApiSession } from './support/api-client';
+import { apiSession, type ApiSession, idempotencyKey } from './support/api-client';
 import { organizationRef } from './support/routing';
 import { waitForEvaluation } from './support/policy';
 import {
@@ -113,10 +113,14 @@ beforeAll(async () => {
   });
   expect(draft.status, JSON.stringify(draft.body)).toBe(201);
   const created = draft.body as { id: string; rowVersion: number };
-  const published = await admin.post(`/risk-scoring/profile/versions/${created.id}/publish`, {
-    activate: true,
-    expectedRowVersion: created.rowVersion,
-  });
+  const published = await admin.post(
+    `/risk-scoring/profile/versions/${created.id}/publish`,
+    {
+      activate: true,
+      expectedRowVersion: created.rowVersion,
+    },
+    idempotencyKey(),
+  );
   expect(published.status, JSON.stringify(published.body)).toBe(200);
   tenantVersionId = (
     await fx.prisma.riskScoringProfileVersion.findFirstOrThrow({

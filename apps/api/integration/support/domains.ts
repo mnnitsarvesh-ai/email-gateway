@@ -14,7 +14,7 @@ import type { TestDnsServer } from '../../test/support/dns/test-dns-server';
 import { TEST_DOMAIN_ENV } from '../../test/support/test-env';
 import { createIntegrationApp, type IntegrationApp } from './app';
 import { uniqueSuffix } from './fixtures';
-import { uniqueIp } from './http';
+import { idem, uniqueIp } from './http';
 
 /** Gateway DNS settings of every domain suite (pinned, independent of the local `.env`). */
 export const GATEWAY_MX = [
@@ -236,8 +236,9 @@ export class DomainApi {
     return this.ctx.http.post(this.url(id, '/verify')).set(this.headers).set('X-Forwarded-For', ip);
   }
 
-  rotate(id: string, body?: Record<string, unknown>): Test {
-    const req = this.ctx.http.post(this.url(id, '/dkim/rotate')).set(this.headers);
+  /** `key`: the Idempotency-Key (step 6.1 §3.5; a fresh one by default). */
+  rotate(id: string, body?: Record<string, unknown>, key?: string): Test {
+    const req = this.ctx.http.post(this.url(id, '/dkim/rotate')).set(this.headers).set(idem(key));
     return body === undefined ? req : req.send(body);
   }
 

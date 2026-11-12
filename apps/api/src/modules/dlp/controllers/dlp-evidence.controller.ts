@@ -5,6 +5,7 @@ import {
   ApiOkResponse,
   ApiOperation,
 } from '@nestjs/swagger';
+import { Idempotent } from '../../../http/idempotency/idempotency.interceptor';
 import {
   CurrentPrincipal,
   CurrentScope,
@@ -90,6 +91,7 @@ export class DlpMessageEvidenceController {
   }
 
   @Delete(':messageId/scans/:scanId/dlp-evidence')
+  @Idempotent({ operation: 'dlp.evidence_purge', legacy: true })
   @RequirePermissions(DLP_MANAGE)
   @RequireMfa()
   @HttpCode(HttpStatus.NO_CONTENT)
@@ -126,6 +128,7 @@ export class DlpEvidenceController {
   constructor(private readonly evidence: DlpEvidenceService) {}
 
   @Delete('evidence')
+  @Idempotent({ operation: 'dlp.evidence_purge_all', legacy: true })
   @RequirePermissions(DLP_MANAGE)
   @RequireMfa()
   @HttpCode(HttpStatus.ACCEPTED)

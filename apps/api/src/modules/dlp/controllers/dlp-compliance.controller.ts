@@ -1,5 +1,6 @@
 import { Body, Controller, Delete, Get, Put, Query } from '@nestjs/common';
 import { ApiBody, ApiOkResponse, ApiOperation } from '@nestjs/swagger';
+import { Idempotent } from '../../../http/idempotency/idempotency.interceptor';
 import {
   CurrentScope,
   RequireMfa,
@@ -55,6 +56,7 @@ export class DlpComplianceController {
   }
 
   @Put('aadhaar')
+  @Idempotent({ operation: 'dlp.aadhaar_enable', legacy: true })
   @RequirePermissions(DLP_COMPLIANCE_MANAGE)
   @RequireMfa()
   @UserOnly()
@@ -86,6 +88,7 @@ export class DlpComplianceController {
   }
 
   @Delete('aadhaar')
+  @Idempotent({ operation: 'dlp.aadhaar_disable', legacy: true })
   @RequirePermissions(DLP_COMPLIANCE_MANAGE)
   @RequireMfa()
   @UserOnly()

@@ -25,7 +25,12 @@ import { AppModule } from '../src/app.module';
 import { loadApiConfig } from '../src/config';
 import { EmailSender } from '../src/email/email-sender';
 import { configureApiApp } from '../src/http/configure-api-app';
-import { ACCESS_TOKEN_SCHEME, API_KEY_SCHEME, buildOpenApiDocument } from '../src/http/openapi';
+import {
+  ACCESS_TOKEN_SCHEME,
+  API_KEY_SCHEME,
+  buildOpenApiDocument,
+  OPENAPI_TAGS,
+} from '../src/http/openapi';
 import { KeyValueStore } from '../src/kv/key-value-store';
 import { InMemoryKeyValueStore } from './support/in-memory-key-value-store';
 import { RecordingEmailSender } from './support/recording-email-sender';
@@ -126,10 +131,73 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     await app?.close();
   });
 
-  it('documents business routes under /api/v1 only (plus the unprefixed probes)', () => {
+  it('documents business routes under /api/v1 only (step 6.1 D13: no probes, no metrics)', () => {
     for (const path of Object.keys(doc.paths)) {
-      expect(path.startsWith('/api/v1/') || path.startsWith('/health/'), path).toBe(true);
+      expect(path.startsWith('/api/v1/'), path).toBe(true);
     }
+    for (const internal of ['/health/live', '/health/ready', '/metrics']) {
+      expect(doc.paths[internal], internal).toBeUndefined();
+    }
+  });
+
+  it('defines the shared error schemas and response headers (step 6.1 D14)', () => {
+    expect(Object.keys(doc.components?.schemas ?? {})).toEqual(
+      expect.arrayContaining(['ErrorBody', 'ValidationErrorBody', 'RateLimitedErrorBody']),
+    );
+    expect(Object.keys(doc.components?.headers ?? {}).sort()).toEqual(
+      [
+        'Idempotency-Replayed',
+        'RateLimit-Limit',
+        'RateLimit-Remaining',
+        'RateLimit-Reset',
+        'Retry-After',
+        'X-Correlation-Id',
+        'X-Request-Id',
+      ].sort(),
+    );
+  });
+
+  it('gives every operation the standard error responses and headers (step 6.1 D14)', () => {
+    type Response = { headers?: Record<string, unknown> };
+    type Op = {
+      security?: unknown[];
+      parameters?: Array<{ in: string }>;
+      requestBody?: unknown;
+      responses: Record<string, Response>;
+      'x-eg-idempotency'?: string;
+    };
+    const failures: string[] = [];
+    let count = 0;
+    for (const [path, item] of Object.entries(doc.paths)) {
+      for (const method of METHODS) {
+        const op = (item as Record<string, Op | undefined>)[method];
+        if (!op) continue;
+        count += 1;
+        const key = `${method.toUpperCase()} ${path}`;
+        const secured = (op.security ?? []).length > 0;
+        const expected = ['429', '500', '503'];
+        if ((op.parameters ?? []).length > 0 || op.requestBody) expected.push('400');
+        if (secured) expected.push('401', '403');
+        if (path.includes('{')) expected.push('404');
+        for (const status of expected) {
+          if (!op.responses[status]) failures.push(`${key}: no ${status}`);
+        }
+        for (const [status, response] of Object.entries(op.responses)) {
+          const headers = Object.keys(response.headers ?? {}).map((h) => h.toLowerCase());
+          const want = ['x-request-id', 'x-correlation-id'];
+          if (secured) want.push('ratelimit-limit', 'ratelimit-remaining', 'ratelimit-reset');
+          if (status === '429') want.push('retry-after');
+          if (op['x-eg-idempotency'] && status.startsWith('2')) want.push('idempotency-replayed');
+          for (const header of want) {
+            if (!headers.includes(header)) failures.push(`${key} ${status}: no ${header}`);
+          }
+        }
+      }
+    }
+    expect(failures).toEqual([]);
+    // 231 operations before step 6.1, minus the two probes (D13), plus the 20 new routes of
+    // §3.3 (step 6.1 §1.2): 249, all under /api/v1.
+    expect(count).toBe(249);
   });
 
   it('gives every /api/v1 operation a tag', () => {
@@ -312,8 +380,9 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     }
     const replay = (doc.paths['/api/v1/platform/dead-letters/replay'] as Record<string, unknown>)
       .post as { responses: Record<string, unknown>; description?: string };
+    // Step 6.1 D14 adds the standard 429 and 500 to every operation.
     expect(Object.keys(replay.responses).sort()).toEqual(
-      ['200', '400', '401', '403', '404', '409', '503'].sort(),
+      ['200', '400', '401', '403', '404', '409', '429', '500', '503'].sort(),
     );
     expect(replay.description).toContain('source_queue_not_replayable');
     // The internal Prometheus endpoint is not part of the contract.
@@ -334,9 +403,19 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
       const schemes = op!.security.flatMap((s) => Object.keys(s)).sort();
       expect(schemes, key).toEqual([ACCESS_TOKEN_SCHEME, API_KEY_SCHEME].sort());
     }
+    // Step 6.1 adds the list, the detail and the recipients / attachments / urls sub-resources
+    // (WP2, asserted below in the step 6.1 test); the step 3.3 lifecycle set is unchanged.
+    const STEP_6_1 = new Set([
+      'GET /api/v1/messages',
+      'GET /api/v1/messages/{messageId}',
+      'GET /api/v1/messages/{messageId}/recipients',
+      'GET /api/v1/messages/{messageId}/attachments',
+      'GET /api/v1/messages/{messageId}/urls',
+    ]);
     const messageOps = operations(doc).filter(
       (op) =>
         op.key.includes(' /api/v1/messages') &&
+        !STEP_6_1.has(op.key) &&
         !op.key.includes('/deliveries') &&
         !op.key.endsWith('/scans') &&
         !op.key.endsWith('/bec-feedback') &&
@@ -355,7 +434,7 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     for (const action of ['rescan', 'release']) {
       const op = (doc.paths[`/api/v1/messages/{messageId}/${action}`] as Record<string, Op>).post!;
       expect(Object.keys(op.responses).sort(), action).toEqual(
-        ['202', '400', '401', '403', '404', '409', '422'].sort(),
+        ['202', '400', '401', '403', '404', '409', '422', '429', '500', '503'].sort(),
       );
       expect(op.parameters?.find((p) => p.name === 'Idempotency-Key')).toMatchObject({
         in: 'header',
@@ -411,11 +490,13 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     type Op = { responses: Record<string, unknown>; description?: string };
     const op = (path: string, method: string) => (doc.paths[path] as Record<string, Op>)[method]!;
     const scans = op('/api/v1/messages/{messageId}/scans', 'get');
-    expect(Object.keys(scans.responses).sort()).toEqual(['200', '400', '401', '403', '404']);
+    expect(Object.keys(scans.responses).sort()).toEqual(
+      ['200', '400', '401', '403', '404', '429', '500', '503'].sort(),
+    );
     expect(JSON.stringify(scans.responses)).toContain('message_not_found');
     const put = op('/api/v1/scan-settings/{engine}', 'put');
     expect(Object.keys(put.responses).sort()).toEqual(
-      ['200', '400', '401', '403', '404', '409', '422'].sort(),
+      ['200', '400', '401', '403', '404', '409', '422', '429', '500', '503'].sort(),
     );
     for (const code of ['scan_engine_not_found', 'version_conflict', 'scan_settings_invalid']) {
       expect(JSON.stringify(put.responses)).toContain(code);
@@ -426,7 +507,7 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
       'post',
     );
     expect(Object.keys(train.responses).sort()).toEqual(
-      ['200', '400', '401', '403', '404', '409', '422', '429', '503'].sort(),
+      ['200', '400', '401', '403', '404', '409', '422', '429', '500', '503'].sort(),
     );
     for (const code of ['content_unavailable', 'rspamd_unavailable', 'organization_not_found']) {
       expect(JSON.stringify(train.responses)).toContain(code);
@@ -715,6 +796,84 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     expect(path('/entries')).toContain('quarantine_cursor_invalid');
     // Never an S3 URL, a body or a subject search parameter.
     expect(path('/entries')).not.toMatch(/"name":"(subject|q|text)"/);
+  });
+
+  it('describes every tag and states the step 6.1 conventions and deferrals (D14)', () => {
+    const used = new Set(operations(doc).flatMap((op) => op.tags));
+    const described = new Map((doc.tags ?? []).map((t) => [t.name, t.description ?? '']));
+    expect([...used].filter((tag) => !described.get(tag)?.trim()).sort()).toEqual([]);
+    // No description for a tag nothing uses, and the module list matches OPENAPI_TAGS.
+    expect([...described.keys()].sort()).toEqual([...used].sort());
+    expect(OPENAPI_TAGS.map((t) => t.name).sort()).toEqual([...used].sort());
+    const description = doc.info.description ?? '';
+    for (const text of [
+      '/api/v1',
+      'X-API-Key',
+      'X-Request-Id',
+      'nextCursor',
+      'cursor_invalid',
+      'RateLimit-Limit',
+      'Idempotency-Key',
+      'step 8.1',
+      'step 6.2',
+      'step 8.2',
+      'step 8.3',
+      '/api/v1/smtp-connectors',
+      '/api/v1/api-keys',
+      'delivery_routes',
+      'threat indicators',
+    ]) {
+      expect(description, text).toContain(text);
+    }
+  });
+
+  it('documents the 20 step 6.1 routes with their module tags (§3.3, D14)', () => {
+    const expected: Record<string, string> = {
+      'GET /api/v1/messages': 'messages',
+      'GET /api/v1/messages/{messageId}': 'messages',
+      'GET /api/v1/messages/{messageId}/recipients': 'messages',
+      'GET /api/v1/messages/{messageId}/attachments': 'attachments',
+      'GET /api/v1/attachments': 'attachments',
+      'GET /api/v1/messages/{messageId}/urls': 'url-protection',
+      'GET /api/v1/url-protection/clicks': 'url-protection',
+      'GET /api/v1/recipients/suppressions': 'recipients',
+      'GET /api/v1/recipients/suppressions/{suppressionId}': 'recipients',
+      'POST /api/v1/recipients/suppressions': 'recipients',
+      'DELETE /api/v1/recipients/suppressions/{suppressionId}': 'recipients',
+      'GET /api/v1/audit/logs': 'audit',
+      'GET /api/v1/platform/audit/logs': 'platform',
+      'GET /api/v1/reports/traffic': 'reports',
+      'GET /api/v1/reports/threats': 'reports',
+      'GET /api/v1/reports/url-clicks': 'reports',
+      'GET /api/v1/usage': 'usage',
+      'GET /api/v1/billing/plan': 'billing',
+      'GET /api/v1/billing/usage': 'billing',
+      'GET /api/v1/threat-intelligence/lookup': 'threat-intelligence',
+    };
+    const byKey = new Map(operations(doc).map((op) => [op.key, op]));
+    for (const [key, tag] of Object.entries(expected)) {
+      expect(byKey.get(key)?.tags, key).toEqual([tag]);
+      expect(byKey.get(key)?.security.length, key).toBeGreaterThan(0);
+    }
+  });
+
+  it('marks every Idempotency-Key operation with x-eg-idempotency (step 6.1 D9)', () => {
+    const keyed: string[] = [];
+    for (const [path, item] of Object.entries(doc.paths)) {
+      for (const method of METHODS) {
+        const op = (item as Record<string, unknown>)[method] as
+          | { parameters?: Array<{ name: string; in: string }>; 'x-eg-idempotency'?: string }
+          | undefined;
+        const header = op?.parameters?.some(
+          (p) => p.in === 'header' && p.name === 'Idempotency-Key',
+        );
+        if (!op || !header) continue;
+        keyed.push(`${method.toUpperCase()} ${path}`);
+        expect(['required', 'legacy'], path).toContain(op['x-eg-idempotency']);
+      }
+    }
+    // §3.5: 13 transactional since 3.3/5.3, 2 new transactional, 22 legacy (interceptor).
+    expect(keyed).toHaveLength(37);
   });
 
   it('matches the committed snapshot docs/api/openapi.json', async () => {

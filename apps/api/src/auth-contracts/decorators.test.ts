@@ -6,6 +6,8 @@ import {
   AllowDuringMfaEnrollment,
   AUTHZ_KEY,
   AuthenticatedOnly,
+  CURSOR_LIST_KEY,
+  CursorList,
   IS_PUBLIC_KEY,
   Public,
   principalFromContext,
@@ -96,5 +98,44 @@ describe('CurrentPrincipal / CurrentScope resolution', () => {
   it('throws 401 when the guard did not run', () => {
     expect(() => principalFromContext(contextWith({}))).toThrow(UnauthorizedException);
     expect(() => scopeFromContext(contextWith({}))).toThrow(UnauthorizedException);
+  });
+});
+
+describe('OpenAPI extensions of the authorization and list decorators (step 6.1 D14)', () => {
+  const API_EXTENSION = 'swagger/apiExtension';
+
+  class Documented {
+    @RequirePermissions('message:read')
+    one(): void {}
+    @RequireAnyPermission('a:read', 'b:read')
+    either(): void {}
+    @CursorList('v1')
+    @RequirePermissions('message:read')
+    list(): void {}
+    @CursorList('v0')
+    @RequirePermissions('message:read')
+    legacy(): void {}
+  }
+
+  it('documents the requirement as x-eg-permissions and keeps the AUTHZ_KEY metadata', () => {
+    expect(Reflect.getMetadata(API_EXTENSION, Documented.prototype.one)).toEqual({
+      'x-eg-permissions': { mode: 'all', permissions: ['message:read'] },
+    });
+    expect(Reflect.getMetadata(API_EXTENSION, Documented.prototype.either)).toEqual({
+      'x-eg-permissions': { mode: 'any', permissions: ['a:read', 'b:read'] },
+    });
+    expect(reflector.get(AUTHZ_KEY, Documented.prototype.one)).toEqual({
+      mode: 'all',
+      permissions: ['message:read'],
+    });
+  });
+
+  it('records the cursor encoding of a list (metadata and x-eg-cursor)', () => {
+    expect(reflector.get(CURSOR_LIST_KEY, Documented.prototype.list)).toBe('v1');
+    expect(reflector.get(CURSOR_LIST_KEY, Documented.prototype.legacy)).toBe('v0');
+    expect(Reflect.getMetadata(API_EXTENSION, Documented.prototype.list)).toMatchObject({
+      'x-eg-cursor': 'v1',
+    });
+    expect(() => CursorList('v2' as 'v1')).toThrow();
   });
 });

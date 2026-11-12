@@ -209,8 +209,10 @@ export type SandboxSubmissionView = z.output<typeof SandboxSubmissionViewSchema>
 const {
   cache: _cacheResult,
   durationMs: _attachmentDuration,
-  ...tenantAttachmentShape
+  ...tenantAttachmentFields
 } = attachmentResultSchema.shape;
+/** Step 6.1: reused by `GET /messages/{messageId}/attachments` (never the cache outcome). */
+export const tenantAttachmentShape = tenantAttachmentFields;
 
 /**
  * One attachment's result in a round (step 4.2 A16): the normalized `attachmentResultSchema` of
@@ -244,8 +246,10 @@ const {
   reputation: _reputation,
   lookalike: _lookalike,
   fetch: _fetch,
-  ...tenantUrlShape
+  ...tenantUrlFields
 } = urlResultSchema.shape;
+/** Step 6.1: reused by `GET /messages/{messageId}/urls` (never cache outcomes). */
+export const tenantUrlShape = tenantUrlFields;
 
 export const UrlClickDecisionSchema = z.enum(CLICK_DECISIONS);
 

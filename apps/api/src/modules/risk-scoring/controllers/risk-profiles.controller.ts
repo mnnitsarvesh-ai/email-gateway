@@ -17,9 +17,11 @@ import {
   ApiOkResponse,
   ApiOperation,
 } from '@nestjs/swagger';
+import { Idempotent } from '../../../http/idempotency/idempotency.interceptor';
 import {
   CurrentPrincipal,
   CurrentScope,
+  CursorList,
   RequirePermissions,
 } from '../../../auth-contracts/decorators';
 import type { Principal } from '../../../auth-contracts/principal';
@@ -123,6 +125,7 @@ export class RiskProfilesController {
   }
 
   @Get('profile/versions')
+  @CursorList('v0')
   @RequirePermissions(POLICY_READ)
   @ApiOperation({
     summary: 'List the risk profile versions',
@@ -247,6 +250,7 @@ export class RiskProfilesController {
   }
 
   @Post('profile/versions/:versionId/publish')
+  @Idempotent({ operation: 'risk_profile.publish', legacy: true })
   @RequirePermissions(POLICY_PUBLISH)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
@@ -277,6 +281,7 @@ export class RiskProfilesController {
   }
 
   @Post('profile/versions/:versionId/activate')
+  @Idempotent({ operation: 'risk_profile.activate', legacy: true })
   @RequirePermissions(POLICY_PUBLISH)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
@@ -306,6 +311,7 @@ export class RiskProfilesController {
   }
 
   @Post('profile/reset')
+  @Idempotent({ operation: 'risk_profile.reset', legacy: true })
   @RequirePermissions(POLICY_PUBLISH)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({

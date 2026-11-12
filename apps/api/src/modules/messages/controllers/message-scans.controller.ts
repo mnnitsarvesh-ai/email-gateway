@@ -3,6 +3,7 @@ import { ApiBearerAuth, ApiOkResponse, ApiOperation, ApiSecurity, ApiTags } from
 import {
   CurrentPrincipal,
   CurrentScope,
+  CursorList,
   RequirePermissions,
 } from '../../../auth-contracts/decorators';
 import type { Principal } from '../../../auth-contracts/principal';
@@ -38,6 +39,7 @@ export class MessageScansController {
 
   @Get(':messageId/scans')
   @RequirePermissions(MESSAGE_READ)
+  @CursorList('v0')
   @ApiOperation({
     summary: 'Get the security scan results of a message',
     description:

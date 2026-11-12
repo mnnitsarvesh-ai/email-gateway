@@ -70,7 +70,7 @@ export type AuthResultRow = Prisma.EmailAuthResultGetPayload<{ select: typeof au
 /** Most engine rows one page reads: ≤ 20 rounds × (attempts of every engine). */
 const MAX_ENGINE_ROWS = 2_000;
 
-const attachmentResultSelect = {
+export const attachmentResultSelect = {
   scanId: true,
   attachmentId: true,
   partIndex: true,
@@ -171,7 +171,7 @@ const MAX_SANDBOX_ARTIFACT_ROWS = 2_000;
  */
 const MAX_ATTACHMENT_ROWS = 2_000;
 
-const messageUrlSelect = {
+export const messageUrlSelect = {
   urlSeq: true,
   url: true,
   urlSha256: true,
@@ -185,7 +185,7 @@ const messageUrlSelect = {
 
 export type MessageUrlRow = Prisma.MessageUrlGetPayload<{ select: typeof messageUrlSelect }>;
 
-const urlResultSelect = {
+export const urlResultSelect = {
   scanId: true,
   urlSeq: true,
   urlSha256: true,
@@ -207,7 +207,7 @@ const urlResultSelect = {
 
 export type UrlResultRow = Prisma.UrlScanResultGetPayload<{ select: typeof urlResultSelect }>;
 
-const urlRewriteSelect = {
+export const urlRewriteSelect = {
   scanId: true,
   lifecycleRound: true,
   status: true,

@@ -5,6 +5,16 @@
  * export with its cursor header and rate limit, the 202 purge and the `bec` scan settings. The
  * same routes against the real MySQL run in integration/bec.test.ts.
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers delete /api/v1/bec/history
+// @covers get /api/v1/bec/executives
+// @covers get /api/v1/bec/executives/:id
+// @covers get /api/v1/bec/feedback/export
+// @covers post /api/v1/bec/executives
+// @covers post /api/v1/bec/trusted-senders
+// @covers post /api/v1/bec/vendors
+// @covers post /api/v1/messages/:messageId/scans/:scanId/bec-feedback
+// ---- end of route coverage ----
 import { randomBytes, randomUUID } from 'node:crypto';
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
@@ -35,6 +45,8 @@ import { BecFeedbackRepository } from '../src/modules/bec/repositories/bec-feedb
 import { BecProfilesRepository } from '../src/modules/bec/repositories/bec-profiles.repository';
 import { ScanSettingsRepository } from '../src/modules/scans/repositories/scan-settings.repository';
 import { OrganizationFeaturesService } from '../src/tenancy/organization-features.service';
+import { idem, withIdempotencyStore } from './legacy-idempotency-support';
+import { InMemoryIdempotencyStore } from './support/api-test-app';
 import { InMemoryKeyValueStore } from './support/in-memory-key-value-store';
 import { RecordingEmailSender } from './support/recording-email-sender';
 import { TEST_DOMAIN_ENV } from './support/test-env';
@@ -187,7 +199,7 @@ describe('step 4.4 BEC routes (e2e, dependencies stubbed)', () => {
   beforeAll(async () => {
     const config = loadApiConfig(env);
     const stub = (healthName: string) => ({ healthName, checkHealth: () => Promise.resolve() });
-    const moduleRef = await Test.createTestingModule({ imports: [AppModule.forRoot(config)] })
+    const builder = Test.createTestingModule({ imports: [AppModule.forRoot(config)] })
       .overrideProvider(PrismaService)
       .useValue(stub('mysql'))
       .overrideProvider(PrismaReadService)
@@ -218,8 +230,11 @@ describe('step 4.4 BEC routes (e2e, dependencies stubbed)', () => {
       .useValue(settingsRows)
       // Plan features (step 4.6 X17: the scan-settings views state attachment_sandbox).
       .overrideProvider(OrganizationFeaturesService)
-      .useValue({ isEnabled: () => Promise.resolve(false) })
-      .compile();
+      .useValue({ isEnabled: () => Promise.resolve(false) });
+    // Step 6.1 §3.5: the history purge takes an Idempotency-Key.
+    const moduleRef = await withIdempotencyStore(builder, new InMemoryIdempotencyStore(), {
+      runner: false,
+    }).compile();
     app = moduleRef.createNestApplication({ logger: false });
     configureHttpApp(app, createLogger({ service: 'api-test', level: 'silent' }));
     configureApiApp(app, config);
@@ -401,12 +416,14 @@ describe('step 4.4 BEC routes (e2e, dependencies stubbed)', () => {
   it('history purge: MFA users with bec:manage, 202 with the count, audited', async () => {
     await http()
       .delete('/api/v1/bec/history')
+      .set(idem())
       .set(await bearer(['pwd']))
       .expect(403);
     apiKeyPermissions = new Set([MANAGE]);
     await http().delete('/api/v1/bec/history').set(apiKey).expect(403);
     const res = await http()
       .delete('/api/v1/bec/history')
+      .set(idem())
       .set(await bearer())
       .expect(202);
     expect(res.body).toEqual({ deleted: 3 });

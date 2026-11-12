@@ -1,3 +1,25 @@
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers delete /api/v1/auth/sessions/:sessionId
+// @covers delete /api/v1/platform/overrides/:overrideId
+// @covers get /api/v1/auth/me
+// @covers get /api/v1/auth/sessions
+// @covers post /api/v1/auth/email/verification
+// @covers post /api/v1/auth/email/verify
+// @covers post /api/v1/auth/invitations/accept
+// @covers post /api/v1/auth/invitations/inspect
+// @covers post /api/v1/auth/login
+// @covers post /api/v1/auth/logout
+// @covers post /api/v1/auth/logout-all
+// @covers post /api/v1/auth/mfa/totp/disable
+// @covers post /api/v1/auth/mfa/totp/enable
+// @covers post /api/v1/auth/mfa/totp/setup
+// @covers post /api/v1/auth/mfa/verify
+// @covers post /api/v1/auth/password/change
+// @covers post /api/v1/auth/password/forgot
+// @covers post /api/v1/auth/password/reset
+// @covers post /api/v1/auth/refresh
+// @covers post /api/v1/platform/overrides
+// ---- end of route coverage ----
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { generateApiKey, TokenHasher } from '../src/crypto/tokens';
 import { TransactionRunner } from '../src/database/transaction-runner';

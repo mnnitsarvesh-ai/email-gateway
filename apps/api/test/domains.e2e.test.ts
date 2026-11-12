@@ -5,6 +5,17 @@
  * scope passed to the services (always from the credential, never from headers or the body).
  * The full flows run against real MySQL/Redis and a test DNS server in the integration suites.
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers delete /api/v1/domains/:id
+// @covers get /api/v1/domains
+// @covers get /api/v1/domains/:id
+// @covers get /api/v1/domains/:id/dns-records
+// @covers get /api/v1/domains/:id/status
+// @covers patch /api/v1/domains/:id/status
+// @covers post /api/v1/domains
+// @covers post /api/v1/domains/:id/dkim/rotate
+// @covers post /api/v1/domains/:id/verify
+// ---- end of route coverage ----
 import { randomBytes, randomUUID } from 'node:crypto';
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
@@ -37,6 +48,8 @@ import { DkimRotationService } from '../src/modules/domains/services/dkim-rotati
 import { DomainCheckScheduler } from '../src/modules/domains/services/domain-check-scheduler.service';
 import { DomainVerificationService } from '../src/modules/domains/services/domain-verification.service';
 import { DomainsService } from '../src/modules/domains/services/domains.service';
+import { idem, withIdempotencyStore } from './legacy-idempotency-support';
+import { InMemoryIdempotencyStore } from './support/api-test-app';
 import { InMemoryKeyValueStore } from './support/in-memory-key-value-store';
 import { RecordingEmailSender } from './support/recording-email-sender';
 import { TEST_DOMAIN_ENV } from './support/test-env';
@@ -112,7 +125,7 @@ describe('domain endpoints (e2e, services stubbed)', () => {
 
   beforeAll(async () => {
     const stub = (healthName: string) => ({ healthName, checkHealth: () => Promise.resolve() });
-    const moduleRef = await Test.createTestingModule({ imports: [AppModule.forRoot(config)] })
+    const builder = Test.createTestingModule({ imports: [AppModule.forRoot(config)] })
       .overrideProvider(PrismaService)
       .useValue(stub('mysql'))
       .overrideProvider(PrismaReadService)
@@ -136,8 +149,9 @@ describe('domain endpoints (e2e, services stubbed)', () => {
       .overrideProvider(DomainVerificationService)
       .useValue(verification)
       .overrideProvider(DkimRotationService)
-      .useValue(rotation)
-      .compile();
+      .useValue(rotation);
+    // Step 6.1 §3.5: the DKIM rotation takes an Idempotency-Key.
+    const moduleRef = await withIdempotencyStore(builder, new InMemoryIdempotencyStore()).compile();
     app = moduleRef.createNestApplication({ logger: false });
     configureHttpApp(app, createLogger({ service: 'api-test', level: 'silent' }));
     configureApiApp(app, config);
@@ -179,7 +193,10 @@ describe('domain endpoints (e2e, services stubbed)', () => {
       ['POST /domains/{id}/verify', () => http().post(`/api/v1/domains/${id}/verify`)],
       ['GET /domains/{id}/dns-records', () => http().get(`/api/v1/domains/${id}/dns-records`)],
       ['GET /domains/{id}/status', () => http().get(`/api/v1/domains/${id}/status`)],
-      ['POST /domains/{id}/dkim/rotate', () => http().post(`/api/v1/domains/${id}/dkim/rotate`)],
+      [
+        'POST /domains/{id}/dkim/rotate',
+        () => http().post(`/api/v1/domains/${id}/dkim/rotate`).set(idem()),
+      ],
       [
         'PATCH /domains/{id}/status',
         () => http().patch(`/api/v1/domains/${id}/status`).send({ status: 'active' }),
@@ -234,7 +251,11 @@ describe('domain endpoints (e2e, services stubbed)', () => {
     it('refuses an API key without the permission in its scopes', async () => {
       apiKeyPrincipal = { ...apiKeyPrincipal, permissions: new Set(['domain:read']) };
       await http().post('/api/v1/domains').set(apiKey).send({ name: 'acme.test' }).expect(403);
-      await http().post(`/api/v1/domains/${domainId}/dkim/rotate`).set(apiKey).expect(403);
+      await http()
+        .post(`/api/v1/domains/${domainId}/dkim/rotate`)
+        .set(idem())
+        .set(apiKey)
+        .expect(403);
       expectNoServiceCall();
       await http().get('/api/v1/domains').set(apiKey).expect(200);
       expect(domains.list).toHaveBeenCalledWith(
@@ -345,6 +366,7 @@ describe('domain endpoints (e2e, services stubbed)', () => {
     ])('POST /domains/{id}/dkim/rotate %j → 400', async (body, message) => {
       const res = await http()
         .post(`/api/v1/domains/${domainId}/dkim/rotate`)
+        .set(idem())
         .set(await bearer())
         .send(body)
         .expect(400);
@@ -403,7 +425,11 @@ describe('domain endpoints (e2e, services stubbed)', () => {
         domainId,
         expect.anything(),
       );
-      await http().post(`/api/v1/domains/${domainId}/dkim/rotate`).set(auth).expect(201);
+      await http()
+        .post(`/api/v1/domains/${domainId}/dkim/rotate`)
+        .set(idem())
+        .set(auth)
+        .expect(201);
       expect(rotation.rotate).toHaveBeenLastCalledWith(
         expect.anything(),
         expect.anything(),
@@ -413,6 +439,7 @@ describe('domain endpoints (e2e, services stubbed)', () => {
       );
       await http()
         .post(`/api/v1/domains/${domainId}/dkim/rotate`)
+        .set(idem())
         .set(auth)
         .send({ algorithm: 'ed25519' })
         .expect(201);
@@ -459,6 +486,7 @@ describe('domain endpoints (e2e, services stubbed)', () => {
       rotation.rotate.mockRejectedValueOnce(new TooManyRotationsException(3600));
       const res = await http()
         .post(`/api/v1/domains/${domainId}/dkim/rotate`)
+        .set(idem())
         .set(await bearer())
         .expect(429);
       expect(res.headers['retry-after']).toBe('3600');
@@ -471,7 +499,7 @@ describe('domain endpoints (e2e, services stubbed)', () => {
       [
         'POST /domains/{id}/dkim/rotate',
         30,
-        () => http().post(`/api/v1/domains/${domainId}/dkim/rotate`),
+        () => http().post(`/api/v1/domains/${domainId}/dkim/rotate`).set(idem()),
       ],
     ] as const)(
       'limits %s per caller (%i per minute, 429 with Retry-After)',

@@ -5,7 +5,7 @@
  * request to a rate-limited route, including authenticated ones (password change, MFA
  * enrollment): the counters live in the real Redis and outlast a test run.
  */
-import { randomInt } from 'node:crypto';
+import { randomInt, randomUUID } from 'node:crypto';
 import type { Test } from 'supertest';
 import type { IntegrationApp } from './app';
 import type { Fixtures, FixtureUser } from './fixtures';
@@ -26,6 +26,16 @@ export const bearer = (accessToken: string): Record<string, string> => ({
 export const apiKeyHeader = (key: string): Record<string, string> => ({ 'X-API-Key': key });
 
 export const fromIp = (ip: string): Record<string, string> => ({ 'X-Forwarded-For': ip });
+
+/**
+ * A fresh `Idempotency-Key` (step 6.1 §3.5): the legacy sensitive mutations (DKIM rotation,
+ * invitations, MFA reset, organization status and deletion, policy and risk profile publish /
+ * activate / reset, BEC/DLP purges, the Aadhaar switch and the platform operations) refuse a
+ * request without one under `API_IDEMPOTENCY_LEGACY_MODE=enforce`. Pass a fixed `key` to replay.
+ */
+export const idem = (key: string = `it-${randomUUID()}`): Record<string, string> => ({
+  'Idempotency-Key': key,
+});
 
 export interface LoginBody {
   email: string;

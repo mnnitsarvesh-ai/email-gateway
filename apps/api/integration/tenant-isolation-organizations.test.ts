@@ -6,6 +6,16 @@
  * carry `metadata.override`, and the override cannot reach C, create organizations or be
  * refreshed, and stops on DELETE. Organization endpoints only (identity endpoints: WP4's suite).
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers get /api/v1/organizations
+// @covers get /api/v1/organizations/:id
+// @covers get /api/v1/organizations/:id/features
+// @covers get /api/v1/organizations/:id/limits
+// @covers get /api/v1/organizations/:id/settings
+// @covers get /api/v1/organizations/:id/usage
+// @covers put /api/v1/organizations/:id
+// @covers put /api/v1/organizations/:id/settings
+// ---- end of route coverage ----
 import { randomBytes } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { generateApiKey, TokenHasher } from '../src/crypto/tokens';
@@ -16,7 +26,7 @@ import {
   type Fixtures,
   type FixtureUser,
 } from './support/fixtures';
-import { apiKeyHeader, bearer, login, loginWithMfa, uniqueIp } from './support/http';
+import { apiKeyHeader, bearer, idem, login, loginWithMfa, uniqueIp } from './support/http';
 
 let ctx: IntegrationApp;
 let fx: Fixtures;
@@ -158,6 +168,7 @@ describe('tenant A member', () => {
     for (const target of [orgA, orgB]) {
       await ctx.http
         .patch(path(target, '/status'))
+        .set(idem())
         .set(auth)
         .send({ status: 'suspended', reason: 'Takeover' })
         .expect(403);
@@ -191,6 +202,7 @@ describe('tenant A API key', () => {
     await expectNoWriteAccess(apiKeyHeader(keyOfA), orgB);
     await ctx.http
       .patch(path(orgA, '/status'))
+      .set(idem())
       .set(apiKeyHeader(keyOfA))
       .send({ status: 'suspended', reason: 'x' })
       .expect(403);
@@ -271,6 +283,7 @@ describe('platform override into B (organization endpoints)', () => {
       .expect(403);
     await ctx.http
       .patch(path(orgB, '/status'))
+      .set(idem())
       .set(asOverride)
       .send({ status: 'suspended', reason: 'Not allowed' })
       .expect(403);

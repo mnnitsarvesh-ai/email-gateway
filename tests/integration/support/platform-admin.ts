@@ -22,10 +22,15 @@ export interface PlatformAdminSession {
   userId: bigint;
   /** `users.public_id` (the audit actor id). */
   userPublicId: string;
+  /**
+   * `headers` are extra request headers, e.g. the `Idempotency-Key` of a step 6.1 §3.5
+   * sensitive mutation (`idempotencyKey()` of ./api-client).
+   */
   call(
     method: 'GET' | 'POST' | 'DELETE',
     path: string,
     body?: unknown,
+    headers?: Record<string, string>,
   ): Promise<{ status: number; body: Record<string, unknown> }>;
   remove(): Promise<void>;
 }
@@ -79,10 +84,16 @@ export async function platformAdminSession(prisma: PrismaClient): Promise<Platfo
       },
     });
 
-    const post = async (path: string, body: unknown, token?: string) => {
+    const post = async (
+      path: string,
+      body: unknown,
+      token?: string,
+      headers: Record<string, string> = {},
+    ) => {
       const res = await fetch(`${apiBaseUrl()}/api/v1${path}`, {
         method: 'POST',
         headers: {
+          ...headers,
           'content-type': 'application/json',
           ...(token ? { authorization: `Bearer ${token}` } : {}),
         },
@@ -113,11 +124,11 @@ export async function platformAdminSession(prisma: PrismaClient): Promise<Platfo
     return {
       userId: user.id,
       userPublicId: user.publicId,
-      call: async (method, path, body) => {
-        if (method === 'POST') return post(path, body ?? {}, token);
+      call: async (method, path, body, headers = {}) => {
+        if (method === 'POST') return post(path, body ?? {}, token, headers);
         const res = await fetch(`${apiBaseUrl()}/api/v1${path}`, {
           method,
-          headers: { authorization: `Bearer ${token}` },
+          headers: { ...headers, authorization: `Bearer ${token}` },
           signal: AbortSignal.timeout(60_000),
         });
         const text = await res.text();

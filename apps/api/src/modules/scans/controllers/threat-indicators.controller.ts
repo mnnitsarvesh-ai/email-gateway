@@ -20,7 +20,13 @@ import {
   ApiParam,
   ApiTags,
 } from '@nestjs/swagger';
-import { RequireMfa, RequirePermissions, UserOnly } from '../../../auth-contracts/decorators';
+import { Idempotent } from '../../../http/idempotency/idempotency.interceptor';
+import {
+  CursorList,
+  RequireMfa,
+  RequirePermissions,
+  UserOnly,
+} from '../../../auth-contracts/decorators';
 import type { UserPrincipal } from '../../../auth-contracts/principal';
 import { CodedExceptionFilter } from '../../../http/coded-exception';
 import { ACCESS_TOKEN_SCHEME } from '../../../http/openapi';
@@ -71,6 +77,7 @@ export class ThreatIndicatorsController {
   constructor(private readonly indicators: ThreatIndicatorsService) {}
 
   @Get()
+  @CursorList('v0')
   @RequirePermissions(PLATFORM_THREAT_INTEL_MANAGE)
   @RequireMfa()
   @ApiOperation({
@@ -93,6 +100,7 @@ export class ThreatIndicatorsController {
   }
 
   @Post()
+  @Idempotent({ operation: 'platform.threat_indicator_add', legacy: true })
   @RequirePermissions(PLATFORM_THREAT_INTEL_MANAGE)
   @RequireMfa()
   @HttpCode(HttpStatus.CREATED)

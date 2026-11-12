@@ -182,6 +182,22 @@ export const PERMISSIONS = Object.freeze([
     description:
       'View, preview and request the release of quarantined mail addressed to oneself (step 5.3)',
   },
+  // Step 6.1 (docs/plan/steps/18-rest-api.md §3.6): permissions of the new REST routes.
+  // organization_admin and super_admin hold them through TENANT_PERMISSIONS / ALL_PERMISSIONS;
+  // security_analyst and platform_admin get threat_intel:read, compliance_auditor billing:read,
+  // domain_admin delivery:suppression_manage, explicitly. None is in TENANT_READ_PERMISSIONS.
+  {
+    key: 'threat_intel:read',
+    description: 'Look up platform threat intelligence (hash catalogue, indicators) (step 6.1)',
+  },
+  {
+    key: 'billing:read',
+    description: 'View the plan, entitlements and metered usage (step 6.1)',
+  },
+  {
+    key: 'delivery:suppression_manage',
+    description: 'Add and remove recipient suppressions (step 6.1)',
+  },
 ] as const satisfies readonly PermissionDef[]);
 
 /** Every permission key of the catalog. */
@@ -287,6 +303,7 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'platform:scan_rescan',
       ...TENANT_READ_PERMISSIONS,
       'audit:read',
+      'threat_intel:read',
     ],
   },
   {
@@ -311,6 +328,7 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'policy:read',
       'message:read',
       'delivery:read',
+      'delivery:suppression_manage',
       'quarantine:read',
       'report:read',
     ],
@@ -345,6 +363,7 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'dlp:read',
       'dlp:manage',
       'dlp:evidence_read',
+      'threat_intel:read',
     ],
   },
   {
@@ -376,6 +395,7 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'bec:read',
       'dlp:read',
       'dlp:evidence_read',
+      'billing:read',
     ],
   },
   {

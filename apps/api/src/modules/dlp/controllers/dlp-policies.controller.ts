@@ -20,6 +20,7 @@ import {
 import {
   CurrentPrincipal,
   CurrentScope,
+  CursorList,
   RequirePermissions,
 } from '../../../auth-contracts/decorators';
 import type { Principal } from '../../../auth-contracts/principal';
@@ -78,6 +79,7 @@ export class DlpPoliciesController {
   constructor(private readonly policies: DlpPoliciesService) {}
 
   @Get()
+  @CursorList('v0')
   @RequirePermissions(DLP_READ)
   @ApiOperation({
     summary: 'List the DLP policies',

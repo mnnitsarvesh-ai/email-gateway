@@ -24,9 +24,12 @@ import {
   ApiSecurity,
   ApiTags,
 } from '@nestjs/swagger';
+import { Idempotent } from '../../http/idempotency/idempotency.interceptor';
+import { LegacyIdempotent } from '../../legacy-idempotency/legacy-idempotent';
 import {
   CurrentPrincipal,
   CurrentScope,
+  CursorList,
   RequireMfa,
   RequirePermissions,
   UserOnly,
@@ -71,6 +74,7 @@ export class UsersController {
   constructor(private readonly users: UsersService) {}
 
   @Get()
+  @CursorList('v0')
   @RequirePermissions('user:read')
   @ApiSecurity(API_KEY_SCHEME)
   @ApiOperation({
@@ -100,6 +104,7 @@ export class UsersController {
   }
 
   @Post('invitations')
+  @LegacyIdempotent({ operation: 'user.invite', legacy: true, publicFields: ['key'] })
   @RequirePermissions('user:manage')
   @ApiSecurity(API_KEY_SCHEME)
   @ApiOperation({
@@ -133,6 +138,7 @@ export class UsersController {
   }
 
   @Post(':id/invitation')
+  @Idempotent({ operation: 'user.invitation_resend', legacy: true })
   @RequirePermissions('user:manage')
   @ApiSecurity(API_KEY_SCHEME)
   @HttpCode(HttpStatus.ACCEPTED)
@@ -244,6 +250,7 @@ export class UsersController {
   }
 
   @Post(':id/mfa/reset')
+  @Idempotent({ operation: 'user.mfa_reset', legacy: true })
   @RequirePermissions('user:manage')
   @UserOnly()
   @RequireMfa()

@@ -4,6 +4,30 @@
  * platform-role and last-administrator rules, custom roles, API keys end to end, MFA reset,
  * administrator session management and the login events listing.
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers delete /api/v1/api-keys/:id
+// @covers delete /api/v1/roles/:key
+// @covers delete /api/v1/users/:id
+// @covers delete /api/v1/users/:id/sessions
+// @covers delete /api/v1/users/:id/sessions/:sessionId
+// @covers get /api/v1/api-keys
+// @covers get /api/v1/audit/login-events
+// @covers get /api/v1/permissions
+// @covers get /api/v1/roles
+// @covers get /api/v1/roles/:key
+// @covers get /api/v1/users
+// @covers get /api/v1/users/:id
+// @covers get /api/v1/users/:id/sessions
+// @covers patch /api/v1/users/:id
+// @covers patch /api/v1/users/:id/status
+// @covers post /api/v1/api-keys
+// @covers post /api/v1/roles
+// @covers post /api/v1/users/:id/invitation
+// @covers post /api/v1/users/:id/mfa/reset
+// @covers post /api/v1/users/invitations
+// @covers put /api/v1/roles/:key
+// @covers put /api/v1/users/:id/roles
+// ---- end of route coverage ----
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createIntegrationApp, type IntegrationApp } from './support/app';
 import {
@@ -18,6 +42,7 @@ import {
   apiKeyHeader,
   bearer,
   fromIp,
+  idem,
   login,
   loginWithMfa,
   type TokenResponseBody,
@@ -66,7 +91,7 @@ async function orgWithAdmin(
 }
 
 const invite = (token: string, body: { email: string; displayName: string; roleKeys: string[] }) =>
-  ctx.http.post('/api/v1/users/invitations').set(bearer(token)).send(body);
+  ctx.http.post('/api/v1/users/invitations').set(idem()).set(bearer(token)).send(body);
 
 const newEmail = () => `invitee-${uniqueSuffix()}@example.test`;
 
@@ -165,6 +190,7 @@ describe('invitations', () => {
     const first = ctx.emails.tokenFor(former.email, 'invitation');
     const resent = await ctx.http
       .post(`/api/v1/users/${former.publicId}/invitation`)
+      .set(idem())
       .set(bearer(token))
       .expect(202);
     expect(new Date(resent.body.expiresAt).getTime()).toBeGreaterThan(Date.now());
@@ -181,6 +207,7 @@ describe('invitations', () => {
     const active = await fx.createUser(org, { roles: ['read_only_user'] });
     await ctx.http
       .post(`/api/v1/users/${active.publicId}/invitation`)
+      .set(idem())
       .set(bearer(token))
       .expect(409);
   });
@@ -471,12 +498,14 @@ describe('profile, deletion and MFA reset', () => {
     const plain = await sessionOf(plainAdmin);
     const refused = await ctx.http
       .post(`/api/v1/users/${target.publicId}/mfa/reset`)
+      .set(idem())
       .set(bearer(plain.accessToken))
       .expect(403);
     expect(refused.body.message).toBe('MFA required');
 
     await ctx.http
       .post(`/api/v1/users/${target.publicId}/mfa/reset`)
+      .set(idem())
       .set(bearer(token))
       .expect(204);
     await me(targetSession.accessToken).expect(401);
@@ -685,6 +714,7 @@ describe('API keys', () => {
     await ctx.http.get('/api/v1/api-keys').set(apiKeyHeader(key)).expect(403);
     await ctx.http
       .post('/api/v1/users/invitations')
+      .set(idem())
       .set(apiKeyHeader(key))
       .send({ email: newEmail(), displayName: 'X', roleKeys: ['read_only_user'] })
       .expect(403);

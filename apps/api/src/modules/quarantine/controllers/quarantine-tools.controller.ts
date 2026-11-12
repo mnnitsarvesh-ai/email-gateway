@@ -25,7 +25,6 @@ import {
 import type { Principal, UserPrincipal } from '../../../auth-contracts/principal';
 import type { TenantScope } from '../../../auth-contracts/tenant-scope';
 import { ApiCodedError, CodedHttpException } from '../../../http/coded-exception';
-import { ApiIdempotencyKey } from '../../../http/idempotency/idempotency-key';
 import { zodToOpenApi } from '../../../validation/zod-openapi';
 import { ZodValidationPipe } from '../../../validation/zod-validation.pipe';
 import { ApiErrors } from '../../auth/api-docs';
@@ -56,7 +55,8 @@ import {
   SummaryResponseSchema,
   type SummaryResponse,
 } from '../dto/quarantine.schemas';
-import { NO_STORE, Q, SETTINGS_MANAGE } from '../quarantine.constants';
+import { NO_STORE, Q, SETTINGS_MANAGE, QUARANTINE_OPERATIONS } from '../quarantine.constants';
+import { TransactionalIdempotency } from '../../messages/api-docs';
 import { QuarantineRateLimit } from '../quarantine-rate-limit';
 import { QuarantineBulkService } from '../services/quarantine-bulk.service';
 import { QuarantineDownloadService } from '../services/quarantine-download.service';
@@ -159,6 +159,7 @@ export class QuarantineToolsController {
   }
 
   @Post('bulk')
+  @TransactionalIdempotency(QUARANTINE_OPERATIONS.bulk)
   @RequireAnyPermission(Q.release, Q.reject, Q.delete, Q.approve)
   @QuarantineRateLimit('bulk')
   @HttpCode(HttpStatus.OK)
@@ -176,7 +177,6 @@ export class QuarantineToolsController {
       'Partial failure is reported per item. The whole response is stored under the ' +
       'Idempotency-Key. Audited as `quarantine.bulk` plus the per-item rows.',
   })
-  @ApiIdempotencyKey()
   @ApiBody({ schema: zodToOpenApi(BulkBodySchema, { io: 'input' }) })
   @ApiOkResponse({ schema: zodToOpenApi(BulkResponseSchema) })
   @ApiErrors(400, 401, 403, 422, 429)

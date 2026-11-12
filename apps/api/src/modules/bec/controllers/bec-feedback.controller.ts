@@ -20,10 +20,12 @@ import {
   ApiProduces,
   ApiResponse,
 } from '@nestjs/swagger';
+import { Idempotent } from '../../../http/idempotency/idempotency.interceptor';
 import type { Response } from 'express';
 import {
   CurrentPrincipal,
   CurrentScope,
+  CursorList,
   RequireMfa,
   RequirePermissions,
   UserOnly,
@@ -138,6 +140,7 @@ export class BecFeedbackController {
   constructor(private readonly feedback: BecFeedbackService) {}
 
   @Get('feedback')
+  @CursorList('v0')
   @RequirePermissions(BEC_READ)
   @ApiOperation({
     summary: 'List the BEC feedback',
@@ -202,6 +205,7 @@ export class BecFeedbackController {
   }
 
   @Get('suppressions')
+  @CursorList('v0')
   @RequirePermissions(BEC_READ)
   @ApiOperation({
     summary: 'List the BEC suppression rules',
@@ -241,6 +245,7 @@ export class BecFeedbackController {
   }
 
   @Delete('history')
+  @Idempotent({ operation: 'bec.history_purge', legacy: true })
   @RequirePermissions(BEC_MANAGE)
   @RequireMfa()
   @HttpCode(HttpStatus.ACCEPTED)

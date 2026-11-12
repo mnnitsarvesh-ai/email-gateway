@@ -9,6 +9,11 @@
  * public suffix refused, 409, audit rows with the before-image, replica list). URL rows are
  * inserted as the email-worker / click-service write them (fixtures).
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers delete /api/v1/platform/threat-indicators/:id
+// @covers get /api/v1/platform/threat-indicators
+// @covers post /api/v1/platform/threat-indicators
+// ---- end of route coverage ----
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { PrismaReadService } from '@email-gateway/common';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -19,7 +24,7 @@ import {
   type Fixtures,
   type FixtureUser,
 } from './support/fixtures';
-import { apiKeyHeader, bearer, loginWithMfa, uniqueIp } from './support/http';
+import { apiKeyHeader, bearer, idem, loginWithMfa, uniqueIp } from './support/http';
 import {
   deleteLifecycleFixtures,
   insertLifecycleMessage,
@@ -438,6 +443,7 @@ describe('platform threat indicators (U16)', () => {
   it('adds normalized as source analyst with its audit row; 409 for the same value', async () => {
     const res = await ctx.http
       .post(path)
+      .set(idem())
       .set(headers(platformAdmin))
       .send({
         type: 'domain',
@@ -479,6 +485,7 @@ describe('platform threat indicators (U16)', () => {
 
     const again = await ctx.http
       .post(path)
+      .set(idem())
       .set(headers(platformAdmin))
       .send({
         type: 'domain',
@@ -494,6 +501,7 @@ describe('platform threat indicators (U16)', () => {
   it('normalizes URLs (identity form) and IPs; refuses public suffixes and bad values', async () => {
     const url = await ctx.http
       .post(path)
+      .set(idem())
       .set(headers(platformAdmin))
       .send({
         type: 'url',
@@ -507,6 +515,7 @@ describe('platform threat indicators (U16)', () => {
     expect(url.body.value).toBe(`https://it-${run}.example/login?x=1`);
     const ip = await ctx.http
       .post(path)
+      .set(idem())
       .set(headers(platformAdmin))
       .send({
         type: 'ip',
@@ -526,6 +535,7 @@ describe('platform threat indicators (U16)', () => {
     ]) {
       const refused = await ctx.http
         .post(path)
+        .set(idem())
         .set(headers(platformAdmin))
         .send({ type, value, severity: 'high', category: 'other', reason: 'x' })
         .expect(400);
@@ -536,6 +546,7 @@ describe('platform threat indicators (U16)', () => {
   it('lists through the replica and removes with the before-image (204, then 404)', async () => {
     const created = await ctx.http
       .post(path)
+      .set(idem())
       .set(headers(platformAdmin))
       .send({
         type: 'domain',
@@ -591,11 +602,11 @@ describe('platform threat indicators (U16)', () => {
     const value = `rbac-${run}.example`;
     const body = { type: 'domain', value, severity: 'high', category: 'phishing', reason: 'x' };
     const tenantAdmin = await tokenOf(await fx.createUser(orgA, { roles: ['organization_admin'] }));
-    await ctx.http.post(path).set(headers(tenantAdmin)).send(body).expect(403);
+    await ctx.http.post(path).set(idem()).set(headers(tenantAdmin)).send(body).expect(403);
     const key = apiKeyHeader(await fx.createApiKey(orgA, ['message:read', 'policy:read']));
     await ctx.http.get(path).set(headers(key)).expect(403);
     const noMfa = await tokenOf(await fx.createPlatformUser(['platform_admin'], { mfa: false }));
-    await ctx.http.post(path).set(headers(noMfa)).send(body).expect(403);
+    await ctx.http.post(path).set(idem()).set(headers(noMfa)).send(body).expect(403);
     expect(
       await ctx.prisma.threatIndicator.findFirst({ where: { valueSha256: sha(value) } }),
     ).toBeNull();

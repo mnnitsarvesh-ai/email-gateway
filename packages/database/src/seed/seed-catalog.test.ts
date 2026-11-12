@@ -72,7 +72,7 @@ describe('seed catalog', () => {
   const sorted = (list: readonly string[]) => [...list].sort();
   const role = (key: string) => SYSTEM_ROLES.find((r) => r.key === key)!.permissions;
 
-  it('contains the 55 permissions of D7, D8, steps 2.1 D14, 2.2, 2.3, 3.2, 3.3, 4.1, 4.2, 4.4, 4.5 and 5.3, without duplicates', () => {
+  it('contains the 58 permissions of D7, D8, steps 2.1 D14, 2.2, 2.3, 3.2, 3.3, 4.1, 4.2, 4.4, 4.5, 5.3 and 6.1, without duplicates', () => {
     expect(new Set(keys).size).toBe(keys.length);
     expect(sorted(keys)).toEqual(
       sorted([
@@ -131,14 +131,17 @@ describe('seed catalog', () => {
         'quarantine:manage',
         'quarantine:download',
         'quarantine:self',
+        'threat_intel:read',
+        'billing:read',
+        'delivery:suppression_manage',
       ]),
     );
-    expect(keys).toHaveLength(55);
+    expect(keys).toHaveLength(58);
     // Step 3.3 placed message:rescan next to the other message permissions (design §3.3); the
     // seed upserts by key, so on an existing database it simply gets the next id.
     expect(keys.indexOf('message:rescan')).toBe(keys.indexOf('message:read_content') + 1);
     // Otherwise appended in catalog order (permission ids follow it on a fresh database).
-    expect(keys.slice(-23)).toEqual([
+    expect(keys.slice(-26)).toEqual([
       'connector:read',
       'connector:manage',
       'domain:routing_manage',
@@ -162,8 +165,12 @@ describe('seed catalog', () => {
       'quarantine:manage',
       'quarantine:download',
       'quarantine:self',
+      'threat_intel:read',
+      'billing:read',
+      'delivery:suppression_manage',
     ]);
-    for (const key of keys) expect(key).toMatch(/^[a-z]+:[a-z_]+$/);
+    // `resource:action`; the resource may contain underscores since step 6.1 (`threat_intel`).
+    for (const key of keys) expect(key).toMatch(/^[a-z]+(?:_[a-z]+)*:[a-z_]+$/);
     for (const p of PERMISSIONS) expect(p.description.length, p.key).toBeGreaterThan(0);
   });
 
@@ -197,6 +204,26 @@ describe('seed catalog', () => {
         'delivery:read',
       ]),
     );
+  });
+
+  it('grants the step 6.1 permissions exactly as §3.6 says', () => {
+    const holders = (permission: string) =>
+      SYSTEM_ROLES.filter((r) => (r.permissions as readonly string[]).includes(permission))
+        .map((r) => r.key)
+        .sort();
+    expect(holders('threat_intel:read')).toEqual(
+      ['organization_admin', 'platform_admin', 'security_analyst', 'super_admin'].sort(),
+    );
+    expect(holders('billing:read')).toEqual(
+      ['compliance_auditor', 'organization_admin', 'super_admin'].sort(),
+    );
+    expect(holders('delivery:suppression_manage')).toEqual(
+      ['domain_admin', 'organization_admin', 'super_admin'].sort(),
+    );
+    for (const key of ['threat_intel:read', 'billing:read', 'delivery:suppression_manage']) {
+      expect(TENANT_PERMISSIONS, key).toContain(key);
+      expect(TENANT_READ_PERMISSIONS, key).not.toContain(key);
+    }
   });
 
   it('has exactly the 8 system roles of D8 plus mailbox_user (5.3), each referencing existing permissions only', () => {
@@ -252,6 +279,7 @@ describe('seed catalog', () => {
         'platform:scan_rescan',
         ...read,
         'audit:read',
+        'threat_intel:read',
       ],
       organization_admin: TENANT_PERMISSIONS,
       domain_admin: [
@@ -266,6 +294,7 @@ describe('seed catalog', () => {
         'policy:read',
         'message:read',
         'delivery:read',
+        'delivery:suppression_manage',
         'quarantine:read',
         'report:read',
       ],
@@ -295,6 +324,7 @@ describe('seed catalog', () => {
         'dlp:read',
         'dlp:manage',
         'dlp:evidence_read',
+        'threat_intel:read',
       ],
       quarantine_reviewer: [
         'organization:read',
@@ -315,6 +345,7 @@ describe('seed catalog', () => {
         'bec:read',
         'dlp:read',
         'dlp:evidence_read',
+        'billing:read',
       ],
       read_only_user: read,
       mailbox_user: ['quarantine:self'],

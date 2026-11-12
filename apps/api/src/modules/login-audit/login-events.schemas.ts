@@ -17,7 +17,7 @@ export const LoginEventsQuerySchema = PageQuerySchema.extend({
   to: z.iso.datetime({ offset: true }).optional().describe('Exclusive; default now'),
   outcome: z.enum(LOGIN_OUTCOMES).optional(),
   userId: z.uuid().optional().describe('Public id of a user of the organization'),
-});
+}).strict();
 
 export const LoginEventResponseSchema = z.object({
   id: z.string().describe('Decimal row id'),

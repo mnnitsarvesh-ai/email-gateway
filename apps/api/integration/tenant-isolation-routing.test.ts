@@ -6,6 +6,14 @@
  * override; `super_admin` under an override into B replaces B's destinations (audited with
  * `metadata.override`); `platform_admin` under an override can only read.
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers delete /api/v1/domains/:id/destinations
+// @covers get /api/v1/deliveries
+// @covers get /api/v1/domains/:id/destinations
+// @covers get /api/v1/messages/:messageId/deliveries
+// @covers get /api/v1/messages/:messageId/deliveries/events
+// @covers put /api/v1/domains/:id/destinations
+// ---- end of route coverage ----
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createIntegrationApp, type IntegrationApp } from './support/app';
 import {

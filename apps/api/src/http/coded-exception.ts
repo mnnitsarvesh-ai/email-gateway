@@ -2,6 +2,7 @@ import {
   type ArgumentsHost,
   Catch,
   type ExceptionFilter,
+  ForbiddenException,
   HttpException,
   HttpStatus,
 } from '@nestjs/common';
@@ -9,6 +10,7 @@ import { ApiResponse } from '@nestjs/swagger';
 import type { SchemaObject } from '@nestjs/swagger/dist/interfaces/open-api-spec.interface';
 import { getCorrelationId } from '@email-gateway/logger';
 import type { Response } from 'express';
+import { ensureRequestId } from './request-id.middleware';
 
 type CodedErrorScalar = string | number | boolean | null;
 
@@ -22,8 +24,8 @@ export type CodedErrorDetails = Readonly<
 
 /**
  * An HTTP error with a stable machine-readable `code` (e.g. `message_version_conflict`) next to
- * the human `message`, plus optional detail fields. Rendered by `CodedExceptionFilter` (the
- * global AllExceptionsFilter keeps only status and message). Step 3.3 L10/L11.
+ * the human `message`, plus optional detail fields. Rendered by the global `ApiExceptionFilter`
+ * (step 6.1) and, identically, by the controller-scoped `CodedExceptionFilter`. Step 3.3 L10/L11.
  */
 export class CodedHttpException extends HttpException {
   constructor(
@@ -36,6 +38,21 @@ export class CodedHttpException extends HttpException {
   }
 }
 
+/**
+ * A coded `403` that is also a `ForbiddenException` (step 6.1 D2), for the global
+ * PermissionsGuard whose callers and tests treat its refusals as ForbiddenException. The global
+ * ApiExceptionFilter renders its `code` (it reads the code of the exception's response object),
+ * so the body is the same as a CodedHttpException's.
+ */
+export class CodedForbiddenException extends ForbiddenException {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super({ message, code });
+  }
+}
+
 /** The body of a coded error: the standard error body plus `code` and the details. */
 export interface CodedErrorBody {
   statusCode: number;
@@ -43,6 +60,8 @@ export interface CodedErrorBody {
   code: string;
   message: string;
   correlationId?: string;
+  /** The server-minted `X-Request-Id` of the request (step 6.1 D1). */
+  requestId?: string;
   [detail: string]: unknown;
 }
 
@@ -57,15 +76,44 @@ export function codedErrorBody(exception: CodedHttpException): CodedErrorBody {
   };
 }
 
-/** Renders CodedHttpException with its `code` and details; scope it to the controllers using it. */
+/**
+ * Writes an error body with the request's `correlationId` and `requestId` (step 6.1 D1). Shared by
+ * the global ApiExceptionFilter and CodedExceptionFilter so both render the same bytes.
+ */
+export function sendErrorBody(res: Response, body: CodedErrorBody | Record<string, unknown>): void {
+  const out: Record<string, unknown> = { ...body };
+  const correlationId = getCorrelationId();
+  if (correlationId !== undefined) out.correlationId = correlationId;
+  out.requestId = ensureRequestId(res);
+  res.status(out.statusCode as number).json(out);
+}
+
+/**
+ * Response headers a coded error asks for: `Retry-After` from a numeric `retryAfterSeconds`
+ * property (e.g. `409 idempotency_request_in_progress`), unless a guard already set one.
+ */
+export function applyCodedHeaders(res: Response, exception: CodedHttpException): void {
+  const retryAfter = (exception as { retryAfterSeconds?: unknown }).retryAfterSeconds;
+  if (
+    typeof retryAfter === 'number' &&
+    Number.isFinite(retryAfter) &&
+    !res.headersSent &&
+    res.getHeader('Retry-After') === undefined
+  ) {
+    res.setHeader('Retry-After', String(Math.max(1, Math.ceil(retryAfter))));
+  }
+}
+
+/**
+ * Renders CodedHttpException with its `code` and details. Kept for the controllers that scope
+ * it (since step 6.1 the global ApiExceptionFilter renders the same body for every route).
+ */
 @Catch(CodedHttpException)
 export class CodedExceptionFilter implements ExceptionFilter<CodedHttpException> {
   catch(exception: CodedHttpException, host: ArgumentsHost): void {
     const res = host.switchToHttp().getResponse<Response>();
-    const body: CodedErrorBody = { ...codedErrorBody(exception) };
-    const correlationId = getCorrelationId();
-    if (correlationId !== undefined) body.correlationId = correlationId;
-    res.status(exception.getStatus()).json(body);
+    applyCodedHeaders(res, exception);
+    sendErrorBody(res, codedErrorBody(exception));
   }
 }
 
@@ -84,6 +132,7 @@ export function codedErrorSchema(
       message: { type: 'string' },
       ...details,
       correlationId: { type: 'string' },
+      requestId: { type: 'string', format: 'uuid' },
     },
     required: ['statusCode', 'error', 'code', 'message'],
   };

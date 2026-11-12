@@ -20,6 +20,7 @@ import {
 import {
   CurrentPrincipal,
   CurrentScope,
+  CursorList,
   RequirePermissions,
 } from '../../../auth-contracts/decorators';
 import type { Principal } from '../../../auth-contracts/principal';
@@ -88,6 +89,7 @@ export class DepartmentsController {
   constructor(private readonly departments: DepartmentsService) {}
 
   @Get()
+  @CursorList('v0')
   @RequirePermissions(USER_READ)
   @ApiOperation({
     summary: 'List departments',
@@ -193,6 +195,7 @@ export class DepartmentsController {
   }
 
   @Get(':departmentId/members')
+  @CursorList('v0')
   @RequirePermissions(USER_READ)
   @ApiOperation({
     summary: 'List the members of a department',

@@ -334,9 +334,25 @@ export class Fixtures {
     await p.organizationSetting.deleteMany({ where: { organizationId: { in: orgs } } });
     await p.organizationDeployment.deleteMany({ where: { organizationId: { in: orgs } } });
     await p.archiveLegalHold.deleteMany({ where: { organizationId: { in: orgs } } });
-    await p.organization.deleteMany({
-      where: { id: { in: orgs }, slug: { not: PLATFORM_ORGANIZATION_SLUG } },
-    });
+    // Idempotency-Key rows (step 3.3 L11, step 6.1 §3.5) of the fixture organizations (no FK;
+    // they would only expire after 24 h).
+    await p.apiIdempotencyKey.deleteMany({ where: { organizationId: { in: orgs } } });
+    // The notification-worker's quarantine digest scheduler (step 5.3) can create a
+    // quarantine_digest_runs row (FK RESTRICT) for any organization at any moment, including a
+    // fixture organization between this delete and the organization delete. Delete them and
+    // retry the organization delete a few times when that race happens.
+    for (let attempt = 0; ; attempt++) {
+      await p.quarantineDigestRun.deleteMany({ where: { organizationId: { in: orgs } } });
+      try {
+        await p.organization.deleteMany({
+          where: { id: { in: orgs }, slug: { not: PLATFORM_ORGANIZATION_SLUG } },
+        });
+        break;
+      } catch (error) {
+        const code = (error as { code?: string }).code;
+        if (code !== 'P2003' || attempt >= 4) throw error;
+      }
+    }
     this.organizations.clear();
     this.platformUsers.clear();
     this.emails.clear();

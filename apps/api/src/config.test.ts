@@ -1,4 +1,7 @@
 import { randomBytes } from 'node:crypto';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { ConfigValidationError } from '@email-gateway/config';
 import {
   ATTACHMENT_PLATFORM_DEFAULTS,
@@ -1057,5 +1060,166 @@ describe('loadApiConfig: quarantine (step 5.3 §5)', () => {
         LIFECYCLE_DEADLINE_HELD_FOR_REVIEW_HOURS: '312',
       }),
     ).toContain('QUARANTINE_MAX_REVIEW_DAYS');
+  });
+});
+
+describe('loadApiConfig: REST API conventions (step 6.1 §3.7)', () => {
+  /** `valid` without the generous test limits of TEST_DOMAIN_ENV, so the defaults show. */
+  const base = Object.fromEntries(
+    Object.entries(valid).filter(([key]) => !key.startsWith('API_RATE_')),
+  ) as Record<string, string>;
+
+  it('defaults every key and requires the cursor key', () => {
+    const cfg = loadApiConfig(base);
+    expect(cfg).toMatchObject({
+      API_CURSOR_TTL_SECONDS: 86_400,
+      API_RATE_PRINCIPAL_PER_MINUTE: 600,
+      API_RATE_TENANT_DEFAULT_PER_MINUTE: 300,
+      API_RATE_TENANT_MIN_PER_MINUTE: 10,
+      API_RATE_TENANT_MAX_PER_MINUTE: 10_000,
+      API_RATE_SENSITIVE_PER_MINUTE: 30,
+      API_RATE_EXPENSIVE_PER_MINUTE: 20,
+      API_RATE_LIMIT_CACHE_SECONDS: 60,
+      API_IDEMPOTENCY_LEGACY_MODE: 'enforce',
+      API_IDEMPOTENCY_PENDING_TTL_SECONDS: 300,
+      API_LIST_SCAN_BUDGET_ROWS: 5000,
+      API_MESSAGES_MAX_RANGE_DAYS: 31,
+      API_AUDIT_MAX_RANGE_DAYS: 90,
+      REPORTS_MAX_RANGE_DAYS: 31,
+      REPORTS_CACHE_TTL_SECONDS: 60,
+      REPORTS_QUERY_TIMEOUT_MS: 10_000,
+      RECIPIENT_SUPPRESSIONS_MAX_MANUAL: 100_000,
+    });
+    expect(cfg.API_CURSOR_KEY).toBe(base.API_CURSOR_KEY);
+    expect(cfg.API_CURSOR_KEY_PREVIOUS).toBeUndefined();
+    const { API_CURSOR_KEY: _omit, ...withoutKey } = base;
+    expect(rejection(withoutKey)).toContain('API_CURSOR_KEY');
+  });
+
+  it('names the cursor keys but never their values', () => {
+    const bad = 'short-cursor-key-MARKER';
+    const message = rejection({ ...base, API_CURSOR_KEY: bad });
+    expect(message).toContain('API_CURSOR_KEY');
+    expect(message).not.toContain(bad);
+    const previous = rejection({ ...base, API_CURSOR_KEY_PREVIOUS: bad });
+    expect(previous).toContain('API_CURSOR_KEY_PREVIOUS');
+    expect(previous).not.toContain(bad);
+  });
+
+  it('accepts a previous cursor key (rotation) and an empty one', () => {
+    const previous = hex64();
+    expect(
+      loadApiConfig({ ...base, API_CURSOR_KEY_PREVIOUS: previous }).API_CURSOR_KEY_PREVIOUS,
+    ).toBe(previous);
+    expect(loadApiConfig({ ...base, API_CURSOR_KEY_PREVIOUS: '' }).API_CURSOR_KEY_PREVIOUS).toBe(
+      undefined,
+    );
+  });
+
+  it('reads API_CURSOR_KEY from API_CURSOR_KEY_FILE', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'api-cursor-key-'));
+    const file = join(dir, 'key');
+    const key = hex64();
+    writeFileSync(file, `${key}\n`);
+    try {
+      const { API_CURSOR_KEY: _omit, ...withoutKey } = base;
+      expect(loadApiConfig({ ...withoutKey, API_CURSOR_KEY_FILE: file }).API_CURSOR_KEY).toBe(key);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts every key at its bounds', () => {
+    const low = loadApiConfig({
+      ...base,
+      API_CURSOR_TTL_SECONDS: '300',
+      API_RATE_PRINCIPAL_PER_MINUTE: '10',
+      API_RATE_TENANT_DEFAULT_PER_MINUTE: '10',
+      API_RATE_TENANT_MIN_PER_MINUTE: '1',
+      API_RATE_TENANT_MAX_PER_MINUTE: '10',
+      API_RATE_SENSITIVE_PER_MINUTE: '1',
+      API_RATE_EXPENSIVE_PER_MINUTE: '1',
+      API_RATE_LIMIT_CACHE_SECONDS: '5',
+      API_IDEMPOTENCY_LEGACY_MODE: 'warn',
+      API_IDEMPOTENCY_PENDING_TTL_SECONDS: '30',
+      API_LIST_SCAN_BUDGET_ROWS: '1000',
+      API_MESSAGES_MAX_RANGE_DAYS: '1',
+      API_AUDIT_MAX_RANGE_DAYS: '1',
+      REPORTS_MAX_RANGE_DAYS: '1',
+      REPORTS_CACHE_TTL_SECONDS: '10',
+      REPORTS_QUERY_TIMEOUT_MS: '1000',
+      RECIPIENT_SUPPRESSIONS_MAX_MANUAL: '1',
+    });
+    expect(low.API_IDEMPOTENCY_LEGACY_MODE).toBe('warn');
+    expect(low.API_RATE_TENANT_MIN_PER_MINUTE).toBe(1);
+    const high = loadApiConfig({
+      ...base,
+      API_CURSOR_TTL_SECONDS: '604800',
+      API_RATE_PRINCIPAL_PER_MINUTE: '10000',
+      API_RATE_TENANT_DEFAULT_PER_MINUTE: '100000',
+      API_RATE_TENANT_MIN_PER_MINUTE: '100000',
+      API_RATE_TENANT_MAX_PER_MINUTE: '1000000',
+      API_RATE_SENSITIVE_PER_MINUTE: '600',
+      API_RATE_EXPENSIVE_PER_MINUTE: '600',
+      API_RATE_LIMIT_CACHE_SECONDS: '300',
+      API_IDEMPOTENCY_PENDING_TTL_SECONDS: '3600',
+      API_LIST_SCAN_BUDGET_ROWS: '50000',
+      API_MESSAGES_MAX_RANGE_DAYS: '92',
+      API_AUDIT_MAX_RANGE_DAYS: '366',
+      REPORTS_MAX_RANGE_DAYS: '92',
+      REPORTS_CACHE_TTL_SECONDS: '900',
+      REPORTS_QUERY_TIMEOUT_MS: '30000',
+      RECIPIENT_SUPPRESSIONS_MAX_MANUAL: '1000000',
+    });
+    expect(high.API_RATE_TENANT_MAX_PER_MINUTE).toBe(1_000_000);
+  });
+
+  it.each([
+    [{ API_CURSOR_TTL_SECONDS: '299' }, 'API_CURSOR_TTL_SECONDS'],
+    [{ API_CURSOR_TTL_SECONDS: '604801' }, 'API_CURSOR_TTL_SECONDS'],
+    [{ API_RATE_PRINCIPAL_PER_MINUTE: '9' }, 'API_RATE_PRINCIPAL_PER_MINUTE'],
+    [{ API_RATE_PRINCIPAL_PER_MINUTE: '10001' }, 'API_RATE_PRINCIPAL_PER_MINUTE'],
+    [{ API_RATE_TENANT_DEFAULT_PER_MINUTE: '9' }, 'API_RATE_TENANT_DEFAULT_PER_MINUTE'],
+    [{ API_RATE_TENANT_DEFAULT_PER_MINUTE: '100001' }, 'API_RATE_TENANT_DEFAULT_PER_MINUTE'],
+    [{ API_RATE_TENANT_MIN_PER_MINUTE: '0' }, 'API_RATE_TENANT_MIN_PER_MINUTE'],
+    [{ API_RATE_TENANT_MAX_PER_MINUTE: '9' }, 'API_RATE_TENANT_MAX_PER_MINUTE'],
+    [{ API_RATE_TENANT_MAX_PER_MINUTE: '1000001' }, 'API_RATE_TENANT_MAX_PER_MINUTE'],
+    [{ API_RATE_SENSITIVE_PER_MINUTE: '0' }, 'API_RATE_SENSITIVE_PER_MINUTE'],
+    [{ API_RATE_SENSITIVE_PER_MINUTE: '601' }, 'API_RATE_SENSITIVE_PER_MINUTE'],
+    [{ API_RATE_EXPENSIVE_PER_MINUTE: '601' }, 'API_RATE_EXPENSIVE_PER_MINUTE'],
+    [{ API_RATE_LIMIT_CACHE_SECONDS: '4' }, 'API_RATE_LIMIT_CACHE_SECONDS'],
+    [{ API_RATE_LIMIT_CACHE_SECONDS: '301' }, 'API_RATE_LIMIT_CACHE_SECONDS'],
+    [{ API_IDEMPOTENCY_LEGACY_MODE: 'off' }, 'API_IDEMPOTENCY_LEGACY_MODE'],
+    [{ API_IDEMPOTENCY_PENDING_TTL_SECONDS: '29' }, 'API_IDEMPOTENCY_PENDING_TTL_SECONDS'],
+    [{ API_IDEMPOTENCY_PENDING_TTL_SECONDS: '3601' }, 'API_IDEMPOTENCY_PENDING_TTL_SECONDS'],
+    [{ API_LIST_SCAN_BUDGET_ROWS: '999' }, 'API_LIST_SCAN_BUDGET_ROWS'],
+    [{ API_LIST_SCAN_BUDGET_ROWS: '50001' }, 'API_LIST_SCAN_BUDGET_ROWS'],
+    [{ API_MESSAGES_MAX_RANGE_DAYS: '93' }, 'API_MESSAGES_MAX_RANGE_DAYS'],
+    [{ API_AUDIT_MAX_RANGE_DAYS: '367' }, 'API_AUDIT_MAX_RANGE_DAYS'],
+    [{ REPORTS_MAX_RANGE_DAYS: '0' }, 'REPORTS_MAX_RANGE_DAYS'],
+    [{ REPORTS_CACHE_TTL_SECONDS: '901' }, 'REPORTS_CACHE_TTL_SECONDS'],
+    [{ REPORTS_QUERY_TIMEOUT_MS: '999' }, 'REPORTS_QUERY_TIMEOUT_MS'],
+    [{ REPORTS_QUERY_TIMEOUT_MS: '30001' }, 'REPORTS_QUERY_TIMEOUT_MS'],
+    [{ RECIPIENT_SUPPRESSIONS_MAX_MANUAL: '0' }, 'RECIPIENT_SUPPRESSIONS_MAX_MANUAL'],
+    [{ RECIPIENT_SUPPRESSIONS_MAX_MANUAL: '1000001' }, 'RECIPIENT_SUPPRESSIONS_MAX_MANUAL'],
+  ])('refuses %o naming %s', (env, key) => {
+    expect(rejection({ ...base, ...env })).toContain(key);
+  });
+
+  it('requires tenant min <= default <= max', () => {
+    expect(
+      rejection({
+        ...base,
+        API_RATE_TENANT_MIN_PER_MINUTE: '500',
+        API_RATE_TENANT_DEFAULT_PER_MINUTE: '300',
+      }),
+    ).toContain('API_RATE_TENANT_MIN_PER_MINUTE');
+    expect(
+      rejection({
+        ...base,
+        API_RATE_TENANT_DEFAULT_PER_MINUTE: '3000',
+        API_RATE_TENANT_MAX_PER_MINUTE: '2000',
+      }),
+    ).toContain('API_RATE_TENANT_MAX_PER_MINUTE');
   });
 });

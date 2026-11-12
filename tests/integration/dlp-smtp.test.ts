@@ -769,6 +769,8 @@ describe.skipIf(gate.skip)(
         messageId: publicId,
         scanId: scanId.toString(),
         matchCount: body.matchCount,
+        // Step 6.1: every audit row carries the request id of the HTTP request.
+        requestId: expect.any(String),
       });
       expect(withoutHexDigests(json(audits))).not.toMatch(LONG_DIGIT_RUN);
       expect(json(audits)).not.toContain(iban);

@@ -73,7 +73,7 @@ export type RecipientsBody = z.output<typeof RecipientsBodySchema>;
 
 export const ListRecipientsQuerySchema = PageQuerySchema.extend({
   q: LocalPartSchema.optional().describe('Prefix of the local part (case-insensitive)'),
-});
+}).strict();
 export type ListRecipientsQuery = z.output<typeof ListRecipientsQuerySchema>;
 
 // ---- Responses ---------------------------------------------------------------------------

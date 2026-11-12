@@ -4,6 +4,7 @@ import { AuthController } from './controllers/auth.controller';
 import { MfaController } from './controllers/mfa.controller';
 import { PlatformOverrideController } from './controllers/platform-override.controller';
 import { SessionsController } from './controllers/sessions.controller';
+import { ApiRateLimitGuard } from '../../rate-limit/api-rate-limit.guard';
 import { AuthGuard } from './guards/auth.guard';
 import { PermissionsGuard } from './guards/permissions.guard';
 import { OverrideAuditInterceptor } from './interceptors/override-audit.interceptor';
@@ -70,8 +71,11 @@ import { UserTokenService } from './services/user-token.service';
     SessionPurgeService,
     BootstrapAdminService,
     ReauthenticationService,
-    // Global guards in this order (D9), then the override audit interceptor.
+    // Global guards in this order (D9): authentication, the global API rate limiter (step 6.1
+    // D8: after authentication so it knows the principal, before authorization so denied
+    // requests count too), authorization; then the override audit interceptor.
     { provide: APP_GUARD, useClass: AuthGuard },
+    { provide: APP_GUARD, useClass: ApiRateLimitGuard },
     { provide: APP_GUARD, useClass: PermissionsGuard },
     { provide: APP_INTERCEPTOR, useClass: OverrideAuditInterceptor },
   ],

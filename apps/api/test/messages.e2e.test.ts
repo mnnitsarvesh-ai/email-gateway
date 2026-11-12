@@ -3,8 +3,14 @@
  * authorization (401, 403 per permission, users and API keys), request validation before any
  * database access (400 with the coded Idempotency-Key errors, invalid ids and bodies), the 202
  * with the `Idempotency-Replayed` header, and the coded 404 body of the read routes. The writes
- * against the real writer and replica run in integration/messages-lifecycle.test.ts.
+ * against the real writer and replica run in integration/messages-lifecycle.test.ts. Step 6.1
+ * (WP2 convergence): the scans route's validation, authorization and coded 404, strict query.
  */
+// @covers get /api/v1/messages/:messageId/lifecycle
+// @covers get /api/v1/messages/:messageId/lifecycle/history
+// @covers post /api/v1/messages/:messageId/rescan
+// @covers post /api/v1/messages/:messageId/release
+// @covers get /api/v1/messages/:messageId/scans
 import { randomBytes, randomUUID } from 'node:crypto';
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
@@ -368,6 +374,35 @@ describe('message lifecycle routes (e2e, dependencies stubbed)', () => {
       currentVersion: 4,
       entries: 2,
       route: 'POST /api/v1/quarantine/entries/{entryId}/release',
+    });
+  });
+
+  it('scans (step 6.1 convergence): 401, 403, 400 for bad ids and unknown query fields, coded 404', async () => {
+    await http().get(`/api/v1/messages/${id}/scans`).expect(401);
+    principalWith([RESCAN]);
+    await http()
+      .get(`/api/v1/messages/${id}/scans`)
+      .set(await bearer())
+      .expect(403);
+    principalWith([READ]);
+    for (const path of [
+      '/api/v1/messages/not-a-uuid/scans',
+      `/api/v1/messages/${id}/scans?unknown=1`,
+      `/api/v1/messages/${id}/scans?limit=21`,
+    ]) {
+      const res = await http()
+        .get(path)
+        .set(await bearer());
+      expect(res.status, path).toBe(400);
+      expect(res.body.code).toBe('validation_failed');
+    }
+    const missing = await http()
+      .get(`/api/v1/messages/${randomUUID()}/scans`)
+      .set(await bearer())
+      .expect(404);
+    expect(missing.body).toMatchObject({
+      code: 'message_not_found',
+      requestId: expect.any(String),
     });
   });
 });

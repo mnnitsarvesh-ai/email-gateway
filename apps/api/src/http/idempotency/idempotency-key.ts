@@ -24,6 +24,7 @@ export const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]+$/;
 export const IDEMPOTENCY_KEY_REQUIRED = 'idempotency_key_required';
 export const IDEMPOTENCY_KEY_INVALID = 'idempotency_key_invalid';
 export const IDEMPOTENCY_KEY_REUSED = 'idempotency_key_reused';
+export const IDEMPOTENCY_REQUEST_IN_PROGRESS = 'idempotency_request_in_progress';
 
 export const idempotencyKeyRequired = (): CodedHttpException =>
   new CodedHttpException(
@@ -45,6 +46,21 @@ export const idempotencyKeyReused = (): CodedHttpException =>
     IDEMPOTENCY_KEY_REUSED,
     'The Idempotency-Key was already used for a different request',
   );
+
+/**
+ * `409 idempotency_request_in_progress` (step 6.1 D9): the same request is still running under
+ * this key (a live `pending` reservation). `retryAfterSeconds` becomes the `Retry-After` header
+ * (set by the ApiExceptionFilter / CodedExceptionFilter and the interceptor).
+ */
+export class IdempotencyInProgressException extends CodedHttpException {
+  constructor(readonly retryAfterSeconds: number) {
+    super(
+      HttpStatus.CONFLICT,
+      IDEMPOTENCY_REQUEST_IN_PROGRESS,
+      'A request with this Idempotency-Key is still in progress; retry later',
+    );
+  }
+}
 
 /**
  * The validated header value. Missing (or empty) → `400 idempotency_key_required`; repeated,

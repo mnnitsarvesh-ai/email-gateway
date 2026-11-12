@@ -21,9 +21,11 @@ import {
   ApiSecurity,
   ApiTags,
 } from '@nestjs/swagger';
+import { ReturnsSecret } from '../../rate-limit/rate-class.decorator';
 import {
   CurrentPrincipal,
   CurrentScope,
+  CursorList,
   RequirePermissions,
   UserOnly,
 } from '../../auth-contracts/decorators';
@@ -58,6 +60,7 @@ export class ApiKeysController {
   constructor(private readonly keys: ApiKeysService) {}
 
   @Get()
+  @CursorList('v0')
   @RequirePermissions('apikey:read')
   @ApiSecurity(API_KEY_SCHEME)
   @ApiOperation({
@@ -80,6 +83,7 @@ export class ApiKeysController {
   }
 
   @Post()
+  @ReturnsSecret()
   @RequirePermissions('apikey:manage')
   @UserOnly()
   @ApiOperation({

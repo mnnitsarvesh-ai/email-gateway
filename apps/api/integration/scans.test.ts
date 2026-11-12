@@ -7,6 +7,12 @@
  * Scan rows are inserted as the email-worker writes them (fixtures, L8.6); the worker itself is
  * tested in apps/email-worker.
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers delete /api/v1/scan-settings/:engine
+// @covers get /api/v1/scan-settings
+// @covers post /api/v1/platform/organizations/:organizationId/messages/:messageId/scan-training
+// @covers put /api/v1/scan-settings/:engine
+// ---- end of route coverage ----
 import { randomBytes, randomUUID } from 'node:crypto';
 import { PrismaReadService } from '@email-gateway/common';
 import { Prisma } from '@email-gateway/database';
@@ -18,7 +24,7 @@ import {
   type Fixtures,
   type FixtureUser,
 } from './support/fixtures';
-import { apiKeyHeader, bearer, loginWithMfa, uniqueIp } from './support/http';
+import { apiKeyHeader, bearer, idem, loginWithMfa, uniqueIp } from './support/http';
 import {
   deleteLifecycleFixtures,
   insertLifecycleMessage,
@@ -451,6 +457,7 @@ describe('POST /platform/organizations/{organizationId}/messages/{messageId}/sca
     const body = { operation: 'learn_spam', reason: 'confirmed spam campaign' };
     const first = await ctx.http
       .post(trainUrl(orgA, message))
+      .set(idem())
       .set(headers(platformAdmin))
       .send(body)
       .expect(200);
@@ -461,6 +468,7 @@ describe('POST /platform/organizations/{organizationId}/messages/{messageId}/sca
     });
     const again = await ctx.http
       .post(trainUrl(orgA, message))
+      .set(idem())
       .set(headers(platformAdmin))
       .send(body)
       .expect(200);
@@ -492,12 +500,14 @@ describe('POST /platform/organizations/{organizationId}/messages/{messageId}/sca
     const message = await insertLifecycleMessage(ctx, orgA, { state: 'scanned', emlObjectKey });
     const add = await ctx.http
       .post(trainUrl(orgA, message))
+      .set(idem())
       .set(headers(platformAdmin))
       .send({ operation: 'fuzzy_add', fuzzyFlag: 'spam', reason: 'campaign template' })
       .expect(200);
     expect(add.body.result).toBe('added');
     const del = await ctx.http
       .post(trainUrl(orgA, message))
+      .set(idem())
       .set(headers(platformAdmin))
       .send({ operation: 'fuzzy_delete', fuzzyFlag: 'spam', reason: 'false positive' })
       .expect(200);
@@ -515,11 +525,26 @@ describe('POST /platform/organizations/{organizationId}/messages/{messageId}/sca
     const message = await insertLifecycleMessage(ctx, orgA, { state: 'scanned', emlObjectKey });
     const body = { operation: 'learn_ham', reason: 'not spam' };
     const tenantAdmin = await tokenOf(await fx.createUser(orgA, { roles: ['organization_admin'] }));
-    await ctx.http.post(trainUrl(orgA, message)).set(headers(tenantAdmin)).send(body).expect(403);
+    await ctx.http
+      .post(trainUrl(orgA, message))
+      .set(idem())
+      .set(headers(tenantAdmin))
+      .send(body)
+      .expect(403);
     const adminKey = apiKeyHeader(await fx.createApiKey(orgA, ['message:read', 'message:rescan']));
-    await ctx.http.post(trainUrl(orgA, message)).set(headers(adminKey)).send(body).expect(403);
+    await ctx.http
+      .post(trainUrl(orgA, message))
+      .set(idem())
+      .set(headers(adminKey))
+      .send(body)
+      .expect(403);
     const noMfa = await tokenOf(await fx.createPlatformUser(['platform_admin'], { mfa: false }));
-    await ctx.http.post(trainUrl(orgA, message)).set(headers(noMfa)).send(body).expect(403);
+    await ctx.http
+      .post(trainUrl(orgA, message))
+      .set(idem())
+      .set(headers(noMfa))
+      .send(body)
+      .expect(403);
     expect((await trainingRows(orgA, message)).audit).toHaveLength(0);
   });
 
@@ -528,12 +553,14 @@ describe('POST /platform/organizations/{organizationId}/messages/{messageId}/sca
     const body = { operation: 'learn_spam', reason: 'x' };
     const wrongOrg = await ctx.http
       .post(trainUrl(orgB, message))
+      .set(idem())
       .set(headers(platformAdmin))
       .send(body)
       .expect(404);
     expect(wrongOrg.body.code).toBe('message_not_found');
     const missing = await ctx.http
       .post(trainUrl(orgA, message))
+      .set(idem())
       .set(headers(platformAdmin))
       .send(body)
       .expect(409);
@@ -546,6 +573,7 @@ describe('POST /platform/organizations/{organizationId}/messages/{messageId}/sca
       .post(
         `/api/v1/platform/organizations/${randomUUID()}/messages/${message.publicId}/scan-training`,
       )
+      .set(idem())
       .set(headers(platformAdmin))
       .send(body)
       .expect(404);
@@ -558,6 +586,7 @@ describe('POST /platform/organizations/{organizationId}/messages/{messageId}/sca
       const message = await insertLifecycleMessage(ctx, orgA, { state: 'scanned', emlObjectKey });
       const res = await unreachable.http
         .post(trainUrl(orgA, message))
+        .set(idem())
         .set(headers(platformAdmin))
         .send({ operation: 'learn_spam', reason: 'outage test' })
         .expect(503);

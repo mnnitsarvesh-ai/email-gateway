@@ -10,6 +10,11 @@ export interface RequestContext {
    * Never taken from client headers.
    */
   tenantId?: string;
+  /**
+   * Server-minted id of one HTTP request (step 6.1 D1, the api's `X-Request-Id`). Never taken from
+   * client headers (clients use the correlation id for their own ids).
+   */
+  requestId?: string;
 }
 
 const storage = new AsyncLocalStorage<RequestContext>();
@@ -45,4 +50,17 @@ export function getCorrelationId(): string | undefined {
 export function setContextTenant(organizationId: string): void {
   const store = storage.getStore();
   if (store) store.tenantId = organizationId;
+}
+
+/**
+ * Records the server-minted request id (step 6.1 D1) on the current request context so every
+ * later log line carries it. Called by the API's request-id middleware; a no-op outside a context.
+ */
+export function setContextRequestId(requestId: string): void {
+  const store = storage.getStore();
+  if (store) store.requestId = requestId;
+}
+
+export function getRequestId(): string | undefined {
+  return storage.getStore()?.requestId;
 }

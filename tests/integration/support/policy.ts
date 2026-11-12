@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { PrismaClient } from '@email-gateway/database';
 import { EventTypes } from '@email-gateway/event-contracts';
-import type { ApiSession } from './api-client';
+import { idempotencyKey, type ApiSession } from './api-client';
 import { compose, composeOk, run, waitFor } from './compose';
 import { stack } from './env';
 import type { MessageKey } from './lifecycle';
@@ -382,15 +382,20 @@ export async function createAndPublishPolicy(
   return { policyId, generation: await publishVersion(publisher, policyId, 1) };
 }
 
-/** Publishes and activates draft `versionNo` (expected row version 1). */
+/**
+ * Publishes and activates draft `versionNo` (expected row version 1). The publish is a step 6.1
+ * §3.5 sensitive mutation (`policy.version_publish`), so it carries a fresh `Idempotency-Key`.
+ */
 export async function publishVersion(
   publisher: ApiSession,
   policyId: string,
   versionNo: number,
 ): Promise<string> {
-  const published = await publisher.post(`/policies/${policyId}/versions/${versionNo}/publish`, {
-    expectedRowVersion: 1,
-  });
+  const published = await publisher.post(
+    `/policies/${policyId}/versions/${versionNo}/publish`,
+    { expectedRowVersion: 1 },
+    idempotencyKey(),
+  );
   if (published.status !== 200) {
     throw new Error(
       `publish of ${policyId} v${versionNo} answered ${published.status}: ${JSON.stringify(published.body)}`,

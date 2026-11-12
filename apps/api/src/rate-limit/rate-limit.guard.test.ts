@@ -9,6 +9,7 @@ import { Reflector } from '@nestjs/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { InMemoryKeyValueStore } from '../../test/support/in-memory-key-value-store';
 import { sha256Hex } from '../crypto/tokens';
+import { CodedHttpException } from '../http/coded-exception';
 import { RateLimit } from './rate-limit.decorator';
 import { RateLimitGuard } from './rate-limit.guard';
 
@@ -84,6 +85,11 @@ describe('RateLimitGuard', () => {
     expect(error).toBeInstanceOf(HttpException);
     expect((error as HttpException).getStatus()).toBe(429);
     expect(headers['Retry-After']).toBe('45');
+    // Step 6.1 D8: coded like the global limiter, same message.
+    expect(error).toBeInstanceOf(CodedHttpException);
+    expect((error as CodedHttpException).code).toBe('rate_limited');
+    expect((error as CodedHttpException).details).toEqual({ scope: 'route' });
+    expect((error as CodedHttpException).message).toBe('Too many requests');
   });
 
   it('counts per identifier', async () => {

@@ -5,6 +5,12 @@
  * same transaction, deprecated `outbound_source` rows never shown or touched, and the
  * permission split (`domain:read` cannot change destinations).
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers delete /api/v1/domains/:id/destinations
+// @covers get /api/v1/destination-providers
+// @covers get /api/v1/domains/:id/destinations
+// @covers put /api/v1/domains/:id/destinations
+// ---- end of route coverage ----
 import { domainRoutingChangedV1 } from '@email-gateway/event-contracts';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createIntegrationApp, type IntegrationApp } from './support/app';

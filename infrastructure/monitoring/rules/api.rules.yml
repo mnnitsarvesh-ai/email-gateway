@@ -1,0 +1,64 @@
+# REST API alerts (step 6.1 D16, docs/plan/steps/18-rest-api.md; ADR-0050..0053).
+# Series (the api's registry, GET /metrics on the internal port, job "api"):
+# api_http_requests_total{method,route,status_class} (route = the path template or
+# `unmatched`), api_rate_limit_store_errors_total (Redis failures of the global limiter; the
+# request is refused with 503, fail closed) and api_report_timeouts_total{report} (report queries
+# stopped by MAX_EXECUTION_TIME, answered 503 report_timeout). Labels are bounded enums and route
+# templates only: never a tenant, principal, address or id. The alerts aggregate them away.
+# Every alert links its section of docs/runbooks/api-rate-limits-and-reports.md.
+# Validate with `promtool check rules` and `promtool test rules tests/api.rules.test.yml`.
+groups:
+  - name: api
+    rules:
+      - alert: ApiHighServerErrorRatio
+        # More than 5 % of the api's requests answered 5xx over 10 minutes, sustained for 10
+        # minutes. Needs a minimum of traffic (1 request per second) so that a handful of
+        # errors on an idle stack does not page. Probes and the scrape are included (they are
+        # 2xx while the api is healthy).
+        expr: >-
+          (
+            sum(rate(api_http_requests_total{status_class="5xx"}[10m]))
+            /
+            sum(rate(api_http_requests_total[10m]))
+          ) > 0.05
+          and
+          sum(rate(api_http_requests_total[10m])) > 1
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: More than 5 % of API requests fail with a server error
+          description: >-
+            For 10 minutes more than 5 % of the api's requests were answered with a 5xx status.
+            Break the 5xx series of api_http_requests_total down by route: a 503 storm on every
+            route usually means the rate-limit store (Redis) or the MySQL writer/replica is
+            unreachable, a 503 on the report routes only means report timeouts.
+          runbook_url: docs/runbooks/api-rate-limits-and-reports.md#apihighservererrorratio
+      - alert: ApiRateLimitStoreErrors
+        # The global limiter fails closed: every authenticated request is refused with 503 while
+        # Redis is unreachable.
+        expr: sum(increase(api_rate_limit_store_errors_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: The API rate-limit store (Redis) is failing; requests are refused
+          description: >-
+            The api could not read or increment its rate-limit counters for at least 5 minutes.
+            The limiter fails closed, so authenticated API requests are answered 503
+            service_unavailable until Redis answers again. Check the Redis endpoint (REDIS_URL),
+            its memory and connection count, and the api logs for the store error.
+          runbook_url: docs/runbooks/api-rate-limits-and-reports.md#apiratelimitstoreerrors
+      - alert: ApiReportTimeouts
+        # Report queries stopped by MAX_EXECUTION_TIME (REPORTS_QUERY_TIMEOUT_MS).
+        expr: sum(increase(api_report_timeouts_total[15m])) > 5
+        labels:
+          severity: warning
+        annotations:
+          summary: API report queries are timing out
+          description: >-
+            More than 5 report queries in 15 minutes were stopped by MAX_EXECUTION_TIME and
+            answered 503 report_timeout. Nothing is cached for them. The replica is overloaded or
+            lagging, or tenants request wide ranges at high volume; see which report with sum by
+            (report) (increase(api_report_timeouts_total[15m])).
+          runbook_url: docs/runbooks/api-rate-limits-and-reports.md#apireporttimeouts

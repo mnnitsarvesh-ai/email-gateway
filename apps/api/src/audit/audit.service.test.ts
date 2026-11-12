@@ -98,6 +98,32 @@ describe('AuditService.record', () => {
     });
   });
 
+  it('adds the request id of the HTTP request to the metadata (step 6.1 D11)', async () => {
+    const { audit, create } = service();
+    const requestId = '0b9c6a2e-1111-4222-8333-444455556666';
+    await runWithContext({ correlationId: 'corr-audit-0002', requestId }, async () => {
+      await audit.record({
+        organizationId: 7n,
+        actor: { type: 'user', id: 'u-1' },
+        action: 'user.invited',
+        resourceType: 'user',
+        metadata: { roleKeys: ['read_only_user'] },
+      });
+      // Also when the caller passes no metadata.
+      await audit.record({
+        organizationId: 7n,
+        actor: SYSTEM_ACTOR,
+        action: 'x.y',
+        resourceType: 'x',
+      });
+    });
+    expect(create.mock.calls[0]![0].data.metadata).toEqual({
+      roleKeys: ['read_only_user'],
+      requestId,
+    });
+    expect(create.mock.calls[1]![0].data.metadata).toEqual({ requestId });
+  });
+
   it('writes platform-only and system rows with nulls', async () => {
     const { audit, create } = service();
     await audit.record({

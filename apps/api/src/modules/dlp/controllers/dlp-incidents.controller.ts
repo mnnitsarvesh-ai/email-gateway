@@ -1,6 +1,6 @@
 import { Controller, Get, Query } from '@nestjs/common';
 import { ApiOkResponse, ApiOperation } from '@nestjs/swagger';
-import { CurrentScope, RequirePermissions } from '../../../auth-contracts/decorators';
+import { CurrentScope, CursorList, RequirePermissions } from '../../../auth-contracts/decorators';
 import type { TenantScope } from '../../../auth-contracts/tenant-scope';
 import { zodToOpenApi } from '../../../validation/zod-openapi';
 import { ZodValidationPipe } from '../../../validation/zod-validation.pipe';
@@ -22,6 +22,7 @@ export class DlpIncidentsController {
   constructor(private readonly incidents: DlpIncidentsService) {}
 
   @Get()
+  @CursorList('v0')
   @RequirePermissions(DLP_READ)
   @ApiOperation({
     summary: 'List the DLP incidents',

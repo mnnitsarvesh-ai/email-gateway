@@ -10,6 +10,24 @@
  * `reproducible: true`, the history filters/pagination/range bound, the scans `policy` section,
  * departments with `department_in_use`, and the organization purge.
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers delete /api/v1/departments/:departmentId
+// @covers get /api/v1/messages/:messageId/policy-evaluations
+// @covers get /api/v1/policies
+// @covers get /api/v1/policies/:policyId
+// @covers get /api/v1/policies/executions
+// @covers post /api/v1/departments
+// @covers post /api/v1/departments/:departmentId/members
+// @covers post /api/v1/messages/:messageId/scans/:scanId/policy/dry-run
+// @covers post /api/v1/policies
+// @covers post /api/v1/policies/:policyId/disable
+// @covers post /api/v1/policies/:policyId/enable
+// @covers post /api/v1/policies/:policyId/versions
+// @covers post /api/v1/policies/:policyId/versions/:versionNo/activate
+// @covers post /api/v1/policies/:policyId/versions/:versionNo/publish
+// @covers post /api/v1/policies/test
+// @covers put /api/v1/policies/:policyId/versions/:versionNo
+// ---- end of route coverage ----
 import { createHash } from 'node:crypto';
 import {
   buildPolicyInput,
@@ -45,7 +63,7 @@ import {
   type Fixtures,
   type FixtureUser,
 } from './support/fixtures';
-import { bearer, loginWithMfa, uniqueIp } from './support/http';
+import { bearer, idem, loginWithMfa, uniqueIp } from './support/http';
 import {
   deleteLifecycleFixtures,
   insertLifecycleMessage,
@@ -354,11 +372,13 @@ describe('policy lifecycle on the writer (P17, P12)', () => {
 
     await ctx.http
       .post(`${P}/${policyId}/versions/1/publish`)
+      .set(idem())
       .set(headers(analystA))
       .send({ expectedRowVersion: 1 })
       .expect(403);
     const published = await ctx.http
       .post(`${P}/${policyId}/versions/1/publish`)
+      .set(idem())
       .set(headers(adminA))
       .send({ expectedRowVersion: 1 })
       .expect(200);
@@ -388,12 +408,21 @@ describe('policy lifecycle on the writer (P17, P12)', () => {
       .expect(201);
     await ctx.http
       .post(`${P}/${policyId}/versions/2/publish`)
+      .set(idem())
       .set(headers(adminA))
       .send({ expectedRowVersion: 1 })
       .expect(200);
     expect(await generationOf(orgA)).toBe(2n);
-    await ctx.http.post(`${P}/${policyId}/versions/1/activate`).set(headers(adminA)).expect(200);
-    await ctx.http.post(`${P}/${policyId}/versions/1/activate`).set(headers(adminA)).expect(200);
+    await ctx.http
+      .post(`${P}/${policyId}/versions/1/activate`)
+      .set(idem())
+      .set(headers(adminA))
+      .expect(200);
+    await ctx.http
+      .post(`${P}/${policyId}/versions/1/activate`)
+      .set(idem())
+      .set(headers(adminA))
+      .expect(200);
     expect(await generationOf(orgA)).toBe(3n);
     await ctx.http.post(`${P}/${policyId}/disable`).set(headers(adminA)).expect(200);
     await ctx.http.post(`${P}/${policyId}/disable`).set(headers(adminA)).expect(200);
@@ -495,6 +524,7 @@ describe('test, dry-run, scans policy section and history (P16, P22, P23)', () =
       .expect(201);
     await ctx.http
       .post(`${P}/${created.body.policy.id as string}/versions/1/publish`)
+      .set(idem())
       .set(headers(adminA))
       .send({ expectedRowVersion: 1 })
       .expect(200);
@@ -682,6 +712,7 @@ describe('organization purge (step 5.2)', () => {
       .expect(201);
     await ctx.http
       .post(`${P}/${created.body.policy.id as string}/versions/1/publish`)
+      .set(idem())
       .set(headers(adminC))
       .send({ expectedRowVersion: 1 })
       .expect(200);

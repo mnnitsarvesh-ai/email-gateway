@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma } from '@email-gateway/database';
+import { type ApiIdempotencyState, Prisma } from '@email-gateway/database';
 
 type Tx = Prisma.TransactionClient;
 
@@ -13,6 +13,11 @@ export interface IdempotencyRecord {
   statusCode: number;
   response: unknown;
   expiresAt: Date;
+  /**
+   * `completed` (stored 2xx) or `pending` (a reservation of the interceptor, step 6.1 D9);
+   * absent means `completed` (records built before 6.1).
+   */
+  state?: ApiIdempotencyState;
 }
 
 export interface NewIdempotencyRecord {
@@ -36,6 +41,7 @@ interface RecordRow {
   status_code: number | bigint;
   response: unknown;
   expires_at: Date;
+  state: ApiIdempotencyState;
 }
 
 /** The unique key `(organization_id, idempotency_key)` of `api_idempotency_keys`. */
@@ -54,6 +60,30 @@ export function isIdempotencyKeyViolation(error: unknown): boolean {
   return false;
 }
 
+/** MySQL ER_LOCK_DEADLOCK, as a raw query reports it (P2010 `meta.code`). */
+const MYSQL_DEADLOCK = '1213';
+
+/**
+ * An InnoDB deadlock or write conflict (P2034, or 1213 from a raw query). Two requests with the
+ * same new key both `SELECT … FOR UPDATE` the absent row under REPEATABLE READ: their gap locks
+ * are compatible, each insert's insert-intention lock waits on the other's gap lock, and InnoDB
+ * rolls one back. The loser's retry then sees the winner's row (step 6.1 D9).
+ */
+export function isWriteConflict(error: unknown): boolean {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError)) return false;
+  if (error.code === 'P2034') return true;
+  const code = (error.meta as { code?: unknown } | undefined)?.code;
+  return error.code === 'P2010' && String(code) === MYSQL_DEADLOCK;
+}
+
+/**
+ * A lost race for one `(organization_id, idempotency_key)`: the unique key (P2002) or the
+ * deadlock of the lock-then-insert pattern (isWriteConflict). Retried once by both services.
+ */
+export function isIdempotencyRace(error: unknown): boolean {
+  return isIdempotencyKeyViolation(error) || isWriteConflict(error);
+}
+
 /**
  * `api_idempotency_keys` (step 3.3 L11; not partitioned, no foreign key, owned by the api) on
  * the writer, always inside the caller's transaction. The key column is `utf8mb4_bin`
@@ -65,7 +95,7 @@ export class IdempotencyRepository {
   async lock(tx: Tx, organizationId: bigint, key: string): Promise<IdempotencyRecord | null> {
     const rows = await tx.$queryRaw<RecordRow[]>`
       SELECT id, operation, principal, request_sha256, resource_id, status_code, response,
-             expires_at
+             expires_at, state
       FROM api_idempotency_keys
       WHERE organization_id = ${organizationId} AND idempotency_key = ${key}
       FOR UPDATE`;
@@ -81,6 +111,7 @@ export class IdempotencyRepository {
       response:
         typeof row.response === 'string' ? (JSON.parse(row.response) as unknown) : row.response,
       expiresAt: row.expires_at,
+      state: row.state,
     };
   }
 
@@ -90,6 +121,9 @@ export class IdempotencyRepository {
   }
 
   async insert(tx: Tx, record: NewIdempotencyRecord): Promise<void> {
-    await tx.apiIdempotencyKey.create({ data: record, select: { id: true } });
+    await tx.apiIdempotencyKey.create({
+      data: { ...record, state: 'completed' },
+      select: { id: true },
+    });
   }
 }

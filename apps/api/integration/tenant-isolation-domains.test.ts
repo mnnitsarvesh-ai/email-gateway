@@ -7,6 +7,17 @@
  * under an override into B manages B only, `platform_admin` under an override can only read, and
  * every override request is audited with domain audit rows carrying `metadata.override`.
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers delete /api/v1/domains/:id
+// @covers get /api/v1/domains
+// @covers get /api/v1/domains/:id
+// @covers get /api/v1/domains/:id/dns-records
+// @covers get /api/v1/domains/:id/status
+// @covers patch /api/v1/domains/:id/status
+// @covers post /api/v1/domains
+// @covers post /api/v1/domains/:id/dkim/rotate
+// @covers post /api/v1/domains/:id/verify
+// ---- end of route coverage ----
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { TestDnsServer } from '../test/support/dns/test-dns-server';
 import type { IntegrationApp } from './support/app';

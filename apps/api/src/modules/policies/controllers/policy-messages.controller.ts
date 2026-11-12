@@ -1,5 +1,6 @@
 import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post } from '@nestjs/common';
 import { ApiBody, ApiOkResponse, ApiOperation } from '@nestjs/swagger';
+import { RateClass } from '../../../rate-limit/rate-class.decorator';
 import { CurrentScope, RequirePermissions } from '../../../auth-contracts/decorators';
 import type { TenantScope } from '../../../auth-contracts/tenant-scope';
 import { zodToOpenApi } from '../../../validation/zod-openapi';
@@ -64,6 +65,7 @@ export class PolicyMessagesController {
   }
 
   @Post(':messageId/scans/:scanId/policy/dry-run')
+  @RateClass('expensive')
   @RequirePermissions(POLICY_MANAGE, MESSAGE_READ)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({

@@ -7,6 +7,19 @@
  * under an override into B manages B's connectors (audited with `metadata.override`) and
  * `platform_admin` under an override can only read.
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers delete /api/v1/smtp-connectors/:id
+// @covers get /api/v1/domains/:id/recipient-validation
+// @covers get /api/v1/domains/:id/recipients
+// @covers get /api/v1/smtp-connectors
+// @covers get /api/v1/smtp-connectors/:id
+// @covers patch /api/v1/smtp-connectors/:id
+// @covers post /api/v1/domains/:id/recipients
+// @covers post /api/v1/domains/:id/recipients/remove
+// @covers post /api/v1/smtp-connectors
+// @covers post /api/v1/smtp-connectors/:id/rotate-secret
+// @covers put /api/v1/domains/:id/recipient-validation
+// ---- end of route coverage ----
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { IntegrationApp } from './support/app';
 import { createIntegrationApp } from './support/app';

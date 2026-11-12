@@ -9,6 +9,7 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import type { z } from 'zod';
+import { ReturnsSecret } from '../../../rate-limit/rate-class.decorator';
 import {
   AuthenticatedOnly,
   RequireMfa,
@@ -43,6 +44,7 @@ export class PlatformOverrideController {
   constructor(private readonly overrides: PlatformOverrideService) {}
 
   @Post()
+  @ReturnsSecret()
   @RequirePermissions(OVERRIDE_PERMISSION)
   @RequireMfa()
   @ApiOperation({

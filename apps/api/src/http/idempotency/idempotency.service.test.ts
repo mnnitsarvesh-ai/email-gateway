@@ -3,13 +3,22 @@ import { Prisma } from '@email-gateway/database';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { TransactionRunner } from '../../database/transaction-runner';
 import { CodedHttpException } from '../coded-exception';
-import { IDEMPOTENCY_KEY_REUSED, IDEMPOTENCY_TTL_MS } from './idempotency-key';
+import {
+  IDEMPOTENCY_KEY_REUSED,
+  IDEMPOTENCY_REQUEST_IN_PROGRESS,
+  IDEMPOTENCY_TTL_MS,
+  IdempotencyInProgressException,
+} from './idempotency-key';
 import type {
   IdempotencyRecord,
   IdempotencyRepository,
   NewIdempotencyRecord,
 } from './idempotency.repository';
-import { isIdempotencyKeyViolation } from './idempotency.repository';
+import {
+  isIdempotencyKeyViolation,
+  isIdempotencyRace,
+  isWriteConflict,
+} from './idempotency.repository';
 import {
   IdempotencyRaceError,
   type IdempotentRequest,
@@ -29,6 +38,10 @@ class FakeStore {
   locks: string[] = [];
   /** Throw this P2002 from the next insert (a concurrent request committed the key). */
   insertConflict: (() => void) | null = null;
+  /** The error code of the next insert conflict (P2034: the InnoDB gap-lock deadlock). */
+  conflictCode: 'P2002' | 'P2034' = 'P2002';
+  /** Every insert fails with an InnoDB deadlock (P2034). */
+  alwaysDeadlock = false;
 
   readonly repo: IdempotencyRepository = {
     lock: (_tx: Tx, organizationId: bigint, key: string) => {
@@ -42,10 +55,12 @@ class FakeStore {
       return Promise.resolve();
     },
     insert: (_tx: Tx, record: NewIdempotencyRecord) => {
+      if (this.alwaysDeadlock) return Promise.reject(deadlock());
       if (this.insertConflict) {
         const conflict = this.insertConflict;
         this.insertConflict = null;
         conflict();
+        if (this.conflictCode === 'P2034') return Promise.reject(deadlock());
         return Promise.reject(
           new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
             code: 'P2002',
@@ -96,6 +111,14 @@ class FakeStore {
 }
 
 const NOW = new Date('2026-11-04T10:00:00.000Z');
+
+/** What Prisma raises when InnoDB picks the transaction as the deadlock victim (1213). */
+function deadlock(): Prisma.PrismaClientKnownRequestError {
+  return new Prisma.PrismaClientKnownRequestError(
+    'Transaction failed due to a write conflict or a deadlock. Please retry your transaction',
+    { code: 'P2034', clientVersion: 'test' },
+  );
+}
 
 const request: IdempotentRequest = {
   organizationId: 7n,
@@ -155,6 +178,43 @@ describe('IdempotencyService', () => {
     expect(work).not.toHaveBeenCalled();
   });
 
+  it('answers a live pending reservation of the same request with 409 in progress + Retry-After', async () => {
+    store.store(request, {
+      state: 'pending',
+      statusCode: 0,
+      response: null,
+      expiresAt: new Date(now.getTime() + 90_500),
+    });
+    const work = vi.fn();
+    const error = await service.execute(request, work).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(IdempotencyInProgressException);
+    expect((error as IdempotencyInProgressException).getStatus()).toBe(HttpStatus.CONFLICT);
+    expect((error as IdempotencyInProgressException).code).toBe(IDEMPOTENCY_REQUEST_IN_PROGRESS);
+    expect((error as IdempotencyInProgressException).retryAfterSeconds).toBe(91);
+    expect(work).not.toHaveBeenCalled();
+  });
+
+  it('answers a live pending reservation of another request with 422 reused', async () => {
+    store.store(request, { state: 'pending', statusCode: 0, response: null });
+    const error = await service
+      .execute({ ...request, fingerprint: 'other' }, vi.fn())
+      .catch((e: unknown) => e);
+    expect(reusedCode(error)).toBe(IDEMPOTENCY_KEY_REUSED);
+  });
+
+  it('replaces an expired pending reservation', async () => {
+    store.store(request, {
+      state: 'pending',
+      statusCode: 0,
+      response: null,
+      expiresAt: new Date(now.getTime() - 1),
+    });
+    const result = await service.execute(request, () =>
+      Promise.resolve({ statusCode: 201, body: { fresh: true } }),
+    );
+    expect(result).toEqual({ replayed: false, statusCode: 201, body: { fresh: true } });
+  });
+
   it('replaces an expired record (treated as absent)', async () => {
     store.store(request, { expiresAt: new Date(now.getTime() - 1), response: { old: true } });
     const result = await service.execute({ ...request, fingerprint: 'other' }, () =>
@@ -188,6 +248,25 @@ describe('IdempotencyService', () => {
     expect(result).toEqual({ replayed: true, statusCode: 202, body: { winner: true } });
     expect(store.runner.run).toHaveBeenCalledTimes(2);
     expect(work).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries once after an InnoDB deadlock (P2034) on the absent key and replays the winner', async () => {
+    const work = vi.fn(() => Promise.resolve({ statusCode: 202, body: { mine: true } }));
+    store.conflictCode = 'P2034';
+    store.insertConflict = () => store.store(request, { response: { winner: true } });
+    const result = await service.execute(request, work);
+    expect(result).toEqual({ replayed: true, statusCode: 202, body: { winner: true } });
+    expect(store.runner.run).toHaveBeenCalledTimes(2);
+  });
+
+  it('a second deadlock is rethrown as it is, not reported as a key reuse', async () => {
+    store.alwaysDeadlock = true;
+    const error = await service
+      .execute(request, () => Promise.resolve({ statusCode: 202, body: {} }))
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+    expect((error as Prisma.PrismaClientKnownRequestError).code).toBe('P2034');
+    expect(store.runner.run).toHaveBeenCalledTimes(2);
   });
 
   it('retries once after an IdempotencyRaceError from the work', async () => {
@@ -242,5 +321,35 @@ describe('isIdempotencyKeyViolation', () => {
       ),
     ).toBe(false);
     expect(isIdempotencyKeyViolation(new Error('P2002'))).toBe(false);
+  });
+});
+
+describe('isWriteConflict / isIdempotencyRace', () => {
+  it('matches P2034 and a raw-query deadlock (P2010, MySQL 1213) only', () => {
+    expect(isWriteConflict(deadlock())).toBe(true);
+    const raw = (code: unknown) =>
+      new Prisma.PrismaClientKnownRequestError('Raw query failed', {
+        code: 'P2010',
+        clientVersion: 'test',
+        meta: { code, message: 'x' },
+      });
+    expect(isWriteConflict(raw('1213'))).toBe(true);
+    expect(isWriteConflict(raw('1205'))).toBe(false);
+    expect(isWriteConflict(new Error('P2034'))).toBe(false);
+    expect(isIdempotencyRace(deadlock())).toBe(true);
+    expect(
+      isIdempotencyRace(
+        new Prisma.PrismaClientKnownRequestError('x', {
+          code: 'P2002',
+          clientVersion: 'test',
+          meta: { target: ['organization_id', 'idempotency_key'] },
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      isIdempotencyRace(
+        new Prisma.PrismaClientKnownRequestError('x', { code: 'P2003', clientVersion: 'test' }),
+      ),
+    ).toBe(false);
   });
 });

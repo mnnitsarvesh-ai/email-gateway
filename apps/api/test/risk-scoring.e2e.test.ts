@@ -11,6 +11,19 @@
  * from a stored `message_risk_scores` row. The same routes run against the real MySQL writer
  * and replica in integration/risk-scoring.test.ts.
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers delete /api/v1/risk-scoring/profile/versions/:versionId
+// @covers get /api/v1/risk-scoring/platform-profile
+// @covers get /api/v1/risk-scoring/profile
+// @covers get /api/v1/risk-scoring/profile/versions
+// @covers get /api/v1/risk-scoring/profile/versions/:versionId
+// @covers post /api/v1/messages/:messageId/scans/:scanId/risk/dry-run
+// @covers post /api/v1/risk-scoring/profile/reset
+// @covers post /api/v1/risk-scoring/profile/versions
+// @covers post /api/v1/risk-scoring/profile/versions/:versionId/activate
+// @covers post /api/v1/risk-scoring/profile/versions/:versionId/publish
+// @covers put /api/v1/risk-scoring/profile/versions/:versionId
+// ---- end of route coverage ----
 import { randomBytes, randomUUID } from 'node:crypto';
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
@@ -53,6 +66,8 @@ import {
   RiskDryRunRepository,
 } from '../src/modules/risk-scoring/repositories/risk-dry-run.repository';
 import { RiskProfilesRepository } from '../src/modules/risk-scoring/repositories/risk-profiles.repository';
+import { idem, withIdempotencyStore } from './legacy-idempotency-support';
+import { InMemoryIdempotencyStore } from './support/api-test-app';
 import { InMemoryKeyValueStore } from './support/in-memory-key-value-store';
 import { InMemoryRiskProfiles } from './support/in-memory-risk-profiles';
 import { RecordingEmailSender } from './support/recording-email-sender';
@@ -278,7 +293,7 @@ describe('step 5.1 risk scoring routes (e2e, dependencies stubbed)', () => {
       {},
       { get: (_t, key: string) => (store.repository as unknown as Record<string, unknown>)[key] },
     );
-    const moduleRef = await Test.createTestingModule({ imports: [AppModule.forRoot(cfg)] })
+    const builder = Test.createTestingModule({ imports: [AppModule.forRoot(cfg)] })
       .overrideProvider(PrismaService)
       .useValue(stub('mysql'))
       .overrideProvider(PrismaReadService)
@@ -328,8 +343,11 @@ describe('step 5.1 risk scoring routes (e2e, dependencies stubbed)', () => {
           ),
       })
       .overrideProvider(MessageScansReadRepository)
-      .useValue(scanReads)
-      .compile();
+      .useValue(scanReads);
+    // Step 6.1 §3.5: publish, activate and reset take an Idempotency-Key.
+    const moduleRef = await withIdempotencyStore(builder, new InMemoryIdempotencyStore(), {
+      runner: false,
+    }).compile();
     app = moduleRef.createNestApplication({ logger: false });
     configureHttpApp(app, createLogger({ service: 'api-test', level: 'silent' }));
     configureApiApp(app, cfg);
@@ -358,9 +376,9 @@ describe('step 5.1 risk scoring routes (e2e, dependencies stubbed)', () => {
     await http().post(versions).send({}).expect(401);
     await http().put(`${versions}/${id}`).send({}).expect(401);
     await http().delete(`${versions}/${id}`).expect(401);
-    await http().post(`${versions}/${id}/publish`).send({}).expect(401);
-    await http().post(`${versions}/${id}/activate`).send({}).expect(401);
-    await http().post('/api/v1/risk-scoring/profile/reset').send({}).expect(401);
+    await http().post(`${versions}/${id}/publish`).set(idem()).send({}).expect(401);
+    await http().post(`${versions}/${id}/activate`).set(idem()).send({}).expect(401);
+    await http().post('/api/v1/risk-scoring/profile/reset').set(idem()).send({}).expect(401);
     await http().post(dryRunUrl).send({ profile: 'active' }).expect(401);
   });
 
@@ -423,16 +441,23 @@ describe('step 5.1 risk scoring routes (e2e, dependencies stubbed)', () => {
     expect(updated.body).toMatchObject({ rowVersion: 2, changeNote: 'hold medium' });
     await http()
       .post(`${versions}/${v1}/publish`)
+      .set(idem())
       .set(analyst)
       .send({ expectedRowVersion: 2 })
       .expect(403);
-    await http().post(`${versions}/${v1}/activate`).set(analyst).send({}).expect(403);
-    await http().post('/api/v1/risk-scoring/profile/reset').set(analyst).send({}).expect(403);
+    await http().post(`${versions}/${v1}/activate`).set(idem()).set(analyst).send({}).expect(403);
+    await http()
+      .post('/api/v1/risk-scoring/profile/reset')
+      .set(idem())
+      .set(analyst)
+      .send({})
+      .expect(403);
 
     // policy:publish (organization admin) publishes and activates (activate defaults to true).
     const admin = await as(ADMIN);
     const published = await http()
       .post(`${versions}/${v1}/publish`)
+      .set(idem())
       .set(admin)
       .send({ expectedRowVersion: 2 })
       .expect(200);
@@ -459,6 +484,7 @@ describe('step 5.1 risk scoring routes (e2e, dependencies stubbed)', () => {
       await http().delete(`${versions}/${v1}`).set(admin).expect(409),
       await http()
         .post(`${versions}/${v1}/publish`)
+        .set(idem())
         .set(admin)
         .send({ expectedRowVersion: 3 })
         .expect(409),
@@ -469,21 +495,28 @@ describe('step 5.1 risk scoring routes (e2e, dependencies stubbed)', () => {
     // A second version, published without activation; a draft cannot be activated.
     const v2 = (await http().post(versions).set(admin).send({ basedOnVersionId: v1 }).expect(201))
       .body.id as string;
-    const draftActivate = await http().post(`${versions}/${v2}/activate`).set(admin).expect(409);
+    const draftActivate = await http()
+      .post(`${versions}/${v2}/activate`)
+      .set(idem())
+      .set(admin)
+      .expect(409);
     expect(draftActivate.body.code).toBe('risk_profile_version_not_published');
     await http()
       .post(`${versions}/${v2}/publish`)
+      .set(idem())
       .set(admin)
       .send({ activate: false, expectedRowVersion: 1 })
       .expect(200);
     const switched = await http()
       .post(`${versions}/${v2}/activate`)
+      .set(idem())
       .set(admin)
       .send({ expectedProfileVersion: 2 })
       .expect(200);
     expect(switched.body.active).toMatchObject({ versionId: v2, versionNo: 2 });
     const stale = await http()
       .post(`${versions}/${v1}/activate`)
+      .set(idem())
       .set(admin)
       .send({ expectedProfileVersion: 2 })
       .expect(409);
@@ -492,8 +525,12 @@ describe('step 5.1 risk scoring routes (e2e, dependencies stubbed)', () => {
       currentProfileVersion: 3,
     });
     // Rollback to v1, then reset to the platform default.
-    await http().post(`${versions}/${v1}/activate`).set(admin).expect(200);
-    const reset = await http().post('/api/v1/risk-scoring/profile/reset').set(admin).expect(200);
+    await http().post(`${versions}/${v1}/activate`).set(idem()).set(admin).expect(200);
+    const reset = await http()
+      .post('/api/v1/risk-scoring/profile/reset')
+      .set(idem())
+      .set(admin)
+      .expect(200);
     expect(reset.body).toMatchObject({
       active: { source: 'platform', versionId: null },
       counts: { drafts: 0, published: 2 },
@@ -590,6 +627,7 @@ describe('step 5.1 risk scoring routes (e2e, dependencies stubbed)', () => {
     const v1 = (await http().post(versions).set(adminA).send({}).expect(201)).body.id as string;
     await http()
       .post(`${versions}/${v1}/publish`)
+      .set(idem())
       .set(adminA)
       .send({ expectedRowVersion: 1 })
       .expect(200);
@@ -603,9 +641,10 @@ describe('step 5.1 risk scoring routes (e2e, dependencies stubbed)', () => {
         .send({ overrides: {}, expectedRowVersion: 2 })
         .expect(404),
       await http().delete(`${versions}/${v1}`).set(adminB).expect(404),
-      await http().post(`${versions}/${v1}/activate`).set(adminB).expect(404),
+      await http().post(`${versions}/${v1}/activate`).set(idem()).set(adminB).expect(404),
       await http()
         .post(`${versions}/${v1}/publish`)
+        .set(idem())
         .set(adminB)
         .send({ expectedRowVersion: 2 })
         .expect(404),

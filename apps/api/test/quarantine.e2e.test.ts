@@ -8,6 +8,32 @@
  * bulk), the bulk limits and the audit row of every action. The SQL behaviour runs in
  * integration/quarantine.test.ts.
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers get /api/v1/quarantine/approvals
+// @covers get /api/v1/quarantine/catalog
+// @covers get /api/v1/quarantine/downloads/:token
+// @covers get /api/v1/quarantine/entries
+// @covers get /api/v1/quarantine/entries/:entryId
+// @covers get /api/v1/quarantine/entries/:entryId/history
+// @covers get /api/v1/quarantine/entries/:entryId/preview
+// @covers get /api/v1/quarantine/me/entries
+// @covers get /api/v1/quarantine/me/entries/:entryId
+// @covers get /api/v1/quarantine/me/entries/:entryId/preview
+// @covers get /api/v1/quarantine/settings
+// @covers get /api/v1/quarantine/summary
+// @covers post /api/v1/quarantine/approvals/:approvalId/approve
+// @covers post /api/v1/quarantine/approvals/:approvalId/deny
+// @covers post /api/v1/quarantine/bulk
+// @covers post /api/v1/quarantine/entries
+// @covers post /api/v1/quarantine/entries/:entryId/delete
+// @covers post /api/v1/quarantine/entries/:entryId/download-grants
+// @covers post /api/v1/quarantine/entries/:entryId/reject
+// @covers post /api/v1/quarantine/entries/:entryId/release
+// @covers post /api/v1/quarantine/entries/:entryId/request-release
+// @covers post /api/v1/quarantine/me/entries/:entryId/release
+// @covers post /api/v1/quarantine/me/entries/:entryId/request-release
+// @covers put /api/v1/quarantine/settings
+// ---- end of route coverage ----
 import { randomBytes, randomUUID } from 'node:crypto';
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';

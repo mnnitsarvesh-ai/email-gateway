@@ -1,6 +1,13 @@
 import { Writable } from 'node:stream';
 import { describe, expect, it } from 'vitest';
-import { getContext, normalizeCorrelationId, runWithContext, setContextTenant } from './context';
+import {
+  getContext,
+  getRequestId,
+  normalizeCorrelationId,
+  runWithContext,
+  setContextRequestId,
+  setContextTenant,
+} from './context';
 import { createLogger, REDACT_PATHS } from './logger';
 
 function capture(): { stream: Writable; lines: () => Record<string, unknown>[] } {
@@ -314,5 +321,46 @@ describe('normalizeCorrelationId', () => {
     const injected = 'x\n{"level":"fatal"}';
     expect(normalizeCorrelationId(injected)).not.toBe(injected);
     expect(normalizeCorrelationId(undefined)).toMatch(/^[0-9a-f-]{36}$/);
+  });
+});
+
+describe('setContextRequestId / getRequestId (step 6.1 D1)', () => {
+  it('adds the request id to the current context and to later log lines', () => {
+    const out = capture();
+    const logger = createLogger({ service: 'test-svc', destination: out.stream });
+    runWithContext({ correlationId: 'corr-request-0001' }, () => {
+      logger.info('before');
+      expect(getRequestId()).toBeUndefined();
+      setContextRequestId('0b9c6a2e-1111-4222-8333-444455556666');
+      expect(getRequestId()).toBe('0b9c6a2e-1111-4222-8333-444455556666');
+      logger.info('after');
+    });
+    const [before, after] = out.lines();
+    expect(before).not.toHaveProperty('requestId');
+    expect(after).toMatchObject({
+      correlationId: 'corr-request-0001',
+      requestId: '0b9c6a2e-1111-4222-8333-444455556666',
+    });
+  });
+
+  it('is a no-op outside a request context', () => {
+    expect(() => setContextRequestId('r-1')).not.toThrow();
+    expect(getRequestId()).toBeUndefined();
+  });
+
+  it('keeps sibling contexts apart', async () => {
+    const seen: (string | undefined)[] = [];
+    await Promise.all([
+      runWithContext({ correlationId: 'corr-a-000001' }, async () => {
+        setContextRequestId('a');
+        await new Promise((r) => setTimeout(r, 5));
+        seen.push(getRequestId());
+      }),
+      runWithContext({ correlationId: 'corr-b-000001' }, async () => {
+        await new Promise((r) => setTimeout(r, 1));
+        seen.push(getRequestId());
+      }),
+    ]);
+    expect(seen.sort()).toEqual(['a', undefined].sort());
   });
 });

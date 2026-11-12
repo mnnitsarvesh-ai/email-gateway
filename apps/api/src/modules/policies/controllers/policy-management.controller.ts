@@ -18,9 +18,11 @@ import {
   ApiOkResponse,
   ApiOperation,
 } from '@nestjs/swagger';
+import { LegacyIdempotent } from '../../../legacy-idempotency/legacy-idempotent';
 import {
   CurrentPrincipal,
   CurrentScope,
+  CursorList,
   RequirePermissions,
 } from '../../../auth-contracts/decorators';
 import type { Principal } from '../../../auth-contracts/principal';
@@ -104,6 +106,7 @@ export class PolicyManagementController {
   constructor(private readonly policies: PoliciesService) {}
 
   @Get()
+  @CursorList('v0')
   @RequirePermissions(POLICY_READ)
   @ApiOperation({
     summary: 'List policies',
@@ -279,6 +282,7 @@ export class PolicyManagementController {
   }
 
   @Get(':policyId/versions')
+  @CursorList('v0')
   @RequirePermissions(POLICY_READ)
   @ApiOperation({
     summary: 'List the versions of a policy',
@@ -412,6 +416,7 @@ export class PolicyManagementController {
   }
 
   @Post(':policyId/versions/:versionNo/publish')
+  @LegacyIdempotent({ operation: 'policy.version_publish', legacy: true, publicFields: ['code'] })
   @RequirePermissions(POLICY_PUBLISH)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
@@ -447,6 +452,7 @@ export class PolicyManagementController {
   }
 
   @Post(':policyId/versions/:versionNo/activate')
+  @LegacyIdempotent({ operation: 'policy.version_activate', legacy: true, publicFields: ['code'] })
   @RequirePermissions(POLICY_PUBLISH)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({

@@ -3,7 +3,7 @@ import { GetObjectTaggingCommand, HeadObjectCommand, S3Client } from '@aws-sdk/c
 import { urlClickedV1 } from '@email-gateway/event-contracts';
 import { signToken, verifyToken } from '@email-gateway/url-security';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { apiSession, type ApiSession } from './support/api-client';
+import { apiSession, type ApiSession, idempotencyKey } from './support/api-client';
 import { waitFor } from './support/compose';
 import { waitForMessage } from './support/deliveries';
 import { stack } from './support/env';
@@ -307,13 +307,18 @@ describe.skipIf(gate.skip)(
       );
 
       // The analyst adds the link's domain to the platform feed through the api (effective at once).
-      const added = await platform!.call('POST', '/platform/threat-indicators', {
-        type: 'domain',
-        value: CLEAN_HOST.toUpperCase(),
-        severity: 'high',
-        category: 'phishing',
-        reason: 'stack test: time-of-click block',
-      });
+      const added = await platform!.call(
+        'POST',
+        '/platform/threat-indicators',
+        {
+          type: 'domain',
+          value: CLEAN_HOST.toUpperCase(),
+          severity: 'high',
+          category: 'phishing',
+          reason: 'stack test: time-of-click block',
+        },
+        idempotencyKey(),
+      );
       expect(added.status, JSON.stringify(added.body)).toBe(201);
       indicatorIds.add(added.body.id as string);
       expect(added.body).toMatchObject({ value: CLEAN_HOST, source: 'analyst' });

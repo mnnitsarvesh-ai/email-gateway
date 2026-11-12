@@ -4,7 +4,8 @@ global:
 
 # Alert rules (step 3.2 Q15: messaging.rules.yml; step 3.3 L14: lifecycle.rules.yml; step 4.1 S17:
 # scanning.rules.yml; step 4.3 U18: click-service.rules.yml, url-scanning.rules.yml; step 4.6 X20:
-# sandbox-controller.rules.yml; step 5.2 P24: policy-engine.rules.yml). Alertmanager routing is
+# sandbox-controller.rules.yml; step 5.2 P24: policy-engine.rules.yml; step 6.1 D16:
+# api.rules.yml). Alertmanager routing is
 # step 10.3; until then the alerts are visible on the Prometheus /alerts page.
 rule_files:
   - rules/*.rules.yml
@@ -27,6 +28,14 @@ scrape_configs:
       family: [queue_coarse_metrics, queue_consumer_count]
     static_configs:
       - targets: ['rabbitmq:15692']
+  # api (step 6.1 D16; quarantine series of step 5.3 Q29): api_http_*, api_rate_limit*,
+  # api_idempotency_total, api_cursor_rejected_total, api_list_scan_budget_exhausted_total,
+  # api_report_*, quarantine_* and the shared process series. /metrics is on the api port but
+  # outside /api (internal only; never routed by an Ingress, ADR-0053).
+  - job_name: api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['api:3000']
   # smtp-adapter (step 2.2 D16): policy, socketmap, SASL, ingestion, bounce and reputation
   # metrics. Metric names are a contract for the dashboards of step 10.3.
   - job_name: smtp-adapter

@@ -11,7 +11,7 @@ const PermissionKeyListSchema = z
   .max(100)
   .transform((keys) => [...new Set(keys)].sort());
 
-export const CreateRoleRequestSchema = z.object({
+export const CreateRoleRequestSchema = z.strictObject({
   key: z
     .string()
     .regex(CUSTOM_ROLE_KEY_PATTERN, 'must match ^[a-z][a-z0-9_]{2,63}$')
@@ -21,7 +21,7 @@ export const CreateRoleRequestSchema = z.object({
   permissions: PermissionKeyListSchema.describe('Tenant permission keys (no platform:*)'),
 });
 
-export const UpdateRoleRequestSchema = z.object({
+export const UpdateRoleRequestSchema = z.strictObject({
   name: z.string().trim().min(1).max(255),
   description: z.string().trim().max(512).nullable().optional(),
   permissions: PermissionKeyListSchema.describe('Replaces the role permissions'),

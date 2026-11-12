@@ -23,13 +23,13 @@ import type { Response } from 'express';
 import {
   CurrentPrincipal,
   CurrentScope,
+  CursorList,
   RequirePermissions,
 } from '../../../auth-contracts/decorators';
 import type { Principal } from '../../../auth-contracts/principal';
 import type { TenantScope } from '../../../auth-contracts/tenant-scope';
 import { CodedExceptionFilter } from '../../../http/coded-exception';
 import {
-  ApiIdempotencyKey,
   IDEMPOTENCY_KEY_HEADER,
   IDEMPOTENCY_REPLAYED_HEADER,
 } from '../../../http/idempotency/idempotency-key';
@@ -52,7 +52,9 @@ import {
   QUARANTINE_RELEASE,
   RELEASE_CONFLICTS,
   RESCAN_CONFLICTS,
+  TransactionalIdempotency,
 } from '../api-docs';
+import { OPERATION_NAMES } from '../domain/lifecycle-operations';
 import {
   type LifecycleHistoryEntry,
   LifecycleHistoryPageSchema,
@@ -116,6 +118,7 @@ export class MessageLifecycleController {
 
   @Get(':messageId/lifecycle/history')
   @RequirePermissions(MESSAGE_READ)
+  @CursorList('v0')
   @ApiOperation({
     summary: 'Get the lifecycle history of a message',
     description:
@@ -155,7 +158,7 @@ export class MessageLifecycleController {
       'quarantine_rescan_forbidden`, nothing written). Requires the Idempotency-Key header.',
   })
   @ApiMessageId()
-  @ApiIdempotencyKey()
+  @TransactionalIdempotency(OPERATION_NAMES.rescan)
   @ApiBody({ schema: zodToOpenApi(LifecycleOperationBodySchema, { io: 'input' }) })
   @ApiLifecycleAccepted(RescanResponseSchema, 'Rescan requested (or the stored response replayed)')
   @ApiLifecycleWriteErrors(RESCAN_CONFLICTS)
@@ -190,7 +193,7 @@ export class MessageLifecycleController {
       'their conflicts. Nothing is written. Requires the Idempotency-Key header.',
   })
   @ApiMessageId()
-  @ApiIdempotencyKey()
+  @TransactionalIdempotency(OPERATION_NAMES.release)
   @ApiBody({ schema: zodToOpenApi(LifecycleOperationBodySchema, { io: 'input' }) })
   @ApiLifecycleAccepted(
     ReleaseResponseSchema,

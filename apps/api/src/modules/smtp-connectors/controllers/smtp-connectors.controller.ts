@@ -20,9 +20,11 @@ import {
   ApiSecurity,
   ApiTags,
 } from '@nestjs/swagger';
+import { ReturnsSecret } from '../../../rate-limit/rate-class.decorator';
 import {
   CurrentPrincipal,
   CurrentScope,
+  CursorList,
   RequirePermissions,
 } from '../../../auth-contracts/decorators';
 import type { Principal } from '../../../auth-contracts/principal';
@@ -72,6 +74,7 @@ export class SmtpConnectorsController {
   constructor(private readonly connectors: SmtpConnectorsService) {}
 
   @Post()
+  @ReturnsSecret()
   @RequirePermissions(CONNECTOR_MANAGE)
   @RateLimit({ bucket: 'smtp-connectors-create', limit: 20, windowSeconds: 60, by: 'principal' })
   @ApiOperation({
@@ -105,6 +108,7 @@ export class SmtpConnectorsController {
   }
 
   @Get()
+  @CursorList('v0')
   @RequirePermissions(CONNECTOR_READ)
   @ApiOperation({
     summary: 'List SMTP connectors',
@@ -159,6 +163,7 @@ export class SmtpConnectorsController {
   }
 
   @Post(':id/rotate-secret')
+  @ReturnsSecret()
   @RequirePermissions(CONNECTOR_MANAGE)
   @RateLimit({ bucket: 'smtp-connectors-rotate', limit: 10, windowSeconds: 60, by: 'principal' })
   @HttpCode(HttpStatus.OK)

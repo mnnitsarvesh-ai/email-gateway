@@ -5,8 +5,19 @@
  * bounds, `409 department_in_use` while an active policy version references the department,
  * isolation between two organizations and audit rows with ids only.
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers delete /api/v1/departments/:departmentId
+// @covers delete /api/v1/departments/:departmentId/members/:memberId
+// @covers get /api/v1/departments
+// @covers get /api/v1/departments/:departmentId
+// @covers get /api/v1/departments/:departmentId/members
+// @covers patch /api/v1/departments/:departmentId
+// @covers post /api/v1/departments
+// @covers post /api/v1/departments/:departmentId/members
+// ---- end of route coverage ----
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { idem, installIdempotencyStore } from './legacy-idempotency-support';
 import { createPolicyApp, type PolicyApp, roleOf } from './support/policy-app';
 import { departmentExceptionDefinition } from './support/policy-fixtures';
 
@@ -20,6 +31,8 @@ describe('step 5.2 department routes (e2e, dependencies stubbed)', () => {
 
   beforeAll(async () => {
     ctx = await createPolicyApp({ DEPARTMENT_MAX_PER_ORG: '10', DEPARTMENT_MAX_MEMBERS: '100' });
+    // Step 6.1 §3.5: version publish and activate take an Idempotency-Key.
+    installIdempotencyStore(ctx.app);
   });
   afterAll(async () => {
     await ctx?.close();
@@ -157,6 +170,7 @@ describe('step 5.2 department routes (e2e, dependencies stubbed)', () => {
     const pid = policy.body.policy.id as string;
     await http()
       .post(`/api/v1/policies/${pid}/versions/1/publish`)
+      .set(idem())
       .set(await ctx.as(ADMIN))
       .send({ expectedRowVersion: 1 })
       .expect(200);

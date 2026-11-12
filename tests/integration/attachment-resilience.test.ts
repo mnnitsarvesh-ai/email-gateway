@@ -2,6 +2,7 @@ import { randomInt } from 'node:crypto';
 import { pdfLike } from '@email-gateway/attachment-corpus';
 import { messageScannedV1 } from '@email-gateway/event-contracts';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { idempotencyKey } from './support/api-client';
 import { attachmentMessage, clamdResponds } from './support/attachment-stack';
 import { purgeDormantQueues } from './support/broker';
 import { waitFor } from './support/compose';
@@ -259,22 +260,32 @@ describe.skipIf(gate.skip)('attachment stack: ClamAV outage', { timeout: 900_000
     const round0Before = await scanRoundsOf(fx.prisma, message);
     const rows0Before = await engineResultsOf(fx.prisma, message);
 
-    const dry = await admin!.call('POST', '/platform/attachment-rescans', {
-      windowHours: 1,
-      states: ['quarantined'],
-      organizationId: orgPublicId,
-      reason: 'stack test: clamd recovered (dry run)',
-      dryRun: true,
-    });
+    const dry = await admin!.call(
+      'POST',
+      '/platform/attachment-rescans',
+      {
+        windowHours: 1,
+        states: ['quarantined'],
+        organizationId: orgPublicId,
+        reason: 'stack test: clamd recovered (dry run)',
+        dryRun: true,
+      },
+      idempotencyKey(),
+    );
     expect(dry.status, JSON.stringify(dry.body)).toBe(200);
     expect(dry.body).toMatchObject({ dryRun: true, estimatedMessages: 1 });
 
-    const created = await admin!.call('POST', '/platform/attachment-rescans', {
-      windowHours: 1,
-      states: ['quarantined'],
-      organizationId: orgPublicId,
-      reason: 'stack test: clamd recovered',
-    });
+    const created = await admin!.call(
+      'POST',
+      '/platform/attachment-rescans',
+      {
+        windowHours: 1,
+        states: ['quarantined'],
+        organizationId: orgPublicId,
+        reason: 'stack test: clamd recovered',
+      },
+      idempotencyKey(),
+    );
     expect(created.status, JSON.stringify(created.body)).toBe(202);
     expect(created.body).toMatchObject({ status: 'pending', estimatedMessages: 1 });
     const jobId = created.body.jobId as string;

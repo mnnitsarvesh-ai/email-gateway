@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '@email-gateway/common';
 import { type AuditActorType, Prisma } from '@email-gateway/database';
-import { getCorrelationId } from '@email-gateway/logger';
+import { getCorrelationId, getRequestId } from '@email-gateway/logger';
 import type { Principal } from '../auth-contracts/principal';
 
 export interface AuditActor {
@@ -92,9 +92,12 @@ export class AuditService {
 
   async record(entry: AuditEntry, tx?: Prisma.TransactionClient): Promise<void> {
     const client = tx ?? this.prisma;
+    const requestId = getRequestId();
     const metadata = {
       ...(entry.metadata ?? {}),
       ...(entry.actor.override && { override: entry.actor.override }),
+      // Step 6.1 D1/D11: the server-minted X-Request-Id of the HTTP request (absent for jobs).
+      ...(requestId !== undefined && { requestId }),
     };
     const scrubbed = Object.keys(metadata).length > 0 ? scrubMetadata(metadata) : null;
     await client.auditLog.create({

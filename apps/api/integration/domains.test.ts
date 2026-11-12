@@ -9,6 +9,17 @@
  * re-add), "first to verify wins", DKIM rotation through retirement, audit and outbox rows, the
  * mail-path resolver and DoH mode.
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers delete /api/v1/domains/:id
+// @covers get /api/v1/domains
+// @covers get /api/v1/domains/:id
+// @covers get /api/v1/domains/:id/dns-records
+// @covers get /api/v1/domains/:id/status
+// @covers patch /api/v1/domains/:id/status
+// @covers post /api/v1/domains
+// @covers post /api/v1/domains/:id/dkim/rotate
+// @covers post /api/v1/domains/:id/verify
+// ---- end of route coverage ----
 import { createPublicKey } from 'node:crypto';
 import { resolveActiveDomain } from '@email-gateway/database';
 import { domainStatusChangedV1, EventTypes } from '@email-gateway/event-contracts';

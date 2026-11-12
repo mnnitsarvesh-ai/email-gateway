@@ -1,5 +1,6 @@
 import { Body, Controller, Get, HttpCode, HttpStatus, Post } from '@nestjs/common';
 import { ApiBearerAuth, ApiBody, ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Idempotent } from '../../../http/idempotency/idempotency.interceptor';
 import { RequireMfa, RequirePermissions, UserOnly } from '../../../auth-contracts/decorators';
 import type { UserPrincipal } from '../../../auth-contracts/principal';
 import { ACCESS_TOKEN_SCHEME } from '../../../http/openapi';
@@ -56,6 +57,7 @@ export class DeadLettersController {
   }
 
   @Post('replay')
+  @Idempotent({ operation: 'platform.dead_letter_replay', legacy: true })
   @RequirePermissions(PLATFORM_DEAD_LETTER_REPLAY)
   @RequireMfa()
   @HttpCode(HttpStatus.OK)

@@ -5,6 +5,10 @@
  * once by a `processOnce` test handler. The audit row, the Redis lock release, a second replay
  * (nothing to do, then a ledger duplicate) and a dry run (queue unchanged) are checked.
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers get /api/v1/platform/dead-letters
+// @covers post /api/v1/platform/dead-letters/replay
+// ---- end of route coverage ----
 import { randomBytes } from 'node:crypto';
 import {
   AmqpConnection,
@@ -34,7 +38,7 @@ import {
   type FixtureUser,
   type Fixtures,
 } from './support/fixtures';
-import { bearer, loginWithMfa } from './support/http';
+import { bearer, idem, loginWithMfa } from './support/http';
 
 const silent = createLogger({ service: 'api-it-dead-letters', level: 'silent' });
 const suffix = randomBytes(4).toString('hex');
@@ -151,6 +155,7 @@ async function deadLetter(events: EventEnvelope<MessageReceivedV1>[]): Promise<v
 const replay = (body: Record<string, unknown>) =>
   ctx.http
     .post('/api/v1/platform/dead-letters/replay')
+    .set(idem())
     .set(bearer(token))
     .send({
       sourceQueue: 'email.received',

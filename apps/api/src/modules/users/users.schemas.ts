@@ -19,22 +19,22 @@ export const UserListQuerySchema = PageQuerySchema.extend({
   status: z.enum(['invited', 'active', 'disabled', 'locked']).optional(),
   q: z.string().trim().min(1).max(320).optional().describe('Email or display-name prefix'),
   role: RoleKeySchema.optional().describe('Only users holding this role'),
-});
+}).strict();
 
-export const InviteUserRequestSchema = z.object({
+export const InviteUserRequestSchema = z.strictObject({
   email: EmailSchema,
   displayName: DisplayNameSchema,
   roleKeys: RoleKeyListSchema,
 });
 
 export const UpdateUserRequestSchema = z
-  .object({ displayName: DisplayNameSchema.optional(), email: EmailSchema.optional() })
+  .strictObject({ displayName: DisplayNameSchema.optional(), email: EmailSchema.optional() })
   .refine((v) => v.displayName !== undefined || v.email !== undefined, {
     message: 'provide displayName and/or email',
   });
 
 export const UserStatusRequestSchema = z
-  .object({
+  .strictObject({
     status: z.enum(['active', 'disabled']),
     reason: ReasonSchema.optional().describe('Required when disabling'),
   })
@@ -43,7 +43,7 @@ export const UserStatusRequestSchema = z
     path: ['reason'],
   });
 
-export const UserRolesRequestSchema = z.object({ roleKeys: RoleKeyListSchema });
+export const UserRolesRequestSchema = z.strictObject({ roleKeys: RoleKeyListSchema });
 
 export const UserResponseSchema = z.object({
   id: z.uuid(),

@@ -12,12 +12,16 @@ import {
   S3Service,
 } from '@email-gateway/common';
 import { ApiCommonModule } from './api-common.module';
+import { HttpConventionsModule } from './http/http-conventions.module';
 import { API_CONFIG } from './api-config.token';
 import type { ApiConfig } from './config';
 import { MetaModule } from './meta/meta.module';
 import { ApiKeysModule } from './modules/api-keys/api-keys.module';
+import { AttachmentsModule } from './modules/attachments/attachments.module';
+import { AuditLogsModule } from './modules/audit-logs/audit-logs.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { BecModule } from './modules/bec/bec.module';
+import { BillingModule } from './modules/billing/billing.module';
 import { DeadLettersModule } from './modules/dead-letters/dead-letters.module';
 import { DlpModule } from './modules/dlp/dlp.module';
 import { DeliveriesModule } from './modules/deliveries/deliveries.module';
@@ -29,11 +33,16 @@ import { OrganizationsModule } from './modules/organizations/organizations.modul
 import { RiskScoringModule } from './modules/risk-scoring/risk-scoring.module';
 import { PoliciesModule } from './modules/policies/policies.module';
 import { QuarantineModule } from './modules/quarantine/quarantine.module';
+import { RecipientsModule } from './modules/recipients/recipients.module';
+import { ReportsModule } from './modules/reports/reports.module';
 import { DirectoryModule } from './modules/directory/directory.module';
 import { RolesModule } from './modules/roles/roles.module';
 import { ScansModule } from './modules/scans/scans.module';
 import { SmtpConnectorsModule } from './modules/smtp-connectors/smtp-connectors.module';
 import { TenantDataModule } from './modules/tenant-data/tenant-data.module';
+import { ThreatIntelligenceModule } from './modules/threat-intelligence/threat-intelligence.module';
+import { UrlProtectionModule } from './modules/url-protection/url-protection.module';
+import { UsageModule } from './modules/usage/usage.module';
 import { UsersModule } from './modules/users/users.module';
 
 export const SERVICE_NAME = 'api';
@@ -46,6 +55,9 @@ export class AppModule {
       global: true,
       imports: [
         CorrelationModule,
+        // Step 6.1 D1, D2, D16: request id + Cache-Control and HTTP metrics middleware (after the
+        // correlation middleware: same distance, import order) and the global ApiExceptionFilter.
+        HttpConventionsModule,
         DatabaseModule.forRoot({
           url: config.DATABASE_URL,
           read: {
@@ -94,6 +106,15 @@ export class AppModule {
         DirectoryModule,
         // Step 5.3: quarantine search, preview, downloads, release, approvals, self-service.
         QuarantineModule,
+        // Step 6.1: the new REST resources (filled by WP2 and WP3).
+        RecipientsModule,
+        AttachmentsModule,
+        UrlProtectionModule,
+        AuditLogsModule,
+        ReportsModule,
+        UsageModule,
+        BillingModule,
+        ThreatIntelligenceModule,
       ],
       providers: [{ provide: API_CONFIG, useValue: config }],
       exports: [API_CONFIG],

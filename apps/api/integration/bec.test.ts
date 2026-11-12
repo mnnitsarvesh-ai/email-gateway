@@ -9,6 +9,25 @@
  * text or hashes) and the organization purge of the seven BEC tables. Result rows are inserted
  * as the email-worker writes them (fixtures).
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers delete /api/v1/bec/executives/:id
+// @covers delete /api/v1/bec/history
+// @covers delete /api/v1/bec/suppressions/:id
+// @covers delete /api/v1/bec/trusted-senders/:id
+// @covers get /api/v1/bec/executives
+// @covers get /api/v1/bec/executives/:id
+// @covers get /api/v1/bec/feedback
+// @covers get /api/v1/bec/feedback/export
+// @covers get /api/v1/bec/suppressions
+// @covers get /api/v1/bec/vendors/:id
+// @covers patch /api/v1/bec/executives/:id
+// @covers patch /api/v1/bec/trusted-senders/:id
+// @covers patch /api/v1/bec/vendors/:id
+// @covers post /api/v1/bec/executives
+// @covers post /api/v1/bec/trusted-senders
+// @covers post /api/v1/bec/vendors
+// @covers post /api/v1/messages/:messageId/scans/:scanId/bec-feedback
+// ---- end of route coverage ----
 import { randomBytes, randomUUID } from 'node:crypto';
 import { PrismaReadService } from '@email-gateway/common';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -24,7 +43,7 @@ import {
   type Fixtures,
   type FixtureUser,
 } from './support/fixtures';
-import { apiKeyHeader, bearer, loginWithMfa, uniqueIp } from './support/http';
+import { apiKeyHeader, bearer, idem, loginWithMfa, uniqueIp } from './support/http';
 import {
   deleteLifecycleFixtures,
   insertLifecycleMessage,
@@ -637,6 +656,13 @@ describe('feedback, suppressions, export and the scans read API (B11, B15)', () 
       (line) => JSON.parse(line) as Record<string, unknown>,
     );
     expect(lines.map((l) => l.kind).sort()).toEqual(['false_negative', 'false_positive']);
+    // Another organization's export never contains A's feedback (step 6.1 WP4, cross-tenant).
+    const foreign = await ctx.http
+      .get('/api/v1/bec/feedback/export')
+      .set(headers(adminB))
+      .expect(200);
+    expect(foreign.text.trim()).toBe('');
+    expect(foreign.headers['x-next-cursor']).toBeUndefined();
     expect(Object.keys(lines[0]!).sort()).toEqual(
       [
         'aiLabels',
@@ -793,8 +819,12 @@ describe('history purge, bec settings and the organization purge (B12, B13, B18)
     await ctx.prisma.becContactHistory.createMany({
       data: [historyRow(orgA.id), historyRow(orgA.id), historyRow(orgA.id), historyRow(orgB.id)],
     });
-    await ctx.http.delete('/api/v1/bec/history').set(headers(noMfaA)).expect(403);
-    const res = await ctx.http.delete('/api/v1/bec/history').set(headers(adminA)).expect(202);
+    await ctx.http.delete('/api/v1/bec/history').set(idem()).set(headers(noMfaA)).expect(403);
+    const res = await ctx.http
+      .delete('/api/v1/bec/history')
+      .set(idem())
+      .set(headers(adminA))
+      .expect(202);
     expect(res.body).toEqual({ deleted: 3 });
     expect(await ctx.prisma.becContactHistory.count({ where: { organizationId: orgA.id } })).toBe(
       0,

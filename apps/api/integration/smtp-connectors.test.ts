@@ -5,6 +5,14 @@
  * fingerprint uniqueness, disable, rotate, delete, the per-organization limit and the audit
  * rows (never carrying secrets).
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers delete /api/v1/smtp-connectors/:id
+// @covers get /api/v1/smtp-connectors
+// @covers get /api/v1/smtp-connectors/:id
+// @covers patch /api/v1/smtp-connectors/:id
+// @covers post /api/v1/smtp-connectors
+// @covers post /api/v1/smtp-connectors/:id/rotate-secret
+// ---- end of route coverage ----
 import * as argon2 from 'argon2';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createIntegrationApp, type IntegrationApp } from './support/app';

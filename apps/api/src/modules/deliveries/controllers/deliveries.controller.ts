@@ -1,6 +1,6 @@
 import { Controller, Get, Param, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOkResponse, ApiOperation, ApiSecurity, ApiTags } from '@nestjs/swagger';
-import { CurrentScope, RequirePermissions } from '../../../auth-contracts/decorators';
+import { CurrentScope, CursorList, RequirePermissions } from '../../../auth-contracts/decorators';
 import type { TenantScope } from '../../../auth-contracts/tenant-scope';
 import { ACCESS_TOKEN_SCHEME, API_KEY_SCHEME } from '../../../http/openapi';
 import type { Page } from '../../../http/pagination';
@@ -56,6 +56,7 @@ export class DeliveriesController {
   }
 
   @Get('messages/:messageId/deliveries/events')
+  @CursorList('v0')
   @RequirePermissions(DELIVERY_READ)
   @ApiOperation({
     summary: 'Get the delivery audit trail of a message',
@@ -79,6 +80,7 @@ export class DeliveriesController {
   }
 
   @Get('deliveries')
+  @CursorList('v0')
   @RequirePermissions(DELIVERY_READ)
   @ApiOperation({
     summary: 'List deliveries',

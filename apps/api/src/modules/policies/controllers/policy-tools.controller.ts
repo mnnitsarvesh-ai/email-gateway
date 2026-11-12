@@ -1,6 +1,7 @@
 import { Body, Controller, Get, HttpCode, HttpStatus, Post, Query } from '@nestjs/common';
 import { ApiBody, ApiOkResponse, ApiOperation } from '@nestjs/swagger';
-import { CurrentScope, RequirePermissions } from '../../../auth-contracts/decorators';
+import { RateClass } from '../../../rate-limit/rate-class.decorator';
+import { CurrentScope, CursorList, RequirePermissions } from '../../../auth-contracts/decorators';
 import type { TenantScope } from '../../../auth-contracts/tenant-scope';
 import { zodToOpenApi } from '../../../validation/zod-openapi';
 import { ZodValidationPipe } from '../../../validation/zod-validation.pipe';
@@ -63,6 +64,7 @@ export class PolicyToolsController {
   }
 
   @Post('test')
+  @RateClass('expensive')
   @RequirePermissions(POLICY_MANAGE)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
@@ -90,6 +92,7 @@ export class PolicyToolsController {
   }
 
   @Get('executions')
+  @CursorList('v0')
   @RequirePermissions(POLICY_READ)
   @ApiOperation({
     summary: 'List policy executions (history)',

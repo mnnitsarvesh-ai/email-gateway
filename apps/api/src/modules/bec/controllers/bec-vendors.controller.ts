@@ -20,6 +20,7 @@ import {
 import {
   CurrentPrincipal,
   CurrentScope,
+  CursorList,
   RequirePermissions,
 } from '../../../auth-contracts/decorators';
 import type { Principal } from '../../../auth-contracts/principal';
@@ -71,6 +72,7 @@ export class BecVendorsController {
   constructor(private readonly profiles: BecProfilesService) {}
 
   @Get()
+  @CursorList('v0')
   @RequirePermissions(BEC_READ)
   @ApiOperation({
     summary: 'List the vendor profiles',

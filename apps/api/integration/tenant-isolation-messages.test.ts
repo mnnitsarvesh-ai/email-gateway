@@ -5,8 +5,14 @@
  * change nothing of B (state, version, history, outbox, idempotency records). An Idempotency-Key
  * of A never replays B's response. Platform users see nothing without an override; super_admin
  * under an override into B can rescan B's message, audited with `metadata.override` (the release
- * of a held message answers `409 quarantine_workflow_required` since step 5.3, Q30).
+ * of a held message answers `409 quarantine_workflow_required` since step 5.3, Q30). Step 6.1
+ * (WP2 convergence): the scans route of B's message is `404` as well.
  */
+// @covers get /api/v1/messages/:messageId/lifecycle
+// @covers get /api/v1/messages/:messageId/lifecycle/history
+// @covers post /api/v1/messages/:messageId/rescan
+// @covers post /api/v1/messages/:messageId/release
+// @covers get /api/v1/messages/:messageId/scans
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createIntegrationApp, type IntegrationApp } from './support/app';
@@ -66,6 +72,14 @@ async function expectEveryRoute(
   const calls: Array<[string, () => ReturnType<LifecycleApi['lifecycle']>]> = [
     ['GET lifecycle', () => api.lifecycle(messageB.publicId)],
     ['GET history', () => api.history(messageB.publicId)],
+    [
+      'GET scans',
+      () =>
+        ctx.http
+          .get(`/api/v1/messages/${messageB.publicId}/scans`)
+          .set(headers)
+          .set('X-Forwarded-For', uniqueIp()),
+    ],
     ['POST rescan', () => api.rescan(messageB.publicId, body, `iso-${randomUUID()}`)],
     ['POST release', () => api.release(messageB.publicId, body, `iso-${randomUUID()}`)],
   ];
@@ -116,6 +130,12 @@ describe('tenant A (organization admin and API key)', () => {
         POLL,
       )
       .toBe(200);
+    const scans = await ctx.http
+      .get(`/api/v1/messages/${messageA.publicId}/scans`)
+      .set(keyA)
+      .set('X-Forwarded-For', uniqueIp());
+    expect(scans.status).toBe(200);
+    expect(scans.body).toEqual({ messageId: messageA.publicId, data: [], nextCursor: null });
     await expectEveryRoute(adminA, 404);
     await expectEveryRoute(keyA, 404);
   });

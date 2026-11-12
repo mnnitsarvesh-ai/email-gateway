@@ -1,6 +1,12 @@
 import { Global, Module } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
-import { PrismaService, RedisService } from '@email-gateway/common';
+import {
+  METRICS_OPTIONS,
+  MetricsService,
+  PrismaReadService,
+  PrismaService,
+  RedisService,
+} from '@email-gateway/common';
 import { describe, expect, it } from 'vitest';
 import { RecordingEmailSender } from '../test/support/recording-email-sender';
 import { ApiCommonModule } from './api-common.module';
@@ -15,7 +21,15 @@ import { EmailSender } from './email/email-sender';
 import { LogEmailSender } from './email/log-email-sender';
 import { KeyValueStore } from './kv/key-value-store';
 import { RedisKeyValueStore } from './kv/redis-key-value-store';
+import { ApiConventionMetrics } from './http/api-metrics';
+import { CursorCodec } from './http/cursor/cursor-codec';
+import { IdempotencyReservationRepository } from './http/idempotency/idempotency-reservation.repository';
+import { IdempotencyReservationService } from './http/idempotency/idempotency-reservation.service';
+import { IdempotencyInterceptor } from './http/idempotency/idempotency.interceptor';
+import { IdempotencyRepository } from './http/idempotency/idempotency.repository';
+import { IdempotencyService } from './http/idempotency/idempotency.service';
 import { RateLimitGuard } from './rate-limit/rate-limit.guard';
+import { TenantRateLimitResolver } from './rate-limit/tenant-rate-limit.resolver';
 import { OrganizationFeaturesService } from './tenancy/organization-features.service';
 import { OrganizationLimitsService } from './tenancy/organization-limits.service';
 import { TEST_DOMAIN_ENV } from '../test/support/test-env';
@@ -39,8 +53,11 @@ const config = loadApiConfig({
     { provide: API_CONFIG, useValue: config },
     { provide: PrismaService, useValue: {} },
     { provide: RedisService, useValue: { client: {} } },
+    { provide: PrismaReadService, useValue: {} },
+    { provide: METRICS_OPTIONS, useValue: { service: 'api-test' } },
+    MetricsService,
   ],
-  exports: [API_CONFIG, PrismaService, RedisService],
+  exports: [API_CONFIG, PrismaService, RedisService, PrismaReadService, MetricsService],
 })
 class RootStub {}
 
@@ -66,6 +83,14 @@ describe('ApiCommonModule', () => {
       OrganizationLimitsService,
       OrganizationFeaturesService,
       RateLimitGuard,
+      ApiConventionMetrics,
+      CursorCodec,
+      TenantRateLimitResolver,
+      IdempotencyRepository,
+      IdempotencyService,
+      IdempotencyReservationRepository,
+      IdempotencyReservationService,
+      IdempotencyInterceptor,
     ]) {
       expect(moduleRef.get(token)).toBeInstanceOf(token);
     }

@@ -4,6 +4,25 @@
  * §4.3 access column, MFA step-up, user-only routes) and the access passed to the services. The
  * full flows run against real MySQL/Redis in integration/organizations.test.ts.
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers delete /api/v1/organizations/:id/features/:featureKey
+// @covers delete /api/v1/organizations/:id/limits/:limitKey
+// @covers get /api/v1/organizations
+// @covers get /api/v1/organizations/:id
+// @covers get /api/v1/organizations/:id/deletion
+// @covers get /api/v1/organizations/:id/limits
+// @covers get /api/v1/organizations/:id/settings
+// @covers get /api/v1/organizations/:id/usage
+// @covers patch /api/v1/organizations/:id/status
+// @covers post /api/v1/organizations
+// @covers post /api/v1/organizations/:id/deletion
+// @covers post /api/v1/organizations/:id/deletion/cancel
+// @covers post /api/v1/organizations/:id/deletion/confirm
+// @covers put /api/v1/organizations/:id
+// @covers put /api/v1/organizations/:id/features/:featureKey
+// @covers put /api/v1/organizations/:id/limits/:limitKey
+// @covers put /api/v1/organizations/:id/settings
+// ---- end of route coverage ----
 import { randomBytes, randomUUID } from 'node:crypto';
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
@@ -33,6 +52,8 @@ import { OrganizationEntitlementsService } from '../src/modules/organizations/se
 import { OrganizationSettingsService } from '../src/modules/organizations/services/organization-settings.service';
 import { OrganizationUsageService } from '../src/modules/organizations/services/organization-usage.service';
 import { OrganizationsService } from '../src/modules/organizations/services/organizations.service';
+import { idem, withIdempotencyStore } from './legacy-idempotency-support';
+import { InMemoryIdempotencyStore } from './support/api-test-app';
 import { InMemoryKeyValueStore } from './support/in-memory-key-value-store';
 import { RecordingEmailSender } from './support/recording-email-sender';
 import { TEST_DOMAIN_ENV } from './support/test-env';
@@ -130,7 +151,7 @@ describe('organization endpoints (e2e, services stubbed)', () => {
 
   beforeAll(async () => {
     const stub = (healthName: string) => ({ healthName, checkHealth: () => Promise.resolve() });
-    const moduleRef = await Test.createTestingModule({ imports: [AppModule.forRoot(config)] })
+    const builder = Test.createTestingModule({ imports: [AppModule.forRoot(config)] })
       .overrideProvider(PrismaService)
       .useValue(stub('mysql'))
       .overrideProvider(PrismaReadService)
@@ -158,8 +179,9 @@ describe('organization endpoints (e2e, services stubbed)', () => {
       .overrideProvider(OrganizationEntitlementsService)
       .useValue(entitlements)
       .overrideProvider(OrganizationDeletionService)
-      .useValue(deletion)
-      .compile();
+      .useValue(deletion);
+    // Step 6.1 §3.5: status change, deletion request and confirmation take an Idempotency-Key.
+    const moduleRef = await withIdempotencyStore(builder, new InMemoryIdempotencyStore()).compile();
     app = moduleRef.createNestApplication({ logger: false });
     configureHttpApp(app, createLogger({ service: 'api-test', level: 'silent' }));
     configureApiApp(app, config);
@@ -298,6 +320,7 @@ describe('organization endpoints (e2e, services stubbed)', () => {
           () =>
             http()
               .patch(`/api/v1/organizations/${orgId}/status`)
+              .set(idem())
               .set(auth)
               .send({ status: 'suspended' }),
           'reason: is required when suspending',
@@ -306,6 +329,7 @@ describe('organization endpoints (e2e, services stubbed)', () => {
           () =>
             http()
               .patch(`/api/v1/organizations/${orgId}/status`)
+              .set(idem())
               .set(auth)
               .send({ status: 'deleted', reason: 'abc' }),
           'status: Invalid option: expected one of "active"|"suspended"',
@@ -326,6 +350,7 @@ describe('organization endpoints (e2e, services stubbed)', () => {
           () =>
             http()
               .post(`/api/v1/organizations/${orgId}/deletion`)
+              .set(idem())
               .set(auth)
               .send({ reason: 'short', confirmSlug: 'acme' }),
           'reason: Too small: expected string to have >=10 characters',
@@ -372,6 +397,7 @@ describe('organization endpoints (e2e, services stubbed)', () => {
         () =>
           http()
             .patch(`/api/v1/organizations/${orgId}/status`)
+            .set(idem())
             .set(auth)
             .send({ status: 'active' }),
         () =>
@@ -429,6 +455,7 @@ describe('organization endpoints (e2e, services stubbed)', () => {
       await http().post('/api/v1/organizations').set(apiKey).send({}).expect(403);
       await http()
         .patch(`/api/v1/organizations/${orgId}/status`)
+        .set(idem())
         .set(apiKey)
         .send({ status: 'active' })
         .expect(403);
@@ -443,6 +470,7 @@ describe('organization endpoints (e2e, services stubbed)', () => {
       for (const path of ['deletion', 'deletion/confirm', 'deletion/cancel']) {
         const res = await http()
           .post(`/api/v1/organizations/${orgId}/${path}`)
+          .set(idem())
           .set(noMfa)
           .send(body)
           .expect(403);
@@ -451,6 +479,7 @@ describe('organization endpoints (e2e, services stubbed)', () => {
       await http().get(`/api/v1/organizations/${orgId}/deletion`).set(noMfa).expect(200);
       await http()
         .post(`/api/v1/organizations/${orgId}/deletion`)
+        .set(idem())
         .set(await bearer())
         .send(body)
         .expect(200);

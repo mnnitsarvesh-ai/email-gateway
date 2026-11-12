@@ -4,6 +4,10 @@
  * step-up, API keys refused), 503 without RABBITMQ_OPS_URL and 409 while another replay holds the
  * lock. The full replay against a real broker runs in integration/dead-letters.test.ts.
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers get /api/v1/platform/dead-letters
+// @covers post /api/v1/platform/dead-letters/replay
+// ---- end of route coverage ----
 import { randomBytes, randomUUID } from 'node:crypto';
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
@@ -34,6 +38,8 @@ import {
   type DeadLetterSession,
 } from '../src/modules/dead-letters/broker/dead-letter-broker';
 import { REPLAY_LOCK_KEY } from '../src/modules/dead-letters/domain/dead-letter-replay';
+import { idem, withIdempotencyStore } from './legacy-idempotency-support';
+import { InMemoryIdempotencyStore } from './support/api-test-app';
 import { InMemoryKeyValueStore } from './support/in-memory-key-value-store';
 import { RecordingEmailSender } from './support/recording-email-sender';
 import { TEST_DOMAIN_ENV } from './support/test-env';
@@ -135,6 +141,8 @@ async function buildApp(
   if (overrides.broker) {
     builder = builder.overrideProvider(DeadLetterBroker).useValue(overrides.broker);
   }
+  // Step 6.1 §3.5: the replay is a legacy sensitive mutation (Idempotency-Key, in memory here).
+  builder = withIdempotencyStore(builder, new InMemoryIdempotencyStore());
   const moduleRef = await builder.compile();
   const app = moduleRef.createNestApplication({ logger: false });
   configureHttpApp(app, createLogger({ service: 'api-test', level: 'silent' }));
@@ -210,6 +218,7 @@ describe('dead-letter routes (e2e, broker stubbed)', () => {
     const res = await http()
       .post('/api/v1/platform/dead-letters/replay')
       .set(await bearer())
+      .set(idem())
       .send(body)
       .expect(400);
     expect(res.body.message).toContain(message);
@@ -221,6 +230,7 @@ describe('dead-letter routes (e2e, broker stubbed)', () => {
     await http()
       .post('/api/v1/platform/dead-letters/replay')
       .set(await bearer())
+      .set(idem())
       .send(valid)
       .expect(403);
     principalWith([REPLAY]);
@@ -235,6 +245,7 @@ describe('dead-letter routes (e2e, broker stubbed)', () => {
     const res = await http()
       .post('/api/v1/platform/dead-letters/replay')
       .set(await bearer(['pwd']))
+      .set(idem())
       .send(valid)
       .expect(403);
     expect(JSON.stringify(res.body.message)).toMatch(/MFA/i);
@@ -252,6 +263,7 @@ describe('dead-letter routes (e2e, broker stubbed)', () => {
     const res = await http()
       .post('/api/v1/platform/dead-letters/replay')
       .set(await bearer())
+      .set(idem())
       .send(valid)
       .expect(409);
     expect(res.body.message).toBe('replay_in_progress');
@@ -262,6 +274,7 @@ describe('dead-letter routes (e2e, broker stubbed)', () => {
     const res = await http()
       .post('/api/v1/platform/dead-letters/replay')
       .set(await bearer())
+      .set(idem())
       .send({ ...valid, dryRun: true })
       .expect(200);
     expect(res.body).toMatchObject({
@@ -285,6 +298,7 @@ describe('dead-letter routes (e2e, broker stubbed)', () => {
     const replay = await server()
       .post('/api/v1/platform/dead-letters/replay')
       .set(await bearer())
+      .set(idem())
       .send(valid)
       .expect(503);
     expect(replay.body.message).toBe('dead_letter_replay_unavailable');

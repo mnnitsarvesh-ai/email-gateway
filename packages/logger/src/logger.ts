@@ -69,7 +69,7 @@ export const REDACT_PATHS = [
 ];
 
 /**
- * Structured JSON logger. Every line carries service, correlationId, tenantId and
+ * Structured JSON logger. Every line carries service, correlationId, tenantId, requestId (api) and
  * trace/span ids when available, so logs join up with traces in Grafana.
  */
 export function createLogger(options: CreateLoggerOptions): Logger {
@@ -88,6 +88,7 @@ export function createLogger(options: CreateLoggerOptions): Logger {
       return {
         ...(ctx?.correlationId && { correlationId: ctx.correlationId }),
         ...(ctx?.tenantId && { tenantId: ctx.tenantId }),
+        ...(ctx?.requestId && { requestId: ctx.requestId }),
         ...(span && { traceId: span.traceId, spanId: span.spanId }),
       };
     },

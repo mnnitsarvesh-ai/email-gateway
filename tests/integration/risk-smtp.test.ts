@@ -2,7 +2,7 @@ import { randomInt } from 'node:crypto';
 import { eicar } from '@email-gateway/attachment-corpus';
 import { Prng, Synthetic } from '@email-gateway/dlp';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { apiSession, type ApiSession } from './support/api-client';
+import { apiSession, type ApiSession, idempotencyKey } from './support/api-client';
 import { attachmentMessage, type MessageAttachment } from './support/attachment-stack';
 import { purgeDormantQueues } from './support/broker';
 import { waitFor } from './support/compose';
@@ -644,15 +644,23 @@ describe.skipIf(gate.skip)(
       expect(draft.status, JSON.stringify(draft.body)).toBe(201);
       const created = draft.body as { id: string; rowVersion: number; versionNo: number };
       // security_analyst holds policy:manage but not policy:publish.
-      const refused = await analyst!.post(`/risk-scoring/profile/versions/${created.id}/publish`, {
-        activate: true,
-        expectedRowVersion: created.rowVersion,
-      });
+      const refused = await analyst!.post(
+        `/risk-scoring/profile/versions/${created.id}/publish`,
+        {
+          activate: true,
+          expectedRowVersion: created.rowVersion,
+        },
+        idempotencyKey(),
+      );
       expect(refused.status).toBe(403);
-      const published = await admin!.post(`/risk-scoring/profile/versions/${created.id}/publish`, {
-        activate: true,
-        expectedRowVersion: created.rowVersion,
-      });
+      const published = await admin!.post(
+        `/risk-scoring/profile/versions/${created.id}/publish`,
+        {
+          activate: true,
+          expectedRowVersion: created.rowVersion,
+        },
+        idempotencyKey(),
+      );
       expect(published.status, JSON.stringify(published.body)).toBe(200);
       const body = published.body as {
         version: { id: string; versionNo: number; status: string; profileSha256: string };

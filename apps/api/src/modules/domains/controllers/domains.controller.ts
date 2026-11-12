@@ -23,6 +23,7 @@ import {
 import {
   CurrentPrincipal,
   CurrentScope,
+  CursorList,
   RequirePermissions,
 } from '../../../auth-contracts/decorators';
 import type { Principal } from '../../../auth-contracts/principal';
@@ -86,6 +87,7 @@ export class DomainsController {
   }
 
   @Get()
+  @CursorList('v0')
   @RequirePermissions(DOMAIN_READ)
   @ApiOperation({
     summary: 'List domains',

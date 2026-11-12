@@ -20,6 +20,7 @@ import {
 import {
   CurrentPrincipal,
   CurrentScope,
+  CursorList,
   RequirePermissions,
 } from '../../../auth-contracts/decorators';
 import type { Principal } from '../../../auth-contracts/principal';
@@ -65,6 +66,7 @@ export class DlpDictionariesController {
   constructor(private readonly dictionaries: DlpDictionariesService) {}
 
   @Get()
+  @CursorList('v0')
   @RequirePermissions(DLP_READ)
   @ApiOperation({
     summary: 'List the keyword dictionaries',

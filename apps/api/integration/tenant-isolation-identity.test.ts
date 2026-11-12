@@ -5,6 +5,29 @@
  * platform operator under an override into B sees B only and every request is audited; the
  * read-only repositories never return another tenant's rows.
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers delete /api/v1/api-keys/:id
+// @covers delete /api/v1/roles/:key
+// @covers delete /api/v1/users/:id
+// @covers delete /api/v1/users/:id/sessions
+// @covers delete /api/v1/users/:id/sessions/:sessionId
+// @covers get /api/v1/api-keys
+// @covers get /api/v1/audit/login-events
+// @covers get /api/v1/roles
+// @covers get /api/v1/roles/:key
+// @covers get /api/v1/users
+// @covers get /api/v1/users/:id
+// @covers get /api/v1/users/:id/sessions
+// @covers patch /api/v1/users/:id
+// @covers patch /api/v1/users/:id/status
+// @covers post /api/v1/api-keys
+// @covers post /api/v1/roles
+// @covers post /api/v1/users/:id/invitation
+// @covers post /api/v1/users/:id/mfa/reset
+// @covers post /api/v1/users/invitations
+// @covers put /api/v1/roles/:key
+// @covers put /api/v1/users/:id/roles
+// ---- end of route coverage ----
 import { randomBytes } from 'node:crypto';
 import { TENANT_PERMISSIONS } from '@email-gateway/database';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -26,6 +49,7 @@ import {
   apiKeyHeader,
   bearer,
   fromIp,
+  idem,
   login,
   loginWithMfa,
   type TokenResponseBody,
@@ -156,8 +180,8 @@ describe('tenant A administrator (every tenant permission) versus tenant B', () 
       .set(auth)
       .send({ roleKeys: ['read_only_user'] })
       .expect(404);
-    await ctx.http.post(`/api/v1/users/${target}/invitation`).set(auth).expect(404);
-    await ctx.http.post(`/api/v1/users/${target}/mfa/reset`).set(auth).expect(404);
+    await ctx.http.post(`/api/v1/users/${target}/invitation`).set(auth).set(idem()).expect(404);
+    await ctx.http.post(`/api/v1/users/${target}/mfa/reset`).set(auth).set(idem()).expect(404);
     await ctx.http.delete(`/api/v1/users/${target}`).set(auth).expect(404);
     // Unknown ids look exactly the same.
     await ctx.http.get(`/api/v1/users/${unknownId()}`).set(auth).expect(404);
@@ -332,13 +356,13 @@ describe('target-side no escalation inside A (user:manage is not every permissio
       .set(as)
       .send({ status: 'disabled', reason: 'Takeover attempt' })
       .expect(403);
-    await ctx.http.post(`${target}/mfa/reset`).set(as).expect(403);
+    await ctx.http.post(`${target}/mfa/reset`).set(idem()).set(as).expect(403);
     await ctx.http
       .put(`${target}/roles`)
       .set(as)
       .send({ roleKeys: ['read_only_user'] })
       .expect(403);
-    await ctx.http.post(`${target}/invitation`).set(as).expect(403);
+    await ctx.http.post(`${target}/invitation`).set(idem()).set(as).expect(403);
     await ctx.http.delete(target).set(as).expect(403);
 
     const row = await ctx.prisma.user.findUniqueOrThrow({ where: { id: victim.id } });
@@ -503,6 +527,7 @@ describe('platform override into B', () => {
     const invited = `override-invite-${uniqueSuffix()}@example.test`;
     await ctx.http
       .post('/api/v1/users/invitations')
+      .set(idem())
       .set(bearer(token))
       .send({ email: invited, displayName: 'Override invitee', roleKeys: ['organization_admin'] })
       .expect(403);

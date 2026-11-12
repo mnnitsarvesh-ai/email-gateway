@@ -19,8 +19,14 @@ import {
   ApiParam,
   ApiTags,
 } from '@nestjs/swagger';
+import { Idempotent } from '../../../http/idempotency/idempotency.interceptor';
 import type { Response } from 'express';
-import { RequireMfa, RequirePermissions, UserOnly } from '../../../auth-contracts/decorators';
+import {
+  CursorList,
+  RequireMfa,
+  RequirePermissions,
+  UserOnly,
+} from '../../../auth-contracts/decorators';
 import type { UserPrincipal } from '../../../auth-contracts/principal';
 import { CodedExceptionFilter } from '../../../http/coded-exception';
 import { ACCESS_TOKEN_SCHEME } from '../../../http/openapi';
@@ -77,6 +83,7 @@ export class AttachmentRescansController {
   constructor(private readonly rescans: AttachmentRescansService) {}
 
   @Post()
+  @Idempotent({ operation: 'platform.attachment_rescan', legacy: true })
   @RequirePermissions(PLATFORM_SCAN_RESCAN)
   @RequireMfa()
   @HttpCode(HttpStatus.ACCEPTED)
@@ -115,6 +122,7 @@ export class AttachmentRescansController {
   }
 
   @Get()
+  @CursorList('v0')
   @RequirePermissions(PLATFORM_SCAN_RESCAN)
   @RequireMfa()
   @ApiOperation({

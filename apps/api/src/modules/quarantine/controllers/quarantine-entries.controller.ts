@@ -27,6 +27,7 @@ import type {
 import {
   CurrentPrincipal,
   CurrentScope,
+  CursorList,
   RequireMfa,
   RequirePermissions,
   UserOnly,
@@ -34,10 +35,7 @@ import {
 import type { Principal, UserPrincipal } from '../../../auth-contracts/principal';
 import type { TenantScope } from '../../../auth-contracts/tenant-scope';
 import { ApiCodedError } from '../../../http/coded-exception';
-import {
-  ApiIdempotencyKey,
-  IDEMPOTENCY_REPLAYED_HEADER,
-} from '../../../http/idempotency/idempotency-key';
+import { IDEMPOTENCY_REPLAYED_HEADER } from '../../../http/idempotency/idempotency-key';
 import type { IdempotentResult } from '../../../http/idempotency/idempotency.service';
 import { zodToOpenApi } from '../../../validation/zod-openapi';
 import { ZodValidationPipe } from '../../../validation/zod-validation.pipe';
@@ -88,7 +86,8 @@ import {
   ReleaseOutcomeSchema,
   type ReleaseOutcome,
 } from '../dto/quarantine.schemas';
-import { NO_STORE, Q } from '../quarantine.constants';
+import { NO_STORE, Q, QUARANTINE_OPERATIONS } from '../quarantine.constants';
+import { TransactionalIdempotency } from '../../messages/api-docs';
 import { QuarantineRateLimit } from '../quarantine-rate-limit';
 import { QuarantineDispositionService } from '../services/quarantine-disposition.service';
 import { QuarantineDownloadService } from '../services/quarantine-download.service';
@@ -122,6 +121,7 @@ export class QuarantineEntriesController {
   ) {}
 
   @Get()
+  @CursorList('v0')
   @RequirePermissions(Q.read)
   @Header('Cache-Control', NO_STORE)
   @ApiOperation({
@@ -154,6 +154,7 @@ export class QuarantineEntriesController {
   }
 
   @Post()
+  @TransactionalIdempotency(QUARANTINE_OPERATIONS.manual)
   @RequirePermissions(Q.manage)
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
@@ -168,7 +169,6 @@ export class QuarantineEntriesController {
       'quarantine_state_conflict` (no clawback of delivered mail). Audited as ' +
       '`quarantine.manual_quarantined`. Requires the Idempotency-Key header.',
   })
-  @ApiIdempotencyKey()
   @ApiBody({ schema: zodToOpenApi(ManualQuarantineBodySchema, { io: 'input' }) })
   @ApiCreatedResponse({ schema: zodToOpenApi(ManualQuarantineResponseSchema) })
   @ApiErrors(400, 401, 403, 422)
@@ -307,6 +307,7 @@ export class QuarantineEntriesController {
   }
 
   @Post(':entryId/release')
+  @TransactionalIdempotency(QUARANTINE_OPERATIONS.release)
   @RequirePermissions(Q.release)
   @HttpCode(HttpStatus.ACCEPTED)
   @ApiOperation({
@@ -323,7 +324,6 @@ export class QuarantineEntriesController {
       'Requires the Idempotency-Key header.',
   })
   @ApiEntryId()
-  @ApiIdempotencyKey()
   @ApiBody({ schema: zodToOpenApi(ReleaseBodySchema, { io: 'input' }) })
   @ApiAcceptedResponse({ schema: zodToOpenApi(ReleaseOutcomeSchema) })
   @ApiErrors(400, 401, 403, 422)
@@ -346,6 +346,7 @@ export class QuarantineEntriesController {
   }
 
   @Post(':entryId/request-release')
+  @TransactionalIdempotency(QUARANTINE_OPERATIONS.requestRelease)
   @RequirePermissions(Q.requestRelease)
   @HttpCode(HttpStatus.ACCEPTED)
   @ApiOperation({
@@ -357,7 +358,6 @@ export class QuarantineEntriesController {
       'Idempotency-Key header.',
   })
   @ApiEntryId()
-  @ApiIdempotencyKey()
   @ApiBody({ schema: zodToOpenApi(ReasonBodySchema, { io: 'input' }) })
   @ApiAcceptedResponse({ schema: zodToOpenApi(ReleaseOutcomeSchema) })
   @ApiErrors(400, 401, 403, 422)
@@ -380,6 +380,7 @@ export class QuarantineEntriesController {
   }
 
   @Post(':entryId/reject')
+  @TransactionalIdempotency(QUARANTINE_OPERATIONS.reject)
   @RequirePermissions(Q.reject)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
@@ -394,7 +395,6 @@ export class QuarantineEntriesController {
       'Requires the Idempotency-Key header.',
   })
   @ApiEntryId()
-  @ApiIdempotencyKey()
   @ApiBody({ schema: zodToOpenApi(RejectBodySchema, { io: 'input' }) })
   @ApiOkResponse({ schema: zodToOpenApi(EntryStateResponseSchema) })
   @ApiErrors(400, 401, 403, 422)
@@ -417,6 +417,7 @@ export class QuarantineEntriesController {
   }
 
   @Post(':entryId/delete')
+  @TransactionalIdempotency(QUARANTINE_OPERATIONS.delete)
   @RequirePermissions(Q.delete)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
@@ -431,7 +432,6 @@ export class QuarantineEntriesController {
       '`quarantine.deleted` / `quarantine.delete_refused`. Requires the Idempotency-Key header.',
   })
   @ApiEntryId()
-  @ApiIdempotencyKey()
   @ApiBody({ schema: zodToOpenApi(DeleteBodySchema, { io: 'input' }) })
   @ApiOkResponse({ schema: zodToOpenApi(EntryStateResponseSchema) })
   @ApiErrors(400, 401, 403, 422)

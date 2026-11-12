@@ -1679,12 +1679,14 @@ describe('message lifecycle schema (step 3.3, §3.1, §3.2)', () => {
       ['resource_id', 'varchar(64)', 'NO'],
       ['status_code', 'smallint unsigned', 'NO'],
       ['response', 'json', 'NO'],
+      // Step 6.1 D9: reservation state of the idempotency interceptor.
+      ['state', "enum('completed','pending')", 'NO'],
       ['created_at', 'datetime(3)', 'NO'],
       ['expires_at', 'datetime(3)', 'NO'],
     ] as const) {
       expect(col(column), column).toMatchObject({ columnType: type, nullable });
     }
-    expect(cols.size).toBe(11);
+    expect(cols.size).toBe(12);
     const keys = await indexColumnSets('api_idempotency_keys');
     expect(keys.map((k) => [k.key, k.unique]).sort()).toEqual(
       [
@@ -4514,6 +4516,41 @@ describe('quarantine schema (step 5.3, docs/plan/steps/17-quarantine.md §3)', (
       // Deleting the entry cascades its approval requests.
       await prisma.quarantineMessage.delete({ where: { id: e.id } });
       expect(await prisma.quarantineApprovalRequest.count({ where: { organizationId } })).toBe(0);
+    });
+  });
+});
+
+describe('REST API schema (step 6.1, docs/plan/steps/18-rest-api.md §3.1)', () => {
+  it('adds the verdict-list, report and suppression-list indexes with their exact columns', async () => {
+    const messages = await indexes('email_messages');
+    expect(messages.get('email_messages_org_verdict_received_idx')).toEqual({
+      columns: ['organization_id', 'final_verdict', 'received_at', 'id'],
+      unique: false,
+    });
+    // final_action since migration rest_api_index_coverage (index-only threats outcomes).
+    expect(messages.get('email_messages_org_received_dir_verdict_idx')).toEqual({
+      columns: ['organization_id', 'received_at', 'direction', 'final_verdict', 'final_action'],
+      unique: false,
+    });
+    // received_at, id since rest_api_index_coverage: the hash search keyset without a filesort.
+    const attachments = await indexes('email_attachments');
+    expect(attachments.get('email_attachments_organization_id_sha256_idx')).toEqual({
+      columns: ['organization_id', 'sha256', 'received_at', 'id'],
+      unique: false,
+    });
+    const suppressions = await indexes('delivery_suppressions');
+    expect(suppressions.get('delivery_suppressions_organization_id_id_idx')).toEqual({
+      columns: ['organization_id', 'id'],
+      unique: false,
+    });
+  });
+
+  it('defaults api_idempotency_keys.state to completed', async () => {
+    const cols = await columns(['api_idempotency_keys']);
+    expect(cols.get('api_idempotency_keys.state')).toMatchObject({
+      columnType: "enum('completed','pending')",
+      nullable: 'NO',
+      columnDefault: 'completed',
     });
   });
 });

@@ -16,10 +16,10 @@
   },
   "dependencies": {
     "@email-gateway/bec": "workspace:*",
-    "@email-gateway/dlp": "workspace:*",
     "@email-gateway/common": "workspace:*",
     "@email-gateway/config": "workspace:*",
     "@email-gateway/database": "workspace:*",
+    "@email-gateway/dlp": "workspace:*",
     "@email-gateway/event-contracts": "workspace:*",
     "@email-gateway/logger": "workspace:*",
     "@email-gateway/mail-routing": "workspace:*",
@@ -56,6 +56,7 @@
     "@types/nodemailer": "^8.0.2",
     "@types/supertest": "^6.0.3",
     "supertest": "^7.1.4",
-    "unplugin-swc": "^1.5.7"
+    "unplugin-swc": "^1.5.7",
+    "yaml": "^2.9.1"
   }
 }

@@ -1,0 +1,126 @@
+# promtool unit tests of rules/api.rules.yml (step 6.1 D16):
+#   docker run --rm -v "$PWD/infrastructure/monitoring:/m:ro" --entrypoint promtool \
+#     prom/prometheus:v3.6.0 test rules /m/tests/api.rules.test.yml
+rule_files:
+  - ../rules/api.rules.yml
+evaluation_interval: 1m
+tests:
+  - name: '10 % of 10 req/s are 5xx - critical after 10 minutes'
+    interval: 1m
+    input_series:
+      - series: 'api_http_requests_total{job="api",instance="a",method="GET",route="/api/v1/messages",status_class="2xx"}'
+        values: '0+540x40'
+      - series: 'api_http_requests_total{job="api",instance="a",method="GET",route="/api/v1/messages",status_class="5xx"}'
+        values: '0+60x40'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ApiHighServerErrorRatio
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: ApiHighServerErrorRatio
+        exp_alerts:
+          - exp_labels:
+              severity: 'critical'
+            exp_annotations:
+              summary: 'More than 5 % of API requests fail with a server error'
+              description: "For 10 minutes more than 5 % of the api's requests were answered with a 5xx status. Break the 5xx series of api_http_requests_total down by route: a 503 storm on every route usually means the rate-limit store (Redis) or the MySQL writer/replica is unreachable, a 503 on the report routes only means report timeouts."
+              runbook_url: 'docs/runbooks/api-rate-limits-and-reports.md#apihighservererrorratio'
+
+  - name: '2 % 5xx - quiet'
+    interval: 1m
+    input_series:
+      - series: 'api_http_requests_total{job="api",instance="a",method="GET",route="/api/v1/messages",status_class="2xx"}'
+        values: '0+588x40'
+      - series: 'api_http_requests_total{job="api",instance="a",method="GET",route="/api/v1/messages",status_class="5xx"}'
+        values: '0+12x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: ApiHighServerErrorRatio
+        exp_alerts: []
+
+  - name: 'idle stack with a few 5xx (below 1 req/s) - quiet'
+    interval: 1m
+    input_series:
+      - series: 'api_http_requests_total{job="api",instance="a",method="GET",route="/health/ready",status_class="2xx"}'
+        values: '0+4x40'
+      - series: 'api_http_requests_total{job="api",instance="a",method="GET",route="/api/v1/reports/traffic",status_class="5xx"}'
+        values: '0+2x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: ApiHighServerErrorRatio
+        exp_alerts: []
+
+  - name: 'a 3-minute 5xx burst - pending at 18m, resolved once it left the window'
+    interval: 1m
+    input_series:
+      - series: 'api_http_requests_total{job="api",instance="a",method="GET",route="/api/v1/messages",status_class="2xx"}'
+        values: '0+600x40'
+      - series: 'api_http_requests_total{job="api",instance="a",method="GET",route="/api/v1/messages",status_class="5xx"}'
+        values: '0x10 0+300x3 900x27'
+    alert_rule_test:
+      - eval_time: 18m
+        alertname: ApiHighServerErrorRatio
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: ApiHighServerErrorRatio
+        exp_alerts: []
+
+  - name: 'rate-limit store errors for 5 minutes - critical'
+    interval: 1m
+    input_series:
+      - series: 'api_rate_limit_store_errors_total{job="api",instance="a"}'
+        values: '0x5 0+20x30'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ApiRateLimitStoreErrors
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: ApiRateLimitStoreErrors
+        exp_alerts:
+          - exp_labels:
+              severity: 'critical'
+            exp_annotations:
+              summary: 'The API rate-limit store (Redis) is failing; requests are refused'
+              description: 'The api could not read or increment its rate-limit counters for at least 5 minutes. The limiter fails closed, so authenticated API requests are answered 503 service_unavailable until Redis answers again. Check the Redis endpoint (REDIS_URL), its memory and connection count, and the api logs for the store error.'
+              runbook_url: 'docs/runbooks/api-rate-limits-and-reports.md#apiratelimitstoreerrors'
+
+  - name: 'no store errors - quiet'
+    interval: 1m
+    input_series:
+      - series: 'api_rate_limit_store_errors_total{job="api",instance="a"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ApiRateLimitStoreErrors
+        exp_alerts: []
+
+  - name: 'more than 5 report timeouts in 15 minutes - warning'
+    interval: 1m
+    input_series:
+      - series: 'api_report_timeouts_total{job="api",instance="a",report="traffic"}'
+        values: '0x5 0+1x20'
+      - series: 'api_report_timeouts_total{job="api",instance="b",report="billing_usage"}'
+        values: '0x25'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ApiReportTimeouts
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: ApiReportTimeouts
+        exp_alerts:
+          - exp_labels:
+              severity: 'warning'
+            exp_annotations:
+              summary: 'API report queries are timing out'
+              description: 'More than 5 report queries in 15 minutes were stopped by MAX_EXECUTION_TIME and answered 503 report_timeout. Nothing is cached for them. The replica is overloaded or lagging, or tenants request wide ranges at high volume; see which report with sum by (report) (increase(api_report_timeouts_total[15m])).'
+              runbook_url: 'docs/runbooks/api-rate-limits-and-reports.md#apireporttimeouts'
+
+  - name: 'five report timeouts in 15 minutes - quiet'
+    interval: 1m
+    input_series:
+      - series: 'api_report_timeouts_total{job="api",instance="a",report="threats"}'
+        values: '0x5 1 2 3 4 5 5x20'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ApiReportTimeouts
+        exp_alerts: []

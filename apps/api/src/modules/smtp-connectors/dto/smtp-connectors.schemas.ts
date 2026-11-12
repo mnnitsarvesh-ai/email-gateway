@@ -153,7 +153,7 @@ export type UpdateConnectorInput = z.output<typeof UpdateConnectorSchema>;
 export const ListConnectorsQuerySchema = PageQuerySchema.extend({
   status: ConnectorStatusSchema.optional(),
   authType: ConnectorAuthTypeSchema.optional(),
-});
+}).strict();
 export type ListConnectorsQuery = z.output<typeof ListConnectorsQuerySchema>;
 
 // ---- Responses ---------------------------------------------------------------------------

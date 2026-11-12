@@ -20,7 +20,13 @@ import {
   ApiParam,
   ApiTags,
 } from '@nestjs/swagger';
-import { RequireMfa, RequirePermissions, UserOnly } from '../../../auth-contracts/decorators';
+import { Idempotent } from '../../../http/idempotency/idempotency.interceptor';
+import {
+  CursorList,
+  RequireMfa,
+  RequirePermissions,
+  UserOnly,
+} from '../../../auth-contracts/decorators';
 import type { UserPrincipal } from '../../../auth-contracts/principal';
 import { CodedExceptionFilter } from '../../../http/coded-exception';
 import { ACCESS_TOKEN_SCHEME } from '../../../http/openapi';
@@ -66,6 +72,7 @@ export class ThreatHashesController {
   constructor(private readonly hashes: ThreatHashesService) {}
 
   @Get()
+  @CursorList('v0')
   @RequirePermissions(PLATFORM_THREAT_INTEL_MANAGE)
   @RequireMfa()
   @ApiOperation({
@@ -87,6 +94,7 @@ export class ThreatHashesController {
   }
 
   @Post()
+  @Idempotent({ operation: 'platform.threat_hash_add', legacy: true })
   @RequirePermissions(PLATFORM_THREAT_INTEL_MANAGE)
   @RequireMfa()
   @HttpCode(HttpStatus.CREATED)

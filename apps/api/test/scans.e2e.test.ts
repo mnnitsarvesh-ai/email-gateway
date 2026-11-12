@@ -8,6 +8,22 @@
  * coded 404, the training route's 503 without a configured controller and its rate limit. The
  * same routes against the real MySQL, MinIO and Rspamd run in integration/scans.test.ts.
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers delete /api/v1/platform/threat-hashes/:sha256
+// @covers delete /api/v1/platform/threat-indicators/:id
+// @covers delete /api/v1/scan-settings/:engine
+// @covers get /api/v1/platform/attachment-rescans
+// @covers get /api/v1/platform/attachment-rescans/:jobId
+// @covers get /api/v1/platform/threat-hashes
+// @covers get /api/v1/platform/threat-indicators
+// @covers get /api/v1/scan-settings
+// @covers post /api/v1/platform/attachment-rescans
+// @covers post /api/v1/platform/attachment-rescans/:jobId/cancel
+// @covers post /api/v1/platform/organizations/:organizationId/messages/:messageId/scan-training
+// @covers post /api/v1/platform/threat-hashes
+// @covers post /api/v1/platform/threat-indicators
+// @covers put /api/v1/scan-settings/:engine
+// ---- end of route coverage ----
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
@@ -46,6 +62,8 @@ import { OrganizationFeaturesService } from '../src/tenancy/organization-feature
 import { ScanTrainingRepository } from '../src/modules/scans/repositories/scan-training.repository';
 import { ThreatHashesRepository } from '../src/modules/scans/repositories/threat-hashes.repository';
 import { ThreatIndicatorsRepository } from '../src/modules/scans/repositories/threat-indicators.repository';
+import { idem, withIdempotencyStore } from './legacy-idempotency-support';
+import { InMemoryIdempotencyStore } from './support/api-test-app';
 import { InMemoryKeyValueStore } from './support/in-memory-key-value-store';
 import { RecordingEmailSender } from './support/recording-email-sender';
 import { TEST_DOMAIN_ENV } from './support/test-env';
@@ -426,7 +444,7 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
   beforeAll(async () => {
     const config = loadApiConfig(env);
     const stub = (healthName: string) => ({ healthName, checkHealth: () => Promise.resolve() });
-    const moduleRef = await Test.createTestingModule({ imports: [AppModule.forRoot(config)] })
+    const builder = Test.createTestingModule({ imports: [AppModule.forRoot(config)] })
       .overrideProvider(PrismaService)
       .useValue(stub('mysql'))
       .overrideProvider(PrismaReadService)
@@ -526,8 +544,11 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
       .overrideProvider(ThreatIndicatorsRepository)
       .useValue(indicators)
       .overrideProvider(AttachmentRescansRepository)
-      .useValue(rescans)
-      .compile();
+      .useValue(rescans);
+    // Step 6.1 §3.5: scan training, threat hash/indicator adds and rescan requests take an Idempotency-Key.
+    const moduleRef = await withIdempotencyStore(builder, new InMemoryIdempotencyStore(), {
+      runner: false,
+    }).compile();
     app = moduleRef.createNestApplication({ logger: false });
     configureHttpApp(app, createLogger({ service: 'api-test', level: 'silent' }));
     configureApiApp(app, config);
@@ -553,7 +574,7 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
     await http().get('/api/v1/scan-settings').expect(401);
     await http().put('/api/v1/scan-settings/rspamd').send({}).expect(401);
     await http().delete('/api/v1/scan-settings/rspamd?expectedVersion=1').expect(401);
-    await http().post(trainUrl()).send(learn).expect(401);
+    await http().post(trainUrl()).set(idem()).send(learn).expect(401);
   });
 
   describe('GET /messages/{messageId}/scans', () => {
@@ -1239,15 +1260,17 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
 
     it('refuses API keys, sessions without MFA and users without the permission', async () => {
       apiKeyPermissions = new Set([TRAIN]);
-      await http().post(trainUrl()).set(apiKey).send(learn).expect(403);
+      await http().post(trainUrl()).set(idem()).set(apiKey).send(learn).expect(403);
       await http()
         .post(trainUrl())
+        .set(idem())
         .set(await bearer(['pwd']))
         .send(learn)
         .expect(403);
       principalWith([READ, POLICY_READ, MANAGE], 'platform');
       await http()
         .post(trainUrl())
+        .set(idem())
         .set(await bearer())
         .send(learn)
         .expect(403);
@@ -1255,6 +1278,7 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
       principalWith([READ, POLICY_READ, MANAGE, 'message:rescan']);
       await http()
         .post(trainUrl())
+        .set(idem())
         .set(await bearer())
         .send(learn)
         .expect(403);
@@ -1270,6 +1294,7 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
     ])('400 for body %j', async (body, text) => {
       const res = await http()
         .post(trainUrl())
+        .set(idem())
         .set(await bearer())
         .send(body)
         .expect(400);
@@ -1279,17 +1304,20 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
     it('404 for an unknown organization; 503 rspamd_unavailable without a controller', async () => {
       const missing = await http()
         .post(trainUrl(randomUUID()))
+        .set(idem())
         .set(await bearer())
         .send(learn)
         .expect(404);
       expect(missing.body.code).toBe('organization_not_found');
       await http()
         .post(trainUrl('not-a-uuid'))
+        .set(idem())
         .set(await bearer())
         .send(learn)
         .expect(400);
       const unavailable = await http()
         .post(trainUrl())
+        .set(idem())
         .set(await bearer())
         .send(learn)
         .expect(503);
@@ -1308,9 +1336,9 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
     it('allows 60 calls per caller per minute (429 after)', async () => {
       const auth = await bearer();
       for (let i = 0; i < 60; i += 1) {
-        await http().post(trainUrl(randomUUID())).set(auth).send(learn).expect(404);
+        await http().post(trainUrl(randomUUID())).set(idem()).set(auth).send(learn).expect(404);
       }
-      await http().post(trainUrl(randomUUID())).set(auth).send(learn).expect(429);
+      await http().post(trainUrl(randomUUID())).set(idem()).set(auth).send(learn).expect(429);
     });
   });
 
@@ -1358,6 +1386,7 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
       await http().get(url).set(apiKey).expect(403);
       await http()
         .post(url)
+        .set(idem())
         .set(await bearer(['pwd']))
         .send(body)
         .expect(403);
@@ -1388,6 +1417,7 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
     ])('400 for body %j', async (input, text) => {
       const res = await http()
         .post(url)
+        .set(idem())
         .set(await bearer())
         .send(input)
         .expect(400);
@@ -1398,6 +1428,7 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
     it('adds (201, audited), refuses a listed hash (409), lists and deletes (204, 404)', async () => {
       const created = await http()
         .post(url)
+        .set(idem())
         .set(await bearer())
         .send(body)
         .expect(201);
@@ -1405,6 +1436,7 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
       expect(audit.record.mock.calls[0]![0]).toMatchObject({ action: 'threat_hash.added' });
       const exists = await http()
         .post(url)
+        .set(idem())
         .set(await bearer())
         .send({ ...body, sha256: SHA })
         .expect(409);
@@ -1521,6 +1553,7 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
       await http().get(url).set(apiKey).expect(403);
       await http()
         .post(url)
+        .set(idem())
         .set(await bearer(['pwd']))
         .send(body)
         .expect(403);
@@ -1553,6 +1586,7 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
     ])('400 for body %j', async (input, text) => {
       const res = await http()
         .post(url)
+        .set(idem())
         .set(await bearer())
         .send(input)
         .expect(400);
@@ -1563,6 +1597,7 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
     it('adds normalized (201, audited), 409 for a listed value, lists and deletes (204, 404)', async () => {
       const created = await http()
         .post(url)
+        .set(idem())
         .set(await bearer())
         .send(body)
         .expect(201);
@@ -1585,6 +1620,7 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
       });
       const exists = await http()
         .post(url)
+        .set(idem())
         .set(await bearer())
         .send({ ...body, value: 'LISTED.example' })
         .expect(409);
@@ -1644,9 +1680,10 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
 
     it('refuses API keys, sessions without MFA and users without the permission', async () => {
       apiKeyPermissions = new Set([RESCAN]);
-      await http().post(url).set(apiKey).send(body).expect(403);
+      await http().post(url).set(idem()).set(apiKey).send(body).expect(403);
       await http()
         .post(url)
+        .set(idem())
         .set(await bearer(['pwd']))
         .send(body)
         .expect(403);
@@ -1670,6 +1707,7 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
     ])('400 for body %j', async (input, text) => {
       const res = await http()
         .post(url)
+        .set(idem())
         .set(await bearer())
         .send(input)
         .expect(400);
@@ -1680,6 +1718,7 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
     it('a dry run answers 200 with the estimate; a request 202 with the job (audited)', async () => {
       const dry = await http()
         .post(url)
+        .set(idem())
         .set(await bearer())
         .send({ ...body, dryRun: true })
         .expect(200);
@@ -1687,6 +1726,7 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
       expect(rescans.create).not.toHaveBeenCalled();
       const created = await http()
         .post(url)
+        .set(idem())
         .set(await bearer())
         .send({ ...body, organizationId: ids.org, states: ['scanned'] })
         .expect(202);
@@ -1697,6 +1737,7 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
       });
       const unknown = await http()
         .post(url)
+        .set(idem())
         .set(await bearer())
         .send({ ...body, organizationId: randomUUID() })
         .expect(404);

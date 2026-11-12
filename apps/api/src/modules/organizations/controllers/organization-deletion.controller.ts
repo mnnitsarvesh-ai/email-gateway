@@ -1,5 +1,6 @@
 import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post } from '@nestjs/common';
 import { ApiBearerAuth, ApiBody, ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Idempotent } from '../../../http/idempotency/idempotency.interceptor';
 import { RequireMfa, RequirePermissions, UserOnly } from '../../../auth-contracts/decorators';
 import type { UserPrincipal } from '../../../auth-contracts/principal';
 import { ACCESS_TOKEN_SCHEME } from '../../../http/openapi';
@@ -52,6 +53,7 @@ export class OrganizationDeletionController {
   }
 
   @Post()
+  @Idempotent({ operation: 'organization.deletion_request', legacy: true })
   @RequireMfa()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
@@ -76,6 +78,7 @@ export class OrganizationDeletionController {
   }
 
   @Post('confirm')
+  @Idempotent({ operation: 'organization.deletion_confirm', legacy: true })
   @RequireMfa()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({

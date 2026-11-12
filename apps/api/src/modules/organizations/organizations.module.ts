@@ -33,5 +33,7 @@ import { OrganizationsService } from './services/organizations.service';
     OrganizationUsageService,
     OrganizationDeletionService,
   ],
+  // Step 6.1: the usage, billing and rate-limit routes of WP3 reuse these (no behaviour change).
+  exports: [OrganizationUsageService, OrganizationsRepository, OrganizationEntitlementsService],
 })
 export class OrganizationsModule {}

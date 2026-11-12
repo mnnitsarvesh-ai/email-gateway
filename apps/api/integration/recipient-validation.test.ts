@@ -5,6 +5,13 @@
  * empty enforced list, the allow-list (normalization, idempotent bulk add, prefix listing,
  * remove, per-domain cap) and the audit rows (counts only).
  */
+// ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
+// @covers get /api/v1/domains/:id/recipient-validation
+// @covers get /api/v1/domains/:id/recipients
+// @covers post /api/v1/domains/:id/recipients
+// @covers post /api/v1/domains/:id/recipients/remove
+// @covers put /api/v1/domains/:id/recipient-validation
+// ---- end of route coverage ----
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { TestDnsServer } from '../test/support/dns/test-dns-server';
 import type { IntegrationApp } from './support/app';
@@ -102,8 +109,10 @@ describe('recipient validation mode', () => {
 
     const audits = await domainAudit(ctx, domain.id, 'domain.recipient_validation_changed');
     const withoutName = (m: unknown) => {
-      const { name, ...rest } = m as { name: string };
+      // Step 6.1 D11: every audit row also carries the X-Request-Id of its request.
+      const { name, requestId, ...rest } = m as { name: string; requestId: unknown };
       expect(name).toBe(domain.name);
+      expect(typeof requestId).toBe('string');
       return rest;
     };
     expect(audits.map((a) => withoutName(a.metadata))).toEqual([
@@ -184,8 +193,8 @@ describe('recipient allow-list', () => {
 
     const audits = await domainAudit(ctx, domain.id, 'domain.recipients_added');
     expect(audits.map((a) => a.metadata)).toEqual([
-      { name: domain.name, added: 3, existing: 0 },
-      { name: domain.name, added: 1, existing: 1 },
+      { name: domain.name, added: 3, existing: 0, requestId: expect.any(String) },
+      { name: domain.name, added: 1, existing: 1, requestId: expect.any(String) },
     ]);
   });
 
@@ -208,7 +217,12 @@ describe('recipient allow-list', () => {
     });
     expect((await api.remove(domain.id, ['x']).expect(200)).body).toEqual({ removed: 0 });
     const [audit] = await domainAudit(ctx, domain.id, 'domain.recipients_removed');
-    expect(audit!.metadata).toEqual({ name: domain.name, removed: 2, requested: 3 });
+    expect(audit!.metadata).toEqual({
+      name: domain.name,
+      removed: 2,
+      requested: 3,
+      requestId: expect.any(String),
+    });
     expect((await api.getValidation(domain.id).expect(200)).body.addressCount).toBe(1);
   });
 

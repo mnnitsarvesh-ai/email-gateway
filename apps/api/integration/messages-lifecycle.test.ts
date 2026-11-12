@@ -7,6 +7,10 @@
  * reads through the replica, through the writer fallback, with history pagination and legacy
  * rows.
  */
+// @covers get /api/v1/messages/:messageId/lifecycle
+// @covers get /api/v1/messages/:messageId/lifecycle/history
+// @covers post /api/v1/messages/:messageId/rescan
+// @covers post /api/v1/messages/:messageId/release
 import { createHash, randomUUID } from 'node:crypto';
 import { PrismaReadService } from '@email-gateway/common';
 import {

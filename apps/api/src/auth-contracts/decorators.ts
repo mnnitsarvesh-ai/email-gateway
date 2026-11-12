@@ -1,9 +1,11 @@
 import {
+  applyDecorators,
   createParamDecorator,
   type ExecutionContext,
   SetMetadata,
   UnauthorizedException,
 } from '@nestjs/common';
+import { ApiExtension } from '@nestjs/swagger';
 import type { Principal } from './principal';
 import type { AuthenticatedRequest } from './request';
 import type { TenantScope } from './tenant-scope';
@@ -29,7 +31,11 @@ function permissionRequirement(
     throw new Error(`A ${mode} permission requirement needs at least one permission key`);
   }
   const requirement: AuthzRequirement = { mode, permissions: [...permissions] };
-  return SetMetadata(AUTHZ_KEY, requirement);
+  // Step 6.1 D14: the requirement is also documented for the portal as `x-eg-permissions`.
+  return applyDecorators(
+    SetMetadata(AUTHZ_KEY, requirement),
+    ApiExtension('x-eg-permissions', { mode, permissions: [...permissions] }),
+  );
 }
 
 /** The principal must hold every listed permission. */
@@ -54,6 +60,23 @@ export const RequireMfa = (): MethodDecorator & ClassDecorator =>
 /** Reachable by a principal whose organization requires MFA and who has not enrolled yet. */
 export const AllowDuringMfaEnrollment = (): MethodDecorator & ClassDecorator =>
   SetMetadata(ALLOW_DURING_MFA_ENROLLMENT_KEY, true);
+
+/** Metadata key of a list route's cursor encoding (step 6.1 D3; the WP5 inventory reads it). */
+export const CURSOR_LIST_KEY = 'http:cursorList';
+export type CursorEncoding = 'v0' | 'v1';
+
+/**
+ * Declares a list route and its cursor encoding (D3): `v1` (signed, tenant-bound; mandatory for
+ * lists added since step 6.1) or `v0` (the unsigned legacy cursors). Documented as `x-eg-cursor`.
+ */
+export const CursorList = (encoding: CursorEncoding): MethodDecorator => {
+  if (encoding !== 'v0' && encoding !== 'v1')
+    throw new Error(`Unknown cursor encoding ${String(encoding)}`);
+  return applyDecorators(
+    SetMetadata(CURSOR_LIST_KEY, encoding),
+    ApiExtension('x-eg-cursor', encoding),
+  );
+};
 
 /** `req.principal`; `401` if the route was reached without one (a wiring error). */
 export function principalFromContext(context: ExecutionContext): Principal {

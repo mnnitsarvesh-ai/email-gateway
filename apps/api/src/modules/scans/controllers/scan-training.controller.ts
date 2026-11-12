@@ -7,6 +7,7 @@ import {
   ApiParam,
   ApiTags,
 } from '@nestjs/swagger';
+import { Idempotent } from '../../../http/idempotency/idempotency.interceptor';
 import { RequireMfa, RequirePermissions, UserOnly } from '../../../auth-contracts/decorators';
 import type { UserPrincipal } from '../../../auth-contracts/principal';
 import { CodedExceptionFilter } from '../../../http/coded-exception';
@@ -51,6 +52,7 @@ export class ScanTrainingController {
   constructor(private readonly training: ScanTrainingService) {}
 
   @Post(':organizationId/messages/:messageId/scan-training')
+  @Idempotent({ operation: 'platform.scan_training', legacy: true })
   @RequirePermissions(PLATFORM_SCAN_TRAINING)
   @RequireMfa()
   @RateLimit({ bucket: 'scan-training', limit: 60, windowSeconds: 60, by: 'principal' })
