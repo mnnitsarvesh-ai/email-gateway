@@ -17,7 +17,9 @@ import { stack } from './support/env';
  * ops replay to the three sandbox queues, and adds the sandbox-controller user eg-sandbox,
  * docs/plan/steps/14-sandbox.md; step 5.2 P15 (topology v9) adds the policy-engine user
  * eg-policy-engine and the notification-worker user eg-notification and extends the ops replay
- * to email.policy.evaluate and email.notifications, docs/plan/steps/16-policy-engine.md). Probes
+ * to email.policy.evaluate and email.notifications, docs/plan/steps/16-policy-engine.md; step 5.3
+ * Q27 (topology v10) extends the policy-engine user and the ops replay to email.quarantine, the
+ * release executor's work queue, docs/plan/steps/17-quarantine.md). Probes
  * never leave a message in a real queue: every publish probe is one the broker refuses (a
  * refused publish routes nothing), and the allowed read is a passive checkQueue. Topic
  * permissions restrict the routing keys each user may publish: an allowed key always matches a
@@ -220,12 +222,17 @@ const EXPECTED_TOPICS: Record<Role, TopicPermission[]> = {
     },
   ],
   // Step 5.2 P15 (v9): the policy-engine and the notification-worker publish only the retry
-  // (email.policy) and dead-letter (email.events) hops of their own queue.
+  // (email.policy) and dead-letter (email.events) hops of their own queue; step 5.3 Q27 (v10):
+  // the policy-engine owns two queues (email.policy.evaluate and email.quarantine).
   policyEngine: [
-    { exchange: 'email.policy', write: '^retry\\.email\\.policy\\.evaluate\\.', read: '^$' },
+    {
+      exchange: 'email.policy',
+      write: '^retry\\.email\\.(policy\\.evaluate|quarantine)\\.',
+      read: '^$',
+    },
     {
       exchange: 'email.events',
-      write: '^dead-letter\\.email\\.policy\\.evaluate(\\.|$)',
+      write: '^dead-letter\\.email\\.(policy\\.evaluate|quarantine)(\\.|$)',
       read: '^$',
     },
   ],
@@ -250,10 +257,11 @@ const EXPECTED_TOPICS: Record<Role, TopicPermission[]> = {
         '^retry\\.scan\\.(spam|attachment|url|url\\.inspect|url\\.results|bec|dlp|sandbox|sandbox\\.submissions|sandbox\\.results)\\.',
       read: '^$',
     },
-    // Step 5.2 P15 (v9): replay of email.policy.evaluate and email.notifications.
+    // Step 5.2 P15 (v9): replay of email.policy.evaluate and email.notifications; step 5.3 Q27
+    // (v10): and of email.quarantine.
     {
       exchange: 'email.policy',
-      write: '^retry\\.email\\.(policy\\.evaluate|notifications)\\.',
+      write: '^retry\\.email\\.(policy\\.evaluate|notifications|quarantine)\\.',
       read: '^$',
     },
   ],
@@ -403,12 +411,13 @@ describe('RabbitMQ role permissions on the real vhost', () => {
     expect(
       await publishKeyRefused('ops', 'email.security', 'org.1.mail.message.dlp_incident.v1'),
     ).toBe(ACCESS_REFUSED);
-    // v9: replay may never mint a policy decision, archive or notification request, nor replay
-    // into the dormant email.quarantine.
+    // v9: replay may never mint a policy decision, archive or notification request; v10: nor a
+    // quarantine release or notification request (event keys).
     for (const key of [
       'org.1.mail.policy.decided.v1',
       'org.1.mail.policy.notification_requested.v1',
-      'retry.email.quarantine.org.1.mail.policy.decided.v1',
+      'org.1.mail.quarantine.release_requested.v1',
+      'org.1.mail.quarantine.notification_requested.v1',
       'retry.email.policy.org.1.mail.message.scanned.v1',
     ]) {
       expect(await publishKeyRefused('ops', 'email.policy', key), key).toBe(ACCESS_REFUSED);
@@ -423,7 +432,11 @@ describe('RabbitMQ role permissions on the real vhost', () => {
     expect(
       policyWrite.test('retry.email.notifications.org.1.mail.policy.notification_requested.v1'),
     ).toBe(true);
-    expect(policyWrite.test('retry.email.quarantine.org.1.mail.policy.decided.v1')).toBe(false);
+    // v10 (step 5.3 Q27): email.quarantine is a replayable work queue.
+    expect(
+      policyWrite.test('retry.email.quarantine.org.1.mail.quarantine.release_requested.v1'),
+    ).toBe(true);
+    expect(policyWrite.test('retry.email.quarantines.org.1.x.v1')).toBe(false);
     const opsPermission = await api.get<{ write: string }>(
       `/permissions/${encodeURIComponent(stack.rabbitmqVhost())}/${encodeURIComponent(userOf('ops'))}`,
     );
@@ -704,13 +717,15 @@ describe('RabbitMQ role permissions on the real vhost', () => {
   });
 
   it.each([
-    ['policyEngine', 'email.policy.evaluate'],
-    ['notification', 'email.notifications'],
-  ] as const)('%s (step 5.2) reads %s (passive) and nothing else', async (role, own) => {
+    ['policyEngine', ['email.policy.evaluate', 'email.quarantine']],
+    ['notification', ['email.notifications']],
+  ] as const)('%s (steps 5.2, 5.3) reads %s (passive) and nothing else', async (role, own) => {
     const channel = await model(role).createChannel();
-    await expect(channel.checkQueue(own)).resolves.toMatchObject({ queue: own });
+    for (const queue of own) {
+      await expect(channel.checkQueue(queue)).resolves.toMatchObject({ queue });
+    }
     await channel.close();
-    for (const queue of QUEUE_NAMES.filter((q) => q !== own)) {
+    for (const queue of QUEUE_NAMES.filter((q) => !(own as readonly string[]).includes(q))) {
       expect(await replyCodeOf(role, (ch) => ch.consume(queue, () => undefined)), queue).toBe(
         ACCESS_REFUSED,
       );
@@ -723,9 +738,11 @@ describe('RabbitMQ role permissions on the real vhost', () => {
       // Event keys are the relay's: never a decision, archive or notification request directly.
       'org.1.mail.policy.decided.v1',
       'org.1.mail.policy.notification_requested.v1',
+      // v10: never a quarantine release or notification request directly (outbox and relay).
+      'org.1.mail.quarantine.release_requested.v1',
+      'org.1.mail.quarantine.notification_requested.v1',
       // Not the hops of the other email.policy queues.
       'retry.email.notifications.org.1.mail.policy.notification_requested.v1',
-      'retry.email.quarantine.org.1.mail.policy.decided.v1',
       'retry.email.policy.org.1.mail.message.scanned.v1',
     ]) {
       expect(await publishKeyRefused('policyEngine', 'email.policy', key), key).toBe(
@@ -767,7 +784,7 @@ describe('RabbitMQ role permissions on the real vhost', () => {
     expect(permission).toMatchObject({
       configure: '^$',
       write: '^email\\.(policy|events)$',
-      read: '^email\\.policy\\.evaluate$',
+      read: '^email\\.(policy\\.evaluate|quarantine)$',
     });
     // The allowed side (checked against the broker's topic permissions, never published).
     const actual = await api.get<TopicPermission[]>(
@@ -784,6 +801,21 @@ describe('RabbitMQ role permissions on the real vhost', () => {
       ),
     ).toBe(true);
     expect(write('email.events').test('dead-letter.email.policy.evaluate')).toBe(true);
+    // v10 (step 5.3 Q27): the release executor's hops on email.quarantine, nothing wider.
+    expect(
+      write('email.policy').test(
+        'retry.email.quarantine.org.1.mail.quarantine.release_requested.v1',
+      ),
+    ).toBe(true);
+    expect(
+      write('email.events').test(
+        'dead-letter.email.quarantine.org.1.mail.quarantine.release_requested.v1',
+      ),
+    ).toBe(true);
+    expect(write('email.events').test('dead-letter.email.quarantine')).toBe(true);
+    expect(write('email.policy').test('retry.email.quarantines.org.1.x.v1')).toBe(false);
+    expect(write('email.events').test('dead-letter.email.quarantinex')).toBe(false);
+    expect(write('email.events').test('dead-letter.email.notifications')).toBe(false);
   });
 
   it('notification-worker publishes only its own hops: no event key, queue or exchange', async () => {
@@ -792,7 +824,8 @@ describe('RabbitMQ role permissions on the real vhost', () => {
       'org.1.mail.policy.notification_requested.v1',
       'org.1.mail.policy.decided.v1',
       'retry.email.policy.evaluate.org.1.mail.message.scanned.v1',
-      'retry.email.quarantine.org.1.mail.policy.decided.v1',
+      'retry.email.quarantine.org.1.mail.quarantine.release_requested.v1',
+      'org.1.mail.quarantine.notification_requested.v1',
     ]) {
       expect(await publishKeyRefused('notification', 'email.policy', key), key).toBe(
         ACCESS_REFUSED,

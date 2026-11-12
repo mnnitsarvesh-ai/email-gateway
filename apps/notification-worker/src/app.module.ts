@@ -16,12 +16,15 @@ export const SERVICE_NAME = 'notification-worker';
 
 /**
  * Notification Service. Step 5.2 (docs/plan/steps/16-policy-engine.md P25): the policy notices
- * only — ALERT actions (to the organization's policy administrators) and sender non-delivery
- * notices of rejected outbound/internal mail — consumed from `email.notifications` as the
- * least-privilege broker user `eg-notification` (`RABBITMQ_NOTIFICATION_URL`) and sent through
- * the `NOTIFY_SMTP_*` relay. Digests, webhooks and user preferences are step 6.2. Writer database
- * only; readiness checks mysql and rabbitmq (connected, not blocked, exchanges and queue verified
- * passively); Prometheus metrics on GET /metrics.
+ * — ALERT actions (to the organization's policy administrators) and sender non-delivery
+ * notices of rejected outbound/internal mail. Step 5.3 (docs/plan/steps/17-quarantine.md Q16,
+ * Q20): the quarantine notices — per-user digests, approval requests and decisions, blocked
+ * releases, rate-bounded admin alerts and sender notices of rejected outbound/internal entries.
+ * Both are consumed from `email.notifications` as the least-privilege broker user
+ * `eg-notification` (`RABBITMQ_NOTIFICATION_URL`) and sent through the `NOTIFY_SMTP_*` relay.
+ * Webhooks and a general preference center are step 6.2. Writer database only; readiness checks
+ * mysql and rabbitmq (connected, not blocked, exchanges and queue verified passively);
+ * Prometheus metrics on GET /metrics.
  */
 @Module({})
 export class AppModule {

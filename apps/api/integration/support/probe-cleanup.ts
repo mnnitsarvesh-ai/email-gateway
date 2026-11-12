@@ -264,5 +264,34 @@ export async function cleanupProbeMessages(
   });
   await prisma.emailMessage.deleteMany({ where: { id: { in: ids } } });
   await prisma.messageIdentity.deleteMany({ where: { id: { in: ids } } });
+  // Step 5.3: the probe is a demo-domain message that the policy-engine may quarantine (BEC,
+  // platform default), so its quarantine entries are deleted too, after the message (no
+  // adoption can follow) and scoped to the probe's messages only (never tenant-wide: the
+  // relay domain's organization is the demo tenant). RESTRICT keys: release logs before actions.
+  await deleteProbeQuarantineRows(prisma, ids);
   return { messages: messages.length, queueFiles, objects };
+}
+
+/** The quarantine rows of the given messages (entries and their dependants), RESTRICT-safe. */
+export async function deleteProbeQuarantineRows(
+  prisma: PrismaService,
+  messageIds: readonly bigint[],
+): Promise<number> {
+  const entries = await prisma.quarantineMessage.findMany({
+    where: { messageId: { in: [...messageIds] } },
+    select: { id: true },
+  });
+  const entryIds = entries.map((e) => e.id);
+  if (entryIds.length > 0) {
+    const byEntry = { quarantineMessageId: { in: entryIds } };
+    await prisma.quarantineDownloadGrant.deleteMany({ where: byEntry });
+    await prisma.quarantineApprovalRequest.deleteMany({ where: byEntry });
+    await prisma.quarantineReleaseLog.deleteMany({ where: byEntry });
+    await prisma.quarantineAction.deleteMany({ where: byEntry });
+  }
+  await prisma.quarantineObjectPurge.deleteMany({ where: { messageId: { in: [...messageIds] } } });
+  if (entryIds.length > 0) {
+    await prisma.quarantineMessage.deleteMany({ where: { id: { in: entryIds } } });
+  }
+  return entryIds.length;
 }

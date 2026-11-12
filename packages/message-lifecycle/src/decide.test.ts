@@ -228,3 +228,108 @@ describe('decideTransition: E19 role/reason pairing (step 4.2 A13)', () => {
     }
   });
 });
+
+describe('step 5.3 quarantine edges (docs/plan/steps/17-quarantine.md Q5, ADR-0046)', () => {
+  const request = (
+    to: MessageState,
+    reason: LifecycleReasonCode,
+    role: ActorRole,
+    expectedFrom?: readonly MessageState[],
+  ) => ({ to, reason, actor: { role }, ...(expectedFrom ? { expectedFrom } : {}) });
+
+  it('E10 accepts policy_partial from the policy-engine in the same round', () => {
+    expect(
+      decideTransition(
+        current('policy_evaluated', 4, 1),
+        request('approved', 'policy_partial', 'policy', ['policy_evaluated']),
+      ),
+    ).toMatchObject({ result: 'apply', edge: { id: 'E10' }, nextRound: 1 });
+  });
+
+  it('E28 re-opens delivered, rejected and expired messages for the quarantine role only, new round', () => {
+    for (const from of ['delivered', 'rejected', 'expired'] as const) {
+      expect(
+        decideTransition(
+          current(from, 9, 2),
+          request('approved', 'quarantine_partial_release', 'quarantine', [from]),
+        ),
+        from,
+      ).toMatchObject({ result: 'apply', edge: { id: 'E28' }, nextRound: 3 });
+      for (const role of ['operator', 'policy', 'delivery', 'sweeper'] as const) {
+        expect(
+          decideTransition(current(from), request('approved', 'quarantine_partial_release', role)),
+          `${from} as ${role}`,
+        ).toEqual({ result: 'invalid', why: 'actor_not_allowed' });
+      }
+      // The quarantine role cannot use the E14/E15 reasons from a final state.
+      expect(
+        decideTransition(current(from), request('approved', 'quarantine_release', 'quarantine')),
+      ).toEqual({ result: 'invalid', why: 'reason_not_allowed' });
+    }
+    // Archived stays final.
+    expect(
+      decideTransition(
+        current('archived'),
+        request('approved', 'quarantine_partial_release', 'quarantine'),
+      ),
+    ).toEqual({ result: 'stale', why: 'final_state' });
+  });
+
+  it('E29 moves a rejected message to quarantined (same round) for the quarantine role only', () => {
+    expect(
+      decideTransition(
+        current('rejected', 5, 0),
+        request('quarantined', 'manual_quarantine', 'quarantine', ['rejected']),
+      ),
+    ).toMatchObject({ result: 'apply', edge: { id: 'E29' }, nextRound: 0 });
+    expect(
+      decideTransition(
+        current('rejected'),
+        request('quarantined', 'manual_quarantine', 'operator'),
+      ),
+    ).toEqual({ result: 'invalid', why: 'actor_not_allowed' });
+    expect(
+      decideTransition(current('rejected'), request('quarantined', 'policy_quarantine', 'policy')),
+    ).toEqual({ result: 'invalid', why: 'actor_not_allowed' });
+    // From delivered there is no manual quarantine (no clawback; 8.2).
+    expect(
+      decideTransition(
+        current('delivered'),
+        request('quarantined', 'manual_quarantine', 'quarantine'),
+      ),
+    ).toEqual({ result: 'stale', why: 'final_state' });
+  });
+
+  it('E26 pairs deadline_exceeded with the sweeper and quarantine_expired with the quarantine role', () => {
+    for (const from of ['quarantined', 'held_for_review'] as const) {
+      expect(
+        decideTransition(current(from), request('expired', 'quarantine_expired', 'quarantine')),
+      ).toMatchObject({ result: 'apply', edge: { id: 'E26' }, nextRound: 0 });
+      expect(
+        decideTransition(current(from), request('expired', 'deadline_exceeded', 'sweeper')),
+      ).toMatchObject({ result: 'apply', edge: { id: 'E26' } });
+      expect(
+        decideTransition(current(from), request('expired', 'deadline_exceeded', 'quarantine')),
+      ).toEqual({ result: 'invalid', why: 'reason_not_allowed' });
+      expect(
+        decideTransition(current(from), request('expired', 'quarantine_expired', 'sweeper')),
+      ).toEqual({ result: 'invalid', why: 'reason_not_allowed' });
+    }
+  });
+
+  it('a late policy decision for a final message stays refused (expectedFrom) despite E28/E29', () => {
+    for (const from of ['delivered', 'rejected', 'expired'] as const) {
+      const decision = decideTransition(
+        current(from),
+        request('approved', 'policy_deliver', 'policy', ['policy_evaluated']),
+      );
+      expect(decision.result, from).not.toBe('apply');
+    }
+    expect(
+      decideTransition(
+        current('rejected'),
+        request('quarantined', 'policy_quarantine', 'policy', ['policy_evaluated']),
+      ).result,
+    ).not.toBe('apply');
+  });
+});

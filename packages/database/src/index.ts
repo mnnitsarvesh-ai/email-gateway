@@ -13,3 +13,11 @@ export * from './seed';
 // Domain-name normalization (step 2.1 D2), mail-path tenant resolution (D13) and post-queue
 // owner resolution (step 2.2 D7).
 export * from './domains';
+// Step 5.3 (§9.2): synthetic quarantine entries for search-plan (EXPLAIN) tests and the perf
+// test, and the Q9 search shapes. Test and perf data only; never called by a service.
+export {
+  loadQuarantineEntries,
+  type QuarantineLoadOptions,
+  type QuarantineLoadResult,
+} from './perf/quarantine';
+export { quarantineSearchSteps, type QuarantineSearchSample, type QueryStep } from './perf/queries';

@@ -37,6 +37,19 @@ export const POLICY_CLAMP_CODES = [
   'policy.clamp.ai_only',
 ] as const;
 
+/**
+ * Per-recipient evaluation (step 5.3 Q4): appended to the message result's reason codes when the
+ * split was evaluated or deliberately not evaluated although recipient-scoped rules exist.
+ */
+export const POLICY_SPLIT_CODES = [
+  'policy.split.applied',
+  'policy.split.uniform',
+  'policy.split.too_many_recipients',
+  'policy.split.recipients_truncated',
+  'policy.split.disabled',
+] as const;
+export type PolicySplitCode = (typeof POLICY_SPLIT_CODES)[number];
+
 export const POLICY_REASON_CODES = [
   'policy.decision.tenant_rule',
   'policy.decision.platform_default',
@@ -55,6 +68,7 @@ export const POLICY_REASON_CODES = [
   'policy.settings.invalid_fallback',
   'policy.snapshot.invalid_version',
   'policy.snapshot.platform_default_fallback',
+  ...POLICY_SPLIT_CODES,
 ] as const;
 export type PolicyReasonCode = (typeof POLICY_REASON_CODES)[number];
 

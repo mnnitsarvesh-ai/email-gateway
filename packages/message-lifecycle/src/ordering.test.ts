@@ -192,6 +192,69 @@ describe('ordering rule (L4): table tests', () => {
       'stale',
       'overtaken',
     ],
+    // Step 5.3 (ADR-0046): the partial release E28 and the manual quarantine E29 follow the same
+    // ordering rule as every other edge.
+    [
+      at('delivered', 7, 1),
+      {
+        to: 'approved',
+        reason: 'quarantine_partial_release',
+        actor: { role: 'quarantine' },
+        expectedRound: 0,
+        expectedFrom: ['delivered', 'rejected', 'expired'],
+      },
+      'stale',
+      'older_round',
+    ],
+    [
+      at('delivered', 7, 1),
+      {
+        to: 'approved',
+        reason: 'quarantine_partial_release',
+        actor: { role: 'quarantine' },
+        expectedRound: 1,
+        expectedVersion: 6,
+        expectedFrom: ['delivered'],
+      },
+      'stale',
+      'version_mismatch',
+    ],
+    [
+      at('approved', 8, 2),
+      {
+        to: 'approved',
+        reason: 'quarantine_partial_release',
+        actor: { role: 'quarantine' },
+        expectedRound: 2,
+        expectedFrom: ['delivered'],
+      },
+      // The release already applied (approved, round 2): a redelivered request is a duplicate.
+      'duplicate',
+      'same_state',
+    ],
+    [
+      at('quarantined', 6, 0),
+      {
+        to: 'quarantined',
+        reason: 'manual_quarantine',
+        actor: { role: 'quarantine' },
+        expectedRound: 0,
+        expectedFrom: ['rejected'],
+      },
+      'duplicate',
+      'same_state',
+    ],
+    [
+      at('archived', 9, 0),
+      {
+        to: 'quarantined',
+        reason: 'manual_quarantine',
+        actor: { role: 'quarantine' },
+        expectedFrom: ['rejected'],
+      },
+      'invalid',
+      'unexpected_from',
+    ],
   ] as [LifecycleCurrent, DecisionRequest, string, string][])(
     '%o + %o → %s/%s',
     (cur, request, result, why) => {

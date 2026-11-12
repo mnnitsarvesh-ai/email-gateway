@@ -4,12 +4,16 @@
  *
  *   node dist/perf/cli.js [--messages 200000] [--organizations 20] [--runs 20] [--keep]
  *                         [--out ../../docs/database/performance-report.md] [--seed 42]
+ *                         [--quarantine-entries N]
  *
  * Creates the throwaway schema `<db>_perf` (e.g. `email_gateway_perf`) with the migrator
  * account, which holds ALL on exactly that schema (infrastructure/mysql/init), applies every
  * migration to it, bootstraps partitions 4 months back, loads synthetic data, runs ANALYZE
- * TABLE and Q1–Q18 (EXPLAIN, EXPLAIN FORMAT=TREE, EXPLAIN ANALYZE, timings), samples replica
+ * TABLE and Q1–Q18 and Q24 (EXPLAIN, EXPLAIN FORMAT=TREE, EXPLAIN ANALYZE, timings), samples replica
  * lag through DATABASE_READ_URL, writes the report and drops the schema unless --keep.
+ * `--quarantine-entries N` additionally loads N quarantine entries for the sample organization
+ * with realistic state/reason/recipient/sender/policy/date distributions (step 5.3 §9.2,
+ * `loadQuarantineEntries`); Q24 then runs the quarantine search filters on them.
  * Never run it against production: it drops and recreates `<db>_perf` and generates heavy load.
  */
 import { spawnSync } from 'node:child_process';
@@ -25,6 +29,7 @@ import { runPartitionMaintenance } from '../partitioning/executor';
 import { addPeriods, periodStart } from '../partitioning/planner';
 import { PARTITION_REGISTRY } from '../partitioning/registry';
 import { loadSyntheticData } from './load';
+import { loadQuarantineEntries } from './quarantine';
 import { buildQueries } from './queries';
 import { renderReport } from './report';
 import { readLag, runQuery, startLagSampler } from './run';
@@ -39,7 +44,8 @@ import {
 
 const DAYS = 120;
 const USAGE =
-  'usage: perf [--messages N] [--organizations N] [--runs N] [--seed N] [--out FILE] [--keep]';
+  'usage: perf [--messages N] [--organizations N] [--runs N] [--seed N] [--out FILE] [--keep] ' +
+  '[--quarantine-entries N]';
 
 const perfConfigSchema = maintenanceConfigSchema.extend({
   DATABASE_READ_URL: z.string().startsWith('mysql://').optional(),
@@ -79,7 +85,7 @@ function formatWithPrettier(file: string): boolean {
 async function main(): Promise<number> {
   const args = parseArgs(
     process.argv.slice(2),
-    ['messages', 'organizations', 'runs', 'seed', 'out'],
+    ['messages', 'organizations', 'runs', 'seed', 'out', 'quarantine-entries'],
     ['keep', 'help'],
   );
   if (args.flags.has('help')) {
@@ -90,6 +96,10 @@ async function main(): Promise<number> {
   const organizations = positiveInt(args.values.organizations, 20, '--organizations');
   const runs = positiveInt(args.values.runs, 20, '--runs');
   const seed = positiveInt(args.values.seed, 42, '--seed');
+  const quarantineEntries =
+    args.values['quarantine-entries'] === undefined
+      ? 0
+      : positiveInt(args.values['quarantine-entries'], 0, '--quarantine-entries');
   const out = resolve(
     args.values.out ??
       resolve(PACKAGE_ROOT, '..', '..', 'docs', 'database', 'performance-report.md'),
@@ -156,6 +166,24 @@ async function main(): Promise<number> {
         }
       },
     });
+    if (quarantineEntries > 0) {
+      logger.info({ entries: quarantineEntries }, 'loading quarantine entries');
+      const extra = await loadQuarantineEntries(perf, {
+        organizationId: load.sample.organizationId,
+        count: quarantineEntries,
+        now,
+        days: 60,
+        seed,
+      });
+      const stat = load.stats.find((s) => s.table === 'quarantine_messages');
+      if (stat) {
+        stat.rows += extra.rows;
+        stat.ms += extra.ms;
+      } else {
+        load.stats.push({ table: 'quarantine_messages', rows: extra.rows, ms: extra.ms });
+      }
+      load.sample.quarantine = extra.sample;
+    }
     const lag = await sampler.stop();
 
     let catchUpSeconds: number | null = null;

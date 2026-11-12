@@ -246,7 +246,11 @@ export class Fixtures {
   }
 
   /** An API key of the organization with the given scopes (valid for a day); returns the key. */
-  async createApiKey(org: FixtureOrganization, scopes: string[]): Promise<string> {
+  async createApiKey(
+    org: FixtureOrganization,
+    scopes: string[],
+    options: { createdBy?: FixtureUser } = {},
+  ): Promise<string> {
     const { key, prefix } = generateApiKey();
     await this.prisma.apiKey.create({
       data: {
@@ -255,6 +259,7 @@ export class Fixtures {
         keyPrefix: prefix,
         keyHash: this.ctx.get(TokenHasher).hmacHex(key),
         scopes,
+        createdByUserId: options.createdBy?.id ?? null,
         expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
       },
     });

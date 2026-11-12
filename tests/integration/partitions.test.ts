@@ -43,7 +43,7 @@ async function partitionNames(table: string): Promise<string[]> {
 }
 
 describe('partition maintenance', () => {
-  it('manages the 31 partitioned tables, including the step 2.3, 3.1, 4.1, 4.2, 4.3, 4.4, 4.5, 5.1 and 5.2 tables', () => {
+  it('manages the 31 partitioned tables, including the step 2.3, 3.1, 4.1, 4.2, 4.3, 4.4, 4.5, 5.1 and 5.2 tables (none added by 5.3)', () => {
     // Step 4.6 §3 adds sandbox_analyses and sandbox_artifacts unpartitioned; step 5.1 §3 adds
     // message_risk_scores (partitioned) and the unpartitioned risk_scoring_profiles and
     // risk_scoring_profile_versions.
@@ -90,6 +90,22 @@ describe('partition maintenance', () => {
       tier: 'core',
     });
     for (const table of ['policy_settings', 'tenant_departments', 'tenant_department_members']) {
+      expect(PARTITION_REGISTRY.map((s) => s.table)).not.toContain(table);
+    }
+    // Step 5.3 §3: the quarantine store is unpartitioned (entries are purged by the quarantine
+    // sweeper's row retention, Q19.6); the registry is unchanged (31 tables).
+    for (const table of [
+      'quarantine_messages',
+      'quarantine_actions',
+      'quarantine_release_logs',
+      'quarantine_approval_requests',
+      'quarantine_download_grants',
+      'quarantine_settings',
+      'quarantine_user_preferences',
+      'quarantine_object_purges',
+      'quarantine_digest_runs',
+      'quarantine_digests',
+    ]) {
       expect(PARTITION_REGISTRY.map((s) => s.table)).not.toContain(table);
     }
   });

@@ -17,7 +17,7 @@ import { stack } from './support/env';
 
 /**
  * db:seed (step 1.1 D7, step 1.2/1.3 D8 and D10) against the dev schema, with the DML account:
- * the catalog (49 permissions since step 4.5, the 8 system roles, the platform organization, the step 2.3
+ * the catalog (55 permissions since step 5.3, the 9 system roles incl. mailbox_user (step 5.3 Q25), the platform organization, the step 2.3
  * destination provider presets), the retired
  * role-key remap, and idempotency (running it twice leaves the same row counts). The seeded
  * rows are dev data and are deliberately left in place.
@@ -70,6 +70,7 @@ async function counts() {
     demoPolicies: await prisma.emailPolicy.count({ where: { organizationId } }),
     demoPolicyVersions: await prisma.policyVersion.count({ where: { organizationId } }),
     demoPolicySettings: await prisma.policySettings.count({ where: { organizationId } }),
+    demoQuarantineSettings: await prisma.quarantineSettings.count({ where: { organizationId } }),
     demoLegacyPolicyRows:
       (await prisma.policyCondition.count({ where: { organizationId } })) +
       (await prisma.policyAction.count({ where: { organizationId } })),
@@ -101,8 +102,8 @@ describe('db:seed', () => {
     expect(await counts()).toEqual(afterFirst);
 
     expect(afterFirst).toMatchObject({
-      permissions: 49,
-      systemRoles: 8,
+      permissions: 55,
+      systemRoles: 9,
       destinationPresets: 2,
       plans: expect.any(Number) as unknown,
       demoOrganizations: 2,
@@ -125,6 +126,14 @@ describe('db:seed', () => {
     // step 1.1 seed also keeps its retired legacy version 1 (superseded, never deleted).
     expect([1, 2]).toContain(afterFirst.demoPolicyVersions);
     expect(afterFirst.demoPolicySettings).toBe(1);
+    // Step 5.3 §3 Seed: the demo organization's quarantine settings (`{}` = every default).
+    expect(afterFirst.demoQuarantineSettings).toBe(1);
+    const quarantineSettings = await prisma.quarantineSettings.findFirstOrThrow({
+      where: { organization: { slug: 'demo' } },
+    });
+    expect(quarantineSettings.settings).toEqual({});
+    expect(quarantineSettings.settingsSha256).toBe(createHash('sha256').update('{}').digest('hex'));
+    expect(quarantineSettings.rowVersion).toBe(1);
 
     // Step 2.2 (D6): the SMTP recipient limits are materialized from the plan (demo = standard).
     const demo = await prisma.organization.findUniqueOrThrow({ where: { slug: 'demo' } });
@@ -354,7 +363,7 @@ describe('db:seed', () => {
     );
   });
 
-  it('seeds exactly the 49 permissions and the 8 system roles of D8, with their permissions', async () => {
+  it('seeds exactly the 55 permissions and the 9 system roles (D8 + mailbox_user, 5.3), with their permissions', async () => {
     expect(seed().status).toBe(0);
     const permissions = await prisma.permission.findMany({ select: { key: true } });
     expect(permissions.map((p) => p.key).sort()).toEqual(PERMISSIONS.map((p) => p.key).sort());
@@ -407,7 +416,10 @@ describe('db:seed', () => {
       'organization_admin',
       'super_admin',
     ]);
-    expect(holders('delivery:read')).toEqual([...SYSTEM_ROLE_KEYS].sort());
+    // Every built-in role reads delivery status, except the end-user role (step 5.3 Q15).
+    expect(holders('delivery:read')).toEqual(
+      SYSTEM_ROLE_KEYS.filter((k) => k !== 'mailbox_user').sort(),
+    );
     // Step 3.3 (L10.2): the administrative rescan.
     expect(holders('message:rescan')).toEqual([
       'organization_admin',
@@ -473,6 +485,54 @@ describe('db:seed', () => {
         role,
       ).toEqual([]);
     }
+    // Step 5.3 (Q25): the quarantine permission matrix and the end-user role.
+    expect(holders('quarantine:read')).toEqual([
+      'compliance_auditor',
+      'domain_admin',
+      'organization_admin',
+      'platform_admin',
+      'quarantine_reviewer',
+      'read_only_user',
+      'security_analyst',
+      'super_admin',
+    ]);
+    expect(holders('quarantine:preview')).toEqual([
+      'organization_admin',
+      'security_analyst',
+      'super_admin',
+    ]);
+    for (const key of [
+      'quarantine:release',
+      'quarantine:approve',
+      'quarantine:reject',
+      'quarantine:delete',
+    ]) {
+      expect(holders(key), key).toEqual([
+        'organization_admin',
+        'quarantine_reviewer',
+        'security_analyst',
+        'super_admin',
+      ]);
+    }
+    expect(holders('quarantine:manage')).toEqual([
+      'organization_admin',
+      'security_analyst',
+      'super_admin',
+    ]);
+    expect(holders('quarantine:download')).toEqual(['organization_admin', 'super_admin']);
+    expect(holders('quarantine:request_release')).toEqual([
+      'organization_admin',
+      'quarantine_reviewer',
+      'super_admin',
+    ]);
+    expect(holders('quarantine:self')).toEqual([
+      'mailbox_user',
+      'organization_admin',
+      'super_admin',
+    ]);
+    const mailbox = roles.find((r) => r.key === 'mailbox_user')!;
+    expect(mailbox).toMatchObject({ name: 'Mailbox User', isSystem: true });
+    expect(mailbox.permissions.map((p) => p.permission.key)).toEqual(['quarantine:self']);
   });
 
   it('seeds the platform organization with mandatory MFA and the demo users', async () => {

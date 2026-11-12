@@ -28,6 +28,7 @@ import { PasswordService } from './services/password.service';
 import { PlatformOverrideService } from './services/platform-override.service';
 import { PrincipalCacheService } from './services/principal-cache.service';
 import { PrincipalLoaderService } from './services/principal-loader.service';
+import { ReauthenticationService } from './services/reauthentication.service';
 import { SessionPurgeService } from './services/session-purge.service';
 import { SessionService } from './services/session.service';
 import { TokenService } from './services/token.service';
@@ -68,6 +69,7 @@ import { UserTokenService } from './services/user-token.service';
     OverrideRequestAuditor,
     SessionPurgeService,
     BootstrapAdminService,
+    ReauthenticationService,
     // Global guards in this order (D9), then the override audit interceptor.
     { provide: APP_GUARD, useClass: AuthGuard },
     { provide: APP_GUARD, useClass: PermissionsGuard },
@@ -79,6 +81,7 @@ import { UserTokenService } from './services/user-token.service';
     EmailVerificationService,
     PrincipalCacheService,
     LoginThrottleService,
+    ReauthenticationService,
   ],
 })
 export class AuthModule {}

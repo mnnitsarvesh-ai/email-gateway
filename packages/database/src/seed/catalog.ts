@@ -153,6 +153,35 @@ export const PERMISSIONS = Object.freeze([
     key: 'dlp:compliance_manage',
     description: 'Record the Aadhaar detection compliance basis (step 4.5)',
   },
+  // Step 5.3 (docs/plan/steps/17-quarantine.md Q25): quarantine permissions beyond read, release,
+  // delete and request_release. organization_admin and super_admin hold them through
+  // TENANT_PERMISSIONS / ALL_PERMISSIONS; security_analyst gets preview, approve, reject and
+  // manage, quarantine_reviewer approve and reject, explicitly. `quarantine:self` (own mailbox
+  // only) is the single permission of `mailbox_user` and is NOT in TENANT_READ_PERMISSIONS;
+  // `quarantine:download` is held by no other system role.
+  {
+    key: 'quarantine:preview',
+    description: 'View the sanitized, DLP-masked preview of quarantined messages (step 5.3)',
+  },
+  {
+    key: 'quarantine:approve',
+    description: 'Approve or deny quarantine release and review requests (step 5.3)',
+  },
+  { key: 'quarantine:reject', description: 'Reject quarantined messages (step 5.3)' },
+  {
+    key: 'quarantine:manage',
+    description: 'Manually quarantine held-for-review or policy-rejected messages (step 5.3)',
+  },
+  {
+    key: 'quarantine:download',
+    description:
+      'Download quarantined messages and attachments through single-use grants (step 5.3)',
+  },
+  {
+    key: 'quarantine:self',
+    description:
+      'View, preview and request the release of quarantined mail addressed to oneself (step 5.3)',
+  },
 ] as const satisfies readonly PermissionDef[]);
 
 /** Every permission key of the catalog. */
@@ -191,7 +220,7 @@ export const TENANT_READ_PERMISSIONS: readonly PermissionKey[] = Object.freeze([
   'delivery:read',
 ]);
 
-/** Keys of the 8 built-in system roles (D8). */
+/** Keys of the 9 built-in system roles (D8; `mailbox_user` added in step 5.3 Q15). */
 export const SYSTEM_ROLE_KEYS = Object.freeze([
   'super_admin',
   'platform_admin',
@@ -201,6 +230,7 @@ export const SYSTEM_ROLE_KEYS = Object.freeze([
   'quarantine_reviewer',
   'compliance_auditor',
   'read_only_user',
+  'mailbox_user',
 ] as const);
 export type SystemRoleKey = (typeof SYSTEM_ROLE_KEYS)[number];
 
@@ -230,7 +260,10 @@ export interface RoleDef {
   permissions: readonly PermissionKey[];
 }
 
-/** The 8 built-in system roles (organization_id NULL, is_system true), exactly as D8. */
+/**
+ * The 9 built-in system roles (organization_id NULL, is_system true): the 8 of D8 plus
+ * `mailbox_user` (step 5.3 Q15, Q25).
+ */
 export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
   {
     key: 'super_admin',
@@ -297,8 +330,12 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'scan:settings_manage',
       'delivery:read',
       'quarantine:read',
+      'quarantine:preview',
       'quarantine:release',
+      'quarantine:approve',
+      'quarantine:reject',
       'quarantine:delete',
+      'quarantine:manage',
       'report:read',
       'archive:read',
       'audit:read',
@@ -313,13 +350,16 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
   {
     key: 'quarantine_reviewer',
     name: 'Quarantine Reviewer',
-    description: 'Reviews, releases and deletes quarantined messages; no content access',
+    description:
+      'Reviews, releases, approves, rejects and deletes quarantined messages; no content access',
     permissions: [
       'organization:read',
       'message:read',
       'delivery:read',
       'quarantine:read',
       'quarantine:release',
+      'quarantine:approve',
+      'quarantine:reject',
       'quarantine:delete',
       'quarantine:request_release',
       'report:read',
@@ -343,6 +383,14 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
     name: 'Read-only User',
     description: 'Read-only access to the organization',
     permissions: TENANT_READ_PERMISSIONS,
+  },
+  {
+    key: 'mailbox_user',
+    name: 'Mailbox User',
+    description:
+      'End user: sees, previews and requests the release of quarantined mail addressed to ' +
+      'their own verified address only (step 5.3)',
+    permissions: ['quarantine:self'],
   },
 ]);
 

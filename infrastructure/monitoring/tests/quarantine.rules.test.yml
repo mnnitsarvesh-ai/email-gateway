@@ -1,0 +1,216 @@
+# promtool unit tests of rules/quarantine.rules.yml (step 5.3 Q29):
+#   docker run --rm -v "$PWD/infrastructure/monitoring:/m:ro" --entrypoint promtool \
+#     prom/prometheus:v3.6.0 test rules /m/tests/quarantine.rules.test.yml
+rule_files:
+  - ../rules/quarantine.rules.yml
+evaluation_interval: 1m
+tests:
+  - name: 'releases queued, none executed - critical after 15 minutes'
+    interval: 1m
+    input_series:
+      - series: 'quarantine_requests_total{job="api",instance="a",operation="release",result="queued"}'
+        values: '0+1x60'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: QuarantineReleaseExecutorStalled
+        exp_alerts: []
+      - eval_time: 31m
+        alertname: QuarantineReleaseExecutorStalled
+        exp_alerts:
+          - exp_labels:
+              severity: 'critical'
+            exp_annotations:
+              summary: 'Quarantine releases are queued but not executed'
+              description: 'For 30 minutes releases were queued (entries in state releasing) while the release executor handled none. Nothing is lost: the entries stay releasing and the events wait in email.quarantine until the executor recovers. Check the quarantine-worker (Kubernetes) or the policy-engine container (Compose, POLICY_ENGINE_ROLES), its readiness and the depth of email.quarantine and email.dead-letter.'
+              runbook_url: 'docs/runbooks/quarantine.md#quarantinereleaseexecutorstalled'
+
+  - name: 'releases queued and executed - quiet'
+    interval: 1m
+    input_series:
+      - series: 'quarantine_requests_total{job="api",instance="a",operation="release",result="queued"}'
+        values: '0+1x60'
+      - series: 'quarantine_releases_total{job="policy-engine",instance="q",result="dispatched",mode="operator"}'
+        values: '0+1x60'
+    alert_rule_test:
+      - eval_time: 31m
+        alertname: QuarantineReleaseExecutorStalled
+        exp_alerts: []
+      - eval_time: 59m
+        alertname: QuarantineReleaseExecutorStalled
+        exp_alerts: []
+
+  - name: 'no release requested - quiet'
+    interval: 1m
+    input_series:
+      - series: 'quarantine_requests_total{job="api",instance="a",operation="release",result="queued"}'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: QuarantineReleaseExecutorStalled
+        exp_alerts: []
+
+  - name: 'the leader stops sweeping - warning after 15 + 10 minutes; a non-leader at 0 never pages'
+    interval: 1m
+    input_series:
+      - series: 'quarantine_sweep_last_success_timestamp_seconds{job="policy-engine",instance="leader"}'
+        values: '0+60x10 600x50'
+      - series: 'quarantine_sweep_last_success_timestamp_seconds{job="policy-engine",instance="standby"}'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: QuarantineSweeperStalled
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: QuarantineSweeperStalled
+        exp_alerts: []
+      - eval_time: 36m
+        alertname: QuarantineSweeperStalled
+        exp_alerts:
+          - exp_labels:
+              severity: 'warning'
+            exp_annotations:
+              summary: 'The quarantine sweeper has not completed a pass for 15 minutes'
+              description: 'No quarantine-worker replica completed a sweeper pass for more than 15 minutes (expiry, approval expiry, object purge, adoption, digests, row retention). Nothing is released by this; expiries and purges are only late. Check whether any replica holds the sweeper lock (quarantine_sweeper_leader), its logs for the failing step and the writer.'
+              runbook_url: 'docs/runbooks/quarantine.md#quarantinesweeperstalled'
+
+  - name: 'a sweeping leader with an idle standby - quiet'
+    interval: 1m
+    input_series:
+      - series: 'quarantine_sweep_last_success_timestamp_seconds{job="policy-engine",instance="leader"}'
+        values: '0+60x60'
+      - series: 'quarantine_sweep_last_success_timestamp_seconds{job="policy-engine",instance="standby"}'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: QuarantineSweeperStalled
+        exp_alerts: []
+      - eval_time: 59m
+        alertname: QuarantineSweeperStalled
+        exp_alerts: []
+
+  - name: 'purge failures - warning; purges alone quiet'
+    interval: 1m
+    input_series:
+      - series: 'quarantine_purges_total{job="policy-engine",instance="q",result="purged"}'
+        values: '0+1x60'
+      - series: 'quarantine_purges_total{job="policy-engine",instance="q",result="failed"}'
+        values: '0x20 1x40'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: QuarantinePurgeFailures
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: QuarantinePurgeFailures
+        exp_alerts:
+          - exp_labels:
+              severity: 'warning'
+            exp_annotations:
+              summary: 'Quarantined objects could not be purged'
+              description: 'The quarantine sweeper failed to purge message objects in the last 30 minutes (S3 errors, or an object key outside the organization prefix, which is never deleted). The purge is retried with backoff (quarantine_object_purges.attempts, last_error_code); the metadata rows are unaffected.'
+              runbook_url: 'docs/runbooks/quarantine.md#quarantinepurgefailures'
+      - eval_time: 58m
+        alertname: QuarantinePurgeFailures
+        exp_alerts: []
+
+  - name: 'approval backlog over 500 for an hour - warning'
+    interval: 1m
+    input_series:
+      - series: 'quarantine_pending_approvals{job="policy-engine",instance="leader"}'
+        values: '501x120'
+      - series: 'quarantine_pending_approvals{job="policy-engine",instance="standby"}'
+        values: '0x120'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: QuarantineApprovalBacklog
+        exp_alerts: []
+      - eval_time: 61m
+        alertname: QuarantineApprovalBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: 'warning'
+            exp_annotations:
+              summary: 'More than 500 quarantine approval requests are pending'
+              description: 'More than 500 approval requests (policy reviews, release approvals, release requests) have been pending for an hour. Held mail waits for a second authorized user; review requests expire with their entries (never released). Check the approvers of the affected organizations and the admin alerts.'
+              runbook_url: 'docs/runbooks/quarantine.md#quarantineapprovalbacklog'
+
+  - name: 'approval backlog at 500 - quiet'
+    interval: 1m
+    input_series:
+      - series: 'quarantine_pending_approvals{job="policy-engine",instance="leader"}'
+        values: '500x120'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: QuarantineApprovalBacklog
+        exp_alerts: []
+
+  - name: 'quarantine notice failures - warning'
+    interval: 1m
+    input_series:
+      - series: 'notification_quarantine_messages_total{job="notification-worker",instance="n",kind="user_digest",result="sent"}'
+        values: '0+1x40'
+      - series: 'notification_quarantine_messages_total{job="notification-worker",instance="n",kind="user_digest",result="failed"}'
+        values: '0x10 2x30'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: QuarantineNotificationFailures
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: QuarantineNotificationFailures
+        exp_alerts:
+          - exp_labels:
+              severity: 'warning'
+            exp_annotations:
+              summary: 'Quarantine notices could not be sent'
+              description: 'The notification-worker failed to submit quarantine notices (digests, approval requests and decisions, blocked releases, admin alerts, sender notices) to the relay in the last 30 minutes. They are retried and then dead-lettered (email.notifications). Check the NOTIFY_SMTP_* relay.'
+              runbook_url: 'docs/runbooks/quarantine.md#quarantinenotificationfailures'
+
+  - name: 'download refusal spike - warning above 10 in 10 minutes; grants and downloads quiet'
+    interval: 1m
+    input_series:
+      - series: 'quarantine_downloads_total{job="api",instance="a",stage="grant",result="reauth_failed"}'
+        values: '0+2x30'
+      - series: 'quarantine_downloads_total{job="api",instance="a",stage="download",result="ok"}'
+        values: '0+50x30'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: QuarantineDownloadRefusalSpike
+        exp_alerts:
+          - exp_labels:
+              severity: 'warning'
+            exp_annotations:
+              summary: 'Many quarantine download refusals'
+              description: 'More than 10 quarantine download attempts in 10 minutes failed password re-authentication or used an invalid or already consumed token. This can be a guessing or replay attempt on the download door. Check the audit rows quarantine.download_refused / quarantine.download_granted and the login lockouts.'
+              runbook_url: 'docs/runbooks/quarantine.md#quarantinedownloadrefusalspike'
+
+  - name: 'a few refusals - quiet'
+    interval: 1m
+    input_series:
+      - series: 'quarantine_downloads_total{job="api",instance="a",stage="download",result="token_used"}'
+        values: '0+1x30'
+      - series: 'quarantine_downloads_total{job="api",instance="a",stage="grant",result="ok"}'
+        values: '0+50x30'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: QuarantineDownloadRefusalSpike
+        exp_alerts: []
+
+  - name: 'inconsistent reads above 10 in 15 minutes - warning per read'
+    interval: 1m
+    input_series:
+      - series: 'quarantine_inconsistent_reads_total{job="policy-engine",instance="q",read="entries"}'
+        values: '0+1x30'
+      - series: 'quarantine_inconsistent_reads_total{job="api",instance="a",read="entries"}'
+        values: '0+0x30'
+      - series: 'quarantine_inconsistent_reads_total{job="policy-engine",instance="q",read="digests"}'
+        values: '0+0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: QuarantineInconsistentReads
+        exp_alerts:
+          - exp_labels:
+              severity: 'warning'
+              read: 'entries'
+            exp_annotations:
+              summary: 'Quarantine reads do not echo their request (entries)'
+              description: "More than 10 quarantine reads or compare-and-set writes (entries) in 15 minutes did not match the request (the Prisma wrong-read defect of step 4.2 \u00a76, or concurrent writers). Each one is retried and nothing is decided from a wrong row; a sustained rate points at the writer connection pool or a defect."
+              runbook_url: 'docs/runbooks/quarantine.md#quarantineinconsistentreads'

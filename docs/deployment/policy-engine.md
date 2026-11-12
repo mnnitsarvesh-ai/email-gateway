@@ -1,4 +1,4 @@
-# Policy engine deployment (step 5.2)
+# Policy engine deployment (steps 5.2 and 5.3)
 
 Design: [step 5.2](../plan/steps/16-policy-engine.md) (P12–P15, P20, P21, P24, §5); decisions [ADR-0043](../architecture/adr/0043-policy-dsl-and-deterministic-evaluator.md), [ADR-0044](../architecture/adr/0044-policy-evaluation-placement-and-delivery-gating.md), [ADR-0045](../architecture/adr/0045-policy-action-semantics.md). Operations: [runbook](../runbooks/policy-engine.md). Service: [apps/policy-engine](../../apps/policy-engine/README.md).
 
@@ -58,6 +58,16 @@ The notification-worker reads `NOTIFY_SMTP_HOST`, `NOTIFY_SMTP_FROM`, `NOTIFY_SM
 ## Monitoring
 
 Prometheus scrapes `policy-engine:3030/metrics` and `notification-worker:3050/metrics` (`infrastructure/monitoring/prometheus.yml`). Alerts `infrastructure/monitoring/rules/policy-engine.rules.yml` (promtool tests in `tests/policy-engine.rules.test.yml`): `PolicyEvaluationsStalled` (critical), `PolicyInputErrors`, `PolicySnapshotInvalidVersion`, `PolicyInconsistentReads`, `PolicyRiskMissing`, `PolicyNotificationFailures`. The delivery-worker's `delivery_approvals_total{object}` gains `policy_copy`; the pass-through series (`delivery_approvals_skipped_total`, `delivery_risk_holds_total`, `delivery_dlp_holds_total`, `delivery_dlp_alerts_approved_total`, `delivery_bec_ai_only_not_held_total`, `delivery_outbox_*`) no longer exist: remove them from dashboards.
+
+## Step 5.3: roles, two Deployments and URL key custody
+
+Design: [step 5.3](../plan/steps/17-quarantine.md) Q28, Q22, Q23, §5; [ADR-0046](../architecture/adr/0046-quarantine-store-and-per-recipient-decisions.md) decision 6, [ADR-0049](../architecture/adr/0049-policy-copy-body-edits-banners-and-url-rewrite.md) (amends ADR-0030 key custody). Quarantine rollout: [quarantine.md](quarantine.md).
+
+- **Roles** (`POLICY_ENGINE_ROLES`, comma list, default `evaluate,quarantine`): `evaluate` = the 5.2 consumer of `email.policy.evaluate`, now also writing the quarantine entries, per-recipient decisions, WARN banners and policy URL rewrites; `quarantine` = the release executor on `email.quarantine` (ledger `policy-engine.quarantine`) and the leader-elected sweeper (`GET_LOCK('eg:quarantine-sweeper')` on a dedicated connection). A process verifies only the queues of its roles at startup.
+- **Two Deployments from one image** in Kubernetes: `policy-engine` (`POLICY_ENGINE_ROLES=evaluate`, the delivery gate; HPA as in 5.2) and `quarantine-worker` (`POLICY_ENGINE_ROLES=quarantine`, 2 replicas + PDB), so a quarantine defect never stops evaluation and delivery. Compose runs one container with both roles. Readiness is unchanged (mysql, rabbitmq with the role's queues, redis, s3); the sweeper's leadership is a metric (`quarantine_sweeper_leader`), not a readiness gate — only one replica sweeps, the others take over when its lock connection drops.
+- **URL click-token key custody** (Q23): both Deployments receive `URL_TOKEN_KEY_CURRENT` (`_FILE` from the Secret `email-gateway-url-token-keys`, current key only) and `URL_TOKEN_KEY_CURRENT_ID`, to **sign** the tokens of a policy URL rewrite (evaluate role) or a release copy (quarantine role). They never receive `URL_TOKEN_KEY_PREVIOUS` (the config does not read it) and never verify tokens; the click-service keeps verifying with current and previous keys, so a rotation needs no policy-engine change beyond the new current key (roll both Deployments after the click-service has the new key as current or previous). The policy-engine has no internet ingress. `POLICY_URL_REWRITE_ENABLED=true` (default) refuses to start without the key.
+- New keys: see the configuration table of [quarantine.md](quarantine.md#configuration-5-policy-engine); `URL_CLICK_BASE_URL`, `URL_TOKEN_DEFAULT_EXPIRY_DAYS`, `URL_TOKEN_MAX_EXPIRY_DAYS`, `URL_REWRITE_MAX_MESSAGE_BYTES`, `URL_REWRITE_MAX_PART_BYTES` and `URL_REWRITE_DKIM_SIGNED` must equal the email-worker's values.
+- S3: the WARN banner and the policy URL rewrite write the same `org/<org>/policy/…` copies (tag `eg-object=policy-copy`); the quarantine role additionally purges objects ([quarantine.md](quarantine.md#s3--iam-policy-engine-roles)).
 
 ## Local
 

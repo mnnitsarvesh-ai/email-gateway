@@ -7,11 +7,12 @@ import {
   ACTION_APPLICABILITIES,
   ACTION_ORIGINS,
   ACTION_STATUSES,
+  BODY_BANNER_STATUSES,
   POLICY_ACTION_TYPES,
   POLICY_DELIVERED_OBJECTS,
   POLICY_DISPOSITIONS,
   POLICY_DSL_VERSION,
-  POLICY_EVALUATOR_VERSION,
+  POLICY_EVALUATOR_VERSIONS,
   POLICY_FINAL_ACTIONS,
   POLICY_INPUT_VERSION,
   POLICY_LIMITS,
@@ -54,6 +55,8 @@ export const EXPLANATION_LINE_CODES = [
   'action',
   'not_applicable',
   'snapshot',
+  /** Step 5.3 Q4: per-recipient counts `{ allowed, held, review, rejected }` (never addresses). */
+  'split',
 ] as const;
 export type ExplanationLineCode = (typeof EXPLANATION_LINE_CODES)[number];
 
@@ -106,6 +109,13 @@ export const CLAMP_REASONS = [
 ] as const;
 export type ClampReason = (typeof CLAMP_REASONS)[number];
 
+/** The policy-engine's own URL rewrite of the copy (step 5.3 Q23; set by the engine, not the evaluator). */
+export const policyUrlRewriteAttemptSchema = z.strictObject({
+  status: z.enum(['rewritten', 'skipped']),
+  skipReason: z.enum(REWRITE_SKIP_REASONS).nullable(),
+});
+export type PolicyUrlRewriteAttempt = z.infer<typeof policyUrlRewriteAttemptSchema>;
+
 const deliverySchema = z.strictObject({
   headers: z
     .array(
@@ -120,13 +130,25 @@ const deliverySchema = z.strictObject({
     )
     .max(2),
   subjectPrefix: z.string().min(1).max(32).nullable(),
-  bodyBanner: z.literal('not_supported').nullable(),
+  /**
+   * Step 5.3 Q22: `requested` (evaluator, WARN applies), the engine's outcome (`applied`,
+   * `skipped_*`) or `not_supported` (5.2 rows); null without WARN.
+   */
+  bodyBanner: z.enum(BODY_BANNER_STATUSES).nullable(),
   urlRewrite: z.strictObject({
     required: z.boolean(),
     rewritten: z.boolean(),
     skipReason: z.enum(REWRITE_SKIP_REASONS).nullable(),
+    /**
+     * Step 5.3 Q23: the round was skipped only because the tenant's 4.3 setting was off
+     * (`disabled`, `direction`), so the policy-engine may rewrite the copy itself.
+     */
+    policyRewritable: z.boolean(),
+    /** Step 5.3 Q23: the engine's own rewrite of the copy (absent/null until the engine sets it). */
+    policyAttempt: policyUrlRewriteAttemptSchema.nullable().optional(),
   }),
 });
+export type PolicyDelivery = z.infer<typeof deliverySchema>;
 
 const policyVersionRefSchema = z.strictObject({
   policyPublicId: z.string().regex(UUID),
@@ -222,7 +244,8 @@ export const policyEvaluationResultSchema = z.strictObject({
   }),
   versions: z.strictObject({
     dsl: z.literal(POLICY_DSL_VERSION),
-    evaluator: z.literal(POLICY_EVALUATOR_VERSION),
+    /** The evaluator always writes `POLICY_EVALUATOR_VERSION`; stored 5.2 rows hold `policy-eval/1`. */
+    evaluator: z.enum(POLICY_EVALUATOR_VERSIONS),
     input: z.literal(POLICY_INPUT_VERSION),
     platformDefault: z.string().min(1).max(32),
     snapshotSha256: sha256Schema,
@@ -265,7 +288,9 @@ export function intendedActionStatuses(result: PolicyEvaluationResult): ActionSt
       case 'WARN':
         return 'enforced';
       case 'URL_REWRITE':
-        return a.params.raised === true || result.delivery?.urlRewrite.rewritten === true
+        return a.params.raised === true ||
+          result.delivery?.urlRewrite.rewritten === true ||
+          result.delivery?.urlRewrite.policyAttempt?.status === 'rewritten'
           ? 'enforced'
           : 'recorded';
       case 'ARCHIVE':
@@ -458,6 +483,29 @@ export function evaluationResultToRow(
   };
 }
 
+// ---------------------------------------------------------------------------------------------
+// Per-recipient decisions (step 5.3 Q4.6; `policy_execution_logs.recipient_decisions`)
+// ---------------------------------------------------------------------------------------------
+
+/** One recipient's decision when the message was evaluated per recipient (Q4.6). */
+export const recipientDecisionSchema = z.strictObject({
+  rcptSeq: z.number().int().min(0).max(65_535),
+  disposition: dispositionSchema,
+  source: z.enum(ACTION_ORIGINS),
+  decisiveRuleRef: refSchema.nullable(),
+  /** The recipient result's first reason codes (decisive first), at most 8. */
+  reasonCodes: z.array(codeSchema).min(1).max(POLICY_LIMITS.recipientDecisionReasonCodes),
+});
+export type RecipientDecision = z.infer<typeof recipientDecisionSchema>;
+
+export const recipientDecisionsSchema = z
+  .array(recipientDecisionSchema)
+  .max(POLICY_LIMITS.splitRecipients)
+  .refine(
+    (list) => list.every((d, i) => i === 0 || list[i - 1]!.rcptSeq < d.rcptSeq),
+    'Expected ascending, unique rcptSeq',
+  );
+
 /** The api view of a stored evaluation (P10, P16): the result plus round and engine facts. */
 export const policyEvaluationViewSchema = policyEvaluationResultSchema.extend({
   lifecycleRound: z.number().int().min(0).max(65_535),
@@ -468,14 +516,33 @@ export const policyEvaluationViewSchema = policyEvaluationResultSchema.extend({
   deliveredObject: z.enum(POLICY_DELIVERED_OBJECTS),
   evaluatedAt: z.iso.datetime({ offset: false }),
   durationUs: z.number().int().min(0),
+  /** Step 5.3 Q4: the recipients were decided differently (false for 5.2 rows). */
+  recipientSplit: z.boolean(),
+  /** Step 5.3 Q4.6: per-recipient decisions when evaluated per recipient, else null (5.2 rows). */
+  recipientDecisions: recipientDecisionsSchema.nullable(),
 });
 export type PolicyEvaluationView = z.infer<typeof policyEvaluationViewSchema>;
 
-/** A stored row as read (JSON columns as plain values, ids as bigint or string). */
+/**
+ * A stored row as read (JSON columns as plain values, ids as bigint or string). The 5.3 columns
+ * `recipient_split` / `recipient_decisions` are optional (a caller that does not select them, or
+ * a 5.2 row with NULL, reads as "not split").
+ */
 export type PolicyEvaluationRowRead = { [K in keyof PolicyEvaluationRowJson]: unknown } & {
   durationUs: unknown;
   evaluatedAt: Date | string;
+  recipientSplit?: unknown;
+  recipientDecisions?: unknown;
 };
+
+/** 5.2 rows lack `delivery.urlRewrite.policyRewritable` (no policy rewriting existed): false. */
+function normalizeStoredDelivery(delivery: unknown): unknown {
+  if (delivery === null || typeof delivery !== 'object') return delivery;
+  const d = delivery as Record<string, unknown>;
+  const rw = d.urlRewrite;
+  if (rw === null || typeof rw !== 'object' || 'policyRewritable' in rw) return delivery;
+  return { ...d, urlRewrite: { ...(rw as Record<string, unknown>), policyRewritable: false } };
+}
 
 const idText = (v: unknown): unknown =>
   typeof v === 'bigint' ? v.toString() : typeof v === 'number' ? String(v) : v;
@@ -517,7 +584,7 @@ export function rowToEvaluationView(row: PolicyEvaluationRowRead): PolicyEvaluat
       reason: reasonCodes[0],
     },
     actions: actions.map(({ status: _status, ...rest }) => rest),
-    delivery: row.delivery,
+    delivery: normalizeStoredDelivery(row.delivery),
     notices: {
       senderNonDelivery:
         reject !== undefined &&
@@ -551,5 +618,14 @@ export function rowToEvaluationView(row: PolicyEvaluationRowRead): PolicyEvaluat
     deliveredObject: row.deliveredObject,
     evaluatedAt,
     durationUs: row.durationUs,
+    recipientSplit:
+      row.recipientSplit === undefined || row.recipientSplit === null
+        ? false
+        : row.recipientSplit === 1
+          ? true
+          : row.recipientSplit === 0
+            ? false
+            : row.recipientSplit,
+    recipientDecisions: row.recipientDecisions ?? null,
   });
 }

@@ -31,6 +31,9 @@ resources:
   - sandbox-controller.yaml
   - email-worker-sandbox.yaml
   - policy-engine.yaml
+  # Quarantine (step 5.3 Q28): the policy-engine image with the quarantine role (release executor,
+  # sweeper, digests); separate from the delivery gate.
+  - quarantine-worker.yaml
   - delivery-worker.yaml
   - notification-worker.yaml
   - archive-worker.yaml

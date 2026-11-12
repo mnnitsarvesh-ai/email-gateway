@@ -87,9 +87,12 @@ import { reply, swaks } from './support/smtp-tools';
  *    `X-EG-Policy-Tag` and the subject prefix, approval key `org/<org>/policy/…`, planner
  *    `object="policy_copy"`.
  * 4. Department exception (`unless recipient.department in [finance]`, quantifier `all`): to a
- *    Finance member → delivered; to Finance + another recipient → quarantined.
- * 5. REJECT stops delivery; REQUIRE_APPROVAL → `held_for_review`, operator release (E15) →
- *    delivered.
+ *    Finance member → delivered; to Finance + another recipient → since step 5.3 evaluated per
+ *    recipient (the rule is recipient-scoped): Finance delivered, the other recipient held with
+ *    a quarantine entry, the message `delivered` / `delivery_partial` (17-quarantine.md Q4, Q5).
+ * 5. REJECT stops delivery; REQUIRE_APPROVAL → `held_for_review` with a `review` entry; the step
+ *    3.3 route answers `409 quarantine_workflow_required` and a second MFA user approves the
+ *    `policy_review` request (17-quarantine.md Q14, Q30) → executor E15 → delivered.
  * 6. ARCHIVE → `mail.message.archive_requested.v1` in the dormant `email.archive` (peeked
  *    without losing other messages).
  * 7. ALERT → `mail.policy.notification_requested.v1` → notification-worker → mail-sink.
@@ -126,6 +129,8 @@ let adminA: ApiSession | undefined;
 let analystB: ApiSession | undefined;
 let analystC: ApiSession | undefined;
 let adminC: ApiSession | undefined;
+/** Step 5.3: approves the REQUIRE_APPROVAL review (quarantine:approve, MFA, a second user). */
+let approverC: ApiSession | undefined;
 let adminCEmail = '';
 let financeId = '';
 let rulesPolicyId = '';
@@ -184,7 +189,7 @@ async function evaluated(message: Msg, round = 0, timeoutMs = 180_000): Promise<
     direction: message.direction,
     platformDefaultId: 'pol-default/1',
     dslVersion: 'policy-dsl/1',
-    evaluatorVersion: 'policy-eval/1',
+    evaluatorVersion: 'policy-eval/2',
     inputVersion: 'policy-input/1',
   });
   expect(row.inputSha256).toMatch(/^[0-9a-f]{64}$/);
@@ -240,6 +245,9 @@ beforeAll(async () => {
   analystB = await apiSession(fx.prisma, await organizationRef(fx, orgB), 'security_analyst');
   analystC = await apiSession(fx.prisma, await organizationRef(fx, orgC), 'security_analyst');
   adminC = await apiSession(fx.prisma, await organizationRef(fx, orgC), 'organization_admin');
+  approverC = await apiSession(fx.prisma, await organizationRef(fx, orgC), 'organization_admin', {
+    mfa: true,
+  });
   adminCEmail = (
     await fx.prisma.user.findUniqueOrThrow({
       where: { id: adminC.userId },
@@ -339,7 +347,9 @@ afterAll(async () => {
   if (gate.skip) return;
   if (policyEngineStopped) await startPolicyEngine().catch(() => undefined);
   if (notificationWorkerRedirected) await restoreNotificationWorker();
-  for (const session of [analystA, adminA, analystB, analystC, adminC]) await session?.remove();
+  for (const session of [analystA, adminA, analystB, analystC, adminC, approverC]) {
+    await session?.remove();
+  }
   const names = [inA, outA, outB, inC].filter(Boolean).map((d) => d.name);
   for (const service of ['postfix-outbound', 'postfix'] as const) {
     const queued = involving(await listQueue(service), [...names, extDomain()]);
@@ -810,7 +820,7 @@ describe.skipIf(gate.skip)(
       record('policy-smtp', { tag_copy: row.deliveredObject });
     });
 
-    it('(4) department exception (all): to Finance only delivered, Finance + another quarantined', async () => {
+    it('(4) department exception (all): to Finance only delivered; Finance + another split (5.3: Finance delivered, the other quarantined)', async () => {
       const finance = `${LP.finance}@${inC.name}`;
       const other = `${LP.other}@${inC.name}`;
       const only = await inbound(orgC, [finance], cleanEml());
@@ -826,19 +836,49 @@ describe.skipIf(gate.skip)(
       );
       await expectDelivered(only, [finance]);
 
+      // Step 5.3 (Q4, Q5; 17-quarantine.md §9.3 "Regressions"): the rule is recipient-scoped, so
+      // the message is evaluated per recipient. The decision record stays the message-level
+      // `quarantine` (quantifier `all`), the row records the split and the final action
+      // `partial`; Finance is delivered (E10 `policy_partial`), the other recipient is held
+      // with one quarantine entry, and the message ends `delivered` / `delivery_partial`.
       const mixed = await inbound(orgC, [finance, other], cleanEml());
       const mixedRow = await evaluated(mixed);
       expect(mixedRow).toMatchObject({
         disposition: 'quarantine',
         decisionSource: 'tenant_rule',
         decisiveRuleId: 'quarantine-unless-finance',
+        recipientSplit: true,
+        action: 'partial',
       });
-      await expectPolicyHeld(fx.prisma, mixed);
+      expect(
+        (mixedRow.recipientDecisions as { rcptSeq: number; disposition: string }[]).map((d) => [
+          d.rcptSeq,
+          d.disposition,
+        ]),
+      ).toEqual([
+        [0, 'allow'],
+        [1, 'quarantine'],
+      ]);
       shared.dept = mixed;
-      // The Finance mailbox holds only the first message (checked below).
-      await expectNotDelivered(mixed, [other]);
-      expect(await sinkFiles(finance)).toHaveLength(1); // only the first message
-      record('policy-smtp', { dept_only: onlyRow.disposition, dept_mixed: mixedRow.disposition });
+      await waitForLifecycle(fx.prisma, mixed, 'delivered', 'delivery_partial', 240_000);
+      expect((await pathOf(fx.prisma, mixed)).find(([, to]) => to === 'approved')?.[2]).toBe(
+        'policy_partial',
+      );
+      expect(await sinkFiles(finance)).toHaveLength(2); // the first message and the mixed one
+      for (const service of SINK_SERVICES) {
+        expect(await sinkFiles(other, service), `${other} ${service}`).toEqual([]);
+      }
+      const entries = await fx.prisma.quarantineMessage.findMany({
+        where: { messageId: mixed.id, messageReceivedAt: mixed.receivedAt },
+      });
+      expect(entries.map((e) => [e.recipientAddress, e.status, e.reason])).toEqual([
+        [other, 'held', 'policy'],
+      ]);
+      await expectConsistentHistory(fx.prisma, mixed);
+      record('policy-smtp', {
+        dept_only: onlyRow.disposition,
+        dept_mixed: `${mixedRow.disposition}:${mixedRow.action}`,
+      });
     });
 
     it('(5) REJECT stops delivery; REQUIRE_APPROVAL → held_for_review, then operator release → delivered', async () => {
@@ -869,13 +909,39 @@ describe.skipIf(gate.skip)(
         status: 'held_for_review',
         statusReason: 'policy_hold',
       });
+      // Step 5.3 (Q14, Q30): REQUIRE_APPROVAL creates a `review` entry with a `policy_review`
+      // approval request; the step 3.3 route answers 409 and the release goes through the
+      // quarantine approval API (a second, MFA-authenticated user; the executor applies E15).
       const current = await lifecycleOf(fx.prisma, held);
-      const res = await adminC!.post(
+      const old = await adminC!.post(
         `/messages/${held.publicId}/release`,
         { expectedVersion: current.version, reason: 'stack test: reviewed and released' },
         { 'Idempotency-Key': `it-policy-release-${fx.suffix}` },
       );
-      expect(res.status, JSON.stringify(res.body)).toBe(202);
+      expect(old.status, JSON.stringify(old.body)).toBe(409);
+      expect(old.body).toMatchObject({ code: 'quarantine_workflow_required' });
+      const [entry] = await waitFor(
+        'the review entry',
+        async () => {
+          const rows = await fx.prisma.quarantineMessage.findMany({
+            where: { messageId: held.id, messageReceivedAt: held.receivedAt },
+          });
+          return rows.length === 1 ? rows : undefined;
+        },
+        { timeoutMs: 60_000, intervalMs: 500 },
+      );
+      expect(entry).toMatchObject({ kind: 'review', status: 'pending_approval' });
+      const request = await fx.prisma.quarantineApprovalRequest.findFirstOrThrow({
+        where: { quarantineMessageId: entry!.id },
+      });
+      expect(request).toMatchObject({ kind: 'policy_review', status: 'pending' });
+      const approved = await approverC!.post(
+        `/quarantine/approvals/${request.publicId}/approve`,
+        { reason: 'stack test: reviewed and released' },
+        { 'Idempotency-Key': `it-policy-approve-${fx.suffix}` },
+      );
+      expect(approved.status, JSON.stringify(approved.body)).toBe(202);
+      expect(approved.body).toMatchObject({ status: 'approved', entryState: 'releasing' });
       await waitForLifecycle(fx.prisma, held, 'delivered', 'delivery_complete', 240_000);
       expect(await sinkFiles(holdRcpt)).toHaveLength(1);
       const path = await pathOf(fx.prisma, held);
@@ -888,6 +954,9 @@ describe.skipIf(gate.skip)(
       expect(approvals.map((a) => (a.payload as { source: string }).source)).toEqual([
         'quarantine_release',
       ]);
+      expect(
+        (await fx.prisma.quarantineMessage.findUniqueOrThrow({ where: { id: entry!.id } })).status,
+      ).toBe('released');
       // The release is a new round; the policy evaluation of round 0 is unchanged and the only one.
       expect((await evaluationsOf(fx.prisma, held)).map((r) => rowJson(r))).toEqual([
         rowJson(holdRow),
@@ -938,19 +1007,29 @@ describe.skipIf(gate.skip)(
       expect(actionOf(row, 'ALERT')).toMatchObject({ status: 'requested' });
       const [request] = await notificationsOf(message);
       expect(request?.payload).toMatchObject({ kind: 'policy_alert', severity: 'warning' });
-      const path = await waitFor(
+      // Since step 5.3 the administrator's mailbox also receives quarantine notices (case 5's
+      // REQUIRE_APPROVAL review creates an `approval_requested` notice to approvers): select
+      // the policy notice by its Message-ID.
+      const policyNotices = async () => {
+        const mails: string[] = [];
+        for (const file of await sinkFiles(adminCEmail)) {
+          const text = (await sinkMessage(file)).toString('utf8');
+          if (/^Message-ID:\s+<policy-notice\./im.test(text)) mails.push(text);
+        }
+        return mails;
+      };
+      const mail = await waitFor(
         'the policy alert in mail-sink',
-        async () => (await sinkFiles(adminCEmail))[0],
+        async () => (await policyNotices())[0],
         { timeoutMs: 120_000, intervalMs: 1_000 },
       );
-      const mail = (await sinkMessage(path)).toString('utf8');
       expect(mail).toMatch(
         new RegExp(`^Message-ID:\\s+<policy-notice\\.${request!.eventId}@`, 'im'),
       );
       expect(mail).toContain(message.publicId);
       expect(mail).not.toContain('clean.scan.test');
       expect(mail).not.toContain(rcpt);
-      expect(await sinkFiles(adminCEmail)).toHaveLength(1);
+      expect(await policyNotices()).toHaveLength(1);
       expect(await notificationsSent('policy_alert')).toBeGreaterThanOrEqual(sentBefore + 1);
       await expectDelivered(message, [rcpt]);
     });

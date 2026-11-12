@@ -114,7 +114,8 @@ describe('policy-engine evaluation on the real writer and MinIO (§9.2)', () => 
       policyGeneration: 0n,
       platformDefaultId: 'pol-default/1',
       dslVersion: 'policy-dsl/1',
-      evaluatorVersion: 'policy-eval/1',
+      // Step 5.3 (WP2): per-recipient evaluator.
+      evaluatorVersion: 'policy-eval/2',
       inputVersion: 'policy-input/1',
     });
     expect(row!.explanationText).not.toContain('@');
@@ -281,7 +282,7 @@ describe('policy-engine evaluation on the real writer and MinIO (§9.2)', () => 
     );
   });
 
-  it('TAG/WARN → a policy copy of the rewritten object, named by the approval, tagged, body identical; ARCHIVE and ALERT requested', async () => {
+  it('TAG/WARN → a policy copy of the rewritten object, named by the approval, tagged, body unchanged except the WARN banner (5.3 Q22); ARCHIVE and ALERT requested', async () => {
     const tenant = await fx.organization('copy');
     const p = buildPipeline(fx.prisma, fx.s3, { consumer: fx.consumer('copy') });
     const pub = await fx.publish(
@@ -341,8 +342,13 @@ describe('policy-engine evaluation on the real writer and MinIO (§9.2)', () => 
     expect(text).toContain('Subject: [EXT] quarterly numbers\r\n');
     expect(text).not.toContain('forged-by-sender');
     const original = Buffer.from(rewritten, 'latin1');
-    const bodyAt = (b: Buffer) => b.subarray(b.indexOf('\r\n\r\n'));
-    expect(bodyAt(copy.body)).toEqual(bodyAt(original));
+    const bodyAt = (b: Buffer) => b.subarray(b.indexOf('\r\n\r\n') + 4);
+    // Step 5.3 Q22: the WARN banner is prepended to the text part; the rest is byte-identical.
+    const banner = `[WARNING] External sender\r\n${'-'.repeat(40)}\r\n\r\n`;
+    expect(bodyAt(copy.body)).toEqual(
+      Buffer.concat([Buffer.from(banner, 'latin1'), bodyAt(original)]),
+    );
+    expect((row!.delivery as { bodyBanner: string }).bodyBanner).toBe('applied');
 
     const archive = (await fx.outbox(m, EventTypes.MessageArchiveRequested)).map((r) =>
       messageArchiveRequestedV1.parse(r.payload),
@@ -444,7 +450,7 @@ describe('policy-engine evaluation on the real writer and MinIO (§9.2)', () => 
     expect((await fx.lifecycle(m)).lifecycleRound).toBe(1);
   });
 
-  it('a department exception (recipients all in the department) applies; a mixed message is quarantined', async () => {
+  it('a department exception (recipients all in the department) applies; a mixed message splits per recipient (5.3 Q4/Q5)', async () => {
     const tenant = await fx.organization('dept');
     const p = buildPipeline(fx.prisma, fx.s3, { consumer: fx.consumer('dept') });
     const finance = await fx.department(tenant, 'finance', [
@@ -471,7 +477,31 @@ describe('policy-engine evaluation on the real writer and MinIO (§9.2)', () => 
       recipients: ['fin1@corp.example', 'eve@corp.example'],
     });
     expect(await evaluate(p, fx.scanned(mixed))).toBe('handled');
-    expect((await fx.evaluations(mixed))[0]).toMatchObject({ disposition: 'quarantine' });
+    // The decision record keeps the message-level result (quarantine); step 5.3 decides each
+    // recipient: fin1 is delivered, eve is held (E10 policy_partial, final action partial).
+    expect((await fx.evaluations(mixed))[0]).toMatchObject({
+      disposition: 'quarantine',
+      recipientSplit: true,
+      action: 'partial',
+    });
+    expect(await fx.lifecycle(mixed)).toMatchObject({
+      status: 'approved',
+      statusReason: 'policy_partial',
+      finalAction: 'partial',
+    });
+    const statuses = await fx.prisma.emailRecipient.findMany({
+      where: { messageId: mixed.messageId, receivedAt: mixed.receivedAt },
+      orderBy: { rcptSeq: 'asc' },
+      select: { address: true, status: true, finalAction: true },
+    });
+    expect(statuses).toEqual([
+      { address: 'fin1@corp.example', status: 'pending', finalAction: 'deliver' },
+      { address: 'eve@corp.example', status: 'quarantined', finalAction: 'quarantine' },
+    ]);
+    const [approval] = (await fx.outbox(mixed, EventTypes.DeliveryApproved)).map((r) =>
+      deliveryApprovedV1.parse(r.payload),
+    );
+    expect(approval!.recipients.map((r) => r.rcptSeq)).toEqual([0]);
   });
 
   it('user exceptions and user-members of a department resolve on the writer (active, not deleted only)', async () => {

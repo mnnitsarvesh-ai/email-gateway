@@ -6,8 +6,8 @@ import {
   ListObjectVersionsCommand,
   PutObjectCommand,
 } from '@aws-sdk/client-s3';
-import { randomUUID } from 'node:crypto';
-import { MetricsService, S3Service, uuidv7 } from '@email-gateway/common';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { MetricsService, S3Service, uuidv7, withTransactionDefaults } from '@email-gateway/common';
 import { s3ConfigSchema } from '@email-gateway/config';
 import {
   type MessageDirection,
@@ -20,7 +20,10 @@ import {
 import { type EventEnvelope, EventTypes } from '@email-gateway/event-contracts';
 import { createLogger, type Logger } from '@email-gateway/logger';
 import { canonicalJson, POLICY_DEFAULT_PLATFORM_ID, sha256Hex } from '@email-gateway/policy-dsl';
+import { urlRewriteConfig } from '../../src/core.module';
+import { loadWorkerConfig } from '../../src/config';
 import { S3PolicyCopyWriter } from '../../src/delivery/policy-copy';
+import { CopyFactsReader } from '../../src/delivery/policy-url-rewrite';
 import { DirectoryRepository } from '../../src/evaluation/directory.repository';
 import {
   PolicyEvaluationService,
@@ -31,6 +34,15 @@ import { PolicyEvaluateConsumer } from '../../src/evaluation/policy-evaluate.con
 import { SnapshotCache } from '../../src/evaluation/snapshot-cache';
 import { type LoadedSnapshot, SnapshotRepository } from '../../src/evaluation/snapshot.repository';
 import { PolicyMetrics, type PolicyRead } from '../../src/metrics/policy-metrics';
+import { QuarantineMetrics, type QuarantineRead } from '../../src/metrics/quarantine-metrics';
+import { DigestScheduler } from '../../src/quarantine/digest-scheduler';
+import { DisposalFactsReader, S3QuarantineObjects } from '../../src/quarantine/disposal';
+import { ReleaseExecutor } from '../../src/quarantine/release-executor';
+import { ReleaseFactsReader } from '../../src/quarantine/release-facts';
+import { QuarantineReleaseConsumer } from '../../src/quarantine/release.consumer';
+import { QuarantineSettingsRepository } from '../../src/quarantine/settings.repository';
+import { QuarantineStoreWriter } from '../../src/quarantine/store-writer';
+import { QuarantineSweeper } from '../../src/quarantine/sweeper';
 
 /** Values from the repository's .env (loaded by vitest.integration.config.ts). Never printed. */
 export function requireEnv(name: string): string {
@@ -86,15 +98,36 @@ const PATHS: Record<string, [MessageStatus, string, string][]> = {
   ],
 };
 
+/**
+ * The engine configuration of the suites: the repository's .env (URL click-token key, click base
+ * URL and bounds), loaded the way the service does. Never printed.
+ */
+export function engineConfig(overrides: Record<string, string> = {}) {
+  return loadWorkerConfig({ ...process.env, ...overrides });
+}
+
 /** The pipeline as EvaluationModule builds it, on a given client (the fixtures' by default). */
 export function buildPipeline(
   prisma: PrismaClient,
   s3: S3Service,
-  options: { consumer: string; cacheEntries?: number },
+  options: {
+    consumer: string;
+    cacheEntries?: number;
+    service?: MetricsService;
+    config?: Record<string, string>;
+  },
 ) {
-  const service = new MetricsService({ service: 'policy-engine-it' });
+  const config = engineConfig(options.config);
+  const service = options.service ?? new MetricsService({ service: 'policy-engine-it' });
   const metrics = new PolicyMetrics(service);
+  const quarantineMetrics = new QuarantineMetrics(service);
   const inconsistent = (read: PolicyRead) => metrics.inconsistentReads.inc({ read });
+  const qInconsistent = (read: QuarantineRead) => quarantineMetrics.inconsistentReads.inc({ read });
+  const rewrite = urlRewriteConfig(config);
+  const bounds = {
+    maxHoldDays: config.QUARANTINE_MAX_HOLD_DAYS,
+    maxReviewDays: config.QUARANTINE_MAX_REVIEW_DAYS,
+  };
   const evaluation = new PolicyEvaluationService({
     facts: new FactsRepository(inconsistent),
     snapshots: new SnapshotRepository(
@@ -107,6 +140,16 @@ export function buildPipeline(
       maxMessageBytes: 26_214_400,
       maxHeaderBytes: 262_144,
     }),
+    quarantine: {
+      store: new QuarantineStoreWriter(qInconsistent),
+      settings: new QuarantineSettingsRepository(bounds, qInconsistent, () =>
+        quarantineMetrics.settingsInvalid.inc(),
+      ),
+      copyFacts: new CopyFactsReader(rewrite, inconsistent),
+      urlRewrite: rewrite,
+      bannerMaxPartBytes: config.POLICY_BANNER_MAX_PART_BYTES,
+      bounds,
+    },
     metrics,
     logger: silentLogger,
     copyTimeoutMs: 60_000,
@@ -119,8 +162,9 @@ export function buildPipeline(
     metrics,
     TX_TIMEOUT_MS,
     options.consumer,
+    quarantineMetrics,
   );
-  return { evaluation, consumer, metrics, registry: service };
+  return { evaluation, consumer, metrics, quarantineMetrics, registry: service, config };
 }
 
 /**
@@ -591,6 +635,25 @@ export class Fixtures {
     });
   }
 
+  /** An API key of the organization created by `createdByUserId` (never used to call). */
+  apiKey(
+    organizationId: bigint,
+    createdByUserId: bigint | null,
+  ): Promise<{ id: bigint; publicId: string }> {
+    const prefix = `itpe${randomBytes(6).toString('hex')}`;
+    return this.prisma.apiKey.create({
+      data: {
+        organizationId,
+        name: `it-${prefix}`,
+        keyPrefix: prefix,
+        keyHash: '0'.repeat(64),
+        scopes: [],
+        createdByUserId,
+      },
+      select: { id: true, publicId: true },
+    });
+  }
+
   /** User members (`user_id`, address NULL) of a department, by its public id. */
   async addUserMembers(organizationId: bigint, departmentPublicId: string, userIds: bigint[]) {
     const dept = await this.prisma.tenantDepartment.findUniqueOrThrow({
@@ -669,6 +732,20 @@ export class Fixtures {
     try {
       if (ids.length > 0) {
         const where = { organizationId: { in: ids } };
+        await this.prisma.quarantineReleaseLog.deleteMany({ where });
+        await this.prisma.quarantineAction.deleteMany({ where });
+        await this.prisma.quarantineApprovalRequest.deleteMany({ where });
+        await this.prisma.quarantineDownloadGrant.deleteMany({ where });
+        await this.prisma.quarantineDigest.deleteMany({ where });
+        await this.prisma.quarantineDigestRun.deleteMany({ where });
+        await this.prisma.quarantineObjectPurge.deleteMany({ where });
+        await this.prisma.quarantineUserPreference.deleteMany({ where });
+        await this.prisma.quarantineSettings.deleteMany({ where });
+        await this.prisma.quarantineMessage.deleteMany({ where });
+        await this.prisma.archiveLegalHold.deleteMany({ where });
+        await this.prisma.emailArchive.deleteMany({ where });
+        await this.prisma.organizationSetting.deleteMany({ where });
+        await this.prisma.messageUrl.deleteMany({ where });
         await this.prisma.policyExecutionLog.deleteMany({ where });
         await this.prisma.messageOutbox.deleteMany({ where });
         await this.prisma.emailEvent.deleteMany({ where });
@@ -685,6 +762,7 @@ export class Fixtures {
         await this.prisma.messageIdentity.deleteMany({ where });
         await this.prisma.tenantDepartmentMember.deleteMany({ where });
         await this.prisma.tenantDepartment.deleteMany({ where });
+        await this.prisma.apiKey.deleteMany({ where });
         await this.prisma.user.deleteMany({ where });
         await this.prisma.emailPolicy.updateMany({ where, data: { activeVersionId: null } });
         await this.prisma.policyVersion.deleteMany({ where });
@@ -748,4 +826,113 @@ export class Fixtures {
     );
     if ((rest.Contents ?? []).length > 0) throw new Error(`objects left under ${prefix}`);
   }
+}
+
+/** A leader lock that always leads (the suites sweep their own organizations only). */
+export const alwaysLeader = {
+  ensure: () => Promise.resolve(true),
+  release: () => Promise.resolve(),
+};
+
+/**
+ * The quarantine role as QuarantineModule builds it (executor, consumer with an idle feed,
+ * sweeper restricted to the suite's organizations), on the fixtures' client and MinIO.
+ */
+export function buildQuarantine(
+  prisma: PrismaClient,
+  s3: S3Service,
+  options: {
+    consumer: string;
+    organizationIds: bigint[];
+    service?: MetricsService;
+    config?: Record<string, string>;
+    now?: () => Date;
+    /** Digest scheduler bounds (default 200 organizations, 5000 users per sweep). */
+    digestBatchSize?: number;
+    digestMaxUsersPerSweep?: number;
+  },
+) {
+  const config = engineConfig(options.config);
+  const service = options.service ?? new MetricsService({ service: 'policy-engine-it-q' });
+  const metrics = new PolicyMetrics(service);
+  const q = new QuarantineMetrics(service);
+  const inconsistent = (read: PolicyRead) => metrics.inconsistentReads.inc({ read });
+  const sink = (read: QuarantineRead) => q.inconsistentReads.inc({ read });
+  const rewrite = urlRewriteConfig(config);
+  const bounds = {
+    maxHoldDays: config.QUARANTINE_MAX_HOLD_DAYS,
+    maxReviewDays: config.QUARANTINE_MAX_REVIEW_DAYS,
+  };
+  const settings = new QuarantineSettingsRepository(bounds, sink, () => q.settingsInvalid.inc());
+  const store = new QuarantineStoreWriter(sink);
+  const objects = new S3QuarantineObjects(s3.client, s3.mailBucket);
+  const executor = new ReleaseExecutor({
+    facts: new FactsRepository(inconsistent),
+    snapshots: new SnapshotRepository(
+      new SnapshotCache<LoadedSnapshot>(100),
+      POLICY_DEFAULT_PLATFORM_ID,
+      inconsistent,
+    ),
+    directory: new DirectoryRepository(inconsistent),
+    releaseFacts: new ReleaseFactsReader(sink),
+    settings,
+    store,
+    copies: new S3PolicyCopyWriter(s3.client, s3.mailBucket, {
+      maxMessageBytes: 26_214_400,
+      maxHeaderBytes: 262_144,
+    }),
+    copyFacts: new CopyFactsReader(rewrite, inconsistent),
+    objectExists: (key, signal) => objects.exists(key, signal),
+    urlRewrite: rewrite,
+    bannerMaxPartBytes: config.POLICY_BANNER_MAX_PART_BYTES,
+    bounds,
+    staleness: {
+      maxVerdictAgeHours: config.QUARANTINE_RELEASE_MAX_VERDICT_AGE_HOURS,
+      signatureMaxLagHours: config.QUARANTINE_RELEASE_SIGNATURE_MAX_LAG_HOURS,
+    },
+    copyTimeoutMs: 60_000,
+    policySink: inconsistent,
+    sink,
+    lifecycleMetrics: metrics.lifecycle,
+    logger: silentLogger,
+    ...(options.now ? { now: options.now } : {}),
+  });
+  const feed = { start: () => undefined, stop: () => Promise.resolve() };
+  const consumer = new QuarantineReleaseConsumer(
+    feed,
+    executor,
+    prisma,
+    q,
+    TX_TIMEOUT_MS,
+    options.consumer,
+  );
+  const sweeper = new QuarantineSweeper({
+    prisma,
+    locks: alwaysLeader,
+    objects,
+    store,
+    settings,
+    disposal: new DisposalFactsReader(sink),
+    digests: new DigestScheduler({
+      prisma: withTransactionDefaults(prisma, { timeoutMs: TX_TIMEOUT_MS }),
+      settings,
+      sink,
+      logger: silentLogger,
+      maxUsersPerSweep: options.digestMaxUsersPerSweep ?? 5_000,
+      batchSize: options.digestBatchSize ?? 200,
+      organizationIds: options.organizationIds,
+    }),
+    metrics: q,
+    lifecycleMetrics: metrics.lifecycle,
+    sink,
+    logger: silentLogger,
+    intervalMs: 60_000,
+    txTimeoutMs: TX_TIMEOUT_MS,
+    batchSize: 200,
+    retentionDays: config.QUARANTINE_ENTRY_RETENTION_DAYS,
+    bounds,
+    organizationIds: options.organizationIds,
+    ...(options.now ? { now: options.now } : {}),
+  });
+  return { executor, consumer, sweeper, metrics: q, registry: service, objects };
 }

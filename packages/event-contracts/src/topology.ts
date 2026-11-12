@@ -7,9 +7,10 @@ import {
 } from './registry';
 
 /**
- * RabbitMQ topology v9 as data (step 3.2 §3, ADR-0024; v2: step 3.3 L7, ADR-0025; v3: step 4.1
+ * RabbitMQ topology v10 as data (step 3.2 §3, ADR-0024; v2: step 3.3 L7, ADR-0025; v3: step 4.1
  * S2, ADR-0026; v4: step 4.2 A2, ADR-0028; v5: step 4.3 U2, ADR-0029; v6: step 4.4 B3,
- * ADR-0033; v7: step 4.5 D2, ADR-0036; v8: step 4.6 X11, ADR-0040; v9: step 5.2 P15, ADR-0044):
+ * ADR-0033; v7: step 4.5 D2, ADR-0036; v8: step 4.6 X11, ADR-0040; v9: step 5.2 P15, ADR-0044;
+ * v10: step 5.3 Q27, ADR-0046):
  * exactly six topic exchanges and twenty quorum queues in the vhost `email-gateway`. v2 added the bindings of `mail.message.rescan_requested.v1`
  * (`email.security`) to the five scan queues, and `mail.message.state_changed.v1`
  * (`email.events`) reaches only the `email.analytics` firehose. v3 makes `scan.spam` a work queue
@@ -74,6 +75,18 @@ import {
  * new retry binding is the plain `retry.<queue>.#`. The exchanges and the other queues are
  * unchanged.
  *
+ * v10 (step 5.3 Q2, Q27, ADR-0046 decision 6) builds the quarantine. The store is written in the
+ * policy evaluation transaction, so `email.quarantine` no longer binds `mail.policy.decided.v1`
+ * (its v1–v9 binding is removed by `init.mjs`'s prune step; the decision event reaches only the
+ * `email.analytics` firehose) and becomes the **work** queue of the policy-engine's release
+ * executor (role `quarantine`, ledger `policy-engine.quarantine`): it binds the new
+ * `mail.quarantine.release_requested.v1` on `email.policy` and its retry binding (plain
+ * `retry.email.quarantine.#`: no other queue name starts with `email.quarantine.`); policy `work`
+ * (reject-publish: a queued release is never dropped). `email.notifications` also binds the new
+ * `mail.quarantine.notification_requested.v1` (digests, approval requests and decisions, blocked
+ * releases, admin alerts, sender notices). Twenty queues as before; the exchanges and the other
+ * queues are unchanged.
+ *
  * `infrastructure/rabbitmq/definitions.json` is
  * generated from `TOPOLOGY` (`pnpm --filter @email-gateway/event-contracts topology:export`) and
  * imported by `infrastructure/rabbitmq/init.mjs`; services never declare, they verify passively.
@@ -82,7 +95,7 @@ import {
  * target, overflow, length limits) is a per-queue policy `eg.<queue>` (Q4), so it changes without
  * re-declaring a queue.
  */
-export const TOPOLOGY_VERSION = 9;
+export const TOPOLOGY_VERSION = 10;
 export const DEFAULT_VHOST = 'email-gateway';
 
 /** The six exchanges of the topology (ADR-0024): all topic, durable, not internal. */
@@ -712,14 +725,34 @@ export const TOPOLOGY: Topology = {
       policy: policyFor('delay', 'email.delivery.retry'),
       description: 'Per-message TTL delay of delivery retries',
     },
-    dormant(
-      'email.quarantine',
-      'email.policy',
-      [eventBinding('email.policy', 'mail.policy.decided.v1')],
-      '5.3',
-      'quarantine',
-      'Quarantine of messages whose policy action is quarantine',
-    ),
+    {
+      // v10 (step 5.3 Q2, Q13.2, Q27, ADR-0046): the release executor of the policy-engine's
+      // `quarantine` role. The v1–v9 `mail.policy.decided.v1` binding is removed (pruned by
+      // init.mjs): entries are written in the evaluation transaction. A work queue
+      // (reject-publish): a queued release is never dropped.
+      name: 'email.quarantine',
+      role: 'work',
+      homeExchange: 'email.policy',
+      bindings: [
+        eventBinding('email.policy', 'mail.quarantine.release_requested.v1'),
+        retryBinding('email.policy', 'email.quarantine'),
+      ],
+      consumer: {
+        kind: 'ledger',
+        ledgerName: 'policy-engine.quarantine',
+        service: 'policy-engine',
+      },
+      retry: {
+        strategy: 'hold',
+        maxAttempts: 10,
+        baseDelayMs: 2 * SECOND,
+        maxDelayMs: MINUTE,
+        maxRetryAgeMs: 24 * HOUR,
+      },
+      policy: policyFor('work', 'email.quarantine'),
+      description:
+        'Quarantine releases queued by the api, re-validated and executed by the policy-engine (step 5.3)',
+    },
     // v9 (step 5.2 P15): binds the archive request of a policy ARCHIVE action instead of
     // mail.policy.decided.v1 (still dormant: the consumer is step 8.1).
     dormant(
@@ -738,6 +771,8 @@ export const TOPOLOGY: Topology = {
       homeExchange: 'email.policy',
       bindings: [
         eventBinding('email.policy', 'mail.policy.notification_requested.v1'),
+        // v10 (step 5.3 Q20): quarantine digests, approvals, blocked releases, alerts, notices.
+        eventBinding('email.policy', 'mail.quarantine.notification_requested.v1'),
         retryBinding('email.policy', 'email.notifications'),
       ],
       consumer: {
@@ -753,7 +788,8 @@ export const TOPOLOGY: Topology = {
         maxRetryAgeMs: 24 * HOUR,
       },
       policy: policyFor('work', 'email.notifications'),
-      description: 'Policy alert and sender non-delivery notifications (step 5.2)',
+      description:
+        'Policy alert and sender non-delivery notifications (step 5.2) and quarantine notifications (step 5.3)',
     },
     dormant(
       'email.analytics',

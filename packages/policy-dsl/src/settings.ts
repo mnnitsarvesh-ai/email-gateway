@@ -9,6 +9,8 @@ import { formatPath } from './definition';
  */
 export const policyTenantSettingsSchema = z.strictObject({
   allowRecommendationOverrides: z.boolean().optional(),
+  /** Per-recipient evaluation (step 5.3 Q4, default true). */
+  recipientSplit: z.boolean().optional(),
   notices: z.strictObject({ senderNonDelivery: z.boolean().optional() }).optional(),
   alerts: z.strictObject({ enabled: z.boolean().optional() }).optional(),
   tagging: z
@@ -23,6 +25,8 @@ export type PolicyTenantSettingsDocument = z.infer<typeof policyTenantSettingsSc
 /** Effective settings (every key resolved). */
 export interface PolicyTenantSettings {
   allowRecommendationOverrides: boolean;
+  /** Step 5.3 Q4: evaluate recipient-scoped rules once per recipient (default true). */
+  recipientSplit: boolean;
   notices: { senderNonDelivery: boolean };
   alerts: { enabled: boolean };
   tagging: { platformTagHeader: boolean; platformTagOutbound: boolean };
@@ -30,13 +34,20 @@ export interface PolicyTenantSettings {
 
 export const POLICY_SETTINGS_DEFAULTS: Readonly<PolicyTenantSettings> = Object.freeze({
   allowRecommendationOverrides: false,
+  recipientSplit: true,
   notices: Object.freeze({ senderNonDelivery: true }),
   alerts: Object.freeze({ enabled: true }),
   tagging: Object.freeze({ platformTagHeader: true, platformTagOutbound: false }),
 });
 
+/**
+ * The effective settings document. `recipientSplit` (step 5.3) is optional in this schema only so
+ * that 5.2 callers building a defaults literal without it still type-check (the api catalog);
+ * `resolvePolicySettings` always sets it.
+ */
 export const effectivePolicySettingsSchema = z.strictObject({
   allowRecommendationOverrides: z.boolean(),
+  recipientSplit: z.boolean().optional(),
   notices: z.strictObject({ senderNonDelivery: z.boolean() }),
   alerts: z.strictObject({ enabled: z.boolean() }),
   tagging: z.strictObject({ platformTagHeader: z.boolean(), platformTagOutbound: z.boolean() }),
@@ -44,6 +55,7 @@ export const effectivePolicySettingsSchema = z.strictObject({
 
 const defaults = (): PolicyTenantSettings => ({
   allowRecommendationOverrides: POLICY_SETTINGS_DEFAULTS.allowRecommendationOverrides,
+  recipientSplit: POLICY_SETTINGS_DEFAULTS.recipientSplit,
   notices: { ...POLICY_SETTINGS_DEFAULTS.notices },
   alerts: { ...POLICY_SETTINGS_DEFAULTS.alerts },
   tagging: { ...POLICY_SETTINGS_DEFAULTS.tagging },
@@ -84,6 +96,7 @@ export function resolvePolicySettings(raw: unknown): {
     settings: {
       allowRecommendationOverrides:
         d.allowRecommendationOverrides ?? base.allowRecommendationOverrides,
+      recipientSplit: d.recipientSplit ?? base.recipientSplit,
       notices: {
         senderNonDelivery: d.notices?.senderNonDelivery ?? base.notices.senderNonDelivery,
       },

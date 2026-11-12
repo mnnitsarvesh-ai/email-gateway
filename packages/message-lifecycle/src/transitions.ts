@@ -40,6 +40,11 @@ export const LIFECYCLE_REASON_CODES = [
   'archived',
   'deadline_exceeded',
   'lifecycle_backfill',
+  // Step 5.3 (docs/plan/steps/17-quarantine.md Q5, ADR-0046 decision 4), appended.
+  'policy_partial',
+  'quarantine_partial_release',
+  'manual_quarantine',
+  'quarantine_expired',
 ] as const;
 
 export type LifecycleReasonCode = (typeof LIFECYCLE_REASON_CODES)[number];
@@ -73,8 +78,11 @@ export interface TransitionEdge {
 /**
  * The transition table (step 3.3 L3, edges E1–E26; step 4.1 S15 adds E27 and retires E4; step
  * 4.2 A13 gives E19 the scanner role with the reason signature_rescan; step 5.2 retires E27 and
- * gives E5, E8–E13 their producer, the policy-engine, ADR-0044), as data. Every allowed change of `email_messages.status` is one of these edges; everything else is
- * stale or invalid (L4). Retired ids are never reused.
+ * gives E5, E8–E13 their producer, the policy-engine, ADR-0044; step 5.3 (ADR-0046 decision 4)
+ * adds the reason `policy_partial` to E10, produces E16–E18 (role `quarantine`), lets the
+ * quarantine sweeper expire held messages through E26 (`quarantine_expired`) and adds E28 and
+ * E29), as data. Every allowed change of `email_messages.status` is one of these edges;
+ * everything else is stale or invalid (L4). Retired ids are never reused.
  * At most one edge exists per `(from, to)` pair (`transitions.test.ts`).
  */
 export const TRANSITIONS: readonly TransitionEdge[] = [
@@ -149,7 +157,9 @@ export const TRANSITIONS: readonly TransitionEdge[] = [
     from: ['policy_evaluated'],
     to: 'approved',
     roles: ['policy'],
-    reasons: ['policy_deliver', 'policy_tag'],
+    // Step 5.3 Q5: `policy_partial` = per-recipient decisions differ and at least one recipient
+    // is allowed (the others are held in quarantine or discarded).
+    reasons: ['policy_deliver', 'policy_tag', 'policy_partial'],
     producedBy: '5.2',
   },
   {
@@ -290,14 +300,40 @@ export const TRANSITIONS: readonly TransitionEdge[] = [
     id: 'E26',
     from: EXPIRABLE_STATES,
     to: 'expired',
-    roles: ['sweeper'],
-    reasons: ['deadline_exceeded'],
+    // Step 5.3 Q19: the quarantine sweeper expires a quarantined/held_for_review message whose
+    // last entries expired (never releases); the lifecycle sweeper keeps the deadline backstop.
+    roles: ['sweeper', 'quarantine'],
+    reasons: ['deadline_exceeded', 'quarantine_expired'],
+    reasonRoles: { deadline_exceeded: ['sweeper'], quarantine_expired: ['quarantine'] },
     producedBy: '3.3',
   },
   // E27 (`scanned → approved`, the development pass-through after the scan, step 4.1 S15) is
   // retired by step 5.2 (ADR-0044): delivery is approved only by the policy engine (E8 → E10) and
   // the operator release (E14/E15). The id is never reused; `dev_passthrough` stays a valid actor
   // role and reason code for the history rows written before, but no edge accepts it.
+  {
+    // Step 5.3 Q5 (ADR-0046 decision 4): release of a held recipient after the rest of the
+    // message finished (partial delivery, every other recipient failed, or the delivery deadline
+    // expired). An explicit operator-caused re-entry like E14: the final states stay final for
+    // automatic processing.
+    id: 'E28',
+    from: ['delivered', 'rejected', 'expired'],
+    to: 'approved',
+    roles: ['quarantine'],
+    reasons: ['quarantine_partial_release'],
+    newRound: true,
+    producedBy: '5.3',
+  },
+  {
+    // Step 5.3 Q7: manual quarantine of a policy-rejected message (same round). The quarantine
+    // writer allows it only when `status_reason ∈ {policy_reject, policy_discard}`.
+    id: 'E29',
+    from: ['rejected'],
+    to: 'quarantined',
+    roles: ['quarantine'],
+    reasons: ['manual_quarantine'],
+    producedBy: '5.3',
+  },
 ];
 
 /** The edge from `from` to `to` in `table`, if any (at most one exists per pair). */

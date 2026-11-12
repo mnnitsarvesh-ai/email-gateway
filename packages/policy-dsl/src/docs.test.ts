@@ -3,7 +3,8 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { validatePolicyDefinition } from './definition';
 import { POLICY_FIELDS } from './fields';
-import { run, type Def } from './fixtures.test-support';
+import { input, run, snapshotOf, type Def } from './fixtures.test-support';
+import { evaluatePolicyPerRecipient } from './per-recipient';
 import { intendedActionStatuses, lifecycleOutcome, type PolicyEvaluationResult } from './result';
 import { syntheticFactsSchema, type SyntheticFacts } from './synthetic';
 
@@ -38,7 +39,9 @@ interface Check {
 
 const examples = DOC.split(/^### Example /m)
   .slice(1)
-  .map((section): { title: string; policy: Def; facts: SyntheticFacts; check: Check } => {
+  .map((full): { title: string; policy: Def; facts: SyntheticFacts; check: Check } => {
+    // A section ends at the next level-2 heading (§12 and later are not part of example 12).
+    const section = full.split(/^## /m)[0]!;
     const title = section.split('\n', 1)[0]!;
     const check = /<!-- check: (\{[\s\S]*?\}) -->/.exec(section);
     const blocks = jsonBlocks(section);
@@ -148,10 +151,10 @@ describe('the variants stated in the prose of the worked examples', () => {
     );
     expect(r.disposition).toBe('quarantine');
   });
-  it('3: body banner not supported, ALERT requested', () => {
+  it('3: body banner requested, ALERT requested', () => {
     const ex = byTitle('3:');
     const r = run(ex.facts, [ex.policy]);
-    expect(r.delivery!.bodyBanner).toBe('not_supported');
+    expect(r.delivery!.bodyBanner).toBe('requested');
     expect(intendedActionStatuses(r)).toEqual(['enforced', 'enforced', 'requested']);
   });
   it('4: final action require_approval', () => {
@@ -192,5 +195,79 @@ describe('the variants stated in the prose of the worked examples', () => {
     const ex = byTitle('10:');
     const r = run({ ...ex.facts, recipients: [{ address: 'x@corp.example' }] }, [ex.policy]);
     expect(r.trace[0]!.result).toBe('unknown');
+  });
+});
+
+interface SplitCheck {
+  message: string;
+  split: boolean;
+  lifecycle: string;
+  decisions: Array<[number, string]>;
+  counts: Record<string, number>;
+  headers?: string[];
+}
+
+const splitExamples = DOC.split(/^### Split example /m)
+  .slice(1)
+  .map((full) => {
+    const section = full.split(/^## /m)[0]!;
+    const blocks = jsonBlocks(section);
+    return {
+      title: section.split('\n', 1)[0]!,
+      policy: blocks[0] as Def,
+      facts: blocks[1] as SyntheticFacts,
+      check: JSON.parse(/<!-- split-check: (\{[\s\S]*?\}) -->/.exec(section)![1]!) as SplitCheck,
+    };
+  });
+
+describe('docs/architecture/policy-dsl.md §13 split examples (step 5.3)', () => {
+  it('has two split examples', () => expect(splitExamples).toHaveLength(2));
+  for (const ex of splitExamples) {
+    it(`split example ${ex.title}`, () => {
+      const compiled = snapshotOf([ex.policy]);
+      expect(compiled.invalid).toEqual([]);
+      const e = evaluatePolicyPerRecipient(input(ex.facts), compiled);
+      expect(e.message.disposition).toBe(ex.check.message);
+      expect(e.split).toBe(ex.check.split);
+      expect(e.lifecycleDisposition).toBe(ex.check.lifecycle);
+      expect(e.recipientDecisions.map((d) => [d.rcptSeq, d.disposition])).toEqual(
+        ex.check.decisions,
+      );
+      expect(e.counts).toEqual(ex.check.counts);
+      if (ex.check.headers) {
+        expect(
+          (e.mergedDeliveryActions.edits?.headers ?? []).map((h) => `${h.name}: ${h.value}`),
+        ).toEqual(ex.check.headers);
+      }
+      expect(e.message.explanation.text).not.toContain('@');
+    });
+  }
+  it('split example 1 without recipientSplit: both quarantined', () => {
+    const ex = splitExamples[0]!;
+    const e = evaluatePolicyPerRecipient(
+      input(ex.facts),
+      snapshotOf([ex.policy], { settings: { recipientSplit: false } }),
+    );
+    expect(e.split).toBe(false);
+    expect(e.lifecycleDisposition).toBe('quarantine');
+  });
+  it('split example 2 with a malware hard block: every recipient is held by the floor', () => {
+    const ex = splitExamples[1]!;
+    const e = evaluatePolicyPerRecipient(
+      input({
+        ...ex.facts,
+        risk: {
+          rev0: {
+            score: 950,
+            level: 'critical',
+            verdict: 'malware',
+            recommendedAction: 'block',
+            hardBlocks: [{ id: 'hb.malware_attachment', action: 'block' }],
+          },
+        },
+      }),
+      snapshotOf([ex.policy]),
+    );
+    expect(e.recipientDecisions.map((d) => d.disposition)).toEqual(['reject', 'reject']);
   });
 });

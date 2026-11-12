@@ -1,15 +1,15 @@
 /**
  * Message lifecycle API (step 3.3 L10-L12) against the real MySQL writer and replica, with
- * messages put into their states by SQL fixtures (L8.6): RBAC, rescan (E19) and release
- * (E14/E15) with every refusal of L10.4, Idempotency-Key replay and key reuse (exactly one
- * history, outbox and audit row), concurrent requests, release approvals that satisfy the
- * delivery planner's provenance check, and the reads through the replica, through the writer
- * fallback, with history pagination and legacy rows.
+ * messages put into their states by SQL fixtures (L8.6): RBAC, rescan (E19) with every
+ * refusal of L10.4, Idempotency-Key replay and key reuse (exactly one history, outbox and audit
+ * row), concurrent requests, the operator release (step 5.3 Q30: `409
+ * quarantine_workflow_required` for every quarantined/held message, nothing written), and the
+ * reads through the replica, through the writer fallback, with history pagination and legacy
+ * rows.
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { PrismaReadService } from '@email-gateway/common';
 import {
-  deliveryApprovedV1,
   EventTypes,
   messageRescanRequestedV1,
   messageStateChangedV1,
@@ -38,8 +38,6 @@ import { pauseLiveRelay } from './support/live-relay';
 const POLL = { timeout: 15_000, interval: 200 };
 const ALL = ['message:read', 'message:rescan', 'quarantine:release'];
 const reason = 'operator reviewed the message headers';
-/** The delivery planner's provenance window (delivery-planner.ts PROVENANCE_SKEW_MS). */
-const PROVENANCE_SKEW_MS = 5 * 60_000;
 
 const sha = (text: string) => createHash('sha256').update(text).digest('hex');
 const key = () => `it-${randomUUID()}`;
@@ -64,33 +62,6 @@ async function recipientStatuses(message: LifecycleMessage): Promise<string[]> {
     orderBy: { rcptSeq: 'asc' },
   });
   return rows.map((r) => r.status);
-}
-
-/**
- * The planner's `assertApprovalIssued` (delivery-worker, step 3.2 review round 1), as a query:
- * an outbox row with the approval's event id, type and organization, created at most 5 minutes
- * before the message's received_at, whose payload parses and equals the published payload (the
- * relay publishes the stored payload unchanged).
- */
-async function approvalIssued(eventId: string, message: LifecycleMessage): Promise<unknown> {
-  const row = await ctx.prisma.messageOutbox.findFirst({
-    where: {
-      eventId,
-      eventType: EventTypes.DeliveryApproved,
-      organizationId: message.organizationId,
-      createdAt: { gte: new Date(message.receivedAt.getTime() - PROVENANCE_SKEW_MS) },
-    },
-    select: { payload: true, aggregateType: true, aggregateId: true, correlationId: true },
-  });
-  expect(row, `approval ${eventId} has no outbox row`).not.toBeNull();
-  expect(row!.aggregateType).toBe('message');
-  expect(row!.aggregateId).toBe(message.id.toString());
-  const issued = deliveryApprovedV1.safeParse(row!.payload);
-  expect(issued.success).toBe(true);
-  // The relay builds the envelope payload from the stored payload: the copy equals it.
-  const delivered = deliveryApprovedV1.parse(JSON.parse(JSON.stringify(row!.payload)));
-  expect(delivered).toStrictEqual(issued.data);
-  return issued.data;
 }
 
 let resumeLiveRelay: (() => Promise<void>) | undefined;
@@ -143,6 +114,14 @@ describe('RBAC (L10.1, L12)', () => {
     );
     await rescanOnly.release(message.publicId, body, key()).expect(403);
     await rescanOnly.lifecycle(message.publicId).expect(403);
+    // Step 5.3: a rescan of a quarantined message re-decides (and may deliver) its held
+    // recipients, so message:rescan alone is not enough.
+    const noRelease = await rescanOnly.rescan(message.publicId, body, key()).expect(403);
+    expect(noRelease.body).toMatchObject({
+      code: 'quarantine_rescan_forbidden',
+      currentState: 'quarantined',
+      permission: 'quarantine:release',
+    });
     const releaseOnly = new LifecycleApi(
       ctx,
       apiKeyHeader(await fx.createApiKey(org, ['quarantine:release'])),
@@ -388,186 +367,45 @@ describe('POST /messages/{messageId}/rescan (L10.2)', () => {
   });
 });
 
-describe('POST /messages/{messageId}/release (L10.3)', () => {
-  it('quarantined → approved (E14): approvals with deliverySeq max + 1 that pass the planner check', async () => {
-    const message = await insertLifecycleMessage(ctx, org, {
-      state: 'quarantined',
-      recipients: [
-        { address: 'a@acme.example', status: 'quarantined' },
-        { address: 'b@acme.example', status: 'delivered' },
-        { address: 'c@acme.example', status: 'pending' },
-        { address: 'd@acme.example', status: 'bounced' },
-      ],
-    });
-    await insertDeliveries(ctx, message, [0, 1]);
-    const idempotencyKey = key();
-    const res = await api
-      .release(message.publicId, { expectedVersion: message.version, reason }, idempotencyKey)
-      .expect(202);
-    expect(res.body).toEqual({
-      messageId: message.publicId,
-      state: 'approved',
-      version: message.version + 1,
-      lifecycleRound: 1,
-      deliverySeq: 2,
-      approvalEventIds: [expect.any(String)],
-      recipientCount: 2,
-    });
-    const state = await writerState(ctx, message);
-    expect(state.row).toEqual({
-      status: 'approved',
-      version: message.version + 1,
-      lifecycleRound: 1,
-      statusReason: 'quarantine_release',
-    });
-    expect(state.history.at(-1)).toMatchObject({
-      fromStatus: 'quarantined',
-      toStatus: 'approved',
-      reasonCode: 'quarantine_release',
-      actorRole: 'operator',
-      lifecycleRound: 1,
-    });
+describe('POST /messages/{messageId}/release (L10.3; step 5.3 Q30)', () => {
+  it.each(['quarantined', 'held_for_review'] as const)(
+    '%s → 409 quarantine_workflow_required with the entry count; nothing is written',
+    async (state) => {
+      const message = await insertLifecycleMessage(ctx, org, {
+        state,
+        recipients: [
+          { address: 'a@acme.example', status: 'quarantined' },
+          { address: 'c@acme.example', status: 'pending' },
+        ],
+      });
+      await insertQuarantineEntry(ctx, message);
+      const before = await writerState(ctx, message);
+      const res = await api
+        .release(message.publicId, { expectedVersion: message.version, reason }, key())
+        .expect(409);
+      expect(res.body).toMatchObject({
+        code: 'quarantine_workflow_required',
+        currentState: state,
+        currentVersion: message.version,
+        entries: 1,
+        route: 'POST /api/v1/quarantine/entries/{entryId}/release',
+      });
+      const after = await writerState(ctx, message);
+      expect(after.row).toEqual(before.row);
+      expect(after.history).toHaveLength(before.history.length);
+      expect(after.outbox).toHaveLength(0);
+      expect(await recipientStatuses(message)).toEqual(['quarantined', 'pending']);
+      expect(await auditRows(message.publicId, 'message.quarantine_released')).toHaveLength(0);
+    },
+  );
 
-    const approvalId = res.body.approvalEventIds[0] as string;
-    const payload = await approvalIssued(approvalId, message);
-    expect(payload).toEqual({
-      messageId: message.id.toString(),
-      receivedAt: message.receivedAt.toISOString(),
-      deliverySeq: 2,
-      source: 'quarantine_release',
-      emlS3Key: message.emlObjectKey,
-      recipients: [
-        { recipientId: message.recipientIds[0]!.toString(), rcptSeq: 0 },
-        { recipientId: message.recipientIds[2]!.toString(), rcptSeq: 2 },
-      ],
-      approvedAt: expect.any(String),
-      lifecycleRound: 1,
-    });
-    // The approval's event id is a UUIDv7.
-    expect(approvalId).toMatch(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
-    );
-    const approvals = state.outbox.filter((o) => o.eventType === EventTypes.DeliveryApproved);
-    expect(approvals.map((o) => o.eventId)).toEqual([approvalId]);
-    expect(approvals[0]!.correlationId).toMatch(/^api:/);
-
-    expect(state.events.map((e) => e.eventType)).toEqual([
-      'lifecycle.approved',
-      'delivery.approved',
-    ]);
-    expect(state.events[1]).toMatchObject({
-      sourceService: 'api',
-      eventId: approvalId,
-      actorType: 'api_key',
-      actorId: apiKeyPublicId,
-      details: {
-        source: 'quarantine_release',
-        approvalEventId: approvalId,
-        deliverySeq: 2,
-        recipientCount: 2,
-      },
-    });
-    const audits = await auditRows(message.publicId, 'message.quarantine_released');
-    expect(audits).toHaveLength(1);
-    expect(audits[0]!.metadata).toMatchObject({
-      fromState: 'quarantined',
-      toState: 'approved',
-      deliverySeq: 2,
-      recipientCount: 2,
-      idempotencyKeyHash: sha(idempotencyKey),
-      eventIds: [state.history.at(-1)!.stateEventId, approvalId],
-    });
-
-    // Replay: same body, one approval, one audit row.
-    const replay = await api
-      .release(message.publicId, { expectedVersion: message.version, reason }, idempotencyKey)
-      .expect(202);
-    expect(replay.headers['idempotency-replayed']).toBe('true');
-    expect(replay.body).toEqual(res.body);
-    expect(
-      (await writerState(ctx, message)).outbox.filter(
-        (o) => o.eventType === EventTypes.DeliveryApproved,
-      ),
-    ).toHaveLength(1);
-    expect(await auditRows(message.publicId, 'message.quarantine_released')).toHaveLength(1);
-  });
-
-  it('turns the released quarantined recipients into pending; the others keep their status', async () => {
-    const message = await insertLifecycleMessage(ctx, org, {
-      state: 'quarantined',
-      recipients: [
-        { address: 'q1@acme.example', status: 'quarantined' },
-        { address: 'q2@acme.example', status: 'quarantined' },
-        { address: 'p@acme.example', status: 'pending' },
-        { address: 'd@acme.example', status: 'delivered' },
-      ],
-    });
-    await api
-      .release(message.publicId, { expectedVersion: message.version, reason }, key())
-      .expect(202);
-    expect(await recipientStatuses(message)).toEqual([
-      'pending',
-      'pending',
-      'pending',
-      'delivered',
-    ]);
-  });
-
-  it('a release of more than 1000 recipients: two approvals, every released recipient pending', async () => {
-    const recipients = Array.from({ length: 1001 }, (_, i) => ({
-      address: `bulk${i}@acme.example`,
-      status: 'quarantined' as const,
-    }));
-    const message = await insertLifecycleMessage(ctx, org, { state: 'quarantined', recipients });
-    const res = await api
-      .release(message.publicId, { expectedVersion: message.version, reason }, key())
-      .expect(202);
-    expect(res.body).toMatchObject({ recipientCount: 1001, deliverySeq: 1 });
-    const ids = res.body.approvalEventIds as string[];
-    expect(ids).toHaveLength(2);
-    const chunks = await Promise.all(ids.map((id) => approvalIssued(id, message)));
-    expect(chunks.map((c) => (c as { recipients: unknown[] }).recipients.length)).toEqual([
-      1000, 1,
-    ]);
-    const statuses = await recipientStatuses(message);
-    expect(statuses).toHaveLength(1001);
-    expect(statuses.every((s) => s === 'pending')).toBe(true);
-  });
-
-  it('held_for_review → approved (E15, review_release), deliverySeq 1 without deliveries', async () => {
-    const message = await insertLifecycleMessage(ctx, org, { state: 'held_for_review' });
-    const res = await api
-      .release(message.publicId, { expectedVersion: message.version, reason }, key())
-      .expect(202);
-    expect(res.body).toMatchObject({ deliverySeq: 1, lifecycleRound: 1, recipientCount: 2 });
-    expect((await writerState(ctx, message)).row.statusReason).toBe('review_release');
-    await approvalIssued(res.body.approvalEventIds[0] as string, message);
-  });
-
-  it('409 quarantine_workflow_required with per-recipient quarantine entries', async () => {
+  it('also without entries (a 5.2-held message the quarantine sweeper has not adopted yet)', async () => {
     const message = await insertLifecycleMessage(ctx, org, { state: 'quarantined' });
-    await insertQuarantineEntry(ctx, message);
     const res = await api
       .release(message.publicId, { expectedVersion: message.version, reason }, key())
       .expect(409);
-    expect(res.body).toMatchObject({
-      code: 'quarantine_workflow_required',
-      currentState: 'quarantined',
-      currentVersion: message.version,
-    });
+    expect(res.body).toMatchObject({ code: 'quarantine_workflow_required', entries: 0 });
     expect((await writerState(ctx, message)).row.status).toBe('quarantined');
-  });
-
-  it('409 no_releasable_recipients when no recipient is pending or quarantined', async () => {
-    const message = await insertLifecycleMessage(ctx, org, {
-      state: 'quarantined',
-      recipients: [{ address: 'x@acme.example', status: 'delivered' }],
-    });
-    const res = await api
-      .release(message.publicId, { expectedVersion: message.version, reason }, key())
-      .expect(409);
-    expect(res.body.code).toBe('no_releasable_recipients');
-    expect((await writerState(ctx, message)).outbox).toHaveLength(0);
   });
 
   it('409 message_state_conflict from approved, scanning and delivered; 409 version conflict first', async () => {
@@ -739,22 +577,18 @@ describe('reads with the replica unusable (writer fallback)', () => {
     const message = await insertLifecycleMessage(ctx, org, { state: 'held_for_review' });
     const res = await viaFallback.lifecycle(message.publicId).expect(200);
     expect(res.body).toMatchObject({ state: 'held_for_review', version: message.version });
+    // Step 5.3 (Q30): the write is a rescan (the operator release answers 409 now).
     await viaFallback
-      .release(message.publicId, { expectedVersion: message.version, reason }, key())
+      .rescan(message.publicId, { expectedVersion: message.version, reason }, key())
       .expect(202);
     // Read-after-write on the writer: the new state shows at once.
     const after = await viaFallback.lifecycle(message.publicId).expect(200);
     expect(after.body).toMatchObject({
-      state: 'approved',
-      statusReason: 'review_release',
+      state: 'scanning',
       version: message.version + 1,
       lifecycleRound: 1,
-      actions: { rescan: false, release: false },
     });
     const history = await viaFallback.history(message.publicId).expect(200);
-    expect(history.body.data.at(-1)).toMatchObject({
-      toState: 'approved',
-      reasonCode: 'review_release',
-    });
+    expect(history.body.data.at(-1)).toMatchObject({ toState: 'scanning' });
   });
 });

@@ -146,4 +146,29 @@ describe('one door for the message lifecycle (L5.9)', () => {
     expect(violations('UPDATE email_messages SET subject = ? WHERE status = ?')).toEqual([]);
     expect(violations('tx.emailMessage.create({ data: { ...init.messageFields } })')).toEqual([]);
   });
+
+  it('leaves the step 5.3 entry and recipient state writes to their writers (§2.0 invariant 7)', () => {
+    // The quarantine entry state (`quarantine_messages.status`) and the recipient state
+    // (`email_recipients.status`) are written by the quarantine paths in the same writer
+    // transaction as the message transition; only the message lifecycle has one door.
+    expect(
+      violations(
+        'tx.quarantineMessage.updateMany({ where: { id, rowVersion }, data: { status: "released", rowVersion: { increment: 1 } } })',
+      ),
+    ).toEqual([]);
+    expect(
+      violations('UPDATE quarantine_messages SET status = ?, row_version = row_version + 1'),
+    ).toEqual([]);
+    expect(
+      violations(
+        'tx.emailRecipient.updateMany({ where: { messageId }, data: { status: "quarantined" } })',
+      ),
+    ).toEqual([]);
+    // A message transition hidden in a quarantine path is still caught.
+    expect(
+      violations(
+        'tx.emailMessage.update({ where: { id_receivedAt }, data: { status: "quarantined" } })',
+      ),
+    ).toHaveLength(1);
+  });
 });

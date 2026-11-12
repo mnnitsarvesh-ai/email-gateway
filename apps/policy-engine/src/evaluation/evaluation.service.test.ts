@@ -10,6 +10,8 @@ import {
 import { createLogger } from '@email-gateway/logger';
 import type { TransitionOutcome, TransitionRequest } from '@email-gateway/message-lifecycle';
 import { compileSnapshot, POLICY_DEFAULT_PLATFORM_ID } from '@email-gateway/policy-dsl';
+import { resolveQuarantineSettings } from '@email-gateway/quarantine';
+import { resolveUrlSettings, URL_PLATFORM_DEFAULTS } from '@email-gateway/security-contracts';
 import { describe, expect, it, vi } from 'vitest';
 import type { DeliveryObject } from '../delivery/delivery-object';
 import type { PolicyCopyResult, PolicyCopyWriter } from '../delivery/policy-copy';
@@ -23,6 +25,7 @@ import {
 import type { RoundFacts } from './facts.repository';
 import { cleanFacts, cleanRiskRow, definition, POLICY_A, RULES } from './fixtures.test-support';
 import type { SnapshotLookup } from './snapshot.repository';
+import type { CreatedEntry } from '../quarantine/store-writer';
 
 const RECEIVED = '2026-11-10T09:59:00.000Z';
 const NOW = new Date('2026-11-10T10:00:05.000Z');
@@ -126,6 +129,8 @@ function fakeTx(
   const pending = Array.from({ length: options.pending ?? 1 }, (_, i) => ({
     id: BigInt(500 + i),
     rcptSeq: i,
+    address: i === 0 ? 'bob@corp.example' : `r${String(i)}@corp.example`,
+    status: 'pending',
     messageId: 100n,
     organizationId: 7n,
   }));
@@ -142,7 +147,13 @@ function fakeTx(
         return Promise.resolve({ count: options.updateCount ?? 1 });
       }),
     },
-    emailRecipient: { findMany: vi.fn(() => Promise.resolve(pending)) },
+    emailRecipient: {
+      findMany: vi.fn((args: { where: { status?: string } }) =>
+        Promise.resolve(
+          pending.filter((r) => args.where.status === undefined || r.status === args.where.status),
+        ),
+      ),
+    },
     emailDelivery: {
       aggregate: vi.fn(() =>
         Promise.resolve({ _max: { deliverySeq: options.maxDeliverySeq ?? null } }),
@@ -161,7 +172,7 @@ function fakeTx(
       }),
     },
   };
-  return { tx, writes };
+  return { tx, writes, pending };
 }
 
 function harness(
@@ -213,6 +224,54 @@ function harness(
       this.calls.push(request);
       return Promise.resolve(options.copy ?? { result: 'written', key: request.key });
     },
+    writeEdited(request) {
+      this.calls.push(request);
+      return Promise.resolve({
+        result: 'written',
+        key: request.key,
+        banner: request.plan.banner === null ? null : 'applied',
+        urlRewrite:
+          request.plan.urlRewrite === null ? null : { status: 'rewritten', skipReason: null },
+      });
+    },
+  };
+  const store = {
+    supersedeEarlierRounds: vi.fn((..._args: unknown[]) => Promise.resolve(0)),
+    setRecipientOutcomes: vi.fn((..._args: unknown[]) => Promise.resolve()),
+    createEntries: vi.fn((..._args: unknown[]) =>
+      Promise.resolve({ created: [] as CreatedEntry[], notifications: 0 }),
+    ),
+  };
+  const quarantine = {
+    store,
+    settings: {
+      resolve: vi.fn(() => Promise.resolve(resolveQuarantineSettings(null).settings)),
+    },
+    copyFacts: {
+      read: vi.fn(() =>
+        Promise.resolve({
+          structure: [{ contentType: 'text/plain' }],
+          contentComplete: true,
+          urls: [],
+          urlSettings: (
+            resolveUrlSettings(URL_PLATFORM_DEFAULTS, null) as unknown as {
+              settings: never;
+            }
+          ).settings,
+        }),
+      ),
+    },
+    urlRewrite: {
+      enabled: true,
+      key: { id: 1, key: Buffer.alloc(32, 7) },
+      clickBaseUrl: 'http://click.test',
+      defaultExpiryDays: 30,
+      maxExpiryDays: 90,
+      dkimSignedPolicy: 'rewrite' as const,
+      limits: { maxMessageBytes: 26_214_400, maxPartBytes: 5_242_880 },
+    },
+    bannerMaxPartBytes: 1_048_576,
+    bounds: { maxHoldDays: 60, maxReviewDays: 13 },
   };
   const facts = { read: vi.fn(() => Promise.resolve(options.facts ?? cleanFacts())) };
   const directory = {
@@ -225,6 +284,7 @@ function harness(
     snapshots: { get: vi.fn(() => Promise.resolve(options.snapshot ?? snapshot())) },
     directory,
     copies,
+    quarantine,
     metrics,
     logger: createLogger({ service: 't', level: 'silent' }),
     copyTimeoutMs: 60_000,
@@ -234,7 +294,7 @@ function harness(
       Promise.resolve(options.object ?? { key: EML, object: 'original' }),
     ),
   });
-  return { evaluation, transitions, copies, facts, directory, metrics, service };
+  return { evaluation, transitions, copies, facts, directory, metrics, service, store, quarantine };
 }
 
 const outboxOf = (writes: Array<{ kind: string; data: Record<string, unknown> }>, type: string) =>
@@ -646,5 +706,202 @@ describe('PolicyEvaluationService: failures', () => {
     await expect(h.evaluation.evaluate(scannedEvent(), tx as never)).rejects.toBeInstanceOf(
       InconsistentPolicyReadError,
     );
+  });
+});
+
+describe('PolicyEvaluationService: quarantine store and per-recipient decisions (step 5.3)', () => {
+  /** Links the fake store's recipient outcomes to the fake transaction's rows. */
+  function linked(h: ReturnType<typeof harness>, rows: ReturnType<typeof fakeTx>['pending']) {
+    h.store.setRecipientOutcomes.mockImplementation((...args: unknown[]) => {
+      const outcomes = args[2] as Array<{ id: bigint; status: string }>;
+      for (const o of outcomes) rows.find((r) => r.id === o.id)!.status = o.status;
+      return Promise.resolve();
+    });
+  }
+
+  it('QUARANTINE → recipients quarantined and one entry candidate per recipient (Q5, Q6)', async () => {
+    const h = harness({
+      facts: cleanFacts({ recipients: ['bob@corp.example', 'r1@corp.example'] }),
+      snapshot: snapshot([{ rules: [RULES.quarantineInbound] }]),
+    });
+    const { tx, writes, pending } = fakeTx({ pending: 2 });
+    linked(h, pending);
+    h.store.createEntries.mockResolvedValue({
+      created: [
+        {
+          id: 1n,
+          publicId: 'e1',
+          rcptSeq: 0,
+          kind: 'quarantine',
+          reason: 'policy',
+          direction: 'inbound',
+          hasHardBlock: false,
+          approvalRequestPublicId: null,
+        },
+      ],
+      notifications: 0,
+    } as never);
+    const outcome = await h.evaluation.evaluate(scannedEvent(), tx as never);
+    expect(h.store.supersedeEarlierRounds).not.toHaveBeenCalled();
+    expect(h.store.setRecipientOutcomes).toHaveBeenCalledWith(
+      tx,
+      { messageId: 100n, receivedAt: new Date(RECEIVED), organizationId: 7n },
+      [
+        expect.objectContaining({ id: 500n, status: 'quarantined', finalAction: 'quarantine' }),
+        expect.objectContaining({ id: 501n, status: 'quarantined', finalAction: 'quarantine' }),
+      ],
+    );
+    const input = h.store.createEntries.mock.calls[0]![1] as {
+      origin: string;
+      candidates: Array<{
+        rcptSeq: number;
+        kind: string;
+        facts: { reason: string; decisiveRuleId: string };
+      }>;
+      message: { round: number; scanId: bigint; emlObjectKey: string };
+    };
+    expect(input.origin).toBe('policy');
+    expect(input.message).toMatchObject({ round: 0, scanId: 900n, emlObjectKey: EML });
+    expect(
+      input.candidates.map((c) => [c.rcptSeq, c.kind, c.facts.reason, c.facts.decisiveRuleId]),
+    ).toEqual([
+      [0, 'quarantine', 'policy', 'quarantine-all'],
+      [1, 'quarantine', 'policy', 'quarantine-all'],
+    ]);
+    expect(outcome).toMatchObject({ status: 'evaluated', approvals: 0, split: 'not_scoped' });
+    expect(outboxOf(writes, EventTypes.DeliveryApproved)).toEqual([]);
+  });
+
+  it('REQUIRE_APPROVAL → review candidates; a rescan round supersedes first', async () => {
+    const h = harness({
+      facts: cleanFacts({ round: 1 }),
+      snapshot: snapshot([{ rules: [RULES.holdInbound] }]),
+    });
+    const { tx, pending } = fakeTx();
+    linked(h, pending);
+    await h.evaluation.evaluate(scannedEvent({ round: 1 }), tx as never);
+    expect(h.store.supersedeEarlierRounds).toHaveBeenCalledWith(
+      tx,
+      { messageId: 100n, receivedAt: new Date(RECEIVED), organizationId: 7n },
+      1,
+      NOW,
+    );
+    const input = h.store.createEntries.mock.calls[0]![1] as {
+      candidates: Array<{ kind: string; facts: { approvalReasons: string[] } }>;
+    };
+    expect(input.candidates.map((c) => [c.kind, c.facts.approvalReasons])).toEqual([
+      ['review', ['review']],
+    ]);
+  });
+
+  it('a split approves only the allowed recipients and records the decisions on the row', async () => {
+    const rule = {
+      id: 'q-r1',
+      priority: 10,
+      when: { field: 'recipient.address', op: 'in', value: ['r1@corp.example'] },
+      actions: [{ type: 'QUARANTINE' }],
+    };
+    const h = harness({
+      facts: cleanFacts({ recipients: ['bob@corp.example', 'r1@corp.example'] }),
+      snapshot: snapshot([{ rules: [rule] }]),
+    });
+    const { tx, writes, pending } = fakeTx({ pending: 2 });
+    linked(h, pending);
+    const outcome = await h.evaluation.evaluate(scannedEvent(), tx as never);
+    expect(outcome).toMatchObject({
+      status: 'evaluated',
+      split: 'split',
+      outcome: { edge: 'E10', to: 'approved', reason: 'policy_partial', finalAction: 'partial' },
+    });
+    expect(h.transitions[1]).toMatchObject({ to: 'approved', reason: 'policy_partial' });
+    const approval = deliveryApprovedV1.parse(
+      outboxOf(writes, EventTypes.DeliveryApproved)[0]!.payload,
+    );
+    expect(approval.recipients).toEqual([{ recipientId: '500', rcptSeq: 0 }]);
+    expect(writes[0]!.data).toMatchObject({ recipientSplit: true, action: 'partial' });
+    expect(writes[0]!.data.recipientDecisions).toEqual([
+      expect.objectContaining({ rcptSeq: 0, disposition: 'allow' }),
+      expect.objectContaining({ rcptSeq: 1, disposition: 'quarantine' }),
+    ]);
+    expect(writes[1]!.data).toMatchObject({ finalAction: 'partial' });
+    expect(
+      policyDecidedV1.parse(outboxOf(writes, EventTypes.PolicyDecided)[0]!.payload),
+    ).toMatchObject({ finalAction: 'partial' });
+    const candidates = (
+      h.store.createEntries.mock.calls[0]![1] as {
+        candidates: Array<{ rcptSeq: number }>;
+      }
+    ).candidates;
+    expect(candidates.map((c) => c.rcptSeq)).toEqual([1]);
+  });
+
+  it('WARN → the banner is part of the copy (writeEdited) and recorded as applied', async () => {
+    const warn = {
+      id: 'warn',
+      priority: 10,
+      when: { field: 'direction', op: 'equals', value: 'inbound' },
+      actions: [{ type: 'WARN', level: 'danger', text: 'Careful' }],
+    };
+    const h = harness({ snapshot: snapshot([{ rules: [warn] }]) });
+    const { tx, writes } = fakeTx();
+    const outcome = await h.evaluation.evaluate(scannedEvent(), tx as never);
+    const call = h.copies.calls[0] as { plan: { banner: unknown; urlRewrite: unknown } };
+    expect(call.plan.banner).toEqual({ level: 'danger', text: 'Careful', maxPartBytes: 1_048_576 });
+    expect(call.plan.urlRewrite).toBeNull();
+    expect(outcome).toMatchObject({ banner: 'applied', copy: 'written' });
+    expect((writes[0]!.data.delivery as { bodyBanner: string }).bodyBanner).toBe('applied');
+    expect(
+      (writes[0]!.data.actions as Array<{ type: string; status: string }>).find(
+        (a) => a.type === 'WARN',
+      )?.status,
+    ).toBe('enforced');
+  });
+
+  it('URL_REWRITE (quarantine) on a disabled round that cannot be rewritten re-evaluates and holds', async () => {
+    const rw = {
+      id: 'rw',
+      priority: 10,
+      when: { field: 'direction', op: 'equals', value: 'inbound' },
+      actions: [{ type: 'URL_REWRITE', ifNotRewritten: 'quarantine' }],
+    };
+    const facts = cleanFacts();
+    const h = harness({
+      facts: { ...facts, urlRewrite: { status: 'skipped', skipReason: 'disabled' } },
+      snapshot: snapshot([{ rules: [rw] }]),
+    });
+    h.quarantine.copyFacts.read.mockResolvedValue({
+      ...(await h.quarantine.copyFacts.read()),
+      contentComplete: false,
+    });
+    const { tx, writes, pending } = fakeTx();
+    linked(h, pending);
+    const outcome = await h.evaluation.evaluate(scannedEvent(), tx as never);
+    expect(h.copies.calls).toEqual([]);
+    expect(outcome).toMatchObject({
+      status: 'evaluated',
+      urlRewrite: 'parse_incomplete',
+      outcome: { to: 'quarantined' },
+    });
+    expect(writes[0]!.data).toMatchObject({ disposition: 'quarantine' });
+    expect(outboxOf(writes, EventTypes.DeliveryApproved)).toEqual([]);
+  });
+
+  it('URL_REWRITE (quarantine) on a disabled round with policy rewriting off holds as in 5.2', async () => {
+    const rw = {
+      id: 'rw',
+      priority: 10,
+      when: { field: 'direction', op: 'equals', value: 'inbound' },
+      actions: [{ type: 'URL_REWRITE', ifNotRewritten: 'quarantine' }],
+    };
+    const facts = cleanFacts();
+    const h = harness({
+      facts: { ...facts, urlRewrite: { status: 'skipped', skipReason: 'disabled' } },
+      snapshot: snapshot([{ rules: [rw] }]),
+    });
+    h.quarantine.urlRewrite.enabled = false;
+    const { tx, pending } = fakeTx();
+    linked(h, pending);
+    const outcome = await h.evaluation.evaluate(scannedEvent(), tx as never);
+    expect(outcome).toMatchObject({ urlRewrite: 'disabled', outcome: { to: 'quarantined' } });
   });
 });

@@ -115,6 +115,25 @@ export const EXAMPLE_EVENT_PAYLOADS: Readonly<Record<RegisteredEventType, unknow
     ruleRefs: [`${policyPublicId}#3/block-card-numbers`],
     requestedAt: '2026-11-01T10:15:31.789Z',
   },
+  'mail.quarantine.release_requested.v1': {
+    releaseId: '01890a5d-ac96-774b-bcce-b302099a80a0',
+    messageId,
+    receivedAt,
+    entryIds: ['01890a5d-ac96-774b-bcce-b302099a80a1', '01890a5d-ac96-774b-bcce-b302099a80a2'],
+    mode: 'approved',
+    approvalRequestId: '01890a5d-ac96-774b-bcce-b302099a80a3',
+    requestedBy: { type: 'user', id: '01890a5d-ac96-774b-bcce-b302099a80a4' },
+    requestedAt: '2026-11-02T09:00:00.000Z',
+  },
+  'mail.quarantine.notification_requested.v1': {
+    kind: 'user_digest',
+    refs: {
+      userId: '01890a5d-ac96-774b-bcce-b302099a80a4',
+      digestId: '01890a5d-ac96-774b-bcce-b302099a80a5',
+    },
+    window: { from: '2026-11-01T08:00:00.000Z', to: '2026-11-02T08:00:00.000Z' },
+    requestedAt: '2026-11-02T08:00:01.000Z',
+  },
   'mail.delivery.approved.v1': {
     messageId,
     receivedAt,

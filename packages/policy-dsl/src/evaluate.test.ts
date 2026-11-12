@@ -265,8 +265,14 @@ describe('actions, merge and applicability (P9.9–11)', () => {
         { name: 'X-EG-Policy-Warning', value: 'danger; first text' },
       ],
       subjectPrefix: '[T1]',
-      bodyBanner: 'not_supported',
-      urlRewrite: { required: true, rewritten: true, skipReason: null },
+      bodyBanner: 'requested',
+      urlRewrite: {
+        required: true,
+        rewritten: true,
+        skipReason: null,
+        policyRewritable: false,
+        policyAttempt: null,
+      },
     });
     expect(intendedActionStatuses(r)).toEqual([
       'enforced',
@@ -465,7 +471,13 @@ describe('URL_REWRITE', () => {
   it('a rewritten round is delivered (the rewritten copy)', () => {
     const r = run({ urlRewriteStatus: 'rewritten' }, rw('quarantine'));
     expect(r.disposition).toBe('allow');
-    expect(r.delivery!.urlRewrite).toEqual({ required: true, rewritten: true, skipReason: null });
+    expect(r.delivery!.urlRewrite).toEqual({
+      required: true,
+      rewritten: true,
+      skipReason: null,
+      policyRewritable: false,
+      policyAttempt: null,
+    });
     expect(intendedActionStatuses(r)[1]).toBe('enforced');
   });
   it('ifNotRewritten=deliver records the skip', () => {
@@ -475,8 +487,27 @@ describe('URL_REWRITE', () => {
       required: true,
       rewritten: false,
       skipReason: 'too_large',
+      policyRewritable: false,
+      policyAttempt: null,
     });
     expect(intendedActionStatuses(r)[1]).toBe('recorded');
+  });
+  it('an AI-derived rule never raises through its quarantine fallback (P9.8, step 5.3 fix)', () => {
+    const ai = leaf('bec.verdict', 'in', ['suspicious']);
+    const r = run(
+      {
+        urlRewriteStatus: 'skipped',
+        urlRewriteSkipReason: 'too_large',
+        bec: { deterministicVerdict: 'clean', verdict: 'suspicious', aiRaised: true },
+      },
+      [policy([rule(1, ai, [{ type: 'URL_REWRITE', ifNotRewritten: 'quarantine' }])])],
+    );
+    expect(r.disposition).toBe('allow');
+    expect(r.clamps).toEqual([
+      { ref: `${PID.a}#1/r1`, from: 'quarantine', to: 'allow', reason: 'ai_only' },
+    ]);
+    expect(r.reasonCodes).toContain('policy.clamp.ai_only');
+    expect(r.reasonCodes).not.toContain('policy.url_rewrite.required');
   });
   it('never lowers a stricter decision', () => {
     const r = run({ urlRewriteStatus: 'none' }, [

@@ -36,6 +36,9 @@ import { stack } from './env';
  *   would only pile up. The sandbox-controller (`scan.sandbox`) is the sandbox suites' own gate.
  * - since step 5.2 (P15): topology v9 (`TOPOLOGY_VERSION` of `@email-gateway/event-contracts`)
  *   with a consumer on `email.policy.evaluate`.
+ * - since step 5.3 (17-quarantine.md Q27, Q28): topology v10 with a consumer on the work queue
+ *   `email.quarantine` (the policy-engine's `quarantine` role: release executor, sweeper,
+ *   digests); without it releases stay `releasing` and held entries never expire.
  *
  * `scanStageProblems()` returns what is missing (empty when everything is there); the routing,
  * MIME and scan gates include it.
@@ -65,13 +68,15 @@ export { TOPOLOGY_VERSION };
 export const TOPOLOGY_DESCRIPTION = `email-gateway topology v${TOPOLOGY_VERSION}`;
 /** Step 5.2: the queue of the delivery gate (policy-engine, ledger `policy-engine.evaluate`). */
 export const POLICY_QUEUE = 'email.policy.evaluate';
+/** Step 5.3: the release executor's work queue (policy-engine `quarantine` role). */
+export const QUARANTINE_QUEUE = 'email.quarantine';
 
 export const SCAN_HOW_TO_START = [
   'The scan stage (step 4.1) needs the email-worker scan role; delivery (step 5.2) needs the policy-engine:',
   '  docker compose --profile apps build email-worker && docker compose --profile apps build policy-engine',
   '  docker compose --profile apps up -d --wait email-worker policy-engine delivery-worker',
   '  (or on the host: pnpm --filter @email-gateway/email-worker dev, SCAN_ENABLED=true)',
-  '  pnpm rabbitmq:init   (topology v9, the eg-scanner user on scan.spam, scan.attachment, scan.url, scan.bec, scan.dlp, scan.sandbox.submissions, scan.sandbox.results and the eg-policy-engine user on email.policy.evaluate)',
+  `  pnpm rabbitmq:init   (topology v${TOPOLOGY_VERSION}, the eg-scanner user on scan.spam, scan.attachment, scan.url, scan.bec, scan.dlp, scan.sandbox.submissions, scan.sandbox.results and the eg-policy-engine user on email.policy.evaluate and email.quarantine)`,
   '  (step 4.2: clamav healthy; step 4.5: SCAN_ENGINES=rspamd,attachment,url,bec,dlp and DLP_EVIDENCE_KEY on the email-worker;',
   '   step 4.6: SANDBOX_ENABLED=true with the sandbox bucket and keys on the email-worker)',
 ].join('\n');
@@ -144,7 +149,7 @@ export async function scanStageProblems(): Promise<string[]> {
         `vhost ${vhost} is "${info.description ?? ''}", not topology v${TOPOLOGY_VERSION}`,
       );
     }
-    for (const queue of [...SCAN_CONSUMED_QUEUES, POLICY_QUEUE]) {
+    for (const queue of [...SCAN_CONSUMED_QUEUES, POLICY_QUEUE, QUARANTINE_QUEUE]) {
       if ((await api.queue(vhost, queue)).consumers < 1) problems.push(`${queue} has no consumer`);
     }
   } catch (err) {

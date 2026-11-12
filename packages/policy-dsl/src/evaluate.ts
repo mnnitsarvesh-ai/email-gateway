@@ -28,6 +28,7 @@ import {
   POLICY_HOLD_DISPOSITIONS,
   POLICY_INPUT_VERSION,
   POLICY_LIMITS,
+  POLICY_REWRITABLE_SKIP_REASONS,
   POLICY_TAG_HEADER,
   POLICY_WARNING_HEADER,
   WARN_LEVELS,
@@ -38,7 +39,8 @@ import {
 } from './vocabulary';
 
 /**
- * The policy evaluator `policy-eval/1` (step 5.2 P9 steps 1–11; ADR-0043 decisions 4–6). A pure
+ * The policy evaluator `policy-eval/2` (step 5.2 P9 steps 1–11; ADR-0043 decisions 4–6; step 5.3
+ * Q22/Q23: banner request and policy-rewritable URL skips). A pure
  * function of `(PolicyInput, CompiledSnapshot)`: no I/O, no clock, no randomness. The strictness
  * floor (`./floor`) is applied after the tenant rules, the override and the URL_REWRITE raise,
  * so no rule, exception, override or setting can produce a final disposition below it.
@@ -301,6 +303,7 @@ export function evaluatePolicy(
     fallback: null as 'deliver' | 'quarantine' | null,
     rules: [] as CompiledRule[],
     quarantineRules: [] as CompiledRule[],
+    aiRules: [] as CompiledRule[],
   };
   const archive: CompiledRule[] = [];
   const alert = { severity: null as AlertSeverity | null, rules: [] as CompiledRule[] };
@@ -324,7 +327,10 @@ export function evaluatePolicy(
           urlRewrite.fallback =
             urlRewrite.fallback === 'quarantine' || fb === 'quarantine' ? 'quarantine' : 'deliver';
           urlRewrite.rules.push(rule);
-          if (fb === 'quarantine') urlRewrite.quarantineRules.push(rule);
+          // An AI-only signal can tag or warn, never hold (P9.8): the quarantine fallback of a
+          // rule reading AI-derived fields never raises (step 5.3 fix, clamp `ai_only`).
+          if (fb === 'quarantine' && rule.aiDerived) urlRewrite.aiRules.push(rule);
+          else if (fb === 'quarantine') urlRewrite.quarantineRules.push(rule);
           break;
         }
         case 'ARCHIVE':
@@ -339,9 +345,32 @@ export function evaluatePolicy(
     }
   }
 
-  // URL_REWRITE `ifNotRewritten = quarantine` on a round that was not rewritten.
+  // URL_REWRITE `ifNotRewritten = quarantine` on a round that was not rewritten. A round skipped
+  // only because the tenant's 4.3 setting was off (`disabled`, `direction`) is policy-rewritable
+  // (step 5.3 Q23): the policy-engine rewrites the copy itself, so it does not raise here (if the
+  // engine's own rewrite skips, it re-evaluates with that skip reason, which then raises).
   const rewritten = input.urls.rewriteStatus === 'rewritten';
-  const urlRewriteRequired = urlRewrite.fallback === 'quarantine' && !rewritten;
+  const policyRewritable =
+    !rewritten &&
+    input.urls.rewriteStatus === 'skipped' &&
+    input.urls.rewriteSkipReason !== null &&
+    (POLICY_REWRITABLE_SKIP_REASONS as readonly string[]).includes(input.urls.rewriteSkipReason);
+  const urlRewriteRequired =
+    urlRewrite.quarantineRules.length > 0 && !rewritten && !policyRewritable;
+  if (
+    urlRewrite.aiRules.length > 0 &&
+    !rewritten &&
+    !policyRewritable &&
+    !urlRewriteRequired &&
+    dispositionRank(final) < dispositionRank('quarantine')
+  ) {
+    clamps.push({
+      ref: urlRewrite.aiRules[0]!.ref,
+      from: 'quarantine',
+      to: final,
+      reason: 'ai_only',
+    });
+  }
   let urlRewriteRaised = false;
   if (urlRewriteRequired && dispositionRank(final) < dispositionRank('quarantine')) {
     final = 'quarantine';
@@ -495,11 +524,13 @@ export function evaluatePolicy(
     delivery = {
       headers,
       subjectPrefix: tenantTag.prefix ?? warn.prefix ?? null,
-      bodyBanner: warn.level !== null ? 'not_supported' : null,
+      bodyBanner: warn.level !== null ? 'requested' : null,
       urlRewrite: {
         required: urlRewrite.fallback !== null,
         rewritten,
         skipReason: input.urls.rewriteSkipReason,
+        policyRewritable,
+        policyAttempt: null,
       },
     };
   }

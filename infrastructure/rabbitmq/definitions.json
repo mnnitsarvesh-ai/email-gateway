@@ -1,5 +1,5 @@
 {
-  "topology_version": 9,
+  "topology_version": 10,
   "exchanges": [
     {
       "name": "email.ingestion",
@@ -404,6 +404,14 @@
       "vhost": "email-gateway",
       "destination": "email.notifications",
       "destination_type": "queue",
+      "routing_key": "org.*.mail.quarantine.notification_requested.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.policy",
+      "vhost": "email-gateway",
+      "destination": "email.notifications",
+      "destination_type": "queue",
       "routing_key": "retry.email.notifications.#",
       "arguments": {}
     },
@@ -420,7 +428,7 @@
       "vhost": "email-gateway",
       "destination": "email.quarantine",
       "destination_type": "queue",
-      "routing_key": "org.*.mail.policy.decided.v1",
+      "routing_key": "org.*.mail.quarantine.release_requested.v1",
       "arguments": {}
     },
     {
@@ -846,9 +854,12 @@
       "apply-to": "queues",
       "priority": 10,
       "definition": {
-        "delivery-limit": -1,
-        "max-length": 10000,
-        "overflow": "drop-head"
+        "delivery-limit": 20,
+        "dead-letter-exchange": "email.events",
+        "dead-letter-routing-key": "dead-letter.email.quarantine",
+        "dead-letter-strategy": "at-least-once",
+        "overflow": "reject-publish",
+        "max-length": 1000000
       }
     },
     {

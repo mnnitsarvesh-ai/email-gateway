@@ -4,7 +4,8 @@
  * (never `403`) for the lifecycle reads, the rescan and the release of a tenant B message, and
  * change nothing of B (state, version, history, outbox, idempotency records). An Idempotency-Key
  * of A never replays B's response. Platform users see nothing without an override; super_admin
- * under an override into B can release B's message, audited with `metadata.override`.
+ * under an override into B can rescan B's message, audited with `metadata.override` (the release
+ * of a held message answers `409 quarantine_workflow_required` since step 5.3, Q30).
  */
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -154,7 +155,7 @@ describe('platform users', () => {
     }
   });
 
-  it('super_admin under an override into B releases B’s message, audited with the override', async () => {
+  it('super_admin under an override into B rescans B’s message, audited with the override', async () => {
     const operator = await fx.createPlatformUser(['super_admin']);
     const session = await loginWithMfa(ctx, fx, operator);
     const overrideReason = 'Customer ticket 3301';
@@ -176,10 +177,15 @@ describe('platform users', () => {
     // B's message was rescanned above (scanning): a release is a state conflict, not a 404.
     expect(res.body).toMatchObject({ code: 'message_state_conflict', currentState: 'scanning' });
     const fresh = await insertLifecycleMessage(ctx, orgB, { state: 'held_for_review' });
-    const released = await api
+    // Step 5.3 (Q30): a held message is released through the quarantine workflow only.
+    const refused = await api
       .release(fresh.publicId, { expectedVersion: fresh.version, reason }, `ovr-${randomUUID()}`)
+      .expect(409);
+    expect(refused.body).toMatchObject({ code: 'quarantine_workflow_required', entries: 0 });
+    const rescanned = await api
+      .rescan(fresh.publicId, { expectedVersion: fresh.version, reason }, `ovr-${randomUUID()}`)
       .expect(202);
-    expect(released.body.state).toBe('approved');
+    expect(rescanned.body.state).toBe('scanning');
     await api
       .rescan(
         messageA.publicId,
@@ -189,7 +195,7 @@ describe('platform users', () => {
       .expect(404);
 
     const rows = await ctx.prisma.auditLog.findMany({
-      where: { action: 'message.quarantine_released', actorId: operator.publicId },
+      where: { action: 'message.rescan_requested', actorId: operator.publicId },
     });
     expect(rows).toHaveLength(1);
     expect(rows[0]!.organizationId).toBe(orgB.id);

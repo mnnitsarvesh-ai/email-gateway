@@ -150,7 +150,10 @@ export const MESSAGE_VERDICT_VALUES = [
   'suspicious',
   'unknown',
 ] as const;
-/** `MessageAction` incl. the step 5.2 values `reject` and `require_approval` (P18). */
+/**
+ * `MessageAction` incl. the step 5.2 values `reject` and `require_approval` (P18) and the step 5.3
+ * value `partial` (Q5: the recipients were decided differently; `email_messages.final_action`).
+ */
 export const POLICY_FINAL_ACTION_VALUES = [
   'deliver',
   'tag',
@@ -158,6 +161,7 @@ export const POLICY_FINAL_ACTION_VALUES = [
   'discard',
   'reject',
   'require_approval',
+  'partial',
 ] as const;
 /** Final dispositions in strictness order (P9). */
 export const POLICY_DISPOSITION_VALUES = [
@@ -222,7 +226,12 @@ const policyDecisive = z
     }
   });
 
-/** P18: the `final_action` values each disposition can produce (direction decides reject). */
+/**
+ * P18: the `final_action` values each disposition can produce (direction decides reject). Step
+ * 5.3 (Q4, Q5): `disposition` stays the message-level decision record; when the recipients were
+ * decided differently (per-recipient evaluation) `finalAction` is `partial`, whatever the
+ * message-level disposition.
+ */
 const FINAL_ACTIONS_BY_DISPOSITION: Readonly<
   Record<(typeof POLICY_DISPOSITION_VALUES)[number], readonly string[]>
 > = {
@@ -237,8 +246,9 @@ const FINAL_ACTIONS_BY_DISPOSITION: Readonly<
  * Written by the policy-engine through `message_outbox` (`aggregate_type = 'message'`,
  * `aggregate_id` = decimal message id, correlation copied from the triggering
  * `mail.message.scanned.v1` / `mail.message.parse_failed.v1`) in the evaluation transaction, once
- * per round. Published to `email.policy`; bound to the dormant `email.quarantine` (consumer: step
- * 5.3, which filters `disposition ∈ quarantine, require_approval`) and the analytics firehose.
+ * per round. Published to `email.policy`; since topology v10 (step 5.3 Q2, Q27) bound to no work
+ * queue: the analytics firehose only (the quarantine store is written in the evaluation
+ * transaction, not from this event).
  *
  * **Redefined in place by step 5.2**: the step 1.1 placeholder (`action`,
  * `matchedPolicyVersionIds`, `archive`) never had a producer or a consumer.
@@ -277,14 +287,17 @@ export const policyDecidedV1 = z
     evaluatedAt: z.iso.datetime(),
   })
   .superRefine((payload, ctx) => {
-    if (!FINAL_ACTIONS_BY_DISPOSITION[payload.disposition].includes(payload.finalAction)) {
+    if (
+      payload.finalAction !== 'partial' &&
+      !FINAL_ACTIONS_BY_DISPOSITION[payload.disposition].includes(payload.finalAction)
+    ) {
       ctx.addIssue({
         code: 'custom',
         path: ['finalAction'],
         message: `finalAction ${payload.finalAction} does not follow disposition ${payload.disposition}`,
       });
     }
-    if (payload.disposition === 'reject') {
+    if (payload.disposition === 'reject' && payload.finalAction !== 'partial') {
       const expected = payload.direction === 'inbound' ? 'discard' : 'reject';
       if (payload.finalAction !== expected) {
         ctx.addIssue({
@@ -396,6 +409,197 @@ export const policyNotificationRequestedV1 = z
     }
   });
 export type PolicyNotificationRequestedV1 = z.infer<typeof policyNotificationRequestedV1>;
+
+/** How a quarantine release was authorized (step 5.3 Q13; `QuarantineReleaseMode`). */
+export const QUARANTINE_RELEASE_MODE_VALUES = ['operator', 'self', 'approved'] as const;
+/** Principal kinds of a quarantine request (`ActorType`). */
+export const QUARANTINE_REQUESTER_TYPE_VALUES = ['user', 'api_key', 'system'] as const;
+/** Entries one release event may carry (Q27). */
+export const QUARANTINE_RELEASE_MAX_ENTRIES = 1000;
+/** Notification kinds of the quarantine (step 5.3 Q20). */
+export const QUARANTINE_NOTIFICATION_KIND_VALUES = [
+  'user_digest',
+  'approval_requested',
+  'approval_decided',
+  'release_blocked',
+  'admin_alert',
+  'sender_rejected',
+] as const;
+/** Outcomes of an approval request a notification reports (Q14). */
+export const QUARANTINE_APPROVAL_DECISION_VALUES = [
+  'approved',
+  'denied',
+  'expired',
+  'cancelled',
+] as const;
+/** Approval requests one notification may reference (Q27). */
+export const QUARANTINE_NOTIFICATION_MAX_APPROVAL_REQUESTS = 50;
+
+/**
+ * A queued quarantine release (step 5.3 Q13.1, Q27, ADR-0047): the api accepted a release of one
+ * or more entries of one message (operator release without approval reasons, an allowed
+ * self-release, or an approved request), moved the entries to `releasing` and wrote
+ * `quarantine_release_logs` rows (`pending`, `release_public_id` = `releaseId`) in the same
+ * transaction. Written through `message_outbox` (`aggregate_type = 'message'`, `aggregate_id` =
+ * the decimal message id); published to `email.policy` and consumed from `email.quarantine` by the
+ * policy-engine's release executor (role `quarantine`, ledger `policy-engine.quarantine`), which
+ * re-validates authoritatively before anything is delivered (13.2).
+ *
+ * Content rules (§2.0 invariant 1): ids, enums and times only (strict); entry, release, approval
+ * request and principal ids are public UUIDs; the message id is a decimal string. Consistency
+ * (enforced): `entryIds` 1…1000 and unique; `mode = approved` ⇔ `approvalRequestId` set; a
+ * `system` requester has no id, a user or API key has one; a self-release is requested by a user.
+ */
+export const quarantineReleaseRequestedV1 = z
+  .strictObject({
+    /** `quarantine_release_logs.release_public_id` of the request. */
+    releaseId: z.uuid(),
+    messageId: decimalIdSchema,
+    receivedAt: z.iso.datetime(),
+    /** `quarantine_messages.public_id` of the released entries (one message). */
+    entryIds: z.array(z.uuid()).min(1).max(QUARANTINE_RELEASE_MAX_ENTRIES),
+    mode: z.enum(QUARANTINE_RELEASE_MODE_VALUES),
+    /** `quarantine_approval_requests.public_id` of the approved request (`mode = approved`). */
+    approvalRequestId: z.uuid().nullable(),
+    requestedBy: z.strictObject({
+      type: z.enum(QUARANTINE_REQUESTER_TYPE_VALUES),
+      /** Public id of the user or API key; null for the system. */
+      id: z.uuid().nullable(),
+    }),
+    requestedAt: z.iso.datetime(),
+  })
+  .superRefine((payload, ctx) => {
+    if (new Set(payload.entryIds).size !== payload.entryIds.length) {
+      ctx.addIssue({ code: 'custom', path: ['entryIds'], message: 'Duplicate entry id' });
+    }
+    if ((payload.mode === 'approved') !== (payload.approvalRequestId !== null)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['approvalRequestId'],
+        message: 'approvalRequestId is set exactly for an approved release',
+      });
+    }
+    if ((payload.requestedBy.type === 'system') !== (payload.requestedBy.id === null)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['requestedBy', 'id'],
+        message: 'A user or API key requester has an id; the system has none',
+      });
+    }
+    if (payload.mode === 'self' && payload.requestedBy.type !== 'user') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['requestedBy', 'type'],
+        message: 'A self-release is requested by a user',
+      });
+    }
+  });
+export type QuarantineReleaseRequestedV1 = z.infer<typeof quarantineReleaseRequestedV1>;
+
+/** Which `refs` each notification kind requires (Q20, Q27). */
+const QUARANTINE_NOTIFICATION_REQUIRED_REFS: Readonly<
+  Record<(typeof QUARANTINE_NOTIFICATION_KIND_VALUES)[number], readonly string[]>
+> = {
+  user_digest: ['userId', 'digestId'],
+  approval_requested: ['approvalRequestIds'],
+  approval_decided: ['approvalRequestIds'],
+  release_blocked: ['releaseId'],
+  admin_alert: [],
+  sender_rejected: ['entryId', 'messageId', 'receivedAt'],
+};
+
+/**
+ * A quarantine notification request (step 5.3 Q20, Q27): a user digest, an approval request or
+ * decision, a blocked release, a rate-bounded admin alert or a sender notice of a rejected
+ * outbound/internal entry. Written by the policy-engine (digest and alert scheduler, executor,
+ * evaluation) or the api (requests, decisions, rejects) through `message_outbox`
+ * (`aggregate_type = 'quarantine'`, `aggregate_id` = the decimal organization id); published to
+ * `email.policy` and consumed from `email.notifications` by the notification-worker (ledger
+ * `notification-worker.policy`, at least once), which reads what it renders from the database at
+ * send time.
+ *
+ * Content rules (§2.0 invariant 1): ids, enums and times only (strict): no address, subject,
+ * reason text or count of content. Consistency (enforced): each kind carries the refs it needs
+ * (`user_digest`: user and digest; `approval_*`: 1…50 unique request ids; `release_blocked`: the
+ * release; `sender_rejected`: the entry and its message); `window` (from < to) only for
+ * `user_digest` (required) and `admin_alert` (optional); `decision` exactly for
+ * `approval_decided`; `messageId` and `receivedAt` together.
+ */
+export const quarantineNotificationRequestedV1 = z
+  .strictObject({
+    kind: z.enum(QUARANTINE_NOTIFICATION_KIND_VALUES),
+    refs: z.strictObject({
+      userId: z.uuid().optional(),
+      digestId: z.uuid().optional(),
+      approvalRequestIds: z
+        .array(z.uuid())
+        .min(1)
+        .max(QUARANTINE_NOTIFICATION_MAX_APPROVAL_REQUESTS)
+        .optional(),
+      releaseId: z.uuid().optional(),
+      entryId: z.uuid().optional(),
+      messageId: decimalIdSchema.optional(),
+      receivedAt: z.iso.datetime().optional(),
+    }),
+    window: z.strictObject({ from: z.iso.datetime(), to: z.iso.datetime() }).optional(),
+    decision: z.enum(QUARANTINE_APPROVAL_DECISION_VALUES).optional(),
+    requestedAt: z.iso.datetime(),
+  })
+  .superRefine((payload, ctx) => {
+    const refs = payload.refs as Record<string, unknown>;
+    for (const field of QUARANTINE_NOTIFICATION_REQUIRED_REFS[payload.kind]) {
+      if (refs[field] === undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['refs', field],
+          message: `A ${payload.kind} notification names ${field}`,
+        });
+      }
+    }
+    const ids = payload.refs.approvalRequestIds;
+    if (ids !== undefined && new Set(ids).size !== ids.length) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['refs', 'approvalRequestIds'],
+        message: 'Duplicate approval request id',
+      });
+    }
+    if ((payload.refs.messageId === undefined) !== (payload.refs.receivedAt === undefined)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['refs', 'receivedAt'],
+        message: 'messageId and receivedAt go together',
+      });
+    }
+    if (payload.kind === 'user_digest' && payload.window === undefined) {
+      ctx.addIssue({ code: 'custom', path: ['window'], message: 'A user digest has a window' });
+    }
+    if (
+      payload.window !== undefined &&
+      payload.kind !== 'user_digest' &&
+      payload.kind !== 'admin_alert'
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['window'],
+        message: 'Only a user digest or an admin alert has a window',
+      });
+    }
+    if (
+      payload.window !== undefined &&
+      Date.parse(payload.window.from) >= Date.parse(payload.window.to)
+    ) {
+      ctx.addIssue({ code: 'custom', path: ['window'], message: 'window.from precedes window.to' });
+    }
+    if ((payload.kind === 'approval_decided') !== (payload.decision !== undefined)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['decision'],
+        message: 'decision is set exactly for approval_decided',
+      });
+    }
+  });
+export type QuarantineNotificationRequestedV1 = z.infer<typeof quarantineNotificationRequestedV1>;
 
 /**
  * Published (through `message_outbox`, `aggregate_type = 'domain'`) whenever a domain changes
@@ -1796,4 +2000,6 @@ export const EventTypes = {
   AttachmentSandboxCompleted: 'mail.attachment.sandbox_completed.v1',
   MessageArchiveRequested: 'mail.message.archive_requested.v1',
   PolicyNotificationRequested: 'mail.policy.notification_requested.v1',
+  QuarantineReleaseRequested: 'mail.quarantine.release_requested.v1',
+  QuarantineNotificationRequested: 'mail.quarantine.notification_requested.v1',
 } as const;

@@ -1,14 +1,19 @@
 /**
  * `@email-gateway/policy-dsl` (step 5.2 P1, docs/plan/steps/16-policy-engine.md; ADR-0043,
  * ADR-0045): the constrained policy DSL `policy-dsl/1`, its validator, the input builder shared
- * by the policy-engine and the api, the pure deterministic evaluator `policy-eval/1` with the
- * mandatory strictness floor, and the one row ↔ result mapping. No I/O, no clock, no logger;
+ * by the policy-engine and the api, the pure deterministic evaluator `policy-eval/2` with the
+ * mandatory strictness floor, per-recipient evaluation and the delivery edits of a release copy
+ * (step 5.3 Q4, Q13.6, Q22, Q23; ADR-0046, ADR-0049), and the one row ↔ result mapping. No I/O, no clock, no logger;
  * regular expressions from policy documents run only through RE2 (`re2js`).
  */
 export {
   POLICY_DSL_VERSION,
   POLICY_INPUT_VERSION,
   POLICY_EVALUATOR_VERSION,
+  POLICY_EVALUATOR_VERSIONS,
+  POLICY_REWRITABLE_SKIP_REASONS,
+  BODY_BANNER_STATUSES,
+  BODY_BANNER_OUTCOMES,
   POLICY_MESSAGE_DIRECTIONS,
   POLICY_DIRECTIONS,
   POLICY_DISPOSITIONS,
@@ -56,6 +61,9 @@ export {
   type AlertSeverity,
   type UrlRewriteFallback,
   type Weekday,
+  type PolicyEvaluatorVersion,
+  type BodyBannerStatus,
+  type BodyBannerOutcome,
 } from './vocabulary';
 export {
   POLICY_PLATFORM_DEFAULTS,
@@ -86,9 +94,11 @@ export {
   POLICY_FLOOR_CODES,
   POLICY_DEFAULT_CODES,
   POLICY_CLAMP_CODES,
+  POLICY_SPLIT_CODES,
   isPolicyReasonCode,
   type PolicyReasonCode,
   type PolicyFloorCode,
+  type PolicySplitCode,
 } from './reason-codes';
 export {
   policyDefinitionSchema,
@@ -159,6 +169,9 @@ export {
   policyEvaluationResultSchema,
   policyEvaluationViewSchema,
   explanationLineSchema,
+  recipientDecisionSchema,
+  recipientDecisionsSchema,
+  policyUrlRewriteAttemptSchema,
   evaluationResultToRow,
   rowToEvaluationView,
   intendedActionStatuses,
@@ -175,7 +188,26 @@ export {
   type ResultAction,
   type ExplanationLine,
   type LifecycleOutcome,
+  type RecipientDecision,
+  type PolicyDelivery,
+  type PolicyUrlRewriteAttempt,
 } from './result';
+export {
+  snapshotHasRecipientScopedRules,
+  restrictToRecipient,
+  evaluatePolicyPerRecipient,
+  releaseDeliveryEdits,
+  hasDeliveryEdits,
+  resultForRecipient,
+  recipientDecisionFor,
+  perRecipientToRowFields,
+  SPLIT_OUTCOMES,
+  type PerRecipientEvaluation,
+  type PolicyDeliveryEdits,
+  type MergedDeliveryActions,
+  type SplitOutcome,
+  type SplitCounts,
+} from './per-recipient';
 export { renderExplanation, renderLine } from './explanation';
 export { isValidTimeZone, tzdataVersion } from './time';
 export { normalizeAddress, type NormalizedAddress } from './matchers';

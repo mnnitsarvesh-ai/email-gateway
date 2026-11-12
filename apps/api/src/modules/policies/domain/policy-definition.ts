@@ -46,13 +46,16 @@ import type {
 
 /** What enforcement in step 5.2 means (every route description carries it). */
 export const POLICY_ENFORCEMENT_NOTE =
-  'Step 5.2 **enforces** the final disposition (ALLOW delivers; QUARANTINE holds in ' +
-  '`quarantined`; REQUIRE_APPROVAL holds in `held_for_review`; REJECT rejects) and the ' +
+  'The policy engine **enforces** the final disposition per recipient when rules are ' +
+  'recipient-scoped (`recipientSplit`, step 5.3: ALLOW delivers; QUARANTINE and ' +
+  'REQUIRE_APPROVAL create quarantine entries; REJECT discards the recipient) and the ' +
   'strictness floor (hard blocks, failures, the DLP binding and missing data are never ' +
-  'weakened), plus TAG/WARN headers in a delivered copy; it **requests** ARCHIVE (consumed by ' +
-  'step 8.1), ALERT and sender non-delivery notices (notification-worker); WARN body banners ' +
-  'are recorded only. The quarantine store, end-user quarantine and release re-validation are ' +
-  'step 5.3; archiving and journaling are step 8.1.';
+  'weakened), plus TAG/WARN headers in a delivered copy; from step 5.3 the WARN body banner ' +
+  'and URL_REWRITE are applied to the delivered copy after the scan when the message allows ' +
+  'it (signed, encrypted or oversized messages record a `skipped_*` outcome instead). It ' +
+  '**requests** ARCHIVE (consumed by step 8.1), ALERT and sender non-delivery notices ' +
+  '(notification-worker). Quarantine release re-validates against the current policy ' +
+  '(GET /quarantine/catalog); archiving and journaling are step 8.1.';
 
 /** How a change takes effect (P12). */
 export const POLICY_APPLY_NOTE =
@@ -359,6 +362,7 @@ export function catalogView(bounds: PolicyBounds): PolicyCatalog {
     limits,
     settingsDefaults: {
       allowRecommendationOverrides: POLICY_SETTINGS_DEFAULTS.allowRecommendationOverrides,
+      recipientSplit: POLICY_SETTINGS_DEFAULTS.recipientSplit,
       notices: { ...POLICY_SETTINGS_DEFAULTS.notices },
       alerts: { ...POLICY_SETTINGS_DEFAULTS.alerts },
       tagging: { ...POLICY_SETTINGS_DEFAULTS.tagging },

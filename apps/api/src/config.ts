@@ -33,6 +33,7 @@ import {
   urlPlatformSettingsFromEnv,
 } from '@email-gateway/security-contracts';
 import { isPlatformDefaultId, POLICY_PLATFORM_DEFAULTS } from '@email-gateway/policy-dsl';
+import { validateQuarantinePlatformBounds } from '@email-gateway/quarantine';
 import { isPlatformProfileId, RISK_PLATFORM_PROFILE_IDS } from '@email-gateway/risk-scoring';
 import { z } from 'zod';
 import {
@@ -810,6 +811,79 @@ const policyConfigShape = {
   DEPARTMENT_MAX_MEMBERS: int(100, 50_000).default(5000),
 };
 
+/**
+ * Quarantine (step 5.3 §5, docs/plan/steps/17-quarantine.md Q9, Q11, Q12, Q13, Q18, Q19, Q28):
+ * the writer transaction budget (≥ 120 s, §6), the platform hold/review bounds (validated below
+ * the lifecycle deadlines so the lifecycle backstop never expires held mail first), the release
+ * staleness bounds of the pre-check, manual quarantine of policy rejections, the search, preview,
+ * download and bulk bounds, and the HMAC key of the download tokens (the api is its only holder,
+ * Q28; 32 bytes as 64 hex characters, `_FILE` accepted). Start-up errors name the key, never the
+ * value.
+ */
+const quarantineConfigShape = {
+  QUARANTINE_MAX_HOLD_DAYS: int(7, 80).default(60),
+  QUARANTINE_MAX_REVIEW_DAYS: int(1, 13).default(13),
+  /** Read for the hold/review validation only (the event-relay sweeper enforces them). */
+  LIFECYCLE_DEADLINE_QUARANTINED_HOURS: int(1).default(2160),
+  LIFECYCLE_DEADLINE_HELD_FOR_REVIEW_HOURS: int(1).default(336),
+  QUARANTINE_TX_TIMEOUT_MS: int(120_000, 600_000).default(120_000),
+  QUARANTINE_RELEASE_MAX_VERDICT_AGE_HOURS: int(1, 720).default(72),
+  QUARANTINE_RELEASE_SIGNATURE_MAX_LAG_HOURS: int(1, 168).default(24),
+  QUARANTINE_MANUAL_FROM_REJECT_MAX_DAYS: int(1, 60).default(30),
+  QUARANTINE_SEARCH_MAX_RANGE_DAYS: int(1, 92).default(62),
+  QUARANTINE_SEARCH_MAX_PAGE_SIZE: int(10, 500).default(100),
+  QUARANTINE_PREVIEW_MAX_BODY_BYTES: int(16_384, 2_097_152).default(262_144),
+  QUARANTINE_PREVIEW_MAX_TEXT_CHARS: int(1000, 500_000).default(100_000),
+  QUARANTINE_PREVIEW_RATE_PER_MINUTE: int(1, 600).default(60),
+  /** HMAC-SHA256 key of the download tokens (Q12): exactly 64 hex characters, required. */
+  QUARANTINE_DOWNLOAD_TOKEN_KEY: aesKey,
+  QUARANTINE_DOWNLOAD_TOKEN_TTL_SECONDS: int(10, 300).default(60),
+  QUARANTINE_DOWNLOAD_MAX_BYTES: int(1_048_576, 52_428_800).default(26_214_400),
+  QUARANTINE_DOWNLOAD_GRANTS_PER_HOUR: int(1, 200).default(20),
+  QUARANTINE_BULK_MAX_ITEMS: int(1, 500).default(100),
+  QUARANTINE_BULK_MAX_ITEMS_PER_MINUTE: int(10, 10_000).default(1000),
+  QUARANTINE_BULK_REQUESTS_PER_MINUTE: int(1, 600).default(20),
+  QUARANTINE_BULK_DEADLINE_MS: int(5000, 60_000).default(25_000),
+};
+
+export type QuarantineConfigKeys = {
+  [K in keyof typeof quarantineConfigShape]: z.output<(typeof quarantineConfigShape)[K]>;
+};
+
+/**
+ * Hold and review bounds below the lifecycle deadlines (Q19): `QUARANTINE_MAX_HOLD_DAYS <
+ * LIFECYCLE_DEADLINE_QUARANTINED_HOURS / 24`, `QUARANTINE_MAX_REVIEW_DAYS <
+ * LIFECYCLE_DEADLINE_HELD_FOR_REVIEW_HOURS / 24` (the library rule shared with the policy-engine).
+ */
+export function validateQuarantineConfig(
+  cfg: Pick<
+    QuarantineConfigKeys,
+    | 'QUARANTINE_MAX_HOLD_DAYS'
+    | 'QUARANTINE_MAX_REVIEW_DAYS'
+    | 'LIFECYCLE_DEADLINE_QUARANTINED_HOURS'
+    | 'LIFECYCLE_DEADLINE_HELD_FOR_REVIEW_HOURS'
+  >,
+  ctx: z.RefinementCtx,
+): void {
+  const errors = validateQuarantinePlatformBounds({
+    maxHoldDays: cfg.QUARANTINE_MAX_HOLD_DAYS,
+    maxReviewDays: cfg.QUARANTINE_MAX_REVIEW_DAYS,
+    lifecycleQuarantinedHours: cfg.LIFECYCLE_DEADLINE_QUARANTINED_HOURS,
+    lifecycleHeldForReviewHours: cfg.LIFECYCLE_DEADLINE_HELD_FOR_REVIEW_HOURS,
+  });
+  for (const message of errors) {
+    ctx.addIssue({
+      code: 'custom',
+      path: [
+        message.startsWith('QUARANTINE_MAX_REVIEW_DAYS')
+          ? 'QUARANTINE_MAX_REVIEW_DAYS'
+          : 'QUARANTINE_MAX_HOLD_DAYS',
+      ],
+      message,
+    });
+  }
+}
+
 /** The validated Rspamd platform settings of the api config (S8). */
 export function rspamdPlatformSettingsOf(
   cfg: Pick<ScanConfigKeys, (typeof RSPAMD_PLATFORM_ENV_KEYS)[keyof RspamdPlatformSettings]>,
@@ -869,6 +943,7 @@ export const apiConfigSchema = baseConfigSchema
   .extend(sandboxConfigShape)
   .extend(riskConfigShape)
   .extend(policyConfigShape)
+  .extend(quarantineConfigShape)
   .extend({
     /** Comma-separated allow-list of admin portal origins. */
     CORS_ORIGINS: z
@@ -890,6 +965,7 @@ export const apiConfigSchema = baseConfigSchema
     validateBecConfig(cfg, ctx);
     validateDlpConfig(cfg, ctx);
     validateSandboxConfig(cfg, ctx);
+    validateQuarantineConfig(cfg, ctx);
     if (cfg.AUTH_SESSION_MAX_AGE_SECONDS < cfg.AUTH_REFRESH_TOKEN_TTL_SECONDS) {
       ctx.addIssue({
         code: 'custom',

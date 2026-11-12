@@ -1,12 +1,9 @@
 import { BadRequestException, HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { uuidv7 } from '@email-gateway/common';
 import type { Prisma } from '@email-gateway/database';
-import {
-  deliveryApprovedV1,
-  EventTypes,
-  messageRescanRequestedV1,
-} from '@email-gateway/event-contracts';
+import { EventTypes, messageRescanRequestedV1 } from '@email-gateway/event-contracts';
 import { getCorrelationId } from '@email-gateway/logger';
+import { QUARANTINE_PERMISSIONS } from '@email-gateway/quarantine';
 import {
   decideTransition,
   type LifecycleSnapshot,
@@ -36,11 +33,8 @@ import {
   API_SERVICE,
   apiTransitionKey,
   AUDIT_ACTIONS,
-  chunk,
   decisionConflict,
   type LifecycleOperation,
-  MAX_APPROVAL_RECIPIENTS,
-  nextDeliverySeq,
   OPERATION_NAMES,
   operationTransition,
   outcomeError,
@@ -57,13 +51,10 @@ import { ApiLifecycleMetrics, type OperationOutcome } from '../lifecycle-metrics
 import {
   messageNotFound,
   messageStateConflict,
-  noReleasableRecipients,
+  quarantineRescanForbidden,
   quarantineWorkflowRequired,
 } from '../messages.errors';
-import {
-  MessageLifecycleRepository,
-  type ReleasableRecipient,
-} from '../repositories/message-lifecycle.repository';
+import { MessageLifecycleRepository } from '../repositories/message-lifecycle.repository';
 import { LifecycleGateway } from './lifecycle-gateway';
 
 type Tx = Prisma.TransactionClient;
@@ -161,6 +152,11 @@ export class MessageLifecycleService {
   /**
    * `POST /messages/{messageId}/rescan` (L10.2, edge E19): the message re-enters `scanning`
    * with a new lifecycle round and `mail.message.rescan_requested.v1` is written to the outbox.
+   *
+   * Step 5.3: the new round supersedes the open quarantine entries and re-decides their
+   * recipients, so a clean round delivers held mail. From `quarantined`/`held_for_review` the
+   * caller therefore also needs `quarantine:release` (`403 quarantine_rescan_forbidden`); the
+   * audit row records how many open entries the rescan supersedes.
    */
   rescan(
     principal: Principal,
@@ -168,9 +164,19 @@ export class MessageLifecycleService {
     input: LifecycleOperationInput,
     client: ClientContext,
   ): Promise<IdempotentResult<RescanResponse>> {
-    return this.execute<null, RescanResponse>('rescan', principal, scope, input, client, {
-      prepare: () => Promise.resolve(null),
-      commit: async (tx, ctx, outcome) => {
+    return this.execute<number, RescanResponse>('rescan', principal, scope, input, client, {
+      prepare: async (tx, ctx) => {
+        const held =
+          ctx.snapshot.state === 'quarantined' || ctx.snapshot.state === 'held_for_review';
+        const open = held
+          ? await this.repository.openQuarantineEntryCount(tx, ctx.scope, ctx.ref)
+          : 0;
+        if (held && !ctx.principal.permissions.has(QUARANTINE_PERMISSIONS.release)) {
+          throw quarantineRescanForbidden(ctx.snapshot, open);
+        }
+        return open;
+      },
+      commit: async (tx, ctx, outcome, openEntries) => {
         const now = new Date();
         const rescanEventId = uuidv7(now.getTime());
         const payload = messageRescanRequestedV1.parse({
@@ -201,17 +207,19 @@ export class MessageLifecycleService {
             note: RESCAN_NOTE,
           },
           eventIds: [outcome.stateEventId, rescanEventId],
-          audit: {},
+          audit: { quarantineEntriesSuperseded: openEntries },
         };
       },
     });
   }
 
   /**
-   * `POST /messages/{messageId}/release` (L10.3, edges E14/E15): the message moves to
-   * `approved` with a new lifecycle round and its `pending`/`quarantined` recipients are
-   * approved for delivery (`mail.delivery.approved.v1`, `source: quarantine_release`,
-   * `deliverySeq` = highest + 1, chunks of ≤ 1000), which the delivery planner plans.
+   * `POST /messages/{messageId}/release` (L10.3; step 5.3 Q30): a `quarantined` or
+   * `held_for_review` message is released only through the quarantine workflow, which
+   * re-validates every recipient's entry (`POST /quarantine/entries/{entryId}/release`). The route
+   * stays and answers `409 quarantine_workflow_required` with the entry count for every such
+   * message (entries exist after the quarantine sweeper adopted the 5.2-held messages); other
+   * states and stale versions keep their L10.4 conflicts. Nothing is written.
    */
   release(
     principal: Principal,
@@ -219,89 +227,13 @@ export class MessageLifecycleService {
     input: LifecycleOperationInput,
     client: ClientContext,
   ): Promise<IdempotentResult<ReleaseResponse>> {
-    return this.execute<ReleasableRecipient[], ReleaseResponse>(
-      'release',
-      principal,
-      scope,
-      input,
-      client,
-      {
-        prepare: async (tx, ctx) => {
-          if ((await this.repository.quarantineEntryCount(tx, ctx.scope, ctx.ref)) > 0) {
-            throw quarantineWorkflowRequired(ctx.snapshot);
-          }
-          const recipients = await this.repository.releasableRecipients(tx, ctx.scope, ctx.ref);
-          if (recipients.length === 0) throw noReleasableRecipients(ctx.snapshot);
-          return recipients;
-        },
-        commit: async (tx, ctx, outcome, recipients) => {
-          const deliverySeq = nextDeliverySeq(
-            await this.repository.maxDeliverySeq(tx, ctx.scope, ctx.ref),
-          );
-          // Before any approval: every released recipient reads as undelivered (`pending`) until
-          // its own signal, so a refusal or a delivery of one recipient (or of one chunk) cannot
-          // derive a final message state while the others are still to be planned.
-          await this.repository.markReleasedRecipientsPending(
-            tx,
-            ctx.scope,
-            ctx.ref,
-            recipients.map((r) => r.id),
-          );
-          const now = new Date();
-          const approvalEventIds: string[] = [];
-          for (const part of chunk(recipients, MAX_APPROVAL_RECIPIENTS)) {
-            const approvalEventId = uuidv7(now.getTime());
-            const payload = deliveryApprovedV1.parse({
-              messageId: ctx.ref.id.toString(),
-              receivedAt: ctx.ref.receivedAt.toISOString(),
-              deliverySeq,
-              source: 'quarantine_release',
-              emlS3Key: ctx.snapshot.emlObjectKey,
-              recipients: part.map((r) => ({ recipientId: r.id.toString(), rcptSeq: r.rcptSeq })),
-              approvedAt: now.toISOString(),
-              lifecycleRound: outcome.round,
-            });
-            await this.repository.insertOutbox(tx, {
-              eventId: approvalEventId,
-              organizationId: ctx.ref.organizationId,
-              eventType: EventTypes.DeliveryApproved,
-              aggregateId: ctx.ref.id.toString(),
-              correlationId: ctx.correlationId,
-              payload,
-            });
-            await this.repository.insertEmailEvent(tx, {
-              message: ctx.ref,
-              eventType: 'delivery.approved',
-              occurredAt: now,
-              sourceService: API_SERVICE,
-              eventId: approvalEventId,
-              actorType: ctx.actor.type,
-              actorId: ctx.actor.id ?? null,
-              details: {
-                source: 'quarantine_release',
-                approvalEventId,
-                deliverySeq,
-                recipientCount: part.length,
-              },
-            });
-            approvalEventIds.push(approvalEventId);
-          }
-          return {
-            body: {
-              messageId: ctx.messageId,
-              state: 'approved',
-              version: outcome.version,
-              lifecycleRound: outcome.round,
-              deliverySeq,
-              approvalEventIds,
-              recipientCount: recipients.length,
-            },
-            eventIds: [outcome.stateEventId, ...approvalEventIds],
-            audit: { deliverySeq, recipientCount: recipients.length },
-          };
-        },
+    return this.execute<never, ReleaseResponse>('release', principal, scope, input, client, {
+      prepare: async (tx, ctx) => {
+        const entries = await this.repository.quarantineEntryCount(tx, ctx.scope, ctx.ref);
+        throw quarantineWorkflowRequired(ctx.snapshot, entries);
       },
-    );
+      commit: () => Promise.reject(new Error('unreachable: release is refused in prepare')),
+    });
   }
 
   private async execute<P, T>(

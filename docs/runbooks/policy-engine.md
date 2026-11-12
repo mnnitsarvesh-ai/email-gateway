@@ -5,7 +5,8 @@ Step 5.2 ([design](../plan/steps/16-policy-engine.md), [ADR-0043](../architectur
 The policy-engine evaluates every scanned, scan-failed and parse-failed message round against the tenant's published policies plus the platform default (`pol-default/1`) and the mandatory **strictness floor**, and is the **only automatic producer of delivery approvals**. One evaluation per (message, lifecycle round), stored in `policy_execution_logs`, never updated.
 
 - Alerts: [PolicyEvaluationsStalled](#policyevaluationsstalled) · [PolicyInputErrors](#policyinputerrors) · [PolicySnapshotInvalidVersion](#policysnapshotinvalidversion) · [PolicyInconsistentReads](#policyinconsistentreads) · [PolicyRiskMissing](#policyriskmissing) · [PolicyNotificationFailures](#policynotificationfailures)
-- Procedures: [reading an evaluation](#reading-an-evaluation) · [dry-run and test](#dry-run-and-test) · [rollback](#rolling-back-a-policy) · [disabling a policy](#disabling-a-policy) · [held mail during an outage](#held-mail-during-an-outage-and-recovery) · [dead-lettered rounds](#dead-lettered-rounds) · [floor reasons](#floor-reasons) · [boundaries (5.3, 8.1)](#what-52-does-not-do)
+- Procedures: [reading an evaluation](#reading-an-evaluation) · [per-recipient decisions](#per-recipient-decisions-step-53) · [WARN banners](#warn-body-banners-step-53) · [policy URL rewriting](#url_rewrite-after-the-scan-step-53) · [dry-run and test](#dry-run-and-test) · [rollback](#rolling-back-a-policy) · [disabling a policy](#disabling-a-policy) · [held mail during an outage](#held-mail-during-an-outage-and-recovery) · [dead-lettered rounds](#dead-lettered-rounds) · [floor reasons](#floor-reasons) · [boundaries (8.1)](#what-52-does-not-do)
+- Quarantine (step 5.3: entries, releases, sweeper, digests): [quarantine.md](quarantine.md).
 
 ## What it does, per message round
 
@@ -25,6 +26,20 @@ The policy-engine evaluates every scanned, scan-failed and parse-failed message 
 | reject           | `rejected`            | `discard` (inbound, no bounce) / `reject` (outbound/internal, sender notice requested) | never                                         |
 
 Action statuses (ADR-0045) are stored per action: `enforced`, `requested`, `recorded`, `not_applicable`. TAG/WARN are `recorded` when headers are disabled or the message was too large for a copy (`policy_copy_total{result="too_large"|"header_too_large"}`).
+
+Since step 5.3 the held dispositions write **quarantine entries** in the same transaction (QUARANTINE → `held`, REQUIRE_APPROVAL → `pending_approval` with a `policy_review` request) and set the recipients `quarantined` (REJECT: `discarded`); releases go through the quarantine API and the release executor, not `POST /messages/{id}/release` ([quarantine.md](quarantine.md)). A rescan round supersedes the earlier round's open entries and re-decides `quarantined` recipients.
+
+## Per-recipient decisions (step 5.3)
+
+When a published rule references `recipient.address`, `recipient.domain`, `recipient.local_part`, `recipient.department` or `recipient.user` (and the tenant setting `recipientSplit` is on, the message has 2–200 recipients and the list is not truncated), each recipient is evaluated on its own (evaluator `policy-eval/2`). The row keeps the message-level result as the decision record and adds `recipient_split` and `recipient_decisions` (`rcptSeq`, disposition, source, decisive rule, reason codes; never addresses). Lifecycle (Q5): some recipients allowed → E10 `policy_partial` (`final_action = partial`), approvals only for the allowed recipients, the others held (entries) or `discarded`; none allowed → E11 / E12 with `final_action = partial`. `email_recipients.final_action` is set per recipient. Metric `policy_recipient_split_total{result}` (`split`, `uniform`, `not_scoped`, `disabled`, `too_many`). The delivered copy carries the merge of the allowed recipients' TAG/WARN/URL_REWRITE edits (one copy per round).
+
+## WARN body banners (step 5.3)
+
+A WARN that applies inserts a banner at the top of the first text/plain and text/html body parts of the delivered copy (`@email-gateway/mail-safety`; fixed text per level or the rule's `text`, HTML-escaped; original transfer encoding kept). `delivery.bodyBanner` records the outcome: `applied`, or `skipped_signed` / `skipped_encrypted` (signed or encrypted mail is never edited), `skipped_too_large` (copy bounds), `skipped_no_text_part`, `skipped_part` (a part that cannot be decoded and re-encoded losslessly, or larger than `POLICY_BANNER_MAX_PART_BYTES`). The WARN action stays `enforced` when its header is written; `policy_body_banner_total{result}`. An inbound DKIM signature covering the body no longer verifies downstream (as with URL rewriting).
+
+## URL_REWRITE after the scan (step 5.3)
+
+When a URL_REWRITE rule applies and the round was **not** rewritten only because the tenant's 4.3 setting was off (`url_rewrites.skip_reason` = `disabled` or `direction`), the policy-engine rewrites the delivered copy itself (`rewriteEml`, the tenant's URL rewrite settings with rewriting forced on, the round's `message_urls`, tokens signed with `URL_TOKEN_KEY_CURRENT`). `delivery.urlRewrite.policyAttempt` records `{ status: rewritten | skipped, skipReason }`; URL_REWRITE is `enforced` when rewritten. If the policy rewrite itself cannot run (signed, encrypted, too large, incomplete parse, DKIM policy, structure mismatch) and the rule says `ifNotRewritten = quarantine`, the round is evaluated again with that skip reason and the message is held (deterministic); `no_urls` counts as satisfied. Other round skip reasons cannot be fixed by the policy and hold as in 5.2. `POLICY_URL_REWRITE_ENABLED=false` disables the policy rewrite (rules with `quarantine` hold, `deliver` is recorded). `policy_url_rewrite_total{result}` (`rewritten`, a skip reason, `disabled`, `not_eligible`).
 
 ## Reading an evaluation
 
@@ -108,7 +123,7 @@ The floor is never overridable (tenant ALLOW, overrides and settings cannot weak
 
 ## What 5.2 does not do
 
-- **Quarantine store, digests, end-user release, release re-validation: step 5.3.** 5.2 holds messages in `quarantined` / `held_for_review`; the only release is the operator release (`POST /api/v1/messages/{messageId}/release`, `quarantine:release`). `mail.policy.decided.v1` already reaches the dormant `email.quarantine` for 5.3.
+- ~~Quarantine store, digests, end-user release, release re-validation~~: done in step 5.3 ([quarantine.md](quarantine.md)). `mail.policy.decided.v1` is a firehose event only (topology v10 unbinds it from `email.quarantine`, now the executor's work queue).
 - **Archiving: step 8.1.** ARCHIVE is `requested`: `mail.message.archive_requested.v1` waits in the dormant, bounded `email.archive`; 8.1 reconciles from `policy_execution_logs` rows whose actions contain ARCHIVE.
-- WARN body banners (`bodyBanner: not_supported`), per-recipient dispositions, re-evaluation when a sandbox result arrives later.
+- ~~WARN body banners, per-recipient dispositions~~: done in step 5.3 (5.2 rows keep `bodyBanner: not_supported`). Still not done: re-evaluation when a sandbox result arrives later; per-recipient TAG/WARN edits (one merged copy per round).
 - Policy copies change the Subject of inbound mail when a prefix is configured: DKIM signatures covering Subject no longer verify downstream (as with URL rewriting).

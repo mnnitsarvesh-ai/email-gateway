@@ -1,6 +1,6 @@
 # Policy DSL reference (`policy-dsl/1`)
 
-The reference for tenants and implementers of the email policy language of step 5.2. Design: [step 5.2](../plan/steps/16-policy-engine.md) P1–P12, P18, P19, P23; decisions: [ADR-0043](adr/0043-policy-dsl-and-deterministic-evaluator.md) (DSL, evaluator, conflict resolution, floor), [ADR-0045](adr/0045-policy-action-semantics.md) (what each action does in 5.2). Library: `packages/policy-dsl` (`@email-gateway/policy-dsl`).
+The reference for tenants and implementers of the email policy language of step 5.2, extended by step 5.3 (per-recipient decisions, WARN body banners, URL rewriting after the scan; evaluator `policy-eval/2`). Design: [step 5.2](../plan/steps/16-policy-engine.md) P1–P12, P18, P19, P23 and [step 5.3](../plan/steps/17-quarantine.md) Q4, Q13.6, Q22, Q23; decisions: [ADR-0043](adr/0043-policy-dsl-and-deterministic-evaluator.md) (DSL, evaluator, conflict resolution, floor), [ADR-0045](adr/0045-policy-action-semantics.md) (what each action does in 5.2), [ADR-0046](adr/0046-quarantine-store-and-per-recipient-decisions.md) (per-recipient decisions), [ADR-0049](adr/0049-policy-copy-body-edits-banners-and-url-rewrite.md) (banners and URL rewriting after the scan; supersedes the WARN, URL_REWRITE and QUARANTINE rows of ADR-0045). Library: `packages/policy-dsl` (`@email-gateway/policy-dsl`).
 
 A policy is **data, never code**: a JSON document validated by a strict schema over a closed catalog of fields, operators and actions. No script, template, SQL or JavaScript is ever compiled or run. Regular expressions run only through RE2 (`re2js`, linear time). Anything outside the schema is refused with violations by JSON path. The evaluator is a pure function of the message facts and the published policies: the same input and snapshot always give the byte-identical decision.
 
@@ -190,17 +190,17 @@ The `when` of a rule whose disposition is `ALLOW` or which has `override: true` 
 
 ## 6. Actions
 
-| Action             | Parameters                                                                                                            | 5.2 effect                                                                                                                                                                                                            | Stored status                                                                                             |
-| ------------------ | --------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `ALLOW`            | —                                                                                                                     | Approve and deliver (one approval per ≤ 1 000 pending recipients)                                                                                                                                                     | `enforced`                                                                                                |
-| `REQUIRE_APPROVAL` | —                                                                                                                     | Hold in `held_for_review`; released by the existing operator release (5.3 adds the approval workflow)                                                                                                                 | `enforced`                                                                                                |
-| `QUARANTINE`       | —                                                                                                                     | Hold in `quarantined` (5.3 adds the store, digests and end-user release)                                                                                                                                              | `enforced`                                                                                                |
-| `REJECT`           | `notifySender?: boolean`                                                                                              | Nothing delivered. Inbound: dropped without a bounce (`discard`). Outbound/internal: `reject`, and a non-delivery notice to the organization's sender (`notifySender`, default the tenant setting, itself default on) | `enforced`; notice `requested`                                                                            |
-| `TAG`              | `label` (`[a-z0-9][a-z0-9._-]{0,31}`), `subjectPrefix?` (printable ASCII 1..32, no `:`), `addHeader?: boolean = true` | When delivered: `X-EG-Policy-Tag: <labels>` and the subject prefix in a policy copy (header edits only)                                                                                                               | `enforced` when written; `recorded` when no header/prefix is written; `not_applicable` when not delivered |
-| `WARN`             | `level` (`caution` < `warning` < `danger`), `text?` (printable ASCII 1..128), `subjectPrefix?`                        | When delivered: `X-EG-Policy-Warning: <level>; <text>` and the prefix; **body banners are not supported in 5.2** (`bodyBanner: not_supported`)                                                                        | as TAG                                                                                                    |
-| `URL_REWRITE`      | `ifNotRewritten?: "deliver" \| "quarantine" = "deliver"`                                                              | Requires delivery of the round's rewritten copy (rewriting happens at scan time under the tenant's URL settings). Not rewritten: `deliver` records the skip reason; `quarantine` raises the decision to QUARANTINE    | `enforced` (rewritten copy or quarantine raise) or `recorded`                                             |
-| `ARCHIVE`          | —                                                                                                                     | `mail.message.archive_requested.v1` to the archive stage (**step 8.1** performs it)                                                                                                                                   | `requested`                                                                                               |
-| `ALERT`            | `severity` (`info` < `warning` < `critical`)                                                                          | E-mail to the organization's users holding `policy:publish` (notification-worker, at least once); ids and policy names only, never message content                                                                    | `requested` (`recorded` when alerts are disabled)                                                         |
+| Action             | Parameters                                                                                                            | Effect (5.2, as amended by 5.3)                                                                                                                                                                                                                                               | Stored status                                                                                             |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `ALLOW`            | —                                                                                                                     | Approve and deliver (one approval per ≤ 1 000 pending recipients)                                                                                                                                                                                                             | `enforced`                                                                                                |
+| `REQUIRE_APPROVAL` | —                                                                                                                     | Hold in `held_for_review` with one quarantine entry (`kind = review`) and a `policy_review` approval request per recipient (5.3); released only through an approval by a second user                                                                                          | `enforced`                                                                                                |
+| `QUARANTINE`       | —                                                                                                                     | Hold in `quarantined` with one quarantine entry per recipient (5.3 store: search, preview, release with re-validation, digests)                                                                                                                                               | `enforced`                                                                                                |
+| `REJECT`           | `notifySender?: boolean`                                                                                              | Nothing delivered. Inbound: dropped without a bounce (`discard`). Outbound/internal: `reject`, and a non-delivery notice to the organization's sender (`notifySender`, default the tenant setting, itself default on)                                                         | `enforced`; notice `requested`                                                                            |
+| `TAG`              | `label` (`[a-z0-9][a-z0-9._-]{0,31}`), `subjectPrefix?` (printable ASCII 1..32, no `:`), `addHeader?: boolean = true` | When delivered: `X-EG-Policy-Tag: <labels>` and the subject prefix in a policy copy (header edits only)                                                                                                                                                                       | `enforced` when written; `recorded` when no header/prefix is written; `not_applicable` when not delivered |
+| `WARN`             | `level` (`caution` < `warning` < `danger`), `text?` (printable ASCII 1..128), `subjectPrefix?`                        | When delivered: `X-EG-Policy-Warning: <level>; <text>`, the prefix and a **body banner** in the first text and HTML parts (5.3, §14; `bodyBanner: requested`, then the engine's outcome)                                                                                      | as TAG                                                                                                    |
+| `URL_REWRITE`      | `ifNotRewritten?: "deliver" \| "quarantine" = "deliver"`                                                              | Requires delivery of a rewritten copy: the round's scan-time copy, or (5.3, §14) the policy-engine rewrites the copy itself when the round was skipped only because the tenant setting is off. Otherwise `deliver` records the skip reason; `quarantine` raises to QUARANTINE | `enforced` (rewritten copy or quarantine raise) or `recorded`                                             |
+| `ARCHIVE`          | —                                                                                                                     | `mail.message.archive_requested.v1` to the archive stage (**step 8.1** performs it)                                                                                                                                                                                           | `requested`                                                                                               |
+| `ALERT`            | `severity` (`info` < `warning` < `critical`)                                                                          | E-mail to the organization's users holding `policy:publish` (notification-worker, at least once); ids and policy names only, never message content                                                                                                                            | `requested` (`recorded` when alerts are disabled)                                                         |
 
 TAG, WARN and URL_REWRITE apply only when the final disposition is ALLOW (a URL_REWRITE that raised the decision to QUARANTINE is the exception: it applies). ARCHIVE and ALERT apply to every disposition. Header values are built only from validated policy data, never from message data.
 
@@ -214,7 +214,7 @@ TAG, WARN and URL_REWRITE apply only when the final disposition is ALLOW (a URL_
 6. **Base** = the tenant disposition if it is at least the recommendation; a weaker tenant disposition only through an **override** (§8); otherwise the recommendation, with a recorded **clamp**. No tenant disposition → the recommendation.
 7. **Final** = max(base, floor), then a URL_REWRITE `quarantine` raise, then the floor again. Revision 1 (sandbox) joins the recommendation and the floor by maximum: it can only make the decision stricter.
 
-Non-terminal actions of every matched rule are merged in rule order: TAG labels union (sorted, at most 8), the first subject prefix (TAG before WARN), the strongest WARN level and the first WARN text, the strictest URL_REWRITE fallback, ARCHIVE once, the highest ALERT severity. Rules that read AI-derived fields (`bec.verdict`, `bec.ai_raised`) cannot carry REQUIRE_APPROVAL, QUARANTINE or REJECT (`ai_field_in_hold_rule`), and the platform holds use deterministic verdicts only: **an AI-only signal can tag or warn, never hold**.
+Non-terminal actions of every matched rule are merged in rule order: TAG labels union (sorted, at most 8), the first subject prefix (TAG before WARN), the strongest WARN level and the first WARN text, the strictest URL_REWRITE fallback, ARCHIVE once, the highest ALERT severity. Rules that read AI-derived fields (`bec.verdict`, `bec.ai_raised`) cannot carry REQUIRE_APPROVAL, QUARANTINE or REJECT (`ai_field_in_hold_rule`), and the platform holds use deterministic verdicts only: **an AI-only signal can tag or warn, never hold**. Since `policy-eval/2` this includes the URL_REWRITE fallback: the `ifNotRewritten = quarantine` of a rule that reads an AI-derived field never raises the decision (a clamp `ai_only` is recorded).
 
 **Platform tags** (the recommendation's `risk-<level>` and the floor's mandatory tags) are written as headers on inbound and internal mail (`tagging.platformTagHeader`, default on) and only recorded on outbound mail unless `tagging.platformTagOutbound` is on, so internal labels do not leak to external recipients.
 
@@ -235,12 +235,13 @@ Otherwise the recommendation stands and a clamp is recorded (`override_not_allow
 | Key                            | Default |
 | ------------------------------ | ------- |
 | `allowRecommendationOverrides` | `false` |
+| `recipientSplit`               | `true`  |
 | `notices.senderNonDelivery`    | `true`  |
 | `alerts.enabled`               | `true`  |
 | `tagging.platformTagHeader`    | `true`  |
 | `tagging.platformTagOutbound`  | `false` |
 
-A published change applies to the **next** evaluation (the snapshot is keyed by the organization's generation); a message already evaluated is never re-evaluated by a change.
+`recipientSplit` (step 5.3) turns per-recipient decisions on or off (§13). A published change applies to the **next** evaluation (the snapshot is keyed by the organization's generation); a message already evaluated is never re-evaluated by a change.
 
 ## 10. Limits
 
@@ -335,7 +336,7 @@ Quarantine external mail with attachments, except when every recipient is in the
 
 <!-- check: {"expect": {"disposition": "allow", "source": "platform_default", "excepted": "unless[0]"}} -->
 
-Expected: **allow** (the rule is excepted at `unless[0]`). Adding a recipient outside finance makes the exception false (quantifier `all`) and the message is **quarantined**.
+Expected: **allow** (the rule is excepted at `unless[0]`). Adding a recipient outside finance makes the message-level exception false (quantifier `all`) and the message-level decision is **quarantine**; because the exception is recipient-scoped, the per-recipient evaluation of §13 (default on) then delivers to the finance recipients and quarantines only the other one (split example 1).
 
 ### Example 3: executive impersonation warning
 
@@ -383,7 +384,7 @@ Mail that claims to come from the CEO's own domain but fails DMARC gets a danger
 
 <!-- check: {"expect": {"disposition": "allow", "headers": ["X-EG-Policy-Warning: danger; Possible executive impersonation"], "subjectPrefix": "[CAUTION]", "actions": ["ALLOW", "WARN", "ALERT"]}} -->
 
-Expected: **allow** with `X-EG-Policy-Warning: danger; Possible executive impersonation`, subject prefix `[CAUTION]`, body banner `not_supported`, and an ALERT requested.
+Expected: **allow** with `X-EG-Policy-Warning: danger; Possible executive impersonation`, subject prefix `[CAUTION]`, body banner `requested` (the policy-engine inserts the `danger` banner with the rule text, §14), and an ALERT requested.
 
 ### Example 4: outbound card numbers need approval
 
@@ -603,7 +604,7 @@ Messages with links must be delivered as the rewritten copy; when the round coul
 
 <!-- check: {"expect": {"disposition": "quarantine", "source": "tenant_rule", "reason": "policy.url_rewrite.required"}} -->
 
-Expected: **quarantine** with `policy.url_rewrite.required` (URL_REWRITE `enforced` through the hold). With `urlRewriteStatus: "rewritten"` the message is **allow** and the rewritten copy is delivered.
+Expected: **quarantine** with `policy.url_rewrite.required` (URL_REWRITE `enforced` through the hold). With `urlRewriteStatus: "rewritten"` the message is **allow** and the rewritten copy is delivered. With the skip reason `disabled` or `direction` (the tenant's scan-time rewriting is off for the message) the message is **allow** and the policy-engine rewrites the copy itself (§14).
 
 ### Example 10: archive legal team mail
 
@@ -717,3 +718,118 @@ Expected violations (sorted by path): `rules[0].actions[1].label` `value_invalid
 ## 12. The decision record
 
 Every evaluation stores one `policy_execution_logs` row per message and lifecycle round (the api shows it as `PolicyEvaluationView`): the disposition, the decisive source (`tenant_rule`, `platform_default`, `floor`) with the policy, version and rule, the actions with their applicability and status, the matched rules, a trace (≤ 200 entries: `matched`, `not_matched`, `unknown`, `excepted`, `not_evaluated`, with the JSON path of the deciding condition), the floor, the recommendation, the override or clamps, reason codes (`policy.*`, the first is the decisive reason), an explanation from fixed English templates (≤ 24 lines; ids, codes and integers only, never addresses, domains, file names or URLs), the versions (DSL, evaluator, input, platform default, snapshot SHA-256, generation, tz data, policy versions) and the SHA-256 of the canonical input. A dry-run of a stored round with the same snapshot reproduces the stored decision.
+Since step 5.3 the row also stores `recipient_split` and `recipient_decisions` (§13); rows of `policy-eval/1` stay readable (their banner reads `not_supported`, they have no recipient decisions).
+
+## 13. Per-recipient decisions (step 5.3)
+
+One message can have several envelope recipients, and a tenant rule can name them (`recipient.address`, `recipient.domain`, `recipient.local_part`, `recipient.department`, `recipient.user`, in `when`, `unless` or a policy-wide exception). Since step 5.3 the evaluator decides such messages **per recipient** (`evaluatePolicyPerRecipient`):
+
+1. The message is evaluated once as before; this **message-level result** stays the decision record of the row.
+2. No per-recipient evaluation when the setting `recipientSplit` is off (`policy.split.disabled`), no enabled rule of the direction is recipient-scoped, there is one recipient, the recipient list is truncated (`policy.split.recipients_truncated`), or there are more than **200** recipients (`policy.split.too_many_recipients`). The message-level decision then applies to every recipient.
+3. Otherwise each recipient is evaluated on the same facts restricted to that recipient (`recipients.count` keeps the message's count). The floor and the platform recommendation are message facts, so **every recipient is at least the floor**: a hard block, a failure or a DLP hold holds every recipient.
+4. When the recipients' dispositions differ the message is **split** (`policy.split.applied`): allowed recipients are delivered, quarantined and review recipients get their own quarantine entries, rejected recipients are discarded. The message follows the strongest delivery-phase outcome: delivered when any recipient is allowed, else quarantined when any is quarantined, else held for review. When they agree (`policy.split.uniform`), that disposition applies (it can differ from the message-level result for `quantifier: "all"` conditions).
+5. **One copy is delivered**: the TAG, WARN and URL_REWRITE edits of every allowed recipient are merged with the rules of §7 (a recipient may therefore see a tag triggered by another recipient's rule); ARCHIVE and ALERT are merged over all recipients.
+6. The row records `recipient_decisions` (≤ 200: `rcptSeq`, disposition, source, decisive rule, up to 8 reason codes) and the explanation gains a `split` line with counts only (never addresses).
+
+Quarantine releases use the same restriction (`restrictToRecipient`) to re-decide one recipient against the current policy.
+
+### Split example 1: finance exception with a second recipient
+
+The policy of example 2, sent to a finance recipient and to a sales recipient.
+
+```json
+{
+  "dslVersion": "policy-dsl/1",
+  "direction": "inbound",
+  "priority": 20,
+  "rules": [
+    {
+      "id": "external-attachments",
+      "priority": 10,
+      "when": { "field": "attachments.count", "op": "gt", "value": 0 },
+      "unless": [
+        {
+          "field": "recipient.department",
+          "op": "in",
+          "value": ["01930000-0000-7000-8000-0000000000f1"],
+          "quantifier": "all"
+        }
+      ],
+      "actions": [{ "type": "QUARANTINE" }]
+    }
+  ]
+}
+```
+
+```json
+{
+  "recipients": [{ "address": "ap@corp.example" }, { "address": "rep@corp.example" }],
+  "attachments": [
+    { "filename": "invoice-2026-11.pdf", "typeFamily": "document", "verdict": "clean" }
+  ],
+  "directory": {
+    "departments": { "ap@corp.example": ["01930000-0000-7000-8000-0000000000f1"] }
+  }
+}
+```
+
+<!-- split-check: {"message": "quarantine", "split": true, "lifecycle": "allow", "decisions": [[0, "allow"], [1, "quarantine"]], "counts": {"allowed": 1, "held": 1, "review": 0, "rejected": 0}} -->
+
+Expected: message-level **quarantine** (one recipient is outside finance), split: `ap@` **allow** (excepted), `rep@` **quarantine**. The message is approved for `ap@` (reason `policy_partial`) and `rep@` gets a quarantine entry. With `recipientSplit: false` both recipients are quarantined.
+
+### Split example 2: approval for finance, a tag for everyone
+
+Payment documents sent to the finance department need approval; every external message with an attachment is tagged.
+
+```json
+{
+  "dslVersion": "policy-dsl/1",
+  "direction": "inbound",
+  "priority": 25,
+  "rules": [
+    {
+      "id": "tag-attachments",
+      "priority": 5,
+      "when": { "field": "attachments.count", "op": "gt", "value": 0 },
+      "actions": [{ "type": "TAG", "label": "external-attachment" }]
+    },
+    {
+      "id": "finance-approval",
+      "priority": 10,
+      "when": {
+        "all": [
+          {
+            "field": "recipient.department",
+            "op": "in",
+            "value": ["01930000-0000-7000-8000-0000000000f1"]
+          },
+          { "field": "attachments.count", "op": "gt", "value": 0 }
+        ]
+      },
+      "actions": [{ "type": "REQUIRE_APPROVAL" }]
+    }
+  ]
+}
+```
+
+```json
+{
+  "recipients": [{ "address": "ap@corp.example" }, { "address": "rep@corp.example" }],
+  "attachments": [{ "filename": "remittance.pdf", "typeFamily": "document", "verdict": "clean" }],
+  "directory": {
+    "departments": { "ap@corp.example": ["01930000-0000-7000-8000-0000000000f1"] }
+  }
+}
+```
+
+<!-- split-check: {"message": "require_approval", "split": true, "lifecycle": "allow", "decisions": [[0, "require_approval"], [1, "allow"]], "counts": {"allowed": 1, "held": 0, "review": 1, "rejected": 0}, "headers": ["X-EG-Policy-Tag: external-attachment"]} -->
+
+Expected: `ap@` **require_approval** (a review entry with a `policy_review` approval request), `rep@` **allow**; the one delivered copy carries `X-EG-Policy-Tag: external-attachment`. With a malware hard block both recipients are held by the floor.
+
+## 14. Body banners and URL rewriting after the scan (step 5.3)
+
+**WARN banners.** When WARN applies, the evaluator sets `delivery.bodyBanner = requested`. The policy-engine inserts a fixed-template banner (`[CAUTION]`, `[WARNING]`, `[DANGER]` plus the rule `text`, HTML-escaped; never message data) at the top of the first inline `text/plain` part and right after `<body>` of the first `text/html` part of the delivered copy, re-encoded with the part's original transfer encoding; every other part stays byte-identical. Signed (S/MIME, PGP) or encrypted messages, messages over the copy size bound and parts that cannot be decoded losslessly are left unchanged and recorded: `skipped_signed`, `skipped_encrypted`, `skipped_too_large`, `skipped_no_text_part`, `skipped_part`; `applied` otherwise. The WARN status is `enforced` when the banner or a header was written. A banner (like URL rewriting) invalidates an inbound DKIM body signature downstream.
+
+**URL rewriting after the scan.** URL_REWRITE is normally satisfied by the scan-time rewritten copy (step 4.3). When the round was skipped only because the tenant's URL rewriting setting is off for the message (`disabled`, `direction`), the evaluator marks the round `policyRewritable` and does not raise; the policy-engine rewrites the copy itself with the click service tokens and records `delivery.urlRewrite.policyAttempt`. If that rewrite itself skips (signed, encrypted, too large, structure mismatch) and the rule says `ifNotRewritten = quarantine`, the engine re-evaluates with that skip reason and the message is quarantined; `no_urls` counts as satisfied. Every other scan-time skip reason (`no_urls`, `parse_incomplete`, `too_large`, `signed_*`, `encrypted`, `dkim_policy`, `structure_mismatch`, `error`, or no rewrite record) raises as in 5.2.
+
+**Release copies.** A released quarantine entry is delivered with the TAG, WARN and URL_REWRITE edits its current result would apply if it were allowed (`releaseDeliveryEdits`) plus an `X-EG-Quarantine-Release` header.

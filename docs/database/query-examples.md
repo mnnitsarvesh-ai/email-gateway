@@ -110,37 +110,40 @@ prisma.emailEvent.findMany({
 
 **Pruning:** one partition each, via `(message_id, version, received_at)` and `(message_id, received_at)`.
 
-## Q5: Quarantine list for an organization
+## Q5: Quarantine search for an organization (state filter)
 
 ```sql
-SELECT id, public_id, recipient_address, envelope_from, subject, reason, risk_score, quarantined_at
+SELECT id, public_id, recipient_address, envelope_from, reason, risk_score, quarantined_at
   FROM quarantine_messages
- WHERE organization_id = ? AND status = 'quarantined'
- ORDER BY quarantined_at DESC
+ WHERE organization_id = ? AND status = 'held'
+   AND quarantined_at >= ? AND quarantined_at < ?
+ ORDER BY quarantined_at DESC, id DESC
  LIMIT 50;
 ```
 
 ```ts
 reader.client.quarantineMessage.findMany({
-  where: { organizationId, status: 'quarantined' },
-  orderBy: { quarantinedAt: 'desc' },
+  where: { organizationId, status: 'held', quarantinedAt: { gte: from, lt: to } },
+  orderBy: [{ quarantinedAt: 'desc' }, { id: 'desc' }],
   take: 50,
 });
 ```
 
-`quarantine_messages` is not partitioned. Backward scan of `(organization_id, status, quarantined_at)`. Paginate with a `(quarantined_at, id)` keyset as in Q1.
+`quarantine_messages` is not partitioned. Every search has a bounded `quarantined_at` range (step 5.3 Q9, ≤ 62 days) and pages with the `(quarantined_at, id)` keyset of Q1. A dominant state (`held`) is read by a backward scan of `(organization_id, quarantined_at, id)` filtering the state; a rare state uses `(organization_id, status, quarantined_at, id)`. `subject` is retired (never written, never read). Other filters: Q24.
 
 ## Q6: End-user quarantine by recipient address
 
 ```sql
-SELECT id, public_id, envelope_from, subject, reason, quarantined_at, expires_at
+SELECT id, public_id, envelope_from, reason, status, quarantined_at, expires_at
   FROM quarantine_messages
- WHERE organization_id = ? AND recipient_address = ? AND status = 'quarantined'
- ORDER BY quarantined_at DESC
+ WHERE organization_id = ? AND recipient_address = ?
+   AND quarantined_at >= ? AND quarantined_at < ?
+   AND status IN ('held', 'pending_approval')
+ ORDER BY quarantined_at DESC, id DESC
  LIMIT 50;
 ```
 
-Prisma: `quarantineMessage.findMany({ where: { organizationId, recipientAddress, status: 'quarantined' }, orderBy: { quarantinedAt: 'desc' }, take: 50 })`. Uses the prefix index `(organization_id, recipient_address(100), status)`; the full address is re-checked on the row, and the matching rows are sorted (a small filesort). The address comes from the authenticated end user, never from a parameter they can change.
+Prisma: `quarantineMessage.findMany({ where: { organizationId, recipientAddress, quarantinedAt: { gte, lt }, status: { in: ['held', 'pending_approval'] } }, orderBy: [{ quarantinedAt: 'desc' }, { id: 'desc' }], take: 50 })`. Uses the prefix index `(organization_id, recipient_address(100), quarantined_at, id)` (step 5.3) with a backward scan and no sort; the full address is re-checked on the row, the state is filtered on the row. The address comes from the authenticated end user's verified email (`quarantine:self`), never from a parameter they can change.
 
 ## Q7: Stuck-message reconciliation
 
@@ -387,3 +390,24 @@ SELECT part_index, part_path, depth, disposition, filename, declared_content_typ
 ```
 
 Prisma: `emailMessageParse.findUnique({ where: { messageId_receivedAt: { messageId, receivedAt } } })` (then compare `organizationId`), and `emailAttachment.findMany({ where: { messageId, receivedAt, organizationId }, orderBy: { partIndex: 'asc' } })`. The parse row is a point lookup on UQ `(message_id, received_at)` (`const` in the plan); the attachments are a `ref` read on UQ `(message_id, part_index, received_at)` in index order, no filesort. **Pruning:** one partition for each (`p<yyyymm>` of `received_at`, verified with `EXPLAIN` on the local stack). `original_filename` is escaped metadata for display and forensics; it is never used as a path or an S3 key. Not part of `pnpm db:perf` (like Q19–Q22).
+
+## Q24: Quarantine search filters (step 5.3)
+
+The api's quarantine search (`GET /api/v1/quarantine/entries`, [Q9](../plan/steps/17-quarantine.md#q9-search-api-replica-wp4)) reads the replica with one optional filter on top of the mandatory organization and bounded `quarantined_at` range, ordered by the `(quarantined_at, id)` keyset:
+
+```sql
+SELECT id, public_id, recipient_address, envelope_from, reason, status, risk_level,
+       quarantined_at, expires_at
+  FROM quarantine_messages
+ WHERE organization_id = ? AND quarantined_at >= ? AND quarantined_at < ?
+   -- one of: AND recipient_address = ?          (organization_id, recipient_address(100), quarantined_at, id)
+   --         AND envelope_from = ?              (organization_id, envelope_from(100), quarantined_at)
+   --         AND status = ?                     (organization_id, status, quarantined_at, id)
+   --         AND decisive_policy_public_id = ?  (organization_id, decisive_policy_public_id, quarantined_at)
+   --         AND reason = ? / primary_engine = ?  (organization_id, <column>, quarantined_at)
+   AND (quarantined_at, id) < (?, ?)  -- next page
+ ORDER BY quarantined_at DESC, id DESC
+ LIMIT 50;
+```
+
+The default view (no filter) is a backward range scan of `(organization_id, quarantined_at, id)`. Each filter index ends with `quarantined_at` (InnoDB appends the primary key `id`), so a selective value is a backward range scan with no sort; a very frequent value (or a dominant state) is cheaper on the default index with the filter applied on the row, which the optimizer chooses. `pnpm db:perf -- --quarantine-entries 1000000` runs the five shapes (`quarantineSearchSteps` of `@email-gateway/database`) on 1 M entries of one organization; the api integration test asserts the plans with EXPLAIN. The sweeper's scans: `status IN ('held','pending_approval') AND expires_at <= ?` uses `(status, expires_at)`, row retention `status = ? AND state_changed_at < ?` uses `(status, state_changed_at)`.

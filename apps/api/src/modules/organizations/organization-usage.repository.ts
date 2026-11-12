@@ -48,7 +48,7 @@ export class OrganizationUsageRepository {
       }),
       db.emailMessage.count({ where: { organizationId, receivedAt: { gte: startOfToday } } }),
       db.quarantineMessage.count({
-        where: { organizationId, status: { in: ['quarantined', 'release_requested'] } },
+        where: { organizationId, status: { in: ['held', 'pending_approval', 'releasing'] } },
       }),
       db.apiKey.count({
         where: {

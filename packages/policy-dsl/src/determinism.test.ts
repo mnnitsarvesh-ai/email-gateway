@@ -12,7 +12,8 @@ import { POLICY_FIELDS, type PolicyFieldName } from './fields';
 import { DEPT, PID, sampleValue, snapshotOf, type Def } from './fixtures.test-support';
 import { computeFloor } from './floor';
 import { POLICY_PLATFORM_DEFAULTS } from './platform';
-import { policyEvaluationResultSchema } from './result';
+import { evaluatePolicyPerRecipient, restrictToRecipient } from './per-recipient';
+import { policyEvaluationResultSchema, recipientDecisionsSchema } from './result';
 import type { CompiledSnapshot } from './snapshot';
 import { buildSyntheticInput, type SyntheticFacts } from './synthetic';
 import { dispositionRank, POLICY_HOLD_DISPOSITIONS, type PolicyDisposition } from './vocabulary';
@@ -449,5 +450,94 @@ describe('property: 10 000 seeded random inputs × random valid policies', () =>
     expect(holds).toBeGreaterThan(1000);
     expect(tenantDecided).toBeGreaterThan(100);
     expect(overrides).toBeGreaterThan(0);
+  });
+});
+
+describe('property (step 5.3 Q4): per-recipient evaluation of 10 000 seeded inputs', () => {
+  it('every per-recipient final is at least the floor; records never carry addresses', () => {
+    const r = prng(20261112);
+    const snapshots: CompiledSnapshot[] = [];
+    for (let s = 0; s < 200; s += 1) {
+      const defs = Array.from({ length: 1 + r.int(3) }, () => randomPolicy(r));
+      // A recipient-scoped policy in most snapshots, so that splits are frequent.
+      if (r.chance(0.7)) {
+        defs.push({
+          dslVersion: 'policy-dsl/1',
+          direction: 'any',
+          priority: r.int(1000),
+          rules: [
+            {
+              id: 'split',
+              priority: 1,
+              when: {
+                field: 'recipient.domain',
+                op: 'domain_in',
+                value: [r.pick(DOMAINS)],
+                ...(r.chance(0.3) ? { quantifier: 'all' } : {}),
+              },
+              actions: [
+                { type: r.pick(['ALLOW', 'REQUIRE_APPROVAL', 'QUARANTINE', 'REJECT']) },
+                ...(r.chance(0.5) ? [{ type: 'TAG', label: 'split' }] : []),
+              ],
+              ...(r.chance(0.3) ? { override: true } : {}),
+            },
+          ],
+        });
+      }
+      snapshots.push(
+        snapshotOf(
+          defs.map((def, k) => ({ def, publicId: Object.values(PID)[k]! })),
+          {
+            settings: {
+              allowRecommendationOverrides: r.chance(0.5),
+              recipientSplit: r.chance(0.9),
+            },
+            generation: String(s),
+          },
+        ),
+      );
+    }
+    let splits = 0;
+    let evaluated = 0;
+    for (let i = 0; i < 10_000; i += 1) {
+      const input = buildSyntheticInput(randomFacts(r));
+      const compiled = snapshots[i % snapshots.length]!;
+      const e = evaluatePolicyPerRecipient(input, compiled);
+      const floor = computeFloor(input, pd);
+      const content = contentOf(input);
+      const finals = e.recipients?.map((x) => x.result) ?? [e.message];
+      for (const result of finals) {
+        if (floor.disposition !== null) {
+          expect(atLeast(result.disposition, floor.disposition)).toBe(true);
+        }
+      }
+      if (floor.disposition !== null) {
+        expect(atLeast(e.lifecycleDisposition, floor.disposition)).toBe(true);
+      }
+      for (const x of e.recipients ?? []) {
+        checkInvariants(restrictToRecipient(input, x.rcptSeq), compiled);
+      }
+      const record = JSON.stringify({
+        text: e.message.explanation.text,
+        decisions: e.recipientDecisions,
+        delivery: e.mergedDeliveryActions.delivery,
+      });
+      expect(record.includes('@') || record.includes('://')).toBe(false);
+      for (const c of content) expect(record.includes(c), c).toBe(false);
+      expect(e.message.explanation.lines.length).toBeLessThanOrEqual(24);
+      expect(e.split).toBe(new Set(e.recipientDecisions.map((d) => d.disposition)).size > 1);
+      if (e.split) {
+        splits += 1;
+        const allowed = e.recipientDecisions.some((d) => d.disposition === 'allow');
+        expect(e.lifecycleDisposition === 'allow').toBe(allowed);
+      }
+      if (e.recipients !== null) evaluated += 1;
+      if (i % 50 === 0) {
+        policyEvaluationResultSchema.parse(e.message);
+        recipientDecisionsSchema.parse(e.recipientDecisions);
+      }
+    }
+    expect(evaluated).toBeGreaterThan(500);
+    expect(splits).toBeGreaterThan(50);
   });
 });

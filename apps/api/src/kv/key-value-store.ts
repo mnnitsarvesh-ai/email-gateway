@@ -13,6 +13,17 @@ export abstract class KeyValueStore {
   abstract incr(key: string): Promise<number>;
   /** Atomically increments a counter and gives it `ttlSeconds` when it has no TTL yet. */
   abstract incrWithTtl(key: string, ttlSeconds: number): Promise<number>;
+  /**
+   * Adds `by` (≥ 1) to a counter and gives it `ttlSeconds` when it has no TTL yet; returns the new
+   * value. The default adds one at a time; stores override it with one atomic command.
+   */
+  async incrByWithTtl(key: string, by: number, ttlSeconds: number): Promise<number> {
+    if (!Number.isSafeInteger(by) || by < 1)
+      throw new Error('incrByWithTtl needs a positive amount');
+    let value = 0;
+    for (let i = 0; i < by; i += 1) value = await this.incrWithTtl(key, ttlSeconds);
+    return value;
+  }
   /** Deletes the keys; returns how many existed. */
   abstract del(...keys: string[]): Promise<number>;
   abstract exists(key: string): Promise<boolean>;

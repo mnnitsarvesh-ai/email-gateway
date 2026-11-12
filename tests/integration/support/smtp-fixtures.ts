@@ -494,6 +494,9 @@ export class SmtpFixtures {
         // Step 5.2: the policy tenant tables (RESTRICT keys), in the api purge's order
         // (POLICY_PURGE_ORDER, after the evaluation rows of deleteScanRows).
         await this.deletePolicyTenantRows(ids);
+        // Step 5.3: the quarantine tables (RESTRICT keys), in the api purge's order
+        // (QUARANTINE_PURGE_ORDER), after the messages (no adoption can follow) and the policy rows.
+        await this.deleteQuarantineTenantRows(ids);
         await this.prisma.bounceEvent.deleteMany({ where });
         await this.prisma.deliverySuppression.deleteMany({ where });
         await this.prisma.organizationLimit.deleteMany({ where });
@@ -748,6 +751,31 @@ export class SmtpFixtures {
     await this.prisma.policySettings.deleteMany({ where });
     await this.prisma.tenantDepartmentMember.deleteMany({ where });
     await this.prisma.tenantDepartment.deleteMany({ where });
+  }
+
+  /**
+   * Step 5.3 tenant rows (docs/plan/steps/17-quarantine.md Q17 "Tenant purge", the api's
+   * `QUARANTINE_PURGE_ORDER`): grants, approval requests, release logs (their `action_id` is
+   * RESTRICT on the actions), actions, object purges, digests, digest runs, user preferences,
+   * entries, settings; then the step 8.1 archive rows a suite created as fixtures (legal holds,
+   * retention policies, archive settings; 5.3 only reads them). Every table references
+   * `organizations` with `RESTRICT`.
+   */
+  private async deleteQuarantineTenantRows(ids: readonly bigint[]): Promise<void> {
+    const where = { organizationId: { in: [...ids] } };
+    await this.prisma.quarantineDownloadGrant.deleteMany({ where });
+    await this.prisma.quarantineApprovalRequest.deleteMany({ where });
+    await this.prisma.quarantineReleaseLog.deleteMany({ where });
+    await this.prisma.quarantineAction.deleteMany({ where });
+    await this.prisma.quarantineObjectPurge.deleteMany({ where });
+    await this.prisma.quarantineDigest.deleteMany({ where });
+    await this.prisma.quarantineDigestRun.deleteMany({ where });
+    await this.prisma.quarantineUserPreference.deleteMany({ where });
+    await this.prisma.quarantineMessage.deleteMany({ where });
+    await this.prisma.quarantineSettings.deleteMany({ where });
+    await this.prisma.archiveLegalHold.deleteMany({ where });
+    await this.prisma.archiveRetentionPolicy.deleteMany({ where });
+    await this.prisma.archiveSetting.deleteMany({ where });
   }
 
   /**

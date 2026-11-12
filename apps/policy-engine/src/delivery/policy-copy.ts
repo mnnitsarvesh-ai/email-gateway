@@ -1,12 +1,21 @@
-import { Readable } from 'node:stream';
+import { PassThrough, Readable } from 'node:stream';
 import { DeleteObjectCommand, GetObjectCommand, type S3Client } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
+import { type BannerStatus, insertWarningBannerBuffer } from '@email-gateway/mail-safety';
 import {
   canonicalJson,
   POLICY_TAG_HEADER,
   POLICY_WARNING_HEADER,
   sha256Hex,
+  type WarnLevel,
 } from '@email-gateway/policy-dsl';
+import {
+  rewriteEml,
+  type RewriteLimits,
+  type RewritePolicy,
+  type RewriteSkipReason,
+  type RewriteUrlEntry,
+} from '@email-gateway/url-security';
 
 /** The header edits of a policy copy (P21): headers built from policy data only, a prefix. */
 export interface PolicyCopyEdits {
@@ -22,6 +31,9 @@ export const hasEdits = (edits: PolicyCopyEdits | null): edits is PolicyCopyEdit
 export const POLICY_COPY_OBJECT_TAG = { Key: 'eg-object', Value: 'policy-copy' } as const;
 /** `x-amz-tagging` form, set atomically on PutObject / CreateMultipartUpload (never afterwards). */
 export const POLICY_COPY_OBJECT_TAGGING = `${POLICY_COPY_OBJECT_TAG.Key}=${POLICY_COPY_OBJECT_TAG.Value}`;
+
+/** The release header of a release copy (step 5.3 Q13.6): the release public id. */
+export const QUARANTINE_RELEASE_HEADER = 'X-EG-Quarantine-Release';
 
 /** RFC 5322 line limit (octets, excluding CRLF). */
 export const MAX_LINE_OCTETS = 998;
@@ -41,13 +53,25 @@ export function policyCopyKey(input: {
   round: number;
   baseKey: string;
   edits: PolicyCopyEdits;
+  /**
+   * Step 5.3 body edits (Q22, Q23): part of the canonical edits only when present, so a 5.2
+   * header-only copy keeps its key.
+   */
+  body?: { banner: { level: WarnLevel; text: string | null } | null; urlRewrite: boolean };
+  /** Step 5.3 Q13.6: the release public id of a release copy (`… | releaseId`). */
+  releaseId?: string;
 }): string {
   const d = input.receivedAt;
+  const canonical: Record<string, unknown> = {
+    headers: input.edits.headers.map((h) => ({ name: h.name, value: h.value })),
+    subjectPrefix: input.edits.subjectPrefix,
+  };
+  if (input.body !== undefined && (input.body.banner !== null || input.body.urlRewrite)) {
+    canonical.banner = input.body.banner;
+    canonical.urlRewrite = input.body.urlRewrite;
+  }
   const digest = sha256Hex(
-    `${input.baseKey}|${canonicalJson({
-      headers: input.edits.headers.map((h) => ({ name: h.name, value: h.value })),
-      subjectPrefix: input.edits.subjectPrefix,
-    })}`,
+    `${input.baseKey}|${canonicalJson(canonical)}${input.releaseId === undefined ? '' : `|${input.releaseId}`}`,
   ).slice(0, 32);
   return [
     'org',
@@ -78,6 +102,8 @@ interface Field {
 const REMOVED_HEADERS = new Set([
   POLICY_TAG_HEADER.toLowerCase(),
   POLICY_WARNING_HEADER.toLowerCase(),
+  // Step 5.3 Q13.6: a sender can never pre-set the release header either.
+  QUARANTINE_RELEASE_HEADER.toLowerCase(),
 ]);
 
 /** The line terminator style of a header block: the first line's, CRLF when there is none. */
@@ -144,8 +170,8 @@ function prefixSubject(field: Field, prefix: string, eol: string): Field {
  * Byte-preserving: the block is handled as latin1 (one char per octet), every untouched line is
  * kept verbatim, and the original line ending (CRLF or LF) is used for inserted lines.
  *
- * 1. Every existing `X-EG-Policy-Tag` / `X-EG-Policy-Warning` field (with its continuation lines)
- *    is removed (a sender cannot pre-set them in the copy).
+ * 1. Every existing `X-EG-Policy-Tag` / `X-EG-Policy-Warning` / `X-EG-Quarantine-Release` field
+ *    (with its continuation lines) is removed (a sender cannot pre-set them in the copy).
  * 2. The new headers are prepended in the order given (`X-EG-Policy-Tag`, then
  *    `X-EG-Policy-Warning`).
  * 3. With a subject prefix: `<prefix> ` is inserted after `Subject:` and its whitespace unless the
@@ -204,14 +230,148 @@ class TooLargeError extends Error {
   override readonly name = 'PolicyCopyTooLargeError';
 }
 
+/**
+ * The body edits of a step 5.3 policy copy (Q22, Q23), applied in this order after the base is
+ * read: the policy URL rewrite, then the WARN banner, then the header edits (P21).
+ */
+export interface BodyEditPlan {
+  /** URL_REWRITE after the scan (Q23); null when not eligible or not required. */
+  urlRewrite: {
+    urlMap: ReadonlyMap<string, RewriteUrlEntry>;
+    policy: RewritePolicy;
+    clickBaseUrl: string;
+    sign: (seq: number) => string;
+    limits: RewriteLimits;
+  } | null;
+  /** WARN body banner (Q22). */
+  banner: { level: WarnLevel; text: string | null; maxPartBytes: number } | null;
+  /** `email_message_parses.structure` (content types in document order); null when unknown. */
+  structure: ReadonlyArray<{ contentType: string }> | null;
+  /**
+   * URL_REWRITE `ifNotRewritten = quarantine`: a deterministic rewrite skip (other than
+   * `no_urls`) stops before anything is written (`unchanged`), so the engine can re-evaluate.
+   */
+  requireUrlRewrite?: boolean;
+}
+
+/** The outcome of a policy copy with body edits. */
+export interface EditedCopyResult {
+  /** `unchanged`: no edit applied and no header edit: the base object is delivered. */
+  result: 'written' | 'too_large' | 'header_too_large' | 'unchanged';
+  key?: string;
+  /** The banner outcome (null when not requested). */
+  banner: Exclude<BannerStatus, never> | null;
+  /** The policy URL rewrite outcome (null when not requested). */
+  urlRewrite: { status: 'rewritten' | 'skipped'; skipReason: RewriteSkipReason | null } | null;
+}
+
 /** Something that writes policy copies (the S3 implementation below; fakes in unit tests). */
 export interface PolicyCopyWriter {
+  /** Header edits only (step 5.2 P21): streamed. */
   write(request: {
     baseKey: string;
     key: string;
     edits: PolicyCopyEdits;
     signal: AbortSignal;
   }): Promise<PolicyCopyResult>;
+  /** Header edits plus body edits (step 5.3 Q22, Q23): bounded in memory. */
+  writeEdited(request: {
+    baseKey: string;
+    key: string;
+    edits: PolicyCopyEdits;
+    plan: BodyEditPlan;
+    signal: AbortSignal;
+  }): Promise<EditedCopyResult>;
+}
+
+/** A URL rewrite that failed unexpectedly (`skipReason = error`): retryable, never a skip. */
+export class PolicyUrlRewriteError extends Error {
+  override readonly name = 'PolicyUrlRewriteError';
+}
+
+/**
+ * Applies the body edits of `plan` and then the header edits to `input` (the whole base object,
+ * ≤ the copy size bound), in the Q23 → Q22 → P21 order. Each body step that skips passes its
+ * input through unchanged (a skip never corrupts the object). Pure apart from the token signer.
+ */
+export async function applyCopyEdits(
+  input: Buffer,
+  edits: PolicyCopyEdits,
+  plan: BodyEditPlan,
+  limits: { maxMessageBytes: number; maxHeaderBytes: number },
+): Promise<{ output: Buffer | null } & Omit<EditedCopyResult, 'key'>> {
+  const refused = (result: 'too_large' | 'header_too_large') => ({
+    output: null,
+    result,
+    banner: plan.banner === null ? null : ('skipped_too_large' as const),
+    urlRewrite:
+      plan.urlRewrite === null
+        ? null
+        : { status: 'skipped' as const, skipReason: 'too_large' as const },
+  });
+  if (input.length > limits.maxMessageBytes) return refused('too_large');
+  const baseEnd = findHeaderEnd(input);
+  if ((baseEnd === null ? input.length : baseEnd.headerEnd) > limits.maxHeaderBytes) {
+    return refused('header_too_large');
+  }
+  let current = input;
+  let urlRewrite: EditedCopyResult['urlRewrite'] = null;
+  if (plan.urlRewrite !== null) {
+    const r = plan.urlRewrite;
+    const chunks: Buffer[] = [];
+    const sink = new PassThrough();
+    sink.on('data', (c: Buffer) => chunks.push(c));
+    sink.on('error', () => undefined);
+    const rewritten = await rewriteEml({
+      source: Readable.from([current]),
+      sink,
+      urlMap: r.urlMap,
+      policy: r.policy,
+      clickBaseUrl: r.clickBaseUrl,
+      sign: r.sign,
+      limits: r.limits,
+      structure: plan.structure,
+    });
+    if (rewritten.status === 'rewritten') {
+      current = Buffer.concat(chunks);
+      urlRewrite = { status: 'rewritten', skipReason: null };
+    } else if (rewritten.skipReason === 'error' || rewritten.skipReason === null) {
+      throw new PolicyUrlRewriteError('policy url rewrite failed unexpectedly');
+    } else {
+      urlRewrite = { status: 'skipped', skipReason: rewritten.skipReason };
+      if (plan.requireUrlRewrite === true && rewritten.skipReason !== 'no_urls') {
+        return { output: null, result: 'unchanged', banner: null, urlRewrite };
+      }
+    }
+  }
+  let banner: BannerStatus | null = null;
+  if (plan.banner !== null) {
+    const out = await insertWarningBannerBuffer(current, {
+      level: plan.banner.level,
+      text: plan.banner.text,
+      limits: { maxPartBytes: plan.banner.maxPartBytes, maxMessageBytes: limits.maxMessageBytes },
+      structure: plan.structure,
+    });
+    banner = out.result.status;
+    current = out.output;
+  }
+  const bodyChanged = urlRewrite?.status === 'rewritten' || banner === 'applied';
+  if (!bodyChanged && !hasEdits(edits)) {
+    return { output: null, result: 'unchanged', banner, urlRewrite };
+  }
+  if (current.length > limits.maxMessageBytes) return refused('too_large');
+  const end = findHeaderEnd(current);
+  const headerEnd = end?.headerEnd ?? current.length;
+  if (headerEnd > limits.maxHeaderBytes) return refused('header_too_large');
+  const header = hasEdits(edits)
+    ? editHeaderBlock(current.subarray(0, headerEnd), edits)
+    : current.subarray(0, headerEnd);
+  return {
+    output: Buffer.concat([header, current.subarray(headerEnd)]),
+    result: 'written',
+    banner,
+    urlRewrite,
+  };
 }
 
 /**
@@ -326,5 +486,80 @@ export class S3PolicyCopyWriter implements PolicyCopyWriter {
     } finally {
       request.signal.removeEventListener('abort', onAbort);
     }
+  }
+
+  async writeEdited(request: {
+    baseKey: string;
+    key: string;
+    edits: PolicyCopyEdits;
+    plan: BodyEditPlan;
+    signal: AbortSignal;
+  }): Promise<EditedCopyResult> {
+    const object = await this.client.send(
+      new GetObjectCommand({ Bucket: this.bucket, Key: request.baseKey }),
+      { abortSignal: request.signal },
+    );
+    const body = object.Body as Readable | undefined;
+    if (body === undefined) throw new Error('policy copy base object has no body');
+    const limit = this.limits.maxMessageBytes;
+    const tooLarge = (): EditedCopyResult => ({
+      result: 'too_large',
+      banner: request.plan.banner === null ? null : 'skipped_too_large',
+      urlRewrite:
+        request.plan.urlRewrite === null ? null : { status: 'skipped', skipReason: 'too_large' },
+    });
+    if (object.ContentLength !== undefined && object.ContentLength > limit) {
+      body.destroy();
+      return tooLarge();
+    }
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for await (const chunk of body as AsyncIterable<Buffer>) {
+      total += chunk.length;
+      if (total > limit) {
+        body.destroy();
+        return tooLarge();
+      }
+      chunks.push(Buffer.from(chunk));
+    }
+    const applied = await applyCopyEdits(
+      Buffer.concat(chunks),
+      request.edits,
+      request.plan,
+      this.limits,
+    );
+    if (applied.output === null) {
+      return { result: applied.result, banner: applied.banner, urlRewrite: applied.urlRewrite };
+    }
+    const upload = new Upload({
+      client: this.client,
+      params: {
+        Bucket: this.bucket,
+        Key: request.key,
+        Body: applied.output,
+        ContentType: 'message/rfc822',
+        ContentDisposition: 'attachment',
+        Tagging: POLICY_COPY_OBJECT_TAGGING,
+      },
+      leavePartsOnError: false,
+    });
+    const onAbort = (): void => void upload.abort().catch(() => undefined);
+    request.signal.addEventListener('abort', onAbort, { once: true });
+    try {
+      await upload.done();
+    } catch (error) {
+      await this.client
+        .send(new DeleteObjectCommand({ Bucket: this.bucket, Key: request.key }))
+        .catch(() => undefined);
+      throw error;
+    } finally {
+      request.signal.removeEventListener('abort', onAbort);
+    }
+    return {
+      result: 'written',
+      key: request.key,
+      banner: applied.banner,
+      urlRewrite: applied.urlRewrite,
+    };
   }
 }

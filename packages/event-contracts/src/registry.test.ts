@@ -59,6 +59,10 @@ describe('EVENT_REGISTRY', () => {
       // and its notification request.
       'mail.message.archive_requested.v1': ['email.archive', 'message'],
       'mail.policy.notification_requested.v1': ['email.policy', 'message'],
+      // Step 5.3 Q27: the release request (aggregate message) and the quarantine notification
+      // (aggregate quarantine: the organization).
+      'mail.quarantine.release_requested.v1': ['email.policy', 'message'],
+      'mail.quarantine.notification_requested.v1': ['email.policy', 'quarantine'],
     });
     for (const definition of Object.values(EVENT_REGISTRY)) {
       expect(EXCHANGE_NAMES).toContain(definition.exchange);

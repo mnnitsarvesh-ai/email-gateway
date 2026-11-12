@@ -31,6 +31,7 @@ import { PrincipalLoaderService } from '../src/modules/auth/services/principal-l
 import { SessionService } from '../src/modules/auth/services/session.service';
 import { TokenService } from '../src/modules/auth/services/token.service';
 import { RESCAN_NOTE } from '../src/modules/messages/domain/lifecycle-operations';
+import { quarantineWorkflowRequired } from '../src/modules/messages/messages.errors';
 import {
   type LifecycleMessageRow,
   MessageLifecycleReadRepository,
@@ -343,11 +344,30 @@ describe('message lifecycle routes (e2e, dependencies stubbed)', () => {
       Promise.resolve({ replayed: false, statusCode: 202, body: { ok: true } } as never),
     );
     const res = await http()
-      .post(`/api/v1/messages/${id}/release`)
+      .post(`/api/v1/messages/${id}/rescan`)
       .set(await bearer())
       .set('Idempotency-Key', 'key-2')
       .send(valid)
       .expect(202);
     expect(res.headers['idempotency-replayed']).toBeUndefined();
+  });
+
+  it('release (step 5.3 Q30): the coded 409 quarantine_workflow_required body', async () => {
+    transactions.run.mockImplementationOnce(() =>
+      Promise.reject(quarantineWorkflowRequired({ state: 'quarantined', version: 4 }, 2)),
+    );
+    const res = await http()
+      .post(`/api/v1/messages/${id}/release`)
+      .set(await bearer())
+      .set('Idempotency-Key', 'key-3')
+      .send(valid)
+      .expect(409);
+    expect(res.body).toMatchObject({
+      code: 'quarantine_workflow_required',
+      currentState: 'quarantined',
+      currentVersion: 4,
+      entries: 2,
+      route: 'POST /api/v1/quarantine/entries/{entryId}/release',
+    });
   });
 });

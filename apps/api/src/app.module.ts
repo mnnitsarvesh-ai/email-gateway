@@ -28,6 +28,7 @@ import { MessagesModule } from './modules/messages/messages.module';
 import { OrganizationsModule } from './modules/organizations/organizations.module';
 import { RiskScoringModule } from './modules/risk-scoring/risk-scoring.module';
 import { PoliciesModule } from './modules/policies/policies.module';
+import { QuarantineModule } from './modules/quarantine/quarantine.module';
 import { DirectoryModule } from './modules/directory/directory.module';
 import { RolesModule } from './modules/roles/roles.module';
 import { ScansModule } from './modules/scans/scans.module';
@@ -91,6 +92,8 @@ export class AppModule {
         // Step 5.2: policies (versioned, audited), settings, test, dry-run, history; departments.
         PoliciesModule,
         DirectoryModule,
+        // Step 5.3: quarantine search, preview, downloads, release, approvals, self-service.
+        QuarantineModule,
       ],
       providers: [{ provide: API_CONFIG, useValue: config }],
       exports: [API_CONFIG],

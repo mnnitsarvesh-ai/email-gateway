@@ -296,9 +296,9 @@ export const DORMANT_QUEUES = [
   // stopped its tasks wait there and analyses expire — suites remove only their own tasks).
   // `email.policy.evaluate` is a work queue since v9 (step 5.2 P15: the policy-engine, the
   // delivery gate); until its consumer exists (WP3) its messages wait there and are evaluated
-  // (or skipped as stale by the lifecycle) once it runs — never purged.
+  // (or skipped as stale by the lifecycle) once it runs — never purged. `email.quarantine` is a
+  // work queue since v10 (step 5.3 Q27: the policy-engine's release executor) — never purged.
   'scan.auth',
-  'email.quarantine',
   'email.archive',
   'email.analytics',
 ] as const;

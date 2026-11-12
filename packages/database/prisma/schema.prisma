@@ -240,7 +240,10 @@ enum MessageVerdict {
 /// Final action of a message (`email_messages.final_action`, `email_recipients.final_action`,
 /// `policy_execution_logs.action`). Append-only. Step 5.2 (docs/plan/steps/16-policy-engine.md
 /// P18) appended `reject` (an outbound/internal message refused by policy; inbound refusals are
-/// `discard`) and `require_approval` (held for review).
+/// `discard`) and `require_approval` (held for review). Step 5.3 (docs/plan/steps/17-quarantine.md
+/// Q5) appended `partial`: the message's recipients were decided differently (per-recipient
+/// evaluation); used on `email_messages.final_action` and `policy_execution_logs.action` only,
+/// never on a recipient (each recipient carries its own action).
 enum MessageAction {
   deliver
   tag
@@ -248,6 +251,7 @@ enum MessageAction {
   discard
   reject
   require_approval
+  partial
 }
 
 enum RecipientStatus {
@@ -850,6 +854,8 @@ enum BounceType {
   unknown
 }
 
+/// Why an entry is held (step 5.3 Q6 `quarantineReasonFor`; `manual` appended in 5.3 for manual
+/// quarantine, Q7). Append-only.
 enum QuarantineReason {
   spam
   bulk
@@ -860,16 +866,28 @@ enum QuarantineReason {
   policy
   suspicious
   engine_unavailable
+  manual
 }
 
+/// State of a quarantine entry (step 5.3 Q3, ADR-0046 decision 5). REBUILT in the 5.3 migration
+/// (widen / backfill `quarantined → held`, `release_requested → pending_approval` / narrow): the
+/// second deliberate exception to the append-only enum rule (the first is MessageStatus, 3.3).
+/// Append-only again from now on. Terminal: released, rejected, deleted, expired, superseded.
+/// `releasing` is transient (a release is queued for the executor). Transitions are
+/// `ENTRY_TRANSITIONS` of @email-gateway/quarantine.
 enum QuarantineStatus {
-  quarantined
-  release_requested
+  held
+  pending_approval
+  releasing
   released
+  rejected
   deleted
   expired
+  superseded
 }
 
+/// Append-only. 5.3 appended `view` … `self_release` (Q3, Q10–Q19). `approve_release`,
+/// `deny_release`, `report_false_positive` and `expire` keep their 1.1 meaning.
 enum QuarantineActionType {
   release
   delete
@@ -879,13 +897,109 @@ enum QuarantineActionType {
   report_false_positive
   expire
   preview
+  view
+  download_grant
+  download
+  download_refused
+  reject
+  quarantine
+  release_queued
+  release_blocked
+  approval_cancelled
+  approval_expired
+  supersede
+  adopt
+  object_purged
+  object_retained
+  self_release
 }
 
+/// Status of one entry's release attempt (step 5.3 Q13). Append-only. `pending` = queued for the
+/// executor; the executor ends it in `dispatched`, `approval_required`, `rescan_required`,
+/// `refused`, `stale` or `message_busy`. The 1.1 values `delivered`, `failed` and
+/// `blocked_by_revalidation` stay unused (delivery outcomes are tracked by the delivery tables).
 enum QuarantineReleaseStatus {
   pending
   delivered
   failed
   blocked_by_revalidation
+  dispatched
+  approval_required
+  rescan_required
+  refused
+  stale
+  message_busy
+}
+
+/// Step 5.3 Q3: `quarantine` (QUARANTINE disposition, manual quarantine) or `review`
+/// (REQUIRE_APPROVAL disposition).
+enum QuarantineEntryKind {
+  quarantine
+  review
+}
+
+/// Step 5.3 Q3/Q8: who created the entry: the policy evaluation, a manual quarantine or the
+/// sweeper's adoption of a message held before 5.3.
+enum QuarantineOrigin {
+  policy
+  manual
+  adopted
+}
+
+/// Step 5.3 Q6 `primaryEngineFor`: the engine (or the tenant policy) behind the decisive cause.
+enum QuarantinePrimaryEngine {
+  rspamd
+  attachment
+  url
+  bec
+  dlp
+  sandbox
+  policy
+  none
+}
+
+/// Step 5.3 Q13: how a release was authorized (operator with no approval reasons, end-user
+/// self-release, or an approved request).
+enum QuarantineReleaseMode {
+  operator
+  self
+  approved
+}
+
+/// Step 5.3 Q14: the one approval model.
+enum QuarantineApprovalKind {
+  policy_review
+  release_approval
+  release_request
+}
+
+/// Step 5.3 Q14.
+enum QuarantineApprovalStatus {
+  pending
+  approved
+  denied
+  expired
+  cancelled
+}
+
+/// Step 5.3 Q12: what a download grant serves.
+enum QuarantineDownloadObject {
+  eml
+  attachment
+}
+
+/// Step 5.3 Q17: object purge request state.
+enum QuarantinePurgeStatus {
+  pending
+  purged
+  retained
+  failed
+}
+
+/// Step 5.3 Q20.
+enum QuarantineDigestKind {
+  user_digest
+  admin_alert
 }
 
 enum ArchiveScope {
@@ -1019,6 +1133,13 @@ model Organization {
   quarantineMessages       QuarantineMessage[]
   quarantineActions        QuarantineAction[]
   quarantineReleaseLogs    QuarantineReleaseLog[]
+  quarantineApprovals      QuarantineApprovalRequest[]
+  quarantineDownloadGrants QuarantineDownloadGrant[]
+  quarantineSettings       QuarantineSettings?
+  quarantineUserPrefs      QuarantineUserPreference[]
+  quarantineObjectPurges   QuarantineObjectPurge[]
+  quarantineDigestRuns     QuarantineDigestRun[]
+  quarantineDigests        QuarantineDigest[]
   archiveSettings          ArchiveSetting?
   archiveRetentionPolicies ArchiveRetentionPolicy[]
   archiveLegalHolds        ArchiveLegalHold[]
@@ -1159,60 +1280,67 @@ model User {
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
 
-  userRoles                  UserRole[]                  @relation("UserRoleUser")
-  grantedUserRoles           UserRole[]                  @relation("UserRoleGrantedBy")
-  sessions                   UserSession[]
-  tokens                     UserToken[]                 @relation("UserTokenUser")
-  createdTokens              UserToken[]                 @relation("UserTokenCreatedBy")
-  mfaRecoveryCodes           UserMfaRecoveryCode[]
-  createdApiKeys             ApiKey[]
-  updatedYaraRules           YaraRule[]
-  createdEmailPolicies       EmailPolicy[]               @relation("EmailPolicyCreatedBy")
-  updatedEmailPolicies       EmailPolicy[]               @relation("EmailPolicyUpdatedBy")
-  createdPolicyVersions      PolicyVersion[]             @relation("PolicyVersionCreatedBy")
-  updatedPolicyVersions      PolicyVersion[]             @relation("PolicyVersionUpdatedBy")
-  publishedPolicyVersions    PolicyVersion[]             @relation("PolicyVersionPublishedBy")
-  createdPolicyExceptions    PolicyException[]
-  createdSuppressions        DeliverySuppression[]
-  quarantineMessages         QuarantineMessage[]
-  quarantineActions          QuarantineAction[]
-  createdLegalHolds          ArchiveLegalHold[]          @relation("LegalHoldCreatedBy")
-  releasedLegalHolds         ArchiveLegalHold[]          @relation("LegalHoldReleasedBy")
-  createdWebhooks            WebhookSubscription[]
-  updatedSystemSettings      SystemSetting[]
-  createdSmtpConnectors      SmtpConnector[]
-  createdRecipients          DomainRecipientAddress[]
-  updatedScanEngineSettings  ScanEngineSetting[]
-  addedMalwareSignatures     MalwareSignature[]
-  requestedAttachmentRescans AttachmentRescanJob[]
-  addedThreatIndicators      ThreatIndicator[]
-  createdBecExecutives       BecExecutiveProfile[]       @relation("BecExecutiveCreatedBy")
-  updatedBecExecutives       BecExecutiveProfile[]       @relation("BecExecutiveUpdatedBy")
-  createdBecVendors          BecVendorProfile[]          @relation("BecVendorCreatedBy")
-  updatedBecVendors          BecVendorProfile[]          @relation("BecVendorUpdatedBy")
-  createdBecTrustedSenders   BecTrustedSender[]          @relation("BecTrustedSenderCreatedBy")
-  createdBecFeedback         BecFeedback[]               @relation("BecFeedbackCreatedBy")
-  createdBecSuppressions     BecSuppressionRule[]        @relation("BecSuppressionCreatedBy")
-  createdDlpPolicies         DlpPolicy[]                 @relation("DlpPolicyCreatedBy")
-  updatedDlpPolicies         DlpPolicy[]                 @relation("DlpPolicyUpdatedBy")
-  createdDlpRules            DlpPolicyRule[]             @relation("DlpRuleCreatedBy")
-  updatedDlpRules            DlpPolicyRule[]             @relation("DlpRuleUpdatedBy")
-  createdDlpExceptions       DlpException[]              @relation("DlpExceptionCreatedBy")
-  updatedDlpExceptions       DlpException[]              @relation("DlpExceptionUpdatedBy")
-  createdDlpPatterns         DlpCustomPattern[]          @relation("DlpPatternCreatedBy")
-  updatedDlpPatterns         DlpCustomPattern[]          @relation("DlpPatternUpdatedBy")
-  createdDlpDictionaries     DlpKeywordDictionary[]      @relation("DlpDictionaryCreatedBy")
-  updatedDlpDictionaries     DlpKeywordDictionary[]      @relation("DlpDictionaryUpdatedBy")
-  recordedDlpAadhaarSettings DlpComplianceSettings[]     @relation("DlpAadhaarRecordedBy")
-  updatedRiskProfiles        RiskScoringProfile[]        @relation("RiskProfileUpdatedBy")
-  createdRiskVersions        RiskScoringProfileVersion[] @relation("RiskVersionCreatedBy")
-  updatedRiskVersions        RiskScoringProfileVersion[] @relation("RiskVersionUpdatedBy")
-  publishedRiskVersions      RiskScoringProfileVersion[] @relation("RiskVersionPublishedBy")
-  updatedPolicySettings      PolicySettings[]            @relation("PolicySettingsUpdatedBy")
-  createdDepartments         TenantDepartment[]          @relation("DepartmentCreatedBy")
-  updatedDepartments         TenantDepartment[]          @relation("DepartmentUpdatedBy")
-  departmentMemberships      TenantDepartmentMember[]    @relation("DepartmentMemberUser")
-  createdDepartmentMembers   TenantDepartmentMember[]    @relation("DepartmentMemberCreatedBy")
+  userRoles                    UserRole[]                  @relation("UserRoleUser")
+  grantedUserRoles             UserRole[]                  @relation("UserRoleGrantedBy")
+  sessions                     UserSession[]
+  tokens                       UserToken[]                 @relation("UserTokenUser")
+  createdTokens                UserToken[]                 @relation("UserTokenCreatedBy")
+  mfaRecoveryCodes             UserMfaRecoveryCode[]
+  createdApiKeys               ApiKey[]
+  updatedYaraRules             YaraRule[]
+  createdEmailPolicies         EmailPolicy[]               @relation("EmailPolicyCreatedBy")
+  updatedEmailPolicies         EmailPolicy[]               @relation("EmailPolicyUpdatedBy")
+  createdPolicyVersions        PolicyVersion[]             @relation("PolicyVersionCreatedBy")
+  updatedPolicyVersions        PolicyVersion[]             @relation("PolicyVersionUpdatedBy")
+  publishedPolicyVersions      PolicyVersion[]             @relation("PolicyVersionPublishedBy")
+  createdPolicyExceptions      PolicyException[]
+  createdSuppressions          DeliverySuppression[]
+  quarantineMessages           QuarantineMessage[]         @relation("QuarantineEntryUser")
+  decidedQuarantineEntries     QuarantineMessage[]         @relation("QuarantineEntryDecidedBy")
+  quarantineActions            QuarantineAction[]
+  requestedQuarantineApprovals QuarantineApprovalRequest[] @relation("QuarantineApprovalRequestedBy")
+  decidedQuarantineApprovals   QuarantineApprovalRequest[] @relation("QuarantineApprovalDecidedBy")
+  quarantineDownloadGrants     QuarantineDownloadGrant[]   @relation("QuarantineDownloadGrantUser")
+  updatedQuarantineSettings    QuarantineSettings[]        @relation("QuarantineSettingsUpdatedBy")
+  quarantinePreference         QuarantineUserPreference?   @relation("QuarantineUserPreferenceUser")
+  quarantineDigests            QuarantineDigest[]          @relation("QuarantineDigestUser")
+  createdLegalHolds            ArchiveLegalHold[]          @relation("LegalHoldCreatedBy")
+  releasedLegalHolds           ArchiveLegalHold[]          @relation("LegalHoldReleasedBy")
+  createdWebhooks              WebhookSubscription[]
+  updatedSystemSettings        SystemSetting[]
+  createdSmtpConnectors        SmtpConnector[]
+  createdRecipients            DomainRecipientAddress[]
+  updatedScanEngineSettings    ScanEngineSetting[]
+  addedMalwareSignatures       MalwareSignature[]
+  requestedAttachmentRescans   AttachmentRescanJob[]
+  addedThreatIndicators        ThreatIndicator[]
+  createdBecExecutives         BecExecutiveProfile[]       @relation("BecExecutiveCreatedBy")
+  updatedBecExecutives         BecExecutiveProfile[]       @relation("BecExecutiveUpdatedBy")
+  createdBecVendors            BecVendorProfile[]          @relation("BecVendorCreatedBy")
+  updatedBecVendors            BecVendorProfile[]          @relation("BecVendorUpdatedBy")
+  createdBecTrustedSenders     BecTrustedSender[]          @relation("BecTrustedSenderCreatedBy")
+  createdBecFeedback           BecFeedback[]               @relation("BecFeedbackCreatedBy")
+  createdBecSuppressions       BecSuppressionRule[]        @relation("BecSuppressionCreatedBy")
+  createdDlpPolicies           DlpPolicy[]                 @relation("DlpPolicyCreatedBy")
+  updatedDlpPolicies           DlpPolicy[]                 @relation("DlpPolicyUpdatedBy")
+  createdDlpRules              DlpPolicyRule[]             @relation("DlpRuleCreatedBy")
+  updatedDlpRules              DlpPolicyRule[]             @relation("DlpRuleUpdatedBy")
+  createdDlpExceptions         DlpException[]              @relation("DlpExceptionCreatedBy")
+  updatedDlpExceptions         DlpException[]              @relation("DlpExceptionUpdatedBy")
+  createdDlpPatterns           DlpCustomPattern[]          @relation("DlpPatternCreatedBy")
+  updatedDlpPatterns           DlpCustomPattern[]          @relation("DlpPatternUpdatedBy")
+  createdDlpDictionaries       DlpKeywordDictionary[]      @relation("DlpDictionaryCreatedBy")
+  updatedDlpDictionaries       DlpKeywordDictionary[]      @relation("DlpDictionaryUpdatedBy")
+  recordedDlpAadhaarSettings   DlpComplianceSettings[]     @relation("DlpAadhaarRecordedBy")
+  updatedRiskProfiles          RiskScoringProfile[]        @relation("RiskProfileUpdatedBy")
+  createdRiskVersions          RiskScoringProfileVersion[] @relation("RiskVersionCreatedBy")
+  updatedRiskVersions          RiskScoringProfileVersion[] @relation("RiskVersionUpdatedBy")
+  publishedRiskVersions        RiskScoringProfileVersion[] @relation("RiskVersionPublishedBy")
+  updatedPolicySettings        PolicySettings[]            @relation("PolicySettingsUpdatedBy")
+  createdDepartments           TenantDepartment[]          @relation("DepartmentCreatedBy")
+  updatedDepartments           TenantDepartment[]          @relation("DepartmentUpdatedBy")
+  departmentMemberships        TenantDepartmentMember[]    @relation("DepartmentMemberUser")
+  createdDepartmentMembers     TenantDepartmentMember[]    @relation("DepartmentMemberCreatedBy")
 
   @@unique([organizationId, email])
   @@index([organizationId, status])
@@ -3763,6 +3891,12 @@ model PolicyExecutionLog {
   explanation             Json
   /// Rendered explanation (fixed templates over codes, ids and integers).
   explanationText         String                  @map("explanation_text") @db.VarChar(2048)
+  /// Step 5.3 Q4: true when the recipients were decided differently (per-recipient evaluation).
+  recipientSplit          Boolean                 @default(false) @map("recipient_split")
+  /// Step 5.3 Q4: JSON array (≤ 200) of `{ rcptSeq, disposition, source, decisiveRuleRef,
+  /// reasonCodes }` when the evaluation ran per recipient; NULL for a message-level evaluation.
+  /// Sequence numbers, enums and codes only (never addresses).
+  recipientDecisions      Json?                   @map("recipient_decisions")
   /// policy_settings.generation read in the evaluation transaction (0 = no settings row).
   policyGeneration        BigInt                  @map("policy_generation") @db.UnsignedBigInt
   snapshotSha256          String                  @map("snapshot_sha256") @db.Char(64)
@@ -3772,7 +3906,7 @@ model PolicyExecutionLog {
   platformDefaultId       String                  @map("platform_default_id") @db.VarChar(32)
   /// `policy-dsl/1`.
   dslVersion              String                  @map("dsl_version") @db.VarChar(32)
-  /// `policy-eval/1`.
+  /// `policy-eval/1` (5.2) or `policy-eval/2` (5.3: per-recipient).
   evaluatorVersion        String                  @map("evaluator_version") @db.VarChar(32)
   /// `policy-input/1`.
   inputVersion            String                  @map("input_version") @db.VarChar(32)
@@ -4026,45 +4160,122 @@ model BounceEvent {
 // 3.8 Quarantine (not partitioned)
 // ---------------------------------------------------------------------------------------------
 
-/// One row per quarantined recipient. `message_id`, `recipient_id` and `policy_version_id`
-/// have no FK (the message tables are partitioned); `message_received_at` makes lookups prune.
+/// Quarantine entry (step 5.3 Q3, ADR-0046): one row per (message, lifecycle round, recipient),
+/// unique `(message_id, lifecycle_round, rcpt_seq)`. The SQL column `status` is the entry
+/// **state** of the design and the API.
+/// Writers (Q31): created by the policy-engine (evaluation transaction, adoption by the sweeper)
+/// and the api (manual quarantine); state changes by the api (user actions) and the policy-engine
+/// (executor, sweeper, supersede), always under the message lifecycle lock with a compare-and-set
+/// on `row_version` (lock order message → entries → approval requests).
+/// Content-free (§2.0 invariant 1): ids, enums, codes, integers, hashes, addresses already stored
+/// by earlier steps (recipient, envelope sender, header From) and the content-free policy
+/// explanation. `subject` (1.1) is RETIRED: never written from 5.3 on; a subject is read from
+/// `email_messages.subject` at response time only. The bytes stay in S3 (`eml_object_key`).
+/// `message_id`, `recipient_id`, `scan_id`, `policy_version_id` and `approval_request_id` have
+/// no FK (partitioned targets; the approval request FK would be a cycle).
 model QuarantineMessage {
-  id                BigInt           @id @default(autoincrement()) @db.UnsignedBigInt
-  publicId          String           @unique @default(uuid(7)) @map("public_id") @db.Char(36)
-  organizationId    BigInt           @map("organization_id") @db.UnsignedBigInt
-  messageId         BigInt           @map("message_id") @db.UnsignedBigInt
-  messageReceivedAt DateTime         @map("message_received_at") @db.DateTime(3)
-  recipientId       BigInt           @map("recipient_id") @db.UnsignedBigInt
-  recipientAddress  String           @map("recipient_address") @db.VarChar(320)
-  userId            BigInt?          @map("user_id") @db.UnsignedBigInt
-  reason            QuarantineReason
-  policyVersionId   BigInt?          @map("policy_version_id") @db.UnsignedBigInt
-  status            QuarantineStatus @default(quarantined)
-  envelopeFrom      String           @map("envelope_from") @db.VarChar(320)
-  /// Copied for list views.
-  subject           String?          @db.VarChar(998)
-  riskScore         Int?             @map("risk_score") @db.UnsignedSmallInt
-  emlObjectKey      String           @map("eml_object_key") @db.VarChar(512)
-  quarantinedAt     DateTime         @map("quarantined_at") @db.DateTime(3)
-  expiresAt         DateTime         @map("expires_at") @db.DateTime(3)
-  releasedAt        DateTime?        @map("released_at") @db.DateTime(3)
-  createdAt         DateTime         @default(now()) @map("created_at") @db.DateTime(3)
-  updatedAt         DateTime         @updatedAt @map("updated_at") @db.DateTime(3)
+  id                      BigInt                  @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId                String                  @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId          BigInt                  @map("organization_id") @db.UnsignedBigInt
+  messageId               BigInt                  @map("message_id") @db.UnsignedBigInt
+  messageReceivedAt       DateTime                @map("message_received_at") @db.DateTime(3)
+  /// email_messages.lifecycle_round of the evaluation that created the entry.
+  lifecycleRound          Int                     @default(0) @map("lifecycle_round") @db.UnsignedSmallInt
+  /// email_scans.id of the round; NULL for a parse-failure evaluation or an adoption without one.
+  scanId                  BigInt?                 @map("scan_id") @db.UnsignedBigInt
+  /// policy_execution_logs.evaluation_seq (= the round) of the deciding evaluation.
+  evaluationSeq           Int?                    @map("evaluation_seq") @db.UnsignedSmallInt
+  recipientId             BigInt                  @map("recipient_id") @db.UnsignedBigInt
+  /// email_recipients.rcpt_seq.
+  rcptSeq                 Int                     @default(0) @map("rcpt_seq") @db.UnsignedSmallInt
+  /// Lower-cased.
+  recipientAddress        String                  @map("recipient_address") @db.VarChar(320)
+  /// The organization's active user whose email equals the recipient (informational; self-service
+  /// scopes by address, Q15).
+  userId                  BigInt?                 @map("user_id") @db.UnsignedBigInt
+  direction               MessageDirection
+  kind                    QuarantineEntryKind
+  origin                  QuarantineOrigin
+  reason                  QuarantineReason
+  /// policy_versions.id of the decisive tenant rule's version (no FK).
+  policyVersionId         BigInt?                 @map("policy_version_id") @db.UnsignedBigInt
+  /// The entry state (Q3).
+  status                  QuarantineStatus        @default(held)
+  envelopeFrom            String                  @map("envelope_from") @db.VarChar(320)
+  headerFrom              String?                 @map("header_from") @db.VarChar(320)
+  /// RETIRED (step 5.3 §2.0): never written; kept only so no data is dropped.
+  subject                 String?                 @db.VarChar(998)
+  hasAttachments          Boolean                 @default(false) @map("has_attachments")
+  attachmentCount         Int                     @default(0) @map("attachment_count") @db.UnsignedSmallInt
+  sizeBytes               Int                     @default(0) @map("size_bytes") @db.UnsignedInt
+  /// Max over the round's risk revisions (5.1).
+  riskScore               Int?                    @map("risk_score") @db.UnsignedSmallInt
+  riskLevel               RiskLevel?              @map("risk_level")
+  recommendedAction       RiskAction?             @map("recommended_action")
+  riskVerdict             MessageVerdict?         @map("risk_verdict")
+  hasHardBlock            Boolean                 @default(false) @map("has_hard_block")
+  /// JSON array (≤ 9) of hard-block ids (`hb.*`).
+  hardBlocks              Json?                   @map("hard_blocks")
+  /// JSON array (≤ 32) of reason codes.
+  reasonCodes             Json?                   @map("reason_codes")
+  /// JSON array (≤ 16) of floor reasons.
+  floorReasons            Json?                   @map("floor_reasons")
+  primaryEngine           QuarantinePrimaryEngine @default(none) @map("primary_engine")
+  decisionSource          PolicyDecisionSource?   @map("decision_source")
+  decisivePolicyPublicId  String?                 @map("decisive_policy_public_id") @db.Char(36)
+  decisivePolicyVersionNo Int?                    @map("decisive_policy_version_no") @db.UnsignedInt
+  decisiveRuleId          String?                 @map("decisive_rule_id") @db.VarChar(48)
+  /// JSON array (≤ 24) of the evaluation's explanation lines `{ code, params }`.
+  explanation             Json?
+  /// The rendered policy explanation (≤ 2048; content-free by construction, 5.2 P10).
+  explanationText         String?                 @map("explanation_text") @db.VarChar(2048)
+  /// The ORIGINAL EML (`email_messages.eml_object_key`).
+  emlObjectKey            String                  @map("eml_object_key") @db.VarChar(512)
+  quarantinedAt           DateTime                @map("quarantined_at") @db.DateTime(3)
+  /// Fixed at creation (`computeExpiry`); a settings change applies to new entries.
+  expiresAt               DateTime                @map("expires_at") @db.DateTime(3)
+  stateChangedAt          DateTime                @map("state_changed_at") @db.DateTime(3)
+  releasedAt              DateTime?               @map("released_at") @db.DateTime(3)
+  /// Last operator decision (release, reject, delete, approval) on the entry.
+  decidedAt               DateTime?               @map("decided_at") @db.DateTime(3)
+  decidedByUserId         BigInt?                 @map("decided_by_user_id") @db.UnsignedBigInt
+  decidedByType           ActorType?              @map("decided_by_type")
+  /// Code of the terminal cause (e.g. `expired`, `superseded`, `rejected`); never free text.
+  terminalReason          String?                 @map("terminal_reason") @db.VarChar(64)
+  /// quarantine_approval_requests.id of the entry's current pending request (no FK: cycle).
+  approvalRequestId       BigInt?                 @map("approval_request_id") @db.UnsignedBigInt
+  /// Set by the purge sweeper when the message's objects were deleted (Q17).
+  objectPurgedAt          DateTime?               @map("object_purged_at") @db.DateTime(3)
+  /// Compare-and-set counter of every state change.
+  rowVersion              Int                     @default(1) @map("row_version") @db.UnsignedInt
+  createdAt               DateTime                @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt               DateTime                @updatedAt @map("updated_at") @db.DateTime(3)
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  user         User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+  organization  Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  user          User?        @relation("QuarantineEntryUser", fields: [userId], references: [id], onDelete: SetNull)
+  decidedByUser User?        @relation("QuarantineEntryDecidedBy", fields: [decidedByUserId], references: [id], onDelete: SetNull)
 
-  actions     QuarantineAction[]
-  releaseLogs QuarantineReleaseLog[]
+  actions          QuarantineAction[]
+  releaseLogs      QuarantineReleaseLog[]
+  approvalRequests QuarantineApprovalRequest[]
+  downloadGrants   QuarantineDownloadGrant[]
 
-  @@unique([messageId, recipientId])
-  @@index([organizationId, status, quarantinedAt])
-  @@index([organizationId, recipientAddress(length: 100), status])
+  @@unique([messageId, lifecycleRound, rcptSeq])
+  @@index([organizationId, quarantinedAt, id])
+  @@index([organizationId, status, quarantinedAt, id])
+  @@index([organizationId, recipientAddress(length: 100), quarantinedAt, id])
+  @@index([organizationId, envelopeFrom(length: 100), quarantinedAt])
+  @@index([organizationId, reason, quarantinedAt])
+  @@index([organizationId, decisivePolicyPublicId, quarantinedAt])
+  @@index([organizationId, primaryEngine, quarantinedAt])
   @@index([status, expiresAt])
+  @@index([status, stateChangedAt])
   @@map("quarantine_messages")
 }
 
-/// Append-only.
+/// Append-only audit of every action on an entry (step 5.3 Q21): user actions (api) and system
+/// actions (policy-engine: creation, executor outcomes, expiry, adoption, supersede, purge).
+/// `reason` = the operator's typed reason (≤ 512); `details` = ids, codes and counts only.
 model QuarantineAction {
   id                  BigInt               @id @default(autoincrement()) @db.UnsignedBigInt
   organizationId      BigInt               @map("organization_id") @db.UnsignedBigInt
@@ -4072,7 +4283,16 @@ model QuarantineAction {
   action              QuarantineActionType
   actorType           ActorType            @map("actor_type")
   actorUserId         BigInt?              @map("actor_user_id") @db.UnsignedBigInt
+  /// Public id of the acting user or API key; NULL for system actions.
+  actorId             String?              @map("actor_id") @db.VarChar(64)
   reason              String?              @db.VarChar(512)
+  /// Outcome code (e.g. `queued`, `approval_required`, `refused`).
+  result              String?              @db.VarChar(64)
+  details             Json?
+  /// quarantine_release_logs.id / quarantine_approval_requests.id concerned (no FK).
+  releaseLogId        BigInt?              @map("release_log_id") @db.UnsignedBigInt
+  approvalRequestId   BigInt?              @map("approval_request_id") @db.UnsignedBigInt
+  /// Hash of the request's Idempotency-Key (unique per organization).
   idempotencyKey      String?              @map("idempotency_key") @db.VarChar(64)
   createdAt           DateTime             @default(now()) @map("created_at") @db.DateTime(3)
 
@@ -4084,18 +4304,42 @@ model QuarantineAction {
 
   @@unique([organizationId, idempotencyKey])
   @@index([quarantineMessageId, createdAt])
+  @@index([organizationId, createdAt])
   @@map("quarantine_actions")
 }
 
+/// One entry's release attempt (step 5.3 Q13). The api inserts it (`pending`, `precheck`); the
+/// policy-engine executor completes it (`revalidation`, delivered object, delivery sequence).
+/// `release_public_id` groups the rows of one release request (unique per entry). JSON columns
+/// hold the content-free 13.3 summary (dispositions, codes, levels, hashes, ids).
 /// `revalidation_scan_id` and `delivery_id` have no FK (partitioned targets).
 model QuarantineReleaseLog {
   id                  BigInt                  @id @default(autoincrement()) @db.UnsignedBigInt
   organizationId      BigInt                  @map("organization_id") @db.UnsignedBigInt
   quarantineMessageId BigInt                  @map("quarantine_message_id") @db.UnsignedBigInt
   actionId            BigInt                  @unique @map("action_id") @db.UnsignedBigInt
+  releasePublicId     String                  @map("release_public_id") @db.Char(36)
+  mode                QuarantineReleaseMode
+  /// quarantine_approval_requests.id when `mode = approved` (no FK).
+  approvalRequestId   BigInt?                 @map("approval_request_id") @db.UnsignedBigInt
+  requestedByType     ActorType               @map("requested_by_type")
+  /// Public id of the requesting user or API key; NULL for the system.
+  requestedById       String?                 @map("requested_by_id") @db.VarChar(64)
   releasedTo          String                  @map("released_to") @db.VarChar(320)
   revalidationScanId  BigInt?                 @map("revalidation_scan_id") @db.UnsignedBigInt
   revalidationVerdict MessageVerdict?         @map("revalidation_verdict")
+  /// The api's advisory pre-check (13.1).
+  precheck            Json?
+  /// The executor's authoritative re-validation (13.3 summary, reasons, staleness).
+  revalidation        Json?
+  deliveredObject     PolicyDeliveredObject?  @map("delivered_object")
+  /// S3 key of the delivered object (release policy copy or base).
+  objectKey           String?                 @map("object_key") @db.VarChar(512)
+  deliverySeq         Int?                    @map("delivery_seq") @db.UnsignedInt
+  /// JSON array of the `mail.delivery.approved.v1` event ids written.
+  approvalEventIds    Json?                   @map("approval_event_ids")
+  lifecycleRoundAfter Int?                    @map("lifecycle_round_after") @db.UnsignedSmallInt
+  blockedReason       String?                 @map("blocked_reason") @db.VarChar(64)
   deliveryId          BigInt?                 @map("delivery_id") @db.UnsignedBigInt
   status              QuarantineReleaseStatus @default(pending)
   completedAt         DateTime?               @map("completed_at") @db.DateTime(3)
@@ -4106,8 +4350,182 @@ model QuarantineReleaseLog {
   quarantineMessage QuarantineMessage @relation(fields: [quarantineMessageId], references: [id], onDelete: Cascade)
   action            QuarantineAction  @relation(fields: [actionId], references: [id], onDelete: Restrict)
 
+  @@unique([quarantineMessageId, releasePublicId])
   @@index([organizationId, createdAt])
+  @@index([releasePublicId])
   @@map("quarantine_release_logs")
+}
+
+/// The one approval model (step 5.3 Q14, ADR-0047): `policy_review` (REQUIRE_APPROVAL; created by
+/// the policy-engine), `release_approval` (a release with approval reasons; api or executor),
+/// `release_request` (a user or end-user request; api). Decisions by the api (separation of
+/// duties: decider ≠ requester ≠ recipient); expiry by the policy-engine sweeper. One `pending`
+/// request per entry (entry `approval_request_id`, enforced under the entry lock).
+/// Content-free: `approval_reasons` / `approved_reasons` are JSON arrays of reason codes;
+/// `request_reason` / `decision_reason` are the operator's typed reasons.
+/// `requested_by_api_key_id` has no FK (the trail survives the key).
+model QuarantineApprovalRequest {
+  id                     BigInt                   @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId               String                   @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId         BigInt                   @map("organization_id") @db.UnsignedBigInt
+  quarantineMessageId    BigInt                   @map("quarantine_message_id") @db.UnsignedBigInt
+  kind                   QuarantineApprovalKind
+  status                 QuarantineApprovalStatus @default(pending)
+  approvalReasons        Json                     @map("approval_reasons")
+  approvedReasons        Json?                    @map("approved_reasons")
+  requestedByType        ActorType                @map("requested_by_type")
+  requestedByUserId      BigInt?                  @map("requested_by_user_id") @db.UnsignedBigInt
+  requestedByApiKeyId    BigInt?                  @map("requested_by_api_key_id") @db.UnsignedBigInt
+  requestReason          String?                  @map("request_reason") @db.VarChar(512)
+  decidedByUserId        BigInt?                  @map("decided_by_user_id") @db.UnsignedBigInt
+  decisionReason         String?                  @map("decision_reason") @db.VarChar(512)
+  /// Hex SHA-256 of the decider's permission set at decision time.
+  deciderPermissionsHash String?                  @map("decider_permissions_hash") @db.Char(64)
+  expiresAt              DateTime                 @map("expires_at") @db.DateTime(3)
+  decidedAt              DateTime?                @map("decided_at") @db.DateTime(3)
+  rowVersion             Int                      @default(1) @map("row_version") @db.UnsignedInt
+  createdAt              DateTime                 @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt              DateTime                 @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization      Organization      @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  quarantineMessage QuarantineMessage @relation(fields: [quarantineMessageId], references: [id], onDelete: Cascade)
+  requestedByUser   User?             @relation("QuarantineApprovalRequestedBy", fields: [requestedByUserId], references: [id], onDelete: SetNull)
+  decidedByUser     User?             @relation("QuarantineApprovalDecidedBy", fields: [decidedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, status, createdAt])
+  @@index([status, expiresAt])
+  @@index([quarantineMessageId, createdAt])
+  @@map("quarantine_approval_requests")
+}
+
+/// Single-use download grant (step 5.3 Q12, ADR-0048). Written and consumed by the api only
+/// (`UPDATE … SET consumed_at WHERE jti AND organization_id AND user_id AND consumed_at IS NULL
+/// AND expires_at > now`). The token itself is never stored (only its `jti`). Deleted by the
+/// policy-engine sweeper one day after expiry.
+model QuarantineDownloadGrant {
+  id                  BigInt                   @id @default(autoincrement()) @db.UnsignedBigInt
+  /// UUIDv7 token id.
+  jti                 String                   @unique @db.Char(36)
+  organizationId      BigInt                   @map("organization_id") @db.UnsignedBigInt
+  userId              BigInt                   @map("user_id") @db.UnsignedBigInt
+  quarantineMessageId BigInt                   @map("quarantine_message_id") @db.UnsignedBigInt
+  object              QuarantineDownloadObject
+  /// email_attachments.part_index for `object = attachment`.
+  partIndex           Int?                     @map("part_index") @db.UnsignedSmallInt
+  expiresAt           DateTime                 @map("expires_at") @db.DateTime(3)
+  consumedAt          DateTime?                @map("consumed_at") @db.DateTime(3)
+  sourceIp            String?                  @map("source_ip") @db.VarChar(45)
+  createdAt           DateTime                 @default(now()) @map("created_at") @db.DateTime(3)
+
+  organization      Organization      @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  user              User              @relation("QuarantineDownloadGrantUser", fields: [userId], references: [id], onDelete: Cascade)
+  quarantineMessage QuarantineMessage @relation(fields: [quarantineMessageId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@map("quarantine_download_grants")
+}
+
+/// Tenant quarantine settings (step 5.3 Q24): strict `quarantineSettingsSchema` of
+/// @email-gateway/quarantine, every key optional (`{}` = defaults). Written by the api only
+/// (`PUT /quarantine/settings`, CAS on `row_version`). No message data.
+model QuarantineSettings {
+  id              BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId  BigInt   @unique @map("organization_id") @db.UnsignedBigInt
+  settings        Json
+  /// Hex SHA-256 of the canonical settings JSON.
+  settingsSha256  String   @map("settings_sha256") @db.Char(64)
+  rowVersion      Int      @default(1) @map("row_version") @db.UnsignedInt
+  updatedByUserId BigInt?  @map("updated_by_user_id") @db.UnsignedBigInt
+  createdAt       DateTime @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization  Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  updatedByUser User?        @relation("QuarantineSettingsUpdatedBy", fields: [updatedByUserId], references: [id], onDelete: SetNull)
+
+  @@map("quarantine_settings")
+}
+
+/// End-user quarantine preferences (step 5.3 Q15, Q20). Written by the api only.
+model QuarantineUserPreference {
+  id             BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId BigInt   @map("organization_id") @db.UnsignedBigInt
+  userId         BigInt   @unique @map("user_id") @db.UnsignedBigInt
+  digestOptOut   Boolean  @default(false) @map("digest_opt_out")
+  createdAt      DateTime @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  user         User         @relation("QuarantineUserPreferenceUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("quarantine_user_preferences")
+}
+
+/// Object purge request of one message's S3 objects (step 5.3 Q17): inserted by the api (delete)
+/// and the policy-engine (expiry), processed by the policy-engine sweeper, which re-checks legal
+/// hold, retention, archive pending and shared-object rules at purge time. `reason` is a code
+/// (`legal_hold`, `retention`, `archive_pending`, `shared`); never content. `message_id` has no FK.
+model QuarantineObjectPurge {
+  id                BigInt                @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId    BigInt                @map("organization_id") @db.UnsignedBigInt
+  messageId         BigInt                @map("message_id") @db.UnsignedBigInt
+  messageReceivedAt DateTime              @map("message_received_at") @db.DateTime(3)
+  status            QuarantinePurgeStatus @default(pending)
+  reason            String?               @db.VarChar(64)
+  purgeAfter        DateTime              @map("purge_after") @db.DateTime(3)
+  attempts          Int                   @default(0) @db.UnsignedSmallInt
+  lastErrorCode     String?               @map("last_error_code") @db.VarChar(64)
+  purgedAt          DateTime?             @map("purged_at") @db.DateTime(3)
+  createdAt         DateTime              @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt         DateTime              @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  @@unique([messageId, messageReceivedAt])
+  @@index([status, purgeAfter])
+  @@map("quarantine_object_purges")
+}
+
+/// One digest or admin-alert run per organization and schedule instant (step 5.3 Q20; ≤ 1 per
+/// hour, coalesced). Written by the policy-engine scheduler only. Kept 90 days (with its digests).
+model QuarantineDigestRun {
+  id             BigInt               @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId BigInt               @map("organization_id") @db.UnsignedBigInt
+  kind           QuarantineDigestKind
+  scheduledFor   DateTime             @map("scheduled_for") @db.DateTime(3)
+  windowFrom     DateTime             @map("window_from") @db.DateTime(3)
+  usersTotal     Int                  @default(0) @map("users_total") @db.UnsignedInt
+  usersDone      Int                  @default(0) @map("users_done") @db.UnsignedInt
+  completedAt    DateTime?            @map("completed_at") @db.DateTime(3)
+  createdAt      DateTime             @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt      DateTime             @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  digests QuarantineDigest[]
+
+  @@unique([organizationId, kind, scheduledFor])
+  @@index([createdAt])
+  @@map("quarantine_digest_runs")
+}
+
+/// One user's digest of a run (step 5.3 Q20): ids and a count only; the notification-worker reads
+/// the entries at send time. `event_id` = the outbox event id. Written by the policy-engine.
+model QuarantineDigest {
+  id             BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId       String   @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  runId          BigInt   @map("run_id") @db.UnsignedBigInt
+  organizationId BigInt   @map("organization_id") @db.UnsignedBigInt
+  userId         BigInt   @map("user_id") @db.UnsignedBigInt
+  entryCount     Int      @default(0) @map("entry_count") @db.UnsignedInt
+  eventId        String   @map("event_id") @db.Char(36)
+  createdAt      DateTime @default(now()) @map("created_at") @db.DateTime(3)
+
+  run          QuarantineDigestRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  organization Organization        @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  user         User                @relation("QuarantineDigestUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, userId])
+  @@map("quarantine_digests")
 }
 
 // ---------------------------------------------------------------------------------------------

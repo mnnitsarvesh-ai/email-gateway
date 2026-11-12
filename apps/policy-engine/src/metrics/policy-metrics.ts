@@ -24,7 +24,10 @@ export type PolicyRead =
   | 'departments'
   | 'members'
   | 'users'
-  | 'lifecycle';
+  | 'lifecycle'
+  | 'parse_structure'
+  | 'message_urls'
+  | 'url_settings';
 
 /**
  * The policy-engine's series (step 5.2 P24; names fixed by the design, labels bounded enums,
@@ -42,6 +45,9 @@ export class PolicyMetrics {
   readonly snapshotCache: Counter<'result'>;
   readonly snapshotInvalidVersions: Counter;
   readonly copies: Counter<'result'>;
+  readonly urlRewrites: Counter<'result'>;
+  readonly bodyBanners: Counter<'result'>;
+  readonly recipientSplit: Counter<'result'>;
   readonly riskMissing: Counter;
   readonly lifecycle: LifecycleMetrics;
 
@@ -97,7 +103,22 @@ export class PolicyMetrics {
     );
     this.copies = metrics.counter(
       'policy_copy_total',
-      'Policy copies (header edits of the delivered object): written, or refused as too_large / header_too_large (TAG/WARN recorded)',
+      'Policy copies of the delivered object (header edits, WARN banner, policy URL rewrite, release header): written, or refused as too_large / header_too_large (TAG/WARN/banner recorded)',
+      ['result'],
+    );
+    this.urlRewrites = metrics.counter(
+      'policy_url_rewrite_total',
+      'URL_REWRITE after the scan (step 5.3 Q23): rewritten, a skip reason of the policy rewrite (signed_smime, too_large, no_urls, …), disabled (POLICY_URL_REWRITE_ENABLED=false) or not_eligible (the round skip cannot be fixed by the policy)',
+      ['result'],
+    );
+    this.bodyBanners = metrics.counter(
+      'policy_body_banner_total',
+      'WARN body banners of delivered copies (step 5.3 Q22): applied or skipped_signed / skipped_encrypted / skipped_too_large / skipped_no_text_part / skipped_part',
+      ['result'],
+    );
+    this.recipientSplit = metrics.counter(
+      'policy_recipient_split_total',
+      'Per-recipient evaluation of committed evaluations (step 5.3 Q4): split, uniform, not_scoped, disabled, too_many',
       ['result'],
     );
     this.riskMissing = metrics.counter(

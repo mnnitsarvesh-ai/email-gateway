@@ -15,7 +15,9 @@ import { findEdge, LIFECYCLE_REASON_CODES, TRANSITIONS } from './transitions';
  * The L3 table of the design, written out (edge, from, to, roles, reasons, new round, producer),
  * with step 4.1's changes: E4 (`persisted → approved`, dev pass-through) is retired and E27
  * (`scanned → approved`) added (docs/plan/steps/09-rspamd.md S15); step 5.2 retires E27 as well
- * (docs/plan/steps/16-policy-engine.md P14, ADR-0044).
+ * (docs/plan/steps/16-policy-engine.md P14, ADR-0044); step 5.3 (docs/plan/steps/17-quarantine.md
+ * Q5, ADR-0046 decision 4) adds `policy_partial` to E10, the role `quarantine` with
+ * `quarantine_expired` to E26, and the edges E28 and E29.
  */
 const RETIRED_EDGE_IDS = ['E4', 'E27'];
 /** Kept for history rows written before the retirements (no edge accepts them). */
@@ -30,7 +32,7 @@ E6  scanning scanned scanner scan_complete - 4.x
 E7  scanning scan_failed scanner scan_error,scan_timeout,eml_unavailable - 4.x
 E8  scanned policy_evaluated policy policy_decided - 5.2
 E9  scan_failed policy_evaluated policy scan_failed_fail_safe - 5.2
-E10 policy_evaluated approved policy policy_deliver,policy_tag - 5.2
+E10 policy_evaluated approved policy policy_deliver,policy_tag,policy_partial - 5.2
 E11 policy_evaluated quarantined policy policy_quarantine - 5.2
 E12 policy_evaluated held_for_review policy policy_hold - 5.2
 E13 policy_evaluated rejected policy policy_discard,policy_reject - 5.2
@@ -46,11 +48,20 @@ E22 delivery_retry delivery_pending delivery,recovery delivery_requeued - 3.3
 E23 delivery_pending,delivery_retry delivered delivery,recovery delivery_complete,delivery_partial - 3.3
 E24 delivery_pending,delivery_retry rejected delivery,recovery delivery_failed - 3.3
 E25 delivered,rejected archived archive archived - 8.1
-E26 persisted,scanning,scanned,scan_failed,policy_evaluated,approved,quarantined,held_for_review,delivery_pending,delivery_retry expired sweeper deadline_exceeded - 3.3
+E26 persisted,scanning,scanned,scan_failed,policy_evaluated,approved,quarantined,held_for_review,delivery_pending,delivery_retry expired sweeper,quarantine deadline_exceeded,quarantine_expired - 3.3
+E28 delivered,rejected,expired approved quarantine quarantine_partial_release yes 5.3
+E29 rejected quarantined quarantine manual_quarantine - 5.3
 `;
+/** Role/reason pairings (`reasonRoles`) of the table. */
+const REASON_ROLES: Record<string, Record<string, string[]>> = {
+  // Step 4.2 A13: E19 pairs each rescan reason with one role.
+  E19: { admin_rescan: ['operator'], signature_rescan: ['scanner'] },
+  // Step 5.3 Q19: the lifecycle sweeper's backstop vs the quarantine sweeper's expiry.
+  E26: { deadline_exceeded: ['sweeper'], quarantine_expired: ['quarantine'] },
+};
 
 describe('TRANSITIONS', () => {
-  it('is the L3 table verbatim (E1–E26) without the retired E4 (E27 of step 4.1 retired by 5.2)', () => {
+  it('is the L3 table verbatim (E1–E26, E28, E29) without the retired E4 and E27', () => {
     const expected = L3.trim()
       .split('\n')
       .map((line) => {
@@ -61,10 +72,7 @@ describe('TRANSITIONS', () => {
           to,
           roles: roles!.split(','),
           reasons: reasons!.split(','),
-          // Step 4.2 A13: E19 pairs each rescan reason with one role.
-          ...(id === 'E19'
-            ? { reasonRoles: { admin_rescan: ['operator'], signature_rescan: ['scanner'] } }
-            : {}),
+          ...(REASON_ROLES[id!] ? { reasonRoles: REASON_ROLES[id!] } : {}),
           ...(round === 'yes' ? { newRound: true } : {}),
           producedBy,
         };
@@ -98,22 +106,33 @@ describe('TRANSITIONS', () => {
       }
     }
     // Ids are E1, E2, … in order; a retired id (E4, E27) is never reused.
-    const ids = Array.from({ length: 27 }, (_, i) => `E${i + 1}`).filter(
+    const ids = Array.from({ length: 29 }, (_, i) => `E${i + 1}`).filter(
       (id) => !RETIRED_EDGE_IDS.includes(id),
     );
     expect(TRANSITIONS.map((e) => e.id)).toEqual(ids);
   });
 
-  it('has no edge out of archived; expired leads only to scanning; delivered/rejected only to archived', () => {
+  it('has no edge out of archived; final states leave only by rescan, archive or a quarantine role (5.3)', () => {
     const out = (state: MessageState) =>
       TRANSITIONS.filter((e) => e.from.includes(state)).map((e) => e.to);
     expect(out('archived')).toEqual([]);
-    expect(out('expired')).toEqual(['scanning']);
-    expect(out('delivered')).toEqual(['archived']);
-    expect(out('rejected')).toEqual(['archived']);
+    expect(out('expired')).toEqual(['scanning', 'approved']);
+    expect(out('delivered')).toEqual(['archived', 'approved']);
+    expect(out('rejected')).toEqual(['archived', 'approved', 'quarantined']);
+    // Automatic processing never leaves a final state: the only edges out of one besides the
+    // archive (8.1) and the operator/scanner rescan (E19) belong to the quarantine role (E28,
+    // E29: explicit operator-caused re-entries, ADR-0046).
+    for (const edge of TRANSITIONS) {
+      if (!edge.from.some((f) => f !== null && FINAL_STATES.includes(f))) continue;
+      if (['E19', 'E25'].includes(edge.id)) continue;
+      expect([...edge.roles], edge.id).toEqual(['quarantine']);
+    }
+    expect(findEdge('rejected', 'quarantined')?.id).toBe('E29');
+    expect(findEdge('quarantined', 'approved')?.id).toBe('E14');
+    expect(findEdge('delivered', 'approved')?.id).toBe('E28');
   });
 
-  it('approves only through policy (E10) and the operator release (E14/E15); E4 and E27 retired (step 5.2)', () => {
+  it('approves only through policy (E10), the release (E14/E15) and the partial release (E28); E4 and E27 retired', () => {
     expect(TRANSITIONS.some((e) => e.roles.includes('dev_passthrough'))).toBe(false);
     expect(TRANSITIONS.some((e) => e.reasons.includes('dev_passthrough'))).toBe(false);
     expect(TRANSITIONS.some((e) => e.id === 'E4' || e.id === 'E27')).toBe(false);
@@ -125,6 +144,7 @@ describe('TRANSITIONS', () => {
       ['E10', ['policy_evaluated'], ['policy']],
       ['E14', ['quarantined'], ['operator', 'quarantine']],
       ['E15', ['held_for_review'], ['operator', 'quarantine']],
+      ['E28', ['delivered', 'rejected', 'expired'], ['quarantine']],
     ]);
     // The policy edges (E5, E8–E13) are produced by the policy-engine from step 5.2 on.
     for (const id of ['E5', 'E8', 'E9', 'E10', 'E11', 'E12', 'E13']) {
@@ -139,7 +159,7 @@ describe('TRANSITIONS', () => {
 
   it('opens new rounds only for operator/quarantine actors, and the scanner for signature rescans', () => {
     const roundEdges = TRANSITIONS.filter((e) => e.newRound);
-    expect(roundEdges.map((e) => e.id)).toEqual(['E14', 'E15', 'E19']);
+    expect(roundEdges.map((e) => e.id)).toEqual(['E14', 'E15', 'E19', 'E28']);
     for (const edge of roundEdges) {
       for (const role of edge.roles) {
         if (edge.id === 'E19' && role === 'scanner') continue;
@@ -156,13 +176,32 @@ describe('TRANSITIONS', () => {
 
   it('lists every reason of an edge in its reasonRoles, with roles of the edge only', () => {
     const paired = TRANSITIONS.filter((e) => e.reasonRoles !== undefined);
-    expect(paired.map((e) => e.id)).toEqual(['E19']);
+    expect(paired.map((e) => e.id)).toEqual(['E19', 'E26']);
     for (const edge of paired) {
       expect(Object.keys(edge.reasonRoles!).sort()).toEqual([...edge.reasons].sort());
       const used = new Set(Object.values(edge.reasonRoles!).flat());
       expect([...used].sort()).toEqual([...edge.roles].sort());
     }
     expect(LIFECYCLE_REASON_CODES).toContain('signature_rescan');
+  });
+
+  it('gives the 5.3 quarantine edges their producer and appends the 5.3 reason codes', () => {
+    for (const id of ['E16', 'E17', 'E18', 'E28', 'E29']) {
+      const edge = TRANSITIONS.find((e) => e.id === id)!;
+      expect(edge.roles, id).toEqual(['quarantine']);
+      expect(edge.producedBy, id).toBe('5.3');
+    }
+    expect(TRANSITIONS.find((e) => e.id === 'E29')!.newRound).toBeUndefined();
+    // Appended: the step 5.2 codes keep their positions.
+    expect(LIFECYCLE_REASON_CODES.slice(-4)).toEqual([
+      'policy_partial',
+      'quarantine_partial_release',
+      'manual_quarantine',
+      'quarantine_expired',
+    ]);
+    expect(LIFECYCLE_REASON_CODES.indexOf('lifecycle_backfill')).toBe(
+      LIFECYCLE_REASON_CODES.length - 5,
+    );
   });
 
   it('reaches every state from creation and every non-final state reaches a final state', () => {

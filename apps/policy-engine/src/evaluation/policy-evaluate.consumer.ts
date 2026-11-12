@@ -12,10 +12,12 @@ import type { PrismaClient } from '@email-gateway/database';
 import { EventTypes, type RetryPolicy } from '@email-gateway/event-contracts';
 import type { Logger } from '@email-gateway/logger';
 import type { PolicyMetrics } from '../metrics/policy-metrics';
+import type { QuarantineMetrics } from '../metrics/quarantine-metrics';
 import {
   type EvaluationOutcome,
   POLICY_EVALUATE_CONSUMER,
   type PolicyEvaluationService,
+  splitMetricLabel,
   type TriggerPayload,
 } from './evaluation.service';
 
@@ -56,7 +58,11 @@ export function createPolicyEvaluateFeed(options: {
 }
 
 /** Counts a committed outcome (never inside the transaction: a rollback would over-count). */
-export function recordOutcome(metrics: PolicyMetrics, outcome: EvaluationOutcome): void {
+export function recordOutcome(
+  metrics: PolicyMetrics,
+  outcome: EvaluationOutcome,
+  quarantine?: QuarantineMetrics,
+): void {
   if (outcome.status === 'skipped') {
     metrics.lifecycleSkipped.inc({ result: outcome.result });
     return;
@@ -79,6 +85,22 @@ export function recordOutcome(metrics: PolicyMetrics, outcome: EvaluationOutcome
   if (outcome.invalidVersions > 0) metrics.snapshotInvalidVersions.inc(outcome.invalidVersions);
   if (outcome.copy !== null) metrics.copies.inc({ result: outcome.copy });
   if (outcome.riskMissing) metrics.riskMissing.inc();
+  metrics.recipientSplit.inc({ result: splitMetricLabel(outcome.split) });
+  if (outcome.urlRewrite !== null) metrics.urlRewrites.inc({ result: outcome.urlRewrite });
+  if (outcome.banner !== null) metrics.bodyBanners.inc({ result: outcome.banner });
+  if (quarantine === undefined) return;
+  for (const e of outcome.entries) {
+    quarantine.entriesCreated.inc({
+      origin: 'policy',
+      kind: e.kind,
+      reason: e.reason,
+      direction: e.direction,
+    });
+  }
+  if (outcome.superseded > 0) quarantine.superseded.inc(outcome.superseded);
+  if (outcome.notifications > 0) {
+    quarantine.notifications.inc({ kind: 'approval_requested' }, outcome.notifications);
+  }
 }
 
 /**
@@ -99,6 +121,7 @@ export class PolicyEvaluateConsumer {
     private readonly metrics: PolicyMetrics,
     txTimeoutMs: number,
     consumer: string = POLICY_EVALUATE_CONSUMER,
+    private readonly quarantine?: QuarantineMetrics,
   ) {
     const inner = processOnceHandler<TriggerPayload>(
       prisma,
@@ -113,7 +136,9 @@ export class PolicyEvaluateConsumer {
       try {
         const handled = await inner(event);
         const outcome = this.pending.get(event.eventId);
-        if (handled === 'handled' && outcome !== undefined) recordOutcome(this.metrics, outcome);
+        if (handled === 'handled' && outcome !== undefined) {
+          recordOutcome(this.metrics, outcome, this.quarantine);
+        }
         return handled;
       } finally {
         this.pending.delete(event.eventId);

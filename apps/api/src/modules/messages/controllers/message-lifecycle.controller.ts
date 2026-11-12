@@ -148,8 +148,11 @@ export class MessageLifecycleController {
       '`expired`) and publishes `mail.message.rescan_requested.v1` to the scan stages: every ' +
       'registered scan engine (step 4.1: Rspamd) scans the new round and the message ends ' +
       '`scanned` or `scan_failed` with that round; results of earlier rounds stay unchanged ' +
-      '(`GET /messages/{messageId}/scans`). Audited as `message.rescan_requested`. Requires ' +
-      'the Idempotency-Key header.',
+      '(`GET /messages/{messageId}/scans`). Audited as `message.rescan_requested` (with ' +
+      '`quarantineEntriesSuperseded`). Step 5.3: the new round supersedes the open quarantine ' +
+      'entries and re-decides their recipients (a clean round delivers them), so a rescan from ' +
+      '`quarantined` or `held_for_review` also requires `quarantine:release` (`403 ' +
+      'quarantine_rescan_forbidden`, nothing written). Requires the Idempotency-Key header.',
   })
   @ApiMessageId()
   @ApiIdempotencyKey()
@@ -175,20 +178,24 @@ export class MessageLifecycleController {
   @RequirePermissions(QUARANTINE_RELEASE)
   @HttpCode(HttpStatus.ACCEPTED)
   @ApiOperation({
-    summary: 'Release a quarantined or held message',
+    summary: 'Release a quarantined or held message (replaced by the quarantine workflow)',
     description:
-      'Moves a `quarantined` or `held_for_review` message to `approved` with a new lifecycle ' +
-      'round and approves its `pending` and `quarantined` recipients for delivery (released ' +
-      '`quarantined` recipients become `pending`) ' +
-      '(`mail.delivery.approved.v1`, `source: quarantine_release`, `deliverySeq` = highest + 1, ' +
-      'at most 1000 recipients per approval); the delivery-worker then delivers it. Messages ' +
-      'with per-recipient quarantine entries must go through the quarantine workflow. Audited ' +
-      'as `message.quarantine_released`. Requires the Idempotency-Key header.',
+      'Step 5.3 (Q30): quarantined and held messages are released per recipient through the ' +
+      'quarantine workflow, which re-validates every entry against the latest scan round and ' +
+      'the current policy and requires a second person for hard blocks, engine failures, DLP ' +
+      'holds and policy rejections (`POST /quarantine/entries/{entryId}/release`, approvals ' +
+      'under `/quarantine/approvals`). This route stays for compatibility and answers `409 ' +
+      'quarantine_workflow_required` (with the number of entries and the quarantine route) for ' +
+      'every `quarantined` or `held_for_review` message; other states and stale versions keep ' +
+      'their conflicts. Nothing is written. Requires the Idempotency-Key header.',
   })
   @ApiMessageId()
   @ApiIdempotencyKey()
   @ApiBody({ schema: zodToOpenApi(LifecycleOperationBodySchema, { io: 'input' }) })
-  @ApiLifecycleAccepted(ReleaseResponseSchema, 'Released (or the stored response replayed)')
+  @ApiLifecycleAccepted(
+    ReleaseResponseSchema,
+    'Only the stored response of a release made before step 5.3, replayed under its Idempotency-Key',
+  )
   @ApiLifecycleWriteErrors(RELEASE_CONFLICTS)
   async release(
     @CurrentPrincipal() principal: Principal,

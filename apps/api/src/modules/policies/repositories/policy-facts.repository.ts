@@ -79,6 +79,9 @@ export const evaluationSelect = {
   tzdataVersion: true,
   durationUs: true,
   evaluatedAt: true,
+  // Step 5.3 (Q4): per-recipient decisions of the round (null/false for 5.2 rows).
+  recipientSplit: true,
+  recipientDecisions: true,
 } satisfies Prisma.PolicyExecutionLogSelect;
 export type EvaluationRow = Prisma.PolicyExecutionLogGetPayload<{
   select: typeof evaluationSelect;

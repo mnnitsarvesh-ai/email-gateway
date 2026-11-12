@@ -1,6 +1,6 @@
 # notification-worker
 
-Notification Service. **Step 5.2** ([design](../../docs/plan/steps/16-policy-engine.md) P15, P24, P25; runbook [policy-notifications](../../docs/runbooks/policy-notifications.md)) gives it its first job: the **policy notices** requested by the policy-engine — ALERT actions (to the organization's policy administrators) and sender non-delivery notices of rejected outbound/internal mail. Digests, webhooks, DLP incident notifications and user preferences are step 6.2.
+Notification Service. **Step 5.2** ([design](../../docs/plan/steps/16-policy-engine.md) P15, P24, P25; runbook [policy-notifications](../../docs/runbooks/policy-notifications.md)) gives it its first job: the **policy notices** requested by the policy-engine — ALERT actions (to the organization's policy administrators) and sender non-delivery notices of rejected outbound/internal mail. **Step 5.3** ([design](../../docs/plan/steps/17-quarantine.md) Q16, Q20) adds the **quarantine notices** (`mail.quarantine.notification_requested.v1` on the same queue and ledger): per-user digests, approval requests and decisions, blocked releases, rate-bounded admin alerts and sender notices of rejected outbound/internal entries (`src/notifications/quarantine-notification.handler.ts`, `quarantine-reads.ts`, `quarantine-templates.ts`; metric `notification_quarantine_messages_total{kind,result}`; Message-ID `<quarantine-notice.<eventId>@<From domain>>`). Webhooks, DLP incident notifications and a preference center are step 6.2.
 
 ## Run and test
 

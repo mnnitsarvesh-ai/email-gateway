@@ -30,13 +30,26 @@ export interface RenderedNotice {
   text: string;
 }
 
-/** Printable, single-line, bounded text (no CR/LF/control characters, no `<`/`>`). */
+/**
+ * Printable, single-line, bounded text (no CR/LF/control characters, no bidi controls or invisible
+ * characters, no `<`/`>`).
+ */
 export function safeText(value: string | null | undefined, max = 128): string {
   if (value === null || value === undefined) return '';
   let out = '';
   for (const ch of value.normalize('NFC')) {
     const code = ch.codePointAt(0)!;
     if (code < 0x20 || code === 0x7f || (code >= 0x80 && code < 0xa0)) continue;
+    // Bidi embeddings/overrides/isolates and invisible characters (step 5.3 hardening, Q20).
+    if (
+      (code >= 0x202a && code <= 0x202e) ||
+      (code >= 0x2066 && code <= 0x2069) ||
+      (code >= 0x200b && code <= 0x200f) ||
+      code === 0xfeff ||
+      code === 0x061c
+    ) {
+      continue;
+    }
     if (ch === '<' || ch === '>') continue;
     out += ch;
     if (out.length >= max) break;

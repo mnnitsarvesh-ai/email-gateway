@@ -7,6 +7,7 @@ import { MessagesRepository } from './messages.repository';
 import { PoliciesRepository } from './policies.repository';
 import { PolicyTenantDataRepository } from './policy-tenant-data.repository';
 import { QuarantineRepository } from './quarantine.repository';
+import { QuarantineTenantDataRepository } from './quarantine-tenant-data.repository';
 import { RiskTenantDataRepository } from './risk-tenant-data.repository';
 
 /**
@@ -16,7 +17,8 @@ import { RiskTenantDataRepository } from './risk-tenant-data.repository';
  * BecTenantDataRepository deletes an organization's BEC rows for the organization purge; step
  * 4.5: DlpTenantDataRepository its DLP rows and evidence objects; step 5.1:
  * RiskTenantDataRepository its risk scores and risk scoring profiles; step 5.2:
- * PolicyTenantDataRepository its policy evaluations, policies, settings and departments.
+ * PolicyTenantDataRepository its policy evaluations, policies, settings and departments; step
+ * 5.3: QuarantineTenantDataRepository its quarantine tables (refused under an active legal hold).
  */
 @Module({
   providers: [
@@ -29,6 +31,7 @@ import { RiskTenantDataRepository } from './risk-tenant-data.repository';
     DlpTenantDataRepository,
     RiskTenantDataRepository,
     PolicyTenantDataRepository,
+    QuarantineTenantDataRepository,
   ],
   exports: [
     DomainsRepository,
@@ -39,6 +42,7 @@ import { RiskTenantDataRepository } from './risk-tenant-data.repository';
     DlpTenantDataRepository,
     RiskTenantDataRepository,
     PolicyTenantDataRepository,
+    QuarantineTenantDataRepository,
   ],
 })
 export class TenantDataModule {}

@@ -527,6 +527,44 @@ describe('MessageScansReadService: policy evaluation (step 5.2 P16)', () => {
     expect(JSON.stringify(page.data[0]!.policy)).not.toContain('decisivePolicyVersionId');
   });
 
+  it('shows the per-recipient decisions and the banner/URL-rewrite outcomes (step 5.3 Q4, Q22, Q23)', async () => {
+    const { service, scans } = setup([round(30n, 1)]);
+    const { row } = storedEvaluation({ lifecycleRound: 1, risk: null }, source, { scanId: 30n });
+    const decisions = [
+      {
+        rcptSeq: 0,
+        disposition: 'allow',
+        source: 'tenant_rule',
+        decisiveRuleRef: null,
+        reasonCodes: ['policy.decision.tenant_rule'],
+      },
+      {
+        rcptSeq: 1,
+        disposition: 'quarantine',
+        source: 'floor',
+        decisiveRuleRef: null,
+        reasonCodes: ['policy.floor.risk_missing'],
+      },
+    ];
+    scans.policyEvaluations.mockResolvedValue([
+      { ...row, recipientSplit: 1, recipientDecisions: decisions },
+    ]);
+    const page = await service.list(reader, scope, message.publicId, { limit: 10 });
+    expect(page.data[0]!.policy).toMatchObject({
+      recipientSplit: true,
+      recipientDecisions: decisions,
+    });
+    // 5.2 rows (columns absent/NULL) read as not split.
+    scans.policyEvaluations.mockResolvedValue([
+      { ...row, recipientSplit: 0, recipientDecisions: null },
+    ]);
+    const legacy = await service.list(reader, scope, message.publicId, { limit: 10 });
+    expect(legacy.data[0]!.policy).toMatchObject({
+      recipientSplit: false,
+      recipientDecisions: null,
+    });
+  });
+
   it('shows null for a stored row whose JSON does not form a valid view', async () => {
     const { service, scans } = setup([round(30n, 0)]);
     const { row } = storedEvaluation({}, source, { scanId: 30n });

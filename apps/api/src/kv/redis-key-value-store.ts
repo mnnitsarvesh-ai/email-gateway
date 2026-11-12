@@ -17,6 +17,15 @@ end
 return value
 `;
 
+/** INCRBY with the same first-TTL rule as INCR_WITH_TTL (one script, atomic). */
+const INCRBY_WITH_TTL = `
+local value = redis.call('INCRBY', KEYS[1], ARGV[2])
+if redis.call('TTL', KEYS[1]) == -1 then
+  redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return value
+`;
+
 @Injectable()
 export class RedisKeyValueStore extends KeyValueStore {
   constructor(private readonly redis: RedisService) {
@@ -48,6 +57,14 @@ export class RedisKeyValueStore extends KeyValueStore {
   async incrWithTtl(key: string, ttlSeconds: number): Promise<number> {
     assertTtl(ttlSeconds);
     const result = await this.redis.client.eval(INCR_WITH_TTL, 1, this.k(key), ttlSeconds);
+    return Number(result);
+  }
+
+  override async incrByWithTtl(key: string, by: number, ttlSeconds: number): Promise<number> {
+    assertTtl(ttlSeconds);
+    if (!Number.isSafeInteger(by) || by < 1)
+      throw new Error('incrByWithTtl needs a positive amount');
+    const result = await this.redis.client.eval(INCRBY_WITH_TTL, 1, this.k(key), ttlSeconds, by);
     return Number(result);
   }
 

@@ -18,6 +18,8 @@ import {
   messageStateChangedV1,
   policyDecidedV1,
   policyNotificationRequestedV1,
+  quarantineNotificationRequestedV1,
+  quarantineReleaseRequestedV1,
   sandboxTaskCompletedV1,
   sandboxTaskRequestedV1,
   urlClickedV1,
@@ -37,9 +39,10 @@ import type { ExchangeName } from './topology';
  * Outbox `aggregate_type` values of registered events. `attachment` (step 4.2 A2): the aggregate
  * is a sandbox submission (`aggregate_id` = `sandbox_submissions.id`). `sandbox_analysis` (step
  * 4.6 X11): the aggregate is a sandbox analysis (`aggregate_id` = `sandbox_analyses.id`;
- * `message_outbox.aggregate_type` is VARCHAR(64), no DDL).
+ * `message_outbox.aggregate_type` is VARCHAR(64), no DDL). `quarantine` (step 5.3 Q20): a
+ * quarantine notification of an organization (`aggregate_id` = the decimal organization id).
  */
-export type AggregateType = 'message' | 'domain' | 'attachment' | 'sandbox_analysis';
+export type AggregateType = 'message' | 'domain' | 'attachment' | 'sandbox_analysis' | 'quarantine';
 
 export interface EventDefinition<S extends z.ZodType = z.ZodType> {
   type: string;
@@ -115,8 +118,8 @@ export const EVENT_REGISTRY = {
     messageScannedV1,
     'message',
   ),
-  // Step 5.2 P15: redefined in place; producer policy-engine through the outbox; bound to the
-  // dormant email.quarantine (5.3).
+  // Step 5.2 P15: redefined in place; producer policy-engine through the outbox. Topology v10
+  // (step 5.3 Q2, Q27): no work-queue binding (analytics firehose only).
   [EventTypes.PolicyDecided]: define(
     EventTypes.PolicyDecided,
     'email.policy',
@@ -138,6 +141,22 @@ export const EVENT_REGISTRY = {
     'email.policy',
     policyNotificationRequestedV1,
     'message',
+  ),
+  // Step 5.3 Q13, Q27: producer api through the outbox; bound to email.quarantine (consumer:
+  // policy-engine release executor, ledger policy-engine.quarantine).
+  [EventTypes.QuarantineReleaseRequested]: define(
+    EventTypes.QuarantineReleaseRequested,
+    'email.policy',
+    quarantineReleaseRequestedV1,
+    'message',
+  ),
+  // Step 5.3 Q20, Q27: producers policy-engine and api through the outbox; bound to
+  // email.notifications (consumer: notification-worker).
+  [EventTypes.QuarantineNotificationRequested]: define(
+    EventTypes.QuarantineNotificationRequested,
+    'email.policy',
+    quarantineNotificationRequestedV1,
+    'quarantine',
   ),
   [EventTypes.DeliveryApproved]: define(
     EventTypes.DeliveryApproved,

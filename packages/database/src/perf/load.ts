@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { type SqlClient } from '../partitioning/executor';
+import { QUARANTINE_ENTRY_COLUMNS, quarantineEntryRow } from './quarantine';
 
 /**
  * Synthetic data for the performance test (D8). Messages are generated in time order, so
@@ -41,6 +42,14 @@ export interface LoadSample {
   suppressedAddress: { organizationId: bigint; address: string };
   /** A recipient of the sample organization with at least one bounce. */
   bouncedAddress: string;
+  /** Filter values of the `--quarantine-entries` load (step 5.3 §9.2), when requested. */
+  quarantine?: {
+    recipient: string;
+    sender: string;
+    policyPublicId: string;
+    from: string;
+    to: string;
+  };
 }
 
 export interface LoadResult {
@@ -390,6 +399,8 @@ export async function loadSyntheticData(client: SqlClient, opts: LoadOptions): P
     const messageRows: Row[] = [];
     const recipientRows: Row[] = [];
     const recipientOwners: { m: number; seq: number; quarantined: boolean; address: string }[] = [];
+    /** Per-message facts the quarantine entries copy (step 5.3 §3). */
+    const entryFacts: { risk: number; size: number; direction: 'inbound' | 'outbound' }[] = [];
     const attachmentRows: Row[] = [];
     const scanRows: Row[] = [];
     const scanOwners: number[] = [];
@@ -416,6 +427,7 @@ export async function loadSyntheticData(client: SqlClient, opts: LoadOptions): P
       const risk =
         m.verdict === 'clean' ? Math.floor(rand() * 200) : 400 + Math.floor(rand() * 600);
       const size = Math.floor(4000 * Math.exp(rand() * 7));
+      entryFacts[k] = { risk, size, direction: k % 8 === 0 ? 'outbound' : 'inbound' };
       if (
         !sample &&
         m.orgId === sampleOrg &&
@@ -877,32 +889,40 @@ export async function loadSyntheticData(client: SqlClient, opts: LoadOptions): P
       const m = msgs[owner.m]!;
       const recipientId = recipientIds[r]!;
       if (owner.quarantined) {
+        // Step 5.3 (§3): one entry per (message, round 0, recipient), state `held`, created by
+        // the policy evaluation; `subject` is never written.
         const qMs = m.receivedMs + 3000;
-        quarantineRows.push([
-          uuidv7(qMs),
-          m.orgId,
-          ids[owner.m],
-          m.received,
-          recipientId,
-          owner.address,
-          null,
-          m.verdict === 'phishing' || m.verdict === 'malware'
-            ? m.verdict
-            : m.verdict === 'spam'
-              ? 'spam'
-              : 'suspicious',
-          null,
-          'quarantined',
-          `sender@sender.example`,
-          `Synthetic message ${base + owner.m}`,
-          700,
-          `org/${m.orgId}/messages/${m.received.slice(0, 10).replaceAll('-', '/')}/${ids[owner.m]}.eml`,
-          sqlTime(qMs),
-          sqlTime(qMs + 30 * DAY_MS),
-          null,
-          sqlTime(qMs),
-          sqlTime(qMs),
-        ]);
+        const facts = entryFacts[owner.m]!;
+        quarantineRows.push(
+          quarantineEntryRow({
+            organizationId: m.orgId,
+            messageId: ids[owner.m]!,
+            receivedMs: m.receivedMs,
+            lifecycleRound: 0,
+            scanId: null,
+            recipientId,
+            rcptSeq: owner.seq,
+            recipientAddress: owner.address,
+            direction: facts.direction,
+            kind: 'quarantine',
+            origin: 'policy',
+            reason:
+              m.verdict === 'phishing' || m.verdict === 'malware'
+                ? m.verdict
+                : m.verdict === 'spam'
+                  ? 'spam'
+                  : 'suspicious',
+            state: 'held',
+            envelopeFrom: 'sender@sender.example',
+            attachmentCount: m.attachments,
+            sizeBytes: facts.size,
+            riskScore: facts.risk,
+            decisive: null,
+            quarantinedMs: qMs,
+            stateChangedMs: qMs,
+            holdDays: 30,
+          }),
+        );
         return;
       }
       const attempts = rand() < 0.2 ? 2 : 1;
@@ -1019,31 +1039,7 @@ export async function loadSyntheticData(client: SqlClient, opts: LoadOptions): P
       ],
       attemptRows,
     );
-    await loader.insert(
-      'quarantine_messages',
-      [
-        'public_id',
-        'organization_id',
-        'message_id',
-        'message_received_at',
-        'recipient_id',
-        'recipient_address',
-        'user_id',
-        'reason',
-        'policy_version_id',
-        'status',
-        'envelope_from',
-        'subject',
-        'risk_score',
-        'eml_object_key',
-        'quarantined_at',
-        'expires_at',
-        'released_at',
-        'created_at',
-        'updated_at',
-      ],
-      quarantineRows,
-    );
+    await loader.insert('quarantine_messages', [...QUARANTINE_ENTRY_COLUMNS], quarantineRows);
     await loader.insert(
       'message_outbox',
       [

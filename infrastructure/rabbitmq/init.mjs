@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-// RabbitMQ provisioning for topology v9 (step 3.2 Q5, Q10, ADR-0024; v2: step 3.3 L7; v3: step
+// RabbitMQ provisioning for topology v10 (step 3.2 Q5, Q10, ADR-0024; v2: step 3.3 L7; v3: step
 // 4.1 S2, ADR-0026; v4: step 4.2 A2, ADR-0028; v5: step 4.3 U2, ADR-0029; v6: step 4.4 B3,
-// ADR-0033; v7: step 4.5 D2, ADR-0036; v8: step 4.6 X11, ADR-0040; v9: step 5.2 P15, ADR-0044).
+// ADR-0033; v7: step 4.5 D2, ADR-0036; v8: step 4.6 X11, ADR-0040; v9: step 5.2 P15, ADR-0044;
+// v10: step 5.3 Q27, ADR-0046).
 // The only code that declares broker objects: services verify passively and their users cannot
 // configure.
 //
@@ -20,6 +21,7 @@
 //      declared and this one does not (v3: the two event bindings of scan.auth; v5: the
 //      unqualified retry binding retry.scan.url.# of scan.url; v8: scan.sandbox's
 //      sandbox_requested.v1 binding and its unqualified retry.scan.sandbox.#; v9: email.archive's
+//      mail.policy.decided.v1 binding on email.policy; v10: email.quarantine's
 //      mail.policy.decided.v1 binding on email.policy) is removed. Only
 //      bindings whose destination is a queue or exchange of the definitions are touched; objects
 //      outside the topology are never changed. Logs binding names and counts only;
@@ -101,6 +103,14 @@ const topic = (exchange, write) => ({ exchange, write, read: '^$' });
  * (email.policy) and dead-letter (email.events) hops. Neither configures anything. ops may replay
  * the two new work queues (home exchange email.policy). Neither new queue name is a dot-prefix of
  * another, so the plain `retry.<queue>.` prefix cannot reach another queue.
+ *
+ * Topology v10 (step 5.3 Q27, ADR-0046) makes email.quarantine the work queue of the
+ * policy-engine's `quarantine` role (the release executor): policy-engine also reads
+ * email.quarantine and publishes its retry (email.policy) and dead-letter (email.events) hops;
+ * releases, approvals and notifications still go through the outbox (the relay's `org.` grant
+ * covers the two new event types). ops may replay email.quarantine. `email.quarantine` is no
+ * dot-prefix of another queue name, and `email.policy.evaluate` / `email.quarantine` never share a
+ * prefix, so the alternation cannot reach another queue's hops.
  */
 const SCANNER_QUEUES =
   '(spam|attachment|url|url\\.results|bec|dlp|sandbox\\.submissions|sandbox\\.results)';
@@ -191,17 +201,18 @@ const ROLE_USERS = [
     ],
   },
   {
-    // Step 5.2 P13, P15 (v9): the policy-engine, the delivery gate. Reads its one queue; every
-    // event it produces goes through the outbox (the relay publishes it).
+    // Step 5.2 P13, P15 (v9): the policy-engine, the delivery gate; step 5.3 Q27 (v10): also the
+    // release executor (role `quarantine`) on email.quarantine. Reads its two queues; every event
+    // it produces goes through the outbox (the relay publishes it).
     role: 'policy-engine',
     userKey: 'RABBITMQ_POLICY_ENGINE_USER',
     passwordKey: 'RABBITMQ_POLICY_ENGINE_PASSWORD',
     configure: '^$',
     write: '^email\\.(policy|events)$',
-    read: '^email\\.policy\\.evaluate$',
+    read: '^email\\.(policy\\.evaluate|quarantine)$',
     topics: [
-      topic('email.policy', '^retry\\.email\\.policy\\.evaluate\\.'),
-      topic('email.events', '^dead-letter\\.email\\.policy\\.evaluate(\\.|$)'),
+      topic('email.policy', '^retry\\.email\\.(policy\\.evaluate|quarantine)\\.'),
+      topic('email.events', '^dead-letter\\.email\\.(policy\\.evaluate|quarantine)(\\.|$)'),
     ],
   },
   {
@@ -225,8 +236,8 @@ const ROLE_USERS = [
     // Replay republishes only to the home exchanges of the replayable work queues (Q9); v3 adds
     // scan.spam, v4 scan.attachment, v5 scan.url, scan.url.inspect and scan.url.results, v6
     // scan.bec, v7 scan.dlp, v8 scan.sandbox, scan.sandbox.submissions and scan.sandbox.results
-    // (home exchange email.security), v9 email.policy.evaluate and email.notifications (home
-    // exchange email.policy).
+    // (home exchange email.security), v9 email.policy.evaluate and email.notifications, v10
+    // email.quarantine (home exchange email.policy).
     write: '^email\\.(ingestion|delivery|security|policy)$',
     read: '^email\\.dead-letter$',
     topics: [
@@ -236,7 +247,7 @@ const ROLE_USERS = [
         'email.security',
         '^retry\\.scan\\.(spam|attachment|url|url\\.inspect|url\\.results|bec|dlp|sandbox|sandbox\\.submissions|sandbox\\.results)\\.',
       ),
-      topic('email.policy', '^retry\\.email\\.(policy\\.evaluate|notifications)\\.'),
+      topic('email.policy', '^retry\\.email\\.(policy\\.evaluate|notifications|quarantine)\\.'),
     ],
   },
 ];

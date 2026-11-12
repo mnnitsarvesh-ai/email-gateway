@@ -32,5 +32,7 @@ import { MessageScansReadService } from './services/message-scans-read.service';
     MessageScansReadRepository,
     MessageScansReadService,
   ],
+  // Step 5.3: the quarantine module applies its lifecycle edges through the same door.
+  exports: [ApiLifecycleMetrics, LifecycleGateway, MessageLifecycleRepository],
 })
 export class MessagesModule {}

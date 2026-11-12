@@ -46,6 +46,8 @@ import { PolicyAuditor, PolicyMetrics, PolicyWriter } from './services/policy-wr
     PolicyMetrics,
     PoliciesManagementRepository,
     PolicyExecutionsRepository,
+    // Step 5.3: the quarantine release pre-check reads the round's facts with this reader.
+    PolicyFactsRepository,
   ],
 })
 export class PoliciesModule {}

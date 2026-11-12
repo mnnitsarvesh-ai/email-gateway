@@ -22,8 +22,9 @@ import { stack } from './support/env';
  * 10-attachment-scanning.md, 11-url-protection.md, §3 each), the phishing/BEC tables of step 4.4
  * (12-phishing-bec.md §3), the DLP tables of step 4.5 (13-dlp.md §3), the sandbox engine
  * tables and columns of step 4.6 (14-sandbox.md §3), the risk scoring tables and column of
- * step 5.1 (15-risk-scoring.md §3) and the policy engine tables and columns of step 5.2
- * (16-policy-engine.md §3).
+ * step 5.1 (15-risk-scoring.md §3), the policy engine tables and columns of step 5.2
+ * (16-policy-engine.md §3) and the quarantine tables and columns of step 5.3
+ * (17-quarantine.md §3).
  */
 const prisma = new PrismaClient({ datasourceUrl: stack.databaseUrl() });
 
@@ -198,6 +199,14 @@ const TENANT_OWNED = [
   'quarantine_messages',
   'quarantine_actions',
   'quarantine_release_logs',
+  // Step 5.3 §3.
+  'quarantine_approval_requests',
+  'quarantine_download_grants',
+  'quarantine_settings',
+  'quarantine_user_preferences',
+  'quarantine_object_purges',
+  'quarantine_digest_runs',
+  'quarantine_digests',
   'archive_settings',
   'archive_retention_policies',
   'email_archives',
@@ -212,12 +221,12 @@ const TENANT_OWNED = [
 const ALL_TABLES = [...NOT_TENANT_OWNED, ...TENANT_OWNED];
 
 describe('MySQL schema', () => {
-  it('has exactly the 107 data-model tables plus _prisma_migrations', async () => {
+  it('has exactly the 114 data-model tables plus _prisma_migrations', async () => {
     const rows = await prisma.$queryRaw<{ name: string }[]>`
       SELECT TABLE_NAME AS name FROM information_schema.TABLES
       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'`;
-    expect(ALL_TABLES).toHaveLength(107);
-    expect(new Set(ALL_TABLES).size).toBe(107);
+    expect(ALL_TABLES).toHaveLength(114);
+    expect(new Set(ALL_TABLES).size).toBe(114);
     expect(rows.map((r) => r.name).sort()).toEqual([...ALL_TABLES, '_prisma_migrations'].sort());
   });
 
@@ -1804,10 +1813,14 @@ describe('message_identities retention purge', () => {
           messageReceivedAt: receivedAt,
           recipientId: 1n,
           recipientAddress: 'user@example.test',
+          direction: 'inbound',
+          kind: 'quarantine',
+          origin: 'policy',
           reason: 'spam',
           envelopeFrom: 'sender@example.test',
           emlObjectKey: `it/${randomUUID()}`,
           quarantinedAt: receivedAt,
+          stateChangedAt: receivedAt,
           expiresAt: new Date('2027-01-01T00:00:00Z'),
         },
       });
@@ -3653,8 +3666,9 @@ describe('policy engine schema (step 5.2, docs/plan/steps/16-policy-engine.md §
       WHERE k.TABLE_SCHEMA = DATABASE() AND k.TABLE_NAME = ${table}
         AND k.REFERENCED_TABLE_NAME IS NOT NULL
       ORDER BY k.COLUMN_NAME`;
+  // Step 5.3 Q5 appended `partial`.
   const MESSAGE_ACTION_ENUM =
-    "enum('deliver','tag','quarantine','discard','reject','require_approval')";
+    "enum('deliver','tag','quarantine','discard','reject','require_approval','partial')";
   const VERDICT_ENUM =
     "enum('clean','spam','bulk','phishing','malware','bec','dlp_violation','suspicious','unknown')";
   const DISPOSITION_ENUM = "enum('allow','require_approval','quarantine','reject')";
@@ -3713,7 +3727,7 @@ describe('policy engine schema (step 5.2, docs/plan/steps/16-policy-engine.md §
     }
   };
 
-  it('appends reject and require_approval to MessageAction on every final-action column (P18)', async () => {
+  it('appends reject and require_approval (P18) and partial (5.3 Q5) to MessageAction on every final-action column', async () => {
     const cols = await columns(['email_messages', 'email_recipients', 'policy_execution_logs']);
     expect(cols.get('email_messages.final_action')).toMatchObject({
       columnType: MESSAGE_ACTION_ENUM,
@@ -3878,6 +3892,9 @@ describe('policy engine schema (step 5.2, docs/plan/steps/16-policy-engine.md §
       delivered_object: ["enum('original','rewritten','policy_copy','none')", 'NO'],
       object_key: ['varchar(512)', 'YES'],
       explanation_text: ['varchar(2048)', 'NO'],
+      // Step 5.3 Q4: per-recipient decisions.
+      recipient_split: ['tinyint(1)', 'NO'],
+      recipient_decisions: ['json', 'YES'],
       policy_generation: ['bigint unsigned', 'NO'],
       snapshot_sha256: ['char(64)', 'NO'],
       platform_default_id: ['varchar(32)', 'NO'],
@@ -3891,6 +3908,7 @@ describe('policy engine schema (step 5.2, docs/plan/steps/16-policy-engine.md §
       created_at: ['datetime(3)', 'NO'],
     });
     expect(cols.get('policy_execution_logs.override_applied')?.columnDefault).toBe('0');
+    expect(cols.get('policy_execution_logs.recipient_split')?.columnDefault).toBe('0');
     expect(await uniqueSets('policy_execution_logs')).toEqual(
       ['id,received_at', 'message_id,evaluation_seq,received_at'].sort(),
     );
@@ -4052,6 +4070,450 @@ describe('policy engine schema (step 5.2, docs/plan/steps/16-policy-engine.md §
       await expect(
         prisma.organization.delete({ where: { id: organizationId } }),
       ).rejects.toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+    });
+  });
+});
+
+describe('quarantine schema (step 5.3, docs/plan/steps/17-quarantine.md §3)', () => {
+  const uniqueSets = async (table: string) =>
+    [...(await indexes(table)).values()]
+      .filter((i) => i.unique)
+      .map((i) => i.columns.join(','))
+      .sort();
+  const indexSets = async (table: string) =>
+    [...(await indexes(table)).values()].map((i) => i.columns.join(',')).sort();
+  const foreignKeys = async (table: string) =>
+    prisma.$queryRaw<{ columnName: string; referenced: string; onDelete: string }[]>`
+      SELECT k.COLUMN_NAME AS columnName, k.REFERENCED_TABLE_NAME AS referenced,
+             r.DELETE_RULE AS onDelete
+      FROM information_schema.KEY_COLUMN_USAGE k
+      JOIN information_schema.REFERENTIAL_CONSTRAINTS r
+        ON r.CONSTRAINT_SCHEMA = k.TABLE_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+      WHERE k.TABLE_SCHEMA = DATABASE() AND k.TABLE_NAME = ${table}
+        AND k.REFERENCED_TABLE_NAME IS NOT NULL
+      ORDER BY k.COLUMN_NAME`;
+  const QUARANTINE_TABLES = [
+    'quarantine_messages',
+    'quarantine_actions',
+    'quarantine_release_logs',
+    'quarantine_approval_requests',
+    'quarantine_download_grants',
+    'quarantine_settings',
+    'quarantine_user_preferences',
+    'quarantine_object_purges',
+    'quarantine_digest_runs',
+    'quarantine_digests',
+  ];
+
+  const withOrganization = async (
+    label: string,
+    body: (organizationId: bigint, userId: bigint) => Promise<void>,
+  ) => {
+    const suffix = randomUUID().slice(0, 8);
+    const plan = await prisma.organizationPlan.create({
+      data: { code: `it-${label}-${suffix}`, name: label, defaultLimits: {}, defaultFeatures: {} },
+    });
+    const organization = await prisma.organization.create({
+      data: {
+        slug: `it-${label}-${suffix}`,
+        name: label,
+        planId: plan.id,
+        dataRegion: 'ap-south-1',
+      },
+    });
+    const organizationId = organization.id;
+    const user = await prisma.user.create({
+      data: { organizationId, email: `u-${suffix}@example.test`, displayName: 'IT' },
+    });
+    try {
+      await body(organizationId, user.id);
+    } finally {
+      // RESTRICT-safe order (Q17 tenant purge).
+      await prisma.quarantineDownloadGrant.deleteMany({ where: { organizationId } });
+      await prisma.quarantineApprovalRequest.deleteMany({ where: { organizationId } });
+      await prisma.quarantineReleaseLog.deleteMany({ where: { organizationId } });
+      await prisma.quarantineAction.deleteMany({ where: { organizationId } });
+      await prisma.quarantineObjectPurge.deleteMany({ where: { organizationId } });
+      await prisma.quarantineDigest.deleteMany({ where: { organizationId } });
+      await prisma.quarantineDigestRun.deleteMany({ where: { organizationId } });
+      await prisma.quarantineUserPreference.deleteMany({ where: { organizationId } });
+      await prisma.quarantineMessage.deleteMany({ where: { organizationId } });
+      await prisma.quarantineSettings.deleteMany({ where: { organizationId } });
+      await prisma.user.deleteMany({ where: { organizationId } });
+      await prisma.organization.deleteMany({ where: { id: organizationId } });
+      await prisma.organizationPlan.deleteMany({ where: { id: plan.id } });
+    }
+  };
+
+  const entry = (organizationId: bigint, messageId: bigint, round: number, rcptSeq: number) => {
+    const at = new Date('2026-11-01T10:00:00Z');
+    return {
+      organizationId,
+      messageId,
+      messageReceivedAt: at,
+      lifecycleRound: round,
+      recipientId: messageId * 10n + BigInt(rcptSeq),
+      rcptSeq,
+      recipientAddress: `r${rcptSeq}@example.test`,
+      direction: 'inbound' as const,
+      kind: 'quarantine' as const,
+      origin: 'policy' as const,
+      reason: 'spam' as const,
+      envelopeFrom: 'sender@example.test',
+      emlObjectKey: `org/${organizationId}/eml/it-${randomUUID()}.eml`,
+      quarantinedAt: at,
+      stateChangedAt: at,
+      expiresAt: new Date('2026-12-01T10:00:00Z'),
+    };
+  };
+
+  it('rebuilds QuarantineStatus and appends the other quarantine enums (§3, ADR-0046 decision 5)', async () => {
+    const cols = await columns([
+      'quarantine_messages',
+      'quarantine_actions',
+      'quarantine_release_logs',
+    ]);
+    expect(cols.get('quarantine_messages.status')).toMatchObject({
+      columnType:
+        "enum('held','pending_approval','releasing','released','rejected','deleted','expired','superseded')",
+      nullable: 'NO',
+      columnDefault: 'held',
+    });
+    expect(cols.get('quarantine_messages.reason')?.columnType).toBe(
+      "enum('spam','bulk','phishing','malware','bec','dlp','policy','suspicious','engine_unavailable','manual')",
+    );
+    expect(cols.get('quarantine_actions.action')?.columnType).toBe(
+      "enum('release','delete','request_release','approve_release','deny_release','report_false_positive','expire','preview','view','download_grant','download','download_refused','reject','quarantine','release_queued','release_blocked','approval_cancelled','approval_expired','supersede','adopt','object_purged','object_retained','self_release')",
+    );
+    expect(cols.get('quarantine_release_logs.status')).toMatchObject({
+      columnType:
+        "enum('pending','delivered','failed','blocked_by_revalidation','dispatched','approval_required','rescan_required','refused','stale','message_busy')",
+      columnDefault: 'pending',
+    });
+  });
+
+  it('alters quarantine_messages with the entry columns; subject is kept (retired) (§3 item 1)', async () => {
+    const cols = await columns(['quarantine_messages']);
+    const expected: Record<string, [string, string, string | null]> = {
+      lifecycle_round: ['smallint unsigned', 'NO', '0'],
+      scan_id: ['bigint unsigned', 'YES', null],
+      evaluation_seq: ['smallint unsigned', 'YES', null],
+      rcpt_seq: ['smallint unsigned', 'NO', '0'],
+      direction: ["enum('inbound','outbound','internal')", 'NO', null],
+      kind: ["enum('quarantine','review')", 'NO', null],
+      origin: ["enum('policy','manual','adopted')", 'NO', null],
+      header_from: ['varchar(320)', 'YES', null],
+      has_attachments: ['tinyint(1)', 'NO', '0'],
+      attachment_count: ['smallint unsigned', 'NO', '0'],
+      size_bytes: ['int unsigned', 'NO', '0'],
+      risk_level: ["enum('none','low','medium','high','critical')", 'YES', null],
+      recommended_action: [
+        "enum('deliver','tag','require_approval','quarantine','block')",
+        'YES',
+        null,
+      ],
+      risk_verdict: [
+        "enum('clean','spam','bulk','phishing','malware','bec','dlp_violation','suspicious','unknown')",
+        'YES',
+        null,
+      ],
+      has_hard_block: ['tinyint(1)', 'NO', '0'],
+      hard_blocks: ['json', 'YES', null],
+      reason_codes: ['json', 'YES', null],
+      floor_reasons: ['json', 'YES', null],
+      primary_engine: [
+        "enum('rspamd','attachment','url','bec','dlp','sandbox','policy','none')",
+        'NO',
+        'none',
+      ],
+      decision_source: ["enum('tenant_rule','platform_default','floor')", 'YES', null],
+      decisive_policy_public_id: ['char(36)', 'YES', null],
+      decisive_policy_version_no: ['int unsigned', 'YES', null],
+      decisive_rule_id: ['varchar(48)', 'YES', null],
+      explanation: ['json', 'YES', null],
+      explanation_text: ['varchar(2048)', 'YES', null],
+      state_changed_at: ['datetime(3)', 'NO', null],
+      decided_at: ['datetime(3)', 'YES', null],
+      decided_by_user_id: ['bigint unsigned', 'YES', null],
+      decided_by_type: ["enum('system','user','api_key')", 'YES', null],
+      terminal_reason: ['varchar(64)', 'YES', null],
+      approval_request_id: ['bigint unsigned', 'YES', null],
+      object_purged_at: ['datetime(3)', 'YES', null],
+      row_version: ['int unsigned', 'NO', '1'],
+      // Kept (1.1): subject is retired, never written.
+      subject: ['varchar(998)', 'YES', null],
+      eml_object_key: ['varchar(512)', 'NO', null],
+    };
+    for (const [column, [columnType, nullable, columnDefault]] of Object.entries(expected)) {
+      expect(cols.get(`quarantine_messages.${column}`), column).toMatchObject({
+        columnType,
+        nullable,
+        columnDefault,
+      });
+    }
+    // 20 columns of step 1.1 + 33 of step 5.3.
+    expect(cols.size).toBe(53);
+  });
+
+  it('has the per-round unique key and the search, sweeper and retention indexes (Q9, Q19)', async () => {
+    expect(await uniqueSets('quarantine_messages')).toEqual(
+      ['id', 'message_id,lifecycle_round,rcpt_seq', 'public_id'].sort(),
+    );
+    expect(await indexSets('quarantine_messages')).toEqual(
+      [
+        'id',
+        'public_id',
+        'message_id,lifecycle_round,rcpt_seq',
+        'organization_id,quarantined_at,id',
+        'organization_id,status,quarantined_at,id',
+        'organization_id,recipient_address,quarantined_at,id',
+        'organization_id,envelope_from,quarantined_at',
+        'organization_id,reason,quarantined_at',
+        'organization_id,decisive_policy_public_id,quarantined_at',
+        'organization_id,primary_engine,quarantined_at',
+        'status,expires_at',
+        'status,state_changed_at',
+        'user_id',
+        'decided_by_user_id',
+      ].sort(),
+    );
+    expect(await foreignKeys('quarantine_messages')).toEqual([
+      { columnName: 'decided_by_user_id', referenced: 'users', onDelete: 'SET NULL' },
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+      { columnName: 'user_id', referenced: 'users', onDelete: 'SET NULL' },
+    ]);
+    expect(await uniqueSets('quarantine_release_logs')).toEqual(
+      ['action_id', 'id', 'quarantine_message_id,release_public_id'].sort(),
+    );
+    expect(await indexSets('quarantine_actions')).toContain('organization_id,created_at');
+    expect(await indexSets('quarantine_release_logs')).toContain('release_public_id');
+  });
+
+  it('adds the action and release-log columns (§3 items 2-3)', async () => {
+    const cols = await columns(['quarantine_actions', 'quarantine_release_logs']);
+    for (const [column, type, nullable] of [
+      ['quarantine_actions.actor_id', 'varchar(64)', 'YES'],
+      ['quarantine_actions.result', 'varchar(64)', 'YES'],
+      ['quarantine_actions.details', 'json', 'YES'],
+      ['quarantine_actions.release_log_id', 'bigint unsigned', 'YES'],
+      ['quarantine_actions.approval_request_id', 'bigint unsigned', 'YES'],
+      ['quarantine_release_logs.release_public_id', 'char(36)', 'NO'],
+      ['quarantine_release_logs.mode', "enum('operator','self','approved')", 'NO'],
+      ['quarantine_release_logs.approval_request_id', 'bigint unsigned', 'YES'],
+      ['quarantine_release_logs.requested_by_type', "enum('system','user','api_key')", 'NO'],
+      ['quarantine_release_logs.requested_by_id', 'varchar(64)', 'YES'],
+      ['quarantine_release_logs.precheck', 'json', 'YES'],
+      ['quarantine_release_logs.revalidation', 'json', 'YES'],
+      [
+        'quarantine_release_logs.delivered_object',
+        "enum('original','rewritten','policy_copy','none')",
+        'YES',
+      ],
+      ['quarantine_release_logs.object_key', 'varchar(512)', 'YES'],
+      ['quarantine_release_logs.delivery_seq', 'int unsigned', 'YES'],
+      ['quarantine_release_logs.approval_event_ids', 'json', 'YES'],
+      ['quarantine_release_logs.lifecycle_round_after', 'smallint unsigned', 'YES'],
+      ['quarantine_release_logs.blocked_reason', 'varchar(64)', 'YES'],
+    ] as const) {
+      expect(cols.get(column), column).toMatchObject({ columnType: type, nullable });
+    }
+  });
+
+  it('creates the seven new tables with their keys and foreign keys (§3 items 4-9)', async () => {
+    expect(await uniqueSets('quarantine_approval_requests')).toEqual(['id', 'public_id']);
+    expect(await indexSets('quarantine_approval_requests')).toEqual(
+      expect.arrayContaining([
+        'organization_id,status,created_at',
+        'status,expires_at',
+        'quarantine_message_id,created_at',
+      ]),
+    );
+    expect(await foreignKeys('quarantine_approval_requests')).toEqual([
+      { columnName: 'decided_by_user_id', referenced: 'users', onDelete: 'SET NULL' },
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+      {
+        columnName: 'quarantine_message_id',
+        referenced: 'quarantine_messages',
+        onDelete: 'CASCADE',
+      },
+      { columnName: 'requested_by_user_id', referenced: 'users', onDelete: 'SET NULL' },
+    ]);
+    expect(await uniqueSets('quarantine_download_grants')).toEqual(['id', 'jti']);
+    expect(await indexSets('quarantine_download_grants')).toContain('expires_at');
+    expect(await foreignKeys('quarantine_download_grants')).toEqual([
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+      {
+        columnName: 'quarantine_message_id',
+        referenced: 'quarantine_messages',
+        onDelete: 'CASCADE',
+      },
+      { columnName: 'user_id', referenced: 'users', onDelete: 'CASCADE' },
+    ]);
+    expect(await uniqueSets('quarantine_settings')).toEqual(['id', 'organization_id']);
+    expect(await foreignKeys('quarantine_settings')).toEqual([
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+      { columnName: 'updated_by_user_id', referenced: 'users', onDelete: 'SET NULL' },
+    ]);
+    expect(await uniqueSets('quarantine_user_preferences')).toEqual(['id', 'user_id']);
+    expect(await foreignKeys('quarantine_user_preferences')).toEqual([
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+      { columnName: 'user_id', referenced: 'users', onDelete: 'CASCADE' },
+    ]);
+    expect(await uniqueSets('quarantine_object_purges')).toEqual(
+      ['id', 'message_id,message_received_at'].sort(),
+    );
+    expect(await indexSets('quarantine_object_purges')).toContain('status,purge_after');
+    expect(await foreignKeys('quarantine_object_purges')).toEqual([
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+    ]);
+    expect(await uniqueSets('quarantine_digest_runs')).toEqual(
+      ['id', 'organization_id,kind,scheduled_for'].sort(),
+    );
+    expect(await uniqueSets('quarantine_digests')).toEqual(
+      ['id', 'public_id', 'run_id,user_id'].sort(),
+    );
+    expect(await foreignKeys('quarantine_digests')).toEqual([
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+      { columnName: 'run_id', referenced: 'quarantine_digest_runs', onDelete: 'CASCADE' },
+      { columnName: 'user_id', referenced: 'users', onDelete: 'CASCADE' },
+    ]);
+  });
+
+  it('stores no content-like column: no TEXT/BLOB in the quarantine tables, none partitioned', async () => {
+    const rows = await prisma.$queryRaw<{ tableName: string; columnName: string }[]>`
+      SELECT TABLE_NAME AS tableName, COLUMN_NAME AS columnName
+      FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN (${Prisma.join(QUARANTINE_TABLES)})
+        AND DATA_TYPE IN ('text', 'mediumtext', 'longtext', 'blob', 'mediumblob', 'longblob')`;
+    expect(rows).toEqual([]);
+    for (const table of QUARANTINE_TABLES) expect(PARTITIONED[table], table).toBeUndefined();
+  });
+
+  it('keeps one entry per (message, lifecycle round, recipient) and allows a new round (§2.0-6)', async () => {
+    await withOrganization('qentry', async (organizationId) => {
+      const messageId = BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000));
+      const first = await prisma.quarantineMessage.create({
+        data: entry(organizationId, messageId, 0, 0),
+      });
+      expect(first).toMatchObject({
+        status: 'held',
+        rowVersion: 1,
+        primaryEngine: 'none',
+        subject: null,
+      });
+      await expect(
+        prisma.quarantineMessage.create({ data: entry(organizationId, messageId, 0, 0) }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+      // The 1.1 key (message_id, recipient_id) is gone: the same recipient in a later round.
+      const later = await prisma.quarantineMessage.create({
+        data: entry(organizationId, messageId, 1, 0),
+      });
+      expect(later.recipientId).toBe(first.recipientId);
+      // createMany skipDuplicates is the writers' backstop (Q6).
+      const created = await prisma.quarantineMessage.createMany({
+        data: [entry(organizationId, messageId, 1, 0), entry(organizationId, messageId, 1, 1)],
+        skipDuplicates: true,
+      });
+      expect(created.count).toBe(1);
+    });
+  });
+
+  it('cascades approval requests and grants with the entry, user rows with the user, and blocks deleting the organization', async () => {
+    await withOrganization('qfk', async (organizationId, userId) => {
+      const messageId = BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000));
+      const e = await prisma.quarantineMessage.create({
+        data: { ...entry(organizationId, messageId, 0, 0), decidedByUserId: userId },
+      });
+      const expiresAt = new Date('2026-12-01T00:00:00Z');
+      const request = await prisma.quarantineApprovalRequest.create({
+        data: {
+          organizationId,
+          quarantineMessageId: e.id,
+          kind: 'release_request',
+          approvalReasons: ['hard_block'],
+          requestedByType: 'user',
+          requestedByUserId: userId,
+          expiresAt,
+        },
+      });
+      expect(request).toMatchObject({ status: 'pending', rowVersion: 1 });
+      await prisma.quarantineDownloadGrant.create({
+        data: {
+          jti: randomUUID(),
+          organizationId,
+          userId,
+          quarantineMessageId: e.id,
+          object: 'eml',
+          expiresAt,
+        },
+      });
+      const settings = await prisma.quarantineSettings.create({
+        data: {
+          organizationId,
+          settings: {},
+          settingsSha256: 'a'.repeat(64),
+          updatedByUserId: userId,
+        },
+      });
+      await expect(
+        prisma.quarantineSettings.create({
+          data: { organizationId, settings: {}, settingsSha256: 'a'.repeat(64) },
+        }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+      await prisma.quarantineUserPreference.create({
+        data: { organizationId, userId, digestOptOut: true },
+      });
+      const run = await prisma.quarantineDigestRun.create({
+        data: {
+          organizationId,
+          kind: 'user_digest',
+          scheduledFor: new Date('2026-11-02T08:00:00Z'),
+          windowFrom: new Date('2026-11-01T08:00:00Z'),
+        },
+      });
+      await prisma.quarantineDigest.create({
+        data: { runId: run.id, organizationId, userId, entryCount: 1, eventId: randomUUID() },
+      });
+      await expect(
+        prisma.quarantineDigestRun.create({
+          data: {
+            organizationId,
+            kind: 'user_digest',
+            scheduledFor: new Date('2026-11-02T08:00:00Z'),
+            windowFrom: new Date('2026-11-01T08:00:00Z'),
+          },
+        }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+      await prisma.quarantineObjectPurge.create({
+        data: {
+          organizationId,
+          messageId,
+          messageReceivedAt: e.messageReceivedAt,
+          purgeAfter: new Date(),
+        },
+      });
+      await expect(
+        prisma.organization.delete({ where: { id: organizationId } }),
+      ).rejects.toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+
+      // Deleting the user: grants, preferences and digests cascade; actor columns SET NULL.
+      await prisma.user.delete({ where: { id: userId } });
+      expect(await prisma.quarantineDownloadGrant.count({ where: { organizationId } })).toBe(0);
+      expect(await prisma.quarantineUserPreference.count({ where: { organizationId } })).toBe(0);
+      expect(await prisma.quarantineDigest.count({ where: { organizationId } })).toBe(0);
+      expect(
+        await prisma.quarantineApprovalRequest.findUnique({ where: { id: request.id } }),
+      ).toMatchObject({ requestedByUserId: null });
+      expect(await prisma.quarantineMessage.findUnique({ where: { id: e.id } })).toMatchObject({
+        decidedByUserId: null,
+      });
+      expect(
+        await prisma.quarantineSettings.findUnique({ where: { id: settings.id } }),
+      ).toMatchObject({ updatedByUserId: null });
+
+      // Deleting the entry cascades its approval requests.
+      await prisma.quarantineMessage.delete({ where: { id: e.id } });
+      expect(await prisma.quarantineApprovalRequest.count({ where: { organizationId } })).toBe(0);
     });
   });
 });

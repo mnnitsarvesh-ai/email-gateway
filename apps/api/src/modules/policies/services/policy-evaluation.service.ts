@@ -4,7 +4,8 @@ import {
   buildSyntheticInput,
   compileSnapshot,
   type CompiledSnapshot,
-  evaluatePolicy,
+  evaluatePolicyPerRecipient,
+  type PerRecipientEvaluation,
   type PolicyEvaluationResult,
   type PolicyInput,
   PolicyInputError,
@@ -72,11 +73,30 @@ const invalidVersions = (compiled: CompiledSnapshot): PolicyTestResponse['invali
   }));
 
 /**
+ * The per-recipient evaluation (step 5.3 Q4) as the test and dry-run responses show it: the
+ * message-level decision record, whether the recipients split, their decisions and the
+ * lifecycle disposition of the message.
+ */
+export function perRecipientView(e: PerRecipientEvaluation): {
+  result: PolicyEvaluationResult;
+  recipientSplit: boolean;
+  recipientDecisions: PerRecipientEvaluation['recipientDecisions'];
+  lifecycleDisposition: PerRecipientEvaluation['lifecycleDisposition'];
+} {
+  return {
+    result: e.message,
+    recipientSplit: e.split,
+    recipientDecisions: e.recipientDecisions,
+    lifecycleDisposition: e.lifecycleDisposition,
+  };
+}
+
+/**
  * `POST /policies/test` and `POST /messages/{messageId}/scans/{scanId}/policy/dry-run` (step 5.2
  * P22, P23): evaluates synthetic facts, or the stored facts of a finished round, against a target
  * snapshot (`active`, `platform`, a version of a policy, or an inline definition) with the same
  * library functions the policy-engine uses (`compileSnapshot`, `buildSyntheticInput` /
- * `buildPolicyInput`, `evaluatePolicy`). It reads the replica only and **writes nothing**: no
+ * `buildPolicyInput`, `evaluatePolicyPerRecipient`, step 5.3 Q4). It reads the replica only and **writes nothing**: no
  * evaluation row, no audit row, no outbox row (this service has no writer or audit dependency).
  * Counted `policy_dry_runs_total{kind, result}`.
  */
@@ -133,7 +153,10 @@ export class PolicyEvaluationService {
       if (error instanceof PolicyInputError) throw policyTestFactsInvalid();
       throw error;
     }
-    return { result: evaluatePolicy(input, compiled), invalidVersions: invalidVersions(compiled) };
+    return {
+      ...perRecipientView(evaluatePolicyPerRecipient(input, compiled)),
+      invalidVersions: invalidVersions(compiled),
+    };
   }
 
   private async runDryRun(
@@ -158,9 +181,9 @@ export class PolicyEvaluationService {
       refs.departmentIds.length === 0 && refs.userIds.length === 0
         ? { departmentsByAddress: {}, usersByAddress: {} }
         : directoryMaps(await this.facts.directory(scope, roundAddresses(message, rows), refs));
-    let result: PolicyEvaluationResult;
+    let evaluation: PerRecipientEvaluation;
     try {
-      result = evaluatePolicy(
+      evaluation = evaluatePolicyPerRecipient(
         buildPolicyInput(policyRoundRowsOf(message, scan, rows, directory)),
         compiled,
       );
@@ -170,8 +193,10 @@ export class PolicyEvaluationService {
     }
     const storedRow = await this.facts.storedEvaluation(scope, message, scanId);
     const stored = storedRow === null ? null : evaluationViewOf(storedRow);
+    const view = perRecipientView(evaluation);
+    const result = view.result;
     return {
-      result,
+      ...view,
       invalidVersions: invalidVersions(compiled),
       stored,
       reproducible:

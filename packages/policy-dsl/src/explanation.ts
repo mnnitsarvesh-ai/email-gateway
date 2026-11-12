@@ -18,6 +18,8 @@ const TEMPLATES: Readonly<Record<ExplanationLine['code'], (p: Record<string, str
     exception: (p) => `Rule ${p.ref} excepted by ${p.at}.`,
     action: (p) => `Action ${p.type} (${p.origin}).`,
     not_applicable: (p) => `Action ${p.type} not applicable to ${p.disposition}.`,
+    split: (p) =>
+      `Per-recipient decisions: ${p.allowed} allowed, ${p.held} quarantined, ${p.review} for review, ${p.rejected} rejected.`,
     snapshot: (p) =>
       `Snapshot generation ${p.generation}: ${p.policies} active policies, ${p.invalid} invalid.`,
   };

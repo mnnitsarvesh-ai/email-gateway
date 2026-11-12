@@ -11,6 +11,12 @@ export interface RoundRef {
   trigger: PolicyRoundRows['trigger'];
   /** `email_scans.id` of the round; null for a parse failure. */
   scanId: bigint | null;
+  /**
+   * Step 5.3 Q13.3 (release re-validation): the round read is the latest completed scan round,
+   * which may be older than the message's current round (after an earlier release or E28). The
+   * message row's round is then checked to be at least the scan's (default: equal).
+   */
+  olderRoundAllowed?: boolean;
 }
 
 /** P8 rows without the directory (resolved after the snapshot is known). */
@@ -120,7 +126,13 @@ export class FactsRepository {
     // The first edge locked this row in the same transaction: absence is a wrong read.
     if (row === null) return wrongRead(this.sink, 'message', 'row missing');
     this.echo('message', { ...row, messageId: row.id }, ref);
-    if (row.lifecycleRound !== ref.round) wrongRead(this.sink, 'message', 'round echo');
+    if (
+      ref.olderRoundAllowed === true
+        ? row.lifecycleRound < ref.round
+        : row.lifecycleRound !== ref.round
+    ) {
+      wrongRead(this.sink, 'message', 'round echo');
+    }
     return {
       direction: row.direction,
       envelopeFrom: row.envelopeFrom,
@@ -130,7 +142,8 @@ export class FactsRepository {
       sizeBytes: row.sizeBytes,
       recipientCount: row.recipientCount,
       attachmentCount: row.attachmentCount,
-      lifecycleRound: row.lifecycleRound,
+      // The round evaluated (the scan's): equal to the row's unless an older round is read.
+      lifecycleRound: ref.round,
     };
   }
 

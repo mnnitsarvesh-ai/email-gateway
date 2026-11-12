@@ -112,12 +112,18 @@ importers:
       '@email-gateway/mail-routing':
         specifier: workspace:*
         version: link:../../packages/mail-routing
+      '@email-gateway/mail-safety':
+        specifier: workspace:*
+        version: link:../../packages/mail-safety
       '@email-gateway/message-lifecycle':
         specifier: workspace:*
         version: link:../../packages/message-lifecycle
       '@email-gateway/policy-dsl':
         specifier: workspace:*
         version: link:../../packages/policy-dsl
+      '@email-gateway/quarantine':
+        specifier: workspace:*
+        version: link:../../packages/quarantine
       '@email-gateway/risk-scoring':
         specifier: workspace:*
         version: link:../../packages/risk-scoring
@@ -598,6 +604,9 @@ importers:
       '@email-gateway/logger':
         specifier: workspace:*
         version: link:../../packages/logger
+      '@email-gateway/quarantine':
+        specifier: workspace:*
+        version: link:../../packages/quarantine
       '@email-gateway/shared-types':
         specifier: workspace:*
         version: link:../../packages/shared-types
@@ -665,18 +674,27 @@ importers:
       '@email-gateway/logger':
         specifier: workspace:*
         version: link:../../packages/logger
+      '@email-gateway/mail-safety':
+        specifier: workspace:*
+        version: link:../../packages/mail-safety
       '@email-gateway/message-lifecycle':
         specifier: workspace:*
         version: link:../../packages/message-lifecycle
       '@email-gateway/policy-dsl':
         specifier: workspace:*
         version: link:../../packages/policy-dsl
+      '@email-gateway/quarantine':
+        specifier: workspace:*
+        version: link:../../packages/quarantine
       '@email-gateway/security-contracts':
         specifier: workspace:*
         version: link:../../packages/security-contracts
       '@email-gateway/shared-types':
         specifier: workspace:*
         version: link:../../packages/shared-types
+      '@email-gateway/url-security':
+        specifier: workspace:*
+        version: link:../../packages/url-security
       '@nestjs/common':
         specifier: ^11.1.6
         version: 11.2.8(reflect-metadata@0.2.2)(rxjs@7.8.2)
@@ -1132,6 +1150,46 @@ importers:
         specifier: ^4.1.5
         version: 4.6.7
 
+  packages/mail-safety:
+    dependencies:
+      '@email-gateway/bec':
+        specifier: workspace:*
+        version: link:../bec
+      '@email-gateway/dlp':
+        specifier: workspace:*
+        version: link:../dlp
+      '@email-gateway/quarantine':
+        specifier: workspace:*
+        version: link:../quarantine
+      '@email-gateway/security-contracts':
+        specifier: workspace:*
+        version: link:../security-contracts
+      '@email-gateway/url-security':
+        specifier: workspace:*
+        version: link:../url-security
+      '@zone-eu/mailsplit':
+        specifier: 5.4.29
+        version: 5.4.29
+      iconv-lite:
+        specifier: 0.7.3
+        version: 0.7.3
+      libbase64:
+        specifier: 1.4.1
+        version: 1.4.1
+      libqp:
+        specifier: 3.0.1
+        version: 3.0.1
+      parse5:
+        specifier: 7.3.0
+        version: 7.3.0
+      zod:
+        specifier: ^4.1.5
+        version: 4.6.7
+    devDependencies:
+      prettier:
+        specifier: ^3.6.2
+        version: 3.9.10
+
   packages/message-lifecycle:
     dependencies:
       '@email-gateway/common':
@@ -1196,6 +1254,22 @@ importers:
       tldts:
         specifier: 7.4.18
         version: 7.4.18
+      zod:
+        specifier: ^4.1.5
+        version: 4.6.7
+    devDependencies:
+      prettier:
+        specifier: ^3.6.2
+        version: 3.9.10
+
+  packages/quarantine:
+    dependencies:
+      '@email-gateway/policy-dsl':
+        specifier: workspace:*
+        version: link:../policy-dsl
+      '@email-gateway/risk-scoring':
+        specifier: workspace:*
+        version: link:../risk-scoring
       zod:
         specifier: ^4.1.5
         version: 4.6.7

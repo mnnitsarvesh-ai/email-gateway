@@ -30,6 +30,17 @@ data:
   # Policy (step 5.2 §5): the shipped platform default, read by the api and the policy-engine;
   # they must agree.
   POLICY_PLATFORM_DEFAULT: pol-default/1
+  # Quarantine (step 5.3 §5, docs/plan/steps/17-quarantine.md, ADR-0046–0049). Bounds read by the
+  # api, the policy-engine and the quarantine-worker; they must agree. The hold/review maxima are
+  # validated below the lifecycle deadlines (which must equal event-relay.yaml's values). Service
+  # only keys are set in api.yaml, policy-engine.yaml and quarantine-worker.yaml; the download
+  # token key is the Secret email-gateway-quarantine-download-key, mounted in the api only.
+  QUARANTINE_MAX_HOLD_DAYS: '60'
+  QUARANTINE_MAX_REVIEW_DAYS: '13'
+  QUARANTINE_RELEASE_MAX_VERDICT_AGE_HOURS: '72'
+  QUARANTINE_RELEASE_SIGNATURE_MAX_LAG_HOURS: '24'
+  LIFECYCLE_DEADLINE_QUARANTINED_HOURS: '2160'
+  LIFECYCLE_DEADLINE_HELD_FOR_REVIEW_HOURS: '336'
   # Transactional-email relay (api, and the notification-worker since step 5.2). NOTIFY_SMTP_HOST,
   # NOTIFY_SMTP_FROM and NOTIFY_SMTP_USER are set per overlay; the password is a secret file.
   # A relay with a self-signed certificate: mount the certificate from a Secret and set

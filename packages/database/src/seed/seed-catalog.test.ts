@@ -72,7 +72,7 @@ describe('seed catalog', () => {
   const sorted = (list: readonly string[]) => [...list].sort();
   const role = (key: string) => SYSTEM_ROLES.find((r) => r.key === key)!.permissions;
 
-  it('contains the 49 permissions of D7, D8, steps 2.1 D14, 2.2, 2.3, 3.2, 3.3, 4.1, 4.2, 4.4 and 4.5, without duplicates', () => {
+  it('contains the 55 permissions of D7, D8, steps 2.1 D14, 2.2, 2.3, 3.2, 3.3, 4.1, 4.2, 4.4, 4.5 and 5.3, without duplicates', () => {
     expect(new Set(keys).size).toBe(keys.length);
     expect(sorted(keys)).toEqual(
       sorted([
@@ -125,14 +125,20 @@ describe('seed catalog', () => {
         'dlp:manage',
         'dlp:evidence_read',
         'dlp:compliance_manage',
+        'quarantine:preview',
+        'quarantine:approve',
+        'quarantine:reject',
+        'quarantine:manage',
+        'quarantine:download',
+        'quarantine:self',
       ]),
     );
-    expect(keys).toHaveLength(49);
+    expect(keys).toHaveLength(55);
     // Step 3.3 placed message:rescan next to the other message permissions (design §3.3); the
     // seed upserts by key, so on an existing database it simply gets the next id.
     expect(keys.indexOf('message:rescan')).toBe(keys.indexOf('message:read_content') + 1);
     // Otherwise appended in catalog order (permission ids follow it on a fresh database).
-    expect(keys.slice(-17)).toEqual([
+    expect(keys.slice(-23)).toEqual([
       'connector:read',
       'connector:manage',
       'domain:routing_manage',
@@ -150,6 +156,12 @@ describe('seed catalog', () => {
       'dlp:manage',
       'dlp:evidence_read',
       'dlp:compliance_manage',
+      'quarantine:preview',
+      'quarantine:approve',
+      'quarantine:reject',
+      'quarantine:manage',
+      'quarantine:download',
+      'quarantine:self',
     ]);
     for (const key of keys) expect(key).toMatch(/^[a-z]+:[a-z_]+$/);
     for (const p of PERMISSIONS) expect(p.description.length, p.key).toBeGreaterThan(0);
@@ -187,7 +199,7 @@ describe('seed catalog', () => {
     );
   });
 
-  it('has exactly the 8 system roles of D8, each referencing existing permissions only', () => {
+  it('has exactly the 8 system roles of D8 plus mailbox_user (5.3), each referencing existing permissions only', () => {
     expect(SYSTEM_ROLES.map((r) => r.key)).toEqual([...SYSTEM_ROLE_KEYS]);
     expect([...SYSTEM_ROLE_KEYS]).toEqual([
       'super_admin',
@@ -198,6 +210,7 @@ describe('seed catalog', () => {
       'quarantine_reviewer',
       'compliance_auditor',
       'read_only_user',
+      'mailbox_user',
     ]);
     expect(SYSTEM_ROLES.map((r) => r.name)).toEqual([
       'Super Admin',
@@ -208,6 +221,7 @@ describe('seed catalog', () => {
       'Quarantine Reviewer',
       'Compliance Auditor',
       'Read-only User',
+      'Mailbox User',
     ]);
     for (const r of SYSTEM_ROLES) {
       expect(new Set(r.permissions).size, r.key).toBe(r.permissions.length);
@@ -266,8 +280,12 @@ describe('seed catalog', () => {
         'scan:settings_manage',
         'delivery:read',
         'quarantine:read',
+        'quarantine:preview',
         'quarantine:release',
+        'quarantine:approve',
+        'quarantine:reject',
         'quarantine:delete',
+        'quarantine:manage',
         'report:read',
         'archive:read',
         'audit:read',
@@ -284,6 +302,8 @@ describe('seed catalog', () => {
         'delivery:read',
         'quarantine:read',
         'quarantine:release',
+        'quarantine:approve',
+        'quarantine:reject',
         'quarantine:delete',
         'quarantine:request_release',
         'report:read',
@@ -297,6 +317,7 @@ describe('seed catalog', () => {
         'dlp:evidence_read',
       ],
       read_only_user: read,
+      mailbox_user: ['quarantine:self'],
     };
     expect(Object.keys(expected)).toEqual([...SYSTEM_ROLE_KEYS]);
     for (const [key, permissions] of Object.entries(expected)) {
@@ -374,7 +395,7 @@ describe('seed catalog', () => {
       'domain_admin',
     ]);
     expect(TENANT_READ_PERMISSIONS).not.toContain('domain:routing_manage');
-    expect(holders('delivery:read')).toEqual([...SYSTEM_ROLE_KEYS]);
+    expect(holders('delivery:read')).toEqual(SYSTEM_ROLE_KEYS.filter((k) => k !== 'mailbox_user'));
     expect(TENANT_PERMISSIONS).toContain('domain:routing_manage');
     expect(TENANT_PERMISSIONS).toContain('delivery:read');
     // Step 3.3 (L10.2): the administrative rescan is a tenant write permission.
@@ -408,6 +429,76 @@ describe('seed catalog', () => {
     expect(PERMISSIONS.find((p) => p.key === 'platform:scan_rescan')?.description).toBe(
       'Start and cancel bulk attachment rescans',
     );
+  });
+
+  it('grants the quarantine permissions exactly as the step 5.3 Q25 matrix', () => {
+    const holders = (key: string) =>
+      SYSTEM_ROLES.filter((r) => (r.permissions as readonly string[]).includes(key)).map(
+        (r) => r.key,
+      );
+    const readers = [
+      'super_admin',
+      'platform_admin',
+      'organization_admin',
+      'domain_admin',
+      'security_analyst',
+      'quarantine_reviewer',
+      'compliance_auditor',
+      'read_only_user',
+    ];
+    expect(holders('quarantine:read')).toEqual(readers);
+    expect(holders('quarantine:preview')).toEqual([
+      'super_admin',
+      'organization_admin',
+      'security_analyst',
+    ]);
+    for (const key of ['quarantine:release', 'quarantine:delete'] as const) {
+      expect(holders(key), key).toEqual([
+        'super_admin',
+        'organization_admin',
+        'security_analyst',
+        'quarantine_reviewer',
+      ]);
+    }
+    for (const key of ['quarantine:approve', 'quarantine:reject'] as const) {
+      expect(holders(key), key).toEqual([
+        'super_admin',
+        'organization_admin',
+        'security_analyst',
+        'quarantine_reviewer',
+      ]);
+    }
+    expect(holders('quarantine:manage')).toEqual([
+      'super_admin',
+      'organization_admin',
+      'security_analyst',
+    ]);
+    expect(holders('quarantine:download')).toEqual(['super_admin', 'organization_admin']);
+    expect(holders('quarantine:request_release')).toEqual([
+      'super_admin',
+      'organization_admin',
+      'quarantine_reviewer',
+    ]);
+    expect(holders('quarantine:self')).toEqual([
+      'super_admin',
+      'organization_admin',
+      'mailbox_user',
+    ]);
+    // The end-user role holds nothing else; quarantine:self is never a read permission.
+    expect(role('mailbox_user')).toEqual(['quarantine:self']);
+    for (const key of [
+      'quarantine:preview',
+      'quarantine:approve',
+      'quarantine:reject',
+      'quarantine:manage',
+      'quarantine:download',
+      'quarantine:self',
+    ]) {
+      expect(TENANT_PERMISSIONS, key).toContain(key);
+      expect(PLATFORM_PERMISSIONS, key).not.toContain(key);
+      expect(TENANT_READ_PERMISSIONS, key).not.toContain(key);
+    }
+    expect(PLATFORM_ROLE_KEYS).not.toContain('mailbox_user');
   });
 
   it('maps every retired step-1.1 role key to an existing, non-retired role', () => {

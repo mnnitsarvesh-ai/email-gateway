@@ -13,19 +13,26 @@ import {
 import type { Logger } from '@email-gateway/logger';
 import {
   type ActionStatus,
-  buildPolicyInput,
-  evaluatePolicy,
+  evaluatePolicyPerRecipient,
   evaluationResultToRow,
   intendedActionStatuses,
   lifecycleOutcome,
   type LifecycleOutcome,
+  type PerRecipientEvaluation,
+  perRecipientToRowFields,
   type PolicyDeliveredObject,
+  type PolicyDelivery,
   type PolicyEvaluationResult,
   type PolicyInput,
   PolicyInputError,
   type PolicyRoundRows,
-  referencedDirectoryIds,
+  type PolicyUrlRewriteAttempt,
+  recipientDecisionFor,
+  resultForRecipient,
+  type SplitOutcome,
 } from '@email-gateway/policy-dsl';
+import type { QuarantinePlatformBounds } from '@email-gateway/quarantine';
+import type { RewriteSkipReason } from '@email-gateway/url-security';
 import {
   transitionMessage,
   type LifecycleSnapshot,
@@ -34,18 +41,28 @@ import {
 } from '@email-gateway/message-lifecycle';
 import { deliveryObject, type DeliveryObject } from '../delivery/delivery-object';
 import {
+  type EditedCopyResult,
   hasEdits,
   policyCopyKey,
   type PolicyCopyResult,
   type PolicyCopyWriter,
 } from '../delivery/policy-copy';
-import type { PolicyMetrics } from '../metrics/policy-metrics';
 import {
-  type DirectoryMaps,
-  type DirectoryRepository,
-  EMPTY_DIRECTORY,
-} from './directory.repository';
+  type CopyFactsReader,
+  planPolicyUrlRewrite,
+  type PolicyUrlRewriteConfig,
+} from '../delivery/policy-url-rewrite';
+import { entryFactsFromResult } from '../quarantine/entry-facts';
+import type { QuarantineSettingsRepository } from '../quarantine/settings.repository';
+import type {
+  CreatedEntry,
+  EntryCandidate,
+  QuarantineStoreWriter,
+} from '../quarantine/store-writer';
+import type { PolicyMetrics } from '../metrics/policy-metrics';
+import type { DirectoryRepository } from './directory.repository';
 import { type InconsistencySink, POLICY_INPUT_INVALID, wrongRead } from './errors';
+import { buildInputWithDirectory } from './input-builder';
 import type { FactsRepository, RoundRef } from './facts.repository';
 import type { SnapshotLookup, SnapshotRepository } from './snapshot.repository';
 
@@ -58,6 +75,27 @@ export const MAX_APPROVAL_RECIPIENTS = 1000;
 
 export type TriggerPayload = MessageScannedV1 | MessageParseFailedV1;
 
+/** The lifecycle outcome of a round (step 5.2 P18, step 5.3 Q5: `policy_partial`, `partial`). */
+export interface RoundOutcome {
+  edge: 'E10' | 'E11' | 'E12' | 'E13';
+  to: LifecycleOutcome['to'];
+  reason: LifecycleOutcome['reason'] | 'policy_partial';
+  finalAction: LifecycleOutcome['finalAction'];
+}
+
+type RecipientFinalAction =
+  'deliver' | 'tag' | 'quarantine' | 'require_approval' | 'discard' | 'reject';
+
+/** One decided recipient of the round (Q5). */
+export interface RecipientOutcome {
+  id: bigint;
+  rcptSeq: number;
+  address: string;
+  disposition: PolicyEvaluationResult['disposition'];
+  status: 'pending' | 'quarantined' | 'discarded';
+  finalAction: RecipientFinalAction;
+}
+
 /** What a handled event did; turned into metrics only after the transaction committed. */
 export type EvaluationOutcome =
   | { status: 'skipped'; result: 'stale' | 'invalid' | 'duplicate' | 'not_found' }
@@ -65,20 +103,44 @@ export type EvaluationOutcome =
       status: 'evaluated';
       result: PolicyEvaluationResult;
       statuses: ActionStatus[];
-      copy: PolicyCopyResult['result'] | null;
+      copy: PolicyCopyResult['result'] | EditedCopyResult['result'] | null;
       cache: SnapshotLookup['cache'];
       invalidVersions: number;
       durationSeconds: number;
       riskMissing: boolean;
       approvals: number;
-      outcome: LifecycleOutcome;
+      outcome: RoundOutcome;
+      /** Q4 metric label of `policy_recipient_split_total`. */
+      split: SplitOutcome;
+      entries: CreatedEntry[];
+      superseded: number;
+      /** Q23 metric label of `policy_url_rewrite_total` (null: no policy rewrite involved). */
+      urlRewrite: string | null;
+      /** Q22 banner outcome (null: no banner requested). */
+      banner: string | null;
+      notifications: number;
     };
+
+/** The step 5.3 quarantine side of the evaluation (Q2, Q5, Q6, Q22, Q23). */
+export interface EvaluationQuarantineDeps {
+  store: Pick<
+    QuarantineStoreWriter,
+    'supersedeEarlierRounds' | 'setRecipientOutcomes' | 'createEntries'
+  >;
+  settings: Pick<QuarantineSettingsRepository, 'resolve'>;
+  copyFacts: Pick<CopyFactsReader, 'read'>;
+  urlRewrite: PolicyUrlRewriteConfig;
+  /** POLICY_BANNER_MAX_PART_BYTES. */
+  bannerMaxPartBytes: number;
+  bounds: QuarantinePlatformBounds;
+}
 
 export interface EvaluationDeps {
   facts: Pick<FactsRepository, 'read'>;
   snapshots: Pick<SnapshotRepository, 'get'>;
   directory: Pick<DirectoryRepository, 'resolve'>;
   copies: PolicyCopyWriter;
+  quarantine: EvaluationQuarantineDeps;
   metrics: Pick<PolicyMetrics, 'inconsistentReads' | 'inputErrors' | 'lifecycle'>;
   logger: Logger;
   /** Budget of the policy copy upload (half the transaction budget). */
@@ -101,23 +163,144 @@ const isScanned = (
   event: EventEnvelope<TriggerPayload>,
 ): event is EventEnvelope<MessageScannedV1> => event.eventType === EventTypes.MessageScanned;
 
+/** `policy_recipient_split_total{result}` label of a split outcome (Q4). */
+export function splitMetricLabel(outcome: SplitOutcome): string {
+  if (outcome === 'single_recipient') return 'not_scoped';
+  if (outcome === 'truncated') return 'too_many';
+  return outcome;
+}
+
+const tagged = (r: Pick<PolicyEvaluationResult, 'actions'>): boolean =>
+  r.actions.some((a) => (a.type === 'TAG' || a.type === 'WARN') && a.applicability === 'applies');
+
+/** A recipient's `email_recipients.final_action` (Q5). */
+export function recipientFinalAction(
+  result: PolicyEvaluationResult,
+  direction: 'inbound' | 'outbound' | 'internal',
+): RecipientFinalAction {
+  switch (result.disposition) {
+    case 'allow':
+      return tagged(result) ? 'tag' : 'deliver';
+    case 'quarantine':
+      return 'quarantine';
+    case 'require_approval':
+      return 'require_approval';
+    case 'reject':
+      return direction === 'inbound' ? 'discard' : 'reject';
+  }
+}
+
 /**
- * The policy evaluation of one trigger event (step 5.2 P13, ADR-0044), entirely inside the
- * consumer's writer transaction (`processOnceHandler`, ledger `policy-engine.evaluate`):
+ * The Q5 lifecycle mapping: not split → the P18 edge of the lifecycle disposition (the uniform
+ * disposition of every recipient); split → E10 `policy_partial` when a recipient is allowed,
+ * else E11 when one is quarantined, else E12; `final_action = partial` for every split.
+ */
+export function roundOutcome(
+  evaluation: PerRecipientEvaluation,
+  direction: 'inbound' | 'outbound' | 'internal',
+): RoundOutcome {
+  if (!evaluation.split) {
+    const representative = evaluation.recipients?.[0]?.result ?? evaluation.message;
+    return lifecycleOutcome(
+      { disposition: evaluation.lifecycleDisposition, actions: representative.actions },
+      direction,
+    );
+  }
+  switch (evaluation.lifecycleDisposition) {
+    case 'allow':
+      return { edge: 'E10', to: 'approved', reason: 'policy_partial', finalAction: 'partial' };
+    case 'quarantine':
+      return {
+        edge: 'E11',
+        to: 'quarantined',
+        reason: 'policy_quarantine',
+        finalAction: 'partial',
+      };
+    default:
+      return { edge: 'E12', to: 'held_for_review', reason: 'policy_hold', finalAction: 'partial' };
+  }
+}
+
+/**
+ * The delivery record of the round's delivered copy (Q4.5): the message result's own record
+ * when it decided the allowed recipients (not split, allow), else the merge over the allowed
+ * recipients; null when nobody is delivered.
+ */
+export function deliveryRecordOf(evaluation: PerRecipientEvaluation): PolicyDelivery | null {
+  if (evaluation.lifecycleDisposition !== 'allow') return null;
+  if (!evaluation.split && evaluation.message.disposition === 'allow') {
+    return evaluation.message.delivery;
+  }
+  return evaluation.mergedDeliveryActions.delivery;
+}
+
+/**
+ * The action statuses stored with the decision record (P19, ADR-0045 extended by ADR-0049):
+ * `intendedActionStatuses` of the stored result; for a split message the TAG / WARN /
+ * URL_REWRITE actions merged into the delivered copy are reported as delivered actions; when
+ * nobody is delivered TAG/WARN are `not_applicable`; a refused copy records TAG/WARN.
+ */
+export function storedStatuses(
+  stored: PolicyEvaluationResult,
+  evaluation: PerRecipientEvaluation,
+  copyRefused: boolean,
+): ActionStatus[] {
+  const delivered = evaluation.lifecycleDisposition === 'allow';
+  const merged = evaluation.mergedDeliveryActions.edits;
+  const asAllowed = intendedActionStatuses({
+    ...stored,
+    actions: stored.actions.map((a) => ({ ...a, applicability: 'applies' as const })),
+  });
+  return intendedActionStatuses(stored).map((status, i) => {
+    const a = stored.actions[i]!;
+    if (a.type !== 'TAG' && a.type !== 'WARN' && a.type !== 'URL_REWRITE') return status;
+    let next = status;
+    if (!delivered && (a.type === 'TAG' || a.type === 'WARN') && status !== 'not_applicable') {
+      return 'not_applicable';
+    }
+    if (delivered && status === 'not_applicable' && merged !== null) {
+      const refs =
+        a.type === 'TAG'
+          ? merged.ruleRefs.tag
+          : a.type === 'WARN'
+            ? merged.ruleRefs.warn
+            : merged.ruleRefs.urlRewrite;
+      if (a.ruleRefs.some((r) => refs.includes(r))) next = asAllowed[i]!;
+    }
+    if (copyRefused && (a.type === 'TAG' || a.type === 'WARN') && next === 'enforced') {
+      return 'recorded';
+    }
+    return next;
+  });
+}
+
+/**
+ * The policy evaluation of one trigger event (step 5.2 P13, ADR-0044; step 5.3 Q2–Q6, Q22,
+ * Q23, ADR-0046, ADR-0049), entirely inside the consumer's writer transaction
+ * (`processOnceHandler`, ledger `policy-engine.evaluate`):
  *
  * 1. organization = the envelope's (trusted), matched against the writer message row by every
  *    read; `scanned.v1` (`scanned` → E8, `scan_failed` → E9) or `parse_failed.v1` (E5, round 0:
  *    the event carries no round and a parse failure only happens in round 0);
  * 2. the first edge locks the message; not applied (stale, superseded round, already evaluated,
  *    not found) → ledger row only (`policy_lifecycle_skipped_total{result}`);
- * 3. P8 facts (echo-checked), the snapshot of the current generation (LRU), the directory of the
- *    snapshot's references, `buildPolicyInput`, `evaluatePolicy` (a `PolicyInputError` or any
- *    evaluator exception → `NonRetryableError`: dead letter, the message stays held);
- * 4. ALLOW: the delivered object (P20) and, with header edits, the policy copy (P21);
- * 5. the `policy_execution_logs` row (`evaluation_seq` = round; the unique key is the backstop);
- * 6. `email_messages.final_verdict`, `final_action`, `risk_score` (exactly one row);
- * 7. the disposition edge (E10–E13, P18);
- * 8. outbox rows (P15, each parsed with its strict schema) and `email_events` rows.
+ * 3. a rescan round (> 0) supersedes the earlier rounds' non-terminal entries (their pending
+ *    approval requests are cancelled) and resets `quarantined` recipients to `pending` (Q5);
+ * 4. P8 facts (echo-checked), the snapshot of the current generation (LRU), the directory of the
+ *    snapshot's references, `buildPolicyInput`, `evaluatePolicyPerRecipient` (Q4; a
+ *    `PolicyInputError` or any evaluator exception → `NonRetryableError`: dead letter, the
+ *    message stays held);
+ * 5. allowed recipients: the delivered object (P20) and the policy copy (P21: header edits;
+ *    Q23: URL rewrite after the scan; Q22: WARN banner). A deterministic policy-rewrite skip
+ *    under `ifNotRewritten = quarantine` re-evaluates once with that skip reason;
+ * 6. the `policy_execution_logs` row (`evaluation_seq` = round, `recipient_split`,
+ *    `recipient_decisions`; the unique key is the backstop);
+ * 7. `email_messages.final_verdict`, `final_action` (`partial` for a split), `risk_score`;
+ * 8. the disposition edge (Q5: E10 `policy_partial` / E11 / E12 / E13);
+ * 9. recipients (Q5: quarantined / discarded / pending with their `final_action`) and the
+ *    quarantine entries of the held recipients (Q6: entries, `policy_review` requests, actions,
+ *    `quarantine.created` events, `approval_requested` notifications);
+ * 10. outbox rows (P15; approvals for the allowed recipients only) and `email_events` rows.
  */
 export class PolicyEvaluationService {
   private readonly logger: Logger;
@@ -157,6 +340,11 @@ export class PolicyEvaluationService {
       trigger: ref.trigger,
     };
     const lifecycleDeps = { metrics: this.deps.metrics.lifecycle, logger: this.logger };
+    const key = {
+      messageId: ref.messageId,
+      receivedAt: ref.receivedAt,
+      organizationId,
+    };
 
     // 1–2. First edge (locks the message row).
     const from =
@@ -198,26 +386,42 @@ export class PolicyEvaluationService {
       return { status: 'skipped', result: first.result };
     }
     const snapshot = first.snapshot;
+    const q = this.deps.quarantine;
+    const evaluatedAt = this.now();
 
-    // 3. Facts, snapshot, directory, evaluation.
+    // 3. Rescan interplay (Q5): supersede earlier rounds, re-decide quarantined recipients.
+    const superseded =
+      ref.round > 0 ? await q.store.supersedeEarlierRounds(tx, key, ref.round, evaluatedAt) : 0;
+
+    // 4. Facts, snapshot, directory, evaluation.
     const started = this.hrtime();
     const facts = await this.deps.facts.read(tx, ref);
     const loaded = await this.deps.snapshots.get(tx, organizationId);
-    const result = await this.decide(tx, ref, facts, loaded, ids);
-    const durationSeconds = Number(this.hrtime() - started) / 1e9;
-    const evaluatedAt = this.now();
-    if (result.round.direction !== snapshot.direction) {
+    const decided = await this.decide(tx, ref, facts, loaded, ids);
+    let input = decided.input;
+    let evaluation = decided.evaluation;
+    let durationSeconds = Number(this.hrtime() - started) / 1e9;
+    if (evaluation.message.round.direction !== snapshot.direction) {
       wrongRead(this.sink, 'lifecycle', 'direction echo');
     }
-    const outcome = lifecycleOutcome(result, result.round.direction);
+    const direction = evaluation.message.round.direction;
 
-    // 4. Delivered object and policy copy (ALLOW only).
-    let statuses = intendedActionStatuses(result);
+    // 5. Delivered object and policy copy (allowed recipients only).
     let deliveredObject: PolicyDeliveredObject = 'none';
     let delivered: DeliveryObject | null = null;
     let copyKey: string | null = null;
-    let copy: PolicyCopyResult['result'] | null = null;
-    if (result.disposition === 'allow') {
+    let copy: PolicyCopyResult['result'] | EditedCopyResult['result'] | null = null;
+    let bannerOutcome: EditedCopyResult['banner'] = null;
+    let policyAttempt: PolicyUrlRewriteAttempt | null = null;
+    let urlRewriteMetric: string | null = null;
+    for (let pass = 0; pass < 2; pass += 1) {
+      deliveredObject = 'none';
+      delivered = null;
+      copyKey = null;
+      copy = null;
+      bannerOutcome = null;
+      const record = deliveryRecordOf(evaluation);
+      if (evaluation.lifecycleDisposition !== 'allow' || record === null) break;
       if (ref.scanId === null) {
         // The floor never allows a parse failure (P9.5, P20); a result saying so is a defect.
         this.deps.metrics.inputErrors.inc();
@@ -242,52 +446,156 @@ export class PolicyEvaluationService {
         );
       }
       deliveredObject = delivered.object;
-      const edits = result.delivery
-        ? { headers: result.delivery.headers, subjectPrefix: result.delivery.subjectPrefix }
-        : null;
-      if (hasEdits(edits)) {
-        const key = policyCopyKey({
+      const merged = evaluation.mergedDeliveryActions.edits;
+      const edits = { headers: record.headers, subjectPrefix: record.subjectPrefix };
+      const banner = record.bodyBanner === 'requested' && merged?.banner ? merged.banner : null;
+      const fallback = merged?.urlRewrite?.ifNotRewritten ?? 'deliver';
+      const rewriteWanted =
+        pass === 0 &&
+        record.urlRewrite.required &&
+        record.urlRewrite.policyRewritable &&
+        delivered.object !== 'rewritten';
+      if (banner === null && !rewriteWanted) {
+        if (hasEdits(edits)) {
+          const written = await this.deps.copies.write({
+            baseKey: delivered.key,
+            key: policyCopyKey({
+              organizationId,
+              messageId: ref.messageId,
+              receivedAt: ref.receivedAt,
+              round: ref.round,
+              baseKey: delivered.key,
+              edits,
+            }),
+            edits,
+            signal: AbortSignal.timeout(this.deps.copyTimeoutMs),
+          });
+          copy = written.result;
+          if (written.result === 'written') {
+            copyKey = written.key;
+            deliveredObject = 'policy_copy';
+          } else {
+            this.logger.info(
+              { ...ids, copy: written.result },
+              'policy copy refused by its size limits; delivering without header edits',
+            );
+          }
+        }
+        break;
+      }
+      const copyFacts = await q.copyFacts.read(tx, key);
+      let rewritePlan = null;
+      let skip: RewriteSkipReason | null = null;
+      if (rewriteWanted) {
+        const planned = planPolicyUrlRewrite(copyFacts, q.urlRewrite, {
+          direction,
+          messageSizeBytes: facts.message.sizeBytes,
+          organizationId,
+          messageId: ref.messageId,
+          receivedAt: ref.receivedAt,
+          now: evaluatedAt,
+        });
+        if ('skip' in planned) skip = planned.skip;
+        else rewritePlan = planned.plan;
+      }
+      if (skip !== null) {
+        urlRewriteMetric = skip;
+        policyAttempt = { status: 'skipped', skipReason: skip };
+        if (fallback === 'quarantine' && skip !== 'no_urls') {
+          ({ input, evaluation } = this.reevaluate(input, loaded, skip, ids));
+          continue;
+        }
+      }
+      const written = await this.deps.copies.writeEdited({
+        baseKey: delivered.key,
+        key: policyCopyKey({
           organizationId,
           messageId: ref.messageId,
           receivedAt: ref.receivedAt,
           round: ref.round,
           baseKey: delivered.key,
           edits,
-        });
-        const written = await this.deps.copies.write({
-          baseKey: delivered.key,
-          key,
-          edits,
-          signal: AbortSignal.timeout(this.deps.copyTimeoutMs),
-        });
-        copy = written.result;
-        if (written.result === 'written') {
-          copyKey = written.key;
-          deliveredObject = 'policy_copy';
-        } else {
-          // P19: a deterministic size refusal records TAG/WARN instead of claiming them.
-          statuses = statuses.map((status, i) => {
-            const type = result.actions[i]!.type;
-            return (type === 'TAG' || type === 'WARN') && status === 'enforced'
-              ? 'recorded'
-              : status;
-          });
-          this.logger.info(
-            { ...ids, copy: written.result },
-            'policy copy refused by its size limits; delivering without header edits',
-          );
+          body: { banner, urlRewrite: rewritePlan !== null },
+        }),
+        edits,
+        plan: {
+          urlRewrite: rewritePlan,
+          banner: banner === null ? null : { ...banner, maxPartBytes: q.bannerMaxPartBytes },
+          structure: copyFacts.structure,
+          requireUrlRewrite: fallback === 'quarantine',
+        },
+        signal: AbortSignal.timeout(this.deps.copyTimeoutMs),
+      });
+      if (written.urlRewrite !== null) {
+        policyAttempt = written.urlRewrite;
+        urlRewriteMetric =
+          written.urlRewrite.status === 'rewritten'
+            ? 'rewritten'
+            : (written.urlRewrite.skipReason ?? 'error');
+        const s = written.urlRewrite.skipReason;
+        if (
+          written.urlRewrite.status === 'skipped' &&
+          s !== null &&
+          s !== 'no_urls' &&
+          fallback === 'quarantine'
+        ) {
+          ({ input, evaluation } = this.reevaluate(input, loaded, s, ids));
+          continue;
         }
       }
+      bannerOutcome = written.banner;
+      copy = written.result;
+      if (written.result === 'written' && written.key !== undefined) {
+        copyKey = written.key;
+        deliveredObject = 'policy_copy';
+      } else if (written.result !== 'unchanged') {
+        this.logger.info(
+          { ...ids, copy: written.result },
+          'policy copy refused by its size limits; delivering the base object',
+        );
+      }
+      break;
     }
+    durationSeconds = Math.max(durationSeconds, Number(this.hrtime() - started) / 1e9);
+    if (
+      urlRewriteMetric === null &&
+      evaluation.lifecycleDisposition === 'allow' &&
+      deliveryRecordOf(evaluation)?.urlRewrite.policyRewritable === true &&
+      deliveryRecordOf(evaluation)?.urlRewrite.required === true
+    ) {
+      urlRewriteMetric = q.urlRewrite.enabled ? 'not_eligible' : 'disabled';
+    }
+    const result = evaluation.message;
+    const outcome = roundOutcome(evaluation, direction);
     const emlS3Key = copyKey ?? delivered?.key ?? null;
 
-    // 5. The evaluation row.
-    const row = evaluationResultToRow(result, {
+    // The stored decision record: the message result with the delivered copy's record.
+    const record = deliveryRecordOf(evaluation);
+    const storedDelivery: PolicyDelivery | null =
+      record === null
+        ? evaluation.message.disposition === 'allow'
+          ? null
+          : evaluation.message.delivery
+        : {
+            ...record,
+            bodyBanner:
+              record.bodyBanner === 'requested'
+                ? (bannerOutcome ?? 'requested')
+                : record.bodyBanner,
+            urlRewrite: { ...record.urlRewrite, policyAttempt },
+          };
+    const stored: PolicyEvaluationResult = { ...result, delivery: storedDelivery };
+    const copyRefused = copy === 'too_large' || copy === 'header_too_large';
+    const statuses = storedStatuses(stored, evaluation, copyRefused);
+
+    // 6. The evaluation row.
+    const row = evaluationResultToRow(stored, {
       actionStatuses: statuses,
       deliveredObject,
       objectKey: copyKey,
       policyVersionIds: loaded.policyVersionIds,
     });
+    const split = perRecipientToRowFields(evaluation);
     await tx.policyExecutionLog.create({
       data: {
         receivedAt: ref.receivedAt,
@@ -303,7 +611,7 @@ export class PolicyEvaluationService {
           row.decisivePolicyVersionId === null ? null : BigInt(row.decisivePolicyVersionId),
         decisivePolicyPublicId: row.decisivePolicyPublicId,
         decisiveRuleId: row.decisiveRuleId,
-        action: row.action,
+        action: outcome.finalAction,
         finalVerdict: row.finalVerdict,
         riskScore: row.riskScore,
         overrideApplied: row.overrideApplied,
@@ -336,11 +644,16 @@ export class PolicyEvaluationService {
         tzdataVersion: row.tzdataVersion,
         durationUs: Math.min(4_294_967_295, Math.round(durationSeconds * 1e6)),
         evaluatedAt,
+        recipientSplit: split.recipientSplit,
+        recipientDecisions:
+          split.recipientDecisions === null
+            ? undefined
+            : (split.recipientDecisions as unknown as Prisma.InputJsonValue),
       },
       select: { id: true },
     });
 
-    // 6. The message's final columns.
+    // 7. The message's final columns.
     const updated = await tx.emailMessage.updateMany({
       where: { id: ref.messageId, receivedAt: ref.receivedAt, organizationId },
       data: {
@@ -351,7 +664,7 @@ export class PolicyEvaluationService {
     });
     if (updated.count !== 1) wrongRead(this.sink, 'message_update', 'one row expected');
 
-    // 7. The disposition edge (same round, under the lock taken by the first edge).
+    // 8. The disposition edge (same round, under the lock taken by the first edge).
     const second = await this.transition(
       tx,
       {
@@ -372,12 +685,62 @@ export class PolicyEvaluationService {
       return wrongRead(this.sink, 'lifecycle', `disposition edge ${second.result}`);
     }
 
-    // 8. Outbox and email_events rows.
+    // 9. Recipients and quarantine entries (Q5, Q6).
+    const recipients = await this.decideRecipients(tx, ref, evaluation, direction);
+    let entries: CreatedEntry[] = [];
+    let notifications = 0;
+    if (recipients.some((r) => r.status !== 'pending' || r.finalAction !== 'deliver')) {
+      await q.store.setRecipientOutcomes(tx, key, recipients);
+    }
+    const held = recipients.filter((r) => r.status === 'quarantined');
+    if (held.length > 0) {
+      const settings = await q.settings.resolve(tx, organizationId);
+      const candidates: EntryCandidate[] = held.map((r) => {
+        const kind = r.disposition === 'require_approval' ? 'review' : 'quarantine';
+        return {
+          recipientId: r.id,
+          rcptSeq: r.rcptSeq,
+          address: r.address,
+          kind,
+          facts: entryFactsFromResult(
+            resultForRecipient(evaluation, r.rcptSeq),
+            input,
+            evaluation.recipients === null ? null : recipientDecisionFor(evaluation, r.rcptSeq),
+            kind,
+          ),
+        };
+      });
+      const createdEntries = await q.store.createEntries(tx, {
+        message: {
+          ...key,
+          round: ref.round,
+          scanId: ref.scanId,
+          direction,
+          envelopeFrom: facts.message.envelopeFrom,
+          headerFrom: facts.message.headerFrom,
+          sizeBytes: facts.message.sizeBytes,
+          attachmentCount: facts.message.attachmentCount,
+          emlObjectKey: snapshot.emlObjectKey,
+        },
+        origin: 'policy',
+        candidates,
+        settings,
+        bounds: q.bounds,
+        now: evaluatedAt,
+        policyVersionIds: loaded.policyVersionIds,
+        correlationId: event.correlationId,
+      });
+      entries = createdEntries.created;
+      notifications = createdEntries.notifications;
+    }
+
+    // 10. Outbox and email_events rows.
     const approvals = await this.writeOutbox(tx, {
       event,
       ref,
       snapshot,
-      result,
+      result: stored,
+      disposition: evaluation.split ? result.disposition : evaluation.lifecycleDisposition,
       statuses,
       outcome,
       emlS3Key,
@@ -387,17 +750,21 @@ export class PolicyEvaluationService {
       {
         ...ids,
         disposition: result.disposition,
+        lifecycle: outcome.to,
+        split: evaluation.outcome,
         source: result.decisive.source,
         reason: result.decisive.reason,
         generation: result.versions.generation,
         object: deliveredObject,
         approvals,
+        entries: entries.length,
+        superseded,
       },
       'policy evaluated',
     );
     return {
       status: 'evaluated',
-      result,
+      result: stored,
       statuses,
       copy,
       cache: loaded.cache,
@@ -406,7 +773,112 @@ export class PolicyEvaluationService {
       riskMissing: ref.trigger !== 'parse_failed' && !facts.risk.some((r) => r.revision === 0),
       approvals,
       outcome,
+      split: evaluation.outcome,
+      entries,
+      superseded,
+      urlRewrite: urlRewriteMetric,
+      banner: bannerOutcome,
+      notifications,
     };
+  }
+
+  /**
+   * Q23: a deterministic skip of the policy rewrite under `ifNotRewritten = quarantine` →
+   * evaluate again with the input's `urls.rewriteSkipReason` = that skip (deterministic; the
+   * stored row records `delivery.urlRewrite.policyAttempt`). With policy rewriting disabled
+   * (`POLICY_URL_REWRITE_ENABLED=false`, skip `disabled`) the input says no rewrite happened
+   * (`rewriteStatus = none`), which raises exactly as in step 5.2.
+   */
+  private reevaluate(
+    input: PolicyInput,
+    loaded: SnapshotLookup,
+    skip: RewriteSkipReason,
+    ids: Record<string, unknown>,
+  ): { input: PolicyInput; evaluation: PerRecipientEvaluation } {
+    const next: PolicyInput = {
+      ...input,
+      urls:
+        skip === 'disabled'
+          ? { ...input.urls, rewriteStatus: 'none', rewriteSkipReason: null }
+          : { ...input.urls, rewriteStatus: 'skipped', rewriteSkipReason: skip },
+    };
+    this.logger.info(
+      { ...ids, skip },
+      'policy url rewrite skipped under ifNotRewritten=quarantine; re-evaluating',
+    );
+    return {
+      input: next,
+      evaluation: this.guarded(() => evaluatePolicyPerRecipient(next, loaded.compiled), ids),
+    };
+  }
+
+  /** Q5: every `pending` recipient's disposition, status and final action. */
+  private async decideRecipients(
+    tx: Prisma.TransactionClient,
+    ref: RoundRef,
+    evaluation: PerRecipientEvaluation,
+    direction: 'inbound' | 'outbound' | 'internal',
+  ): Promise<RecipientOutcome[]> {
+    const rows = await tx.emailRecipient.findMany({
+      where: {
+        messageId: ref.messageId,
+        receivedAt: ref.receivedAt,
+        organizationId: ref.organizationId,
+        status: 'pending',
+      },
+      orderBy: { rcptSeq: 'asc' },
+      select: {
+        id: true,
+        rcptSeq: true,
+        address: true,
+        messageId: true,
+        organizationId: true,
+        status: true,
+      },
+    });
+    return rows.map((r) => {
+      if (
+        r.messageId !== ref.messageId ||
+        r.organizationId !== ref.organizationId ||
+        r.status !== 'pending'
+      ) {
+        wrongRead(this.sink, 'recipients', 'pending echo');
+      }
+      const result = resultForRecipient(evaluation, r.rcptSeq);
+      const disposition = evaluation.split
+        ? recipientDecisionFor(evaluation, r.rcptSeq).disposition
+        : evaluation.lifecycleDisposition;
+      const decided = { ...result, disposition };
+      return {
+        id: r.id,
+        rcptSeq: r.rcptSeq,
+        address: r.address,
+        disposition,
+        status:
+          disposition === 'allow'
+            ? 'pending'
+            : disposition === 'reject'
+              ? 'discarded'
+              : 'quarantined',
+        finalAction: recipientFinalAction(decided, direction),
+      };
+    });
+  }
+
+  private guarded<T>(fn: () => T, ids: Record<string, unknown>): T {
+    try {
+      return fn();
+    } catch (error) {
+      this.deps.metrics.inputErrors.inc();
+      this.logger.error(
+        {
+          ...ids,
+          errName: error instanceof PolicyInputError ? 'PolicyInputError' : 'EvaluatorError',
+        },
+        'round facts cannot be evaluated; dead-lettering (the message stays held)',
+      );
+      throw new NonRetryableError(POLICY_INPUT_INVALID);
+    }
   }
 
   /** Directory, input, evaluation; malformed rows or an evaluator exception dead-letter. */
@@ -416,39 +888,17 @@ export class PolicyEvaluationService {
     facts: Omit<PolicyRoundRows, 'directory'>,
     loaded: SnapshotLookup,
     ids: Record<string, unknown>,
-  ): Promise<PolicyEvaluationResult> {
-    const guarded = <T>(fn: () => T): T => {
-      try {
-        return fn();
-      } catch (error) {
-        this.deps.metrics.inputErrors.inc();
-        this.logger.error(
-          {
-            ...ids,
-            errName: error instanceof PolicyInputError ? 'PolicyInputError' : 'EvaluatorError',
-          },
-          'round facts cannot be evaluated; dead-lettering (the message stays held)',
-        );
-        throw new NonRetryableError(POLICY_INPUT_INVALID);
-      }
-    };
-    // First pass without directory: yields the normalized addresses to resolve (P5).
-    let input: PolicyInput = guarded(() =>
-      buildPolicyInput({ ...facts, directory: EMPTY_DIRECTORY }),
+  ): Promise<{ input: PolicyInput; evaluation: PerRecipientEvaluation }> {
+    const input = await buildInputWithDirectory(
+      tx,
+      this.deps.directory,
+      ref.organizationId,
+      facts,
+      loaded.compiled,
+      (fn) => this.guarded(fn, ids),
     );
-    const references = referencedDirectoryIds(loaded.compiled);
-    if (references.departmentIds.length > 0 || references.userIds.length > 0) {
-      const addresses = input.recipients.map((r) => r.address);
-      if (input.sender.authenticated !== null) addresses.push(input.sender.authenticated.address);
-      const directory: DirectoryMaps = await this.deps.directory.resolve(
-        tx,
-        ref.organizationId,
-        references,
-        addresses,
-      );
-      input = guarded(() => buildPolicyInput({ ...facts, directory }));
-    }
-    return guarded(() => evaluatePolicy(input, loaded.compiled));
+    const evaluation = this.guarded(() => evaluatePolicyPerRecipient(input, loaded.compiled), ids);
+    return { input, evaluation };
   }
 
   private async writeOutbox(
@@ -458,8 +908,10 @@ export class PolicyEvaluationService {
       ref: RoundRef;
       snapshot: LifecycleSnapshot;
       result: PolicyEvaluationResult;
+      /** The disposition of the decided event (Q5: the lifecycle disposition unless split). */
+      disposition: PolicyEvaluationResult['disposition'];
       statuses: ActionStatus[];
-      outcome: LifecycleOutcome;
+      outcome: RoundOutcome;
       emlS3Key: string | null;
       evaluatedAt: Date;
     },
@@ -536,7 +988,7 @@ export class PolicyEvaluationService {
         ...base,
         scanId: ref.scanId === null ? null : ref.scanId.toString(),
         trigger: ref.trigger,
-        disposition: result.disposition,
+        disposition: c.disposition,
         finalAction: c.outcome.finalAction,
         finalVerdict: result.finalVerdict,
         riskScore: result.riskScore,
@@ -550,14 +1002,16 @@ export class PolicyEvaluationService {
       }),
     );
     await emailEvent('policy.evaluated', decidedId, {
-      disposition: result.disposition,
+      disposition: c.disposition,
       source: result.decisive.source,
       generation: result.versions.generation,
       evaluationSeq: ref.round,
     });
 
     let approvals = 0;
-    if (result.disposition === 'allow' && c.emlS3Key !== null) {
+    // Approvals for the allowed recipients only (Q5): the held and rejected ones are no longer
+    // `pending` (set before this step).
+    if (c.outcome.to === 'approved' && c.emlS3Key !== null) {
       const recipients = await tx.emailRecipient.findMany({
         where: {
           messageId: ref.messageId,

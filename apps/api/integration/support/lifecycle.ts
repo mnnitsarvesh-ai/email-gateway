@@ -224,6 +224,10 @@ export async function insertQuarantineEntry(
       envelopeFrom: 'sender@fixture.example',
       emlObjectKey: message.emlObjectKey,
       quarantinedAt: message.receivedAt,
+      direction: 'inbound',
+      kind: 'quarantine',
+      origin: 'policy',
+      stateChangedAt: message.receivedAt,
       expiresAt: new Date(message.receivedAt.getTime() + 86_400_000),
     },
   });

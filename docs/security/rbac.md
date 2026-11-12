@@ -66,12 +66,20 @@ The `permissions` table is seeded from `PERMISSIONS` in `packages/database/src/s
 | `dlp:manage`                   | Manage DLP policies, exceptions, custom patterns and dictionaries; purge DLP evidence (step 4.5)         |
 | `dlp:evidence_read`            | Read decrypted DLP evidence (audited; step 4.5)                                                          |
 | `dlp:compliance_manage`        | Record the Aadhaar detection compliance basis (step 4.5)                                                 |
+| `quarantine:preview`           | View the sanitized, DLP-masked preview of quarantined messages (step 5.3)                                |
+| `quarantine:approve`           | Approve or deny quarantine release and review requests (step 5.3)                                        |
+| `quarantine:reject`            | Reject quarantined messages (step 5.3)                                                                   |
+| `quarantine:manage`            | Manually quarantine held-for-review or policy-rejected messages (step 5.3)                               |
+| `quarantine:download`          | Download quarantined messages and attachments through single-use grants (step 5.3)                       |
+| `quarantine:self`              | View, preview and request the release of quarantined mail addressed to oneself (step 5.3)                |
+
+The catalog has **55** permissions (49 before step 5.3).
 
 `GET /permissions` lists `platform:*` keys only to users of the platform organization who are not under an override; customer users and API keys see the tenant permissions only.
 
 ## Default roles
 
-System roles are shared by all organizations (`roles.organization_id IS NULL`, `is_system = true`) and are read-only through the API (`PUT`/`DELETE` → `409`). The seed creates exactly these eight (`SYSTEM_ROLE_KEYS`) and migrates retired step-1.1 keys to them.
+System roles are shared by all organizations (`roles.organization_id IS NULL`, `is_system = true`) and are read-only through the API (`PUT`/`DELETE` → `409`). The seed creates exactly these nine (`SYSTEM_ROLE_KEYS`; `mailbox_user` added by step 5.3) and migrates retired step-1.1 keys to them.
 
 | Abbr. | Key                   | Name                | Purpose                                                                                                                               |
 | ----- | --------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
@@ -79,65 +87,72 @@ System roles are shared by all organizations (`roles.organization_id IS NULL`, `
 | OA    | `organization_admin`  | Organization Admin  | Every tenant permission within the organization                                                                                       |
 | DA    | `domain_admin`        | Domain Admin        | Adds, verifies and configures the organization's domains                                                                              |
 | SAn   | `security_analyst`    | Security Analyst    | Investigates messages, edits draft policies and handles quarantine                                                                    |
-| QR    | `quarantine_reviewer` | Quarantine Reviewer | Reviews, releases and deletes quarantined messages; no content access                                                                 |
+| QR    | `quarantine_reviewer` | Quarantine Reviewer | Reviews, releases, approves, rejects and deletes quarantined messages; no content access                                              |
 | CA    | `compliance_auditor`  | Compliance Auditor  | Read-only access plus the audit log and archive export                                                                                |
 | RO    | `read_only_user`      | Read-only User      | Read-only access to the organization                                                                                                  |
+| MU    | `mailbox_user`        | Mailbox User        | End user (step 5.3): sees, previews and requests the release of quarantined mail addressed to their own verified address only         |
 
 ### Permission matrix
 
 Generated from the seed catalog (`SYSTEM_ROLES`); if the catalog changes, regenerate this table.
 
-| Permission                     | SA  | PA  | OA  | DA  | SAn | QR  | CA  | RO  |
-| ------------------------------ | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: |
-| `organization:read`            |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |
-| `organization:manage`          |  ✓  |     |  ✓  |     |     |     |     |     |
-| `user:read`                    |  ✓  |  ✓  |  ✓  |  ✓  |     |     |  ✓  |  ✓  |
-| `user:manage`                  |  ✓  |     |  ✓  |     |     |     |     |     |
-| `role:read`                    |  ✓  |  ✓  |  ✓  |     |     |     |  ✓  |  ✓  |
-| `role:manage`                  |  ✓  |     |  ✓  |     |     |     |     |     |
-| `apikey:read`                  |  ✓  |  ✓  |  ✓  |     |     |     |  ✓  |  ✓  |
-| `apikey:manage`                |  ✓  |     |  ✓  |     |     |     |     |     |
-| `session:manage`               |  ✓  |     |  ✓  |     |     |     |     |     |
-| `domain:read`                  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |  ✓  |  ✓  |
-| `domain:manage`                |  ✓  |     |  ✓  |  ✓  |     |     |     |     |
-| `domain:dkim_rotate`           |  ✓  |     |  ✓  |  ✓  |     |     |     |     |
-| `policy:read`                  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |  ✓  |  ✓  |
-| `policy:manage`                |  ✓  |     |  ✓  |     |  ✓  |     |     |     |
-| `policy:publish`               |  ✓  |     |  ✓  |     |     |     |     |     |
-| `message:read`                 |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |
-| `message:read_content`         |  ✓  |     |  ✓  |     |  ✓  |     |     |     |
-| `message:rescan`               |  ✓  |     |  ✓  |     |  ✓  |     |     |     |
-| `quarantine:read`              |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |
-| `quarantine:release`           |  ✓  |     |  ✓  |     |  ✓  |  ✓  |     |     |
-| `quarantine:delete`            |  ✓  |     |  ✓  |     |  ✓  |  ✓  |     |     |
-| `quarantine:request_release`   |  ✓  |     |  ✓  |     |     |  ✓  |     |     |
-| `report:read`                  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |
-| `audit:read`                   |  ✓  |  ✓  |  ✓  |     |  ✓  |     |  ✓  |     |
-| `archive:read`                 |  ✓  |  ✓  |  ✓  |     |  ✓  |     |  ✓  |  ✓  |
-| `archive:export`               |  ✓  |     |  ✓  |     |     |     |  ✓  |     |
-| `archive:legal_hold`           |  ✓  |     |  ✓  |     |     |     |     |     |
-| `webhook:manage`               |  ✓  |     |  ✓  |     |     |     |     |     |
-| `settings:manage`              |  ✓  |     |  ✓  |     |     |     |     |     |
-| `platform:organizations`       |  ✓  |  ✓  |     |     |     |     |     |     |
-| `platform:operations`          |  ✓  |  ✓  |     |     |     |     |     |     |
-| `platform:tenant_override`     |  ✓  |  ✓  |     |     |     |     |     |     |
-| `connector:read`               |  ✓  |  ✓  |  ✓  |  ✓  |     |     |  ✓  |  ✓  |
-| `connector:manage`             |  ✓  |     |  ✓  |  ✓  |     |     |     |     |
-| `domain:routing_manage`        |  ✓  |     |  ✓  |  ✓  |     |     |     |     |
-| `delivery:read`                |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |
-| `platform:dead_letter_replay`  |  ✓  |  ✓  |     |     |     |     |     |     |
-| `scan:settings_manage`         |  ✓  |     |  ✓  |     |  ✓  |     |     |     |
-| `platform:scan_training`       |  ✓  |  ✓  |     |     |     |     |     |     |
-| `platform:threat_intel_manage` |  ✓  |  ✓  |     |     |     |     |     |     |
-| `platform:scan_rescan`         |  ✓  |  ✓  |     |     |     |     |     |     |
-| `bec:read`                     |  ✓  |     |  ✓  |     |  ✓  |     |  ✓  |     |
-| `bec:manage`                   |  ✓  |     |  ✓  |     |  ✓  |     |     |     |
-| `bec:feedback`                 |  ✓  |     |  ✓  |     |  ✓  |     |     |     |
-| `bec:feedback_export`          |  ✓  |     |  ✓  |     |     |     |     |     |
-| `dlp:read`                     |  ✓  |     |  ✓  |     |  ✓  |     |  ✓  |     |
-| `dlp:manage`                   |  ✓  |     |  ✓  |     |  ✓  |     |     |     |
-| `dlp:evidence_read`            |  ✓  |     |  ✓  |     |  ✓  |     |  ✓  |     |
-| `dlp:compliance_manage`        |  ✓  |     |  ✓  |     |     |     |     |     |
+| Permission                     | SA  | PA  | OA  | DA  | SAn | QR  | CA  | RO  | MU  |
+| ------------------------------ | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: |
+| `organization:read`            |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |
+| `organization:manage`          |  ✓  |     |  ✓  |     |     |     |     |     |     |
+| `user:read`                    |  ✓  |  ✓  |  ✓  |  ✓  |     |     |  ✓  |  ✓  |     |
+| `user:manage`                  |  ✓  |     |  ✓  |     |     |     |     |     |     |
+| `role:read`                    |  ✓  |  ✓  |  ✓  |     |     |     |  ✓  |  ✓  |     |
+| `role:manage`                  |  ✓  |     |  ✓  |     |     |     |     |     |     |
+| `apikey:read`                  |  ✓  |  ✓  |  ✓  |     |     |     |  ✓  |  ✓  |     |
+| `apikey:manage`                |  ✓  |     |  ✓  |     |     |     |     |     |     |
+| `session:manage`               |  ✓  |     |  ✓  |     |     |     |     |     |     |
+| `domain:read`                  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |  ✓  |  ✓  |     |
+| `domain:manage`                |  ✓  |     |  ✓  |  ✓  |     |     |     |     |     |
+| `policy:read`                  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |  ✓  |  ✓  |     |
+| `policy:manage`                |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |
+| `policy:publish`               |  ✓  |     |  ✓  |     |     |     |     |     |     |
+| `message:read`                 |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |
+| `message:read_content`         |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |
+| `message:rescan`               |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |
+| `quarantine:read`              |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |
+| `quarantine:release`           |  ✓  |     |  ✓  |     |  ✓  |  ✓  |     |     |     |
+| `quarantine:delete`            |  ✓  |     |  ✓  |     |  ✓  |  ✓  |     |     |     |
+| `quarantine:request_release`   |  ✓  |     |  ✓  |     |     |  ✓  |     |     |     |
+| `report:read`                  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |
+| `audit:read`                   |  ✓  |  ✓  |  ✓  |     |  ✓  |     |  ✓  |     |     |
+| `archive:read`                 |  ✓  |  ✓  |  ✓  |     |  ✓  |     |  ✓  |  ✓  |     |
+| `archive:export`               |  ✓  |     |  ✓  |     |     |     |  ✓  |     |     |
+| `archive:legal_hold`           |  ✓  |     |  ✓  |     |     |     |     |     |     |
+| `webhook:manage`               |  ✓  |     |  ✓  |     |     |     |     |     |     |
+| `settings:manage`              |  ✓  |     |  ✓  |     |     |     |     |     |     |
+| `platform:organizations`       |  ✓  |  ✓  |     |     |     |     |     |     |     |
+| `platform:operations`          |  ✓  |  ✓  |     |     |     |     |     |     |     |
+| `platform:tenant_override`     |  ✓  |  ✓  |     |     |     |     |     |     |     |
+| `domain:dkim_rotate`           |  ✓  |     |  ✓  |  ✓  |     |     |     |     |     |
+| `connector:read`               |  ✓  |  ✓  |  ✓  |  ✓  |     |     |  ✓  |  ✓  |     |
+| `connector:manage`             |  ✓  |     |  ✓  |  ✓  |     |     |     |     |     |
+| `domain:routing_manage`        |  ✓  |     |  ✓  |  ✓  |     |     |     |     |     |
+| `delivery:read`                |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |
+| `platform:dead_letter_replay`  |  ✓  |  ✓  |     |     |     |     |     |     |     |
+| `scan:settings_manage`         |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |
+| `platform:scan_training`       |  ✓  |  ✓  |     |     |     |     |     |     |     |
+| `platform:threat_intel_manage` |  ✓  |  ✓  |     |     |     |     |     |     |     |
+| `platform:scan_rescan`         |  ✓  |  ✓  |     |     |     |     |     |     |     |
+| `bec:read`                     |  ✓  |     |  ✓  |     |  ✓  |     |  ✓  |     |     |
+| `bec:manage`                   |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |
+| `bec:feedback`                 |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |
+| `bec:feedback_export`          |  ✓  |     |  ✓  |     |     |     |     |     |     |
+| `dlp:read`                     |  ✓  |     |  ✓  |     |  ✓  |     |  ✓  |     |     |
+| `dlp:manage`                   |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |
+| `dlp:evidence_read`            |  ✓  |     |  ✓  |     |  ✓  |     |  ✓  |     |     |
+| `dlp:compliance_manage`        |  ✓  |     |  ✓  |     |     |     |     |     |     |
+| `quarantine:preview`           |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |
+| `quarantine:approve`           |  ✓  |     |  ✓  |     |  ✓  |  ✓  |     |     |     |
+| `quarantine:reject`            |  ✓  |     |  ✓  |     |  ✓  |  ✓  |     |     |     |
+| `quarantine:manage`            |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |
+| `quarantine:download`          |  ✓  |     |  ✓  |     |     |     |     |     |     |
+| `quarantine:self`              |  ✓  |     |  ✓  |     |     |     |     |     |  ✓  |
 
 **Platform roles** are the roles that hold any `platform:*` permission: `super_admin` and `platform_admin` (`PLATFORM_ROLE_KEYS`). They can be assigned only to users of the platform organization (`kind = platform`); assigning one in a customer organization is `400`. Customer organizations never see platform roles in `GET /roles` or `GET /roles/{key}` (`404`). Domain Admin is organization-wide; per-domain scoping of roles is out of scope for now.
 
@@ -285,6 +300,43 @@ No new permission ([design](../plan/steps/16-policy-engine.md) P22): policies an
 - **Overrides of the platform recommendation.** A rule may weaken a _level-only_ risk recommendation only when it carries `override: true` **and** the organization's setting `allowRecommendationOverrides` is on (`PUT /policy-settings`, `policy:publish`). Turning it on is audited as `policy.settings_overrides_enabled`; publishing a version with override rules is audited as `policy.override_rules_published` with the rule ids. No setting or rule ever weakens the strictness floor (hard blocks, engine failures, the DLP binding, missing data).
 - **Policy alerts** (ALERT action) are mailed by the notification-worker to the organization's active, email-verified users holding `policy:publish` through a role ([runbook](../runbooks/policy-notifications.md)).
 - **Audit.** Every change is audited in its transaction (`policy.created`, `policy.updated`, `policy.enabled`, `policy.disabled`, `policy.deleted`, `policy.version_draft_created`, `policy.version_draft_updated`, `policy.version_draft_deleted`, `policy.version_published`, `policy.version_activated`, `policy.override_rules_published`, `policy.settings_updated`, `policy.settings_overrides_enabled`, `department.created`, `department.updated`, `department.deleted`, `department.member_added`, `department.member_removed`) with public ids, version numbers, row versions, hashes, rule counts, override rule ids, generations and changed paths only — never definition values, change notes, settings values or member addresses. Tests and dry-runs write nothing and are not audited.
+
+## Quarantine (step 5.3)
+
+Six new tenant permissions ([design](../plan/steps/17-quarantine.md) Q25, ADR-0047, ADR-0048); the existing ones keep their meaning (`quarantine:read` = metadata only, `quarantine:release`, `quarantine:delete`, `quarantine:request_release`). `quarantine:self` is **not** part of `TENANT_READ_PERMISSIONS`, and `quarantine:download` is held by no system role except `super_admin` and `organization_admin`. Every route is under `/api/v1/quarantine`, takes the organization from the authenticated scope only (another organization's or another user's entry → `404`, never `403`) and is listed in `apps/api/test/route-security.e2e.test.ts`.
+
+| Role                                         | read | preview | release | approve | reject | delete | manage | download | request_release | self |
+| -------------------------------------------- | :--: | :-----: | :-----: | :-----: | :----: | :----: | :----: | :------: | :-------------: | :--: |
+| super_admin                                  |  ✓   |    ✓    |    ✓    |    ✓    |   ✓    |   ✓    |   ✓    |    ✓     |        ✓        |  ✓   |
+| organization_admin                           |  ✓   |    ✓    |    ✓    |    ✓    |   ✓    |   ✓    |   ✓    |    ✓     |        ✓        |  ✓   |
+| security_analyst                             |  ✓   |    ✓    |    ✓    |    ✓    |   ✓    |   ✓    |   ✓    |          |                 |      |
+| quarantine_reviewer                          |  ✓   |         |    ✓    |    ✓    |   ✓    |   ✓    |        |          |        ✓        |      |
+| compliance_auditor                           |  ✓   |         |         |         |        |        |        |          |                 |      |
+| domain_admin, read_only_user, platform_admin |  ✓   |         |         |         |        |        |        |          |                 |      |
+| **mailbox_user**                             |      |         |         |         |        |        |        |          |                 |  ✓   |
+
+| Permission                                         | Route families (Q26)                                                                                                                                                                                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `quarantine:read`                                  | `GET /catalog`, `GET /summary`, `GET /entries`, `GET /entries/{entryId}`, `GET /entries/{entryId}/history`, `GET /releases/{releaseId}`, `GET /approvals`, `GET /approvals/{id}`, `GET /settings` (metadata; `subject` only with `preview`) |
+| `quarantine:preview`                               | `GET /entries/{entryId}/preview` (sanitized JSON text, DLP-masked; rate-limited; `no-store`)                                                                                                                                                |
+| `quarantine:release`                               | `POST /entries/{entryId}/release` (re-validation; may become an approval request); bulk `release`                                                                                                                                           |
+| `quarantine:request_release`                       | `POST /entries/{entryId}/request-release`                                                                                                                                                                                                   |
+| `quarantine:approve`                               | `POST /approvals/{id}/approve`, `POST /approvals/{id}/deny` (user session + MFA; never the requester or the entry's recipient; never an API key); bulk `approve` / `deny`                                                                   |
+| `quarantine:approve` or the requester              | `POST /approvals/{id}/cancel`                                                                                                                                                                                                               |
+| `quarantine:reject`                                | `POST /entries/{entryId}/reject`; bulk `reject`                                                                                                                                                                                             |
+| `quarantine:delete`                                | `POST /entries/{entryId}/delete` (refused under legal hold or retention); bulk `delete`                                                                                                                                                     |
+| `quarantine:manage`                                | `POST /entries` (manual quarantine of a held-for-review or policy-rejected message)                                                                                                                                                         |
+| `quarantine:download`                              | `POST /entries/{entryId}/download-grants` (user + MFA + password/TOTP re-entry, tenant `download.enabled`), `GET /downloads/{token}` (user; single use)                                                                                     |
+| `settings:manage`                                  | `PUT /settings`                                                                                                                                                                                                                             |
+| `quarantine:self` (user principal, verified email) | `GET /me/entries`, `GET /me/entries/{id}`, `GET /me/entries/{id}/preview`, `POST /me/entries/{id}/release`, `POST /me/entries/{id}/request-release`, `GET` / `PUT /me/preferences` — own address only; API keys and overrides refused       |
+
+- **Separation of duties.** An approver needs `quarantine:approve`, a user session with MFA, and must be neither the requester nor the entry's recipient. For a request made with an API key the requester is the key's creator (`api_keys.created_by_user_id`), so a user cannot approve a release they triggered with their own key; a follow-up request for reasons that appeared after an approval keeps the original requester. The decision records a hash of the decider's permissions, and the release executor re-checks the stored decision (both rules).
+- **End users** (`mailbox_user`, or any user holding `quarantine:self`) never approve, deny, reject, delete, bulk-act or download; self-release is allowed only within the tenant's settings (reason subset, maximum risk level, no approval reason, not stale).
+- **The step 3.3 operator release** `POST /messages/{messageId}/release` keeps `quarantine:release` but answers `409 quarantine_workflow_required` for every quarantined or held message (Q30).
+- **Rescan of held mail.** `POST /messages/{messageId}/rescan` from `quarantined` or `held_for_review` needs `quarantine:release` besides `message:rescan` (`403 quarantine_rescan_forbidden`): the new round supersedes the open entries and a clean verdict delivers the held recipients. Every system role holding `message:rescan` also holds `quarantine:release`; custom roles and API keys with `message:rescan` only can rescan the other source states.
+- **Audit.** Every route writes an audit row (`quarantine.*`, Q21) with ids, enums, counts and hashes only; the operator's typed reason is stored in `quarantine_actions.reason`, never in audit metadata. Previews and downloads are audited before content is read.
+
+The routes are implemented by step 5.3 WP4; this section is the authorization contract they follow.
 
 ## Custom roles
 

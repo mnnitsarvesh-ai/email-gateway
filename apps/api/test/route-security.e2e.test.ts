@@ -28,6 +28,7 @@ import {
 } from '../src/auth-contracts/decorators';
 import { loadApiConfig } from '../src/config';
 import { RATE_LIMIT_KEY, type RateLimitOptions } from '../src/rate-limit/rate-limit.options';
+import { QUARANTINE_RATE_LIMIT_KEY } from '../src/modules/quarantine/quarantine-rate-limit';
 import { EmailSender } from '../src/email/email-sender';
 import { API_GLOBAL_PREFIX, configureApiApp } from '../src/http/configure-api-app';
 import { KeyValueStore } from '../src/kv/key-value-store';
@@ -64,6 +65,8 @@ interface DiscoveredRoute {
   requireMfa: boolean;
   userOnly: boolean;
   rateLimits: RateLimitOptions[];
+  /** Config-driven quarantine rate limit kind (step 5.3), if any. */
+  quarantineRate: string | null;
 }
 
 const asArray = (value: unknown): string[] =>
@@ -111,6 +114,9 @@ function discoverRoutes(app: INestApplication): DiscoveredRoute[] {
             ]),
             userOnly: !!reflector.getAllAndOverride<boolean>(USER_ONLY_KEY, [handler, controller]),
             rateLimits: (Reflect.getMetadata(RATE_LIMIT_KEY, handler) as RateLimitOptions[]) ?? [],
+            quarantineRate:
+              (Reflect.getMetadata(QUARANTINE_RATE_LIMIT_KEY, handler) as string | undefined) ??
+              null,
           });
         }
       }
@@ -485,6 +491,94 @@ describe('route security (e2e, dependencies stubbed)', () => {
     expect(order.indexOf('get /api/v1/policies/catalog')).toBeLessThan(
       order.indexOf('get /api/v1/policies/:policyId'),
     );
+  });
+
+  it('the step 5.3 quarantine routes require exactly their permissions, users, MFA and rate limits (Q26)', () => {
+    type Flags = { any?: boolean; mfa?: boolean; userOnly?: boolean; rate?: string };
+    const expected: Record<string, [string[], Flags?]> = {
+      'get /api/v1/quarantine/catalog': [['quarantine:read', 'quarantine:self'], { any: true }],
+      'get /api/v1/quarantine/summary': [['quarantine:read']],
+      'get /api/v1/quarantine/settings': [['quarantine:read']],
+      'put /api/v1/quarantine/settings': [['settings:manage']],
+      'post /api/v1/quarantine/bulk': [
+        ['quarantine:release', 'quarantine:reject', 'quarantine:delete', 'quarantine:approve'],
+        { any: true, rate: 'bulk' },
+      ],
+      'get /api/v1/quarantine/releases/:releaseId': [['quarantine:read']],
+      'get /api/v1/quarantine/downloads/:token': [
+        ['quarantine:download'],
+        { userOnly: true, rate: 'download' },
+      ],
+      'get /api/v1/quarantine/entries': [['quarantine:read']],
+      'post /api/v1/quarantine/entries': [['quarantine:manage']],
+      'get /api/v1/quarantine/entries/:entryId': [['quarantine:read']],
+      'get /api/v1/quarantine/entries/:entryId/history': [['quarantine:read']],
+      'get /api/v1/quarantine/entries/:entryId/preview': [
+        ['quarantine:preview'],
+        { rate: 'preview' },
+      ],
+      'post /api/v1/quarantine/entries/:entryId/download-grants': [
+        ['quarantine:download'],
+        { userOnly: true, mfa: true, rate: 'download_grant' },
+      ],
+      'post /api/v1/quarantine/entries/:entryId/release': [['quarantine:release']],
+      'post /api/v1/quarantine/entries/:entryId/request-release': [['quarantine:request_release']],
+      'post /api/v1/quarantine/entries/:entryId/reject': [['quarantine:reject']],
+      'post /api/v1/quarantine/entries/:entryId/delete': [['quarantine:delete']],
+      'get /api/v1/quarantine/approvals': [['quarantine:read']],
+      'get /api/v1/quarantine/approvals/:approvalId': [['quarantine:read']],
+      'post /api/v1/quarantine/approvals/:approvalId/approve': [
+        ['quarantine:approve'],
+        { userOnly: true, mfa: true },
+      ],
+      'post /api/v1/quarantine/approvals/:approvalId/deny': [
+        ['quarantine:approve'],
+        { userOnly: true, mfa: true },
+      ],
+      'post /api/v1/quarantine/approvals/:approvalId/cancel': [
+        [
+          'quarantine:approve',
+          'quarantine:release',
+          'quarantine:request_release',
+          'quarantine:self',
+        ],
+        { any: true },
+      ],
+      'get /api/v1/quarantine/me/entries': [['quarantine:self'], { userOnly: true }],
+      'get /api/v1/quarantine/me/entries/:entryId': [['quarantine:self'], { userOnly: true }],
+      'get /api/v1/quarantine/me/entries/:entryId/preview': [
+        ['quarantine:self'],
+        { userOnly: true, rate: 'preview' },
+      ],
+      'post /api/v1/quarantine/me/entries/:entryId/release': [
+        ['quarantine:self'],
+        { userOnly: true },
+      ],
+      'post /api/v1/quarantine/me/entries/:entryId/request-release': [
+        ['quarantine:self'],
+        { userOnly: true },
+      ],
+      'get /api/v1/quarantine/me/preferences': [['quarantine:self'], { userOnly: true }],
+      'put /api/v1/quarantine/me/preferences': [['quarantine:self'], { userOnly: true }],
+    };
+    const quarantineRoutes = routes.filter((r) => r.path.startsWith('/api/v1/quarantine'));
+    expect(quarantineRoutes.map((r) => `${r.method} ${r.path}`).sort()).toEqual(
+      Object.keys(expected).sort(),
+    );
+    for (const [key, [permissions, flags]] of Object.entries(expected)) {
+      const route = routes.find((r) => `${r.method} ${r.path}` === key);
+      expect(route?.isPublic, key).toBe(false);
+      expect(route?.requirement, key).toEqual({ mode: flags?.any ? 'any' : 'all', permissions });
+      expect(route?.requireMfa, key).toBe(flags?.mfa ?? false);
+      expect(route?.userOnly, key).toBe(flags?.userOnly ?? false);
+      expect(route?.rateLimits, key).toEqual([]);
+      expect(route?.quarantineRate, key).toBe(flags?.rate ?? null);
+    }
+    // The operator release of step 3.3 keeps its route and permission (it answers 409, Q30).
+    expect(
+      routes.find((r) => `${r.method} ${r.path}` === 'post /api/v1/messages/:messageId/release')
+        ?.requirement,
+    ).toEqual({ mode: 'all', permissions: ['quarantine:release'] });
   });
 
   it('non-public routes also reject a junk bearer token and a junk API key', async () => {

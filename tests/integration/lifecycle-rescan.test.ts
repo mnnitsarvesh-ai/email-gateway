@@ -197,9 +197,10 @@ describe.skipIf(gate.skip)('lifecycle stack: administrative rescan', { timeout: 
       // Peeking requeued it: still exactly one.
       expect(await copiesOfEvent(mgmt, vhost, queue, rescanEventId), queue).toBe(1);
     }
-    // Not bound to scan.auth (v3), the sandbox task queue (v8), quarantine or policy queues (the dormant
-    // `email.policy.evaluate` is bound to `scanned.v1` for step 5.2 and may hold round 1's
-    // `scanned.v1`, but never the rescan request itself).
+    // Not bound to scan.auth (v3), the sandbox task queue (v8), the quarantine work queue (v10:
+    // release requests only) or the policy queue (`email.policy.evaluate` is bound to
+    // `scanned.v1` since step 5.2 and may hold round 1's `scanned.v1`, but never the rescan
+    // request itself).
     for (const queue of NOT_BOUND_QUEUES) {
       expect(await copiesOfEvent(mgmt, vhost, queue, rescanEventId), queue).toBe(0);
     }

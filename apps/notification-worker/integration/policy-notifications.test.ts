@@ -7,7 +7,10 @@
  * Bcc with a deterministic Message-ID and no message content; a duplicate event sends nothing
  * (ledger); the sender non-delivery notice goes only to a sender of an active domain of the
  * organization; a relay failure is retried until it succeeds; an event naming another
- * organization's message is dead-lettered without a send.
+ * organization's message is dead-lettered without a send. Step 5.3 (17-quarantine.md Q20): a
+ * user digest reaches the user only, with sender, sanitized subject, reason, expiry and portal
+ * links (no body); a quarantine sender notice goes only to an outbound sender of an active
+ * domain.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
 import { Test } from '@nestjs/testing';
@@ -17,6 +20,7 @@ import {
   type EventEnvelope,
   EventTypes,
   type PolicyNotificationRequestedV1,
+  type QuarantineNotificationRequestedV1,
 } from '@email-gateway/event-contracts';
 import { createLogger } from '@email-gateway/logger';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -206,6 +210,10 @@ afterAll(async () => {
   await vhost?.cleanup();
   await sink?.stop();
   const where = { organizationId: { in: orgIds } };
+  await prisma.quarantineDigest.deleteMany({ where });
+  await prisma.quarantineDigestRun.deleteMany({ where });
+  await prisma.quarantineAction.deleteMany({ where });
+  await prisma.quarantineMessage.deleteMany({ where });
   await prisma.messageIdempotency.deleteMany({
     where: { consumer: POLICY_NOTIFICATION_CONSUMER, eventId: { in: eventIds } },
   });
@@ -315,5 +323,131 @@ describe('policy notifications (P25)', () => {
     await new Promise((r) => setTimeout(r, 1_000));
     expect(sink.messages).toHaveLength(before);
     expect(await ledger(forged.eventId)).toBe(0);
+  });
+});
+
+/** A held entry of `message` for `address` (as the policy-engine writes it, Q6). */
+async function createEntry(
+  organizationId: bigint,
+  message: { id: bigint; receivedAt: Date },
+  address: string,
+  direction: 'inbound' | 'outbound' = 'inbound',
+  rcptSeq = 0,
+) {
+  return prisma.quarantineMessage.create({
+    data: {
+      organizationId,
+      messageId: message.id,
+      messageReceivedAt: message.receivedAt,
+      lifecycleRound: 0,
+      recipientId: 1n,
+      rcptSeq,
+      recipientAddress: address,
+      direction,
+      kind: 'quarantine',
+      origin: 'policy',
+      reason: 'phishing',
+      status: 'held',
+      envelopeFrom: `alice@${DOMAIN}`,
+      emlObjectKey: `org/${organizationId.toString()}/eml/it/${randomUUID()}.eml`,
+      quarantinedAt: new Date(Date.now() - 3_600_000),
+      expiresAt: new Date(Date.now() + 29 * 86_400_000),
+      stateChangedAt: new Date(),
+    },
+  });
+}
+
+function quarantineEnvelope(
+  organizationId: bigint,
+  payload: QuarantineNotificationRequestedV1,
+): EventEnvelope<QuarantineNotificationRequestedV1> {
+  const eventId = uuidv7();
+  eventIds.push(eventId);
+  return {
+    eventId,
+    eventType: EventTypes.QuarantineNotificationRequested,
+    occurredAt: new Date().toISOString(),
+    correlationId: `it-${suffix}-q`,
+    organizationId: organizationId.toString(),
+    payload,
+  };
+}
+
+describe('quarantine notifications (step 5.3 Q20)', () => {
+  it('a user digest reaches the user with sender, subject, reason, expiry and portal links only', async () => {
+    const email = await createUser(orgA, 'read_only_user');
+    const user = await prisma.user.findFirstOrThrow({ where: { organizationId: orgA, email } });
+    const entry = await createEntry(orgA, messageA, email);
+    const scheduledFor = new Date();
+    const run = await prisma.quarantineDigestRun.create({
+      data: {
+        organizationId: orgA,
+        kind: 'user_digest',
+        scheduledFor,
+        windowFrom: new Date(scheduledFor.getTime() - 86_400_000),
+      },
+    });
+    const digestId = uuidv7();
+    const e = quarantineEnvelope(orgA, {
+      kind: 'user_digest',
+      refs: { userId: user.publicId, digestId },
+      window: {
+        from: new Date(scheduledFor.getTime() - 86_400_000).toISOString(),
+        to: scheduledFor.toISOString(),
+      },
+      requestedAt: new Date().toISOString(),
+    });
+    await prisma.quarantineDigest.create({
+      data: {
+        publicId: digestId,
+        runId: run.id,
+        organizationId: orgA,
+        userId: user.id,
+        entryCount: 1,
+        eventId: e.eventId,
+      },
+    });
+    const before = sink.messages.length;
+    await publish(e);
+    await eventually(() => sink.messages.length === before + 1, 20_000, 'digest delivered');
+    const mail = sink.messages.at(-1)!;
+    expect(mail.recipients).toEqual([email]);
+    const unfolded = mail.data.replace(/\r\n[ \t]+/g, ' ');
+    expect(unfolded).toContain(`Message-ID: <quarantine-notice.${e.eventId}@gateway.test>`);
+    expect(mail.data).toMatch(/^Subject: \[Email Gateway\] 1 message\(s\) held for you/m);
+    const body = bodyOf(mail.data);
+    expect(body).toContain(`From: alice@${DOMAIN}`);
+    expect(body).toContain('Subject: Quarterly numbers');
+    expect(body).toContain('Reason: phishing');
+    expect(body).toContain(`https://portal.test/quarantine/me/${entry.publicId}`);
+    // Never another user's address, the recipient list or a header injection.
+    expect(mail.data).not.toMatch(/^Bcc:/m);
+    expect(body).not.toContain('admin');
+    await eventually(async () => (await ledger(e.eventId)) === 1, 10_000, 'ledger row');
+    const text = await app.get(MetricsService).metrics();
+    expect(text).toMatch(
+      /notification_quarantine_messages_total\{[^}]*kind="user_digest"[^}]*result="sent"[^}]*\} 1/,
+    );
+  });
+
+  it('a sender notice of a rejected outbound entry goes to the organization sender only', async () => {
+    const entry = await createEntry(orgA, messageA, 'bob@partner-it.example', 'outbound', 1);
+    const before = sink.messages.length;
+    const e = quarantineEnvelope(orgA, {
+      kind: 'sender_rejected',
+      refs: {
+        entryId: entry.publicId,
+        messageId: messageA.id.toString(),
+        receivedAt: messageA.receivedAt.toISOString(),
+      },
+      requestedAt: new Date().toISOString(),
+    });
+    await publish(e);
+    await eventually(() => sink.messages.length === before + 1, 20_000, 'notice delivered');
+    const mail = sink.messages.at(-1)!;
+    expect(mail.recipients).toEqual([`alice@${DOMAIN}`]);
+    expect(mail.data).toContain('Your message was not delivered');
+    expect(mail.data).not.toContain('Quarterly');
+    expect(mail.data).not.toContain('bob@partner-it.example');
   });
 });

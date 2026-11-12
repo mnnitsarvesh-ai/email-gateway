@@ -1,0 +1,143 @@
+# Quarantine worker (step 5.3, docs/plan/steps/17-quarantine.md Q13.2, Q19, Q20, Q28; ADR-0046
+# decision 6, ADR-0047): the policy-engine image with POLICY_ENGINE_ROLES=quarantine. It consumes
+# email.quarantine as the role user eg-policy-engine (the release executor: authoritative
+# re-validation, release copy, lifecycle edge, delivery approvals) and runs the leader-elected
+# sweeper (entry and approval expiry, object purge, adoption of messages held before 5.3, digest
+# and admin-alert scheduling, entry row retention). A separate Deployment from policy-engine
+# (evaluate) so a quarantine defect never stops the delivery gate. Writer-only MySQL, the mail
+# bucket (reads originals and rewritten copies, writes release copies under org/<org>/policy/,
+# deletes purged objects; S3 access through the pod's IAM role, IRSA, in production), Redis for
+# readiness. Signs click tokens of release copies with URL_TOKEN_KEY_CURRENT (sign only, ADR-0049).
+# Never holds QUARANTINE_DOWNLOAD_TOKEN_KEY (api only).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: quarantine-worker
+  labels: { app.kubernetes.io/name: quarantine-worker, app.kubernetes.io/part-of: email-gateway }
+spec:
+  # Two replicas: the executor consumes on both; the sweeper runs on the GET_LOCK leader only.
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels: { app.kubernetes.io/name: quarantine-worker }
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  template:
+    metadata:
+      labels:
+        { app.kubernetes.io/name: quarantine-worker, app.kubernetes.io/part-of: email-gateway }
+    spec:
+      serviceAccountName: quarantine-worker
+      automountServiceAccountToken: false
+      # Longer than one executor/sweeper transaction budget (QUARANTINE_DB_TX_TIMEOUT_MS) plus the
+      # stop grace.
+      terminationGracePeriodSeconds: 150
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile: { type: RuntimeDefault }
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app.kubernetes.io/name: quarantine-worker }
+      containers:
+        - name: quarantine-worker
+          image: email-gateway/policy-engine:latest
+          ports:
+            - { name: http, containerPort: 3030 }
+          envFrom:
+            - configMapRef: { name: email-gateway-config }
+          env:
+            - { name: HTTP_PORT, value: '3030' }
+            # Step 5.3 Q28: the quarantine role only (policy-engine.yaml runs evaluate).
+            - { name: POLICY_ENGINE_ROLES, value: quarantine }
+            # Quarantine (step 5.3 §5); the hold/review maxima, verdict age, signature lag and the
+            # lifecycle deadlines come from the ConfigMap.
+            - { name: QUARANTINE_RELEASE_PREFETCH, value: '4' }
+            - { name: QUARANTINE_DB_TX_TIMEOUT_MS, value: '120000' }
+            - { name: QUARANTINE_SWEEP_INTERVAL_MS, value: '60000' }
+            - { name: QUARANTINE_SWEEP_BATCH_SIZE, value: '200' }
+            - { name: QUARANTINE_ENTRY_RETENTION_DAYS, value: '186' }
+            - { name: QUARANTINE_DIGEST_MAX_USERS_PER_RUN, value: '5000' }
+            # The release copy pipeline (Q13.6) reuses the policy copy bounds, WARN banners and
+            # URL_REWRITE after the scan (Q22, Q23); POLICY_PLATFORM_DEFAULT, URL_CLICK_BASE_URL,
+            # token expiry and rewrite size bounds come from the ConfigMap.
+            - { name: POLICY_DB_TX_TIMEOUT_MS, value: '120000' }
+            - { name: POLICY_SNAPSHOT_CACHE_MAX_ENTRIES, value: '1000' }
+            - { name: POLICY_COPY_MAX_MESSAGE_BYTES, value: '26214400' }
+            - { name: POLICY_COPY_MAX_HEADER_BYTES, value: '262144' }
+            - { name: POLICY_BANNER_MAX_PART_BYTES, value: '1048576' }
+            - { name: POLICY_URL_REWRITE_ENABLED, value: 'true' }
+            # Secrets are mounted as files by External Secrets and read via the <KEY>_FILE convention.
+            - { name: DATABASE_URL_FILE, value: /var/run/secrets/gateway/database-url }
+            # Role user eg-policy-engine (step 5.3 Q27): consumes email.quarantine.
+            - {
+                name: RABBITMQ_POLICY_ENGINE_URL_FILE,
+                value: /var/run/secrets/gateway/rabbitmq-policy-engine-url,
+              }
+            - { name: REDIS_URL_FILE, value: /var/run/secrets/gateway/redis-url }
+            # Click-token signing of release copies (ADR-0049): the CURRENT key and id only.
+            - { name: URL_TOKEN_KEY_CURRENT_FILE, value: /var/run/secrets/url-token/current }
+            - name: URL_TOKEN_KEY_CURRENT_ID
+              valueFrom:
+                secretKeyRef: { name: email-gateway-url-token-keys, key: current-id }
+          volumeMounts:
+            - { name: secrets, mountPath: /var/run/secrets/gateway, readOnly: true }
+            - { name: token-keys, mountPath: /var/run/secrets/url-token, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+          # Readiness does not require the sweeper leadership (Q28).
+          readinessProbe:
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /health/live, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          startupProbe:
+            httpGet: { path: /health/live, port: http }
+            periodSeconds: 5
+            failureThreshold: 24
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+      volumes:
+        - name: secrets
+          secret: { secretName: email-gateway-secrets }
+        - name: token-keys
+          secret:
+            secretName: email-gateway-url-token-keys
+            items: [{ key: current, path: current }]
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: quarantine-worker
+---
+# Metrics (/metrics) and health on the http port, like the policy-engine.
+apiVersion: v1
+kind: Service
+metadata:
+  name: quarantine-worker
+  labels: { app.kubernetes.io/name: quarantine-worker }
+spec:
+  selector: { app.kubernetes.io/name: quarantine-worker }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: quarantine-worker
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: quarantine-worker }

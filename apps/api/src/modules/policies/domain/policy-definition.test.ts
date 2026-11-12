@@ -166,8 +166,9 @@ describe('catalogView', () => {
     expect(catalog.versions).toEqual({
       dsl: 'policy-dsl/1',
       input: 'policy-input/1',
-      evaluator: 'policy-eval/1',
+      evaluator: 'policy-eval/2',
     });
+    expect(catalog.settingsDefaults.recipientSplit).toBe(true);
     expect(catalog.fields.find((f) => f.name === 'recipient.department')).toMatchObject({
       type: 'id',
       scope: 'recipients',

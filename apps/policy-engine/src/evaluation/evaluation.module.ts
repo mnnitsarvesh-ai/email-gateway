@@ -11,21 +11,23 @@ import {
   AmqpConnection,
   ConfirmPublisher,
   type MessagingMetrics,
-  MetricsService,
   PrismaConsumerProgress,
   PrismaService,
-  S3Service,
 } from '@email-gateway/common';
 import type { Logger } from '@email-gateway/logger';
 import type { WorkerConfig } from '../config';
+import { URL_REWRITE_CONFIG } from '../core.module';
 import { S3PolicyCopyWriter } from '../delivery/policy-copy';
-import { PolicyMetrics, type PolicyRead } from '../metrics/policy-metrics';
+import { CopyFactsReader, type PolicyUrlRewriteConfig } from '../delivery/policy-url-rewrite';
+import { PolicyMetrics } from '../metrics/policy-metrics';
+import { QuarantineMetrics } from '../metrics/quarantine-metrics';
+import { QuarantineSettingsRepository } from '../quarantine/settings.repository';
+import { QuarantineStoreWriter } from '../quarantine/store-writer';
 import { DirectoryRepository } from './directory.repository';
 import { PolicyEvaluationService } from './evaluation.service';
 import { FactsRepository } from './facts.repository';
 import { createPolicyEvaluateFeed, PolicyEvaluateConsumer } from './policy-evaluate.consumer';
-import { SnapshotCache } from './snapshot-cache';
-import { type LoadedSnapshot, SnapshotRepository } from './snapshot.repository';
+import { SnapshotRepository } from './snapshot.repository';
 
 /** Starts the consumer after bootstrap and stops it before the clients close. */
 @Injectable()
@@ -42,9 +44,11 @@ export class EvaluationRuntime implements OnApplicationBootstrap, OnModuleDestro
 }
 
 /**
- * The evaluation pipeline of step 5.2 (P13): `email.policy.evaluate` → `PolicyEvaluationService`
- * (facts, snapshot, directory, evaluation, policy copy, decision row, lifecycle, outbox) with the
- * P24 metrics. Needs the global `AmqpModule`, `S3Module` and `MetricsModule`.
+ * The evaluation pipeline (role `evaluate`, step 5.2 P13; step 5.3 Q2–Q6, Q22, Q23):
+ * `email.policy.evaluate` → `PolicyEvaluationService` (facts, snapshot, directory, per-recipient
+ * evaluation, policy copy with banner and URL rewrite, decision row, lifecycle, recipients,
+ * quarantine entries, outbox) with the P24 and Q29 metrics. Needs the global `AmqpModule`,
+ * `S3Module`, `MetricsModule` and `PolicyEngineCoreModule`.
  */
 @Module({})
 export class EvaluationModule {
@@ -53,37 +57,49 @@ export class EvaluationModule {
       module: EvaluationModule,
       providers: [
         {
-          provide: PolicyMetrics,
-          useFactory: (metrics: MetricsService) => new PolicyMetrics(metrics),
-          inject: [MetricsService],
-        },
-        {
           provide: PolicyEvaluationService,
-          useFactory: (metrics: PolicyMetrics, s3: S3Service) => {
-            const inconsistent = (read: PolicyRead) => metrics.inconsistentReads.inc({ read });
-            return new PolicyEvaluationService({
-              facts: new FactsRepository(inconsistent),
-              snapshots: new SnapshotRepository(
-                new SnapshotCache<LoadedSnapshot>(config.POLICY_SNAPSHOT_CACHE_MAX_ENTRIES),
-                config.POLICY_PLATFORM_DEFAULT,
-                inconsistent,
-                ({ policyPublicId }) =>
-                  logger.warn(
-                    { policyPublicId },
-                    'active policy points to a version that is not published; it contributes no rule',
-                  ),
-              ),
-              directory: new DirectoryRepository(inconsistent),
-              copies: new S3PolicyCopyWriter(s3.client, s3.mailBucket, {
-                maxMessageBytes: config.POLICY_COPY_MAX_MESSAGE_BYTES,
-                maxHeaderBytes: config.POLICY_COPY_MAX_HEADER_BYTES,
-              }),
+          useFactory: (
+            metrics: PolicyMetrics,
+            facts: FactsRepository,
+            snapshots: SnapshotRepository,
+            directory: DirectoryRepository,
+            copies: S3PolicyCopyWriter,
+            store: QuarantineStoreWriter,
+            settings: QuarantineSettingsRepository,
+            copyFacts: CopyFactsReader,
+            urlRewrite: PolicyUrlRewriteConfig,
+          ) =>
+            new PolicyEvaluationService({
+              facts,
+              snapshots,
+              directory,
+              copies,
+              quarantine: {
+                store,
+                settings,
+                copyFacts,
+                urlRewrite,
+                bannerMaxPartBytes: config.POLICY_BANNER_MAX_PART_BYTES,
+                bounds: {
+                  maxHoldDays: config.QUARANTINE_MAX_HOLD_DAYS,
+                  maxReviewDays: config.QUARANTINE_MAX_REVIEW_DAYS,
+                },
+              },
               metrics,
               logger,
               copyTimeoutMs: Math.floor(config.POLICY_DB_TX_TIMEOUT_MS / 2),
-            });
-          },
-          inject: [PolicyMetrics, S3Service],
+            }),
+          inject: [
+            PolicyMetrics,
+            FactsRepository,
+            SnapshotRepository,
+            DirectoryRepository,
+            S3PolicyCopyWriter,
+            QuarantineStoreWriter,
+            QuarantineSettingsRepository,
+            CopyFactsReader,
+            URL_REWRITE_CONFIG,
+          ],
         },
         {
           provide: PolicyEvaluateConsumer,
@@ -94,6 +110,7 @@ export class EvaluationModule {
             messaging: MessagingMetrics | null,
             service: PolicyEvaluationService,
             metrics: PolicyMetrics,
+            quarantine: QuarantineMetrics,
           ) =>
             new PolicyEvaluateConsumer(
               createPolicyEvaluateFeed({
@@ -108,6 +125,8 @@ export class EvaluationModule {
               prisma,
               metrics,
               config.POLICY_DB_TX_TIMEOUT_MS,
+              undefined,
+              quarantine,
             ),
           inject: [
             PrismaService,
@@ -116,11 +135,12 @@ export class EvaluationModule {
             AMQP_MESSAGING_METRICS,
             PolicyEvaluationService,
             PolicyMetrics,
+            QuarantineMetrics,
           ],
         },
         EvaluationRuntime,
       ],
-      exports: [PolicyMetrics, PolicyEvaluateConsumer],
+      exports: [PolicyEvaluateConsumer],
     };
   }
 }

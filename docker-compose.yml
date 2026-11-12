@@ -51,6 +51,13 @@
 # and sends policy alerts and sender notices through `postfix-notify`; tests point it at another
 # relay with NOTIFICATION_SMTP_HOST (e.g. the smtp-test mail-sink) and recreate it.
 #
+# Quarantine (step 5.3, docs/plan/steps/17-quarantine.md, ADR-0046..0049, topology v10): the
+# `policy-engine` runs both roles here (POLICY_ENGINE_ROLES=evaluate,quarantine): it writes the
+# per-recipient entries in its evaluation transaction and, as the quarantine role, consumes
+# email.quarantine (release executor) and runs the expiry/purge/adoption sweeper and the digest
+# scheduler; it also signs click tokens for URL_REWRITE after the scan (URL_TOKEN_KEY_CURRENT,
+# sign only). The api serves the quarantine routes and alone holds QUARANTINE_DOWNLOAD_TOKEN_KEY.
+#
 # Security scanning (step 4.1, docs/plan/steps/09-rspamd.md, ADR-0026/ADR-0027): the email-worker
 # scan role consumes scan.spam as eg-scanner (RABBITMQ_SCANNER_URL) and scans every parsed
 # message with `rspamd` /checkv2 (SCAN_RSPAMD_URL); the api trains Bayes/fuzzy through the
@@ -133,8 +140,10 @@ x-sandbox-platform-env: &sandbox-platform-env
 # (step 4.3 §5). Container values: DNS only through dns-sink, the TEST-ONLY documentation-range
 # allowance for url-test (refused unless APP_ENV is local/ci), the test CA of test-pki, no dial
 # map (the containers reach 203.0.113.10 directly on urltest). Secrets: URL_CACHE_HMAC_KEY,
-# URL_TOKEN_KEY_* and URL_EGRESS_PROXY_TOKEN reach only these two services (and the proxy token
-# the url-browser profile).
+# URL_TOKEN_KEY_* and URL_EGRESS_PROXY_TOKEN reach only these two services through this anchor
+# (and the proxy token the url-browser profile); since step 5.3 (ADR-0049) the policy-engine also
+# gets URL_TOKEN_KEY_CURRENT and URL_TOKEN_KEY_CURRENT_ID individually (sign only, never the
+# previous key, never this anchor).
 x-url-platform-env: &url-platform-env
   URL_REPUTATION_PROVIDERS: ${URL_REPUTATION_PROVIDERS:-local_feed,dnsbl}
   URL_DNSBL_DOMAIN_ZONES: ${URL_DNSBL_DOMAIN_ZONES:-dbl.scan.test=127.0.1.2:spam,127.0.1.4:phishing,127.0.1.5:malware,127.0.1.6:c2}
@@ -1138,6 +1147,29 @@ services:
       POLICY_HISTORY_MAX_RANGE_DAYS: ${POLICY_HISTORY_MAX_RANGE_DAYS:-31}
       DEPARTMENT_MAX_PER_ORG: ${DEPARTMENT_MAX_PER_ORG:-500}
       DEPARTMENT_MAX_MEMBERS: ${DEPARTMENT_MAX_MEMBERS:-5000}
+      # Quarantine (step 5.3 §5, ADR-0046–0049). The api is the only holder of
+      # QUARANTINE_DOWNLOAD_TOKEN_KEY (Q28). The lifecycle deadlines bound the hold/review days.
+      QUARANTINE_MAX_HOLD_DAYS: ${QUARANTINE_MAX_HOLD_DAYS:-60}
+      QUARANTINE_MAX_REVIEW_DAYS: ${QUARANTINE_MAX_REVIEW_DAYS:-13}
+      LIFECYCLE_DEADLINE_QUARANTINED_HOURS: ${LIFECYCLE_DEADLINE_QUARANTINED_HOURS:-2160}
+      LIFECYCLE_DEADLINE_HELD_FOR_REVIEW_HOURS: ${LIFECYCLE_DEADLINE_HELD_FOR_REVIEW_HOURS:-336}
+      QUARANTINE_TX_TIMEOUT_MS: ${QUARANTINE_TX_TIMEOUT_MS:-120000}
+      QUARANTINE_RELEASE_MAX_VERDICT_AGE_HOURS: ${QUARANTINE_RELEASE_MAX_VERDICT_AGE_HOURS:-72}
+      QUARANTINE_RELEASE_SIGNATURE_MAX_LAG_HOURS: ${QUARANTINE_RELEASE_SIGNATURE_MAX_LAG_HOURS:-24}
+      QUARANTINE_MANUAL_FROM_REJECT_MAX_DAYS: ${QUARANTINE_MANUAL_FROM_REJECT_MAX_DAYS:-30}
+      QUARANTINE_SEARCH_MAX_RANGE_DAYS: ${QUARANTINE_SEARCH_MAX_RANGE_DAYS:-62}
+      QUARANTINE_SEARCH_MAX_PAGE_SIZE: ${QUARANTINE_SEARCH_MAX_PAGE_SIZE:-100}
+      QUARANTINE_PREVIEW_MAX_BODY_BYTES: ${QUARANTINE_PREVIEW_MAX_BODY_BYTES:-262144}
+      QUARANTINE_PREVIEW_MAX_TEXT_CHARS: ${QUARANTINE_PREVIEW_MAX_TEXT_CHARS:-100000}
+      QUARANTINE_PREVIEW_RATE_PER_MINUTE: ${QUARANTINE_PREVIEW_RATE_PER_MINUTE:-60}
+      QUARANTINE_DOWNLOAD_TOKEN_KEY: ${QUARANTINE_DOWNLOAD_TOKEN_KEY:?append the quarantine keys from .env.example}
+      QUARANTINE_DOWNLOAD_TOKEN_TTL_SECONDS: ${QUARANTINE_DOWNLOAD_TOKEN_TTL_SECONDS:-60}
+      QUARANTINE_DOWNLOAD_MAX_BYTES: ${QUARANTINE_DOWNLOAD_MAX_BYTES:-26214400}
+      QUARANTINE_DOWNLOAD_GRANTS_PER_HOUR: ${QUARANTINE_DOWNLOAD_GRANTS_PER_HOUR:-20}
+      QUARANTINE_BULK_MAX_ITEMS: ${QUARANTINE_BULK_MAX_ITEMS:-100}
+      QUARANTINE_BULK_MAX_ITEMS_PER_MINUTE: ${QUARANTINE_BULK_MAX_ITEMS_PER_MINUTE:-1000}
+      QUARANTINE_BULK_REQUESTS_PER_MINUTE: ${QUARANTINE_BULK_REQUESTS_PER_MINUTE:-20}
+      QUARANTINE_BULK_DEADLINE_MS: ${QUARANTINE_BULK_DEADLINE_MS:-25000}
     ports: ['127.0.0.1:${API_HOST_PORT:-3000}:3000']
     healthcheck:
       <<: *node-healthcheck
@@ -1492,7 +1524,8 @@ services:
     environment:
       <<: *node-env
       HTTP_PORT: 3030
-      # Consumes email.policy.evaluate (step 5.2 P13): role user eg-policy-engine.
+      # Consumes email.policy.evaluate (step 5.2 P13) and, with the quarantine role,
+      # email.quarantine (step 5.3 Q27): role user eg-policy-engine.
       RABBITMQ_POLICY_ENGINE_URL: amqp://${RABBITMQ_POLICY_ENGINE_USER:-eg-policy-engine}:${RABBITMQ_POLICY_ENGINE_PASSWORD:?append the RabbitMQ keys from .env.example}@rabbitmq:5672/${RABBITMQ_VHOST:-email-gateway}
       # Policy engine (step 5.2 §5).
       POLICY_PLATFORM_DEFAULT: ${POLICY_PLATFORM_DEFAULT:-pol-default/1}
@@ -1501,6 +1534,34 @@ services:
       POLICY_SNAPSHOT_CACHE_MAX_ENTRIES: ${POLICY_SNAPSHOT_CACHE_MAX_ENTRIES:-1000}
       POLICY_COPY_MAX_MESSAGE_BYTES: ${POLICY_COPY_MAX_MESSAGE_BYTES:-26214400}
       POLICY_COPY_MAX_HEADER_BYTES: ${POLICY_COPY_MAX_HEADER_BYTES:-262144}
+      # Quarantine (step 5.3 §5, Q28): Compose runs both roles in this one container (Kubernetes
+      # runs policy-engine = evaluate and quarantine-worker = quarantine).
+      POLICY_ENGINE_ROLES: ${POLICY_ENGINE_ROLES:-evaluate,quarantine}
+      QUARANTINE_MAX_HOLD_DAYS: ${QUARANTINE_MAX_HOLD_DAYS:-60}
+      QUARANTINE_MAX_REVIEW_DAYS: ${QUARANTINE_MAX_REVIEW_DAYS:-13}
+      LIFECYCLE_DEADLINE_QUARANTINED_HOURS: ${LIFECYCLE_DEADLINE_QUARANTINED_HOURS:-2160}
+      LIFECYCLE_DEADLINE_HELD_FOR_REVIEW_HOURS: ${LIFECYCLE_DEADLINE_HELD_FOR_REVIEW_HOURS:-336}
+      QUARANTINE_RELEASE_PREFETCH: ${QUARANTINE_RELEASE_PREFETCH:-4}
+      QUARANTINE_DB_TX_TIMEOUT_MS: ${QUARANTINE_DB_TX_TIMEOUT_MS:-120000}
+      QUARANTINE_SWEEP_INTERVAL_MS: ${QUARANTINE_SWEEP_INTERVAL_MS:-60000}
+      QUARANTINE_SWEEP_BATCH_SIZE: ${QUARANTINE_SWEEP_BATCH_SIZE:-200}
+      QUARANTINE_ENTRY_RETENTION_DAYS: ${QUARANTINE_ENTRY_RETENTION_DAYS:-186}
+      QUARANTINE_DIGEST_MAX_USERS_PER_RUN: ${QUARANTINE_DIGEST_MAX_USERS_PER_RUN:-5000}
+      QUARANTINE_RELEASE_MAX_VERDICT_AGE_HOURS: ${QUARANTINE_RELEASE_MAX_VERDICT_AGE_HOURS:-72}
+      QUARANTINE_RELEASE_SIGNATURE_MAX_LAG_HOURS: ${QUARANTINE_RELEASE_SIGNATURE_MAX_LAG_HOURS:-24}
+      # WARN body banners and URL_REWRITE after the scan (Q22, Q23, ADR-0049). The URL keys are
+      # passed individually (not the x-url-platform-env anchor): the CURRENT click-token key and
+      # id only (sign only), the click base URL, token expiry and rewrite size bounds.
+      POLICY_BANNER_MAX_PART_BYTES: ${POLICY_BANNER_MAX_PART_BYTES:-1048576}
+      POLICY_URL_REWRITE_ENABLED: ${POLICY_URL_REWRITE_ENABLED:-true}
+      URL_TOKEN_KEY_CURRENT: ${URL_TOKEN_KEY_CURRENT:?append the URL protection keys from .env.example}
+      URL_TOKEN_KEY_CURRENT_ID: ${URL_TOKEN_KEY_CURRENT_ID:-1}
+      URL_CLICK_BASE_URL: ${URL_CLICK_BASE_URL:-http://localhost:3080}
+      URL_TOKEN_DEFAULT_EXPIRY_DAYS: ${URL_TOKEN_DEFAULT_EXPIRY_DAYS:-30}
+      URL_TOKEN_MAX_EXPIRY_DAYS: ${URL_TOKEN_MAX_EXPIRY_DAYS:-90}
+      URL_REWRITE_MAX_MESSAGE_BYTES: ${URL_REWRITE_MAX_MESSAGE_BYTES:-26214400}
+      URL_REWRITE_MAX_PART_BYTES: ${URL_REWRITE_MAX_PART_BYTES:-5242880}
+      URL_REWRITE_DKIM_SIGNED: ${URL_REWRITE_DKIM_SIGNED:-rewrite}
     ports: ['127.0.0.1:${POLICY_ENGINE_HOST_PORT:-3030}:3030']
     healthcheck:
       <<: *node-healthcheck
@@ -1617,7 +1678,7 @@ services:
       RECONCILE_MAX_REDRIVES: ${RECONCILE_MAX_REDRIVES:-3}
       RECONCILE_LOOKBACK_HOURS: ${RECONCILE_LOOKBACK_HOURS:-72}
       RECONCILE_BATCH_SIZE: ${RECONCILE_BATCH_SIZE:-1000}
-      RECONCILE_QUEUES: ${RECONCILE_QUEUES:-email.received,email.delivery.pending,scan.spam,scan.attachment,scan.url,scan.bec,scan.dlp,scan.sandbox.submissions,email.policy.evaluate,email.notifications}
+      RECONCILE_QUEUES: ${RECONCILE_QUEUES:-email.received,email.delivery.pending,scan.spam,scan.attachment,scan.url,scan.bec,scan.dlp,scan.sandbox.submissions,email.policy.evaluate,email.notifications,email.quarantine}
       RECONCILE_START_POSITION: ${RECONCILE_START_POSITION:-oldest}
       # Message lifecycle jobs (step 3.3 L13, L14; docs/plan/steps/08-message-lifecycle.md §5).
       LIFECYCLE_EXPIRY_ENABLED: ${LIFECYCLE_EXPIRY_ENABLED:-true}

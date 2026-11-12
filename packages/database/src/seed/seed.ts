@@ -53,7 +53,7 @@ export interface CatalogSummary {
 }
 
 /**
- * The catalog: permissions, the 8 system roles (D8) and the migration of retired role keys,
+ * The catalog: permissions, the 9 system roles (D8 + mailbox_user, 5.3) and the migration of retired role keys,
  * plans, system settings and the platform organization (D10). Safe in every environment; one
  * transaction.
  */
@@ -511,6 +511,7 @@ export async function seedDemo(
     }
 
     const policyId = await seedDemoPolicy(tx, organizationId, demoAdminId);
+    await seedDemoQuarantineSettings(tx, organizationId, demoAdminId);
 
     return {
       platformOrganizationId: platform.id,
@@ -632,6 +633,28 @@ async function seedDemoPolicy(
     });
   }
   return policy.id;
+}
+
+/**
+ * The demo organization's quarantine_settings row (step 5.3 §3 Seed, Q24): `{}` = every default.
+ * Created only when missing; a tenant's own settings are never overwritten.
+ */
+async function seedDemoQuarantineSettings(
+  tx: Tx,
+  organizationId: bigint,
+  demoAdminId: bigint | null,
+): Promise<void> {
+  const empty = {};
+  await tx.quarantineSettings.upsert({
+    where: { organizationId },
+    create: {
+      organizationId,
+      settings: empty,
+      settingsSha256: sha256Hex(canonicalJson(empty)),
+      updatedByUserId: demoAdminId,
+    },
+    update: {},
+  });
 }
 
 function sha256Hex(text: string): string {

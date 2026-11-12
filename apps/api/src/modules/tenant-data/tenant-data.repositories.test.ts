@@ -6,6 +6,12 @@ import { MessagesRepository } from './messages.repository';
 import { PoliciesRepository } from './policies.repository';
 import { QuarantineRepository } from './quarantine.repository';
 import {
+  QUARANTINE_PURGE_BATCH,
+  QUARANTINE_PURGE_ORDER,
+  QuarantinePurgeRefusedError,
+  QuarantineTenantDataRepository,
+} from './quarantine-tenant-data.repository';
+import {
   RISK_PURGE_BATCH,
   RISK_PURGE_ORDER,
   RiskTenantDataRepository,
@@ -251,5 +257,79 @@ describe('organization purge: policy engine and directory (step 5.2 P22)', () =>
     expect(statements).toHaveLength(POLICY_PURGE_ORDER.length);
     expect(statements[0]!.values).toEqual([42n, POLICY_PURGE_BATCH]);
     await expect(repo.purgeOrganization(SCOPE, -1)).rejects.toThrow('batch must be positive');
+  });
+});
+
+describe('organization purge: quarantine (step 5.3 Q17)', () => {
+  function rawWriter(answers: number[], activeHolds = 0) {
+    const statements: Array<{ sql: string; values: unknown[] }> = [];
+    const holdQueries: unknown[] = [];
+    const writer = {
+      archiveLegalHold: {
+        count: (args: unknown) => {
+          holdQueries.push(args);
+          return Promise.resolve(activeHolds);
+        },
+      },
+      $executeRaw: (strings: TemplateStringsArray, ...values: unknown[]) => {
+        statements.push({ sql: strings.join('?').replace(/\s+/g, ' ').trim(), values });
+        return Promise.resolve(answers.shift() ?? 0);
+      },
+    } as unknown as PrismaService;
+    return { writer, statements, holdQueries };
+  }
+
+  it('deletes every quarantine table in RESTRICT-safe order, in batches, scoped to the organization', async () => {
+    // Entries: two full batches then a short one; every other table one short batch.
+    const { writer, statements, holdQueries } = rawWriter([1, 1, 1, 1, 0, 1, 0, 0, 2, 2, 1, 1]);
+    const counts = await new QuarantineTenantDataRepository(writer).purgeOrganization(SCOPE, 2);
+    expect(holdQueries).toEqual([{ where: { organizationId: 42n, status: 'active' } }]);
+    expect(counts).toEqual({
+      quarantine_download_grants: 1,
+      quarantine_approval_requests: 1,
+      quarantine_release_logs: 1,
+      quarantine_actions: 1,
+      quarantine_object_purges: 0,
+      quarantine_digests: 1,
+      quarantine_digest_runs: 0,
+      quarantine_user_preferences: 0,
+      quarantine_messages: 5,
+      quarantine_settings: 1,
+    });
+    expect(statements.map((s) => s.sql)).toEqual([
+      ...QUARANTINE_PURGE_ORDER.slice(0, 8).map(
+        (t) => `DELETE FROM ${t} WHERE organization_id = ? ORDER BY id LIMIT ?`,
+      ),
+      'DELETE FROM quarantine_messages WHERE organization_id = ? ORDER BY id LIMIT ?',
+      'DELETE FROM quarantine_messages WHERE organization_id = ? ORDER BY id LIMIT ?',
+      'DELETE FROM quarantine_messages WHERE organization_id = ? ORDER BY id LIMIT ?',
+      'DELETE FROM quarantine_settings WHERE organization_id = ? ORDER BY id LIMIT ?',
+    ]);
+    for (const statement of statements) expect(statement.values).toEqual([42n, 2]);
+    const at = (t: (typeof QUARANTINE_PURGE_ORDER)[number]) => QUARANTINE_PURGE_ORDER.indexOf(t);
+    expect(at('quarantine_release_logs')).toBeLessThan(at('quarantine_actions'));
+    expect(at('quarantine_digests')).toBeLessThan(at('quarantine_digest_runs'));
+    expect(at('quarantine_approval_requests')).toBeLessThan(at('quarantine_messages'));
+    expect(at('quarantine_download_grants')).toBeLessThan(at('quarantine_messages'));
+    expect(QUARANTINE_PURGE_ORDER[QUARANTINE_PURGE_ORDER.length - 1]).toBe('quarantine_settings');
+  });
+
+  it('is refused while an active legal hold exists (nothing deleted)', async () => {
+    const { writer, statements } = rawWriter([], 2);
+    const error = await new QuarantineTenantDataRepository(writer)
+      .purgeOrganization(SCOPE)
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(QuarantinePurgeRefusedError);
+    expect((error as QuarantinePurgeRefusedError).activeLegalHolds).toBe(2);
+    expect(statements).toHaveLength(0);
+  });
+
+  it('is a no-op without rows and refuses a non-positive batch', async () => {
+    const { writer, statements } = rawWriter([]);
+    const repo = new QuarantineTenantDataRepository(writer);
+    expect(Object.values(await repo.purgeOrganization(SCOPE)).every((n) => n === 0)).toBe(true);
+    expect(statements).toHaveLength(QUARANTINE_PURGE_ORDER.length);
+    expect(statements[0]!.values).toEqual([42n, QUARANTINE_PURGE_BATCH]);
+    await expect(repo.purgeOrganization(SCOPE, 0)).rejects.toThrow('batch must be positive');
   });
 });

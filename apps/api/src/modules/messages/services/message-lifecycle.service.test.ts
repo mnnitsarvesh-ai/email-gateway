@@ -2,11 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { HttpException } from '@nestjs/common';
 import { MetricsService, type PrismaService } from '@email-gateway/common';
 import type { Prisma } from '@email-gateway/database';
-import {
-  deliveryApprovedV1,
-  EventTypes,
-  messageRescanRequestedV1,
-} from '@email-gateway/event-contracts';
+import { EventTypes, messageRescanRequestedV1 } from '@email-gateway/event-contracts';
 import { runWithContext } from '@email-gateway/logger';
 import {
   decideTransition,
@@ -61,7 +57,8 @@ const user: UserPrincipal = {
   sessionId: 's',
   mfaAuthenticated: true,
   mfaEnrollmentRequired: false,
-  permissions: new Set(),
+  // The route guard checks message:rescan; the service checks quarantine:release (step 5.3).
+  permissions: new Set(['message:rescan', 'quarantine:release']),
 };
 const apiKey: ApiKeyPrincipal = {
   kind: 'api_key',
@@ -69,7 +66,7 @@ const apiKey: ApiKeyPrincipal = {
   apiKeyPublicId: '0195f3c1-7a2b-7c3d-8e4f-0000000000c1',
   organizationId: ORG,
   organizationPublicId: user.organizationPublicId,
-  permissions: new Set(),
+  permissions: new Set(['message:rescan', 'quarantine:release']),
 };
 
 interface FakeMessage {
@@ -186,6 +183,8 @@ class World {
     hasTransitionKey: (_tx: Tx, ref: MessageRef, hash: string) =>
       Promise.resolve(this.byRef(ref)?.historyKeys.has(hash) ?? false),
     quarantineEntryCount: (_tx: Tx, _s: unknown, ref: MessageRef) =>
+      Promise.resolve(this.byRef(ref)?.quarantineEntries ?? 0),
+    openQuarantineEntryCount: (_tx: Tx, _s: unknown, ref: MessageRef) =>
       Promise.resolve(this.byRef(ref)?.quarantineEntries ?? 0),
     releasableRecipients: (_tx: Tx, _s: unknown, ref: MessageRef) =>
       Promise.resolve(
@@ -422,6 +421,32 @@ describe('MessageLifecycleService.rescan (L10.2, E19)', () => {
     },
   );
 
+  it('step 5.3: a quarantined/held message needs quarantine:release too (403, nothing written)', async () => {
+    const rescanOnly: UserPrincipal = { ...user, permissions: new Set(['message:rescan']) };
+    for (const state of ['quarantined', 'held_for_review'] as const) {
+      const m = world.add(state);
+      m.quarantineEntries = 2;
+      expect(await failure(rescan(m, {}, rescanOnly))).toMatchObject({
+        status: 403,
+        code: 'quarantine_rescan_forbidden',
+        details: { currentState: state, entries: 2, permission: 'quarantine:release' },
+      });
+      expect(m.snapshot.state).toBe(state);
+    }
+    expect(world.transitions).toEqual([]);
+    expect(world.outbox).toEqual([]);
+    expect(world.audits).toEqual([]);
+    // Other rescan sources need message:rescan only.
+    const scanned = world.add('scanned');
+    expect((await rescan(scanned, {}, rescanOnly)).statusCode).toBe(202);
+    expect(world.audits[0]!.metadata).toMatchObject({ quarantineEntriesSuperseded: 0 });
+    // With quarantine:release the rescan supersedes the open entries (recorded in the audit).
+    const held = world.add('quarantined');
+    held.quarantineEntries = 3;
+    await rescan(held, { idempotencyKey: 'key-2' }, user);
+    expect(world.audits[1]!.metadata).toMatchObject({ quarantineEntriesSuperseded: 3 });
+  });
+
   it('records an API key as the actor and requestedBy', async () => {
     const m = world.add('scanned');
     await rescan(m, {}, apiKey);
@@ -615,165 +640,42 @@ describe('MessageLifecycleService.rescan (L10.2, E19)', () => {
   });
 });
 
-describe('MessageLifecycleService.release (L10.3, E14/E15)', () => {
-  it('from quarantined: E14, approvals of pending|quarantined recipients, deliverySeq max + 1', async () => {
-    const m = world.add('quarantined', {
-      maxDeliverySeq: 0,
-      recipients: [
-        { id: 31n, rcptSeq: 2, status: 'pending' },
-        { id: 30n, rcptSeq: 0, status: 'quarantined' },
-        { id: 32n, rcptSeq: 1, status: 'delivered' },
-        { id: 33n, rcptSeq: 3, status: 'bounced' },
-      ],
-    });
-    const result = await release(m);
-    expect(result.statusCode).toBe(202);
-    expect(result.body).toEqual({
-      messageId: m.identity.publicId,
-      state: 'approved',
-      version: 5,
-      lifecycleRound: 1,
-      deliverySeq: 1,
-      approvalEventIds: [expect.any(String)],
-      recipientCount: 2,
-    });
-    expect(world.transitions[0]).toMatchObject({
-      to: 'approved',
-      reason: 'quarantine_release',
-      expectedFrom: ['quarantined', 'held_for_review'],
-      expectedVersion: 4,
-      transitionKey: 'api:7:message.release:key-1',
-      recordIgnored: false,
-    });
-
-    expect(world.outbox).toHaveLength(1);
-    const row = world.outbox[0]!;
-    expect(row).toMatchObject({
-      eventId: result.body.approvalEventIds[0],
-      organizationId: ORG,
-      eventType: EventTypes.DeliveryApproved,
-      aggregateId: m.identity.id.toString(),
-      correlationId: 'api:corr-abcdef12',
-    });
-    expect(deliveryApprovedV1.parse(row.payload)).toEqual({
-      messageId: m.identity.id.toString(),
-      receivedAt: receivedAt.toISOString(),
-      deliverySeq: 1,
-      source: 'quarantine_release',
-      emlS3Key: m.snapshot.emlObjectKey,
-      recipients: [
-        { recipientId: '30', rcptSeq: 0 },
-        { recipientId: '31', rcptSeq: 2 },
-      ],
-      approvedAt: expect.any(String),
-      lifecycleRound: 1,
-    });
-    expect(world.events).toEqual([
-      expect.objectContaining({
-        eventType: 'delivery.approved',
-        sourceService: 'api',
-        eventId: result.body.approvalEventIds[0],
-        actorType: 'user',
-        actorId: user.userPublicId,
+describe('MessageLifecycleService.release (L10.3; step 5.3 Q30: quarantine workflow only)', () => {
+  it.each<MessageState>(['quarantined', 'held_for_review'])(
+    '409 quarantine_workflow_required from %s, with the entry count and the quarantine route',
+    async (state) => {
+      const m = world.add(state, { quarantineEntries: 2 });
+      expect(await failure(release(m))).toMatchObject({
+        status: 409,
+        code: 'quarantine_workflow_required',
         details: {
-          source: 'quarantine_release',
-          approvalEventId: result.body.approvalEventIds[0],
-          deliverySeq: 1,
-          recipientCount: 2,
+          currentState: state,
+          currentVersion: 4,
+          entries: 2,
+          route: 'POST /api/v1/quarantine/entries/{entryId}/release',
         },
-      }),
-    ]);
-    expect(world.audits[0]).toMatchObject({
-      action: 'message.quarantine_released',
-      metadata: {
-        fromState: 'quarantined',
-        toState: 'approved',
-        deliverySeq: 1,
-        recipientCount: 2,
-        idempotencyKeyHash: sha('key-1'),
-        eventIds: [expect.any(String), result.body.approvalEventIds[0]],
-      },
-    });
-    expect(await operationCounts()).toEqual({ 'release:applied': 1 });
-    // The released quarantined recipient reads as pending again; the others are untouched.
-    expect(m.recipients.map((r) => [r.id, r.status])).toEqual([
-      [31n, 'pending'],
-      [30n, 'pending'],
-      [32n, 'delivered'],
-      [33n, 'bounced'],
-    ]);
-  });
+      });
+      expect(world.transitions).toHaveLength(0);
+      expect(world.outbox).toHaveLength(0);
+      expect(world.events).toHaveLength(0);
+      expect(world.audits).toHaveLength(0);
+      expect(world.idempotency.size).toBe(0);
+      expect(m.snapshot.state).toBe(state);
+      expect(m.recipients.find((r) => r.rcptSeq === 0)!.status).toBe('quarantined');
+    },
+  );
 
-  it('a rolled-back release leaves the quarantined recipients quarantined', async () => {
-    const m = world.add('quarantined');
-    world.repository.insertOutbox = () => Promise.reject(new Error('outbox insert failed'));
-    await expect(release(m)).rejects.toThrow('outbox insert failed');
-    expect(m.recipients.find((r) => r.rcptSeq === 0)!.status).toBe('quarantined');
-  });
-
-  it('from held_for_review uses E15 (review_release)', async () => {
-    const m = world.add('held_for_review');
-    await release(m);
-    expect(world.transitions[0]!.reason).toBe('review_release');
-    expect(m.snapshot).toMatchObject({ state: 'approved', round: 1 });
-  });
-
-  it.each([
-    [null, 1],
-    [0, 1],
-    [2, 3],
-  ])('deliverySeq with highest %s is %s', async (max, expected) => {
-    const m = world.add('quarantined', { maxDeliverySeq: max });
-    expect((await release(m)).body.deliverySeq).toBe(expected);
-  });
-
-  it('chunks approvals by 1000 recipients, one delivery.approved event per chunk', async () => {
-    const recipients = Array.from({ length: 2345 }, (_, i) => ({
-      id: BigInt(1000 + i),
-      rcptSeq: i,
-      status: i % 2 === 0 ? 'pending' : 'quarantined',
-    }));
-    const m = world.add('quarantined', { recipients });
-    const result = await release(m);
-    expect(result.body.recipientCount).toBe(2345);
-    expect(result.body.approvalEventIds).toHaveLength(3);
-    const payloads = world.outbox.map((row) => deliveryApprovedV1.parse(row.payload));
-    expect(payloads.map((p) => p.recipients.length)).toEqual([1000, 1000, 345]);
-    expect(payloads.flatMap((p) => p.recipients.map((r) => r.rcptSeq))).toEqual(
-      recipients.map((r) => r.rcptSeq),
-    );
-    expect(new Set(payloads.map((p) => p.deliverySeq))).toEqual(new Set([1]));
-    expect(world.outbox.map((r) => r.eventId)).toEqual(result.body.approvalEventIds);
-    expect(new Set(result.body.approvalEventIds).size).toBe(3);
-    expect(
-      world.events.map((e) => (e.details as { recipientCount: number }).recipientCount),
-    ).toEqual([1000, 1000, 345]);
-  });
-
-  it('409 quarantine_workflow_required when quarantine_messages rows exist', async () => {
-    const m = world.add('quarantined', { quarantineEntries: 1 });
+  it('also without entries (a 5.2-held message not adopted yet): no release around the workflow', async () => {
+    const m = world.add('quarantined', { quarantineEntries: 0 });
     expect(await failure(release(m))).toMatchObject({
-      status: 409,
       code: 'quarantine_workflow_required',
-      details: { currentState: 'quarantined', currentVersion: 4 },
+      details: { entries: 0 },
     });
     expect(world.transitions).toHaveLength(0);
-    expect(m.snapshot.state).toBe('quarantined');
-  });
-
-  it('409 no_releasable_recipients without pending or quarantined recipients', async () => {
-    const m = world.add('quarantined', {
-      recipients: [{ id: 1n, rcptSeq: 0, status: 'delivered' }],
-    });
-    expect(await failure(release(m))).toMatchObject({
-      status: 409,
-      code: 'no_releasable_recipients',
-    });
-    expect(world.outbox).toHaveLength(0);
     expect(await operationCounts()).toEqual({ 'release:conflict': 1 });
   });
 
-  it('state and version are decided before the release preconditions', async () => {
+  it('state and version are decided first (L10.4 conflicts unchanged)', async () => {
     const stale = world.add('quarantined', { quarantineEntries: 1, version: 3 });
     expect(await failure(release(stale, { body: { expectedVersion: 2, reason } }))).toMatchObject({
       code: 'message_version_conflict',
@@ -792,33 +694,6 @@ describe('MessageLifecycleService.release (L10.3, E14/E15)', () => {
       expect(await failure(release(m))).toMatchObject({ code: 'message_state_conflict' });
     },
   );
-
-  it('replays a release: same body, one transition, one approval, one audit row', async () => {
-    const m = world.add('quarantined');
-    const first = await release(m);
-    const second = await release(m);
-    expect(second).toEqual({ ...first, replayed: true });
-    expect(world.outbox).toHaveLength(1);
-    expect(world.audits).toHaveLength(1);
-    expect(await operationCounts()).toEqual({ 'release:applied': 1, 'release:replayed': 1 });
-  });
-
-  it('an unexpected transition outcome rolls everything back', async () => {
-    const m = world.add('quarantined');
-    world.nextOutcome = () => ({
-      result: 'stale',
-      why: 'version_mismatch',
-      snapshot: { ...m.snapshot, version: 5 },
-    });
-    expect(await failure(release(m))).toMatchObject({
-      code: 'message_version_conflict',
-      details: { currentVersion: 5 },
-    });
-    expect(world.outbox).toHaveLength(0);
-    expect(world.events).toHaveLength(0);
-    expect(world.audits).toHaveLength(0);
-    expect(world.idempotency.size).toBe(0);
-  });
 });
 
 describe('ApiLifecycleMetrics', () => {

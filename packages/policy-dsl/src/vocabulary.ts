@@ -7,7 +7,14 @@ import { z } from 'zod';
  */
 export const POLICY_DSL_VERSION = 'policy-dsl/1';
 export const POLICY_INPUT_VERSION = 'policy-input/1';
-export const POLICY_EVALUATOR_VERSION = 'policy-eval/1';
+/**
+ * `policy-eval/2` (step 5.3 Q4, Q22, Q23; ADR-0046, ADR-0049): per-recipient evaluation, the
+ * policy-rewritable URL skip reasons and the body banner request. `policy-eval/1` rows (5.2) stay
+ * readable: the stored-row schemas accept every listed evaluator version.
+ */
+export const POLICY_EVALUATOR_VERSION = 'policy-eval/2';
+export const POLICY_EVALUATOR_VERSIONS = ['policy-eval/1', 'policy-eval/2'] as const;
+export type PolicyEvaluatorVersion = (typeof POLICY_EVALUATOR_VERSIONS)[number];
 
 /** Message directions (Prisma `MessageDirection`). */
 export const POLICY_MESSAGE_DIRECTIONS = ['inbound', 'outbound', 'internal'] as const;
@@ -116,7 +123,11 @@ export type PolicyTrigger = (typeof POLICY_TRIGGERS)[number];
 export const POLICY_DELIVERED_OBJECTS = ['original', 'rewritten', 'policy_copy', 'none'] as const;
 export type PolicyDeliveredObject = (typeof POLICY_DELIVERED_OBJECTS)[number];
 
-/** Final actions written to `email_messages.final_action` (P18; Prisma `MessageAction`). */
+/**
+ * Final actions written to `email_messages.final_action` (P18; Prisma `MessageAction`). `partial`
+ * (step 5.3 Q5) marks a message whose recipients were decided differently; it is a message-level
+ * value (never returned by `lifecycleOutcome`, which maps one result).
+ */
 export const POLICY_FINAL_ACTIONS = [
   'deliver',
   'tag',
@@ -124,6 +135,7 @@ export const POLICY_FINAL_ACTIONS = [
   'require_approval',
   'reject',
   'discard',
+  'partial',
 ] as const;
 export type PolicyFinalAction = (typeof POLICY_FINAL_ACTIONS)[number];
 
@@ -134,6 +146,40 @@ export const ALERT_SEVERITIES = ['info', 'warning', 'critical'] as const;
 export type AlertSeverity = (typeof ALERT_SEVERITIES)[number];
 export const URL_REWRITE_FALLBACKS = ['deliver', 'quarantine'] as const;
 export type UrlRewriteFallback = (typeof URL_REWRITE_FALLBACKS)[number];
+
+/**
+ * Scan-time URL rewrite skip reasons the policy-engine can fix by rewriting the policy copy
+ * itself (step 5.3 Q23, ADR-0049): the tenant's 4.3 setting was off for the message. A URL_REWRITE
+ * `ifNotRewritten = quarantine` does not raise for them; every other skip reason raises as in 5.2.
+ */
+export const POLICY_REWRITABLE_SKIP_REASONS = ['disabled', 'direction'] as const;
+
+/**
+ * `delivery.bodyBanner` (step 5.3 Q22, ADR-0049): `requested` by the evaluator when WARN applies;
+ * the policy-engine replaces it with the outcome of the copy pipeline (`applied` or a
+ * `skipped_*` reason). `not_supported` is what 5.2 (`policy-eval/1`) rows hold.
+ */
+export const BODY_BANNER_STATUSES = [
+  'requested',
+  'applied',
+  'skipped_signed',
+  'skipped_encrypted',
+  'skipped_too_large',
+  'skipped_no_text_part',
+  'skipped_part',
+  'not_supported',
+] as const;
+export type BodyBannerStatus = (typeof BODY_BANNER_STATUSES)[number];
+/** The banner outcomes the policy-engine records (every status but `requested`/`not_supported`). */
+export const BODY_BANNER_OUTCOMES = [
+  'applied',
+  'skipped_signed',
+  'skipped_encrypted',
+  'skipped_too_large',
+  'skipped_no_text_part',
+  'skipped_part',
+] as const;
+export type BodyBannerOutcome = (typeof BODY_BANNER_OUTCOMES)[number];
 
 /** Weekdays of `time.window` (ISO order, Monday first). */
 export const WEEKDAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] as const;
@@ -174,6 +220,13 @@ export const POLICY_LIMITS = Object.freeze({
   activePoliciesPerOrganization: 100,
   activeRulesPerOrganization: 5_000,
   recipients: 1_000,
+  /**
+   * Per-recipient evaluation (step 5.3 Q4): at most this many recipients are evaluated one by
+   * one; a larger message is decided once (`policy.split.too_many_recipients`).
+   */
+  splitRecipients: 200,
+  /** Reason codes kept per recipient decision (Q4.6). */
+  recipientDecisionReasonCodes: 8,
   attachments: 200,
   urls: 500,
   /** Regex subjects are cut to this many characters. */

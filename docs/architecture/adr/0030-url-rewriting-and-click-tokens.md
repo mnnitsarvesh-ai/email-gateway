@@ -1,6 +1,6 @@
 # ADR-0030: URL rewriting in the URL engine into a separate S3 copy, and compact HMAC click tokens
 
-**Status:** Accepted. Refines [ADR-0021](0021-mail-routing-and-delivery-status.md) (the approval's `emlS3Key` may name the rewritten copy; the delivery-worker is unchanged) and [ADR-0022](0022-mime-parsing-and-post-queue-ingestion.md) (the original EML stays immutable). Design: [step 4.3](../../plan/steps/11-url-protection.md) U11, U12.
+**Status:** Accepted. Refines [ADR-0021](0021-mail-routing-and-delivery-status.md) (the approval's `emlS3Key` may name the rewritten copy; the delivery-worker is unchanged) and [ADR-0022](0022-mime-parsing-and-post-queue-ingestion.md) (the original EML stays immutable). Design: [step 4.3](../../plan/steps/11-url-protection.md) U11, U12. **Amended in step 5.3 by [ADR-0049](0049-policy-copy-body-edits-banners-and-url-rewrite.md):** the policy-engine also signs click tokens with the current key only (URL rewriting after the scan); a release reuses the re-validated round's rewritten copy.
 
 **Decision.**
 

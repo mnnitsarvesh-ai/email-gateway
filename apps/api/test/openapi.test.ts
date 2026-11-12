@@ -379,7 +379,8 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
       (doc.paths['/api/v1/messages/{messageId}/release'] as Record<string, Op>).post!.responses,
     );
     expect(release).toContain('quarantine_workflow_required');
-    expect(release).toContain('no_releasable_recipients');
+    // Step 5.3 (Q30): the release answers 409 quarantine_workflow_required; no other refusal.
+    expect(release).not.toContain('no_releasable_recipients');
     // The deliveries view carries the lifecycle reason since step 3.3.
     expect(JSON.stringify(doc.paths['/api/v1/messages/{messageId}/deliveries'])).toContain(
       'statusReason',
@@ -690,6 +691,30 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
       expect(description, path).toContain('step 8.1');
     }
     expect(responses('/api/v1/messages/{messageId}/scans', 'get')).toContain('snapshotSha256');
+  });
+
+  it('documents the step 5.3 quarantine endpoints (Q26) with their tag, errors and headers', () => {
+    const quarantine = operations(doc).filter((op) => op.key.includes(' /api/v1/quarantine'));
+    expect(quarantine).toHaveLength(29);
+    for (const op of quarantine) {
+      expect(op.tags, op.key).toEqual(['quarantine']);
+      expect(op.security.length, op.key).toBeGreaterThan(0);
+    }
+    const path = (p: string) => JSON.stringify(doc.paths[`/api/v1/quarantine${p}`]);
+    expect(path('/entries/{entryId}/preview')).toContain('no-store');
+    expect(path('/entries/{entryId}/preview')).toContain('quarantine_content_purged');
+    expect(path('/entries/{entryId}/release')).toContain('quarantine_rescan_required');
+    expect(path('/entries/{entryId}/release')).toContain('Idempotency-Key');
+    expect(path('/entries/{entryId}/delete')).toContain('quarantine_legal_hold');
+    expect(path('/entries/{entryId}/delete')).toContain('quarantine_retention_active');
+    expect(path('/entries/{entryId}/download-grants')).toContain('quarantine_reauth_failed');
+    expect(path('/downloads/{token}')).toContain('application/octet-stream');
+    expect(path('/downloads/{token}')).toContain('quarantine_download_token_used');
+    expect(path('/approvals/{approvalId}/approve')).toContain('quarantine_approval_forbidden');
+    expect(path('/bulk')).toContain('quarantine_bulk_rate_limited');
+    expect(path('/entries')).toContain('quarantine_cursor_invalid');
+    // Never an S3 URL, a body or a subject search parameter.
+    expect(path('/entries')).not.toMatch(/"name":"(subject|q|text)"/);
   });
 
   it('matches the committed snapshot docs/api/openapi.json', async () => {

@@ -5,7 +5,10 @@
  * mail bucket; step 4.5: a dlp result and evidence row with its evidence object) is found by
  * its marker and removed: queue id handed to `postsuper -d` (an unknown id is ignored), objects
  * and rows deleted. A message with another Message-ID stays. Step 5.2: the round's policy
- * evaluation row and a policy copy object (`org/<org>/policy/…`) go with it.
+ * evaluation row and a policy copy object (`org/<org>/policy/…`) go with it. Step 5.3: the probe
+ * is a demo-domain message the policy-engine may quarantine, so its quarantine entry and the
+ * entry's dependants (action, release log, approval request, object purge) go with it; the other
+ * message's entry stays.
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -13,8 +16,10 @@ import { storedEvaluation } from '../test/support/policy-fixtures';
 import { createIntegrationApp, type IntegrationApp } from './support/app';
 import { createFixtures, type FixtureOrganization, type Fixtures } from './support/fixtures';
 import { deleteLifecycleFixtures } from './support/lifecycle';
+import { insertApproval, insertEntry } from './support/quarantine';
 import {
   cleanupProbeMessages,
+  deleteProbeQuarantineRows,
   findProbeMessages,
   mailBucketClient,
   partPrefix,
@@ -125,6 +130,54 @@ async function insertDlpRows(message: { id: bigint; receivedAt: Date; organizati
   return objectKey;
 }
 
+/**
+ * A quarantine entry of the message as the policy-engine writes it (step 5.3), with an action, a
+ * release log (its `action_id` is RESTRICT), an approval request and an object purge row.
+ */
+async function insertQuarantineRows(message: {
+  id: bigint;
+  receivedAt: Date;
+  organizationId: bigint;
+  emlObjectKey: string;
+}): Promise<bigint> {
+  const entry = await insertEntry(ctx, {
+    ...message,
+    publicId: randomUUID(),
+    version: 0,
+    recipientIds: [],
+  });
+  const action = await ctx.prisma.quarantineAction.create({
+    data: {
+      organizationId: message.organizationId,
+      quarantineMessageId: entry.id,
+      action: 'release_queued',
+      actorType: 'system',
+    },
+    select: { id: true },
+  });
+  await ctx.prisma.quarantineReleaseLog.create({
+    data: {
+      organizationId: message.organizationId,
+      quarantineMessageId: entry.id,
+      actionId: action.id,
+      releasePublicId: randomUUID(),
+      mode: 'operator',
+      requestedByType: 'system',
+      releasedTo: `probe@${domain.name}`,
+    },
+  });
+  await insertApproval(ctx, entry, message.organizationId);
+  await ctx.prisma.quarantineObjectPurge.create({
+    data: {
+      organizationId: message.organizationId,
+      messageId: message.id,
+      messageReceivedAt: message.receivedAt,
+      purgeAfter: new Date(Date.now() + 86_400_000),
+    },
+  });
+  return entry.id;
+}
+
 /** A stored policy evaluation of round 0 (as the policy-engine writes it, step 5.2 P10). */
 async function insertEvaluation(message: { id: bigint; receivedAt: Date }) {
   const { row } = storedEvaluation(
@@ -171,6 +224,8 @@ describe('cleanupProbeMessages (L16)', () => {
     const copyKey = `${partPrefix(probe, 'policy')}r0-${sha('copy').slice(0, 32)}.eml`;
     const evidenceKey = await insertDlpRows(probe);
     await insertEvaluation(probe);
+    const probeEntryId = await insertQuarantineRows(probe);
+    const otherEntryId = await insertQuarantineRows(other);
     try {
       for (const key of [probe.emlObjectKey, partKey, copyKey, evidenceKey, other.emlObjectKey]) {
         await s3.send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: 'probe' }));
@@ -208,7 +263,24 @@ describe('cleanupProbeMessages (L16)', () => {
       expect(await ctx.prisma.emailRecipient.count({ where: { messageId: probe.id } })).toBe(0);
       expect(await ctx.prisma.messageIdentity.count({ where: { id: probe.id } })).toBe(0);
       expect(await ctx.prisma.emailMessage.count({ where: { id: other.id } })).toBe(1);
+
+      // Step 5.3: the probe's quarantine rows are gone, the other message's entry stays.
+      const byProbeEntry = { quarantineMessageId: probeEntryId };
+      expect(await ctx.prisma.quarantineMessage.count({ where: { messageId: probe.id } })).toBe(0);
+      expect(await ctx.prisma.quarantineAction.count({ where: byProbeEntry })).toBe(0);
+      expect(await ctx.prisma.quarantineReleaseLog.count({ where: byProbeEntry })).toBe(0);
+      expect(await ctx.prisma.quarantineApprovalRequest.count({ where: byProbeEntry })).toBe(0);
+      expect(await ctx.prisma.quarantineObjectPurge.count({ where: { messageId: probe.id } })).toBe(
+        0,
+      );
+      expect(await ctx.prisma.quarantineMessage.count({ where: { id: otherEntryId } })).toBe(1);
+      expect(
+        await ctx.prisma.quarantineReleaseLog.count({
+          where: { quarantineMessageId: otherEntryId },
+        }),
+      ).toBe(1);
     } finally {
+      await deleteProbeQuarantineRows(ctx.prisma, [other.id]);
       const { DeleteObjectCommand } = s3Commands();
       await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: other.emlObjectKey }));
       s3.destroy();

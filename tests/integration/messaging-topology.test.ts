@@ -35,7 +35,7 @@ import { stack } from './support/env';
  * (archive_requested.v1 on email.archive replaces policy.decided.v1 on email.policy, pruned by
  * init.mjs) and email.notifications adds two: 47 (42 queue + 5 exchange bindings).
  */
-const TOPOLOGY_BINDINGS = 47;
+const TOPOLOGY_BINDINGS = 48;
 const api = new ManagementApi();
 const vhost = stack.rabbitmqVhost();
 
@@ -136,10 +136,10 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
     expect(bindings.filter((b) => b.destination_type === 'exchange')).toHaveLength(5);
   });
 
-  it('is topology v9: the vhost description and the rescan bindings (steps 4.1 S2, 4.2 A2, 4.3 U2, 4.4 B3, 4.5 D2, 4.6 X11, 5.2 P15)', async () => {
-    expect(TOPOLOGY_VERSION).toBe(9);
+  it('is topology v10: the vhost description and the rescan bindings (steps 4.1 S2, 4.2 A2, 4.3 U2, 4.4 B3, 4.5 D2, 4.6 X11, 5.2 P15, 5.3 Q27)', async () => {
+    expect(TOPOLOGY_VERSION).toBe(10);
     const info = await api.get<{ description?: string }>(`/vhosts/${encodeURIComponent(vhost)}`);
-    expect(info.description).toBe('email-gateway topology v9');
+    expect(info.description).toBe('email-gateway topology v10');
     const rescan = bindings
       .filter(
         (b) =>
@@ -552,6 +552,8 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
     expect(bindingsOf('email.notifications')).toEqual(
       [
         'email.policy [org.*.mail.policy.notification_requested.v1]',
+        // v10 (step 5.3 Q20).
+        'email.policy [org.*.mail.quarantine.notification_requested.v1]',
         'email.policy [retry.email.notifications.#]',
       ].sort(),
     );
@@ -562,15 +564,47 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
     for (const user of await consumerUsers('email.notifications')) expect(user).toBe(worker);
   });
 
-  it('routes the policy events on the live bindings (v9): decision → quarantine (5.3), archive request → archive (8.1), notification → email.notifications', () => {
+  it('email.quarantine is a work queue (v10) for the policy-engine release executor (eg-policy-engine) only', async () => {
+    expect(queueDefinition('email.quarantine')).toMatchObject({
+      role: 'work',
+      homeExchange: 'email.policy',
+      consumer: {
+        kind: 'ledger',
+        ledgerName: 'policy-engine.quarantine',
+        service: 'policy-engine',
+      },
+    });
+    expect(queueDefinition('email.quarantine').lossy).toBeUndefined();
+    // The v1–v9 mail.policy.decided.v1 binding is pruned; the release request replaces it.
+    expect(bindingsOf('email.quarantine')).toEqual(
+      [
+        'email.policy [org.*.mail.quarantine.release_requested.v1]',
+        'email.policy [retry.email.quarantine.#]',
+      ].sort(),
+    );
+    // A queued release is never dropped: work policy (reject-publish), dead letters to email.events.
+    expect(queues.find((q) => q.name === 'email.quarantine')?.effective_policy_definition).toEqual(
+      policyFor('work', 'email.quarantine'),
+    );
+    const engine = process.env.RABBITMQ_POLICY_ENGINE_USER || 'eg-policy-engine';
+    for (const user of await consumerUsers('email.quarantine')) expect(user).toBe(engine);
+  });
+
+  it('routes the policy and quarantine events on the live bindings (v10): decision → firehose only, release request → email.quarantine, archive request → archive (8.1), notifications → email.notifications', () => {
     const route = (exchange: string, type: string) =>
       bindings
         .filter((b) => b.source === exchange && topicMatches(b.routing_key, `org.42.${type}`))
         .map((b) => `${b.destination_type}:${b.destination}`)
         .sort();
-    expect(route('email.policy', 'mail.policy.decided.v1')).toEqual([
+    // v10 (step 5.3 Q2): the decision is a firehose event only.
+    expect(route('email.policy', 'mail.policy.decided.v1')).toEqual(['exchange:email.events']);
+    expect(route('email.policy', 'mail.quarantine.release_requested.v1')).toEqual([
       'exchange:email.events',
       'queue:email.quarantine',
+    ]);
+    expect(route('email.policy', 'mail.quarantine.notification_requested.v1')).toEqual([
+      'exchange:email.events',
+      'queue:email.notifications',
     ]);
     expect(route('email.archive', 'mail.message.archive_requested.v1')).toEqual([
       'exchange:email.events',

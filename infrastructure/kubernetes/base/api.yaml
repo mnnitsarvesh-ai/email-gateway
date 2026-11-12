@@ -54,6 +54,27 @@ spec:
             - { name: POLICY_HISTORY_MAX_RANGE_DAYS, value: '31' }
             - { name: DEPARTMENT_MAX_PER_ORG, value: '500' }
             - { name: DEPARTMENT_MAX_MEMBERS, value: '5000' }
+            # Quarantine (step 5.3 §5); shared bounds come from the ConfigMap.
+            - { name: QUARANTINE_TX_TIMEOUT_MS, value: '120000' }
+            - { name: QUARANTINE_MANUAL_FROM_REJECT_MAX_DAYS, value: '30' }
+            - { name: QUARANTINE_SEARCH_MAX_RANGE_DAYS, value: '62' }
+            - { name: QUARANTINE_SEARCH_MAX_PAGE_SIZE, value: '100' }
+            - { name: QUARANTINE_PREVIEW_MAX_BODY_BYTES, value: '262144' }
+            - { name: QUARANTINE_PREVIEW_MAX_TEXT_CHARS, value: '100000' }
+            - { name: QUARANTINE_PREVIEW_RATE_PER_MINUTE, value: '60' }
+            - { name: QUARANTINE_DOWNLOAD_TOKEN_TTL_SECONDS, value: '60' }
+            - { name: QUARANTINE_DOWNLOAD_MAX_BYTES, value: '26214400' }
+            - { name: QUARANTINE_DOWNLOAD_GRANTS_PER_HOUR, value: '20' }
+            - { name: QUARANTINE_BULK_MAX_ITEMS, value: '100' }
+            - { name: QUARANTINE_BULK_MAX_ITEMS_PER_MINUTE, value: '1000' }
+            - { name: QUARANTINE_BULK_REQUESTS_PER_MINUTE, value: '20' }
+            - { name: QUARANTINE_BULK_DEADLINE_MS, value: '25000' }
+            # Quarantine download tokens (step 5.3 Q12, Q28): the api is the only holder of the
+            # HMAC key; its own Secret, mounted here only (64 hex characters).
+            - {
+                name: QUARANTINE_DOWNLOAD_TOKEN_KEY_FILE,
+                value: /var/run/secrets/quarantine-download/key,
+              }
             - { name: REDIS_URL_FILE, value: /var/run/secrets/gateway/redis-url }
             # Authentication (steps 1.2/1.3) and the transactional-email relay password.
             - { name: AUTH_JWT_SECRET_FILE, value: /var/run/secrets/gateway/auth-jwt-secret }
@@ -77,6 +98,11 @@ spec:
           volumeMounts:
             - { name: secrets, mountPath: /var/run/secrets/gateway, readOnly: true }
             - { name: dlp-evidence-key, mountPath: /var/run/secrets/dlp-evidence, readOnly: true }
+            - {
+                name: quarantine-download-key,
+                mountPath: /var/run/secrets/quarantine-download,
+                readOnly: true,
+              }
             - { name: tmp, mountPath: /tmp }
           readinessProbe:
             httpGet: { path: /health/ready, port: http }
@@ -103,6 +129,10 @@ spec:
         - name: dlp-evidence-key
           secret:
             secretName: email-gateway-dlp-evidence-key
+            items: [{ key: key, path: key }]
+        - name: quarantine-download-key
+          secret:
+            secretName: email-gateway-quarantine-download-key
             items: [{ key: key, path: key }]
         - name: tmp
           emptyDir: {}

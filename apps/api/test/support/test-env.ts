@@ -13,4 +13,6 @@ export const TEST_DOMAIN_ENV: Record<string, string> = {
   DOMAIN_BACKGROUND_JOBS_ENABLED: 'false',
   // Step 4.5 D16: the evidence key-encryption key is required (a fresh key per test process).
   DLP_EVIDENCE_KEY: randomBytes(32).toString('hex'),
+  // Step 5.3 Q12: the download-token HMAC key is required (a fresh key per test process).
+  QUARANTINE_DOWNLOAD_TOKEN_KEY: randomBytes(32).toString('hex'),
 };

@@ -63,6 +63,8 @@ describe('policy vocabularies (step 5.2)', () => {
       'discard',
       'reject',
       'require_approval',
+      // Step 5.3 Q5 (appended to MessageAction).
+      'partial',
     ]);
     expect(POLICY_DISPOSITION_VALUES).toEqual([
       'allow',
@@ -131,11 +133,8 @@ describe('mail.policy.decided.v1 (step 5.2 P15, redefined in place)', () => {
     expect(parseEvent(inEnvelope(type, decided), policyDecidedV1).payload).toEqual(decided);
   });
 
-  it('routes to the dormant quarantine queue and the firehose only (topology v9)', () => {
-    expect(routeMessage('email.policy', eventRoutingKey('42', type))).toEqual([
-      'email.analytics',
-      'email.quarantine',
-    ]);
+  it('routes to the firehose only (topology v10: the email.quarantine binding is removed)', () => {
+    expect(routeMessage('email.policy', eventRoutingKey('42', type))).toEqual(['email.analytics']);
   });
 
   it('has exactly the P15 fields and is strict', () => {
@@ -200,6 +199,16 @@ describe('mail.policy.decided.v1 (step 5.2 P15, redefined in place)', () => {
       );
     }
     expect(okDecided({ finalAction: 'block' })).toBe(false);
+    // Step 5.3 Q4/Q5: a per-recipient split records finalAction `partial` whatever the
+    // message-level disposition (the decision record).
+    for (const disposition of ['allow', 'require_approval', 'quarantine', 'reject']) {
+      for (const direction of ['inbound', 'outbound']) {
+        expect(
+          okDecided({ ...base, direction, disposition, finalAction: 'partial' }),
+          `${disposition}/${direction}`,
+        ).toBe(true);
+      }
+    }
     expect(okDecided({ disposition: 'deliver' })).toBe(false);
   });
 

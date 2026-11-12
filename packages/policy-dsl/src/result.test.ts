@@ -266,7 +266,7 @@ describe('row mapping (§3) and the api view', () => {
       policyGeneration: '1',
       platformDefaultId: 'pol-default/1',
       dslVersion: 'policy-dsl/1',
-      evaluatorVersion: 'policy-eval/1',
+      evaluatorVersion: 'policy-eval/2',
       inputVersion: 'policy-input/1',
     });
     expect(row.actions.map((a) => [a.type, a.status])).toEqual([
@@ -296,9 +296,15 @@ describe('row mapping (§3) and the api view', () => {
       deliveredObject,
       evaluatedAt,
       durationUs,
+      recipientSplit,
+      recipientDecisions,
       ...rest
     } = view;
     expect(rest).toEqual(result);
+    expect({ recipientSplit, recipientDecisions }).toEqual({
+      recipientSplit: false,
+      recipientDecisions: null,
+    });
     expect({
       lifecycleRound,
       trigger,
@@ -359,6 +365,8 @@ describe('row mapping (§3) and the api view', () => {
         deliveredObject,
         evaluatedAt: _e,
         durationUs: _u,
+        recipientSplit: _s,
+        recipientDecisions: _r,
         ...rest
       } = view;
       expect(rest).toEqual(result);

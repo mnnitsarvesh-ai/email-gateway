@@ -72,3 +72,9 @@ describe('policy notice templates (P25)', () => {
     expect(noticeMessageId('e2', 'no-reply@gw.example')).toBe('<policy-notice.e2@gw.example>');
   });
 });
+
+describe('safeText (step 5.3 hardening)', () => {
+  it('drops bidi overrides, isolates and invisible characters', () => {
+    expect(safeText('Acme\u202e moc.evil\u2066x\u2069\u200b\ufeff Ltd')).toBe('Acme moc.evilx Ltd');
+  });
+});

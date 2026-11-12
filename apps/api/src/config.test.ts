@@ -970,3 +970,92 @@ describe('loadApiConfig: policy engine (step 5.2 §5)', () => {
     expect(rejection({ ...valid, ...env })).toContain(key);
   });
 });
+
+describe('loadApiConfig: quarantine (step 5.3 §5)', () => {
+  it('defaults every bound and requires the download-token key', () => {
+    const cfg = loadApiConfig(valid);
+    expect(cfg).toMatchObject({
+      QUARANTINE_MAX_HOLD_DAYS: 60,
+      QUARANTINE_MAX_REVIEW_DAYS: 13,
+      QUARANTINE_TX_TIMEOUT_MS: 120_000,
+      QUARANTINE_RELEASE_MAX_VERDICT_AGE_HOURS: 72,
+      QUARANTINE_RELEASE_SIGNATURE_MAX_LAG_HOURS: 24,
+      QUARANTINE_MANUAL_FROM_REJECT_MAX_DAYS: 30,
+      QUARANTINE_SEARCH_MAX_RANGE_DAYS: 62,
+      QUARANTINE_SEARCH_MAX_PAGE_SIZE: 100,
+      QUARANTINE_PREVIEW_MAX_BODY_BYTES: 262_144,
+      QUARANTINE_PREVIEW_MAX_TEXT_CHARS: 100_000,
+      QUARANTINE_PREVIEW_RATE_PER_MINUTE: 60,
+      QUARANTINE_DOWNLOAD_TOKEN_TTL_SECONDS: 60,
+      QUARANTINE_DOWNLOAD_MAX_BYTES: 26_214_400,
+      QUARANTINE_DOWNLOAD_GRANTS_PER_HOUR: 20,
+      QUARANTINE_BULK_MAX_ITEMS: 100,
+      QUARANTINE_BULK_MAX_ITEMS_PER_MINUTE: 1000,
+      QUARANTINE_BULK_REQUESTS_PER_MINUTE: 20,
+      QUARANTINE_BULK_DEADLINE_MS: 25_000,
+      LIFECYCLE_DEADLINE_QUARANTINED_HOURS: 2160,
+      LIFECYCLE_DEADLINE_HELD_FOR_REVIEW_HOURS: 336,
+    });
+    const { QUARANTINE_DOWNLOAD_TOKEN_KEY: _omit, ...withoutKey } = valid as Record<string, string>;
+    expect(rejection(withoutKey)).toContain('QUARANTINE_DOWNLOAD_TOKEN_KEY');
+    const bad = 'short-key-MARKER';
+    const message = rejection({ ...valid, QUARANTINE_DOWNLOAD_TOKEN_KEY: bad });
+    expect(message).toContain('QUARANTINE_DOWNLOAD_TOKEN_KEY');
+    expect(message).not.toContain(bad);
+  });
+
+  it('accepts every key at its bounds', () => {
+    const low = loadApiConfig({
+      ...valid,
+      QUARANTINE_MAX_HOLD_DAYS: '7',
+      QUARANTINE_MAX_REVIEW_DAYS: '1',
+      QUARANTINE_TX_TIMEOUT_MS: '120000',
+      QUARANTINE_SEARCH_MAX_RANGE_DAYS: '1',
+      QUARANTINE_SEARCH_MAX_PAGE_SIZE: '10',
+      QUARANTINE_PREVIEW_MAX_BODY_BYTES: '16384',
+      QUARANTINE_DOWNLOAD_TOKEN_TTL_SECONDS: '10',
+      QUARANTINE_BULK_MAX_ITEMS: '1',
+      QUARANTINE_BULK_DEADLINE_MS: '5000',
+    });
+    expect(low.QUARANTINE_BULK_MAX_ITEMS).toBe(1);
+    const high = loadApiConfig({
+      ...valid,
+      QUARANTINE_MAX_HOLD_DAYS: '80',
+      QUARANTINE_TX_TIMEOUT_MS: '600000',
+      QUARANTINE_SEARCH_MAX_PAGE_SIZE: '500',
+      QUARANTINE_DOWNLOAD_MAX_BYTES: '52428800',
+      QUARANTINE_BULK_MAX_ITEMS: '500',
+      QUARANTINE_BULK_MAX_ITEMS_PER_MINUTE: '10000',
+    });
+    expect(high.QUARANTINE_MAX_HOLD_DAYS).toBe(80);
+  });
+
+  it('rejects out-of-range keys, a short transaction budget and hold/review days at the lifecycle deadline', () => {
+    expect(rejection({ ...valid, QUARANTINE_TX_TIMEOUT_MS: '119999' })).toContain(
+      'QUARANTINE_TX_TIMEOUT_MS',
+    );
+    expect(rejection({ ...valid, QUARANTINE_MAX_HOLD_DAYS: '81' })).toContain(
+      'QUARANTINE_MAX_HOLD_DAYS',
+    );
+    expect(rejection({ ...valid, QUARANTINE_BULK_MAX_ITEMS: '501' })).toContain(
+      'QUARANTINE_BULK_MAX_ITEMS',
+    );
+    expect(rejection({ ...valid, QUARANTINE_DOWNLOAD_TOKEN_TTL_SECONDS: '301' })).toContain(
+      'QUARANTINE_DOWNLOAD_TOKEN_TTL_SECONDS',
+    );
+    expect(
+      rejection({
+        ...valid,
+        QUARANTINE_MAX_HOLD_DAYS: '60',
+        LIFECYCLE_DEADLINE_QUARANTINED_HOURS: '1440',
+      }),
+    ).toContain('QUARANTINE_MAX_HOLD_DAYS');
+    expect(
+      rejection({
+        ...valid,
+        QUARANTINE_MAX_REVIEW_DAYS: '13',
+        LIFECYCLE_DEADLINE_HELD_FOR_REVIEW_HOURS: '312',
+      }),
+    ).toContain('QUARANTINE_MAX_REVIEW_DAYS');
+  });
+});

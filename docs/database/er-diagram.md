@@ -72,6 +72,8 @@ flowchart LR
   end
   subgraph quarantine[Quarantine]
     quarantine_messages
+    quarantine_approval_requests
+    quarantine_object_purges
   end
   subgraph archive[Archiving]
     email_archives[(email_archives P)]
@@ -1024,22 +1026,41 @@ erDiagram
 
 ## Quarantine
 
+Step 5.3 ([§3](../plan/steps/17-quarantine.md#3-data-model-one-forward-migration-quarantine-wp1)): an entry per (message, lifecycle round, recipient), the one approval model, single-use download grants, tenant settings, end-user preferences, object purges and digests. None is partitioned; every table references `organizations` ON DELETE RESTRICT (tenant purge order: grants, approval requests, release logs, actions, purges, digests, preferences, entries, settings). The message, recipient, scan and approval-request references of an entry are logical (no FK).
+
 ```mermaid
 erDiagram
   organizations ||--o{ quarantine_messages : ""
-  email_recipients ||..o| quarantine_messages : "message_id, recipient_id, no FK"
-  users |o--o{ quarantine_messages : "SET NULL"
+  email_recipients ||..o{ quarantine_messages : "message_id, rcpt_seq, no FK"
+  users |o--o{ quarantine_messages : "user_id, decided_by: SET NULL"
   quarantine_messages ||--o{ quarantine_actions : "CASCADE"
   quarantine_messages ||--o{ quarantine_release_logs : "CASCADE"
   quarantine_actions ||--o| quarantine_release_logs : "action_id"
+  quarantine_messages ||--o{ quarantine_approval_requests : "CASCADE"
+  quarantine_messages ||..o| quarantine_approval_requests : "approval_request_id, no FK"
+  users |o--o{ quarantine_approval_requests : "requester, decider: SET NULL"
+  quarantine_messages ||--o{ quarantine_download_grants : "CASCADE"
+  users ||--o{ quarantine_download_grants : "CASCADE"
+  organizations ||--o| quarantine_settings : "one row"
+  users ||--o| quarantine_user_preferences : "CASCADE"
+  email_messages ||..o| quarantine_object_purges : "message_id, received_at, no FK"
+  organizations ||--o{ quarantine_digest_runs : ""
+  quarantine_digest_runs ||--o{ quarantine_digests : "CASCADE"
+  users ||--o{ quarantine_digests : "CASCADE"
   quarantine_messages {
     bigint id PK
     char public_id UK
-    bigint message_id "logical"
+    bigint message_id "logical, UK with round and rcpt_seq"
     datetime message_received_at "for pruning"
-    bigint recipient_id "logical"
-    enum status
+    smallint lifecycle_round
+    smallint rcpt_seq
+    enum status "entry state"
+    enum kind
+    enum origin
+    enum reason
+    datetime quarantined_at
     datetime expires_at
+    int row_version "CAS"
   }
   quarantine_actions {
     bigint id PK
@@ -1051,6 +1072,53 @@ erDiagram
     bigint id PK
     bigint quarantine_message_id FK
     bigint action_id FK,UK
+    char release_public_id "UK with entry"
+    enum mode
+    enum status
+  }
+  quarantine_approval_requests {
+    bigint id PK
+    char public_id UK
+    bigint quarantine_message_id FK
+    enum kind
+    enum status
+    json approval_reasons
+    datetime expires_at
+  }
+  quarantine_download_grants {
+    bigint id PK
+    char jti UK
+    bigint user_id FK
+    bigint quarantine_message_id FK
+    datetime expires_at
+    datetime consumed_at
+  }
+  quarantine_settings {
+    bigint id PK
+    bigint organization_id FK,UK
+    json settings
+  }
+  quarantine_user_preferences {
+    bigint id PK
+    bigint user_id FK,UK
+    boolean digest_opt_out
+  }
+  quarantine_object_purges {
+    bigint id PK
+    bigint message_id "logical, UK with received_at"
+    enum status
+    datetime purge_after
+  }
+  quarantine_digest_runs {
+    bigint id PK
+    enum kind "UK with org and scheduled_for"
+    datetime scheduled_for
+  }
+  quarantine_digests {
+    bigint id PK
+    char public_id UK
+    bigint run_id FK
+    bigint user_id FK "UK with run"
   }
 ```
 

@@ -13,6 +13,7 @@ import {
   POLICY_OPERATORS,
   POLICY_TRIGGERS,
   policyEvaluationResultSchema,
+  recipientDecisionsSchema,
   policyEvaluationViewSchema,
   policyTenantSettingsSchema,
   syntheticFactsSchema,
@@ -414,6 +415,23 @@ const InvalidVersionSchema = z.strictObject({
 
 export const PolicyTestResponseSchema = z.strictObject({
   result: policyEvaluationResultSchema,
+  recipientSplit: z
+    .boolean()
+    .describe(
+      'Step 5.3 (Q4): true when the recipients were evaluated one by one and their dispositions ' +
+        'differ (recipient-scoped rules, `recipientSplit` setting on, ≤ 200 recipients)',
+    ),
+  recipientDecisions: recipientDecisionsSchema.describe(
+    'Per-recipient decisions (rcptSeq, disposition, source, decisive rule, ≤ 8 reason codes); ' +
+      'empty when the message was not evaluated per recipient (no recipient-scoped rule, one ' +
+      'recipient, setting off, truncated or too many recipients)',
+  ),
+  lifecycleDisposition: z
+    .enum(POLICY_DISPOSITIONS)
+    .describe(
+      'The disposition the message as a whole receives (Q4.4, Q5): the strictest per-recipient ' +
+        'disposition when uniform; with a split, the message follows its allowed recipients',
+    ),
   invalidVersions: z
     .array(InvalidVersionSchema)
     .describe('Versions of the snapshot the current DSL no longer accepts (excluded)'),

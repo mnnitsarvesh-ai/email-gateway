@@ -42,13 +42,13 @@ const mutableQueue = (topology: { queues: QueueDefinition[] }, name: QueueName) 
   return queue;
 };
 
-describe('TOPOLOGY v9', () => {
+describe('TOPOLOGY v10', () => {
   it('satisfies every invariant of design §3', () => {
     expect(validateTopology(TOPOLOGY)).toEqual([]);
   });
 
-  it('declares exactly the six exchanges and twenty queues (v9)', () => {
-    expect(TOPOLOGY_VERSION).toBe(9);
+  it('declares exactly the six exchanges and twenty queues (v10)', () => {
+    expect(TOPOLOGY_VERSION).toBe(10);
     expect(DEFAULT_VHOST).toBe('email-gateway');
     expect([...TOPOLOGY.exchanges]).toEqual([
       'email.ingestion',
@@ -75,7 +75,7 @@ describe('TOPOLOGY v9', () => {
     );
   });
 
-  it('assigns roles: fourteen work queues, one delay, one dead-letter, four dormant (v9)', () => {
+  it('assigns roles: fifteen work queues, one delay, one dead-letter, three dormant (v10)', () => {
     const byRole = (role: string) =>
       TOPOLOGY.queues.filter((q) => q.role === role).map((q) => q.name);
     expect(byRole('work')).toEqual([
@@ -92,16 +92,13 @@ describe('TOPOLOGY v9', () => {
       'scan.sandbox.results',
       'email.policy.evaluate',
       'email.delivery.pending',
+      // v10 (step 5.3 Q27): the release executor.
+      'email.quarantine',
       'email.notifications',
     ]);
     expect(byRole('delay')).toEqual(['email.delivery.retry']);
     expect(byRole('dead-letter')).toEqual(['email.dead-letter']);
-    expect(byRole('dormant')).toEqual([
-      'scan.auth',
-      'email.quarantine',
-      'email.archive',
-      'email.analytics',
-    ]);
+    expect(byRole('dormant')).toEqual(['scan.auth', 'email.archive', 'email.analytics']);
     expect(byRole('dormant')).not.toContain('scan.url');
     // v7 (step 4.5 D2): scan.dlp is no longer dormant; v8 (step 4.6 X11): nor scan.sandbox.
     expect(byRole('dormant')).not.toContain('scan.dlp');
@@ -110,6 +107,8 @@ describe('TOPOLOGY v9', () => {
     expect(byRole('dormant')).not.toContain('email.policy.evaluate');
     expect(queueDefinition('email.policy.evaluate').lossy).toBeUndefined();
     expect(queueDefinition('email.notifications').lossy).toBeUndefined();
+    // v10 (step 5.3): a queued release is never dropped.
+    expect(queueDefinition('email.quarantine').lossy).toBeUndefined();
   });
 
   it('has the bindings and home exchanges of design §3', () => {
@@ -200,9 +199,10 @@ describe('TOPOLOGY v9', () => {
         'email.delivery retry.email.delivery.pending.#',
       ],
       'email.delivery.retry': ['email.delivery', 'email.delivery delay.email.delivery.pending.#'],
+      // v10 (step 5.3 Q27): release requests replace mail.policy.decided.v1 (pruned).
       'email.quarantine': [
         'email.policy',
-        'email.policy org.*.mail.policy.decided.v1',
+        'email.policy org.*.mail.quarantine.release_requested.v1',
         'email.policy retry.email.quarantine.#',
       ],
       // v9 (step 5.2 P15): the archive request replaces mail.policy.decided.v1 (still dormant).
@@ -215,6 +215,8 @@ describe('TOPOLOGY v9', () => {
       'email.notifications': [
         'email.policy',
         'email.policy org.*.mail.policy.notification_requested.v1',
+        // v10 (step 5.3 Q20).
+        'email.policy org.*.mail.quarantine.notification_requested.v1',
         'email.policy retry.email.notifications.#',
       ],
       'email.analytics': [
@@ -350,6 +352,22 @@ describe('TOPOLOGY v9', () => {
         .filter((q) => q.consumer.kind === 'planned')
         .map((q) => [q.name, q.consumer.kind === 'planned' ? q.consumer.plannedStep : '']),
     );
+    // v10 (step 5.3 Q13.2, Q27): the policy-engine's release executor.
+    expect(queueDefinition('email.quarantine').consumer).toEqual({
+      kind: 'ledger',
+      ledgerName: 'policy-engine.quarantine',
+      service: 'policy-engine',
+    });
+    expect(queueDefinition('email.quarantine').retry).toEqual({
+      strategy: 'hold',
+      maxAttempts: 10,
+      baseDelayMs: 2_000,
+      maxDelayMs: 60_000,
+      maxRetryAgeMs: 24 * 3_600_000,
+    });
+    expect(queueDefinition('email.quarantine').policy).toEqual(
+      policyFor('work', 'email.quarantine'),
+    );
     // v9 (step 5.2 P13, P25): the policy-engine and the notification-worker.
     expect(queueDefinition('email.policy.evaluate').consumer).toEqual({
       kind: 'ledger',
@@ -376,7 +394,6 @@ describe('TOPOLOGY v9', () => {
       maxRetryAgeMs: 24 * 3_600_000,
     });
     expect(planned).toEqual({
-      'email.quarantine': '5.3',
       'email.archive': '8.1',
       'email.analytics': 'not scheduled (ADR-0009)',
     });
@@ -747,9 +764,17 @@ describe('routing (topic semantics)', () => {
       'email.policy.evaluate',
     ]);
     expect(route('mail.message.scanned.v1')).toEqual(['email.analytics', 'email.policy.evaluate']);
-    // Topology v9 (step 5.2 P15): the decision reaches only the dormant quarantine queue; the
-    // archive and notification requests their own queues.
-    expect(route('mail.policy.decided.v1')).toEqual(['email.analytics', 'email.quarantine']);
+    // Topology v10 (step 5.3 Q2, Q27): the decision reaches only the firehose; the archive and
+    // notification requests their own queues; release requests the executor.
+    expect(route('mail.policy.decided.v1')).toEqual(['email.analytics']);
+    expect(route('mail.quarantine.release_requested.v1')).toEqual([
+      'email.analytics',
+      'email.quarantine',
+    ]);
+    expect(route('mail.quarantine.notification_requested.v1')).toEqual([
+      'email.analytics',
+      'email.notifications',
+    ]);
     expect(route('mail.message.archive_requested.v1')).toEqual([
       'email.analytics',
       'email.archive',
@@ -1024,18 +1049,19 @@ describe('validateTopology (negative cases)', () => {
 
   it('allows the stateless consumer kind and the lossy policy on work queues only (v5)', () => {
     const t = clone();
-    mutableQueue(t, 'email.quarantine').consumer = {
+    // v10: email.quarantine is a work queue; email.archive is the dormant example.
+    mutableQueue(t, 'email.archive').consumer = {
       kind: 'stateless',
       service: 'x',
       reason: 'y',
     };
     expect(validateTopology(t)).toContain(
-      'email.quarantine: a dormant queue must have consumer kind planned or none',
+      'email.archive: a dormant queue must have consumer kind planned or none',
     );
     const u = clone();
-    const quarantine = mutableQueue(u, 'email.quarantine');
-    quarantine.lossy = true;
-    expect(validateTopology(u)).toContain('email.quarantine: only a work queue can be lossy');
+    const archive = mutableQueue(u, 'email.archive');
+    archive.lossy = true;
+    expect(validateTopology(u)).toContain('email.archive: only a work queue can be lossy');
     // v8 (step 4.6 X11): scan.sandbox is work-lossy; without lossy its policy is wrong.
     const v = clone();
     delete mutableQueue(v, 'scan.sandbox').lossy;
@@ -1109,7 +1135,7 @@ describe('toRabbitDefinitions (Q5)', () => {
   const definitions = toRabbitDefinitions(TOPOLOGY, { vhost: DEFAULT_VHOST });
 
   it('declares topic exchanges and quorum queues with no other argument', () => {
-    expect(definitions.topology_version).toBe(9);
+    expect(definitions.topology_version).toBe(10);
     expect(definitions.exchanges).toHaveLength(6);
     for (const exchange of definitions.exchanges) {
       expect(exchange).toEqual({
@@ -1147,8 +1173,9 @@ describe('toRabbitDefinitions (Q5)', () => {
     // retry key is qualified), the two new queues add two each: 40 queue + 5 exchange = 45. v9
     // (step 5.2 P15): email.policy.evaluate keeps its three bindings, email.archive keeps two
     // (archive_requested.v1 replaces policy.decided.v1), email.notifications adds two: 42 queue
-    // + 5 exchange = 47.
-    expect(definitions.bindings).toHaveLength(47);
+    // + 5 exchange = 47. v10 (step 5.3 Q27): email.quarantine keeps two (release_requested.v1
+    // replaces policy.decided.v1), email.notifications adds one: 43 queue + 5 exchange = 48.
+    expect(definitions.bindings).toHaveLength(48);
     const keys = definitions.bindings.map(
       (b) => `${b.source}|${b.destination_type}|${b.destination}|${b.routing_key}`,
     );

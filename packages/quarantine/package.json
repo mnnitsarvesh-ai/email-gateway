@@ -1,0 +1,25 @@
+{
+  "name": "@email-gateway/quarantine",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src",
+    "test": "vitest run",
+    "test:integration": "echo 'no infrastructure suites in @email-gateway/quarantine (pure library; unit suites run in test)'"
+  },
+  "dependencies": {
+    "@email-gateway/policy-dsl": "workspace:*",
+    "@email-gateway/risk-scoring": "workspace:*",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "prettier": "^3.6.2"
+  }
+}

@@ -7,6 +7,7 @@ export const MESSAGE_VERSION_CONFLICT = 'message_version_conflict';
 export const MESSAGE_STATE_CONFLICT = 'message_state_conflict';
 export const QUARANTINE_WORKFLOW_REQUIRED = 'quarantine_workflow_required';
 export const NO_RELEASABLE_RECIPIENTS = 'no_releasable_recipients';
+export const QUARANTINE_RESCAN_FORBIDDEN = 'quarantine_rescan_forbidden';
 
 /** The lifecycle as a conflict body shows it: state and version only (no content). */
 export interface ConflictSnapshot {
@@ -39,12 +40,36 @@ export const messageStateConflict = (snapshot: ConflictSnapshot): CodedHttpExcep
     current(snapshot),
   );
 
-export const quarantineWorkflowRequired = (snapshot: ConflictSnapshot): CodedHttpException =>
+/** The quarantine route operators use instead (step 5.3 Q30). */
+export const QUARANTINE_RELEASE_ROUTE = 'POST /api/v1/quarantine/entries/{entryId}/release';
+
+export const quarantineWorkflowRequired = (
+  snapshot: ConflictSnapshot,
+  entries: number,
+): CodedHttpException =>
   new CodedHttpException(
     HttpStatus.CONFLICT,
     QUARANTINE_WORKFLOW_REQUIRED,
-    'The message has per-recipient quarantine entries; release it through the quarantine workflow',
-    current(snapshot),
+    'Quarantined and held messages are released per recipient through the quarantine workflow ' +
+      '(re-validation and approvals); search the message’s entries with ' +
+      'GET /api/v1/quarantine/entries?messageId=…',
+    { ...current(snapshot), entries, route: QUARANTINE_RELEASE_ROUTE },
+  );
+
+/**
+ * Step 5.3: a rescan of a `quarantined`/`held_for_review` message re-decides its held recipients
+ * (a clean round delivers them), so it needs `quarantine:release` besides `message:rescan`.
+ */
+export const quarantineRescanForbidden = (
+  snapshot: ConflictSnapshot,
+  entries: number,
+): CodedHttpException =>
+  new CodedHttpException(
+    HttpStatus.FORBIDDEN,
+    QUARANTINE_RESCAN_FORBIDDEN,
+    'A rescan of a quarantined or held message re-decides its held recipients and may deliver ' +
+      'them; it requires the quarantine:release permission',
+    { ...current(snapshot), entries, permission: 'quarantine:release' },
   );
 
 export const noReleasableRecipients = (snapshot: ConflictSnapshot): CodedHttpException =>

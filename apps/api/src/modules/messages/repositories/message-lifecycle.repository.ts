@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import type { ActorType, Prisma } from '@email-gateway/database';
+import type { ActorType, Prisma, QuarantineStatus } from '@email-gateway/database';
 import type { MessageRef } from '@email-gateway/message-lifecycle';
 import { tenantWhere, type TenantScope } from '../../../auth-contracts/tenant-scope';
 
@@ -39,6 +39,8 @@ export interface EmailEventInsert {
 
 /** Recipient statuses a release delivers (L10.3). */
 const RELEASABLE = ['pending', 'quarantined'] as const;
+/** Non-terminal quarantine entry states (step 5.3 Q3). */
+const OPEN_ENTRY_STATES: readonly QuarantineStatus[] = ['held', 'pending_approval', 'releasing'];
 
 /**
  * Writer-side, tenant-scoped queries of the lifecycle operations (step 3.3 L10), always in the
@@ -77,6 +79,20 @@ export class MessageLifecycleRepository {
       where: tenantWhere(scope, {
         messageId: message.id,
         messageReceivedAt: message.receivedAt,
+      }),
+    });
+  }
+
+  /**
+   * Open quarantine entries of the message (`held`, `pending_approval`, `releasing`): the entries
+   * a rescan supersedes (step 5.3 Q5).
+   */
+  openQuarantineEntryCount(tx: Tx, scope: TenantScope, message: MessageRef): Promise<number> {
+    return tx.quarantineMessage.count({
+      where: tenantWhere(scope, {
+        messageId: message.id,
+        messageReceivedAt: message.receivedAt,
+        status: { in: [...OPEN_ENTRY_STATES] },
       }),
     });
   }

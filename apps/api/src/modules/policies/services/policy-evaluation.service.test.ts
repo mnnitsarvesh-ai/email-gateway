@@ -1,7 +1,7 @@
 import {
   buildPolicyInput,
   compileSnapshot,
-  evaluatePolicy,
+  evaluatePolicyPerRecipient,
   evaluationResultToRow,
 } from '@email-gateway/policy-dsl';
 import { describe, expect, it, vi } from 'vitest';
@@ -272,12 +272,14 @@ describe('PolicyEvaluationService.dryRun (P8, P22)', () => {
         userIds: [],
       }),
     );
-    const result = evaluatePolicy(
+    // Step 5.3 (Q4): the engine evaluates per recipient; the row keeps the message-level record.
+    const perRecipient = evaluatePolicyPerRecipient(
       buildPolicyInput(
         policyRoundRowsOf(ctx.message, ctx.round.scan as never, ctx.round.rows, directory),
       ),
       snapshot,
     );
+    const result = perRecipient.message;
     // Bob is not in Finance: the exception (quantifier all) does not apply.
     expect(result.disposition).toBe('quarantine');
     const json = evaluationResultToRow(result);
@@ -295,6 +297,9 @@ describe('PolicyEvaluationService.dryRun (P8, P22)', () => {
     const res = await ctx.service.dryRun(SCOPE, MESSAGE, 900n, PolicyDryRunSchema.parse({}));
     expect(res.reproducible).toBe(true);
     expect(res.result).toEqual(result);
+    expect(res.recipientSplit).toBe(perRecipient.split);
+    expect(res.recipientDecisions).toEqual(perRecipient.recipientDecisions);
+    expect(res.lifecycleDisposition).toBe(perRecipient.lifecycleDisposition);
     expect(res.stored).toMatchObject({
       disposition: 'quarantine',
       lifecycleRound: 0,

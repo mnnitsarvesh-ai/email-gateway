@@ -480,8 +480,11 @@ export const ScanRoundSchema = z.object({
     .describe(
       'The stored policy evaluation of the round (step 5.2): disposition, decisive rule, ' +
         'actions with the status the policy-engine achieved, floor, recommendation, ' +
-        'explanation and hashes; null while not evaluated (or for rounds before 5.2). Ids, ' +
-        'codes and hashes only.',
+        'explanation and hashes; from step 5.3 also `recipientSplit` and the per-recipient ' +
+        '`recipientDecisions` (rcptSeq, disposition, source, decisive rule, reason codes) and, in ' +
+        '`delivery`, the WARN body banner outcome (`bodyBanner`: applied or skipped_*) and the ' +
+        'URL rewrite after the scan (`urlRewrite.policyAttempt`); null while not evaluated (or ' +
+        'for rounds before 5.2). Ids, codes and hashes only.',
     ),
 });
 export type ScanRoundView = z.output<typeof ScanRoundSchema>;

@@ -3,6 +3,8 @@ import { type SqlClient } from '../partitioning/executor';
 
 /**
  * Q1–Q14 from D8 plus Q15–Q18 for the remaining high-volume tables (headers, archives,
+ * bounces, webhook deliveries) and Q24 (query-examples.md) for the step 5.3 quarantine search filters (Q9; on the
+ * entries of `--quarantine-entries` when given),
  * bounces, webhook deliveries), the same SQL as docs/database/query-examples.md. Parameters are picked from
  * the loaded data so every query returns realistic results.
  */
@@ -51,10 +53,24 @@ export async function buildQueries(
 
   const [topRecipient] = await client.$queryRawUnsafe<{ address: string }[]>(
     `SELECT recipient_address AS address FROM quarantine_messages
-      WHERE organization_id = ? AND status = 'quarantined'
+      WHERE organization_id = ? AND status = 'held'
       GROUP BY recipient_address ORDER BY COUNT(*) DESC LIMIT 1`,
     org,
   );
+  // Step 5.3 Q9: every search has a bounded quarantined_at range (≤ 62 days).
+  const quarantineFrom = sqlTime(nowMs - 62 * 24 * HOUR_MS);
+  const [topSender] = await client.$queryRawUnsafe<{ address: string }[]>(
+    `SELECT envelope_from AS address FROM quarantine_messages WHERE organization_id = ?
+      GROUP BY envelope_from ORDER BY COUNT(*) DESC LIMIT 1`,
+    org,
+  );
+  const fallback: QuarantineSearchSample = {
+    recipient: topRecipient?.address ?? '',
+    sender: topSender?.address ?? '',
+    policyPublicId: '00000000-0000-7000-8000-000000000000',
+    from: quarantineFrom,
+    to: until,
+  };
   const [hash] = await client.$queryRawUnsafe<{ sha256: string }[]>(
     `SELECT sha256 FROM email_attachments WHERE organization_id = ? AND received_at >= ? LIMIT 1`,
     org,
@@ -161,33 +177,34 @@ export async function buildQueries(
     },
     {
       id: 'Q5',
-      title: 'Quarantine list for an organization (newest first)',
-      note: 'quarantine_messages is not partitioned; backward scan of (organization_id, status, quarantined_at).',
+      title: 'Quarantine search for an organization (state filter, newest first, keyset)',
+      note: 'quarantine_messages is not partitioned (step 5.3 Q9). A dominant state (held ≈ 55 %) is read by a backward scan of (organization_id, quarantined_at, id) filtering the state (≈ 2 index entries per row returned, no sort); a rare state uses (organization_id, status, quarantined_at, id). Never reads `subject` (retired).',
       steps: [
         {
-          label: 'quarantine list',
-          sql: `SELECT id, public_id, recipient_address, envelope_from, subject, reason, risk_score, quarantined_at
+          label: 'quarantine search',
+          sql: `SELECT id, public_id, recipient_address, envelope_from, reason, risk_score, quarantined_at
   FROM quarantine_messages
- WHERE organization_id = ? AND status = 'quarantined'
- ORDER BY quarantined_at DESC
+ WHERE organization_id = ? AND status = 'held' AND quarantined_at >= ? AND quarantined_at < ?
+ ORDER BY quarantined_at DESC, id DESC
  LIMIT 50`,
-          params: [org],
+          params: [org, quarantineFrom, until],
         },
       ],
     },
     {
       id: 'Q6',
       title: 'End-user quarantine by recipient address',
-      note: 'Prefix index (organization_id, recipient_address(100), status); the address is re-checked on the row.',
+      note: 'Prefix index (organization_id, recipient_address(100), quarantined_at, id) (step 5.3 Q9, Q15); the address is re-checked on the row, the state is filtered on the row.',
       steps: [
         {
           label: 'own quarantine',
-          sql: `SELECT id, public_id, envelope_from, subject, reason, quarantined_at, expires_at
+          sql: `SELECT id, public_id, envelope_from, reason, status, quarantined_at, expires_at
   FROM quarantine_messages
- WHERE organization_id = ? AND recipient_address = ? AND status = 'quarantined'
- ORDER BY quarantined_at DESC
+ WHERE organization_id = ? AND recipient_address = ? AND quarantined_at >= ? AND quarantined_at < ?
+   AND status IN ('held', 'pending_approval')
+ ORDER BY quarantined_at DESC, id DESC
  LIMIT 50`,
-          params: [org, topRecipient?.address ?? ''],
+          params: [org, topRecipient?.address ?? '', quarantineFrom, until],
         },
       ],
     },
@@ -382,6 +399,66 @@ export async function buildQueries(
           params: [sqlTime(nowMs + 2 * HOUR_MS)],
         },
       ],
+    },
+    {
+      id: 'Q24',
+      title: 'Quarantine search filters (step 5.3 Q9, keyset, bounded range)',
+      note: 'Each filter starts from an (organization_id, <filter>, quarantined_at[, id]) index prefix: default view (organization_id, quarantined_at, id); recipient (organization_id, recipient_address(100), quarantined_at, id); sender (organization_id, envelope_from(100), quarantined_at); state (organization_id, status, quarantined_at, id); decisive policy (organization_id, decisive_policy_public_id, quarantined_at).',
+      steps: quarantineSearchSteps(org, sample.quarantine ?? fallback),
+    },
+  ];
+}
+
+/** Filter values for Q24 (from `loadQuarantineEntries` or the generic data). */
+export interface QuarantineSearchSample {
+  recipient: string;
+  sender: string;
+  policyPublicId: string;
+  from: string;
+  to: string;
+}
+
+/** The five Q9 search shapes the api integration test checks with EXPLAIN (WP4). */
+export function quarantineSearchSteps(
+  organizationId: bigint,
+  q: QuarantineSearchSample,
+): QueryStep[] {
+  const select = `SELECT id, public_id, recipient_address, envelope_from, reason, status, risk_level, quarantined_at, expires_at
+  FROM quarantine_messages`;
+  const tail = `
+ ORDER BY quarantined_at DESC, id DESC
+ LIMIT 50`;
+  const range = 'quarantined_at >= ? AND quarantined_at < ?';
+  return [
+    {
+      label: 'default view',
+      sql: `${select}
+ WHERE organization_id = ? AND ${range}${tail}`,
+      params: [organizationId, q.from, q.to],
+    },
+    {
+      label: 'recipient',
+      sql: `${select}
+ WHERE organization_id = ? AND recipient_address = ? AND ${range}${tail}`,
+      params: [organizationId, q.recipient, q.from, q.to],
+    },
+    {
+      label: 'sender',
+      sql: `${select}
+ WHERE organization_id = ? AND envelope_from = ? AND ${range}${tail}`,
+      params: [organizationId, q.sender, q.from, q.to],
+    },
+    {
+      label: 'state',
+      sql: `${select}
+ WHERE organization_id = ? AND status = 'held' AND ${range}${tail}`,
+      params: [organizationId, q.from, q.to],
+    },
+    {
+      label: 'decisive policy',
+      sql: `${select}
+ WHERE organization_id = ? AND decisive_policy_public_id = ? AND ${range}${tail}`,
+      params: [organizationId, q.policyPublicId, q.from, q.to],
     },
   ];
 }

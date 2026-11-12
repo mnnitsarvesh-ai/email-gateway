@@ -16,7 +16,6 @@ import {
   MESSAGE_NOT_FOUND,
   MESSAGE_STATE_CONFLICT,
   MESSAGE_VERSION_CONFLICT,
-  NO_RELEASABLE_RECIPIENTS,
   QUARANTINE_WORKFLOW_REQUIRED,
 } from './messages.errors';
 
@@ -63,9 +62,10 @@ export function ApiLifecycleWriteErrors(conflicts: readonly string[]): MethodDec
       '`message_version_conflict`: `expectedVersion` is not the current version; ' +
         '`message_state_conflict`: the current state does not allow the operation' +
         (conflicts.includes(QUARANTINE_WORKFLOW_REQUIRED)
-          ? '; `quarantine_workflow_required`: the message has per-recipient quarantine entries ' +
-            '(released through the quarantine workflow, 5.3); `no_releasable_recipients`: no ' +
-            '`pending` or `quarantined` recipient'
+          ? '; `quarantine_workflow_required` (step 5.3 Q30): every `quarantined` or ' +
+            '`held_for_review` message is released per recipient through the quarantine ' +
+            'workflow (`entries`: the number of its entries, `route`: the quarantine release ' +
+            'route)'
           : '') +
         '. `currentState` and `currentVersion` describe the message now. Not stored under the ' +
         'Idempotency-Key.',
@@ -73,6 +73,10 @@ export function ApiLifecycleWriteErrors(conflicts: readonly string[]): MethodDec
       {
         currentState: { type: 'string', enum: [...MESSAGE_STATES] },
         currentVersion: { type: 'integer', minimum: 0 },
+        ...(conflicts.includes(QUARANTINE_WORKFLOW_REQUIRED) && {
+          entries: { type: 'integer', minimum: 0 },
+          route: { type: 'string' },
+        }),
       },
     ),
     ApiCodedError(
@@ -89,7 +93,6 @@ export const RELEASE_CONFLICTS = [
   MESSAGE_VERSION_CONFLICT,
   MESSAGE_STATE_CONFLICT,
   QUARANTINE_WORKFLOW_REQUIRED,
-  NO_RELEASABLE_RECIPIENTS,
 ] as const;
 
 /** The `202` of a lifecycle write route with the replay header. */

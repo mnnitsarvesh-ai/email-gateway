@@ -654,6 +654,10 @@ describe('usage', () => {
         envelopeFrom: 'sender@example.test',
         emlObjectKey: rows[1]!.emlObjectKey,
         quarantinedAt: yesterday,
+        direction: 'inbound',
+        kind: 'quarantine',
+        origin: 'policy',
+        stateChangedAt: yesterday,
         expiresAt: new Date(now.getTime() + 10 * DAY),
       },
     });
