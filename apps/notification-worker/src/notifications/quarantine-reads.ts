@@ -4,16 +4,17 @@ import {
   type QuarantineSettings,
   resolveQuarantineSettings,
 } from '@email-gateway/quarantine';
-import { InconsistentNotificationReadError } from './notification-reads';
+import {
+  findPermissionHolders,
+  InconsistentNotificationReadError,
+  type NoticeUser,
+} from './notification-reads';
+
+export type { NoticeUser } from './notification-reads';
 
 type Tx = Prisma.TransactionClient;
 
 const OPEN_STATES = ['held', 'pending_approval'] as const;
-
-export interface NoticeUser {
-  id: bigint;
-  email: string;
-}
 
 export interface DigestEntryRow {
   publicId: string;
@@ -197,42 +198,22 @@ export class QuarantineNotificationReads {
   }
 
   /**
-   * Active, verified users of the organization holding `quarantine:approve` through a role of
-   * the organization or a system role, excluding `excluded`, sorted by id, ≤ `cap`.
+   * One page of the active, verified users of the organization holding `quarantine:approve`
+   * through a role of the organization or a system role, excluding `excluded`, sorted by id,
+   * after `afterId`, ≤ `take` (opt-outs are removed by `PreferenceFilter`, step 6.2 N4).
    */
-  async approvers(
+  approvers(
     tx: Tx,
     organizationId: bigint,
     excluded: readonly bigint[],
-    cap: number,
-  ): Promise<string[]> {
-    const rows = await tx.user.findMany({
-      where: {
-        organizationId,
-        status: 'active',
-        deletedAt: null,
-        emailVerifiedAt: { not: null },
-        ...(excluded.length > 0 ? { id: { notIn: [...excluded] } } : {}),
-        userRoles: {
-          some: {
-            organizationId,
-            role: {
-              OR: [{ organizationId }, { organizationId: null }],
-              permissions: { some: { permission: { key: QUARANTINE_PERMISSIONS.approve } } },
-            },
-          },
-        },
-      },
-      select: { id: true, organizationId: true, email: true, status: true },
-      orderBy: { id: 'asc' },
-      take: cap,
+    take: number,
+    afterId: bigint | null = null,
+  ): Promise<NoticeUser[]> {
+    return findPermissionHolders(tx, organizationId, QUARANTINE_PERMISSIONS.approve, {
+      take,
+      afterId,
+      excluded,
     });
-    for (const r of rows) {
-      if (r.organizationId !== organizationId || r.status !== 'active' || excluded.includes(r.id)) {
-        throw new InconsistentNotificationReadError('approver');
-      }
-    }
-    return rows.map((r) => r.email.toLowerCase());
   }
 
   /** Approval requests of the organization by public id, with their entry's reason. */

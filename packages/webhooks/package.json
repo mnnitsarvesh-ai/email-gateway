@@ -1,0 +1,24 @@
+{
+  "name": "@email-gateway/webhooks",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src",
+    "test": "vitest run",
+    "test:integration": "echo 'no infrastructure suites in @email-gateway/webhooks (pure library; unit suites run in test)'"
+  },
+  "dependencies": {
+    "@email-gateway/common": "workspace:*",
+    "@email-gateway/event-contracts": "workspace:*",
+    "@email-gateway/security-contracts": "workspace:*",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {}
+}

@@ -283,10 +283,13 @@ export const OPENAPI_DESCRIPTION = [
     'require an `Idempotency-Key` header (`required`: exactly once with the effect; `legacy`: ' +
     'the reservation interceptor, at most once per key); replays carry `Idempotency-Replayed: ' +
     'true`. Responses that contain a secret (`x-eg-returns-secret`) are never stored and take ' +
-    'no key.',
+    'no key, except the two webhook secret routes (`x-eg-secret-replay: redacted`, ADR-0057): ' +
+    'they require a key, store the response with `secret: null` and return the secret only in ' +
+    'the original response.',
   '**Integration surfaces today.** Organization API keys (`/api/v1/api-keys`, scoped to ' +
-    'tenant permissions) for this API, and SMTP connectors (`/api/v1/smtp-connectors`) for ' +
-    'outbound relay from customer systems.',
+    'tenant permissions) for this API, SMTP connectors (`/api/v1/smtp-connectors`) for ' +
+    'outbound relay from customer systems, and signed webhooks (`/api/v1/webhooks`, step 6.2) ' +
+    'for mail, threat, quarantine and domain events.',
   '**Not offered, by design.** `delivery_routes` management: no service reads that table ' +
     '(inbound destinations are `/domains/{id}/destinations`, outbound relay is SMTP connectors), ' +
     'so a management API would change nothing. Tenant-managed threat indicators and ' +
@@ -295,8 +298,9 @@ export const OPENAPI_DESCRIPTION = [
     'as BEC trusted senders, DLP exceptions and policy conditions. Prices, invoices and ' +
     'payments: no such data exists (`GET /billing/plan` says `pricing: null`).',
   '**Deferred to later steps.** Archive, journal search, retention policies, legal holds and ' +
-    'export: step 8.1. Webhooks and notification preferences: step 6.2. Microsoft 365 and ' +
-    'Google Workspace connectors: step 8.2. Deployment manager: step 8.3.',
+    'export: step 8.1. Microsoft 365 and Google Workspace connectors: step 8.2. Deployment ' +
+    'manager: step 8.3. Admin-portal screens (webhooks, delivery history, preferences): ' +
+    'steps 7.x.',
 ].join('\n\n');
 
 /**
@@ -429,6 +433,24 @@ export const OPENAPI_TAGS: ReadonlyArray<{ name: string; description: string }> 
     description:
       'Step 6.1: look up a hash, URL, domain or IP in the platform threat data the engines ' +
       'use (audited, expensive class). Tenant-managed indicators are not offered.',
+  },
+  {
+    name: 'webhooks',
+    description:
+      'Step 6.2: signed webhook subscriptions (HMAC-SHA256 `EG-Signature`, secret shown once, ' +
+      'rotation with overlap), the event catalogue, delivery history with attempts, single and ' +
+      'time-range replay, test pings. `webhook:read` / `webhook:manage`; needs the plan ' +
+      'feature `webhooks`. Not offered: events for SMTP-time refusals, per-recipient ' +
+      'deliveries, URL clicks, DLP incidents and archive (8.1), connector events (8.2), ' +
+      'payload version 2, custom headers or mTLS, back-fill of past events; portal screens: 7.x.',
+  },
+  {
+    name: 'notifications',
+    description:
+      'Step 6.2: tenant security-alert settings (threat detected, DNS record failures, ' +
+      'webhook disabled: enabled, severity, throttle windows) and the caller’s own notification ' +
+      'preferences (opt-outs, quarantine digest). E-mail only; SMS, chat and push channels are ' +
+      'not offered; portal screens: 7.x.',
   },
   {
     name: 'platform',

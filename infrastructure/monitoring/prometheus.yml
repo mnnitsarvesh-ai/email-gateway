@@ -64,6 +64,13 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: ['notification-worker:3050']
+  # webhook-worker (step 6.2 W1–W13): webhook_* fanout, delivery, replay, maintenance and alert
+  # request series, the shared amqp_* consumer series (fanout role). Compose runs both roles in
+  # one container; Kubernetes scrapes the webhook-fanout and webhook-delivery Services.
+  - job_name: webhook-worker
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['webhook-worker:3075']
   # event-relay (step 3.2 §5.3): outbox relay (outbox_relay_*), outbox health (outbox_*),
   # reconciliation (reconcile_*), AMQP client (amqp_*).
   - job_name: event-relay

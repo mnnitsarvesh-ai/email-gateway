@@ -679,12 +679,21 @@ describe('route security (e2e, dependencies stubbed)', () => {
       expect(route?.idempotency, key).toBeNull();
       expect(route?.rateClass, key).toBe('sensitive');
     }
+    // Step 6.2 (ADR-0057): the two webhook secret routes return a secret with a transactional,
+    // redacted-replay Idempotency-Key; every other secret-bearing route keeps D9.
     expect(
       routes
-        .filter((r) => r.returnsSecret)
+        .filter((r) => r.returnsSecret && !r.secretRedactedReplay)
         .map((r) => `${r.method} ${r.path}`)
         .sort(),
     ).toEqual([...SECRET_BEARING].sort());
+    expect(
+      routes
+        .filter((r) => r.secretRedactedReplay)
+        .map((r) => `${r.method} ${r.path}`)
+        .sort(),
+    ).toEqual(['post /api/v1/webhooks', 'post /api/v1/webhooks/:webhookId/rotate-secret']);
+    expect(routes.filter((r) => r.secretRedactedReplay && !r.returnsSecret)).toEqual([]);
     expect(routes.filter((r) => r.returnsSecret && r.idempotency !== null)).toEqual([]);
   });
 

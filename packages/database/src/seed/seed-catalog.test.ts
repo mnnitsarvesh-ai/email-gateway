@@ -72,7 +72,7 @@ describe('seed catalog', () => {
   const sorted = (list: readonly string[]) => [...list].sort();
   const role = (key: string) => SYSTEM_ROLES.find((r) => r.key === key)!.permissions;
 
-  it('contains the 58 permissions of D7, D8, steps 2.1 D14, 2.2, 2.3, 3.2, 3.3, 4.1, 4.2, 4.4, 4.5, 5.3 and 6.1, without duplicates', () => {
+  it('contains the 59 permissions of D7, D8, steps 2.1 D14, 2.2, 2.3, 3.2, 3.3, 4.1, 4.2, 4.4, 4.5, 5.3, 6.1 and 6.2, without duplicates', () => {
     expect(new Set(keys).size).toBe(keys.length);
     expect(sorted(keys)).toEqual(
       sorted([
@@ -134,14 +134,15 @@ describe('seed catalog', () => {
         'threat_intel:read',
         'billing:read',
         'delivery:suppression_manage',
+        'webhook:read',
       ]),
     );
-    expect(keys).toHaveLength(58);
+    expect(keys).toHaveLength(59);
     // Step 3.3 placed message:rescan next to the other message permissions (design §3.3); the
     // seed upserts by key, so on an existing database it simply gets the next id.
     expect(keys.indexOf('message:rescan')).toBe(keys.indexOf('message:read_content') + 1);
     // Otherwise appended in catalog order (permission ids follow it on a fresh database).
-    expect(keys.slice(-26)).toEqual([
+    expect(keys.slice(-27)).toEqual([
       'connector:read',
       'connector:manage',
       'domain:routing_manage',
@@ -168,6 +169,7 @@ describe('seed catalog', () => {
       'threat_intel:read',
       'billing:read',
       'delivery:suppression_manage',
+      'webhook:read',
     ]);
     // `resource:action`; the resource may contain underscores since step 6.1 (`threat_intel`).
     for (const key of keys) expect(key).toMatch(/^[a-z]+(?:_[a-z]+)*:[a-z_]+$/);
@@ -224,6 +226,25 @@ describe('seed catalog', () => {
       expect(TENANT_PERMISSIONS, key).toContain(key);
       expect(TENANT_READ_PERMISSIONS, key).not.toContain(key);
     }
+  });
+
+  it('grants webhook:read (step 6.2 §2 D) to the admin roles, security_analyst and compliance_auditor only', () => {
+    const holders = SYSTEM_ROLES.filter((r) =>
+      (r.permissions as readonly string[]).includes('webhook:read'),
+    )
+      .map((r) => r.key)
+      .sort();
+    expect(holders).toEqual(
+      ['compliance_auditor', 'organization_admin', 'security_analyst', 'super_admin'].sort(),
+    );
+    expect(TENANT_PERMISSIONS).toContain('webhook:read');
+    expect(TENANT_READ_PERMISSIONS).not.toContain('webhook:read');
+    // webhook:manage stays with the admin roles.
+    expect(
+      SYSTEM_ROLES.filter((r) => (r.permissions as readonly string[]).includes('webhook:manage'))
+        .map((r) => r.key)
+        .sort(),
+    ).toEqual(['organization_admin', 'super_admin']);
   });
 
   it('has exactly the 8 system roles of D8 plus mailbox_user (5.3), each referencing existing permissions only', () => {
@@ -325,6 +346,7 @@ describe('seed catalog', () => {
         'dlp:manage',
         'dlp:evidence_read',
         'threat_intel:read',
+        'webhook:read',
       ],
       quarantine_reviewer: [
         'organization:read',
@@ -346,6 +368,7 @@ describe('seed catalog', () => {
         'dlp:read',
         'dlp:evidence_read',
         'billing:read',
+        'webhook:read',
       ],
       read_only_user: read,
       mailbox_user: ['quarantine:self'],

@@ -189,7 +189,8 @@ const refusingLookup = (): never => {
   throw new Error('DNS lookup is not allowed on the guarded connector');
 };
 
-function classifyError(error: unknown): FetchError {
+/** The bounded failure class of a socket, TLS, parser or abort error (also used by GuardedPoster). */
+export function classifyError(error: unknown): FetchError {
   if (error instanceof FetchFailure) return error.kind;
   const rawCode = (error as { code?: unknown } | null)?.code;
   const rawName = (error as { name?: unknown } | null)?.name;

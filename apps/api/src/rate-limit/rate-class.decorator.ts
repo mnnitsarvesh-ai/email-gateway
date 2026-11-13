@@ -39,14 +39,42 @@ export function RateClass(rateClass: RateClass): MethodDecorator & ClassDecorato
 }
 
 /**
- * Marks a route whose response contains a secret (API key, connector secret, TOTP seed,
- * recovery codes, override token; D9). It is in the `sensitive` rate class and can never be
- * combined with `@Idempotent()` (its response would be stored as plain JSON in MySQL): the
- * combination throws when the class is decorated. Documented as `x-eg-returns-secret: true`.
+ * Set by `@ReturnsSecret({ redactedReplay: true })` (ADR-0057): the route takes a transactional
+ * Idempotency-Key whose STORED response is the redacted representation (`secret: null`).
  */
-export function ReturnsSecret(): MethodDecorator {
+export const RETURNS_SECRET_REDACTED_REPLAY_KEY = 'http:returnsSecretRedactedReplay';
+
+export interface ReturnsSecretOptions {
+  /**
+   * ADR-0057 (step 6.2): the route keeps the Idempotency-Key of the transactional mechanism
+   * (`IdempotencyService.execute`), stores only the redacted representation (`secret: null`)
+   * and returns the secret in the live response only; a replay returns the redacted body. Only
+   * the routes of the inventory's `SECRET_BEARING_REDACTED_REPLAY` list may set it.
+   */
+  redactedReplay?: true;
+}
+
+/**
+ * Marks a route whose response contains a secret (API key, connector secret, TOTP seed,
+ * recovery codes, override token, webhook signing secret; D9). It is in the `sensitive` rate
+ * class and can never be combined with `@Idempotent()` (the reservation interceptor would store
+ * the response as plain JSON in MySQL): the combination throws when the class is decorated, and
+ * the interceptor refuses such a route at runtime. Documented as `x-eg-returns-secret: true`.
+ *
+ * `{ redactedReplay: true }` (ADR-0057) marks the two webhook secret routes, which use the
+ * transactional Idempotency-Key with a redacted stored response (`x-eg-secret-replay:
+ * redacted`); it does not lift the `@Idempotent()` ban.
+ */
+export function ReturnsSecret(options: ReturnsSecretOptions = {}): MethodDecorator {
+  const redacted = options.redactedReplay === true;
   const apply = applyDecorators(
     SetMetadata(RETURNS_SECRET_KEY, true),
+    ...(redacted
+      ? [
+          SetMetadata(RETURNS_SECRET_REDACTED_REPLAY_KEY, true),
+          ApiExtension('x-eg-secret-replay', 'redacted'),
+        ]
+      : []),
     ApiExtension('x-eg-returns-secret', true),
     RateClass('sensitive'),
   );

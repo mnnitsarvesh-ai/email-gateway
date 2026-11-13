@@ -1223,3 +1223,145 @@ describe('loadApiConfig: REST API conventions (step 6.1 §3.7)', () => {
     ).toContain('API_RATE_TENANT_MAX_PER_MINUTE');
   });
 });
+
+describe('loadApiConfig: webhooks and notifications (step 6.2 §4.4)', () => {
+  it('defaults every key and requires the secret encryption key', () => {
+    const cfg = loadApiConfig(valid);
+    expect(cfg).toMatchObject({
+      WEBHOOK_ALLOWED_PORTS: [443],
+      WEBHOOK_ALLOW_HTTP: false,
+      WEBHOOK_MAX_SUBSCRIPTIONS_PER_ORG: 10,
+      WEBHOOK_SECRET_OVERLAP_HOURS_DEFAULT: 24,
+      WEBHOOK_HISTORY_MAX_RANGE_DAYS: 31,
+      WEBHOOK_REPLAY_MAX_RANGE_HOURS: 72,
+      WEBHOOK_REPLAY_MAX_PER_DELIVERY: 10,
+      WEBHOOK_REPLAY_REQUESTS_PER_HOUR: 10,
+      WEBHOOK_TEST_REQUESTS_PER_MINUTE: 6,
+    });
+    expect(cfg.WEBHOOK_SECRET_ENCRYPTION_KEY).toBe(TEST_DOMAIN_ENV.WEBHOOK_SECRET_ENCRYPTION_KEY);
+    expect(cfg.WEBHOOK_SECRET_ENCRYPTION_KEY_PREVIOUS).toBeUndefined();
+    expect(cfg.URL_CLICK_BASE_URL).toBeUndefined();
+    const { WEBHOOK_SECRET_ENCRYPTION_KEY: _omit, ...withoutKey } = valid as Record<string, string>;
+    expect(rejection(withoutKey)).toContain('WEBHOOK_SECRET_ENCRYPTION_KEY');
+  });
+
+  it('names the cipher keys but never their values; the previous key must differ', () => {
+    const bad = 'short-webhook-key-MARKER';
+    const message = rejection({ ...valid, WEBHOOK_SECRET_ENCRYPTION_KEY: bad });
+    expect(message).toContain('WEBHOOK_SECRET_ENCRYPTION_KEY');
+    expect(message).not.toContain(bad);
+    const previous = rejection({ ...valid, WEBHOOK_SECRET_ENCRYPTION_KEY_PREVIOUS: bad });
+    expect(previous).toContain('WEBHOOK_SECRET_ENCRYPTION_KEY_PREVIOUS');
+    expect(previous).not.toContain(bad);
+    const same = rejection({
+      ...valid,
+      WEBHOOK_SECRET_ENCRYPTION_KEY_PREVIOUS:
+        TEST_DOMAIN_ENV.WEBHOOK_SECRET_ENCRYPTION_KEY!.toUpperCase(),
+    });
+    expect(same).toContain('WEBHOOK_SECRET_ENCRYPTION_KEY_PREVIOUS');
+    expect(same).not.toContain(TEST_DOMAIN_ENV.WEBHOOK_SECRET_ENCRYPTION_KEY!);
+    const other = hex64();
+    expect(
+      loadApiConfig({ ...valid, WEBHOOK_SECRET_ENCRYPTION_KEY_PREVIOUS: other })
+        .WEBHOOK_SECRET_ENCRYPTION_KEY_PREVIOUS,
+    ).toBe(other);
+    expect(
+      loadApiConfig({ ...valid, WEBHOOK_SECRET_ENCRYPTION_KEY_PREVIOUS: '' })
+        .WEBHOOK_SECRET_ENCRYPTION_KEY_PREVIOUS,
+    ).toBeUndefined();
+  });
+
+  it('reads WEBHOOK_SECRET_ENCRYPTION_KEY from WEBHOOK_SECRET_ENCRYPTION_KEY_FILE', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'api-webhook-key-'));
+    const file = join(dir, 'key');
+    const key = hex64();
+    writeFileSync(file, `${key}\n`);
+    try {
+      const { WEBHOOK_SECRET_ENCRYPTION_KEY: _omit, ...withoutKey } = valid as Record<
+        string,
+        string
+      >;
+      expect(
+        loadApiConfig({ ...withoutKey, WEBHOOK_SECRET_ENCRYPTION_KEY_FILE: file })
+          .WEBHOOK_SECRET_ENCRYPTION_KEY,
+      ).toBe(key);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('parses the port list and refuses plain http outside APP_ENV local/ci', () => {
+    expect(
+      loadApiConfig({ ...valid, WEBHOOK_ALLOWED_PORTS: '443, 80,443,8443' }).WEBHOOK_ALLOWED_PORTS,
+    ).toEqual([443, 80, 8443]);
+    for (const ports of ['0', '65536', 'https', '443,,x', ' ']) {
+      expect(rejection({ ...valid, WEBHOOK_ALLOWED_PORTS: ports }), ports).toContain(
+        'WEBHOOK_ALLOWED_PORTS',
+      );
+    }
+    for (const appEnv of ['local', 'ci']) {
+      expect(
+        loadApiConfig({ ...valid, APP_ENV: appEnv, WEBHOOK_ALLOW_HTTP: 'true' }).WEBHOOK_ALLOW_HTTP,
+      ).toBe(true);
+    }
+    for (const appEnv of ['staging', 'production']) {
+      expect(
+        rejection({
+          ...valid,
+          APP_ENV: appEnv,
+          PORTAL_PUBLIC_URL: 'https://portal.example.com',
+          WEBHOOK_ALLOW_HTTP: 'true',
+        }),
+      ).toContain('WEBHOOK_ALLOW_HTTP');
+    }
+  });
+
+  it('accepts the click-service base URL and refuses a non-URL', () => {
+    expect(
+      loadApiConfig({ ...valid, URL_CLICK_BASE_URL: 'https://click.gateway.example' })
+        .URL_CLICK_BASE_URL,
+    ).toBe('https://click.gateway.example');
+    expect(rejection({ ...valid, URL_CLICK_BASE_URL: 'not a url' })).toContain(
+      'URL_CLICK_BASE_URL',
+    );
+  });
+
+  it('accepts every key at its bounds and refuses values outside them', () => {
+    const low = loadApiConfig({
+      ...valid,
+      WEBHOOK_MAX_SUBSCRIPTIONS_PER_ORG: '1',
+      WEBHOOK_SECRET_OVERLAP_HOURS_DEFAULT: '0',
+      WEBHOOK_HISTORY_MAX_RANGE_DAYS: '1',
+      WEBHOOK_REPLAY_MAX_RANGE_HOURS: '1',
+      WEBHOOK_REPLAY_MAX_PER_DELIVERY: '1',
+      WEBHOOK_REPLAY_REQUESTS_PER_HOUR: '1',
+      WEBHOOK_TEST_REQUESTS_PER_MINUTE: '1',
+    });
+    expect(low.WEBHOOK_SECRET_OVERLAP_HOURS_DEFAULT).toBe(0);
+    const high = loadApiConfig({
+      ...valid,
+      WEBHOOK_MAX_SUBSCRIPTIONS_PER_ORG: '100',
+      WEBHOOK_SECRET_OVERLAP_HOURS_DEFAULT: '168',
+      WEBHOOK_HISTORY_MAX_RANGE_DAYS: '62',
+      WEBHOOK_REPLAY_MAX_RANGE_HOURS: '168',
+      WEBHOOK_REPLAY_MAX_PER_DELIVERY: '50',
+      WEBHOOK_REPLAY_REQUESTS_PER_HOUR: '100',
+      WEBHOOK_TEST_REQUESTS_PER_MINUTE: '60',
+    });
+    expect(high.WEBHOOK_HISTORY_MAX_RANGE_DAYS).toBe(62);
+    for (const [key, value] of [
+      ['WEBHOOK_MAX_SUBSCRIPTIONS_PER_ORG', '0'],
+      ['WEBHOOK_MAX_SUBSCRIPTIONS_PER_ORG', '101'],
+      ['WEBHOOK_SECRET_OVERLAP_HOURS_DEFAULT', '169'],
+      ['WEBHOOK_HISTORY_MAX_RANGE_DAYS', '63'],
+      ['WEBHOOK_REPLAY_MAX_RANGE_HOURS', '0'],
+      ['WEBHOOK_REPLAY_MAX_RANGE_HOURS', '169'],
+      ['WEBHOOK_REPLAY_MAX_PER_DELIVERY', '51'],
+      ['WEBHOOK_REPLAY_REQUESTS_PER_HOUR', '101'],
+      ['WEBHOOK_TEST_REQUESTS_PER_MINUTE', '61'],
+      ['WEBHOOK_ALLOW_HTTP', 'yes'],
+    ] as const) {
+      expect(rejection({ ...valid, [key]: value }), `${key}=${value}`).toContain(key);
+    }
+  });
+});

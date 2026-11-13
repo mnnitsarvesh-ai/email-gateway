@@ -334,6 +334,18 @@ export class Fixtures {
     await p.organizationSetting.deleteMany({ where: { organizationId: { in: orgs } } });
     await p.organizationDeployment.deleteMany({ where: { organizationId: { in: orgs } } });
     await p.archiveLegalHold.deleteMany({ where: { organizationId: { in: orgs } } });
+    // Step 6.2: webhook and notification rows of the fixture organizations. The partitioned
+    // tables have no foreign keys; replays reference subscriptions (RESTRICT), every other
+    // table references the organization (RESTRICT), so they go before the organization.
+    const byOrg = { where: { organizationId: { in: orgs } } };
+    await p.webhookReplay.deleteMany(byOrg);
+    await p.webhookDeliveryAttempt.deleteMany(byOrg);
+    await p.webhookDelivery.deleteMany(byOrg);
+    await p.webhookEvent.deleteMany(byOrg);
+    await p.webhookSubscription.deleteMany(byOrg);
+    await p.notificationAlertWindow.deleteMany(byOrg);
+    await p.notificationUserPreference.deleteMany(byOrg);
+    await p.notificationSettings.deleteMany(byOrg);
     // Idempotency-Key rows (step 3.3 L11, step 6.1 §3.5) of the fixture organizations (no FK;
     // they would only expire after 24 h).
     await p.apiIdempotencyKey.deleteMany({ where: { organizationId: { in: orgs } } });

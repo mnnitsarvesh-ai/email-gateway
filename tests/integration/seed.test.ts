@@ -17,7 +17,7 @@ import { stack } from './support/env';
 
 /**
  * db:seed (step 1.1 D7, step 1.2/1.3 D8 and D10) against the dev schema, with the DML account:
- * the catalog (58 permissions since step 6.1, the 9 system roles incl. mailbox_user (step 5.3 Q25), the platform organization, the step 2.3
+ * the catalog (59 permissions since step 6.2, the 9 system roles incl. mailbox_user (step 5.3 Q25), the platform organization, the step 2.3
  * destination provider presets), the retired
  * role-key remap, and idempotency (running it twice leaves the same row counts). The seeded
  * rows are dev data and are deliberately left in place.
@@ -102,7 +102,7 @@ describe('db:seed', () => {
     expect(await counts()).toEqual(afterFirst);
 
     expect(afterFirst).toMatchObject({
-      permissions: 58,
+      permissions: 59,
       systemRoles: 9,
       destinationPresets: 2,
       plans: expect.any(Number) as unknown,
@@ -363,7 +363,7 @@ describe('db:seed', () => {
     );
   });
 
-  it('seeds exactly the 58 permissions and the 9 system roles (D8 + mailbox_user, 5.3), with their permissions', async () => {
+  it('seeds exactly the 59 permissions and the 9 system roles (D8 + mailbox_user, 5.3), with their permissions', async () => {
     expect(seed().status).toBe(0);
     const permissions = await prisma.permission.findMany({ select: { key: true } });
     expect(permissions.map((p) => p.key).sort()).toEqual(PERMISSIONS.map((p) => p.key).sort());
@@ -550,6 +550,14 @@ describe('db:seed', () => {
       'organization_admin',
       'super_admin',
     ]);
+    // Step 6.2 (§2 D): webhook read side; never read-only (URLs may carry receiver tokens).
+    expect(holders('webhook:read')).toEqual([
+      'compliance_auditor',
+      'organization_admin',
+      'security_analyst',
+      'super_admin',
+    ]);
+    expect(holders('webhook:manage')).toEqual(['organization_admin', 'super_admin']);
   });
 
   it('seeds the platform organization with mandatory MFA and the demo users', async () => {

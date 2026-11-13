@@ -24,6 +24,7 @@ flowchart TB
     sec["Secret email-gateway-secrets<br/>mounted at /var/run/secrets/gateway"]:::impl
     eso["External Secrets operator<br/>PLANNED 10.1"]:::planned
     migrate["db-migrate Job<br/>PLANNED, not in base yet"]:::planned
+    wh["webhook-fanout 2 / webhook-delivery 2 (6.2)<br/>same image; only webhook-delivery egress :443<br/>(NetworkPolicy rendered, not applied)"]:::impl
     maint["db-maintenance CronJob<br/>partition maintenance, 01:30 UTC"]:::impl
     engines["Rspamd, ClamAV<br/>placement PLANNED 10.1"]:::planned
   end

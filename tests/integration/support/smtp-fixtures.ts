@@ -47,6 +47,41 @@ export function secretBoxEncrypt(plaintext: string, aad: string): string {
   ].join('.');
 }
 
+/**
+ * Step 6.2 (docs/plan/steps/19-webhooks-notifications.md N2, §6.3): the notification settings
+ * every fixture organization starts with — the three security alert kinds OFF and no
+ * organization contact. Since 6.2 the webhook-worker requests a `threat_detected` alert for every
+ * malicious message by default, and the notification-worker sends it through postfix-notify,
+ * which a developer `.env` may point at a REAL smarthost (NOTIFY_RELAY_HOST). Stack suites
+ * therefore never e-mail alerts unless they switch them on through the api and point
+ * postfix-notify at the TEST-ONLY notify-relay-sink (webhooks-notifications.test.ts). Stored
+ * exactly as the api stores a document: canonical JSON (sorted keys) and its SHA-256.
+ */
+export const FIXTURE_NOTIFICATION_SETTINGS = {
+  alerts: {
+    domainDnsFailed: { enabled: false },
+    includeOrganizationContact: false,
+    threatDetected: { enabled: false },
+    webhookDisabled: { enabled: false },
+  },
+} as const;
+
+/** Canonical JSON (sorted keys) of a settings document, as `canonicalSettings` of 6.2 W2. */
+export function canonicalJson(value: unknown): string {
+  const sort = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(sort);
+    if (v !== null && typeof v === 'object') {
+      return Object.fromEntries(
+        Object.keys(v as Record<string, unknown>)
+          .sort()
+          .map((key) => [key, sort((v as Record<string, unknown>)[key])]),
+      );
+    }
+    return v;
+  };
+  return JSON.stringify(sort(value));
+}
+
 export interface DomainOptions {
   inboundEnabled?: boolean;
   outboundEnabled?: boolean;
@@ -145,6 +180,15 @@ export class SmtpFixtures {
       },
     });
     this.organizationIds.push(org.id);
+    // Step 6.2: security alerts off (see FIXTURE_NOTIFICATION_SETTINGS).
+    const settingsJson = canonicalJson(FIXTURE_NOTIFICATION_SETTINGS);
+    await this.prisma.notificationSettings.create({
+      data: {
+        organizationId: org.id,
+        settings: JSON.parse(settingsJson) as object,
+        settingsSha256: sha256(settingsJson),
+      },
+    });
     for (const prefix of ['sa:rl:in', 'sa:rl:out', 'sa:rl:outd', 'dw:rl:out', 'dw:rl:outd']) {
       this.redisPatterns.add(`${prefix}:${org.id.toString()}:*`);
     }
@@ -499,6 +543,9 @@ export class SmtpFixtures {
         await this.deleteQuarantineTenantRows(ids);
         await this.prisma.bounceEvent.deleteMany({ where });
         await this.prisma.deliverySuppression.deleteMany({ where });
+        // Step 6.2: webhook and notification rows (RESTRICT keys on organizations; the
+        // partitioned delivery tables have none).
+        await this.deleteWebhookTenantRows(ids);
         await this.prisma.organizationLimit.deleteMany({ where });
         // Plan features a suite switched on (step 4.6: attachment_sandbox; Restrict).
         await this.prisma.organizationFeature.deleteMany({ where });
@@ -516,6 +563,7 @@ export class SmtpFixtures {
         await this.deleteParseRows(ids);
         await this.deleteSandboxRows(ids);
         await this.deleteScanRows(ids);
+        await this.deleteWebhookTenantRows(ids);
         for (const id of ids) {
           for (const key of await this.objectKeys(id)) {
             await this.s3.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
@@ -776,6 +824,24 @@ export class SmtpFixtures {
     await this.prisma.archiveLegalHold.deleteMany({ where });
     await this.prisma.archiveRetentionPolicy.deleteMany({ where });
     await this.prisma.archiveSetting.deleteMany({ where });
+  }
+
+  /**
+   * Step 6.2 rows (docs/plan/steps/19-webhooks-notifications.md §3): delivery attempts,
+   * deliveries and stored events (partitioned, keyed by organization), replays, subscriptions,
+   * alert windows, user preferences and the settings row. Every non-partitioned table references
+   * `organizations` with `RESTRICT`.
+   */
+  private async deleteWebhookTenantRows(ids: readonly bigint[]): Promise<void> {
+    const where = { organizationId: { in: [...ids] } };
+    await this.prisma.webhookDeliveryAttempt.deleteMany({ where });
+    await this.prisma.webhookDelivery.deleteMany({ where });
+    await this.prisma.webhookEvent.deleteMany({ where });
+    await this.prisma.webhookReplay.deleteMany({ where });
+    await this.prisma.webhookSubscription.deleteMany({ where });
+    await this.prisma.notificationAlertWindow.deleteMany({ where });
+    await this.prisma.notificationUserPreference.deleteMany({ where });
+    await this.prisma.notificationSettings.deleteMany({ where });
   }
 
   /**

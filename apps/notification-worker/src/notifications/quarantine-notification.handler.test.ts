@@ -8,9 +8,18 @@ import { describe, expect, it, vi } from 'vitest';
 import type { NoticeMail, NoticeMailer } from './mailer';
 import { NoticeSendError } from './mailer';
 import type { NotificationMetrics } from './notification-metrics';
+import { PreferenceFilter } from './preference-filter';
 import { QuarantineNotificationHandler } from './quarantine-notification.handler';
 
-const tx = {} as never;
+/** Stored `notification_user_preferences` rows the fake transaction returns (step 6.2 N4). */
+let preferenceRows: Array<{ organizationId: bigint; userId: bigint; preferences: unknown }> = [];
+const tx = {
+  notificationUserPreference: {
+    findMany: vi.fn((args: { where: { userId: { in: bigint[] } } }) =>
+      Promise.resolve(preferenceRows.filter((r) => args.where.userId.in.includes(r.userId))),
+    ),
+  },
+} as never;
 const logger = { child: () => logger, info: vi.fn(), warn: vi.fn() } as never;
 const EVENT_ID = '0190f0f0-0000-7000-8000-00000000e101';
 const USER = '0190f0f0-0000-7000-8000-0000000000u1'.replace('u', 'a');
@@ -89,7 +98,14 @@ function setup(
         })),
       }),
     ),
-    approvers: vi.fn(() => Promise.resolve(options.approvers ?? ['ann@acme.example'])),
+    approvers: vi.fn(() =>
+      Promise.resolve(
+        (options.approvers ?? ['ann@acme.example']).map((email, i) => ({
+          id: BigInt(21 + i),
+          email,
+        })),
+      ),
+    ),
     approvalRequests: vi.fn(() =>
       Promise.resolve([
         {
@@ -136,16 +152,29 @@ function setup(
     activeDomain: vi.fn(() => Promise.resolve(options.domainActive ?? true)),
   };
   const counts: Array<Record<string, string>> = [];
+  const suppressed: Array<[Record<string, string>, number]> = [];
   const metrics = {
     quarantineMessages: { inc: (labels: Record<string, string>) => counts.push(labels) },
+    alertsSuppressed: {
+      inc: (labels: Record<string, string>, n: number) => suppressed.push([labels, n]),
+    },
     sendDuration: { startTimer: () => () => 0 },
   } as unknown as NotificationMetrics;
-  const handler = new QuarantineNotificationHandler(reads, common, mailer, metrics, logger, {
-    maxRecipients: 50,
-    portalUrl: 'https://portal.acme.example',
-    now: () => new Date(at),
-  });
-  return { handler, sent, reads, counts, common };
+  preferenceRows = [];
+  const handler = new QuarantineNotificationHandler(
+    reads,
+    common,
+    mailer,
+    metrics,
+    logger,
+    {
+      maxRecipients: 50,
+      portalUrl: 'https://portal.acme.example',
+      now: () => new Date(at),
+    },
+    new PreferenceFilter(metrics),
+  );
+  return { handler, sent, reads, counts, common, suppressed };
 }
 
 describe('QuarantineNotificationHandler (step 5.3 Q20)', () => {
@@ -209,11 +238,67 @@ describe('QuarantineNotificationHandler (step 5.3 Q20)', () => {
       tx,
     );
     expect(result).toBe('sent');
-    expect(s.reads.approvers).toHaveBeenCalledWith(tx, 7n, [11n], 50);
+    expect(s.reads.approvers).toHaveBeenCalledWith(tx, 7n, [11n], 50, null);
     expect(s.sent[0]!.recipients).toEqual(['ann@acme.example', 'cid@acme.example']);
     expect(s.sent[0]!.text).toContain(`https://portal.acme.example/quarantine/approvals/${REQ}`);
     expect(s.sent[0]!.text).toContain('Approval needed because: hard_block');
     expect(s.sent[0]!.text).toContain('Held for: malware');
+  });
+
+  it('approval_requested and admin_alert leave out approvers who opted out of their kind (step 6.2 N4)', async () => {
+    const s = setup({ approvers: ['ann@acme.example', 'cid@acme.example'] });
+    // ann (21) opted out of approval requests only; cid (22) of admin alerts only.
+    preferenceRows = [
+      {
+        organizationId: 7n,
+        userId: 21n,
+        preferences: { optOut: ['quarantine_approval_requested'] },
+      },
+      { organizationId: 7n, userId: 22n, preferences: { optOut: ['quarantine_admin_alert'] } },
+    ];
+    await s.handler.handle(
+      event({ kind: 'approval_requested', refs: { approvalRequestIds: [REQ] }, requestedAt: at }),
+      tx,
+    );
+    await s.handler.handle(
+      event({
+        kind: 'admin_alert',
+        refs: {},
+        window: { from: '2026-11-12T07:00:00.000Z', to: at },
+        requestedAt: at,
+      }),
+      tx,
+    );
+    expect(s.sent.map((m) => m.recipients)).toEqual([['cid@acme.example'], ['ann@acme.example']]);
+    expect(s.suppressed).toEqual([
+      [{ kind: 'quarantine_approval_requested', reason: 'opt_out' }, 1],
+      [{ kind: 'quarantine_admin_alert', reason: 'opt_out' }, 1],
+    ]);
+  });
+
+  it('approval_decided, release_blocked and user_digest ignore the 6.2 opt-out list', async () => {
+    const s = setup();
+    preferenceRows = [
+      {
+        organizationId: 7n,
+        userId: 11n,
+        preferences: {
+          optOut: ['policy_alert', 'quarantine_admin_alert', 'quarantine_approval_requested'],
+        },
+      },
+    ];
+    await s.handler.handle(
+      event({
+        kind: 'approval_decided',
+        refs: { approvalRequestIds: [REQ] },
+        decision: 'approved',
+        requestedAt: at,
+      }),
+      tx,
+    );
+    await s.handler.handle(digestEvent, tx);
+    expect(s.sent.map((m) => m.recipients)).toEqual([['bob@acme.example'], ['bob@acme.example']]);
+    expect(s.suppressed).toEqual([]);
   });
 
   it('approval_decided and release_blocked go to the requesting user only', async () => {

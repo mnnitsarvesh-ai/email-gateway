@@ -1,6 +1,6 @@
 # 2. Container architecture (C4 level 2)
 
-The deployables, the mail daemons and the data stores, with the arrows that carry mail, events and reads. The nine deployables are the eight NestJS apps in `apps/*` (step 3.2 added `event-relay`) plus the Next.js `admin-portal`.
+The deployables, the mail daemons and the data stores, with the arrows that carry mail, events and reads. The deployables are the NestJS apps in `apps/*` (step 3.2 added `event-relay`, 4.3 `click-service` and `url-browser-worker`, 4.6 `sandbox-controller`, 6.2 `webhook-worker`) plus the Next.js `admin-portal`.
 
 ```mermaid
 flowchart LR
@@ -11,6 +11,7 @@ flowchart LR
   sender["Sending MTA"]:::ext
   browser["Admin browser"]:::ext
   tenantMx["Tenant mail server"]:::ext
+  receiver["Tenant webhook receiver<br/>(HTTPS, tenant-chosen URL)"]:::ext
 
   subgraph edge["Mail edge"]
     pfIn["postfix inbound MX<br/>:25 (postscreen)"]:::impl
@@ -31,6 +32,8 @@ flowchart LR
     dw["delivery-worker<br/>:3040"]:::impl
     aw["archive-worker<br/>:3060"]:::impl
     nw["notification-worker<br/>:3050"]:::impl
+    ww["webhook-worker (6.2)<br/>fanout + delivery, :3075"]:::impl
+    pfn["postfix-notify<br/>internal smarthost"]:::impl
     er["event-relay<br/>outbox relay + reconciler<br/>:3070 (3.2)"]:::impl
     clickSvc["click-service (4.3)<br/>public GET /c/{token} :3080,<br/>admin :3081"]:::impl
     ubw["url-browser-worker (4.3, profile url-browser)<br/>Chromium headless shell, :3090,<br/>network url-sandbox (internal)"]:::impl
@@ -42,7 +45,7 @@ flowchart LR
   subgraph data["Data stores"]
     mysqlW[("MySQL 8.4 primary<br/>writer, GTID")]:::impl
     mysqlR[("MySQL 8.4 replica<br/>reader")]:::impl
-    mq{{"RabbitMQ 4.1, vhost email-gateway<br/>6 exchanges, 19 quorum queues<br/>(topology v8 since 4.6)"}}:::impl
+    mq{{"RabbitMQ 4.1, vhost email-gateway<br/>6 exchanges, 21 quorum queues<br/>(topology v11 since 6.2)"}}:::impl
     redis[("Redis 7.4")]:::impl
     s3[("S3 / MinIO<br/>mail + archive buckets,<br/>restricted sandbox bucket (4.6)")]:::impl
     os[("OpenSearch 2.19<br/>analytics profile")]:::impl
@@ -89,7 +92,12 @@ flowchart LR
   pe -->|"policy copies org/{org}/policy/ (5.2)"| s3
   mq -->|"email.delivery.pending (3.2)"| dw
   mq -.->|"email.archive (dormant, archive_requested.v1 since 5.2), P 8.1"| aw
-  mq -->|"email.notifications (5.2: policy alerts, sender notices); webhooks P 6.2"| nw
+  mq -->|"email.notifications (5.2 policy alerts, sender notices; 5.3 quarantine; 6.2 security alerts)"| nw
+  nw -->|"SMTP (Bcc), plain-text templates"| pfn
+  mq -->|"email.webhooks (6.2), eg-webhook"| ww
+  ww -->|"events, deliveries, attempts, alert windows (writer)"| mysqlW
+  ww -->|"in-flight caps, rate windows"| redis
+  ww -->|"signed POST via GuardedPoster (SSRF guard)"| receiver
   api -->|"dead-letter view and replay, eg-ops"| mq
   dw -->|"SMTP reinject 10026/10027 (2.3)"| pfOut
   pfOut -->|"SMTP: tenant destination / MX"| tenantMx
@@ -139,4 +147,5 @@ flowchart LR
 | Scan consumers (rspamd, attachment, url)              | IMPLEMENTED 4.1–4.3                                                                                                                                         | email-worker scan role; `scan-*`, `attachment-*`, `url-*` stack suites                                                                                           |
 | click-service, url-browser-worker, url-egress-proxy   | IMPLEMENTED 4.3                                                                                                                                             | `apps/click-service`, `apps/url-browser-worker`; click-service unit/e2e/integration, the browser container suite (profile `url-browser`), `url-smtp.test.ts`     |
 | Consumers policy-engine, notification (5.2); archive  | IMPLEMENTED 5.2 (policy-engine on `email.policy.evaluate`, notification-worker on `email.notifications`: `policy-smtp.test.ts`); archive-worker PLANNED 8.1 | `email.archive` stays dormant until 8.1                                                                                                                          |
+| webhook-worker, `email.webhooks`, security alerts     | IMPLEMENTED 6.2 (`webhooks-smtp.test.ts`, `webhooks-notifications.test.ts`)                                                                                 | Delivery to tenant receivers through the SSRF-guarded client; alerts through `postfix-notify`                                                                    |
 | OpenSearch and ClickHouse feeds                       | PLANNED                                                                                                                                                     | ADR-0009. **No execution-plan step owns them yet** (reported as an open item)                                                                                    |

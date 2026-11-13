@@ -1,0 +1,225 @@
+# promtool unit tests of rules/webhooks.rules.yml (step 6.2):
+#   docker run --rm -v "$PWD/infrastructure/monitoring:/m:ro" --entrypoint promtool \
+#     prom/prometheus:v3.6.0 test rules /m/tests/webhooks.rules.test.yml
+rule_files:
+  - ../rules/webhooks.rules.yml
+evaluation_interval: 1m
+tests:
+  - name: fanout backlog (warning, then critical)
+    interval: 1m
+    input_series:
+      - series: 'rabbitmq_detailed_queue_messages_ready{job="rabbitmq-detailed",vhost="email-gateway",queue="email.webhooks"}'
+        values: '1000x5 150000x15 600000x15'
+      # Another vhost / queue never counts.
+      - series: 'rabbitmq_detailed_queue_messages_ready{job="rabbitmq-detailed",vhost="eg-it-1",queue="email.webhooks"}'
+        values: '900000x35'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: WebhookFanoutBacklog
+        exp_alerts: []
+      - eval_time: 18m
+        alertname: WebhookFanoutBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: email.webhooks backlog above 100000
+              description: >-
+                The webhook fanout is not keeping up (or is down): more than 100000 events are ready in
+                email.webhooks. At 1000000 the queue rejects publishes and the outbox relay stalls for
+                every consumer. Scale webhook-fanout or check its readiness.
+              runbook_url: docs/runbooks/webhooks.md#webhookfanoutbacklog
+      - eval_time: 33m
+        alertname: WebhookFanoutBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: email.webhooks backlog above 100000
+              description: >-
+                The webhook fanout is not keeping up (or is down): more than 100000 events are ready in
+                email.webhooks. At 1000000 the queue rejects publishes and the outbox relay stalls for
+                every consumer. Scale webhook-fanout or check its readiness.
+              runbook_url: docs/runbooks/webhooks.md#webhookfanoutbacklog
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: email.webhooks backlog above 500000
+              description: >-
+                email.webhooks is half way to its reject-publish bound (1000000). Scale webhook-fanout
+                now; if it cannot drain, follow the unbind procedure of the runbook before the relay is
+                nacked.
+              runbook_url: docs/runbooks/webhooks.md#webhookfanoutbacklog
+
+  - name: delivery stalled and oldest due age
+    interval: 1m
+    input_series:
+      # Leader and non-leader replicas: max() is the leader's value.
+      - series: 'webhook_due_backlog{job="webhook-worker",instance="a"}'
+        values: '0x5 40x30'
+      - series: 'webhook_due_backlog{job="webhook-worker",instance="b"}'
+        values: '0x35'
+      - series: 'webhook_oldest_due_age_seconds{job="webhook-worker",instance="a"}'
+        values: '0x5 60+60x30'
+      # Attempts stop after 5 minutes.
+      - series: 'webhook_delivery_attempts_total{job="webhook-worker",instance="a",outcome="succeeded"}'
+        values: '0+10x5 50x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: WebhookDeliveryStalled
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: WebhookDeliveryStalled
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: Webhook deliveries are due but none is attempted
+              description: >-
+                Pending webhook deliveries are due and no delivery attempt was recorded for 20 minutes.
+                Check webhook-delivery (readiness: mysql, redis), its logs and
+                webhook_rate_limit_store_errors_total.
+              runbook_url: docs/runbooks/webhooks.md#webhookdeliverystalled
+      - eval_time: 18m
+        alertname: WebhookOldestDueAge
+        exp_alerts: []
+      - eval_time: 33m
+        alertname: WebhookOldestDueAge
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: The oldest due webhook delivery waits more than 15 minutes
+              description: >-
+                A due delivery has waited more than 900 s past its scheduled attempt. The delivery
+                replicas are saturated (WEBHOOK_DELIVERY_CONCURRENCY), capped per organization or
+                subscription, or slowed by endpoints that time out.
+              runbook_url: docs/runbooks/webhooks.md#webhookoldestdueage
+
+  - name: a stall never fires while attempts continue
+    interval: 1m
+    input_series:
+      - series: 'webhook_due_backlog{job="webhook-worker",instance="a"}'
+        values: '40x30'
+      - series: 'webhook_delivery_attempts_total{job="webhook-worker",instance="a",outcome="http_error"}'
+        values: '0+5x30'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: WebhookDeliveryStalled
+        exp_alerts: []
+
+  - name: dead letters, SSRF blocks and store errors
+    interval: 1m
+    input_series:
+      - series: 'webhook_deliveries_dead_total{job="webhook-worker",instance="a"}'
+        values: '0+5x60'
+      - series: 'webhook_ssrf_blocked_total{job="webhook-worker",instance="a",reason="metadata"}'
+        values: '0x10 0+10x20'
+      - series: 'webhook_rate_limit_store_errors_total{job="webhook-worker",instance="a"}'
+        values: '0x10 1+1x20'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: WebhookDeadLetters
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: WebhookDeadLetters
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: More than 100 webhook deliveries became dead in an hour
+              description: >-
+                Deliveries exhausted their retries (WEBHOOK_MAX_ATTEMPTS / WEBHOOK_MAX_RETRY_AGE_HOURS)
+                or were inserted dead by the per-subscription backlog bound. Tenants can replay them;
+                check which endpoints fail.
+              runbook_url: docs/runbooks/webhooks.md#webhookdeadletters
+      - eval_time: 8m
+        alertname: WebhookSsrfBlockedSpike
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: WebhookSsrfBlockedSpike
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: The SSRF guard blocked more than 50 webhook attempts in 15 minutes
+              description: >-
+                Webhook endpoints resolve to internal, metadata or otherwise blocked addresses. Blocked
+                deliveries fail at once and count toward auto-disable. Look for a tenant probing
+                internal addresses or a DNS change of a popular endpoint.
+              runbook_url: docs/runbooks/webhooks.md#webhookssrfblockedspike
+      - eval_time: 9m
+        alertname: WebhookRateLimitStoreErrors
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: WebhookRateLimitStoreErrors
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: The webhook delivery loop cannot reach Redis
+              description: >-
+                Delivery ticks found Redis (in-flight and rate counters) unavailable and sent nothing
+                (fail closed). Deliveries wait; nothing is lost. Check Redis and the delivery replicas.
+              runbook_url: docs/runbooks/webhooks.md#webhookratelimitstoreerrors
+
+  - name: fanout errors (unsafe at once, error above 10 per 15 minutes)
+    interval: 1m
+    input_series:
+      - series: 'webhook_fanout_events_total{job="webhook-worker",instance="a",source_type="mail.message.received.v1",result="unsafe"}'
+        values: '0x10 1x20'
+      - series: 'webhook_fanout_events_total{job="webhook-worker",instance="a",source_type="mail.policy.decided.v1",result="error"}'
+        values: '0+1x30'
+      - series: 'webhook_fanout_events_total{job="webhook-worker",instance="a",source_type="mail.message.received.v1",result="projected"}'
+        values: '0+100x30'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: WebhookFanoutErrors
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: WebhookFanoutErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              result: unsafe
+            exp_annotations:
+              summary: Webhook fanout failures (unsafe)
+              description: >-
+                The fanout reported unsafe results in the last 15 minutes. unsafe means a
+                payload was refused by the payload guard and its source event dead-lettered; error means
+                retried failures (writer reads, broker or database outages).
+              runbook_url: docs/runbooks/webhooks.md#webhookfanouterrors
+          - exp_labels:
+              severity: warning
+              result: error
+            exp_annotations:
+              summary: Webhook fanout failures (error)
+              description: >-
+                The fanout reported error results in the last 15 minutes. unsafe means a
+                payload was refused by the payload guard and its source event dead-lettered; error means
+                retried failures (writer reads, broker or database outages).
+              runbook_url: docs/runbooks/webhooks.md#webhookfanouterrors
+
+  - name: security alert e-mail failures
+    interval: 1m
+    input_series:
+      - series: 'notification_alert_messages_total{job="notification-worker",instance="a",kind="threat_detected",result="sent"}'
+        values: '0+1x40'
+      - series: 'notification_alert_messages_total{job="notification-worker",instance="a",kind="threat_detected",result="failed"}'
+        values: '0x20 1x20'
+    alert_rule_test:
+      - eval_time: 18m
+        alertname: SecurityAlertNotificationFailures
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: SecurityAlertNotificationFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Security alert e-mails failed
+              description: >-
+                The notification-worker failed to send security alert e-mails (threat detected, DNS
+                failure, webhook disabled) in the last 30 minutes; they are retried by the queue and
+                dead-lettered after the retry policy. Check the notification relay (postfix-notify).
+              runbook_url: docs/runbooks/webhooks.md#securityalertnotificationfailures

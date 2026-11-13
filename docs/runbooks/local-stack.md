@@ -41,7 +41,7 @@ pnpm --filter @email-gateway/event-contracts topology:export    # after changing
 
 ```bash
 docker compose stop api admin-portal smtp-adapter email-worker policy-engine delivery-worker \
-  event-relay notification-worker archive-worker
+  event-relay notification-worker webhook-worker archive-worker
 docker compose --profile rabbitmq-cluster up -d --wait rabbitmq-node1 rabbitmq-node2 rabbitmq-node3
 docker compose --profile rabbitmq-cluster exec rabbitmq-node1 rabbitmq-diagnostics cluster_status   # 3 running nodes
 node --env-file=.env infrastructure/rabbitmq/init.mjs --mgmt-url http://127.0.0.1:15701 --users
@@ -53,6 +53,24 @@ docker compose --profile apps up -d --wait
 ```
 
 Remove exactly those three volumes (never `down -v`, which would wipe every volume of the stack). The nodes share `RABBITMQ_CLUSTER_ERLANG_COOKIE`, written by `infrastructure/rabbitmq/cluster/entrypoint.sh`.
+
+## Webhooks and notifications (step 6.2)
+
+The `webhook-worker` (apps profile, `127.0.0.1:${WEBHOOK_WORKER_HOST_PORT:-3075}`: `/health/ready`, `/metrics`) runs both roles (`fanout` on `email.webhooks` as `eg-webhook`, `delivery`); [runbook](webhooks.md). In the container it resolves only through `dns-sink`, trusts the test-pki CA and may dial only the documentation range of the TEST-ONLY `webhook-receiver` (smtp-test profile, `https://hooks.receiver.test/<path>` = 203.0.113.20):
+
+```bash
+docker compose --profile apps --profile smtp-test up -d --wait webhook-worker webhook-receiver notify-relay-sink
+curl -s localhost:${WEBHOOK_WORKER_HOST_PORT:-3075}/health/ready
+curl -s localhost:${WEBHOOK_RECEIVER_ADMIN_HOST_PORT:-18091}/health
+# the requests the receiver recorded for one path (headers, base64 body, signatureValid)
+curl -s localhost:${WEBHOOK_RECEIVER_ADMIN_HOST_PORT:-18091}/requests/<path>
+curl -s localhost:${WEBHOOK_WORKER_HOST_PORT:-3075}/metrics | grep -E '^webhook_(fanout_events|delivery_attempts|due_backlog)'
+```
+
+- New `.env` keys: the "Webhooks and notifications" section of `.env.example` (`WEBHOOK_SECRET_ENCRYPTION_KEY`, `RABBITMQ_WEBHOOK_*`, `NOTIFY_RELAY_SINK_*`, `WEBHOOK_*`); Compose refuses to start without them (`:?`). Then `docker compose up rabbitmq-init` (user `eg-webhook`, topology v11).
+- Security alert e-mails go notification-worker → `postfix-notify`. Without `NOTIFY_RELAY_HOST` postfix-notify discards them; **if your `.env` points it at a real smarthost, alerts of your own organizations are really sent**. The stack suite `webhooks-notifications.test.ts` recreates postfix-notify against the TEST-ONLY `notify-relay-sink` (172.31.250.31:587, STARTTLS with the pinned test-pki certificate, SASL `NOTIFY_RELAY_SINK_USER`) through the Compose environment only and restores it from `.env` afterwards; the fixture organizations of the other stack suites keep every alert off.
+- `DELETE /requests` on the receiver's admin API forgets **every** path, program and secret (shared by all suites); prefer per-run paths.
+- With mail flowing and no webhook-worker running, `email.webhooks` fills up (bounded at 1 000 000); start the worker or purge that queue by name (see [rabbitmq-messaging.md](rabbitmq-messaging.md)).
 
 ## Security scanning (step 4.1)
 
@@ -134,15 +152,17 @@ curl -s localhost:${EVENT_RELAY_HOST_PORT:-3070}/metrics | grep -E '^lifecycle_(
 
 ## Useful endpoints (default ports)
 
-| What                            | URL                                                                                       |
-| ------------------------------- | ----------------------------------------------------------------------------------------- |
-| API OpenAPI                     | http://localhost:3000/docs (outside production only; the document lists `/api/v1/*` only) |
-| API Prometheus series           | http://localhost:3000/metrics (internal; `/api/metrics` is a `404`)                       |
-| Admin portal                    | http://localhost:3001                                                                     |
-| RabbitMQ management             | http://localhost:15672 (`RABBITMQ_USER`/`RABBITMQ_PASSWORD`; vhost `email-gateway`)       |
-| RabbitMQ Prometheus             | http://localhost:15692/metrics (`RABBITMQ_PROMETHEUS_HOST_PORT`)                          |
-| MinIO console                   | http://localhost:9001 (`MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD`)                           |
-| Grafana (observability profile) | http://localhost:3100 (`admin` / `GRAFANA_ADMIN_PASSWORD`)                                |
+| What                            | URL                                                                                                     |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| API OpenAPI                     | http://localhost:3000/docs (outside production only; the document lists `/api/v1/*` only)               |
+| API Prometheus series           | http://localhost:3000/metrics (internal; `/api/metrics` is a `404`)                                     |
+| Admin portal                    | http://localhost:3001                                                                                   |
+| RabbitMQ management             | http://localhost:15672 (`RABBITMQ_USER`/`RABBITMQ_PASSWORD`; vhost `email-gateway`)                     |
+| RabbitMQ Prometheus             | http://localhost:15692/metrics (`RABBITMQ_PROMETHEUS_HOST_PORT`)                                        |
+| webhook-worker probes / metrics | http://localhost:3075/health/ready, /metrics (`WEBHOOK_WORKER_HOST_PORT`)                               |
+| webhook-receiver admin (test)   | http://localhost:18091/health, /requests/<path> (`WEBHOOK_RECEIVER_ADMIN_HOST_PORT`, profile smtp-test) |
+| MinIO console                   | http://localhost:9001 (`MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD`)                                         |
+| Grafana (observability profile) | http://localhost:3100 (`admin` / `GRAFANA_ADMIN_PASSWORD`)                                              |
 
 ## Sending a test message
 

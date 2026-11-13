@@ -18,7 +18,13 @@
  *    and every list new in 6.1 is `v1` (D3);
  * 6. strict request schemas — every body and query schema rejects unknown fields (D1);
  * 7. sensitive mutations — every §3.5 route has idempotency metadata and the `sensitive` class;
- *    no route is both `@Idempotent()` and `@ReturnsSecret()` (D9, D10).
+ *    no route is both `@Idempotent()` and `@ReturnsSecret()` (D9, D10); a `@ReturnsSecret()`
+ *    route takes an Idempotency-Key only when it is one of the two step 6.2 webhook secret
+ *    routes and declares the redacted replay (ADR-0057).
+ *
+ * Step 6.2 (docs/plan/steps/19-webhooks-notifications.md §6.2) adds the 17 webhook and
+ * notification routes (`NEW_IN_6_2`, examples required, lists v1), five transactional keyed
+ * routes and the `SECRET_BEARING_REDACTED_REPLAY` allow-list.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -32,7 +38,13 @@ import { buildOpenApiDocument } from '../src/http/openapi';
 import { TRANSACTIONAL_IDEMPOTENCY_KEY } from '../src/modules/messages/api-docs';
 import { LifecycleOperationBodySchema } from '../src/modules/messages/dto/messages.schemas';
 import { BulkBodySchema } from '../src/modules/quarantine/dto/quarantine.schemas';
+import { SettingsUpdateBodySchema } from '../src/modules/notifications/notifications.schemas';
 import { CreateSuppressionBodySchema } from '../src/modules/recipients/recipient-suppressions.schemas';
+import {
+  CreateReplayBodySchema,
+  CreateWebhookBodySchema,
+  RotateSecretBodySchema,
+} from '../src/modules/webhooks/webhooks.schemas';
 import { isStrictRequestSchema } from '../src/validation/strict-schema';
 import { ZodValidationPipe } from '../src/validation/zod-validation.pipe';
 import { COVERAGE, COVERAGE_BY_AREA, type RouteCoverage } from './route-coverage';
@@ -77,6 +89,9 @@ const AUTHENTICATED_ONLY_ROUTES = [
   'post /api/v1/auth/mfa/totp/disable',
   'post /api/v1/auth/mfa/recovery-codes',
   'delete /api/v1/platform/overrides/:overrideId',
+  // Step 6.2 N3: the caller's own notification preferences (users only).
+  'get /api/v1/notifications/preferences',
+  'put /api/v1/notifications/preferences',
 ];
 
 /** §3.3: the 20 routes new in step 6.1 (examples required, lists must be v1). */
@@ -103,6 +118,37 @@ const NEW_IN_6_1 = [
   'get /api/v1/threat-intelligence/lookup',
 ];
 
+/** Step 6.2 §6.1: the 17 webhook and notification routes (examples required, lists v1). */
+const NEW_IN_6_2 = [
+  'get /api/v1/webhooks',
+  'post /api/v1/webhooks',
+  'get /api/v1/webhooks/event-types',
+  'get /api/v1/webhooks/:webhookId',
+  'patch /api/v1/webhooks/:webhookId',
+  'delete /api/v1/webhooks/:webhookId',
+  'post /api/v1/webhooks/:webhookId/rotate-secret',
+  'post /api/v1/webhooks/:webhookId/test',
+  'get /api/v1/webhooks/:webhookId/deliveries',
+  'get /api/v1/webhooks/:webhookId/deliveries/:deliveryId',
+  'post /api/v1/webhooks/:webhookId/deliveries/:deliveryId/replay',
+  'post /api/v1/webhooks/:webhookId/replays',
+  'get /api/v1/webhooks/:webhookId/replays/:replayId',
+  'get /api/v1/notifications/settings',
+  'put /api/v1/notifications/settings',
+  'get /api/v1/notifications/preferences',
+  'put /api/v1/notifications/preferences',
+];
+
+/**
+ * ADR-0057: the only routes allowed to combine `@ReturnsSecret()` with an Idempotency-Key, and
+ * only as `@ReturnsSecret({ redactedReplay: true })` with the transactional mechanism (the
+ * stored response carries `secret: null`).
+ */
+const SECRET_BEARING_REDACTED_REPLAY = [
+  'post /api/v1/webhooks',
+  'post /api/v1/webhooks/:webhookId/rotate-secret',
+];
+
 /** §3.5: sensitive mutations keyed transactionally (IdempotencyService.execute). */
 const SENSITIVE_TRANSACTIONAL = [
   'post /api/v1/messages/:messageId/rescan',
@@ -120,6 +166,12 @@ const SENSITIVE_TRANSACTIONAL = [
   'post /api/v1/quarantine/me/entries/:entryId/request-release',
   'post /api/v1/recipients/suppressions',
   'delete /api/v1/recipients/suppressions/:suppressionId',
+  // Step 6.2 §6.1 (ADR-0057 for the first and third).
+  'post /api/v1/webhooks',
+  'delete /api/v1/webhooks/:webhookId',
+  'post /api/v1/webhooks/:webhookId/rotate-secret',
+  'post /api/v1/webhooks/:webhookId/deliveries/:deliveryId/replay',
+  'post /api/v1/webhooks/:webhookId/replays',
 ];
 
 /** §3.5: the legacy sensitive mutations keyed by the reservation interceptor (`@Idempotent`). */
@@ -189,6 +241,11 @@ const BODY_PARSED_IN_SERVICE = new Map<string, z.ZodType>([
   ['MessageLifecycleController.rescan', LifecycleOperationBodySchema],
   ['MessageLifecycleController.release', LifecycleOperationBodySchema],
   ['RecipientSuppressionsController.create', CreateSuppressionBodySchema],
+  // Step 6.2: keyed routes parse after the key checks; settings map to their coded 400.
+  ['WebhooksController.create', CreateWebhookBodySchema],
+  ['WebhooksController.rotate', RotateSecretBodySchema],
+  ['WebhookDeliveriesController.createReplay', CreateReplayBodySchema],
+  ['NotificationsController.putSettings', SettingsUpdateBodySchema],
 ]);
 
 const BODY: number = RouteParamtypes.BODY;
@@ -321,9 +378,10 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     await api?.close();
   });
 
-  it('discovers every route once (249 operations under /api/v1 plus the 3 internal endpoints)', () => {
+  it('discovers every route once (266 operations under /api/v1 plus the 3 internal endpoints)', () => {
     expect(facts.length).toBe(byKey.size);
-    expect(facts.filter((f) => f.key.includes(' /api/v1/')).length).toBe(249);
+    // 249 after step 6.1, plus the 17 routes of step 6.2.
+    expect(facts.filter((f) => f.key.includes(' /api/v1/')).length).toBe(266);
     expect(
       facts
         .filter((f) => isInternal(f.key))
@@ -418,9 +476,9 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     }
   });
 
-  it('gives every route new in 6.1 explicit response examples (D14)', () => {
+  it('gives every route new in 6.1 and 6.2 explicit response examples (D14)', () => {
     const failures: string[] = [];
-    for (const key of NEW_IN_6_1) {
+    for (const key of [...NEW_IN_6_1, ...NEW_IN_6_2]) {
       const op = operation(key);
       if (!op) {
         failures.push(`${key}: missing`);
@@ -453,6 +511,9 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     );
     expect(COVERAGE_BY_AREA.insights.every((c) => NEW_IN_6_1.includes(c.route))).toBe(true);
     expect(NEW_IN_6_1).toHaveLength(20);
+    // NEW_IN_6_2 is exactly the step 6.2 manifest.
+    expect(COVERAGE_BY_AREA.webhooks.map((c) => c.route).sort()).toEqual([...NEW_IN_6_2].sort());
+    expect(NEW_IN_6_2).toHaveLength(17);
   });
 
   it('has one coverage entry per served route and none for a route that does not exist (§3.8)', () => {
@@ -465,6 +526,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     // Each area holds its own routes: pre-6.1 in legacy.ts (except the messages module).
     for (const route of COVERAGE_BY_AREA.legacy.map((c) => c.route)) {
       expect(NEW_IN_6_1.includes(route), route).toBe(false);
+      expect(NEW_IN_6_2.includes(route), route).toBe(false);
     }
   });
 
@@ -507,8 +569,8 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
       if ((coverage.get(key)?.cursor ?? null) !== route.cursor) {
         failures.push(`${key}: manifest cursor ${coverage.get(key)?.cursor} ≠ ${route.cursor}`);
       }
-      if (NEW_IN_6_1.includes(key) && route.cursor === 'v0')
-        failures.push(`${key}: 6.1 list on v0`);
+      if ((NEW_IN_6_1.includes(key) || NEW_IN_6_2.includes(key)) && route.cursor === 'v0')
+        failures.push(`${key}: 6.1/6.2 list on v0`);
       if (route.cursor !== null && operation(key)!['x-eg-cursor'] !== route.cursor) {
         failures.push(`${key}: x-eg-cursor not documented`);
       }
@@ -516,8 +578,9 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     expect(failures).toEqual([]);
     const counts = { v0: 0, v1: 0 };
     for (const { route } of facts) if (route.cursor) counts[route.cursor] += 1;
-    // 33 pre-6.1 lists keep the unsigned v0 cursors; the 9 lists of 6.1 are signed v1.
-    expect(counts).toEqual({ v0: 33, v1: 9 });
+    // 33 pre-6.1 lists keep the unsigned v0 cursors; the 9 lists of 6.1 and the 2 of 6.2
+    // (webhooks, deliveries) are signed v1.
+    expect(counts).toEqual({ v0: 33, v1: 11 });
   });
 
   it('every body and query schema of every route is strict at every object node (D1)', () => {
@@ -570,18 +633,39 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
       [f.route.idempotency?.operation, f.transactional?.operation].filter(Boolean),
     );
     expect(new Set(operations).size).toBe(operations.length);
-    expect(operations).toHaveLength(37);
+    expect(operations).toHaveLength(42);
   });
 
-  it('no route is both @Idempotent() and @ReturnsSecret(); secret-bearing and expensive routes carry their class (D8, D9)', () => {
+  it('no route is both @Idempotent() and @ReturnsSecret(); secret-bearing and expensive routes carry their class (D8, D9, ADR-0057)', () => {
+    expect(
+      facts.filter((f) => f.route.returnsSecret && f.route.idempotency !== null).map((f) => f.key),
+    ).toEqual([]);
+    // ADR-0057: @ReturnsSecret + idempotency only on the allow-list, only transactional and
+    // only with the redacted replay; the allow-list routes are exactly that.
     expect(
       facts
-        .filter((f) => f.route.returnsSecret && (f.route.idempotency !== null || f.transactional))
+        .filter((f) => f.route.returnsSecret && f.transactional)
+        .filter(
+          (f) => !SECRET_BEARING_REDACTED_REPLAY.includes(f.key) || !f.route.secretRedactedReplay,
+        )
         .map((f) => f.key),
     ).toEqual([]);
+    for (const key of SECRET_BEARING_REDACTED_REPLAY) {
+      const fact = byKey.get(key);
+      expect(fact?.route.returnsSecret, key).toBe(true);
+      expect(fact?.route.secretRedactedReplay, key).toBe(true);
+      expect(fact?.transactional, key).not.toBeNull();
+      expect(operation(key)?.['x-eg-secret-replay'], key).toBe('redacted');
+    }
     expect(
       facts
-        .filter((f) => f.route.returnsSecret)
+        .filter((f) => f.route.secretRedactedReplay)
+        .map((f) => f.key)
+        .sort(),
+    ).toEqual([...SECRET_BEARING_REDACTED_REPLAY].sort());
+    expect(
+      facts
+        .filter((f) => f.route.returnsSecret && !f.route.secretRedactedReplay)
         .map((f) => f.key)
         .sort(),
     ).toEqual([...SECRET_BEARING].sort());
@@ -592,7 +676,14 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
         .sort();
     expect(byClass('expensive')).toEqual([...EXPENSIVE].sort());
     expect(byClass('sensitive')).toEqual(
-      [...SENSITIVE_TRANSACTIONAL, ...SENSITIVE_LEGACY, ...SECRET_BEARING].sort(),
+      [
+        ...new Set([
+          ...SENSITIVE_TRANSACTIONAL,
+          ...SENSITIVE_LEGACY,
+          ...SECRET_BEARING,
+          ...SECRET_BEARING_REDACTED_REPLAY,
+        ]),
+      ].sort(),
     );
     for (const { key, route } of facts) {
       if (route.rateClass && operation(key)?.['x-eg-rate-class'] !== route.rateClass) {

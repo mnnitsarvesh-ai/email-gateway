@@ -178,7 +178,7 @@ describe('sandbox event types (step 4.6 X11)', () => {
     }
   });
 
-  it('route the task to scan.sandbox, the result to scan.sandbox.results and the completion to the firehose only (topology v8)', () => {
+  it('route the task to scan.sandbox, the result to scan.sandbox.results and the completion to the firehose (topology v8) and the webhook fanout (v11)', () => {
     expect(
       routeMessage('email.security', eventRoutingKey('42', 'mail.sandbox.task_requested.v1')),
     ).toEqual(['email.analytics', 'scan.sandbox']);
@@ -187,7 +187,8 @@ describe('sandbox event types (step 4.6 X11)', () => {
     ).toEqual(['email.analytics', 'scan.sandbox.results']);
     expect(
       routeMessage('email.security', eventRoutingKey('42', 'mail.attachment.sandbox_completed.v1')),
-    ).toEqual(['email.analytics']);
+      // Topology v11 (step 6.2 §4.3): the webhook fanout projects malicious late verdicts.
+    ).toEqual(['email.analytics', 'email.webhooks']);
     expect(
       routeMessage('email.security', eventRoutingKey('42', 'mail.attachment.sandbox_requested.v1')),
     ).toEqual(['email.analytics', 'scan.sandbox.submissions']);

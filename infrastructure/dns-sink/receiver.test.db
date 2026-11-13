@@ -1,0 +1,11 @@
+; Zone receiver.test (TEST-ONLY, step 6.2 §4.5): the webhook test receiver (webhook-receiver,
+; 203.0.113.20 on `urltest`). Subscriptions of the stack suites point at
+; https://hooks.receiver.test/<org>/… (test-CA certificate, SAN hooks2.receiver.test); hooks2 is a
+; second name of the same receiver (two subscriptions, two hosts). Every other name is NXDOMAIN.
+$ORIGIN receiver.test.
+$TTL 60
+@       IN SOA  ns.receiver.test. hostmaster.receiver.test. ( 2026111301 3600 600 86400 60 )
+@       IN NS   ns.receiver.test.
+ns      IN A    172.31.250.53
+hooks   IN A    203.0.113.20
+hooks2  IN A    203.0.113.20

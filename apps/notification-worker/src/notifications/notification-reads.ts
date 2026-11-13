@@ -13,6 +13,74 @@ export class InconsistentNotificationReadError extends Error {
 /** The permission whose holders receive policy alerts (P25). */
 export const ALERT_PERMISSION = 'policy:publish';
 
+/** A recipient user: internal id (opt-out lookup, paging) and lower-cased e-mail. */
+export interface NoticeUser {
+  id: bigint;
+  email: string;
+}
+
+/** A page of permission holders: after `afterId` (exclusive), at most `take`, minus `excluded`. */
+export interface HolderPage {
+  take: number;
+  afterId?: bigint | null;
+  excluded?: readonly bigint[];
+}
+
+/**
+ * Active, non-deleted, e-mail-verified users of the organization holding `permission` through a
+ * role of that organization or a system role, sorted by user id (keyset paging on `afterId`),
+ * echo-checked (4.2 §6). Shared by the policy alert (P25), the quarantine approvers (Q20) and
+ * the security alerts (step 6.2 N3).
+ */
+export async function findPermissionHolders(
+  tx: Tx,
+  organizationId: bigint,
+  permission: string,
+  page: HolderPage,
+): Promise<NoticeUser[]> {
+  const excluded = page.excluded ?? [];
+  const afterId = page.afterId ?? null;
+  const rows = await tx.user.findMany({
+    where: {
+      organizationId,
+      status: 'active',
+      deletedAt: null,
+      emailVerifiedAt: { not: null },
+      ...(afterId !== null || excluded.length > 0
+        ? {
+            id: {
+              ...(afterId !== null ? { gt: afterId } : {}),
+              ...(excluded.length > 0 ? { notIn: [...excluded] } : {}),
+            },
+          }
+        : {}),
+      userRoles: {
+        some: {
+          organizationId,
+          role: {
+            OR: [{ organizationId }, { organizationId: null }],
+            permissions: { some: { permission: { key: permission } } },
+          },
+        },
+      },
+    },
+    select: { id: true, organizationId: true, email: true, status: true },
+    orderBy: { id: 'asc' },
+    take: page.take,
+  });
+  for (const r of rows) {
+    if (
+      r.organizationId !== organizationId ||
+      r.status !== 'active' ||
+      excluded.includes(r.id) ||
+      (afterId !== null && r.id <= afterId)
+    ) {
+      throw new InconsistentNotificationReadError('permission_holder');
+    }
+  }
+  return rows.map((r) => ({ id: r.id, email: r.email.toLowerCase() }));
+}
+
 export interface NoticeMessage {
   id: bigint;
   publicId: string | null;
@@ -90,34 +158,17 @@ export class NotificationReads {
     return row?.name ?? null;
   }
 
-  /** Emails of the organization's policy administrators (P25), sorted by user id, ≤ `cap`. */
-  async alertRecipients(tx: Tx, organizationId: bigint, cap: number): Promise<string[]> {
-    const rows = await tx.user.findMany({
-      where: {
-        organizationId,
-        status: 'active',
-        deletedAt: null,
-        emailVerifiedAt: { not: null },
-        userRoles: {
-          some: {
-            organizationId,
-            role: {
-              OR: [{ organizationId }, { organizationId: null }],
-              permissions: { some: { permission: { key: ALERT_PERMISSION } } },
-            },
-          },
-        },
-      },
-      select: { id: true, organizationId: true, email: true, status: true },
-      orderBy: { id: 'asc' },
-      take: cap,
-    });
-    for (const r of rows) {
-      if (r.organizationId !== organizationId || r.status !== 'active') {
-        throw new InconsistentNotificationReadError('alert_recipient');
-      }
-    }
-    return rows.map((r) => r.email.toLowerCase());
+  /**
+   * One page of the organization's policy administrators (P25): users holding `policy:publish`,
+   * sorted by user id, after `afterId`, ≤ `take` (opt-outs are removed by `PreferenceFilter`).
+   */
+  alertRecipients(
+    tx: Tx,
+    organizationId: bigint,
+    take: number,
+    afterId: bigint | null = null,
+  ): Promise<NoticeUser[]> {
+    return findPermissionHolders(tx, organizationId, ALERT_PERMISSION, { take, afterId });
   }
 
   /** True when `domain` is an active, non-deleted domain of the organization. */

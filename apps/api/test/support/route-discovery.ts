@@ -23,6 +23,7 @@ import {
   RATE_CLASS_KEY,
   type RateClass,
   RETURNS_SECRET_KEY,
+  RETURNS_SECRET_REDACTED_REPLAY_KEY,
 } from '../../src/rate-limit/rate-class.decorator';
 import { RATE_LIMIT_KEY, type RateLimitOptions } from '../../src/rate-limit/rate-limit.options';
 
@@ -48,6 +49,8 @@ export interface DiscoveredRoute {
   idempotency: IdempotentOptions | null;
   /** `@ReturnsSecret()` (step 6.1 D9). */
   returnsSecret: boolean;
+  /** `@ReturnsSecret({ redactedReplay: true })` (step 6.2, ADR-0057). */
+  secretRedactedReplay: boolean;
   /** `@CursorList()` encoding (step 6.1 D3), if declared. */
   cursor: CursorEncoding | null;
 }
@@ -104,6 +107,8 @@ export function discoverRoutes(app: INestApplication): DiscoveredRoute[] {
               (Reflect.getMetadata(IDEMPOTENT_KEY, handler) as IdempotentOptions | undefined) ??
               null,
             returnsSecret: Reflect.getMetadata(RETURNS_SECRET_KEY, handler) === true,
+            secretRedactedReplay:
+              Reflect.getMetadata(RETURNS_SECRET_REDACTED_REPLAY_KEY, handler) === true,
             cursor:
               (Reflect.getMetadata(CURSOR_LIST_KEY, handler) as CursorEncoding | undefined) ?? null,
           });

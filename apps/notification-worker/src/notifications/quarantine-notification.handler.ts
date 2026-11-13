@@ -9,6 +9,7 @@ import type { NoticeMailer } from './mailer';
 import type { NotificationMetrics } from './notification-metrics';
 import type { NotificationReads } from './notification-reads';
 import { addressDomain } from './policy-notification.handler';
+import type { PreferenceFilter } from './preference-filter';
 import type { QuarantineNotificationReads } from './quarantine-reads';
 import {
   quarantineNoticeMessageId,
@@ -42,10 +43,12 @@ export interface QuarantineNotificationOptions {
  * - `user_digest` → the digest's user (active, verified, not opted out, `endUser.enabled`):
  *   their `held`/`pending_approval` entries of the window (≤ `digest.maxEntries`; sender,
  *   subject only with `digest.includeSubject`, reason, expiry, portal link);
- * - `approval_requested` → users holding `quarantine:approve`, never the requester(s),
+ * - `approval_requested` → users holding `quarantine:approve`, never the requester(s), minus
+ *   users who opted out of `quarantine_approval_requested` (step 6.2 N4),
  *   ≤ NOTIFICATION_MAX_RECIPIENTS, Bcc;
  * - `approval_decided`, `release_blocked` → the requesting user (API keys get none);
- * - `admin_alert` → as `approval_requested`, counts and a link;
+ * - `admin_alert` → as `approval_requested` (opt-out kind `quarantine_admin_alert`), counts and
+ *   a link;
  * - `sender_rejected` → the envelope sender of an outbound/internal message, only when its
  *   domain is an active domain of the organization; never for inbound mail (no backscatter).
  *
@@ -64,6 +67,7 @@ export class QuarantineNotificationHandler {
     private readonly metrics: NotificationMetrics,
     private readonly logger: Logger,
     private readonly options: QuarantineNotificationOptions,
+    private readonly preferences: PreferenceFilter,
   ) {
     this.now = options.now ?? (() => new Date());
   }
@@ -176,10 +180,11 @@ export class QuarantineNotificationHandler {
         const requesters = pending
           .map((r) => r.requestedByUserId)
           .filter((id): id is bigint => id !== null);
-        const recipients = await this.reads.approvers(
+        const { emails: recipients } = await this.preferences.collect(
           tx,
           organizationId,
-          requesters,
+          'quarantine_approval_requested',
+          (afterId, take) => this.reads.approvers(tx, organizationId, requesters, take, afterId),
           this.options.maxRecipients,
         );
         if (recipients.length === 0) return { skip: 'no_recipients' };
@@ -249,10 +254,11 @@ export class QuarantineNotificationHandler {
         if (counts.hardBlocks === 0 && counts.pendingApprovals === 0) {
           return { skip: 'not_applicable' };
         }
-        const recipients = await this.reads.approvers(
+        const { emails: recipients } = await this.preferences.collect(
           tx,
           organizationId,
-          [],
+          'quarantine_admin_alert',
+          (afterId, take) => this.reads.approvers(tx, organizationId, [], take, afterId),
           this.options.maxRecipients,
         );
         if (recipients.length === 0) return { skip: 'no_recipients' };

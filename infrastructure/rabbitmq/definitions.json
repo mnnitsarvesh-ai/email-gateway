@@ -1,5 +1,5 @@
 {
-  "topology_version": 10,
+  "topology_version": 11,
   "exchanges": [
     {
       "name": "email.ingestion",
@@ -220,6 +220,15 @@
       }
     },
     {
+      "name": "email.webhooks",
+      "vhost": "email-gateway",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-queue-type": "quorum"
+      }
+    },
+    {
       "name": "email.analytics",
       "vhost": "email-gateway",
       "durable": true,
@@ -296,6 +305,14 @@
       "arguments": {}
     },
     {
+      "source": "email.delivery",
+      "vhost": "email-gateway",
+      "destination": "email.webhooks",
+      "destination_type": "queue",
+      "routing_key": "org.*.mail.delivery.approved.v1",
+      "arguments": {}
+    },
+    {
       "source": "email.events",
       "vhost": "email-gateway",
       "destination": "email.analytics",
@@ -317,6 +334,38 @@
       "destination": "email.dead-letter",
       "destination_type": "queue",
       "routing_key": "dead-letter.#",
+      "arguments": {}
+    },
+    {
+      "source": "email.events",
+      "vhost": "email-gateway",
+      "destination": "email.webhooks",
+      "destination_type": "queue",
+      "routing_key": "org.*.domain.dns.records_changed.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.events",
+      "vhost": "email-gateway",
+      "destination": "email.webhooks",
+      "destination_type": "queue",
+      "routing_key": "org.*.domain.status.changed.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.events",
+      "vhost": "email-gateway",
+      "destination": "email.webhooks",
+      "destination_type": "queue",
+      "routing_key": "org.*.mail.message.state_changed.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.events",
+      "vhost": "email-gateway",
+      "destination": "email.webhooks",
+      "destination_type": "queue",
+      "routing_key": "retry.email.webhooks.#",
       "arguments": {}
     },
     {
@@ -349,6 +398,14 @@
       "destination": "email.received",
       "destination_type": "queue",
       "routing_key": "retry.email.received.#",
+      "arguments": {}
+    },
+    {
+      "source": "email.ingestion",
+      "vhost": "email-gateway",
+      "destination": "email.webhooks",
+      "destination_type": "queue",
+      "routing_key": "org.*.mail.message.received.v1",
       "arguments": {}
     },
     {
@@ -412,6 +469,14 @@
       "vhost": "email-gateway",
       "destination": "email.notifications",
       "destination_type": "queue",
+      "routing_key": "org.*.notification.alert_requested.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.policy",
+      "vhost": "email-gateway",
+      "destination": "email.notifications",
+      "destination_type": "queue",
       "routing_key": "retry.email.notifications.#",
       "arguments": {}
     },
@@ -440,6 +505,14 @@
       "arguments": {}
     },
     {
+      "source": "email.policy",
+      "vhost": "email-gateway",
+      "destination": "email.webhooks",
+      "destination_type": "queue",
+      "routing_key": "org.*.mail.policy.decided.v1",
+      "arguments": {}
+    },
+    {
       "source": "email.security",
       "vhost": "email-gateway",
       "destination": "email.events",
@@ -451,6 +524,22 @@
       "source": "email.security",
       "vhost": "email-gateway",
       "destination": "email.policy.evaluate",
+      "destination_type": "queue",
+      "routing_key": "org.*.mail.message.scanned.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
+      "destination": "email.webhooks",
+      "destination_type": "queue",
+      "routing_key": "org.*.mail.attachment.sandbox_completed.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
+      "destination": "email.webhooks",
       "destination_type": "queue",
       "routing_key": "org.*.mail.message.scanned.v1",
       "arguments": {}
@@ -884,6 +973,21 @@
         "delivery-limit": 20,
         "dead-letter-exchange": "email.events",
         "dead-letter-routing-key": "dead-letter.email.notifications",
+        "dead-letter-strategy": "at-least-once",
+        "overflow": "reject-publish",
+        "max-length": 1000000
+      }
+    },
+    {
+      "vhost": "email-gateway",
+      "name": "eg.email.webhooks",
+      "pattern": "^email\\.webhooks$",
+      "apply-to": "queues",
+      "priority": 10,
+      "definition": {
+        "delivery-limit": 20,
+        "dead-letter-exchange": "email.events",
+        "dead-letter-routing-key": "dead-letter.email.webhooks",
         "dead-letter-strategy": "at-least-once",
         "overflow": "reject-publish",
         "max-length": 1000000

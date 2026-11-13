@@ -30,5 +30,7 @@ export const TEST_DOMAIN_ENV: Record<string, string> = {
   QUARANTINE_DOWNLOAD_TOKEN_KEY: randomBytes(32).toString('hex'),
   // Step 6.1 D3: the v1 cursor HMAC key is required (a fresh key per test process).
   API_CURSOR_KEY: randomBytes(32).toString('hex'),
+  // Step 6.2 W7: the webhook secret encryption key is required (a fresh key per test process).
+  WEBHOOK_SECRET_ENCRYPTION_KEY: randomBytes(32).toString('hex'),
   ...TEST_GENEROUS_RATE_LIMITS,
 };

@@ -12,7 +12,12 @@ import { lastValueFrom, of, throwError } from 'rxjs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ApiKeyPrincipal, UserPrincipal } from '../../auth-contracts/principal';
 import type { TransactionRunner } from '../../database/transaction-runner';
-import { RATE_CLASS_KEY, ReturnsSecret } from '../../rate-limit/rate-class.decorator';
+import {
+  RATE_CLASS_KEY,
+  RETURNS_SECRET_KEY,
+  RETURNS_SECRET_REDACTED_REPLAY_KEY,
+  ReturnsSecret,
+} from '../../rate-limit/rate-class.decorator';
 import { CodedHttpException } from '../coded-exception';
 import {
   canonicalJson,
@@ -472,5 +477,38 @@ describe('@Idempotent and @ReturnsSecret (step 6.1 D9)', () => {
       }
       return B;
     }).toThrow(/Idempotent/);
+  });
+
+  it('redactedReplay (ADR-0057) marks the route but still refuses @Idempotent()', () => {
+    class C {
+      @ReturnsSecret({ redactedReplay: true })
+      @Post()
+      create(): void {}
+
+      @ReturnsSecret()
+      @Post()
+      plain(): void {}
+    }
+    expect(Reflect.getMetadata(RETURNS_SECRET_KEY, C.prototype.create)).toBe(true);
+    expect(Reflect.getMetadata(RETURNS_SECRET_REDACTED_REPLAY_KEY, C.prototype.create)).toBe(true);
+    expect(Reflect.getMetadata(RETURNS_SECRET_REDACTED_REPLAY_KEY, C.prototype.plain)).toBe(
+      undefined,
+    );
+    expect(Reflect.getMetadata(RATE_CLASS_KEY, C.prototype.create)).toBe('sensitive');
+    expect(Reflect.getMetadata('swagger/apiExtension', C.prototype.create)).toMatchObject({
+      'x-eg-returns-secret': true,
+      'x-eg-secret-replay': 'redacted',
+    });
+    expect(Reflect.getMetadata('swagger/apiExtension', C.prototype.plain)).not.toHaveProperty(
+      'x-eg-secret-replay',
+    );
+    expect(() => {
+      class D {
+        @Idempotent({ operation: 'a.b' })
+        @ReturnsSecret({ redactedReplay: true })
+        m(): void {}
+      }
+      return D;
+    }).toThrow(/ReturnsSecret/);
   });
 });

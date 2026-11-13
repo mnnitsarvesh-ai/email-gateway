@@ -11,6 +11,16 @@
 #   url-test/{cert,key}.pem                   step 4.3 U19: every url-test corpus name + 203.0.113.10
 #                                             (HTTPS of the url-test container; trusted by the URL
 #                                             fetchers through URL_FETCH_CA_FILE=/pki/ca/ca.pem)
+#   notify-relay-sink/{cert,key}.pem          step 6.2: SAN notify-relay.sink.test + 172.31.250.31
+#                                             (STARTTLS of the submission relay notify-relay-sink)
+#   webhook-receiver/{cert,key}.pem           step 6.2: SAN hooks.receiver.test, hooks2.receiver.test
+#                                             + 203.0.113.20 (HTTPS of webhook-receiver; trusted by
+#                                             the webhook-worker through WEBHOOK_EXTRA_CA_PATH)
+#
+# Idempotent per file: each leaf is created when its directory lacks a valid certificate signed
+# by the current CA, so an existing volume gains new leaves without a new CA (and without
+# re-issuing the leaves it already has). The containers that read the keys (Postfix of the sinks,
+# url-test and webhook-receiver on node:22-alpine) run as root.
 #
 # The leaves mimic the real providers' certificate names, so postfix-outbound's `secure match=`
 # policies for the Microsoft 365 and Google Workspace presets are verified against the same names
@@ -102,6 +112,13 @@ rebind.test url-test"
 url_test_san=""
 for name in $URL_TEST_NAMES; do url_test_san="${url_test_san:+$url_test_san,}DNS:$name"; done
 leaf url-test url-test "$url_test_san,IP:203.0.113.10" record-san
+
+# Step 6.2 §4.5: the authenticated submission relay of postfix-notify's alert path and the
+# webhook test receiver (dns-sink zone receiver.test → 203.0.113.20).
+leaf notify-relay-sink notify-relay.sink.test \
+  "DNS:notify-relay.sink.test,IP:172.31.250.31" record-san
+leaf webhook-receiver hooks.receiver.test \
+  "DNS:hooks.receiver.test,DNS:hooks2.receiver.test,IP:203.0.113.20" record-san
 
 # Hash links (<subject hash>.0) so OpenSSL finds the CA in a CApath directory.
 openssl rehash "$PKI_DIR/ca"

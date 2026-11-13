@@ -16,6 +16,10 @@ data:
   DATABASE_READ_MAX_LAG_SECONDS: '10'
   DATABASE_READ_LAG_CHECK_INTERVAL_MS: '5000'
   OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.observability:4318
+  # Webhooks (step 6.2 §4.4), shared by the api (URL rules at registration) and the webhook-worker
+  # (the authoritative check at every attempt): HTTPS on 443 only; plain http is a TEST-ONLY seam.
+  WEBHOOK_ALLOWED_PORTS: '443'
+  WEBHOOK_ALLOW_HTTP: 'false'
   # api: one reverse-proxy hop (ALB / ingress) in front of the pods; drives client IPs.
   HTTP_TRUST_PROXY: '1'
   # api: links in invitation/reset/verification emails. Set per overlay (https required).

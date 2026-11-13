@@ -32,12 +32,13 @@
 #
 # Messaging (step 3.2, docs/architecture/messaging-topology.md): `rabbitmq-init` (one-shot,
 # default profile) provisions vhost ${RABBITMQ_VHOST} from infrastructure/rabbitmq/definitions.json
-# (topology v9: 6 exchanges, 20 quorum queues, bindings, policies) and the least-privilege role
+# (topology v11: 6 exchanges, 21 quorum queues, bindings, policies) and the least-privilege role
 # users, and removes the empty ADR-0005 objects on vhost "/". Every app waits for it. Services
 # never declare topology and each one gets only its own role URL (no RABBITMQ_URL): email-worker
 # RABBITMQ_EMAIL_WORKER_URL, delivery-worker RABBITMQ_DELIVERY_WORKER_URL, api RABBITMQ_OPS_URL,
 # event-relay (outbox relay and reconciler, ADR-0023) RABBITMQ_RELAY_URL, policy-engine
-# RABBITMQ_POLICY_ENGINE_URL, notification-worker RABBITMQ_NOTIFICATION_URL. archive-worker
+# RABBITMQ_POLICY_ENGINE_URL, notification-worker RABBITMQ_NOTIFICATION_URL, webhook-worker
+# RABBITMQ_WEBHOOK_URL. archive-worker
 # consumes nothing yet and does not connect to RabbitMQ.
 #
 # Policy (step 5.2, docs/plan/steps/16-policy-engine.md, ADR-0043/0044/0045, topology v9): the
@@ -57,6 +58,20 @@
 # email.quarantine (release executor) and runs the expiry/purge/adoption sweeper and the digest
 # scheduler; it also signs click tokens for URL_REWRITE after the scan (URL_TOKEN_KEY_CURRENT,
 # sign only). The api serves the quarantine routes and alone holds QUARANTINE_DOWNLOAD_TOKEN_KEY.
+#
+# Webhooks and notifications (step 6.2, docs/plan/steps/19-webhooks-notifications.md,
+# ADR-0054..0057, topology v11): `webhook-worker` (apps profile, 3075: probes and metrics only)
+# runs both roles here (WEBHOOK_WORKER_ROLES=fanout,delivery): the fanout consumes email.webhooks
+# as eg-webhook (RABBITMQ_WEBHOOK_URL) and projects internal events into public webhook events and
+# deliveries; the delivery loop signs and POSTs them through the SSRF-guarded client, resolving
+# ONLY through dns-sink (WEBHOOK_DNS_SERVERS, mailtest .53) and trusting the test CA. The api
+# ENCRYPTS signing secrets and the webhook-worker DECRYPTS them (WEBHOOK_SECRET_ENCRYPTION_KEY: no
+# other service holds it). TEST-ONLY (smtp-test profile): `webhook-receiver` is the local webhook
+# endpoint (hooks.receiver.test / hooks2.receiver.test → 203.0.113.20 on `urltest`, admin API on
+# 127.0.0.1:${WEBHOOK_RECEIVER_ADMIN_HOST_PORT}); `notify-relay-sink` (mailtest .31) is an
+# authenticated STARTTLS submission relay a stack test points postfix-notify at, to prove alert
+# e-mails travel notification-worker → postfix-notify → relay. postfix-notify joins `mailtest`.
+#   docker compose --profile smtp-test --profile apps up -d --wait
 #
 # Security scanning (step 4.1, docs/plan/steps/09-rspamd.md, ADR-0026/ADR-0027): the email-worker
 # scan role consumes scan.spam as eg-scanner (RABBITMQ_SCANNER_URL) and scans every parsed
@@ -448,6 +463,9 @@ services:
       # Notification worker (step 5.2 P15, P25): reads email.notifications, its own hops only.
       RABBITMQ_NOTIFICATION_USER: ${RABBITMQ_NOTIFICATION_USER:-eg-notification}
       RABBITMQ_NOTIFICATION_PASSWORD: ${RABBITMQ_NOTIFICATION_PASSWORD:?append the RabbitMQ keys from .env.example}
+      # Webhook worker (step 6.2 §4.3): reads email.webhooks, publishes its own hops only.
+      RABBITMQ_WEBHOOK_USER: ${RABBITMQ_WEBHOOK_USER:-eg-webhook}
+      RABBITMQ_WEBHOOK_PASSWORD: ${RABBITMQ_WEBHOOK_PASSWORD:?append the webhook keys from .env.example}
     volumes: ['./infrastructure/rabbitmq:/rabbitmq:ro']
     depends_on:
       rabbitmq: { condition: service_healthy }
@@ -771,6 +789,11 @@ services:
       POSTFIX_MYNETWORKS: 127.0.0.0/8 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
     volumes: ['postfix-notify-spool:/var/spool/postfix']
     ports: ['127.0.0.1:${NOTIFY_SMARTHOST_HOST_PORT:-2526}:25']
+    # Step 6.2: also on `mailtest` (dynamic address) so a stack test can recreate it with
+    # NOTIFY_RELAY_HOST=172.31.250.31 (notify-relay-sink) and reach the TEST-ONLY relay.
+    networks:
+      default: {}
+      mailtest: {}
 
   # ---------------------------------------------------------------- SMTP test sinks (profile: smtp-test)
   # TEST-ONLY (step 2.2 §6): stand-ins for "the Internet" and tenant destination servers on the
@@ -788,7 +811,8 @@ services:
 
   test-pki:
     # TEST-ONLY one-shot (step 2.3 §6): test CA + leaf certificates with the real Microsoft 365
-    # and Google Workspace SAN sets in volume `test-pki`, created only if absent (idempotent).
+    # and Google Workspace SAN sets in volume `test-pki`, created only if absent (idempotent per
+    # file: step 6.2 adds notify-relay.sink.test and hooks.receiver.test to existing volumes).
     # Trusted only by the local postfix-outbound (POSTFIX_OUTBOUND_SMTP_TLS_CAPATH).
     profiles: [smtp-test]
     # Same image as `smtp-tools` (built there; one build, never in parallel on the 8 GB VM).
@@ -880,6 +904,60 @@ services:
     depends_on:
       test-pki: { condition: service_completed_successfully }
 
+  notify-relay-sink:
+    # TEST-ONLY (step 6.2 §4.5): an authenticated submission relay standing in for the production
+    # smarthost of postfix-notify (NOTIFY_RELAY_HOST). Postfix submission on 587 with mandatory
+    # STARTTLS (test-CA certificate notify-relay.sink.test) and SASL PLAIN against a cyrus sasldb
+    # account (NOTIFY_RELAY_SINK_USER / _PASSWORD, test-only values); refuses unauthenticated
+    # clients and stores accepted mail into Maildirs like mail-sink.
+    profiles: [smtp-test]
+    # Same image as `mail-sink` (built there; one build, never in parallel on the 8 GB VM).
+    image: email-gateway/mail-sink:local
+    pull_policy: never
+    restart: unless-stopped
+    hostname: notify-relay.sink.test
+    environment:
+      SINK_MODE: submission
+      SINK_HOSTNAME: notify-relay.sink.test
+      SINK_TLS_CERT_PATH: /pki/notify-relay-sink/cert.pem
+      SINK_TLS_KEY_PATH: /pki/notify-relay-sink/key.pem
+      SINK_SASL_USER: ${NOTIFY_RELAY_SINK_USER:-notify-relay}
+      SINK_SASL_PASSWORD: ${NOTIFY_RELAY_SINK_PASSWORD:?append the webhook keys from .env.example}
+    volumes: ['test-pki:/pki:ro']
+    networks:
+      mailtest: { ipv4_address: 172.31.250.31 }
+    depends_on:
+      test-pki: { condition: service_completed_successfully }
+
+  webhook-receiver:
+    # TEST-ONLY webhook endpoint of step 6.2 (§4.5): HTTPS 443 (test-CA certificate
+    # hooks.receiver.test, SAN hooks2.receiver.test) and HTTP 80 on 203.0.113.20 (`urltest`;
+    # dns-sink zone receiver.test), admin API 8080 (program responses, register secrets, read the
+    # recorded requests). Code: infrastructure/webhook-receiver/server.mjs (no build, no
+    # dependencies).
+    profiles: [smtp-test]
+    image: node:22-alpine
+    restart: unless-stopped
+    command: ['node', '/receiver/server.mjs']
+    read_only: true
+    mem_limit: 128m
+    volumes:
+      - ./infrastructure/webhook-receiver:/receiver:ro
+      - test-pki:/pki:ro
+    environment:
+      WEBHOOK_RECEIVER_PKI_DIR: /pki/webhook-receiver
+    networks:
+      urltest: { ipv4_address: 203.0.113.20 }
+      mailtest: {}
+    ports: ['127.0.0.1:${WEBHOOK_RECEIVER_ADMIN_HOST_PORT:-18091}:8080']
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://127.0.0.1:8080/health']
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    depends_on:
+      test-pki: { condition: service_completed_successfully }
+
   reinject-forwarder:
     # TEST-ONLY (step 2.3 §6): lets a delivery-worker on the HOST reinject (pnpm dev):
     # 127.0.0.1:REINJECT_INBOUND_HOST_PORT -> postfix-outbound:10026,
@@ -913,7 +991,8 @@ services:
     # Distroless image: no shell, so no health check (dependants wait for service_started).
     # Since step 4.3 (U19) also the URL corpus (url-test.hosts, mapped-v6.test, rebind.test
     # forwarded to url-test 172.31.250.60:5300 without cache) and published on 127.0.0.1 for
-    # host-run suites (URL_DNS_SERVERS=127.0.0.1:${DNS_SINK_HOST_PORT}).
+    # host-run suites (URL_DNS_SERVERS=127.0.0.1:${DNS_SINK_HOST_PORT}). Since step 6.2 also
+    # receiver.test (hooks, hooks2 -> webhook-receiver 203.0.113.20).
     profiles: [smtp-test]
     image: coredns/coredns:1.11.3
     restart: unless-stopped
@@ -1191,6 +1270,20 @@ services:
       REPORTS_CACHE_TTL_SECONDS: ${REPORTS_CACHE_TTL_SECONDS:-60}
       REPORTS_QUERY_TIMEOUT_MS: ${REPORTS_QUERY_TIMEOUT_MS:-10000}
       RECIPIENT_SUPPRESSIONS_MAX_MANUAL: ${RECIPIENT_SUPPRESSIONS_MAX_MANUAL:-100000}
+      # Webhooks and notifications (step 6.2 §4.4). The api ENCRYPTS webhook signing secrets
+      # (the webhook-worker decrypts; nobody else holds WEBHOOK_SECRET_ENCRYPTION_KEY) and checks
+      # endpoint URLs (ports; plain http TEST-ONLY, refused outside APP_ENV local/ci).
+      WEBHOOK_SECRET_ENCRYPTION_KEY: ${WEBHOOK_SECRET_ENCRYPTION_KEY:?append the webhook keys from .env.example}
+      WEBHOOK_SECRET_ENCRYPTION_KEY_PREVIOUS: ${WEBHOOK_SECRET_ENCRYPTION_KEY_PREVIOUS:-}
+      WEBHOOK_ALLOWED_PORTS: ${WEBHOOK_ALLOWED_PORTS:-443,80}
+      WEBHOOK_ALLOW_HTTP: ${WEBHOOK_ALLOW_HTTP:-true}
+      WEBHOOK_MAX_SUBSCRIPTIONS_PER_ORG: ${WEBHOOK_MAX_SUBSCRIPTIONS_PER_ORG:-10}
+      WEBHOOK_SECRET_OVERLAP_HOURS_DEFAULT: ${WEBHOOK_SECRET_OVERLAP_HOURS_DEFAULT:-24}
+      WEBHOOK_HISTORY_MAX_RANGE_DAYS: ${WEBHOOK_HISTORY_MAX_RANGE_DAYS:-31}
+      WEBHOOK_REPLAY_MAX_RANGE_HOURS: ${WEBHOOK_REPLAY_MAX_RANGE_HOURS:-72}
+      WEBHOOK_REPLAY_MAX_PER_DELIVERY: ${WEBHOOK_REPLAY_MAX_PER_DELIVERY:-10}
+      WEBHOOK_REPLAY_REQUESTS_PER_HOUR: ${WEBHOOK_REPLAY_REQUESTS_PER_HOUR:-10}
+      WEBHOOK_TEST_REQUESTS_PER_MINUTE: ${WEBHOOK_TEST_REQUESTS_PER_MINUTE:-6}
     ports: ['127.0.0.1:${API_HOST_PORT:-3000}:3000']
     healthcheck:
       <<: *node-healthcheck
@@ -1773,6 +1866,74 @@ services:
           "fetch('http://127.0.0.1:3050/health/ready').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))",
         ]
 
+  # Webhook Service (step 6.2 W1, ADR-0055): both roles in one container here (fanout consumes
+  # email.webhooks as eg-webhook; delivery POSTs through the SSRF-guarded client). Resolves only
+  # through dns-sink and trusts the test CA; the TEST-ONLY seams admit the documentation range of
+  # webhook-receiver (refused outside APP_ENV local/ci).
+  webhook-worker:
+    <<: *node-service
+    build:
+      {
+        context: .,
+        dockerfile: infrastructure/docker/node-service.Dockerfile,
+        args: { APP: webhook-worker },
+      }
+    image: email-gateway/webhook-worker:local
+    environment:
+      <<: *node-env
+      HTTP_PORT: 3075
+      RABBITMQ_WEBHOOK_URL: amqp://${RABBITMQ_WEBHOOK_USER:-eg-webhook}:${RABBITMQ_WEBHOOK_PASSWORD:?append the webhook keys from .env.example}@rabbitmq:5672/${RABBITMQ_VHOST:-email-gateway}
+      WEBHOOK_WORKER_ROLES: ${WEBHOOK_WORKER_ROLES:-fanout,delivery}
+      # Decrypts signing secrets (the api encrypts; nobody else holds the key).
+      WEBHOOK_SECRET_ENCRYPTION_KEY: ${WEBHOOK_SECRET_ENCRYPTION_KEY:?append the webhook keys from .env.example}
+      WEBHOOK_SECRET_ENCRYPTION_KEY_PREVIOUS: ${WEBHOOK_SECRET_ENCRYPTION_KEY_PREVIOUS:-}
+      WEBHOOK_ALLOWED_PORTS: ${WEBHOOK_ALLOWED_PORTS:-443,80}
+      WEBHOOK_ALLOW_HTTP: ${WEBHOOK_ALLOW_HTTP:-true}
+      WEBHOOK_FANOUT_PREFETCH: ${WEBHOOK_FANOUT_PREFETCH:-16}
+      WEBHOOK_FANOUT_TX_TIMEOUT_MS: ${WEBHOOK_FANOUT_TX_TIMEOUT_MS:-120000}
+      WEBHOOK_SUBSCRIPTION_CACHE_SECONDS: ${WEBHOOK_SUBSCRIPTION_CACHE_SECONDS:-5}
+      WEBHOOK_DELIVERY_POLL_INTERVAL_MS: ${WEBHOOK_DELIVERY_POLL_INTERVAL_MS:-500}
+      WEBHOOK_DELIVERY_CONCURRENCY: ${WEBHOOK_DELIVERY_CONCURRENCY:-32}
+      WEBHOOK_MAX_INFLIGHT_PER_ORG: ${WEBHOOK_MAX_INFLIGHT_PER_ORG:-16}
+      WEBHOOK_MAX_INFLIGHT_PER_SUBSCRIPTION: ${WEBHOOK_MAX_INFLIGHT_PER_SUBSCRIPTION:-4}
+      WEBHOOK_RATE_PER_SUBSCRIPTION_PER_MINUTE: ${WEBHOOK_RATE_PER_SUBSCRIPTION_PER_MINUTE:-600}
+      WEBHOOK_HTTP_CONNECT_TIMEOUT_MS: ${WEBHOOK_HTTP_CONNECT_TIMEOUT_MS:-3000}
+      WEBHOOK_HTTP_TOTAL_TIMEOUT_MS: ${WEBHOOK_HTTP_TOTAL_TIMEOUT_MS:-10000}
+      WEBHOOK_RESPONSE_MAX_BYTES: ${WEBHOOK_RESPONSE_MAX_BYTES:-4096}
+      WEBHOOK_MAX_ATTEMPTS: ${WEBHOOK_MAX_ATTEMPTS:-8}
+      WEBHOOK_RETRY_BASE_SECONDS: ${WEBHOOK_RETRY_BASE_SECONDS:-30}
+      WEBHOOK_RETRY_MAX_DELAY_SECONDS: ${WEBHOOK_RETRY_MAX_DELAY_SECONDS:-21600}
+      WEBHOOK_RETRY_AFTER_MAX_SECONDS: ${WEBHOOK_RETRY_AFTER_MAX_SECONDS:-3600}
+      WEBHOOK_MAX_RETRY_AGE_HOURS: ${WEBHOOK_MAX_RETRY_AGE_HOURS:-24}
+      WEBHOOK_MAX_PENDING_PER_SUBSCRIPTION: ${WEBHOOK_MAX_PENDING_PER_SUBSCRIPTION:-50000}
+      WEBHOOK_DISABLE_AFTER_FAILURES: ${WEBHOOK_DISABLE_AFTER_FAILURES:-50}
+      WEBHOOK_DISABLE_AFTER_HOURS: ${WEBHOOK_DISABLE_AFTER_HOURS:-24}
+      WEBHOOK_REPLAY_MAX_EVENTS: ${WEBHOOK_REPLAY_MAX_EVENTS:-10000}
+      WEBHOOK_REPLAY_MAX_PER_DELIVERY: ${WEBHOOK_REPLAY_MAX_PER_DELIVERY:-10}
+      WEBHOOK_MAINTENANCE_INTERVAL_MS: ${WEBHOOK_MAINTENANCE_INTERVAL_MS:-60000}
+      WEBHOOK_DELETED_RETENTION_DAYS: ${WEBHOOK_DELETED_RETENTION_DAYS:-62}
+      # Container values (not the host-run .env ones): dns-sink only, the test CA of test-pki,
+      # the TEST-ONLY documentation range of webhook-receiver (203.0.113.20), no dial map.
+      WEBHOOK_DNS_SERVERS: 172.31.250.53
+      WEBHOOK_TEST_ALLOW_CIDRS: 203.0.113.0/24
+      WEBHOOK_TEST_DIAL_MAP: ''
+      WEBHOOK_EXTRA_CA_PATH: /pki/ca/ca.pem
+    networks:
+      default: {}
+      mailtest: {}
+      urltest: {}
+    volumes: ['test-pki:/pki:ro']
+    ports: ['127.0.0.1:${WEBHOOK_WORKER_HOST_PORT:-3075}:3075']
+    healthcheck:
+      <<: *node-healthcheck
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3075/health/ready').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))",
+        ]
+
   archive-worker:
     <<: *node-service
     build:
@@ -2248,8 +2409,10 @@ networks:
   # and smtp-tools. Fixed subnet so dns-sink can be the outbound MTA's only resolver. Step 2.3:
   # postfix (gateway MX) .10, sink-m365 .26, sink-google .27, sink-google-alt .28, relay-sink .29,
   # reinject-forwarder .30. Step 4.3: url-test .60 (rebinding DNS responder for dns-sink); the
-  # email-worker, click-service and url-egress-proxy join it to resolve through dns-sink. Dynamic addresses come from the upper half only (ip_range), so they
-  # can never take one of the fixed addresses.
+  # email-worker, click-service and url-egress-proxy join it to resolve through dns-sink. Step
+  # 6.2: notify-relay-sink .31; the webhook-worker (resolves through dns-sink), webhook-receiver
+  # and postfix-notify join it with dynamic addresses. Dynamic addresses come from the upper half
+  # only (ip_range), so they can never take one of the fixed addresses.
   mailtest:
     ipam:
       config:
@@ -2261,8 +2424,9 @@ networks:
   # (its key store). internal: no route outside the network, nothing published.
   dkim-signing:
     internal: true
-  # TEST-ONLY "Internet" of step 4.3 (U19): TEST-NET-3, url-test fixed at .10; dynamic addresses
-  # (email-worker, click-service, url-egress-proxy) come from the upper half only.
+  # TEST-ONLY "Internet" of step 4.3 (U19): TEST-NET-3, url-test fixed at .10, step 6.2
+  # webhook-receiver at .20; dynamic addresses (email-worker, click-service, url-egress-proxy,
+  # webhook-worker) come from the upper half only.
   urltest:
     ipam:
       config:

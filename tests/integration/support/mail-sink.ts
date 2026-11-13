@@ -7,7 +7,14 @@ import { composeExec, waitFor } from './compose';
  * (`*.mail.protection.outlook.com`), `sink-google` (`aspmx.l` / `alt2`–`alt4.aspmx.l.google.com`)
  * and `sink-google-alt` (`alt1.aspmx.l.google.com`), the same image with other identities.
  */
-export type SinkService = 'mail-sink' | 'sink-m365' | 'sink-google' | 'sink-google-alt';
+export type SinkService =
+  | 'mail-sink'
+  | 'sink-m365'
+  | 'sink-google'
+  | 'sink-google-alt'
+  // Step 6.2: the authenticated submission relay of postfix-notify (SINK_MODE=submission);
+  // same Maildir layout. Not in SINK_SERVICES (only the notification suite writes to it).
+  | 'notify-relay-sink';
 
 export const SINK_SERVICES: readonly SinkService[] = [
   'mail-sink',

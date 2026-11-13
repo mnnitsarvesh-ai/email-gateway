@@ -309,6 +309,49 @@ describe('DomainVerificationService.verifyNow', () => {
   });
 });
 
+describe('DomainVerificationService: domain.dns.records_changed.v1 (step 6.2 §4.1)', () => {
+  it('writes one event per check with record status transitions, none for repeats or indeterminate results', async () => {
+    const bed = createDomainTestbed();
+    const created = await create(bed, 'rc.example.com');
+    bed.script(everything);
+    await verify(bed, created.id);
+    expect(bed.store.recordsChanged).toHaveLength(1);
+    const first = bed.store.recordsChanged[0]!;
+    expect(first.organizationId).toBe(ORG_A);
+    expect(first.payload).toMatchObject({
+      domainPublicId: created.id,
+      name: 'rc.example.com',
+      domainStatus: 'verified',
+    });
+    expect(first.payload.changes.every((c) => c.previousStatus === 'pending')).toBe(true);
+    expect(first.payload.changes.every((c) => c.status === 'valid')).toBe(true);
+    // Outside a request the correlation id is minted like the status event's.
+    expect(first.correlationId).toMatch(/^domain:/);
+
+    // Same result again: nothing changed, no event.
+    await verify(bed, created.id);
+    expect(bed.store.recordsChanged).toHaveLength(1);
+
+    // Indeterminate never changes a status: no event.
+    bed.script(() => 'indeterminate');
+    await verify(bed, created.id);
+    expect(bed.store.recordsChanged).toHaveLength(1);
+
+    // SPF stops validating on the verified domain: one event with that transition only.
+    bed.script((key) => (key === 'spf' ? 'invalid' : 'valid'));
+    await verify(bed, created.id);
+    expect(bed.store.recordsChanged).toHaveLength(2);
+    const failed = bed.store.recordsChanged[1]!.payload;
+    expect(failed).toMatchObject({ domainStatus: 'verified' });
+    expect(failed.changes).toEqual([
+      { recordKey: 'spf', purpose: 'spf', previousStatus: 'valid', status: 'invalid' },
+    ]);
+    // Ids and codes only: no observed or expected values, no evidence.
+    expect(JSON.stringify(failed)).not.toMatch(/observed|expected|evidence|v=spf1/);
+    expect(bed.store.outbox.map((e) => e.payload.status)).toEqual(['verified']);
+  });
+});
+
 describe('DomainVerificationService.applyReport', () => {
   it('skips deleted domains and domains that left the checked statuses', async () => {
     const bed = createDomainTestbed();

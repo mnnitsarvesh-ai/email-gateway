@@ -43,11 +43,11 @@ async function partitionNames(table: string): Promise<string[]> {
 }
 
 describe('partition maintenance', () => {
-  it('manages the 31 partitioned tables, including the step 2.3, 3.1, 4.1, 4.2, 4.3, 4.4, 4.5, 5.1 and 5.2 tables (none added by 5.3)', () => {
+  it('manages the 33 partitioned tables, including the step 2.3, 3.1, 4.1, 4.2, 4.3, 4.4, 4.5, 5.1, 5.2 and 6.2 tables (none added by 5.3)', () => {
     // Step 4.6 §3 adds sandbox_analyses and sandbox_artifacts unpartitioned; step 5.1 §3 adds
     // message_risk_scores (partitioned) and the unpartitioned risk_scoring_profiles and
     // risk_scoring_profile_versions.
-    expect(PARTITION_REGISTRY).toHaveLength(31);
+    expect(PARTITION_REGISTRY).toHaveLength(33);
     expect(PARTITION_REGISTRY.map((s) => s.table)).not.toEqual(
       expect.arrayContaining(['risk_scoring_profiles']),
     );
@@ -105,6 +105,30 @@ describe('partition maintenance', () => {
       'quarantine_object_purges',
       'quarantine_digest_runs',
       'quarantine_digests',
+    ]) {
+      expect(PARTITION_REGISTRY.map((s) => s.table)).not.toContain(table);
+    }
+    // Step 6.2 §3: stored webhook events and delivery attempts are partitioned like the
+    // deliveries (2 months, operational); the replay, settings, preference and alert-window
+    // tables are unpartitioned (row purges by the webhook-worker maintenance, W13).
+    for (const [table, column] of [
+      ['webhook_events', 'occurred_at'],
+      ['webhook_delivery_attempts', 'attempted_at'],
+    ] as const) {
+      expect(PARTITION_REGISTRY.find((s) => s.table === table)).toEqual({
+        table,
+        column,
+        granularity: 'month',
+        retention: 2,
+        drop: true,
+        tier: 'operational',
+      });
+    }
+    for (const table of [
+      'webhook_replays',
+      'notification_settings',
+      'notification_user_preferences',
+      'notification_alert_windows',
     ]) {
       expect(PARTITION_REGISTRY.map((s) => s.table)).not.toContain(table);
     }

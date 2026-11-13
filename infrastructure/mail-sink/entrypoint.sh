@@ -13,6 +13,13 @@
 #   SINK_RELAY_NEXTHOP      relay mode: next hop, e.g. [172.31.250.10]:25 (required)
 #   SINK_RECIPIENT_REWRITE  relay mode: 'from.domain=to.domain,...' envelope recipient domain
 #                           rewrites applied before relaying (empty: none)
+#                           submission (step 6.2): an authenticated relay (the stand-in for
+#                           postfix-notify's NOTIFY_RELAY_HOST): Postfix submission on 587 with
+#                           mandatory STARTTLS (SINK_TLS_*) and SASL PLAIN/LOGIN against a cyrus
+#                           sasldb account; only authenticated clients are accepted, mail is
+#                           stored into Maildirs exactly like store mode; port 25 is closed
+#   SINK_SASL_USER          submission mode: the account name ([A-Za-z0-9._-], required)
+#   SINK_SASL_PASSWORD      submission mode: its password (required; never printed)
 #
 # With no variables set the sink behaves exactly as before step 2.3.
 set -eu
@@ -32,6 +39,8 @@ is_hostname() {
 : "${SINK_MODE:=store}"
 : "${SINK_RELAY_NEXTHOP:=}"
 : "${SINK_RECIPIENT_REWRITE:=}"
+: "${SINK_SASL_USER:=}"
+: "${SINK_SASL_PASSWORD:=}"
 
 is_hostname "$SINK_HOSTNAME" || die "SINK_HOSTNAME must be a host name"
 for pair in "SINK_TLS_CERT_PATH:$SINK_TLS_CERT_PATH" "SINK_TLS_KEY_PATH:$SINK_TLS_KEY_PATH"; do
@@ -51,10 +60,47 @@ postconf -e \
 
 rewrite_map=/etc/postfix/sink/rewrite.regexp
 
+if [ "$SINK_MODE" != submission ]; then
+  [ -z "$SINK_SASL_USER" ] || die "SINK_SASL_USER is only valid with SINK_MODE=submission"
+  [ -z "$SINK_SASL_PASSWORD" ] || die "SINK_SASL_PASSWORD is only valid with SINK_MODE=submission"
+fi
+
 case "$SINK_MODE" in
   store)
     [ -z "$SINK_RELAY_NEXTHOP" ] || die "SINK_RELAY_NEXTHOP is only valid with SINK_MODE=relay"
     [ -z "$SINK_RECIPIENT_REWRITE" ] || die "SINK_RECIPIENT_REWRITE is only valid with SINK_MODE=relay"
+    ;;
+  submission)
+    [ -z "$SINK_RELAY_NEXTHOP" ] || die "SINK_RELAY_NEXTHOP is only valid with SINK_MODE=relay"
+    [ -z "$SINK_RECIPIENT_REWRITE" ] || die "SINK_RECIPIENT_REWRITE is only valid with SINK_MODE=relay"
+    printf '%s' "$SINK_SASL_USER" | grep -Eq '^[A-Za-z0-9._-]{1,64}$' \
+      || die "SINK_SASL_USER must be 1-64 characters of [A-Za-z0-9._-]"
+    [ -n "$SINK_SASL_PASSWORD" ] || die "SINK_SASL_PASSWORD is required with SINK_MODE=submission"
+    case "$SINK_SASL_PASSWORD" in
+      *"
+"*) die "SINK_SASL_PASSWORD must be a single line" ;;
+    esac
+    # The account, in the realm $myhostname (smtpd_sasl_local_domain), from stdin: the password
+    # never appears in argv, a file of ours or the log.
+    rm -f /etc/sasldb2
+    printf '%s' "$SINK_SASL_PASSWORD" \
+      | saslpasswd2 -p -c -f /etc/sasldb2 -u "$SINK_HOSTNAME" "$SINK_SASL_USER" \
+      || die "could not create the SASL account"
+    unset SINK_SASL_PASSWORD
+    chown root:postfix /etc/sasldb2
+    chmod 0640 /etc/sasldb2
+    # Port 25 closed: only the authenticated submission service below accepts mail. Delivery is
+    # store mode's (virtual_mailbox_* of main.cf: *.test into Maildirs, never relayed).
+    postconf -M# 'smtp/inet'
+    postconf -e \
+      "cyrus_sasl_config_path=/etc/postfix/sasl" \
+      "smtpd_sasl_type=cyrus" \
+      "smtpd_sasl_path=smtpd" \
+      "smtpd_sasl_local_domain=\$myhostname" \
+      "smtpd_sasl_security_options=noanonymous" \
+      "smtpd_sasl_tls_security_options=noanonymous" \
+      "broken_sasl_auth_clients=no"
+    postconf -M 'submission/inet=submission inet n - n - - smtpd -o syslog_name=postfix/submission -o smtpd_tls_security_level=encrypt -o smtpd_tls_auth_only=yes -o smtpd_sasl_auth_enable=yes -o smtpd_client_restrictions=permit_sasl_authenticated,reject -o smtpd_relay_restrictions=permit_sasl_authenticated,reject -o smtpd_recipient_restrictions=permit_sasl_authenticated,reject'
     ;;
   relay)
     # [IPv4]:port, [host]:port or host[:port]; no spaces, no '$'.
@@ -92,7 +138,7 @@ case "$SINK_MODE" in
     # docs/deployment/mail-routing.md, deviations.
     postconf -e "smtp_generic_maps=regexp:${rewrite_map}"
     ;;
-  *) die "SINK_MODE must be one of: store relay" ;;
+  *) die "SINK_MODE must be one of: store relay submission" ;;
 esac
 
 check_output=$(postfix check 2>&1) || {

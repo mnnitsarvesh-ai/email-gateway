@@ -3,8 +3,11 @@ import { describe, expect, it } from 'vitest';
 import type { DomainCheckReport, RecordCheckResult } from '../engine/types';
 import {
   indeterminateError,
+  MAX_RECORD_CHANGES,
   ownershipIntent,
   planReportApplication,
+  type RecordUpdate,
+  recordStatusChanges,
   reportApplies,
   type StoredDomainState,
 } from './apply-report';
@@ -399,5 +402,110 @@ describe('planReportApplication: DKIM activation (D9)', () => {
     expect(p.keyChanges).toEqual([]);
     expect(p.ownershipRecordMissing).toBeNull();
     expect(p.records.every((u) => !('statusChangedAt' in u.data))).toBe(true);
+  });
+});
+
+describe('planReportApplication: record status transitions (step 6.2 §4.1)', () => {
+  const allValid = {
+    verification: 'valid',
+    'mx:mx1.gw.test': 'valid',
+    spf: 'valid',
+    'dkim:sel1': 'valid',
+    dmarc: 'valid',
+  } as const;
+
+  it('lists only definitive status changes, failures first', () => {
+    const plan = planReportApplication(
+      state({ status: 'active', recordStatus: { ...allValid, dmarc: 'missing' } }),
+      report({ ...allValid, spf: 'invalid', 'dkim:sel1': 'missing', dmarc: 'valid' }),
+      { now, schedule, overlapDays: 7, jitter: noJitter },
+    );
+    expect(plan.recordChanges).toEqual([
+      { recordKey: 'spf', purpose: 'spf', previousStatus: 'valid', status: 'invalid' },
+      { recordKey: 'dkim:sel1', purpose: 'dkim', previousStatus: 'valid', status: 'missing' },
+      { recordKey: 'dmarc', purpose: 'dmarc', previousStatus: 'missing', status: 'valid' },
+    ]);
+  });
+
+  it('never reports an indeterminate result as a change', () => {
+    const plan = planReportApplication(
+      state({ status: 'active', recordStatus: allValid }),
+      report({ ...allValid, spf: 'indeterminate', 'mx:mx1.gw.test': 'indeterminate' }),
+      { now, schedule, overlapDays: 7, jitter: noJitter },
+    );
+    expect(plan.recordChanges).toEqual([]);
+  });
+
+  it('is empty when every status stays the same (a repeated check emits nothing)', () => {
+    const plan = planReportApplication(
+      state({ status: 'active', recordStatus: allValid }),
+      report(allValid),
+      { now, schedule, overlapDays: 7, jitter: noJitter },
+    );
+    expect(plan.recordChanges).toEqual([]);
+  });
+
+  it('includes the pending → valid transitions of a first check', () => {
+    const plan = planReportApplication(state({}), report({ spf: 'valid' }), {
+      now,
+      schedule,
+      overlapDays: 7,
+      jitter: noJitter,
+    });
+    expect(plan.recordChanges).toEqual(
+      [
+        {
+          recordKey: 'mx:mx1.gw.test',
+          purpose: 'mx',
+          previousStatus: 'pending',
+          status: 'missing',
+        },
+        { recordKey: 'dkim:sel1', purpose: 'dkim', previousStatus: 'pending', status: 'missing' },
+        { recordKey: 'dmarc', purpose: 'dmarc', previousStatus: 'pending', status: 'missing' },
+        {
+          recordKey: 'verification',
+          purpose: 'verification',
+          previousStatus: 'pending',
+          status: 'missing',
+        },
+        { recordKey: 'spf', purpose: 'spf', previousStatus: 'pending', status: 'valid' },
+      ].sort(
+        (a, b) =>
+          KEYS.findIndex(([k]) => k === a.recordKey) - KEYS.findIndex(([k]) => k === b.recordKey),
+      ),
+    );
+  });
+});
+
+describe('recordStatusChanges (step 6.2 §4.1)', () => {
+  it('caps at 32 changes and keeps every valid → failed transition first', () => {
+    const records: StoredDomainState['records'] = Array.from({ length: 40 }, (_, i) => ({
+      id: BigInt(i + 1),
+      recordKey: `dkim:s${i}`,
+      purpose: 'dkim' as const,
+      status: i < 35 ? 'pending' : 'valid',
+      evidence: {},
+    }));
+    const updates: RecordUpdate[] = records.map((r) => ({
+      id: r.id,
+      recordKey: r.recordKey,
+      data: {
+        status: r.status === 'valid' ? 'missing' : 'valid',
+        lastOutcome: 'valid' as const,
+        lastCheckedAt: now,
+        lastError: null,
+        evidence: {},
+      },
+    }));
+    const changes = recordStatusChanges({ records }, updates);
+    expect(changes).toHaveLength(MAX_RECORD_CHANGES);
+    expect(changes.slice(0, 5).map((c) => c.recordKey)).toEqual([
+      'dkim:s35',
+      'dkim:s36',
+      'dkim:s37',
+      'dkim:s38',
+      'dkim:s39',
+    ]);
+    expect(changes.slice(0, 5).every((c) => c.status === 'missing')).toBe(true);
   });
 });

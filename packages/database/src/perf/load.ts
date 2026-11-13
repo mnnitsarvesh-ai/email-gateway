@@ -694,6 +694,8 @@ export async function loadSyntheticData(client: SqlClient, opts: LoadOptions): P
         const failed = !fresh && rand() < 0.01;
         webhookRows.push([
           sqlTime(changedMs),
+          // Step 6.2: delivery public id (NOT NULL since migration webhooks_notifications).
+          uuidv7(changedMs),
           subscriptionByOrg.get(m.org),
           m.orgId,
           uuidv7(changedMs),
@@ -1138,6 +1140,7 @@ export async function loadSyntheticData(client: SqlClient, opts: LoadOptions): P
       'webhook_deliveries',
       [
         'event_occurred_at',
+        'public_id',
         'subscription_id',
         'organization_id',
         'event_id',

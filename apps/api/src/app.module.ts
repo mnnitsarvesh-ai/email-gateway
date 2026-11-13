@@ -44,6 +44,8 @@ import { ThreatIntelligenceModule } from './modules/threat-intelligence/threat-i
 import { UrlProtectionModule } from './modules/url-protection/url-protection.module';
 import { UsageModule } from './modules/usage/usage.module';
 import { UsersModule } from './modules/users/users.module';
+import { WebhooksModule } from './modules/webhooks/webhooks.module';
+import { NotificationsModule } from './modules/notifications/notifications.module';
 
 export const SERVICE_NAME = 'api';
 
@@ -115,6 +117,10 @@ export class AppModule {
         UsageModule,
         BillingModule,
         ThreatIntelligenceModule,
+        // Step 6.2: webhook subscriptions, delivery history and replays; notification settings
+        // and the personal preference center.
+        WebhooksModule,
+        NotificationsModule,
       ],
       providers: [{ provide: API_CONFIG, useValue: config }],
       exports: [API_CONFIG],

@@ -52,11 +52,12 @@ const monthly = (
 });
 
 /**
- * The 31 partitioned tables: the 16 of D3, the two delivery tables of step 2.3 (§3), the parse
+ * The 33 partitioned tables: the 16 of D3, the two delivery tables of step 2.3 (§3), the parse
  * stage table of step 3.1 (§3), the authentication results table of step 4.1 (§3), the
  * per-attachment results and sandbox submissions of step 4.2 (§3), the five URL tables of
- * step 4.3 (§3), the BEC results table of step 4.4 (§3), the two DLP tables of step 4.5 (§3)
- * and the risk scores table of step 5.1 (§3).
+ * step 4.3 (§3), the BEC results table of step 4.4 (§3), the two DLP tables of step 4.5 (§3),
+ * the risk scores table of step 5.1 (§3) and the webhook events and delivery attempts of
+ * step 6.2 (§3).
  */
 export const PARTITION_REGISTRY: readonly PartitionSpec[] = Object.freeze([
   monthly('email_messages', 'received_at', 6, 'core'),
@@ -115,6 +116,12 @@ export const PARTITION_REGISTRY: readonly PartitionSpec[] = Object.freeze([
   // Compliance: export and drop are a later manual or ops decision.
   monthly('audit_logs', 'created_at', null, 'compliance'),
   monthly('webhook_deliveries', 'event_occurred_at', 2, 'operational'),
+  // Step 6.2 (docs/plan/steps/19-webhooks-notifications.md §3, W13): the stored public events and
+  // the delivery attempts live as long as the deliveries that reference them (2 months,
+  // operational). Events are partitioned by the source event's `occurredAt` (deterministic across
+  // redeliveries), attempts by the attempt instant.
+  monthly('webhook_events', 'occurred_at', 2, 'operational'),
+  monthly('webhook_delivery_attempts', 'attempted_at', 2, 'operational'),
   {
     table: 'message_outbox',
     column: 'created_at',

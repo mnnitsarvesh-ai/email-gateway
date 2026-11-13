@@ -1,0 +1,170 @@
+# Webhook fanout (step 6.2 W1, docs/plan/steps/19-webhooks-notifications.md; ADR-0055;
+# docs/deployment/webhooks.md): the webhook-worker image with WEBHOOK_WORKER_ROLES=fanout. Consumes
+# email.webhooks (topology v11) as the role user eg-webhook (RABBITMQ_WEBHOOK_URL), projects the
+# eight internal events into public webhook events, deliveries and security alert requests in one
+# writer transaction per acted-on event (ledger webhook-worker.fanout). No-op events are acked
+# without a transaction. Writer-only MySQL; REDIS_URL is required by the shared configuration but
+# this role opens no Redis connection; no Internet egress (the delivery Deployment is the only
+# workload that reaches tenant endpoints).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webhook-fanout
+  labels: { app.kubernetes.io/name: webhook-fanout, app.kubernetes.io/part-of: email-gateway }
+spec:
+  # Two replicas share the queue (prefetch each); scale on email.webhooks depth
+  # (WebhookFanoutBacklog, docs/runbooks/webhooks.md).
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels: { app.kubernetes.io/name: webhook-fanout }
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: webhook-fanout, app.kubernetes.io/part-of: email-gateway }
+    spec:
+      serviceAccountName: webhook-fanout
+      automountServiceAccountToken: false
+      # Longer than one fanout transaction budget (WEBHOOK_FANOUT_TX_TIMEOUT_MS) plus the stop
+      # grace: in-flight events finish and are acked, never half-applied.
+      terminationGracePeriodSeconds: 150
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile: { type: RuntimeDefault }
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app.kubernetes.io/name: webhook-fanout }
+      containers:
+        - name: webhook-fanout
+          image: email-gateway/webhook-worker:latest
+          ports:
+            - { name: http, containerPort: 3075 }
+          envFrom:
+            - configMapRef: { name: email-gateway-config }
+          env:
+            - { name: HTTP_PORT, value: '3075' }
+            - { name: WEBHOOK_WORKER_ROLES, value: fanout }
+            # Fanout (step 6.2 §4.4); WEBHOOK_ALLOWED_PORTS / WEBHOOK_ALLOW_HTTP: ConfigMap.
+            - { name: WEBHOOK_FANOUT_PREFETCH, value: '16' }
+            - { name: WEBHOOK_FANOUT_TX_TIMEOUT_MS, value: '120000' }
+            - { name: WEBHOOK_SUBSCRIPTION_CACHE_SECONDS, value: '5' }
+            - { name: WEBHOOK_MAX_PENDING_PER_SUBSCRIPTION, value: '50000' }
+            # Secrets are mounted as files by External Secrets and read via the <KEY>_FILE convention.
+            - { name: DATABASE_URL_FILE, value: /var/run/secrets/gateway/database-url }
+            # Role user eg-webhook (step 6.2 §4.3): reads email.webhooks, publishes its own retry
+            # and dead-letter hops on email.events only.
+            - {
+                name: RABBITMQ_WEBHOOK_URL_FILE,
+                value: /var/run/secrets/gateway/rabbitmq-webhook-url,
+              }
+            - { name: REDIS_URL_FILE, value: /var/run/secrets/gateway/redis-url }
+            # Webhook secret cipher key (W7): required by the shared worker configuration; this
+            # role never decrypts. Its own Secret, mounted here, in webhook-delivery and the api.
+            - {
+                name: WEBHOOK_SECRET_ENCRYPTION_KEY_FILE,
+                value: /var/run/secrets/webhook-secret-key/key,
+              }
+          volumeMounts:
+            - { name: secrets, mountPath: /var/run/secrets/gateway, readOnly: true }
+            - {
+                name: webhook-secret-key,
+                mountPath: /var/run/secrets/webhook-secret-key,
+                readOnly: true,
+              }
+            - { name: tmp, mountPath: /tmp }
+          # Readiness: mysql and rabbitmq (email.events and email.webhooks verified passively).
+          readinessProbe:
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /health/live, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          startupProbe:
+            httpGet: { path: /health/live, port: http }
+            periodSeconds: 5
+            failureThreshold: 24
+          resources:
+            requests: { cpu: 250m, memory: 384Mi }
+            limits: { memory: 384Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+      volumes:
+        - name: secrets
+          secret: { secretName: email-gateway-secrets }
+        - name: webhook-secret-key
+          secret:
+            secretName: email-gateway-webhook-secret-key
+            items: [{ key: key, path: key }]
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: webhook-fanout
+---
+# Metrics (/metrics) and health on the http port.
+apiVersion: v1
+kind: Service
+metadata:
+  name: webhook-fanout
+  labels: { app.kubernetes.io/name: webhook-fanout }
+spec:
+  selector: { app.kubernetes.io/name: webhook-fanout }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: webhook-fanout
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: webhook-fanout }
+---
+# The fanout never calls tenant endpoints: MySQL, RabbitMQ, DNS and OTLP only (no Redis client).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: webhook-fanout
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: webhook-fanout }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # Metrics and probes only (Prometheus; the kubelet's probes are not subject to policies).
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: observability }
+          podSelector:
+            matchLabels: { app.kubernetes.io/name: prometheus }
+      ports: [{ protocol: TCP, port: 3075 }]
+  egress:
+    # MySQL writer (RDS/Aurora subnet).
+    - to: [{ ipBlock: { cidr: 10.0.32.0/20 } }]
+      ports: [{ protocol: TCP, port: 3306 }]
+    # RabbitMQ (Amazon MQ subnet).
+    - to: [{ ipBlock: { cidr: 10.0.64.0/20 } }]
+      ports: [{ protocol: TCP, port: 5671 }, { protocol: TCP, port: 5672 }]
+    # Cluster DNS.
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }]
+    # OTLP traces / logs to the collector.
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: observability }
+      ports: [{ protocol: TCP, port: 4318 }]

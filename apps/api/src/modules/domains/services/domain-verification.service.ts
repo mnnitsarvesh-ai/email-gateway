@@ -332,6 +332,14 @@ export class DomainVerificationService {
         await this.supersedeOtherClaims(tx, domain, now);
       }
     }
+    // Step 6.2 §4.1: definitive record status transitions of this check (one event, if any).
+    await this.events.recordsChanged(tx, {
+      organizationId: scope.organizationId,
+      domain: ref,
+      domainStatus: plan.transition?.to ?? domain.status,
+      changes: plan.recordChanges,
+      checkedAt: now,
+    });
     for (const activation of plan.keyActivations) {
       await this.events.record(tx, {
         organizationId: scope.organizationId,

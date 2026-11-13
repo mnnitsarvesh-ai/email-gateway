@@ -42,13 +42,13 @@ const mutableQueue = (topology: { queues: QueueDefinition[] }, name: QueueName) 
   return queue;
 };
 
-describe('TOPOLOGY v10', () => {
+describe('TOPOLOGY v11', () => {
   it('satisfies every invariant of design §3', () => {
     expect(validateTopology(TOPOLOGY)).toEqual([]);
   });
 
-  it('declares exactly the six exchanges and twenty queues (v10)', () => {
-    expect(TOPOLOGY_VERSION).toBe(10);
+  it('declares exactly the six exchanges and twenty-one queues (v11)', () => {
+    expect(TOPOLOGY_VERSION).toBe(11);
     expect(DEFAULT_VHOST).toBe('email-gateway');
     expect([...TOPOLOGY.exchanges]).toEqual([
       'email.ingestion',
@@ -59,9 +59,9 @@ describe('TOPOLOGY v10', () => {
       'email.events',
     ]);
     expect(EXCHANGE_NAMES).toHaveLength(6);
-    expect(QUEUE_NAMES).toHaveLength(20);
+    expect(QUEUE_NAMES).toHaveLength(21);
     expect(TOPOLOGY.queues.map((q) => q.name)).toEqual([...QUEUE_NAMES]);
-    expect(new Set(QUEUE_NAMES).size).toBe(20);
+    expect(new Set(QUEUE_NAMES).size).toBe(21);
     expect(QUEUE_NAMES).toEqual(
       expect.arrayContaining([
         'scan.url.inspect',
@@ -71,11 +71,13 @@ describe('TOPOLOGY v10', () => {
         'scan.sandbox.results',
         // v9 (step 5.2 P15).
         'email.notifications',
+        // v11 (step 6.2 §4.3).
+        'email.webhooks',
       ]),
     );
   });
 
-  it('assigns roles: fifteen work queues, one delay, one dead-letter, three dormant (v10)', () => {
+  it('assigns roles: sixteen work queues, one delay, one dead-letter, three dormant (v11)', () => {
     const byRole = (role: string) =>
       TOPOLOGY.queues.filter((q) => q.role === role).map((q) => q.name);
     expect(byRole('work')).toEqual([
@@ -95,6 +97,8 @@ describe('TOPOLOGY v10', () => {
       // v10 (step 5.3 Q27): the release executor.
       'email.quarantine',
       'email.notifications',
+      // v11 (step 6.2 W1): the webhook-worker fanout.
+      'email.webhooks',
     ]);
     expect(byRole('delay')).toEqual(['email.delivery.retry']);
     expect(byRole('dead-letter')).toEqual(['email.dead-letter']);
@@ -109,6 +113,8 @@ describe('TOPOLOGY v10', () => {
     expect(queueDefinition('email.notifications').lossy).toBeUndefined();
     // v10 (step 5.3): a queued release is never dropped.
     expect(queueDefinition('email.quarantine').lossy).toBeUndefined();
+    // v11 (step 6.2 §4.3): webhook events are never dropped while the worker is down.
+    expect(queueDefinition('email.webhooks').lossy).toBeUndefined();
   });
 
   it('has the bindings and home exchanges of design §3', () => {
@@ -217,7 +223,22 @@ describe('TOPOLOGY v10', () => {
         'email.policy org.*.mail.policy.notification_requested.v1',
         // v10 (step 5.3 Q20).
         'email.policy org.*.mail.quarantine.notification_requested.v1',
+        // v11 (step 6.2 N2): security alerts of the webhook-worker.
+        'email.policy org.*.notification.alert_requested.v1',
         'email.policy retry.email.notifications.#',
+      ],
+      // v11 (step 6.2 §4.3): each source event on the exchange it is published to.
+      'email.webhooks': [
+        'email.events',
+        'email.ingestion org.*.mail.message.received.v1',
+        'email.security org.*.mail.message.scanned.v1',
+        'email.security org.*.mail.attachment.sandbox_completed.v1',
+        'email.policy org.*.mail.policy.decided.v1',
+        'email.delivery org.*.mail.delivery.approved.v1',
+        'email.events org.*.mail.message.state_changed.v1',
+        'email.events org.*.domain.status.changed.v1',
+        'email.events org.*.domain.dns.records_changed.v1',
+        'email.events retry.email.webhooks.#',
       ],
       'email.analytics': [
         'email.events',
@@ -393,6 +414,19 @@ describe('TOPOLOGY v10', () => {
       maxDelayMs: 60_000,
       maxRetryAgeMs: 24 * 3_600_000,
     });
+    // v11 (step 6.2 §4.3): the webhook-worker fanout.
+    expect(queueDefinition('email.webhooks').consumer).toEqual({
+      kind: 'ledger',
+      ledgerName: 'webhook-worker.fanout',
+      service: 'webhook-worker',
+    });
+    expect(queueDefinition('email.webhooks').retry).toEqual({
+      strategy: 'hold',
+      maxAttempts: 10,
+      baseDelayMs: 2_000,
+      maxDelayMs: 60_000,
+      maxRetryAgeMs: 24 * 3_600_000,
+    });
     expect(planned).toEqual({
       'email.archive': '8.1',
       'email.analytics': 'not scheduled (ADR-0009)',
@@ -433,9 +467,19 @@ describe('policies (Q4)', () => {
       'scan.sandbox.results',
       'email.policy.evaluate',
       'email.notifications',
+      'email.webhooks',
     ] as const) {
       expect(queueDefinition(name).policy, name).toEqual(policyFor('work', name));
     }
+    // v11 (step 6.2 §4.3): reject-publish at 1 000 000, dead letters to email.dead-letter.
+    expect(queueDefinition('email.webhooks').policy).toEqual({
+      'delivery-limit': 20,
+      'dead-letter-exchange': 'email.events',
+      'dead-letter-routing-key': 'dead-letter.email.webhooks',
+      'dead-letter-strategy': 'at-least-once',
+      overflow: 'reject-publish',
+      'max-length': 1_000_000,
+    });
     // v9 (step 5.2): the delivery gate rejects publishes when full, it never drops mail.
     expect(queueDefinition('email.policy.evaluate').policy).toEqual({
       'delivery-limit': 20,
@@ -754,7 +798,11 @@ describe('routing (topic semantics)', () => {
   it('routes each registered event to its queues and to the firehose', () => {
     const route = (type: keyof typeof EVENT_REGISTRY) =>
       routeMessage(EVENT_REGISTRY[type].exchange, eventRoutingKey('42', type));
-    expect(route('mail.message.received.v1')).toEqual(['email.analytics', 'email.received']);
+    expect(route('mail.message.received.v1')).toEqual([
+      'email.analytics',
+      'email.received',
+      'email.webhooks',
+    ]);
     // v3: scan.auth is unbound (step 4.1 S2).
     expect(route('mail.message.parsed.v1')).toEqual(
       ['email.analytics', 'scan.attachment', 'scan.dlp', 'scan.spam', 'scan.url'].sort(),
@@ -763,10 +811,15 @@ describe('routing (topic semantics)', () => {
       'email.analytics',
       'email.policy.evaluate',
     ]);
-    expect(route('mail.message.scanned.v1')).toEqual(['email.analytics', 'email.policy.evaluate']);
+    expect(route('mail.message.scanned.v1')).toEqual([
+      'email.analytics',
+      'email.policy.evaluate',
+      'email.webhooks',
+    ]);
     // Topology v10 (step 5.3 Q2, Q27): the decision reaches only the firehose; the archive and
     // notification requests their own queues; release requests the executor.
-    expect(route('mail.policy.decided.v1')).toEqual(['email.analytics']);
+    // Topology v11 (step 6.2 §4.3): and the webhook fanout.
+    expect(route('mail.policy.decided.v1')).toEqual(['email.analytics', 'email.webhooks']);
     expect(route('mail.quarantine.release_requested.v1')).toEqual([
       'email.analytics',
       'email.quarantine',
@@ -786,12 +839,13 @@ describe('routing (topic semantics)', () => {
     expect(route('mail.delivery.approved.v1')).toEqual([
       'email.analytics',
       'email.delivery.pending',
+      'email.webhooks',
     ]);
     expect(route('mail.delivery.status_changed.v1')).toEqual(['email.analytics']);
-    expect(route('domain.status.changed.v1')).toEqual(['email.analytics']);
+    expect(route('domain.status.changed.v1')).toEqual(['email.analytics', 'email.webhooks']);
     expect(route('domain.routing.changed.v1')).toEqual(['email.analytics']);
-    // Topology v2 (step 3.3 L7).
-    expect(route('mail.message.state_changed.v1')).toEqual(['email.analytics']);
+    // Topology v2 (step 3.3 L7); v11 adds the webhook fanout.
+    expect(route('mail.message.state_changed.v1')).toEqual(['email.analytics', 'email.webhooks']);
     expect(route('mail.message.rescan_requested.v1')).toEqual(
       ['email.analytics', 'scan.attachment', 'scan.dlp', 'scan.spam', 'scan.url'].sort(),
     );
@@ -825,7 +879,18 @@ describe('routing (topic semantics)', () => {
       'email.analytics',
       'scan.sandbox.results',
     ]);
-    expect(route('mail.attachment.sandbox_completed.v1')).toEqual(['email.analytics']);
+    // Topology v11 (step 6.2 §4.3): the late sandbox verdict reaches the webhook fanout.
+    expect(route('mail.attachment.sandbox_completed.v1')).toEqual([
+      'email.analytics',
+      'email.webhooks',
+    ]);
+    // Topology v11: the new DNS record transitions reach only the fanout and the firehose; the
+    // security alert requests only the notification-worker and the firehose.
+    expect(route('domain.dns.records_changed.v1')).toEqual(['email.analytics', 'email.webhooks']);
+    expect(route('notification.alert_requested.v1')).toEqual([
+      'email.analytics',
+      'email.notifications',
+    ]);
   });
 
   it('keeps the retry hops of dot-prefixed queue names apart (v5 scan.url, scan.url.*)', () => {
@@ -842,6 +907,8 @@ describe('routing (topic semantics)', () => {
     // v9 (step 5.2): no new dot-prefix: plain retry bindings.
     expect(retryBindingKey('email.policy.evaluate')).toBe('retry.email.policy.evaluate.#');
     expect(retryBindingKey('email.notifications')).toBe('retry.email.notifications.#');
+    // v11 (step 6.2): no other queue name starts with email.webhooks.
+    expect(retryBindingKey('email.webhooks')).toBe('retry.email.webhooks.#');
     // Every retry key of every work/dormant queue and every event type reaches exactly that queue.
     const types = [...Object.keys(EVENT_REGISTRY), ...Object.keys(RESERVED_EVENT_TYPES)];
     for (const queue of TOPOLOGY.queues.filter((q) => q.role === 'work' || q.role === 'dormant')) {
@@ -942,6 +1009,56 @@ describe('routing (topic semantics)', () => {
     );
     expect(eventTypesBoundTo('email.delivery.retry')).toEqual([]);
     expect(eventTypesBoundTo('email.dead-letter')).toEqual([]);
+    // v11 (step 6.2 §4.3, W3): the eight source events of the projection.
+    expect(eventTypesBoundTo('email.webhooks')).toEqual(
+      [
+        'mail.message.received.v1',
+        'mail.message.scanned.v1',
+        'mail.attachment.sandbox_completed.v1',
+        'mail.policy.decided.v1',
+        'mail.delivery.approved.v1',
+        'mail.message.state_changed.v1',
+        'domain.status.changed.v1',
+        'domain.dns.records_changed.v1',
+      ].sort(),
+    );
+    expect(eventTypesBoundTo('email.notifications')).toEqual([
+      'mail.policy.notification_requested.v1',
+      'mail.quarantine.notification_requested.v1',
+      'notification.alert_requested.v1',
+    ]);
+  });
+
+  it('keeps the webhook fanout hops apart (v11): retry and dead-letter reach exactly their queue', () => {
+    for (const type of eventTypesBoundTo('email.webhooks')) {
+      expect(
+        routeMessage('email.events', retryRoutingKey('email.webhooks', '42', type)),
+        type,
+      ).toEqual(['email.webhooks']);
+      expect(
+        routeMessage('email.events', deadLetterRoutingKey('email.webhooks', '42', type)),
+        type,
+      ).toEqual(['email.dead-letter']);
+    }
+    expect(routeMessage('email.events', deadLetterRoutingKey('email.webhooks'))).toEqual([
+      'email.dead-letter',
+    ]);
+    // A received event published once reaches email.webhooks once (direct binding on
+    // email.ingestion; the email.events copy matches no email.webhooks binding).
+    expect(
+      routeMessage('email.ingestion', eventRoutingKey('42', 'mail.message.received.v1')),
+    ).toEqual(['email.analytics', 'email.received', 'email.webhooks']);
+    // Events that are not projected never reach the fanout.
+    for (const type of [
+      'mail.message.parsed.v1',
+      'mail.delivery.status_changed.v1',
+      'domain.routing.changed.v1',
+      'mail.url.clicked.v1',
+      'mail.quarantine.notification_requested.v1',
+      'notification.alert_requested.v1',
+    ]) {
+      expect(eventTypesBoundTo('email.webhooks'), type).not.toContain(type);
+    }
   });
 });
 
@@ -1127,7 +1244,11 @@ describe('validateTopology (negative cases)', () => {
     const t = clone();
     const analytics = mutableQueue(t, 'email.analytics');
     analytics.bindings = analytics.bindings.filter((b) => b.routingKey !== 'org.#');
-    expect(validateTopology(t)).toContain('event type domain.status.changed.v1 reaches no queue');
+    // v11: domain.status.changed.v1 also reaches email.webhooks; routing changes only the firehose.
+    expect(validateTopology(t)).toContain('event type domain.routing.changed.v1 reaches no queue');
+    expect(validateTopology(t)).not.toContain(
+      'event type domain.status.changed.v1 reaches no queue',
+    );
   });
 });
 
@@ -1135,7 +1256,7 @@ describe('toRabbitDefinitions (Q5)', () => {
   const definitions = toRabbitDefinitions(TOPOLOGY, { vhost: DEFAULT_VHOST });
 
   it('declares topic exchanges and quorum queues with no other argument', () => {
-    expect(definitions.topology_version).toBe(10);
+    expect(definitions.topology_version).toBe(11);
     expect(definitions.exchanges).toHaveLength(6);
     for (const exchange of definitions.exchanges) {
       expect(exchange).toEqual({
@@ -1148,7 +1269,7 @@ describe('toRabbitDefinitions (Q5)', () => {
         arguments: {},
       });
     }
-    expect(definitions.queues).toHaveLength(20);
+    expect(definitions.queues).toHaveLength(21);
     for (const queue of definitions.queues) {
       expect(queue).toEqual({
         name: queue.name,
@@ -1175,7 +1296,9 @@ describe('toRabbitDefinitions (Q5)', () => {
     // (archive_requested.v1 replaces policy.decided.v1), email.notifications adds two: 42 queue
     // + 5 exchange = 47. v10 (step 5.3 Q27): email.quarantine keeps two (release_requested.v1
     // replaces policy.decided.v1), email.notifications adds one: 43 queue + 5 exchange = 48.
-    expect(definitions.bindings).toHaveLength(48);
+    // v11 (step 6.2 §4.3): email.webhooks adds nine (eight events + retry), email.notifications
+    // one (alert_requested.v1): 53 queue + 5 exchange = 58.
+    expect(definitions.bindings).toHaveLength(58);
     const keys = definitions.bindings.map(
       (b) => `${b.source}|${b.destination_type}|${b.destination}|${b.routing_key}`,
     );
@@ -1203,7 +1326,7 @@ describe('toRabbitDefinitions (Q5)', () => {
   });
 
   it('generates one anchored policy per queue', () => {
-    expect(definitions.policies).toHaveLength(20);
+    expect(definitions.policies).toHaveLength(21);
     for (const policy of definitions.policies) {
       const queue = policy.name.slice('eg.'.length);
       expect(policy).toEqual({

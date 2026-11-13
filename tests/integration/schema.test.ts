@@ -23,8 +23,9 @@ import { stack } from './support/env';
  * (12-phishing-bec.md §3), the DLP tables of step 4.5 (13-dlp.md §3), the sandbox engine
  * tables and columns of step 4.6 (14-sandbox.md §3), the risk scoring tables and column of
  * step 5.1 (15-risk-scoring.md §3), the policy engine tables and columns of step 5.2
- * (16-policy-engine.md §3) and the quarantine tables and columns of step 5.3
- * (17-quarantine.md §3).
+ * (16-policy-engine.md §3), the quarantine tables and columns of step 5.3
+ * (17-quarantine.md §3) and the webhook and notification tables and columns of step 6.2
+ * (19-webhooks-notifications.md §3).
  */
 const prisma = new PrismaClient({ datasourceUrl: stack.databaseUrl() });
 
@@ -71,6 +72,9 @@ const PARTITIONED: Record<string, string> = {
   dlp_evidence: 'received_at',
   // Step 5.1 §3: the risk scores of a scan round (per revision).
   message_risk_scores: 'received_at',
+  // Step 6.2 §3: stored public webhook events and delivery attempts.
+  webhook_events: 'occurred_at',
+  webhook_delivery_attempts: 'attempted_at',
 };
 
 /** Tables with no `organization_id`: platform catalogs, the root, a join table, the ledger and
@@ -215,23 +219,30 @@ const TENANT_OWNED = [
   'audit_logs',
   'webhook_subscriptions',
   'webhook_deliveries',
+  // Step 6.2 §3.
+  'webhook_events',
+  'webhook_delivery_attempts',
+  'webhook_replays',
+  'notification_settings',
+  'notification_user_preferences',
+  'notification_alert_windows',
   'api_idempotency_keys',
 ];
 
 const ALL_TABLES = [...NOT_TENANT_OWNED, ...TENANT_OWNED];
 
 describe('MySQL schema', () => {
-  it('has exactly the 114 data-model tables plus _prisma_migrations', async () => {
+  it('has exactly the 120 data-model tables plus _prisma_migrations', async () => {
     const rows = await prisma.$queryRaw<{ name: string }[]>`
       SELECT TABLE_NAME AS name FROM information_schema.TABLES
       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'`;
-    expect(ALL_TABLES).toHaveLength(114);
-    expect(new Set(ALL_TABLES).size).toBe(114);
+    expect(ALL_TABLES).toHaveLength(120);
+    expect(new Set(ALL_TABLES).size).toBe(120);
     expect(rows.map((r) => r.name).sort()).toEqual([...ALL_TABLES, '_prisma_migrations'].sort());
   });
 
-  it('partitions the 31 high-volume tables by RANGE COLUMNS with a pmax partition', async () => {
-    expect(Object.keys(PARTITIONED)).toHaveLength(31);
+  it('partitions the 33 high-volume tables by RANGE COLUMNS with a pmax partition', async () => {
+    expect(Object.keys(PARTITIONED)).toHaveLength(33);
     const rows = await prisma.$queryRaw<
       { tableName: string; method: string; expression: string; partitionName: string }[]
     >`
@@ -4551,6 +4562,480 @@ describe('REST API schema (step 6.1, docs/plan/steps/18-rest-api.md §3.1)', () 
       columnType: "enum('completed','pending')",
       nullable: 'NO',
       columnDefault: 'completed',
+    });
+  });
+});
+
+describe('webhooks and notifications schema (step 6.2, docs/plan/steps/19-webhooks-notifications.md §3)', () => {
+  const uniqueSets = async (table: string) =>
+    [...(await indexes(table)).values()]
+      .filter((i) => i.unique)
+      .map((i) => i.columns.join(','))
+      .sort();
+  const indexSets = async (table: string) =>
+    [...(await indexes(table)).values()].map((i) => i.columns.join(',')).sort();
+  const foreignKeys = async (table: string) =>
+    prisma.$queryRaw<{ columnName: string; referenced: string; onDelete: string }[]>`
+      SELECT k.COLUMN_NAME AS columnName, k.REFERENCED_TABLE_NAME AS referenced,
+             r.DELETE_RULE AS onDelete
+      FROM information_schema.KEY_COLUMN_USAGE k
+      JOIN information_schema.REFERENTIAL_CONSTRAINTS r
+        ON r.CONSTRAINT_SCHEMA = k.TABLE_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+      WHERE k.TABLE_SCHEMA = DATABASE() AND k.TABLE_NAME = ${table}
+        AND k.REFERENCED_TABLE_NAME IS NOT NULL
+      ORDER BY k.COLUMN_NAME`;
+  /** Expected [COLUMN_TYPE, IS_NULLABLE] of every column of a table. */
+  const expectColumns = async (table: string, expected: Record<string, [string, string]>) => {
+    const cols = await columns([table]);
+    expect([...cols.keys()].map((k) => k.split('.')[1]!).sort()).toEqual(
+      Object.keys(expected).sort(),
+    );
+    for (const [column, [columnType, nullable]] of Object.entries(expected)) {
+      expect(cols.get(`${table}.${column}`), column).toMatchObject({ columnType, nullable });
+    }
+    return cols;
+  };
+  const SEVERITY_ENUM = "enum('info','low','medium','high')";
+  const NEW_TABLES = [
+    'webhook_events',
+    'webhook_delivery_attempts',
+    'webhook_replays',
+    'notification_settings',
+    'notification_user_preferences',
+    'notification_alert_windows',
+  ];
+
+  const withOrganization = async (
+    label: string,
+    body: (organizationId: bigint, userId: bigint) => Promise<void>,
+  ) => {
+    const suffix = randomUUID().slice(0, 8);
+    const plan = await prisma.organizationPlan.create({
+      data: { code: `it-${label}-${suffix}`, name: label, defaultLimits: {}, defaultFeatures: {} },
+    });
+    const organization = await prisma.organization.create({
+      data: {
+        slug: `it-${label}-${suffix}`,
+        name: label,
+        planId: plan.id,
+        dataRegion: 'ap-south-1',
+      },
+    });
+    const organizationId = organization.id;
+    const user = await prisma.user.create({
+      data: { organizationId, email: `u-${suffix}@example.test`, displayName: 'IT' },
+    });
+    try {
+      await body(organizationId, user.id);
+    } finally {
+      // RESTRICT-safe order (replays before their subscription).
+      await prisma.webhookReplay.deleteMany({ where: { organizationId } });
+      await prisma.webhookDeliveryAttempt.deleteMany({ where: { organizationId } });
+      await prisma.webhookDelivery.deleteMany({ where: { organizationId } });
+      await prisma.webhookEvent.deleteMany({ where: { organizationId } });
+      await prisma.webhookSubscription.deleteMany({ where: { organizationId } });
+      await prisma.notificationAlertWindow.deleteMany({ where: { organizationId } });
+      await prisma.notificationUserPreference.deleteMany({ where: { organizationId } });
+      await prisma.notificationSettings.deleteMany({ where: { organizationId } });
+      await prisma.user.deleteMany({ where: { organizationId } });
+      await prisma.organization.deleteMany({ where: { id: organizationId } });
+      await prisma.organizationPlan.deleteMany({ where: { id: plan.id } });
+    }
+  };
+
+  it('extends webhook_subscriptions with the W5-W7/W11 columns and indexes', async () => {
+    const cols = await expectColumns('webhook_subscriptions', {
+      id: ['bigint unsigned', 'NO'],
+      public_id: ['char(36)', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      name: ['varchar(255)', 'NO'],
+      description: ['varchar(512)', 'YES'],
+      url: ['varchar(2048)', 'NO'],
+      event_types: ['json', 'NO'],
+      filters: ['json', 'YES'],
+      secret_ciphertext: ['varchar(512)', 'NO'],
+      secret_version: ['smallint unsigned', 'NO'],
+      secret_rotated_at: ['datetime(3)', 'YES'],
+      previous_secret_ciphertext: ['varchar(512)', 'YES'],
+      previous_secret_expires_at: ['datetime(3)', 'YES'],
+      status: ["enum('active','paused','disabled','deleted')", 'NO'],
+      max_concurrency: ['tinyint unsigned', 'YES'],
+      consecutive_failures: ['int unsigned', 'NO'],
+      failing_since: ['datetime(3)', 'YES'],
+      last_success_at: ['datetime(3)', 'YES'],
+      last_failure_at: ['datetime(3)', 'YES'],
+      disabled_reason: ['varchar(64)', 'YES'],
+      disabled_at: ['datetime(3)', 'YES'],
+      deleted_at: ['datetime(3)', 'YES'],
+      row_version: ['int unsigned', 'NO'],
+      created_by_user_id: ['bigint unsigned', 'YES'],
+      created_at: ['datetime(3)', 'NO'],
+      updated_at: ['datetime(3)', 'NO'],
+    });
+    expect(cols.get('webhook_subscriptions.secret_version')?.columnDefault).toBe('1');
+    expect(cols.get('webhook_subscriptions.row_version')?.columnDefault).toBe('1');
+    expect(cols.get('webhook_subscriptions.status')?.columnDefault).toBe('active');
+    const idx = await indexes('webhook_subscriptions');
+    expect(idx.get('webhook_subscriptions_organization_id_id_idx')).toEqual({
+      columns: ['organization_id', 'id'],
+      unique: false,
+    });
+    expect(idx.get('webhook_subscriptions_status_deleted_at_idx')).toEqual({
+      columns: ['status', 'deleted_at'],
+      unique: false,
+    });
+    expect(await uniqueSets('webhook_subscriptions')).toEqual(['id', 'public_id']);
+  });
+
+  it('extends webhook_deliveries (partitioned) with the replay-aware unique key and claim indexes', async () => {
+    const cols = await expectColumns('webhook_deliveries', {
+      id: ['bigint unsigned', 'NO'],
+      event_occurred_at: ['datetime(3)', 'NO'],
+      public_id: ['char(36)', 'NO'],
+      subscription_id: ['bigint unsigned', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      event_id: ['char(36)', 'NO'],
+      event_type: ['varchar(100)', 'NO'],
+      delivery_seq: ['smallint unsigned', 'NO'],
+      trigger: ["enum('event','replay','test')", 'NO'],
+      replay_id: ['bigint unsigned', 'YES'],
+      status: ["enum('pending','succeeded','failed','dead','cancelled')", 'NO'],
+      attempt_count: ['smallint unsigned', 'NO'],
+      next_attempt_at: ['datetime(3)', 'YES'],
+      first_attempt_at: ['datetime(3)', 'YES'],
+      last_attempt_at: ['datetime(3)', 'YES'],
+      last_response_code: ['smallint unsigned', 'YES'],
+      last_latency_ms: ['int unsigned', 'YES'],
+      last_error: ['varchar(1024)', 'YES'],
+      completed_at: ['datetime(3)', 'YES'],
+      created_at: ['datetime(3)', 'NO'],
+      updated_at: ['datetime(3)', 'NO'],
+    });
+    expect(cols.get('webhook_deliveries.delivery_seq')?.columnDefault).toBe('0');
+    expect(cols.get('webhook_deliveries.trigger')?.columnDefault).toBe('event');
+    const idx = await indexes('webhook_deliveries');
+    expect(idx.get('webhook_deliveries_sub_event_seq_key')).toEqual({
+      columns: ['subscription_id', 'event_id', 'event_occurred_at', 'delivery_seq'],
+      unique: true,
+    });
+    expect(idx.has('webhook_deliveries_subscription_id_event_id_event_occurred_a_key')).toBe(false);
+    expect(idx.get('webhook_deliveries_public_id_idx')).toEqual({
+      columns: ['public_id'],
+      unique: false,
+    });
+    expect(idx.get('webhook_deliveries_status_org_next_idx')).toEqual({
+      columns: ['status', 'organization_id', 'next_attempt_at'],
+      unique: false,
+    });
+    expect(idx.get('webhook_deliveries_sub_occurred_id_idx')).toEqual({
+      columns: ['subscription_id', 'event_occurred_at', 'id'],
+      unique: false,
+    });
+    // The step 1.1 retry-queue index stays (perf harness query Q-webhook).
+    expect(idx.get('webhook_deliveries_status_next_attempt_at_idx')).toEqual({
+      columns: ['status', 'next_attempt_at'],
+      unique: false,
+    });
+    expect(await uniqueSets('webhook_deliveries')).toEqual(
+      ['id,event_occurred_at', 'subscription_id,event_id,event_occurred_at,delivery_seq'].sort(),
+    );
+    expect(await foreignKeys('webhook_deliveries')).toEqual([]);
+  });
+
+  it('has webhook_events (partitioned) with exactly the §3 columns and keys', async () => {
+    const cols = await expectColumns('webhook_events', {
+      id: ['bigint unsigned', 'NO'],
+      occurred_at: ['datetime(3)', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      event_id: ['char(36)', 'NO'],
+      event_type: ['varchar(64)', 'NO'],
+      source_event_id: ['char(36)', 'NO'],
+      source_event_type: ['varchar(100)', 'NO'],
+      message_id: ['bigint unsigned', 'YES'],
+      message_received_at: ['datetime(3)', 'YES'],
+      domain_id: ['bigint unsigned', 'YES'],
+      severity: [SEVERITY_ENUM, 'NO'],
+      payload_json: ['text', 'NO'],
+      payload_sha256: ['char(64)', 'NO'],
+      created_at: ['datetime(3)', 'NO'],
+    });
+    expect(cols.get('webhook_events.created_at')?.columnDefault).toMatch(/CURRENT_TIMESTAMP/i);
+    expect(await uniqueSets('webhook_events')).toEqual(
+      ['event_id,occurred_at', 'id,occurred_at'].sort(),
+    );
+    expect(await indexSets('webhook_events')).toEqual(
+      ['event_id,occurred_at', 'id,occurred_at', 'organization_id,occurred_at'].sort(),
+    );
+    expect(await foreignKeys('webhook_events')).toEqual([]);
+  });
+
+  it('has webhook_delivery_attempts (partitioned) with exactly the §3 columns and keys', async () => {
+    await expectColumns('webhook_delivery_attempts', {
+      id: ['bigint unsigned', 'NO'],
+      attempted_at: ['datetime(3)', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      subscription_id: ['bigint unsigned', 'NO'],
+      delivery_id: ['bigint unsigned', 'NO'],
+      delivery_event_occurred_at: ['datetime(3)', 'NO'],
+      attempt_no: ['smallint unsigned', 'NO'],
+      outcome: [
+        "enum('succeeded','http_error','redirect','timeout','dns_error','connection_error','tls_error','blocked','too_large','secret_unavailable')",
+        'NO',
+      ],
+      http_status: ['smallint unsigned', 'YES'],
+      latency_ms: ['int unsigned', 'NO'],
+      response_snippet: ['varchar(512)', 'YES'],
+      retry_after_seconds: ['int unsigned', 'YES'],
+      error_code: ['varchar(64)', 'YES'],
+      signature_count: ['tinyint unsigned', 'NO'],
+      next_attempt_at: ['datetime(3)', 'YES'],
+    });
+    expect(await uniqueSets('webhook_delivery_attempts')).toEqual(
+      ['delivery_id,attempt_no,attempted_at', 'id,attempted_at'].sort(),
+    );
+    expect(await indexSets('webhook_delivery_attempts')).toContain(
+      'organization_id,delivery_id,attempted_at',
+    );
+    expect(await foreignKeys('webhook_delivery_attempts')).toEqual([]);
+  });
+
+  it('has the four unpartitioned tables with their columns, keys and foreign keys', async () => {
+    await expectColumns('webhook_replays', {
+      id: ['bigint unsigned', 'NO'],
+      public_id: ['char(36)', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      subscription_id: ['bigint unsigned', 'NO'],
+      requested_by_type: ["enum('user','api_key')", 'NO'],
+      requested_by_id: ['char(36)', 'NO'],
+      range_from: ['datetime(3)', 'NO'],
+      range_to: ['datetime(3)', 'NO'],
+      statuses: ['json', 'NO'],
+      event_types: ['json', 'YES'],
+      status: ["enum('queued','running','completed','failed','cancelled')", 'NO'],
+      cursor_occurred_at: ['datetime(3)', 'YES'],
+      cursor_id: ['bigint unsigned', 'YES'],
+      matched_count: ['int unsigned', 'NO'],
+      created_count: ['int unsigned', 'NO'],
+      truncated: ['tinyint(1)', 'NO'],
+      error_code: ['varchar(64)', 'YES'],
+      created_at: ['datetime(3)', 'NO'],
+      started_at: ['datetime(3)', 'YES'],
+      completed_at: ['datetime(3)', 'YES'],
+      updated_at: ['datetime(3)', 'NO'],
+    });
+    expect(await uniqueSets('webhook_replays')).toEqual(['id', 'public_id']);
+    expect(await indexSets('webhook_replays')).toEqual(
+      [
+        'id',
+        'public_id',
+        'status,created_at',
+        'subscription_id,status',
+        'organization_id,id',
+      ].sort(),
+    );
+    expect(await foreignKeys('webhook_replays')).toEqual([
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+      { columnName: 'subscription_id', referenced: 'webhook_subscriptions', onDelete: 'RESTRICT' },
+    ]);
+
+    await expectColumns('notification_settings', {
+      id: ['bigint unsigned', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      settings: ['json', 'NO'],
+      settings_sha256: ['char(64)', 'NO'],
+      row_version: ['int unsigned', 'NO'],
+      updated_by_user_id: ['bigint unsigned', 'YES'],
+      created_at: ['datetime(3)', 'NO'],
+      updated_at: ['datetime(3)', 'NO'],
+    });
+    expect(await uniqueSets('notification_settings')).toEqual(['id', 'organization_id']);
+    expect(await foreignKeys('notification_settings')).toEqual([
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+      { columnName: 'updated_by_user_id', referenced: 'users', onDelete: 'SET NULL' },
+    ]);
+
+    await expectColumns('notification_user_preferences', {
+      id: ['bigint unsigned', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      user_id: ['bigint unsigned', 'NO'],
+      preferences: ['json', 'NO'],
+      row_version: ['int unsigned', 'NO'],
+      created_at: ['datetime(3)', 'NO'],
+      updated_at: ['datetime(3)', 'NO'],
+    });
+    expect(await uniqueSets('notification_user_preferences')).toEqual(['id', 'user_id']);
+    expect(await indexSets('notification_user_preferences')).toContain('organization_id');
+    expect(await foreignKeys('notification_user_preferences')).toEqual([
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+      { columnName: 'user_id', referenced: 'users', onDelete: 'CASCADE' },
+    ]);
+
+    await expectColumns('notification_alert_windows', {
+      id: ['bigint unsigned', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      kind: ['varchar(32)', 'NO'],
+      scope_key: ['varchar(64)', 'NO'],
+      window_start: ['datetime(3)', 'NO'],
+      event_count: ['int unsigned', 'NO'],
+      first_source_event_id: ['char(36)', 'NO'],
+      alert_event_id: ['char(36)', 'YES'],
+      created_at: ['datetime(3)', 'NO'],
+      updated_at: ['datetime(3)', 'NO'],
+    });
+    expect(await uniqueSets('notification_alert_windows')).toEqual(
+      ['id', 'organization_id,kind,scope_key,window_start'].sort(),
+    );
+    expect(await indexSets('notification_alert_windows')).toContain('created_at');
+    expect(await foreignKeys('notification_alert_windows')).toEqual([
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+    ]);
+  });
+
+  it('stores no content-like column: the only TEXT column is the guarded envelope', async () => {
+    const rows = await prisma.$queryRaw<{ tableName: string; columnName: string }[]>`
+      SELECT TABLE_NAME AS tableName, COLUMN_NAME AS columnName
+      FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME IN (${Prisma.join([...NEW_TABLES, 'webhook_subscriptions', 'webhook_deliveries'])})
+        AND DATA_TYPE IN ('text', 'mediumtext', 'longtext', 'blob', 'mediumblob', 'longblob')`;
+    expect(rows).toEqual([{ tableName: 'webhook_events', columnName: 'payload_json' }]);
+    const names = await prisma.$queryRaw<{ columnName: string }[]>`
+      SELECT COLUMN_NAME AS columnName FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN (${Prisma.join(NEW_TABLES)})`;
+    for (const { columnName } of names) {
+      expect(columnName).not.toMatch(/subject|body|address|s3_key|object_key|^url$/);
+    }
+  });
+
+  it('keeps one delivery per (subscription, event, occurred_at, delivery_seq): a replay is a new row', async () => {
+    await withOrganization('whdel', async (organizationId) => {
+      const subscription = await prisma.webhookSubscription.create({
+        data: {
+          organizationId,
+          name: 'IT',
+          url: 'https://hooks.receiver.test/it',
+          eventTypes: ['email.received'],
+          secretCiphertext: 'v1.k.iv.tag.ct',
+        },
+      });
+      expect(subscription).toMatchObject({ secretVersion: 1, rowVersion: 1, status: 'active' });
+      const eventId = randomUUID();
+      const eventOccurredAt = new Date('2026-11-13T09:14:03.120Z');
+      const base = {
+        subscriptionId: subscription.id,
+        organizationId,
+        eventId,
+        eventType: 'email.received',
+        eventOccurredAt,
+      };
+      const original = await prisma.webhookDelivery.create({ data: base });
+      expect(original).toMatchObject({ deliverySeq: 0, trigger: 'event', status: 'pending' });
+      expect(original.publicId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-/);
+      await expect(prisma.webhookDelivery.create({ data: base })).rejects.toMatchObject({
+        code: 'P2002',
+      });
+      const replay = await prisma.webhookDelivery.create({
+        data: { ...base, deliverySeq: 1, trigger: 'replay', status: 'cancelled' },
+      });
+      expect(replay).toMatchObject({ deliverySeq: 1, status: 'cancelled' });
+
+      // webhook_events: one row per public event id and occurred_at.
+      const event = {
+        organizationId,
+        occurredAt: eventOccurredAt,
+        eventId,
+        eventType: 'email.received',
+        sourceEventId: randomUUID(),
+        sourceEventType: 'mail.message.received.v1',
+        severity: 'info' as const,
+        payloadJson: '{}',
+        payloadSha256: 'a'.repeat(64),
+      };
+      await prisma.webhookEvent.create({ data: event });
+      await expect(prisma.webhookEvent.create({ data: event })).rejects.toMatchObject({
+        code: 'P2002',
+      });
+      const attempt = {
+        organizationId,
+        subscriptionId: subscription.id,
+        deliveryId: original.id,
+        deliveryEventOccurredAt: eventOccurredAt,
+        attemptNo: 1,
+        attemptedAt: new Date('2026-11-13T09:14:04.000Z'),
+        outcome: 'http_error' as const,
+        httpStatus: 500,
+        latencyMs: 12,
+        signatureCount: 1,
+      };
+      await prisma.webhookDeliveryAttempt.create({ data: attempt });
+      await expect(prisma.webhookDeliveryAttempt.create({ data: attempt })).rejects.toMatchObject({
+        code: 'P2002',
+      });
+
+      // A subscription with replays cannot be deleted (RESTRICT).
+      await prisma.webhookReplay.create({
+        data: {
+          organizationId,
+          subscriptionId: subscription.id,
+          requestedByType: 'user',
+          requestedById: randomUUID(),
+          rangeFrom: new Date('2026-11-13T00:00:00Z'),
+          rangeTo: new Date('2026-11-13T12:00:00Z'),
+          statuses: ['failed', 'dead'],
+        },
+      });
+      await expect(
+        prisma.webhookSubscription.delete({ where: { id: subscription.id } }),
+      ).rejects.toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+    });
+  });
+
+  it('keeps one settings row per organization, one preference row per user, one alert window per key', async () => {
+    await withOrganization('notif', async (organizationId, userId) => {
+      const settings = await prisma.notificationSettings.create({
+        data: {
+          organizationId,
+          settings: {},
+          settingsSha256: 'b'.repeat(64),
+          updatedByUserId: userId,
+        },
+      });
+      expect(settings.rowVersion).toBe(1);
+      await expect(
+        prisma.notificationSettings.create({
+          data: { organizationId, settings: {}, settingsSha256: 'b'.repeat(64) },
+        }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+      await prisma.notificationUserPreference.create({
+        data: { organizationId, userId, preferences: { optOut: ['policy_alert'] } },
+      });
+      await expect(
+        prisma.notificationUserPreference.create({
+          data: { organizationId, userId, preferences: { optOut: [] } },
+        }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+      const window = {
+        organizationId,
+        kind: 'threat_detected',
+        scopeKey: '-',
+        windowStart: new Date('2026-11-13T09:00:00Z'),
+        firstSourceEventId: randomUUID(),
+      };
+      const first = await prisma.notificationAlertWindow.create({ data: window });
+      expect(first.eventCount).toBe(1);
+      await expect(prisma.notificationAlertWindow.create({ data: window })).rejects.toMatchObject({
+        code: 'P2002',
+      });
+      await expect(
+        prisma.organization.delete({ where: { id: organizationId } }),
+      ).rejects.toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+
+      // Deleting the user: preferences cascade, the settings editor is set NULL.
+      await prisma.user.delete({ where: { id: userId } });
+      expect(await prisma.notificationUserPreference.count({ where: { organizationId } })).toBe(0);
+      expect(
+        await prisma.notificationSettings.findUnique({ where: { id: settings.id } }),
+      ).toMatchObject({ updatedByUserId: null });
     });
   });
 });

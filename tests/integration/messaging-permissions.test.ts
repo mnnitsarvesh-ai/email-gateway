@@ -19,7 +19,9 @@ import { stack } from './support/env';
  * eg-policy-engine and the notification-worker user eg-notification and extends the ops replay
  * to email.policy.evaluate and email.notifications, docs/plan/steps/16-policy-engine.md; step 5.3
  * Q27 (topology v10) extends the policy-engine user and the ops replay to email.quarantine, the
- * release executor's work queue, docs/plan/steps/17-quarantine.md). Probes
+ * release executor's work queue, docs/plan/steps/17-quarantine.md; step 6.2 §4.3 (topology v11)
+ * adds the webhook-worker user eg-webhook (email.webhooks) and extends the ops replay to
+ * email.webhooks on email.events, docs/plan/steps/19-webhooks-notifications.md). Probes
  * never leave a message in a real queue: every publish probe is one the broker refuses (a
  * refused publish routes nothing), and the allowed read is a passive checkQueue. Topic
  * permissions restrict the routing keys each user may publish: an allowed key always matches a
@@ -40,7 +42,8 @@ type Role =
   | 'urlBrowser'
   | 'sandbox'
   | 'policyEngine'
-  | 'notification';
+  | 'notification'
+  | 'webhook';
 const ROLES = [
   'relay',
   'emailWorker',
@@ -51,6 +54,7 @@ const ROLES = [
   'sandbox',
   'policyEngine',
   'notification',
+  'webhook',
 ] as const;
 const models = new Map<Role, ChannelModel>();
 let countsBefore: number[] = [];
@@ -59,8 +63,8 @@ let countsBefore: number[] = [];
  * The AMQP URLs of the role users: those of `stack.rabbitmqRoleUrls()` plus (step 4.3 U2) the
  * url-browser user (`RABBITMQ_URL_BROWSER_URL` of `.env`) and (step 4.6 X11) the
  * sandbox-controller user (`RABBITMQ_SANDBOX_URL`) and (step 5.2 P15) the policy-engine and
- * notification-worker users (`RABBITMQ_POLICY_ENGINE_URL`, `RABBITMQ_NOTIFICATION_URL`); never
- * logged.
+ * notification-worker users (`RABBITMQ_POLICY_ENGINE_URL`, `RABBITMQ_NOTIFICATION_URL`) and
+ * (step 6.2) the webhook-worker user (`RABBITMQ_WEBHOOK_URL`); never logged.
  */
 function roleUrls(): Record<Role, string> {
   const urlBrowser = process.env.RABBITMQ_URL_BROWSER_URL;
@@ -71,10 +75,12 @@ function roleUrls(): Record<Role, string> {
   if (!policyEngine) throw new Error('RABBITMQ_POLICY_ENGINE_URL is not set (step 5.2 .env keys)');
   const notification = process.env.RABBITMQ_NOTIFICATION_URL;
   if (!notification) throw new Error('RABBITMQ_NOTIFICATION_URL is not set (step 5.2 .env keys)');
-  return { ...stack.rabbitmqRoleUrls(), urlBrowser, sandbox, policyEngine, notification };
+  const webhook = process.env.RABBITMQ_WEBHOOK_URL;
+  if (!webhook) throw new Error('RABBITMQ_WEBHOOK_URL is not set (step 6.2 .env keys)');
+  return { ...stack.rabbitmqRoleUrls(), urlBrowser, sandbox, policyEngine, notification, webhook };
 }
 
-/** Message counts of the 20 real queues (administrator, passive declares). */
+/** Message counts of the 21 real queues (administrator, passive declares). */
 async function queueCounts(): Promise<number[]> {
   const url = new URL(stack.rabbitmqUrl());
   url.pathname = `/${encodeURIComponent(stack.rabbitmqVhost())}`;
@@ -244,6 +250,14 @@ const EXPECTED_TOPICS: Record<Role, TopicPermission[]> = {
       read: '^$',
     },
   ],
+  // Step 6.2 §4.3 (v11): the webhook-worker publishes only its queue's hops, both on email.events.
+  webhook: [
+    {
+      exchange: 'email.events',
+      write: '^(retry\\.email\\.webhooks\\.|dead-letter\\.email\\.webhooks(\\.|$))',
+      read: '^$',
+    },
+  ],
   ops: [
     { exchange: 'email.ingestion', write: '^retry\\.email\\.received\\.', read: '^$' },
     { exchange: 'email.delivery', write: '^retry\\.email\\.delivery\\.pending\\.', read: '^$' },
@@ -264,6 +278,8 @@ const EXPECTED_TOPICS: Record<Role, TopicPermission[]> = {
       write: '^retry\\.email\\.(policy\\.evaluate|notifications|quarantine)\\.',
       read: '^$',
     },
+    // Step 6.2 (v11): replay of email.webhooks (home exchange email.events), retry hops only.
+    { exchange: 'email.events', write: '^retry\\.email\\.webhooks\\.', read: '^$' },
   ],
 };
 
@@ -440,7 +456,22 @@ describe('RabbitMQ role permissions on the real vhost', () => {
     const opsPermission = await api.get<{ write: string }>(
       `/permissions/${encodeURIComponent(stack.rabbitmqVhost())}/${encodeURIComponent(userOf('ops'))}`,
     );
-    expect(opsPermission.write).toBe('^email\\.(ingestion|delivery|security|policy)$');
+    // v11 (step 6.2): email.events for the email.webhooks replay (topic: retry hops only).
+    expect(opsPermission.write).toBe('^email\\.(ingestion|delivery|security|policy|events)$');
+    const eventsWrite = new RegExp(ops.find((t) => t.exchange === 'email.events')?.write ?? '^$');
+    expect(eventsWrite.test('retry.email.webhooks.org.1.mail.message.received.v1')).toBe(true);
+    // Never an event key, a dead letter or another queue's hop on email.events.
+    for (const key of [
+      'org.1.mail.message.state_changed.v1',
+      'org.1.domain.dns.records_changed.v1',
+      'dead-letter.email.webhooks',
+      'dead-letter.email.received.org.1.mail.message.received.v1',
+      'retry.email.analytics.org.1.mail.message.received.v1',
+      'retry.email.webhooksx.org.1.x.v1',
+    ]) {
+      expect(eventsWrite.test(key), key).toBe(false);
+      expect(await publishKeyRefused('ops', 'email.events', key), key).toBe(ACCESS_REFUSED);
+    }
   });
 
   it.each(ROLES)('%s cannot declare queues or exchanges, nor bind', async (role) => {
@@ -719,7 +750,8 @@ describe('RabbitMQ role permissions on the real vhost', () => {
   it.each([
     ['policyEngine', ['email.policy.evaluate', 'email.quarantine']],
     ['notification', ['email.notifications']],
-  ] as const)('%s (steps 5.2, 5.3) reads %s (passive) and nothing else', async (role, own) => {
+    ['webhook', ['email.webhooks']],
+  ] as const)('%s (steps 5.2, 5.3, 6.2) reads %s (passive) and nothing else', async (role, own) => {
     const channel = await model(role).createChannel();
     for (const queue of own) {
       await expect(channel.checkQueue(queue)).resolves.toMatchObject({ queue });
@@ -867,6 +899,62 @@ describe('RabbitMQ role permissions on the real vhost', () => {
       ),
     ).toBe(true);
     expect(write('email.events').test('dead-letter.email.notifications')).toBe(true);
+  });
+
+  it('webhook-worker (step 6.2) publishes only the hops of email.webhooks: no event key, queue or exchange', async () => {
+    for (const key of [
+      PROBE_KEY,
+      // Alert requests and webhook events go through the outbox and the relay (or HTTP).
+      'org.1.notification.alert_requested.v1',
+      'org.1.domain.dns.records_changed.v1',
+      'org.1.mail.message.state_changed.v1',
+      // Not the hops of another queue whose home exchange is email.events.
+      'retry.email.analytics.org.1.mail.message.received.v1',
+      'dead-letter.email.notifications.org.1.notification.alert_requested.v1',
+      'dead-letter.email.received',
+      'retry.email.webhooksx.org.1.x.v1',
+      'dead-letter.email.webhooksx',
+    ]) {
+      expect(await publishKeyRefused('webhook', 'email.events', key), key).toBe(ACCESS_REFUSED);
+    }
+    for (const exchange of [
+      'email.ingestion',
+      'email.security',
+      'email.policy',
+      'email.delivery',
+      'email.archive',
+    ]) {
+      expect(await publishRefused('webhook', exchange), exchange).toBe(ACCESS_REFUSED);
+    }
+    expect(
+      await publishKeyRefused('webhook', 'email.policy', 'org.1.notification.alert_requested.v1'),
+    ).toBe(ACCESS_REFUSED);
+    const permission = await api.get<{ configure: string; write: string; read: string }>(
+      `/permissions/${encodeURIComponent(stack.rabbitmqVhost())}/${encodeURIComponent(userOf('webhook'))}`,
+    );
+    expect(permission).toMatchObject({
+      configure: '^$',
+      write: '^email\\.events$',
+      read: '^email\\.webhooks$',
+    });
+    // The allowed side (checked against the broker's topic permissions, never published).
+    const actual = await api.get<TopicPermission[]>(
+      `/topic-permissions/${encodeURIComponent(stack.rabbitmqVhost())}/${encodeURIComponent(userOf('webhook'))}`,
+    );
+    const write = new RegExp(actual.find((t) => t.exchange === 'email.events')?.write ?? '^$');
+    expect(write.test('retry.email.webhooks.org.1.mail.policy.decided.v1')).toBe(true);
+    expect(write.test('dead-letter.email.webhooks.org.1.mail.policy.decided.v1')).toBe(true);
+    expect(write.test('dead-letter.email.webhooks')).toBe(true);
+  });
+
+  it('relay may publish the two step 6.2 event keys (the org.<id>. prefix on every exchange)', async () => {
+    const actual = await api.get<TopicPermission[]>(
+      `/topic-permissions/${encodeURIComponent(stack.rabbitmqVhost())}/${encodeURIComponent(userOf('relay'))}`,
+    );
+    const write = (exchange: string) =>
+      new RegExp(actual.find((t) => t.exchange === exchange)?.write ?? '^$');
+    expect(write('email.events').test('org.1.domain.dns.records_changed.v1')).toBe(true);
+    expect(write('email.policy').test('org.1.notification.alert_requested.v1')).toBe(true);
   });
 
   it('role users cannot open the administrator vhost /', async () => {

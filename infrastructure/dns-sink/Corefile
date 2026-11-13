@@ -12,6 +12,8 @@
 #   rebind.test                    step 4.3 U19: forwarded WITHOUT cache to the url-test DNS
 #                                  responder (172.31.250.60:5300), which alternates 203.0.113.10
 #                                  and 127.0.0.1 with TTL 0 (DNS rebinding suite)
+#   receiver.test                  step 6.2: hooks / hooks2 → webhook-receiver (203.0.113.20),
+#                                  resolved by the webhook-worker (WEBHOOK_DNS_SERVERS)
 # Published on 127.0.0.1:${DNS_SINK_HOST_PORT:-1053} (udp+tcp) for host-run suites (step 4.3).
 sink.test:53 {
     file /etc/coredns/sink.test.db
@@ -69,6 +71,13 @@ mapped-v6.test:53 {
 # DNS rebinding (U19): no `cache` plugin, so every query reaches the alternating responder.
 rebind.test:53 {
     forward . 172.31.250.60:5300
+    errors
+    log
+}
+
+# Step 6.2 (docs/plan/steps/19-webhooks-notifications.md §4.5): the webhook test receiver.
+receiver.test:53 {
+    file /etc/coredns/receiver.test.db
     errors
     log
 }

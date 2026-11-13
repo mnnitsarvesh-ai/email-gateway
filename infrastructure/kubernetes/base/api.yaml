@@ -123,6 +123,26 @@ spec:
               valueFrom:
                 secretKeyRef:
                   { name: email-gateway-dlp-evidence-key, key: previous-key, optional: true }
+            # Webhooks (step 6.2 W6, W7, W12, §4.4): registration, history, replay and test bounds;
+            # WEBHOOK_ALLOWED_PORTS / WEBHOOK_ALLOW_HTTP come from the ConfigMap.
+            - { name: WEBHOOK_MAX_SUBSCRIPTIONS_PER_ORG, value: '10' }
+            - { name: WEBHOOK_SECRET_OVERLAP_HOURS_DEFAULT, value: '24' }
+            - { name: WEBHOOK_HISTORY_MAX_RANGE_DAYS, value: '31' }
+            - { name: WEBHOOK_REPLAY_MAX_RANGE_HOURS, value: '72' }
+            - { name: WEBHOOK_REPLAY_MAX_PER_DELIVERY, value: '10' }
+            - { name: WEBHOOK_REPLAY_REQUESTS_PER_HOUR, value: '10' }
+            - { name: WEBHOOK_TEST_REQUESTS_PER_MINUTE, value: '6' }
+            # Webhook secret cipher (W7): the api ENCRYPTS signing secrets (webhook-delivery
+            # decrypts; nobody else holds the key). Its own Secret; the previous key (encryption
+            # key rotation, decryption only) is optional.
+            - {
+                name: WEBHOOK_SECRET_ENCRYPTION_KEY_FILE,
+                value: /var/run/secrets/webhook-secret-key/key,
+              }
+            - name: WEBHOOK_SECRET_ENCRYPTION_KEY_PREVIOUS
+              valueFrom:
+                secretKeyRef:
+                  { name: email-gateway-webhook-secret-key, key: previous-key, optional: true }
           volumeMounts:
             - { name: secrets, mountPath: /var/run/secrets/gateway, readOnly: true }
             - { name: dlp-evidence-key, mountPath: /var/run/secrets/dlp-evidence, readOnly: true }
@@ -132,6 +152,11 @@ spec:
                 readOnly: true,
               }
             - { name: api-cursor-key, mountPath: /var/run/secrets/api-cursor, readOnly: true }
+            - {
+                name: webhook-secret-key,
+                mountPath: /var/run/secrets/webhook-secret-key,
+                readOnly: true,
+              }
             - { name: tmp, mountPath: /tmp }
           readinessProbe:
             httpGet: { path: /health/ready, port: http }
@@ -166,6 +191,10 @@ spec:
         - name: api-cursor-key
           secret:
             secretName: email-gateway-api-cursor-key
+            items: [{ key: key, path: key }]
+        - name: webhook-secret-key
+          secret:
+            secretName: email-gateway-webhook-secret-key
             items: [{ key: key, path: key }]
         - name: tmp
           emptyDir: {}

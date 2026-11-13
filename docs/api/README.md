@@ -6,7 +6,7 @@ The control-plane REST API (`apps/api`). Decisions: [ADR-0015](../architecture/a
 
 - Business routes live under the `/api` prefix and are versioned in the URI: `/api/v1/...` ([ADR-0015](../architecture/adr/0015-api-base-path.md)). Breaking changes ship as `/api/v2` alongside `/api/v1` until clients migrate. The old unprefixed `/v1/...` paths return `404`.
 - Operational routes stay unprefixed and unversioned: `GET /health/live`, `GET /health/ready` (probes and Compose health checks do not change) and `GET /metrics`. They are **internal** ([ADR-0053](../architecture/adr/0053-public-internal-api-boundary.md)): never routed by the Ingress (which routes only `Prefix /api/v1/`) and not in the public OpenAPI document. `/api/health/*`, `/api/metrics`, `/api/docs` and `/api/v1/metrics` are `404 route_not_found`.
-- In non-production environments, OpenAPI is served at `/docs` (Swagger UI) and `/docs-json`; never in production (`NODE_ENV=production`). The document lists only `/api/v1/*` (249 operations at step 6.1), describes every tag (the step that built it and its deferrals) and carries the portal extensions `x-eg-permissions`, `x-eg-rate-class`, `x-eg-idempotency`, `x-eg-cursor`, `x-eg-returns-secret`. The document declares two security schemes: `access-token` (HTTP bearer, JWT) and `api-key` (`X-API-Key` header). Every protected operation names the schemes it accepts and carries a tag; every request and response schema is generated from the zod schemas that validate it.
+- In non-production environments, OpenAPI is served at `/docs` (Swagger UI) and `/docs-json`; never in production (`NODE_ENV=production`). The document lists only `/api/v1/*` (249 operations at step 6.1, 266 since step 6.2), describes every tag (the step that built it and its deferrals) and carries the portal extensions `x-eg-permissions`, `x-eg-rate-class`, `x-eg-idempotency`, `x-eg-cursor`, `x-eg-returns-secret` and (step 6.2) `x-eg-secret-replay: redacted`. The document declares two security schemes: `access-token` (HTTP bearer, JWT) and `api-key` (`X-API-Key` header). Every protected operation names the schemes it accepts and carries a tag; every request and response schema is generated from the zod schemas that validate it.
 - A snapshot of the document is committed as [docs/api/openapi.json](openapi.json). `apps/api/test/openapi.test.ts` fails when the running API and the snapshot differ; after an intended change regenerate it with `UPDATE_OPENAPI=1 pnpm --filter @email-gateway/api test:e2e -- openapi` and review the diff.
 - `API_INTERNAL_URL` (portal → api) is the api **origin**; callers append `/api/v1/...`.
 
@@ -790,6 +790,457 @@ curl -s "$API/api/v1/threat-intelligence/lookup?type=domain&value=login.evil-exa
 
 Tenant-managed indicators are not offered: no engine reads tenant-owned `threat_indicators` rows, so managing them would change nothing (step 6.1 §1.2). Your own allow-lists are BEC trusted senders, DLP exceptions and policy conditions.
 
+### Webhooks (`webhooks` tag, step 6.2)
+
+Signed HTTP callbacks for mail, threat, quarantine and domain events of your organization. Design: [docs/plan/steps/19-webhooks-notifications.md](../plan/steps/19-webhooks-notifications.md); decisions: [ADR-0054](../architecture/adr/0054-webhook-event-model.md) (event model), [ADR-0055](../architecture/adr/0055-webhook-signing-and-delivery.md) (signing and delivery), [ADR-0057](../architecture/adr/0057-idempotent-secret-bearing-routes-redacted-replay.md) (redacted replay of the secret routes). Reads need `webhook:read`, every change `webhook:manage`; API keys may hold both. Creating, re-activating, testing and replaying need the plan feature `webhooks` (`403 webhooks_not_enabled`; on in the standard, enterprise and dedicated plans, off in trial). Another organization's webhook, delivery or replay id answers `404` like a missing one.
+
+| Method | Path                                                   | Permission          | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ------ | ------------------------------------------------------ | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/webhooks`                                            | `webhook:read`, K   | Newest first, v1 cursor; `status` (≤ 4; default every status except `deleted`)                                                                                                                                                                                                                                                                                                                                                                                                   |
+| POST   | `/webhooks`                                            | `webhook:manage`, K | **Idempotency-Key required** (redacted replay), class `sensitive`. `{ name, description?, url, eventTypes (1–10), filters?, status?: active \| paused, maxConcurrency? (1–32) }` → `201` with the webhook and `secret` (shown once). `409 webhook_limit_reached` (WEBHOOK_MAX_SUBSCRIPTIONS_PER_ORG, default 10 live webhooks), `422 webhook_url_not_allowed` (`reason`), `422 webhook_filter_invalid` (`path`). Audit `webhook.created`                                         |
+| GET    | `/webhooks/event-types`                                | `webhook:read`, K   | The catalogue: type, version, description, severity rule, applicable filters, example envelope                                                                                                                                                                                                                                                                                                                                                                                   |
+| GET    | `/webhooks/{webhookId}`                                | `webhook:read`, K   | `404 webhook_not_found`. Deleted webhooks are shown with `status: deleted`                                                                                                                                                                                                                                                                                                                                                                                                       |
+| PATCH  | `/webhooks/{webhookId}`                                | `webhook:manage`, K | Any of `name`, `description`, `url`, `eventTypes`, `filters`, `status` (`active`, `paused`, `disabled`), `maxConcurrency`, with `expectedRowVersion` (`409 webhook_version_conflict` with `currentRowVersion`). `paused` parks the pending deliveries (`nextAttemptAt: null`, still `pending`); `active` makes them due now; `disabled` cancels them. Audit `webhook.updated` (changed paths; `urlHost` and `urlSha256` for a new URL; `parkedDeliveries` / `resumedDeliveries`) |
+| DELETE | `/webhooks/{webhookId}`                                | `webhook:manage`, K | **Idempotency-Key required**, `sensitive`. Soft delete; pending deliveries are cancelled in the same transaction → `204` (a replay answers `204` again; a new key is `404`). Audit `webhook.deleted`                                                                                                                                                                                                                                                                             |
+| POST   | `/webhooks/{webhookId}/rotate-secret`                  | `webhook:manage`, K | **Idempotency-Key required** (redacted replay), `sensitive`. `{ overlapHours? (0–168, default 24) }` → `200 { id, secret, secretVersion, secretRotatedAt, previousSecretExpiresAt }`. Audit `webhook.secret_rotated` (version and overlap only)                                                                                                                                                                                                                                  |
+| POST   | `/webhooks/{webhookId}/test`                           | `webhook:manage`, K | A `webhook.ping` event and a `trigger: test` delivery → `202 { deliveryId, eventId }`. Webhook must be `active` (`409 webhook_not_active`). RL: WEBHOOK_TEST_REQUESTS_PER_MINUTE (6) per webhook. Audit `webhook.test_requested`                                                                                                                                                                                                                                                 |
+| GET    | `/webhooks/{webhookId}/deliveries`                     | `webhook:read`, K   | History newest event first, v1 cursor; required range on the event time `from`/`to` (default the last 24 h, at most WEBHOOK_HISTORY_MAX_RANGE_DAYS = 31); filters `status` (≤ 5), `eventType` (≤ 10), `trigger` (`event`, `replay`, `test`); scan-bounded when filtered. Kept 2 months                                                                                                                                                                                           |
+| GET    | `/webhooks/{webhookId}/deliveries/{deliveryId}`        | `webhook:read`, K   | The delivery with every attempt (outcome, HTTP status, latency, sanitized response snippet ≤ 512 characters, Retry-After, error code, signature count) and the stored envelope (`null` after retention). `404 webhook_delivery_not_found`                                                                                                                                                                                                                                        |
+| POST   | `/webhooks/{webhookId}/deliveries/{deliveryId}/replay` | `webhook:manage`, K | **Idempotency-Key required**, `sensitive`. A new delivery of the same stored event → `202 { deliveryId }`. `409 webhook_not_active`, `409 webhook_replay_limit` (WEBHOOK_REPLAY_MAX_PER_DELIVERY = 10 per event), `410 webhook_event_expired`. Audit `webhook.delivery_replayed`                                                                                                                                                                                                 |
+| POST   | `/webhooks/{webhookId}/replays`                        | `webhook:manage`, K | **Idempotency-Key required**, `sensitive`. `{ from, to (≤ 72 h, within retention), statuses? (default failed, dead; ⊆ succeeded, failed, dead, cancelled), eventTypes? }` → `202 { replayId, status: queued }`. One queued or running replay per webhook (`409 webhook_replay_in_progress` with `replayId`). RL: WEBHOOK_REPLAY_REQUESTS_PER_HOUR (10) per organization. Audit `webhook.replay_requested`                                                                        |
+| GET    | `/webhooks/{webhookId}/replays/{replayId}`             | `webhook:read`, K   | `{ id, status, from, to, statuses, eventTypes, matchedCount, createdCount, truncated, errorCode, createdAt, startedAt, completedAt }`. `404 webhook_replay_not_found`                                                                                                                                                                                                                                                                                                            |
+
+**Webhook representation:** `{ id, name, description, url, eventTypes, filters, status, disabledReason, disabledAt, maxConcurrency, secretVersion, secretRotatedAt, previousSecretExpiresAt, consecutiveFailures, failingSince, lastSuccessAt, lastFailureAt, createdBy: { type: "user", id } | null, createdAt, updatedAt, rowVersion }`. The secret and its ciphertext are never returned again. The `url` is shown to `webhook:read` holders (it may carry a receiver token): `webhook:read` is therefore not part of the read-only role.
+
+**Event types and filters.** A webhook lists 1–10 types of the catalogue below (no wildcard; `webhook.ping` is sent only by the test route). Optional `filters` (strict; every field optional): `directions` (1–3 of `inbound`, `outbound`, `internal`), `domainIds` (1–20 of **your** domain ids; another organization's or an unknown id is `422 webhook_filter_invalid`), `minSeverity` (`info` < `low` < `medium` < `high`), `verdicts` (1–7 scan verdicts). An event is delivered when its type is listed **and** every present filter matches the attribute the event carries (domain events carry no direction or verdict and pass those filters; a message of no tenant domain never matches `domainIds`). Only events that occur after the webhook was created, while it is `active`, are delivered: there is no back-fill. Changes reach the delivery worker within its cache TTL (5 s by default).
+
+**Endpoint URL rules** (checked at create and update, `422 webhook_url_not_allowed` with `reason`):
+
+- absolute `https` URL of at most 2048 characters, without userinfo (`user:pass@`), fragment (`#…`), whitespace or control characters (`reason: format`, or `scheme` for another scheme; plain `http` only where the TEST-ONLY `WEBHOOK_ALLOW_HTTP` is set, which the configuration refuses outside local/CI);
+- a port of `WEBHOOK_ALLOWED_PORTS` (default 443; `reason: port`);
+- a host that is not `localhost`, a single label or a `.local`/`.internal`/`.localdomain`/`home.arpa` name (`name`), not the click-service host, the portal host or the host the API request reached (`deny_list`), and, for an IP literal, not a loopback, private, link-local, CGNAT, multicast, documentation, metadata (169.254.169.254, fd00:ec2::254), ULA, IPv4-mapped or other reserved address (the reason names the class).
+
+DNS is **not** resolved at registration (it can change). The delivery worker resolves the host at every attempt and refuses the attempt when **any** answer is a non-public address (DNS rebinding), dials the checked address itself, re-checks the connected address and never follows redirects. A refused attempt fails with `lastError: blocked:<reason>` and is not retried.
+
+**Secrets, shown once, and the redacted replay (ADR-0057).** Create and rotate return the signing secret (`whsec_` followed by 43 base64url characters; 256 bits) in that response only. It is stored encrypted (AES-256-GCM, bound to your organization, the webhook and the secret version) with a key only the api (encrypt) and the delivery worker (decrypt) hold; it is never logged, audited or stored in an idempotency record. Both routes require an `Idempotency-Key`: the stored response is the same body with `secret: null`, so repeating the request with the same key (within 24 h) returns `Idempotency-Replayed: true` and `secret: null` and creates or rotates nothing. **If you lost the original response, rotate the secret with a new key.**
+
+**Rotation overlap.** `rotate-secret` makes a new secret current (`secretVersion + 1`); the retiring secret keeps signing until `previousSecretExpiresAt` (`overlapHours`, default 24, 0 = none). During the overlap every request carries two `v1=` signatures (the new secret first), so a receiver can deploy the new secret at its own pace. Rotating again during an overlap retires the then-current secret (only one previous secret exists).
+
+**The delivery contract.** The worker sends `POST <url>` with the stored envelope as body (UTF-8 JSON, at most 16 KiB, byte-identical on every attempt and replay) and exactly these headers:
+
+| Header                | Value                                                                                                                         |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `Content-Type`        | `application/json`                                                                                                            |
+| `User-Agent`          | `EmailGateway-Webhooks/1`                                                                                                     |
+| `EG-Signature`        | `t=<unix seconds>,v1=<hex HMAC-SHA256(secret, "<t>.<raw body>")>`; a second `,v1=…` during a rotation overlap (current first) |
+| `EG-Event-Id`         | the envelope `id` (deterministic: the same event always has the same id)                                                      |
+| `EG-Event-Type`       | the envelope `type`                                                                                                           |
+| `EG-Delivery-Id`      | the delivery id (new for each replay)                                                                                         |
+| `EG-Delivery-Attempt` | attempt number, 1-based                                                                                                       |
+| `EG-Subscription-Id`  | the webhook id                                                                                                                |
+| `Idempotency-Key`     | the envelope `id`                                                                                                             |
+
+The HMAC key is the UTF-8 bytes of the **whole** secret string (including `whsec_`). Receivers must: **verify before parsing** (over the raw body bytes), reject a timestamp more than **300 s** away from their clock, compare signatures in **constant time** and accept the request when **any** `v1` matches any of their current secrets; answer `2xx` within 10 s (process asynchronously); **deduplicate by `EG-Event-Id`** (delivery is at least once, and replays re-send the same event).
+
+**Retries, Retry-After, dead letters, auto-disable.** `2xx` is delivered. Every other status, redirects (`3xx` is never followed), timeouts (3 s connect, 10 s total), DNS, connection and TLS errors and oversized responses are retried with exponential backoff and jitter (about 0 s, 30 s, 1.5 min, 3.5 min, 7.5 min, 15.5 min, 31.5 min, 63.5 min: 8 attempts by default). A `Retry-After` on any non-`2xx` answer (seconds or HTTP date) is honoured up to 1 h (a larger value is clamped). After the last attempt, or 24 h after the first, the delivery becomes `dead`: dead deliveries are the webhook dead-letter store (list them with `status=dead`, replay them). A webhook whose deliveries fail continuously (by default 50 consecutive failures over at least 24 h) is disabled by the system (`disabledReason: sustained_failure`, audited `webhook.auto_disabled`, a security alert to `webhook:manage` holders); re-enable it with `PATCH { status: "active" }` and replay what you missed. While a webhook is `paused` no new deliveries are created and pending ones wait; `disabled` and deleted webhooks have their pending deliveries cancelled.
+
+**Replay semantics.** A replay (single or range) re-sends the **stored** envelope: same `EG-Event-Id` and bytes, a new `EG-Delivery-Id`, timestamp and signature. Events that occurred while a webhook was paused or disabled were never recorded for it and cannot be replayed. A range replay skips events that already have `WEBHOOK_REPLAY_MAX_PER_DELIVERY` (default 10) replays, so `createdCount` can be lower than `matchedCount`; it ends `failed` (`errorCode`) when the webhook is no longer active (`webhook_not_active`), the organization is suspended or being deleted (`organization_inactive`) or the `webhooks` feature was revoked (`webhooks_not_enabled`). While an organization is not active or lacks the feature, nothing is delivered: its due deliveries become `cancelled` (`lastError` `organization_inactive` / `webhooks_not_enabled`) and can be replayed afterwards. Stored events and the delivery history are kept 2 months (`410 webhook_event_expired` afterwards).
+
+**What payloads never contain.** No message body, subject, attachment content or file name, address local part (domains only), raw header other than `internetMessageId`, URL found in mail, S3 key, secret or token. A payload guard refuses to build an envelope that would violate this. Response snippets shown in the history are untrusted text (secrets and tokens redacted): never render them as HTML.
+
+#### Verifying a delivery (Node.js, `node:crypto` only)
+
+<!-- webhook-verify-snippet:start -->
+
+```js
+import { createHmac, timingSafeEqual } from 'node:crypto';
+
+/**
+ * Verifies an EmailGateway webhook request. `rawBody` is the exact request body (a Buffer, read
+ * BEFORE any JSON parsing); `header` is the EG-Signature header; `secrets` are your current
+ * secrets (two during a rotation). Returns true when the timestamp is within the tolerance and
+ * any v1 signature matches any secret.
+ */
+export function verifyEmailGatewayWebhook(
+  rawBody,
+  header,
+  secrets,
+  toleranceSeconds = 300,
+  nowMs = Date.now(),
+) {
+  if (typeof header !== 'string' || header.length > 1024) return false;
+  let timestamp = null;
+  const signatures = [];
+  for (const part of header.split(',')) {
+    const eq = part.indexOf('=');
+    if (eq < 1) return false;
+    const key = part.slice(0, eq).trim();
+    const value = part.slice(eq + 1).trim();
+    if (key === 't') timestamp = value;
+    else if (key === 'v1' && /^[0-9a-f]{64}$/.test(value))
+      signatures.push(Buffer.from(value, 'hex'));
+  }
+  if (timestamp === null || !/^\d{1,12}$/.test(timestamp) || signatures.length === 0) return false;
+  if (Math.abs(Math.floor(nowMs / 1000) - Number(timestamp)) > toleranceSeconds) return false;
+  let valid = false;
+  for (const secret of secrets) {
+    const expected = createHmac('sha256', Buffer.from(secret, 'utf8'))
+      .update(`${timestamp}.`)
+      .update(rawBody)
+      .digest();
+    // No early exit: every comparison runs in constant time.
+    for (const signature of signatures) {
+      if (timingSafeEqual(expected, signature)) valid = true;
+    }
+  }
+  return valid;
+}
+```
+
+<!-- webhook-verify-snippet:end -->
+
+With Express, read the raw body (`express.raw({ type: 'application/json', limit: '64kb' })`), call `verifyEmailGatewayWebhook(req.body, req.get('EG-Signature'), [process.env.EG_WEBHOOK_SECRET])` and answer `401` when it returns false; only then `JSON.parse(req.body)`, skip events whose `EG-Event-Id` you already processed, and answer `204`. `apps/api/src/modules/webhooks/verify-snippet.test.ts` runs this exact snippet against the platform's signer (valid, tampered body, wrong secret, stale and future timestamps, rotation with two `v1`).
+
+#### Verifying or producing a signature with openssl and curl
+
+```bash
+SECRET='whsec_…'                                  # your webhook secret
+BODY_FILE=delivery.json                           # the raw body exactly as received
+T=1763025243                                      # the t= value of EG-Signature
+# The expected v1 value: compare it with the header's v1 (any of them).
+printf '%s.' "$T" | cat - "$BODY_FILE" | openssl dgst -sha256 -hmac "$SECRET" -hex | sed 's/^.*= //'
+
+# Exercise your receiver with a correctly signed request (current time):
+T=$(date +%s); SIG=$(printf '%s.' "$T" | cat - "$BODY_FILE" | openssl dgst -sha256 -hmac "$SECRET" -hex | sed 's/^.*= //')
+curl -sS -X POST "https://hooks.example.com/email-gateway" -H 'Content-Type: application/json' \
+  -H "EG-Signature: t=$T,v1=$SIG" -H "EG-Event-Id: $(jq -r .id "$BODY_FILE")" --data-binary @"$BODY_FILE"
+```
+
+```bash
+# Register a webhook (the secret is in this response only), then send it a test event.
+curl -s -X POST "$API/api/v1/webhooks" -H "X-API-Key: $API_KEY" -H "Idempotency-Key: hook-siem-0001" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"SIEM","url":"https://hooks.example.com/email-gateway","eventTypes":["email.threat.detected","email.quarantined"],"filters":{"minSeverity":"medium"}}'
+# → 201 {"id":"0193…","status":"active","secretVersion":1,…,"secret":"whsec_…"}
+curl -s -X POST "$API/api/v1/webhooks/0193…/test" -H "X-API-Key: $API_KEY"
+# → 202 {"deliveryId":"0193…","eventId":"…"}
+```
+
+#### Event catalogue (payload version 1)
+
+Every envelope is `{ id, type, version, occurredAt, organizationId, data }`: `id` is deterministic (the same event redelivered or replayed keeps it), `occurredAt` is when the fact happened, `organizationId` is your organization's public id. A breaking change of a type's `data` would ship as `version: 2` without changing version 1 (not built in 6.2). Shared objects: `message` = `{ id, receivedAt, direction, domainId | null, internetMessageId | null, senderDomain | null, headerFromDomain | null, recipientCount, recipientDomains (≤ 20), sizeBytes, attachmentCount }` (domains only, never local parts or a subject); `domain` = `{ id, name, status }` (your own domain). Severities: `info` < `low` < `medium` < `high`.
+
+**`email.received`** — A message was accepted and stored by the gateway. Severity: info. Filters: `directions`, `domainIds`, `minSeverity`.
+
+```json
+{
+  "id": "89ce8a67-39df-8ab9-a503-4ae5c0b19b77",
+  "type": "email.received",
+  "version": 1,
+  "occurredAt": "2026-11-13T09:14:03.120Z",
+  "organizationId": "0192f0c4-7d1e-7b6a-9c55-6f3e2a1d4b10",
+  "data": {
+    "message": {
+      "id": "0192f0c4-8a11-7c2e-9d3f-1a2b3c4d5e6f",
+      "receivedAt": "2026-11-13T09:14:02.481Z",
+      "direction": "inbound",
+      "domainId": "0192f0c4-7d1e-7b6a-9c55-6f3e2a1d4b11",
+      "internetMessageId": "<CAF1x2y3z@mail.partner.example>",
+      "senderDomain": "partner.example",
+      "headerFromDomain": "partner.example",
+      "recipientCount": 2,
+      "recipientDomains": ["acme.example"],
+      "sizeBytes": 48213,
+      "attachmentCount": 1
+    }
+  }
+}
+```
+
+**`email.scanned`** — A scan round of a message completed (initial scan or rescan). Severity: clean/unknown/timeout/error → info, spam → low, suspicious → medium, malicious → high. Filters: `directions`, `domainIds`, `minSeverity`, `verdicts`.
+
+```json
+{
+  "id": "9e83e129-eb3d-8e4c-8cc1-55b055ed602d",
+  "type": "email.scanned",
+  "version": 1,
+  "occurredAt": "2026-11-13T09:14:03.120Z",
+  "organizationId": "0192f0c4-7d1e-7b6a-9c55-6f3e2a1d4b10",
+  "data": {
+    "message": "<the message object, as in email.received>",
+    "scan": {
+      "lifecycleRound": 0,
+      "kind": "initial",
+      "outcome": "scanned",
+      "verdict": "malicious",
+      "engines": [
+        {
+          "engine": "rspamd",
+          "outcome": "suspicious"
+        },
+        {
+          "engine": "attachment",
+          "outcome": "malicious"
+        },
+        {
+          "engine": "url",
+          "outcome": "clean"
+        }
+      ],
+      "reasonCodes": ["attachment.clamav_match", "spam.score"],
+      "completedAt": "2026-11-13T09:14:03.010Z"
+    }
+  }
+}
+```
+
+**`email.threat.detected`** — The final verdict of a message is spam, suspicious or malicious, or the sandbox found a malicious attachment after delivery. Severity: spam → low, suspicious → medium, malicious → high. Filters: `directions`, `domainIds`, `minSeverity`, `verdicts`.
+
+```json
+{
+  "id": "8754c726-2d7b-80f4-a78d-9cfb9653d672",
+  "type": "email.threat.detected",
+  "version": 1,
+  "occurredAt": "2026-11-13T09:14:03.120Z",
+  "organizationId": "0192f0c4-7d1e-7b6a-9c55-6f3e2a1d4b10",
+  "data": {
+    "message": "<the message object, as in email.received>",
+    "detection": {
+      "stage": "scan",
+      "verdict": "malicious",
+      "riskScore": 940,
+      "reasonCodes": ["attachment.clamav_match"],
+      "lifecycleRound": 0,
+      "finalAction": "quarantine",
+      "attachment": null
+    }
+  }
+}
+```
+
+**`email.policy.triggered`** — At least one tenant policy rule matched a message. Severity: reject/quarantine/require_approval dispositions → medium, otherwise low. Filters: `directions`, `domainIds`, `minSeverity`.
+
+```json
+{
+  "id": "ac346d1b-045e-8624-bc51-dd103bd44770",
+  "type": "email.policy.triggered",
+  "version": 1,
+  "occurredAt": "2026-11-13T09:14:03.120Z",
+  "organizationId": "0192f0c4-7d1e-7b6a-9c55-6f3e2a1d4b10",
+  "data": {
+    "message": "<the message object, as in email.received>",
+    "policy": {
+      "disposition": "quarantine",
+      "finalAction": "quarantine",
+      "decisionSource": "tenant_rule",
+      "decisive": {
+        "policyId": "0192f0c4-9b22-7d3f-8e40-2b3c4d5e6f70",
+        "versionNo": 3,
+        "ruleId": "block-macros"
+      },
+      "matchedRules": [
+        {
+          "policyId": "0192f0c4-9b22-7d3f-8e40-2b3c4d5e6f70",
+          "versionNo": 3,
+          "ruleId": "block-macros"
+        }
+      ],
+      "actions": ["ALERT", "TAG"],
+      "overrideApplied": false,
+      "lifecycleRound": 0,
+      "evaluatedAt": "2026-11-13T09:14:03.120Z"
+    }
+  }
+}
+```
+
+**`email.quarantined`** — A message was quarantined (by policy or manually) for one or more recipients. Severity: medium. Filters: `directions`, `domainIds`, `minSeverity`.
+
+```json
+{
+  "id": "d920d55c-adb1-879a-a804-bd261487a9bc",
+  "type": "email.quarantined",
+  "version": 1,
+  "occurredAt": "2026-11-13T09:14:03.120Z",
+  "organizationId": "0192f0c4-7d1e-7b6a-9c55-6f3e2a1d4b10",
+  "data": {
+    "message": "<the message object, as in email.received>",
+    "quarantine": {
+      "origin": "policy",
+      "lifecycleRound": 0,
+      "entryCount": 2,
+      "kinds": {
+        "quarantine": 2,
+        "review": 0
+      },
+      "reasons": ["malware"],
+      "entryIds": ["0192f0c4-a133-7e40-9f51-3c4d5e6f7081", "0192f0c4-a133-7e40-9f51-3c4d5e6f7082"],
+      "earliestExpiresAt": "2026-12-13T09:14:03.120Z"
+    }
+  }
+}
+```
+
+**`email.released`** — Quarantined recipients of a message were released for delivery. Severity: info. Filters: `directions`, `domainIds`, `minSeverity`.
+
+```json
+{
+  "id": "77ed1c49-9250-8cbf-8c1d-18871fd483a3",
+  "type": "email.released",
+  "version": 1,
+  "occurredAt": "2026-11-13T09:14:03.120Z",
+  "organizationId": "0192f0c4-7d1e-7b6a-9c55-6f3e2a1d4b10",
+  "data": {
+    "message": "<the message object, as in email.received>",
+    "release": {
+      "releaseId": "0192f0c4-b244-7f51-8a62-4d5e6f708192",
+      "mode": "operator",
+      "entryIds": ["0192f0c4-a133-7e40-9f51-3c4d5e6f7081"],
+      "recipientCount": 1,
+      "deliverySeq": 1,
+      "approvedAt": "2026-11-13T10:02:11.000Z"
+    }
+  }
+}
+```
+
+**`email.delivered`** — Delivery of a message completed (all or some recipients delivered). Severity: info. Filters: `directions`, `domainIds`, `minSeverity`.
+
+```json
+{
+  "id": "f5ceaea5-8aa8-860f-9419-cc09d9e58af2",
+  "type": "email.delivered",
+  "version": 1,
+  "occurredAt": "2026-11-13T09:14:03.120Z",
+  "organizationId": "0192f0c4-7d1e-7b6a-9c55-6f3e2a1d4b10",
+  "data": {
+    "message": "<the message object, as in email.received>",
+    "delivery": {
+      "outcome": "complete",
+      "lifecycleRound": 0,
+      "recipients": {
+        "delivered": 2,
+        "failed": 0,
+        "bounced": 0,
+        "expired": 0,
+        "suppressed": 0,
+        "quarantined": 0,
+        "discarded": 0,
+        "other": 0
+      },
+      "completedAt": "2026-11-13T09:14:05.900Z"
+    }
+  }
+}
+```
+
+**`email.rejected`** — A stored message was rejected by policy, quarantine or delivery. Severity: low. Filters: `directions`, `domainIds`, `minSeverity`.
+
+```json
+{
+  "id": "a1810c49-cd34-8343-999f-a58078dd4842",
+  "type": "email.rejected",
+  "version": 1,
+  "occurredAt": "2026-11-13T09:14:03.120Z",
+  "organizationId": "0192f0c4-7d1e-7b6a-9c55-6f3e2a1d4b10",
+  "data": {
+    "message": "<the message object, as in email.received>",
+    "rejection": {
+      "reason": "policy_reject",
+      "stage": "policy",
+      "lifecycleRound": 0,
+      "rejectedAt": "2026-11-13T09:14:03.120Z"
+    }
+  }
+}
+```
+
+**`domain.verified`** — Ownership of a tenant domain was verified. Severity: info. Filters: `domainIds`, `minSeverity`.
+
+```json
+{
+  "id": "eb32f691-c117-821c-a76c-3ad4b457676a",
+  "type": "domain.verified",
+  "version": 1,
+  "occurredAt": "2026-11-13T09:14:03.120Z",
+  "organizationId": "0192f0c4-7d1e-7b6a-9c55-6f3e2a1d4b10",
+  "data": {
+    "domain": {
+      "id": "0192f0c4-7d1e-7b6a-9c55-6f3e2a1d4b11",
+      "name": "acme.example",
+      "status": "verified"
+    },
+    "previousStatus": "pending_verification",
+    "verifiedAt": "2026-11-13T08:00:00.000Z"
+  }
+}
+```
+
+**`domain.dns.failed`** — Domain verification failed, or a DNS record of a verified domain stopped validating. Severity: verification → medium, mx/spf/dkim/dmarc records → high, other records → medium. Filters: `domainIds`, `minSeverity`.
+
+```json
+{
+  "id": "b6ac9409-25c8-8130-80cc-e6bdd0a20dc4",
+  "type": "domain.dns.failed",
+  "version": 1,
+  "occurredAt": "2026-11-13T09:14:03.120Z",
+  "organizationId": "0192f0c4-7d1e-7b6a-9c55-6f3e2a1d4b10",
+  "data": {
+    "domain": "<the domain object, as in domain.verified>",
+    "failure": {
+      "kind": "records_failed",
+      "reason": null,
+      "records": [
+        {
+          "purpose": "spf",
+          "recordKey": "spf",
+          "previousStatus": "valid",
+          "status": "invalid"
+        }
+      ],
+      "checkedAt": "2026-11-13T09:00:00.000Z"
+    }
+  }
+}
+```
+
+**`webhook.ping`** — Test event sent by POST /webhooks/{id}/test; not subscribable. Severity: info. Filters: none (not subscribable).
+
+```json
+{
+  "id": "e68adad7-c6c5-87f0-b0f3-62c2d01dd259",
+  "type": "webhook.ping",
+  "version": 1,
+  "occurredAt": "2026-11-13T09:14:03.120Z",
+  "organizationId": "0192f0c4-7d1e-7b6a-9c55-6f3e2a1d4b10",
+  "data": {
+    "subscriptionId": "0192f0c4-c355-7062-9b73-5e6f708192a3",
+    "requestedAt": "2026-11-13T09:20:00.000Z"
+  }
+}
+```
+
+Not events (by design, step 6.2 §11): SMTP-time refusals (no message is stored), per-recipient delivery outcomes (`email.delivered` carries counts; per-recipient detail is `GET /messages/{id}/recipients`), URL clicks, DLP incidents, archive and connector events (8.1, 8.2), quarantine adoption of pre-5.3 messages.
+
+### Notifications (`notifications` tag, step 6.2)
+
+Security alerts by e-mail ([ADR-0056](../architecture/adr/0056-security-alert-notifications.md)): **threat detected** (a threat at or above the configured severity), **DNS record failures** (a verified domain's verification, MX, SPF, DKIM or DMARC record stops validating) and **webhook disabled** (sustained delivery failure). They go to the active, verified users of your organization holding the kind's permission (`quarantine:approve`, `domain:manage`, `webhook:manage`) who did not opt out, plus `organization_settings.notification_email` when `includeOrganizationContact` is on; at most one alert per organization, kind, scope (the domain, the webhook) and throttle window, the next one saying how many events it summarizes. Alerts carry ids, counts, the verdict and links into the portal: never a subject, address, URL from mail, file name, endpoint URL or secret. The existing policy alerts (5.2) and quarantine admin alerts, approval requests and digests (5.3) are unchanged and honour the same preference center.
+
+| Method | Path                         | Permission             | Notes                                                                                                                                                                                                                                                                                                                                                                                    |
+| ------ | ---------------------------- | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/notifications/settings`    | `organization:read`, K | `{ settings (effective), stored (or null), invalidStored, rowVersion (0 = nothing stored), updatedAt, defaults, bounds }`                                                                                                                                                                                                                                                                |
+| PUT    | `/notifications/settings`    | `settings:manage`, K   | `{ settings, expectedRowVersion }` replaces the whole document (`{}` = defaults). `400 notification_settings_invalid` with `violations` (path, rule), `409 notification_settings_conflict` with `currentRowVersion`. Audit `notification.settings_updated` (changed paths only)                                                                                                          |
+| GET    | `/notifications/preferences` | authenticated, **U**   | Your own: `{ optOut, quarantineDigestOptOut, quarantineDigestOptOutAllowed, kinds, invalidStored }`. API keys and platform overrides get `403`                                                                                                                                                                                                                                           |
+| PUT    | `/notifications/preferences` | authenticated, **U**   | `{ optOut: kinds (unique), quarantineDigestOptOut }`. Kinds: `threat_detected`, `domain_dns_failed`, `webhook_disabled`, `policy_alert`, `quarantine_admin_alert`, `quarantine_approval_requested`. The digest opt-out is the same setting as `/quarantine/me/preferences` and needs the organization's `digest.allowOptOut` (`400` otherwise). Audit `notification.preferences_updated` |
+
+Settings document (strict, every key optional; defaults in brackets): `{ alerts: { threatDetected: { enabled [true], minSeverity: medium | high [high], throttleMinutes: 15–1440 [60] }, domainDnsFailed: { enabled [true], throttleMinutes: 60–10080 [360] }, webhookDisabled: { enabled [true], throttleMinutes: 60–10080 [1440] }, includeOrganizationContact [true] } }`. Decisions on your own release requests and sender notices are not optional. SMS, chat and push channels are not offered.
+
+```bash
+curl -s -X PUT "$API/api/v1/notifications/settings" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"settings":{"alerts":{"threatDetected":{"minSeverity":"medium","throttleMinutes":30}}},"expectedRowVersion":0}'
+# → 200 {"settings":{"alerts":{"threatDetected":{"enabled":true,"minSeverity":"medium","throttleMinutes":30},…}},"rowVersion":1,…}
+```
+
 ## Conventions (step 6.1)
 
 Binding decisions: [ADR-0050](../architecture/adr/0050-api-conventions.md) (resources, status codes, envelope, errors, Request-Id, strict validation, deprecation, OpenAPI), [ADR-0051](../architecture/adr/0051-pagination-cursor-filtering-sorting.md) (pagination, filters, sorting, scan budget), [ADR-0052](../architecture/adr/0052-rate-limiting-and-idempotency.md) (rate limits, idempotency), [ADR-0053](../architecture/adr/0053-public-internal-api-boundary.md) (public/internal boundary); design [docs/plan/steps/18-rest-api.md](../plan/steps/18-rest-api.md). `apps/api/test/route-inventory.e2e.test.ts` enforces them for every route.
@@ -912,7 +1363,7 @@ Every authenticated request counts against fixed 60-second windows in Redis ([AD
 | `tenant`    | each organization (under an override: the target)                                                 | the organization's `api_requests_per_minute` (plan: 60 / 300 / 1 200 / 3 000; platform overrides possible), clamped to `[API_RATE_TENANT_MIN_PER_MINUTE, …_MAX_…]` (10, 10 000); `API_RATE_TENANT_DEFAULT_PER_MINUTE` (300) without a value |
 | `sensitive` | per principal, the [sensitive mutations](#idempotency) and secret-bearing routes                  | `API_RATE_SENSITIVE_PER_MINUTE` (30)                                                                                                                                                                                                        |
 | `expensive` | per principal: reports, `/billing/usage`, threat lookup, `/attachments`, policy test and dry-runs | `API_RATE_EXPENSIVE_PER_MINUTE` (20)                                                                                                                                                                                                        |
-| `route`     | route-specific limits (authentication, BEC feedback, DLP tests, domain checks, quarantine, …)     | per route, unchanged                                                                                                                                                                                                                        |
+| `route`     | route-specific limits (authentication, BEC feedback, DLP tests, domain checks, quarantine, …)     | per route, unchanged; since step 6.2 also `POST /webhooks/{id}/test` per webhook (`WEBHOOK_TEST_REQUESTS_PER_MINUTE`, 6) and `POST /webhooks/{id}/replays` per organization (`WEBHOOK_REPLAY_REQUESTS_PER_HOUR`, 10 per hour)               |
 
 Every authenticated response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset` of the most restrictive counter. Over a limit: `429 rate_limited` with `scope` and `Retry-After`; wait that long. Public routes (login and the other **P** routes, `GET /meta`) keep their per-IP limits. When the rate-limit store is unreachable the api answers `503 service_unavailable` (fail closed). Operations: [runbook](../runbooks/api-rate-limits-and-reports.md).
 
@@ -922,11 +1373,12 @@ Send `Idempotency-Key: <1–128 chars of [A-Za-z0-9._:-]>` (unique per organizat
 
 | Mechanism (`x-eg-idempotency`)                                                                                       | Routes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | -------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `required` — exactly once (effect, audit row and stored response in one transaction)                                 | `POST /messages/{id}/rescan`, `POST /messages/{id}/release`; quarantine `POST /quarantine/bulk`, `POST /quarantine/entries`, `POST /quarantine/entries/{id}/release`, `…/request-release`, `…/reject`, `…/delete`, `POST /quarantine/approvals/{id}/approve`, `…/deny`, `…/cancel`, `POST /quarantine/me/entries/{id}/release`, `…/request-release`; `POST /recipients/suppressions`, `DELETE /recipients/suppressions/{id}`                                                                                                                                                                                                                                                                                                                                                      |
+| `required` — exactly once (effect, audit row and stored response in one transaction)                                 | `POST /messages/{id}/rescan`, `POST /messages/{id}/release`; quarantine `POST /quarantine/bulk`, `POST /quarantine/entries`, `POST /quarantine/entries/{id}/release`, `…/request-release`, `…/reject`, `…/delete`, `POST /quarantine/approvals/{id}/approve`, `…/deny`, `…/cancel`, `POST /quarantine/me/entries/{id}/release`, `…/request-release`; `POST /recipients/suppressions`, `DELETE /recipients/suppressions/{id}`; (step 6.2) `POST /webhooks`, `DELETE /webhooks/{id}`, `POST /webhooks/{id}/rotate-secret`, `POST /webhooks/{id}/deliveries/{deliveryId}/replay`, `POST /webhooks/{id}/replays`                                                                                                                                                                      |
 | `legacy` — at most once per key (a reservation row before the handler, the response stored after it; since step 6.1) | `POST /domains/{id}/dkim/rotate`; `PATCH /organizations/{id}/status`, `POST /organizations/{id}/deletion`, `POST /organizations/{id}/deletion/confirm`; `POST /users/invitations`, `POST /users/{id}/invitation`, `POST /users/{id}/mfa/reset`; `POST /policies/{id}/versions/{n}/publish`, `…/activate`; `POST /risk-scoring/profile/versions/{id}/publish`, `…/activate`, `POST /risk-scoring/profile/reset`; `DELETE /bec/history`; `DELETE /dlp/evidence`, `DELETE /messages/{id}/scans/{scanId}/dlp-evidence`, `PUT` and `DELETE /dlp/compliance/aadhaar`; `POST /platform/dead-letters/replay`, `POST /platform/attachment-rescans`, `POST /platform/organizations/{orgId}/messages/{id}/scan-training`, `POST /platform/threat-hashes`, `POST /platform/threat-indicators` |
 
 - The `legacy` routes accepted no key before step 6.1. While the deprecation switch `API_IDEMPOTENCY_LEGACY_MODE=warn` is set (default `enforce`), a keyless call is processed as before and answered with `Deprecation: true` and `Link: <…/docs/api/README.md#idempotency>; rel="deprecation"`. A `legacy` request whose process crashed between the effect and the stored response blocks the key for `API_IDEMPOTENCY_PENDING_TTL_SECONDS` (300 s); a retry after that may repeat the effect.
 - **Secret-bearing responses are never stored**, so these routes take no key: `POST /api-keys`, `POST /smtp-connectors`, `POST /smtp-connectors/{id}/rotate-secret`, `POST /platform/overrides`, `POST /auth/mfa/totp/setup`, `POST /auth/mfa/recovery-codes` (`x-eg-returns-secret: true`, class `sensitive`) and the public authentication routes (single-use tokens, uniqueness and their rate limits protect them).
+- **Exception (step 6.2, [ADR-0057](../architecture/adr/0057-idempotent-secret-bearing-routes-redacted-replay.md)):** `POST /webhooks` and `POST /webhooks/{id}/rotate-secret` return a signing secret **and** require an `Idempotency-Key` (`x-eg-secret-replay: redacted`). The stored response is the redacted representation (`secret: null`); a replay returns it with `Idempotency-Replayed: true` and never generates, re-encrypts or reveals a secret. A client that lost the original response rotates the secret with a new key.
 - `POST /quarantine/entries/{id}/download-grants` (a single-use grant) and `PUT /quarantine/settings` (a replace with `expectedRowVersion`) take no key.
 
 ## Audit of sensitive reads
@@ -935,20 +1387,25 @@ Every mutation writes an `audit_logs` row in its transaction. Since step 6.1 the
 
 ## Not offered, and deferred
 
-| Area                                                               | Status                                                                                                                                              |
-| ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Archive, journal search, retention policies, legal holds, export   | Step 8.1 (the `archive:*` permissions and tables exist; no route)                                                                                   |
-| Webhooks, notification preferences                                 | Step 6.2                                                                                                                                            |
-| Microsoft 365 / Google Workspace connectors                        | Step 8.2. **Integration surfaces today:** organization API keys (`/api-keys`) and SMTP connectors (`/smtp-connectors`)                              |
-| Deployment manager                                                 | Step 8.3                                                                                                                                            |
-| `delivery_routes` management                                       | Not offered: no service reads the table (inbound destinations are `/domains/{id}/destinations`, outbound relay is SMTP connectors)                  |
-| Tenant threat indicators, IP/domain/URL reputation, brand lists    | Not offered: no engine reads tenant rows; brand lists are code constants. Use the lookup, BEC trusted senders, DLP exceptions and policy conditions |
-| Prices, invoices, payments, subscriptions                          | Not offered: no such data exists (`pricing: null`)                                                                                                  |
-| Total counts, offsets, field selection, ETags, bulk message export | Not offered (unbounded at scale; field selection and ETags may come with the portal, 7.x)                                                           |
-| Signing the v0 cursors                                             | Follow-up (14.1 or a 7.x need)                                                                                                                      |
-| `sort` and the shared filter operators on the 33 v0 lists          | Not offered in 6.1: fixed order and module-specific filters ([Filtering and sorting](#filtering-and-sorting)); follow-up with the portal (7.x)      |
+| Area                                                                                                                                                                             | Status                                                                                                                                                          |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Archive, journal search, retention policies, legal holds, export                                                                                                                 | Step 8.1 (the `archive:*` permissions and tables exist; no route)                                                                                               |
+| Microsoft 365 / Google Workspace connectors                                                                                                                                      | Step 8.2. **Integration surfaces today:** organization API keys (`/api-keys`), SMTP connectors (`/smtp-connectors`) and signed webhooks (`/webhooks`, step 6.2) |
+| Admin-portal screens for webhooks, delivery history and preferences                                                                                                              | Steps 7.x (the API is ready)                                                                                                                                    |
+| Webhook events for SMTP-time refusals, per-recipient deliveries, URL clicks, DLP incidents; payload version 2; custom headers or mTLS; an egress proxy; SMS, chat or push alerts | Not offered in 6.2 ([Webhooks](#webhooks-webhooks-tag-step-62)); archive events 8.1, connector events 8.2                                                       |
+| Deployment manager                                                                                                                                                               | Step 8.3                                                                                                                                                        |
+| `delivery_routes` management                                                                                                                                                     | Not offered: no service reads the table (inbound destinations are `/domains/{id}/destinations`, outbound relay is SMTP connectors)                              |
+| Tenant threat indicators, IP/domain/URL reputation, brand lists                                                                                                                  | Not offered: no engine reads tenant rows; brand lists are code constants. Use the lookup, BEC trusted senders, DLP exceptions and policy conditions             |
+| Prices, invoices, payments, subscriptions                                                                                                                                        | Not offered: no such data exists (`pricing: null`)                                                                                                              |
+| Total counts, offsets, field selection, ETags, bulk message export                                                                                                               | Not offered (unbounded at scale; field selection and ETags may come with the portal, 7.x)                                                                       |
+| Signing the v0 cursors                                                                                                                                                           | Follow-up (14.1 or a 7.x need)                                                                                                                                  |
+| `sort` and the shared filter operators on the 33 v0 lists                                                                                                                        | Not offered in 6.1: fixed order and module-specific filters ([Filtering and sorting](#filtering-and-sorting)); follow-up with the portal (7.x)                  |
 
 ## Changelog
+
+### Step 6.2 (2026-11-13)
+
+Additive only: 17 new operations (266 in total) under the `webhooks` and `notifications` tags — webhook subscriptions with signed deliveries (`EG-Signature`, secret shown once, rotation with overlap), the event catalogue, the delivery history with attempts, single and range replays, test pings, security-alert settings and the personal preference center. New permission `webhook:read` (organization administrators, security analysts, compliance auditors); `webhook:manage` now gates the webhook mutations. `POST /webhooks` and `POST /webhooks/{id}/rotate-secret` are the two secret-bearing routes that take an `Idempotency-Key`, with a redacted replay (ADR-0057). No existing operation changed (the snapshot test compares every operationId).
 
 ### Step 6.1 (2026-11-12)
 

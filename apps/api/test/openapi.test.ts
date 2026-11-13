@@ -196,8 +196,9 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     }
     expect(failures).toEqual([]);
     // 231 operations before step 6.1, minus the two probes (D13), plus the 20 new routes of
-    // §3.3 (step 6.1 §1.2): 249, all under /api/v1.
-    expect(count).toBe(249);
+    // §3.3 (step 6.1 §1.2): 249; plus the 17 webhook and notification routes of step 6.2
+    // (docs/plan/steps/19-webhooks-notifications.md §6.1): 266, all under /api/v1.
+    expect(count).toBe(266);
   });
 
   it('gives every /api/v1 operation a tag', () => {
@@ -872,8 +873,60 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
         expect(['required', 'legacy'], path).toContain(op['x-eg-idempotency']);
       }
     }
-    // §3.5: 13 transactional since 3.3/5.3, 2 new transactional, 22 legacy (interceptor).
-    expect(keyed).toHaveLength(37);
+    // §3.5: 13 transactional since 3.3/5.3, 2 new transactional, 22 legacy (interceptor);
+    // step 6.2: 5 transactional webhook routes (create, delete, rotate, replay, range replay).
+    expect(keyed).toHaveLength(42);
+  });
+
+  it('documents the 17 step 6.2 routes with their tags, permissions and the redacted replay (§6.1, ADR-0057)', () => {
+    const byKey = new Map(operations(doc).map((op) => [op.key, op]));
+    const expected: Record<string, [string, string | null]> = {
+      'GET /api/v1/webhooks': ['webhooks', 'webhook:read'],
+      'POST /api/v1/webhooks': ['webhooks', 'webhook:manage'],
+      'GET /api/v1/webhooks/event-types': ['webhooks', 'webhook:read'],
+      'GET /api/v1/webhooks/{webhookId}': ['webhooks', 'webhook:read'],
+      'PATCH /api/v1/webhooks/{webhookId}': ['webhooks', 'webhook:manage'],
+      'DELETE /api/v1/webhooks/{webhookId}': ['webhooks', 'webhook:manage'],
+      'POST /api/v1/webhooks/{webhookId}/rotate-secret': ['webhooks', 'webhook:manage'],
+      'POST /api/v1/webhooks/{webhookId}/test': ['webhooks', 'webhook:manage'],
+      'GET /api/v1/webhooks/{webhookId}/deliveries': ['webhooks', 'webhook:read'],
+      'GET /api/v1/webhooks/{webhookId}/deliveries/{deliveryId}': ['webhooks', 'webhook:read'],
+      'POST /api/v1/webhooks/{webhookId}/deliveries/{deliveryId}/replay': [
+        'webhooks',
+        'webhook:manage',
+      ],
+      'POST /api/v1/webhooks/{webhookId}/replays': ['webhooks', 'webhook:manage'],
+      'GET /api/v1/webhooks/{webhookId}/replays/{replayId}': ['webhooks', 'webhook:read'],
+      'GET /api/v1/notifications/settings': ['notifications', 'organization:read'],
+      'PUT /api/v1/notifications/settings': ['notifications', 'settings:manage'],
+      'GET /api/v1/notifications/preferences': ['notifications', null],
+      'PUT /api/v1/notifications/preferences': ['notifications', null],
+    };
+    for (const [key, [tag, permission]] of Object.entries(expected)) {
+      const op = byKey.get(key) as
+        (ReturnType<typeof operations>[number] & Record<string, unknown>) | undefined;
+      expect(op?.tags, key).toEqual([tag]);
+      expect(op?.security.length, key).toBeGreaterThan(0);
+      const raw = (doc.paths[key.split(' ')[1]!] as Record<string, Record<string, unknown>>)[
+        key.split(' ')[0]!.toLowerCase()
+      ]!;
+      expect(raw['x-eg-permissions'], key).toEqual(
+        permission === null ? undefined : { mode: 'all', permissions: [permission] },
+      );
+    }
+    const secretOps = ['/api/v1/webhooks', '/api/v1/webhooks/{webhookId}/rotate-secret'].map(
+      (path) => (doc.paths[path] as Record<string, Record<string, unknown>>).post!,
+    );
+    for (const op of secretOps) {
+      expect(op['x-eg-returns-secret']).toBe(true);
+      expect(op['x-eg-secret-replay']).toBe('redacted');
+      expect(op['x-eg-idempotency']).toBe('required');
+      expect(op['x-eg-rate-class']).toBe('sensitive');
+    }
+    const tags = new Map((doc.tags ?? []).map((t) => [t.name, t.description ?? '']));
+    expect(tags.get('webhooks')).toContain('Step 6.2');
+    expect(tags.get('notifications')).toContain('Step 6.2');
+    expect(doc.info.description).toContain('x-eg-secret-replay: redacted');
   });
 
   it('matches the committed snapshot docs/api/openapi.json', async () => {

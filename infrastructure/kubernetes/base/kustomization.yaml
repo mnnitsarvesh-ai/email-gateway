@@ -36,6 +36,11 @@ resources:
   - quarantine-worker.yaml
   - delivery-worker.yaml
   - notification-worker.yaml
+  # Webhooks (step 6.2 W1, ADR-0055; docs/deployment/webhooks.md): the webhook-worker image as two
+  # Deployments: webhook-fanout (consumes email.webhooks) and webhook-delivery (signs and POSTs
+  # through the SSRF-guarded client; the only workload with Internet egress on 443 for webhooks).
+  - webhook-fanout.yaml
+  - webhook-delivery.yaml
   - archive-worker.yaml
   # Outbox relay and reconciliation (step 3.2, ADR-0023).
   - event-relay.yaml

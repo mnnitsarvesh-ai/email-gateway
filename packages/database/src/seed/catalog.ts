@@ -198,6 +198,14 @@ export const PERMISSIONS = Object.freeze([
     key: 'delivery:suppression_manage',
     description: 'Add and remove recipient suppressions (step 6.1)',
   },
+  // Step 6.2 (docs/plan/steps/19-webhooks-notifications.md §2 D): read side of the webhook
+  // routes (webhook:manage gates every mutation). organization_admin and super_admin hold it
+  // through TENANT_PERMISSIONS / ALL_PERMISSIONS; security_analyst and compliance_auditor get it
+  // explicitly. NOT in TENANT_READ_PERMISSIONS: endpoint URLs may carry receiver tokens.
+  {
+    key: 'webhook:read',
+    description: 'View webhook subscriptions, event catalogue and delivery history (step 6.2)',
+  },
 ] as const satisfies readonly PermissionDef[]);
 
 /** Every permission key of the catalog. */
@@ -364,6 +372,7 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'dlp:manage',
       'dlp:evidence_read',
       'threat_intel:read',
+      'webhook:read',
     ],
   },
   {
@@ -396,6 +405,7 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'dlp:read',
       'dlp:evidence_read',
       'billing:read',
+      'webhook:read',
     ],
   },
   {

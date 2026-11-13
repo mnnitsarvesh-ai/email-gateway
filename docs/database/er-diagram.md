@@ -82,6 +82,10 @@ flowchart LR
     message_outbox[(message_outbox P)]
     audit_logs[(audit_logs P)]
     api_idempotency_keys
+    webhook_subscriptions
+    webhook_events[(webhook_events P)]
+    webhook_deliveries[(webhook_deliveries P)]
+    notification_settings[notification_settings, notification_user_preferences, notification_alert_windows]
   end
   organization_plans --> organizations
   organizations --> users
@@ -134,6 +138,10 @@ flowchart LR
   email_messages -.-> policy_execution_logs
   organizations -.-> audit_logs
   organizations -.-> api_idempotency_keys
+  organizations --> webhook_subscriptions
+  webhook_subscriptions -.-> webhook_deliveries
+  webhook_events -.-> webhook_deliveries
+  organizations --> notification_settings
 ```
 
 Solid arrows are foreign keys, dotted arrows are logical references. Cylinders (`P`) are partitioned tables.
@@ -1163,6 +1171,15 @@ erDiagram
   organizations |o..o{ audit_logs : "NULL = platform action"
   organizations ||--o{ webhook_subscriptions : ""
   webhook_subscriptions ||..o{ webhook_deliveries : "subscription_id"
+  webhook_events ||..o{ webhook_deliveries : "event_id + occurred_at"
+  webhook_deliveries ||..o{ webhook_delivery_attempts : "delivery_id + event_occurred_at"
+  webhook_subscriptions ||--o{ webhook_replays : "RESTRICT"
+  organizations ||--o{ webhook_replays : "RESTRICT"
+  webhook_replays |o..o{ webhook_deliveries : "replay_id"
+  organizations ||--o| notification_settings : "RESTRICT"
+  users |o--o{ notification_settings : "updated_by SET NULL"
+  users ||--o| notification_user_preferences : "CASCADE"
+  organizations ||--o{ notification_alert_windows : "RESTRICT"
   users |o--o{ system_settings : "updated_by"
   message_outbox {
     bigint id PK
@@ -1201,12 +1218,59 @@ erDiagram
     bigint id PK
     char public_id UK
     bigint organization_id FK
+    enum status "active, paused, disabled, deleted"
+    smallint secret_version
+    int row_version
+  }
+  webhook_events {
+    bigint id PK
+    datetime occurred_at PK "PARTITIONED month"
+    char event_id "UQ with occurred_at (deterministic)"
+    bigint organization_id
+    text payload_json "guarded envelope"
   }
   webhook_deliveries {
     bigint id PK
     datetime event_occurred_at PK "PARTITIONED month"
+    char public_id
     bigint subscription_id
     char event_id
+    smallint delivery_seq "UQ (subscription_id, event_id, event_occurred_at, delivery_seq)"
+    enum status "pending, succeeded, failed, dead, cancelled"
+  }
+  webhook_delivery_attempts {
+    bigint id PK
+    datetime attempted_at PK "PARTITIONED month"
+    bigint delivery_id
+    smallint attempt_no
+    enum outcome
+  }
+  webhook_replays {
+    bigint id PK
+    char public_id UK
+    bigint organization_id FK
+    bigint subscription_id FK
+    enum status "queued, running, completed, failed, cancelled"
+  }
+  notification_settings {
+    bigint id PK
+    bigint organization_id FK "UQ"
+    json settings
+    int row_version
+  }
+  notification_user_preferences {
+    bigint id PK
+    bigint organization_id FK
+    bigint user_id FK "UQ"
+    json preferences "optOut kinds"
+  }
+  notification_alert_windows {
+    bigint id PK
+    bigint organization_id FK
+    varchar kind "UQ with scope_key, window_start"
+    varchar scope_key
+    datetime window_start
+    int event_count
   }
   system_settings {
     bigint id PK
@@ -1224,4 +1288,4 @@ erDiagram
   }
 ```
 
-`message_idempotency` stands alone: its key is the consumer name and the event id. So does `message_consumer_progress` (step 3.2 review round 1), with the same key. `stream_cursors` (step 2.3) holds the durable positions of the delivery-worker's outbox pollers and Postfix log tailers; it references nothing. `maintenance_watermarks` belongs to the partition-maintenance job (the registry purge watermark, see [retention.md](retention.md)). `api_idempotency_keys` (step 3.3 L11) is the api's Idempotency-Key store: unpartitioned and without a foreign key (the row outlives nothing it references and is purged one day after it expires), one row per organization and key.
+`message_idempotency` stands alone: its key is the consumer name and the event id. So does `message_consumer_progress` (step 3.2 review round 1), with the same key. `stream_cursors` (step 2.3) holds the durable positions of the delivery-worker's outbox pollers and Postfix log tailers; it references nothing. `maintenance_watermarks` belongs to the partition-maintenance job (the registry purge watermark, see [retention.md](retention.md)). `api_idempotency_keys` (step 3.3 L11) is the api's Idempotency-Key store: unpartitioned and without a foreign key (the row outlives nothing it references and is purged one day after it expires), one row per organization and key. Step 6.2: `webhook_events` and `webhook_delivery_attempts` are partitioned (logical references only); `webhook_replays` and the three notification tables are unpartitioned with real foreign keys.

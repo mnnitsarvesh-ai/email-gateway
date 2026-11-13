@@ -33,6 +33,9 @@ const SECRET_FIELDS = [
   'privateKey',
   'privateKeyPem',
   'privateKeyCiphertext',
+  // Webhook signing secrets at rest (step 6.2 W7).
+  'secretCiphertext',
+  'previousSecretCiphertext',
 ];
 
 /**

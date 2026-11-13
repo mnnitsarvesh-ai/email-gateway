@@ -14,7 +14,7 @@
 // - Timestamps are DATETIME(3) UTC. Append-only tables have no `updated_at`.
 // - snake_case table and column names via @@map / @map. Enum values are only ever appended.
 // - No email bodies or attachment content: only S3 object keys, sizes and hashes.
-// - Partitioned tables (31, marked PARTITIONED below) use a composite primary key
+// - Partitioned tables (33, marked PARTITIONED below) use a composite primary key
 //   (id, <partition column>), have no foreign keys in either direction, and every unique key
 //   ends with the partition column. The PARTITION BY clause is hand-written in the migration
 //   SQL; Prisma does not model partitions. Child rows of a message copy the message's
@@ -1035,6 +1035,9 @@ enum WebhookStatus {
   active
   paused
   disabled
+  /// Step 6.2 (W5): soft delete; hard-deleted by the webhook-worker maintenance after
+  /// WEBHOOK_DELETED_RETENTION_DAYS.
+  deleted
 }
 
 enum WebhookDeliveryStatus {
@@ -1042,6 +1045,52 @@ enum WebhookDeliveryStatus {
   succeeded
   failed
   dead
+  /// Step 6.2 (W5, W11): the subscription was paused-then-disabled or deleted before delivery.
+  cancelled
+}
+
+/// Step 6.2 (W12): what created a delivery row.
+enum WebhookDeliveryTrigger {
+  event
+  replay
+  test
+}
+
+/// Step 6.2 (W9, W10): result of one HTTP delivery attempt.
+enum WebhookAttemptOutcome {
+  succeeded
+  http_error
+  redirect
+  timeout
+  dns_error
+  connection_error
+  tls_error
+  blocked
+  too_large
+  secret_unavailable
+}
+
+/// Step 6.2 (§5): severity of a public webhook event.
+enum WebhookEventSeverity {
+  info
+  low
+  medium
+  high
+}
+
+/// Step 6.2 (W12): state of a time-range replay.
+enum WebhookReplayStatus {
+  queued
+  running
+  completed
+  failed
+  cancelled
+}
+
+/// Step 6.2 (W12): principal kind that requested a replay.
+enum WebhookRequesterType {
+  user
+  api_key
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1144,6 +1193,10 @@ model Organization {
   archiveRetentionPolicies ArchiveRetentionPolicy[]
   archiveLegalHolds        ArchiveLegalHold[]
   webhookSubscriptions     WebhookSubscription[]
+  webhookReplays           WebhookReplay[]
+  notificationSettings     NotificationSettings?
+  notificationUserPrefs    NotificationUserPreference[]
+  notificationAlertWindows NotificationAlertWindow[]
   scanEngineSettings       ScanEngineSetting[]
   attachmentRescanJobs     AttachmentRescanJob[]
   becExecutiveProfiles     BecExecutiveProfile[]
@@ -1307,6 +1360,8 @@ model User {
   createdLegalHolds            ArchiveLegalHold[]          @relation("LegalHoldCreatedBy")
   releasedLegalHolds           ArchiveLegalHold[]          @relation("LegalHoldReleasedBy")
   createdWebhooks              WebhookSubscription[]
+  updatedNotificationSettings  NotificationSettings[]      @relation("NotificationSettingsUpdatedBy")
+  notificationPreference       NotificationUserPreference? @relation("NotificationUserPreferenceUser")
   updatedSystemSettings        SystemSetting[]
   createdSmtpConnectors        SmtpConnector[]
   createdRecipients            DomainRecipientAddress[]
@@ -4767,52 +4822,276 @@ model AuditLog {
   @@map("audit_logs")
 }
 
-/// `event_types` is an array of event type names. The HMAC secret is application-encrypted.
+/// Tenant webhook endpoint (step 1.1; extended by step 6.2 §3, W5-W7, W11). Written by the api
+/// (registration, rotation, status) and the webhook-worker (failure counters, auto-disable).
+/// `event_types` is a JSON array of 1-10 public event types (`WEBHOOK_EVENT_TYPES` of
+/// @email-gateway/webhooks); `filters` the strict `subscriptionFiltersSchema` object or NULL.
+/// The signing secret is AES-256-GCM encrypted with WEBHOOK_SECRET_ENCRYPTION_KEY
+/// (`WebhookSecretCipher`, AAD binds organization, subscription and secret version): never
+/// plaintext, never returned after create/rotate. `url` may carry a receiver token: never logged
+/// or audited (host and hash only). No message content.
 model WebhookSubscription {
-  id                  BigInt        @id @default(autoincrement()) @db.UnsignedBigInt
-  publicId            String        @unique @default(uuid(7)) @map("public_id") @db.Char(36)
-  organizationId      BigInt        @map("organization_id") @db.UnsignedBigInt
-  name                String        @db.VarChar(255)
-  url                 String        @db.VarChar(2048)
-  eventTypes          Json          @map("event_types")
-  secretCiphertext    String        @map("secret_ciphertext") @db.VarChar(512)
-  status              WebhookStatus @default(active)
-  consecutiveFailures Int           @default(0) @map("consecutive_failures") @db.UnsignedInt
-  lastSuccessAt       DateTime?     @map("last_success_at") @db.DateTime(3)
-  lastFailureAt       DateTime?     @map("last_failure_at") @db.DateTime(3)
-  createdByUserId     BigInt?       @map("created_by_user_id") @db.UnsignedBigInt
-  createdAt           DateTime      @default(now()) @map("created_at") @db.DateTime(3)
-  updatedAt           DateTime      @updatedAt @map("updated_at") @db.DateTime(3)
+  id                       BigInt        @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId                 String        @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId           BigInt        @map("organization_id") @db.UnsignedBigInt
+  name                     String        @db.VarChar(255)
+  description              String?       @db.VarChar(512)
+  url                      String        @db.VarChar(2048)
+  eventTypes               Json          @map("event_types")
+  /// `subscriptionFiltersSchema` (directions, domainIds, minSeverity, verdicts) or NULL.
+  filters                  Json?
+  secretCiphertext         String        @map("secret_ciphertext") @db.VarChar(512)
+  /// Starts at 1; +1 per rotation (bound into the cipher AAD).
+  secretVersion            Int           @default(1) @map("secret_version") @db.UnsignedSmallInt
+  secretRotatedAt          DateTime?     @map("secret_rotated_at") @db.DateTime(3)
+  /// The retired secret during a rotation overlap (W7); NULL when there is none.
+  previousSecretCiphertext String?       @map("previous_secret_ciphertext") @db.VarChar(512)
+  previousSecretExpiresAt  DateTime?     @map("previous_secret_expires_at") @db.DateTime(3)
+  status                   WebhookStatus @default(active)
+  /// Per-subscription in-flight cap (1 … WEBHOOK_MAX_INFLIGHT_PER_SUBSCRIPTION); NULL = default.
+  maxConcurrency           Int?          @map("max_concurrency") @db.UnsignedTinyInt
+  consecutiveFailures      Int           @default(0) @map("consecutive_failures") @db.UnsignedInt
+  /// First failure of the current failure streak (auto-disable window, W11).
+  failingSince             DateTime?     @map("failing_since") @db.DateTime(3)
+  lastSuccessAt            DateTime?     @map("last_success_at") @db.DateTime(3)
+  lastFailureAt            DateTime?     @map("last_failure_at") @db.DateTime(3)
+  /// Code: `sustained_failure` (system) or `manual`.
+  disabledReason           String?       @map("disabled_reason") @db.VarChar(64)
+  disabledAt               DateTime?     @map("disabled_at") @db.DateTime(3)
+  deletedAt                DateTime?     @map("deleted_at") @db.DateTime(3)
+  rowVersion               Int           @default(1) @map("row_version") @db.UnsignedInt
+  createdByUserId          BigInt?       @map("created_by_user_id") @db.UnsignedBigInt
+  createdAt                DateTime      @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt                DateTime      @updatedAt @map("updated_at") @db.DateTime(3)
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
   createdBy    User?        @relation(fields: [createdByUserId], references: [id], onDelete: SetNull)
 
+  replays WebhookReplay[]
+
   @@index([organizationId, status])
+  @@index([organizationId, id], map: "webhook_subscriptions_organization_id_id_idx")
+  @@index([status, deletedAt], map: "webhook_subscriptions_status_deleted_at_idx")
   @@map("webhook_subscriptions")
 }
 
-/// PARTITIONED by RANGE COLUMNS(event_occurred_at), monthly. `event_occurred_at` comes from the
-/// envelope, so the unique key is deterministic across redeliveries. No foreign keys.
+/// PARTITIONED by RANGE COLUMNS(event_occurred_at), monthly (2 months, operational).
+/// `event_occurred_at` comes from the envelope, so the unique key is deterministic across
+/// redeliveries. One row per (subscription, public event, delivery_seq): `delivery_seq` 0 is the
+/// original delivery (fanout or test), 1.. are replays (W12). Inserted by the webhook-worker
+/// fanout and the api (single replay, test); updated by the webhook-worker delivery role
+/// (lease, CAS on `attempt_count`). `last_error` is a code (`blocked:<reason>`,
+/// `backlog_exceeded`, outcome codes), never a response body. No foreign keys.
 model WebhookDelivery {
-  id               BigInt                @default(autoincrement()) @db.UnsignedBigInt
-  eventOccurredAt  DateTime              @map("event_occurred_at") @db.DateTime(3)
-  subscriptionId   BigInt                @map("subscription_id") @db.UnsignedBigInt
-  organizationId   BigInt                @map("organization_id") @db.UnsignedBigInt
-  eventId          String                @map("event_id") @db.Char(36)
-  eventType        String                @map("event_type") @db.VarChar(100)
-  status           WebhookDeliveryStatus @default(pending)
-  attemptCount     Int                   @default(0) @map("attempt_count") @db.UnsignedSmallInt
-  nextAttemptAt    DateTime?             @map("next_attempt_at") @db.DateTime(3)
-  lastResponseCode Int?                  @map("last_response_code") @db.UnsignedSmallInt
-  lastError        String?               @map("last_error") @db.VarChar(1024)
-  completedAt      DateTime?             @map("completed_at") @db.DateTime(3)
-  createdAt        DateTime              @default(now()) @map("created_at") @db.DateTime(3)
-  updatedAt        DateTime              @updatedAt @map("updated_at") @db.DateTime(3)
+  id               BigInt                 @default(autoincrement()) @db.UnsignedBigInt
+  eventOccurredAt  DateTime               @map("event_occurred_at") @db.DateTime(3)
+  /// UUIDv7, app-generated (`EG-Delivery-Id`, REST id).
+  publicId         String                 @default(uuid(7)) @map("public_id") @db.Char(36)
+  subscriptionId   BigInt                 @map("subscription_id") @db.UnsignedBigInt
+  organizationId   BigInt                 @map("organization_id") @db.UnsignedBigInt
+  /// webhook_events.event_id (the public event id).
+  eventId          String                 @map("event_id") @db.Char(36)
+  eventType        String                 @map("event_type") @db.VarChar(100)
+  /// 0 = original delivery; replays count up (≤ WEBHOOK_REPLAY_MAX_PER_DELIVERY).
+  deliverySeq      Int                    @default(0) @map("delivery_seq") @db.UnsignedSmallInt
+  trigger          WebhookDeliveryTrigger @default(event)
+  /// webhook_replays.id of a range replay (no FK: partitioned table).
+  replayId         BigInt?                @map("replay_id") @db.UnsignedBigInt
+  status           WebhookDeliveryStatus  @default(pending)
+  attemptCount     Int                    @default(0) @map("attempt_count") @db.UnsignedSmallInt
+  nextAttemptAt    DateTime?              @map("next_attempt_at") @db.DateTime(3)
+  firstAttemptAt   DateTime?              @map("first_attempt_at") @db.DateTime(3)
+  lastAttemptAt    DateTime?              @map("last_attempt_at") @db.DateTime(3)
+  lastResponseCode Int?                   @map("last_response_code") @db.UnsignedSmallInt
+  lastLatencyMs    Int?                   @map("last_latency_ms") @db.UnsignedInt
+  lastError        String?                @map("last_error") @db.VarChar(1024)
+  completedAt      DateTime?              @map("completed_at") @db.DateTime(3)
+  createdAt        DateTime               @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt        DateTime               @updatedAt @map("updated_at") @db.DateTime(3)
 
   @@id([id, eventOccurredAt])
-  @@unique([subscriptionId, eventId, eventOccurredAt])
+  @@unique([subscriptionId, eventId, eventOccurredAt, deliverySeq], map: "webhook_deliveries_sub_event_seq_key")
+  /// Step 1.1 retry-queue index (perf harness query Q-webhook).
   @@index([status, nextAttemptAt])
+  @@index([publicId], map: "webhook_deliveries_public_id_idx")
+  /// Due work per organization (W8 claim, loose index scan).
+  @@index([status, organizationId, nextAttemptAt], map: "webhook_deliveries_status_org_next_idx")
+  /// Delivery history keyset and range replay scan (W12, §6.1).
+  @@index([subscriptionId, eventOccurredAt, id], map: "webhook_deliveries_sub_occurred_id_idx")
   @@map("webhook_deliveries")
+}
+
+/// PARTITIONED by RANGE COLUMNS(occurred_at), monthly (2 months, operational; step 6.2 §3, W3,
+/// W4). One public webhook event projected from an internal event by the webhook-worker fanout
+/// (or a `webhook.ping` of the api test route): `event_id` is the deterministic public id
+/// (`webhookEventId`), `occurred_at` the source envelope's `occurredAt`, so redeliveries insert
+/// nothing new (insert-ignore on the unique key). `payload_json` is the serialized envelope sent
+/// byte-identically on every attempt and replay; it passed `assertWebhookPayloadSafe` (public
+/// ids, domains, codes and counts only: never a subject, address local part, body, attachment,
+/// S3 key, URL from mail or secret). Never updated. No foreign keys.
+model WebhookEvent {
+  id                BigInt               @default(autoincrement()) @db.UnsignedBigInt
+  occurredAt        DateTime             @map("occurred_at") @db.DateTime(3)
+  organizationId    BigInt               @map("organization_id") @db.UnsignedBigInt
+  /// Public event id (envelope `id`, `EG-Event-Id`, `Idempotency-Key`).
+  eventId           String               @map("event_id") @db.Char(36)
+  eventType         String               @map("event_type") @db.VarChar(64)
+  /// Envelope id of the internal source event.
+  sourceEventId     String               @map("source_event_id") @db.Char(36)
+  sourceEventType   String               @map("source_event_type") @db.VarChar(100)
+  messageId         BigInt?              @map("message_id") @db.UnsignedBigInt
+  messageReceivedAt DateTime?            @map("message_received_at") @db.DateTime(3)
+  domainId          BigInt?              @map("domain_id") @db.UnsignedBigInt
+  severity          WebhookEventSeverity
+  /// The envelope JSON (≤ 16 KiB), exactly the bytes that are signed and sent.
+  payloadJson       String               @map("payload_json") @db.Text
+  /// Hex SHA-256 of `payload_json`.
+  payloadSha256     String               @map("payload_sha256") @db.Char(64)
+  createdAt         DateTime             @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@id([id, occurredAt])
+  @@unique([eventId, occurredAt])
+  @@index([organizationId, occurredAt])
+  @@map("webhook_events")
+}
+
+/// PARTITIONED by RANGE COLUMNS(attempted_at), monthly (2 months, operational; step 6.2 §3, W8,
+/// W10). Append-only record of one HTTP attempt of a delivery, written by the webhook-worker
+/// delivery role in the transaction that records the outcome. `response_snippet` is the
+/// sanitized first ≤ 512 characters of the response (`responseSnippet`: secrets and tokens
+/// redacted); untrusted text, never rendered as HTML. No request body, no headers, no URL.
+/// No foreign keys.
+model WebhookDeliveryAttempt {
+  id                      BigInt                @default(autoincrement()) @db.UnsignedBigInt
+  attemptedAt             DateTime              @map("attempted_at") @db.DateTime(3)
+  organizationId          BigInt                @map("organization_id") @db.UnsignedBigInt
+  subscriptionId          BigInt                @map("subscription_id") @db.UnsignedBigInt
+  /// webhook_deliveries.id (with `delivery_event_occurred_at`, its partition key).
+  deliveryId              BigInt                @map("delivery_id") @db.UnsignedBigInt
+  deliveryEventOccurredAt DateTime              @map("delivery_event_occurred_at") @db.DateTime(3)
+  /// 1-based (`EG-Delivery-Attempt`).
+  attemptNo               Int                   @map("attempt_no") @db.UnsignedSmallInt
+  outcome                 WebhookAttemptOutcome
+  httpStatus              Int?                  @map("http_status") @db.UnsignedSmallInt
+  latencyMs               Int                   @map("latency_ms") @db.UnsignedInt
+  responseSnippet         String?               @map("response_snippet") @db.VarChar(512)
+  retryAfterSeconds       Int?                  @map("retry_after_seconds") @db.UnsignedInt
+  /// Code only (e.g. `ECONNREFUSED`, `blocked:loopback`).
+  errorCode               String?               @map("error_code") @db.VarChar(64)
+  /// Number of `v1=` signatures sent (2 during a rotation overlap).
+  signatureCount          Int                   @map("signature_count") @db.UnsignedTinyInt
+  nextAttemptAt           DateTime?             @map("next_attempt_at") @db.DateTime(3)
+
+  @@id([id, attemptedAt])
+  @@unique([deliveryId, attemptNo, attemptedAt])
+  @@index([organizationId, deliveryId, attemptedAt])
+  @@map("webhook_delivery_attempts")
+}
+
+/// Time-range replay request (step 6.2 W12): inserted by the api (`queued`), processed in
+/// batches by the webhook-worker delivery role over the subscription's original deliveries
+/// (`cursor_*` keyset progress so a crash resumes). `statuses` / `event_types` are JSON arrays
+/// of codes. Terminal rows are purged after 30 days (W13). No message data.
+model WebhookReplay {
+  id               BigInt               @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId         String               @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId   BigInt               @map("organization_id") @db.UnsignedBigInt
+  subscriptionId   BigInt               @map("subscription_id") @db.UnsignedBigInt
+  requestedByType  WebhookRequesterType @map("requested_by_type")
+  /// Public id of the requesting user or API key.
+  requestedById    String               @map("requested_by_id") @db.Char(36)
+  rangeFrom        DateTime             @map("range_from") @db.DateTime(3)
+  rangeTo          DateTime             @map("range_to") @db.DateTime(3)
+  /// JSON array ⊆ succeeded, failed, dead, cancelled.
+  statuses         Json
+  /// JSON array of public event types, or NULL = all of the subscription's.
+  eventTypes       Json?                @map("event_types")
+  status           WebhookReplayStatus  @default(queued)
+  cursorOccurredAt DateTime?            @map("cursor_occurred_at") @db.DateTime(3)
+  cursorId         BigInt?              @map("cursor_id") @db.UnsignedBigInt
+  matchedCount     Int                  @default(0) @map("matched_count") @db.UnsignedInt
+  createdCount     Int                  @default(0) @map("created_count") @db.UnsignedInt
+  /// True when WEBHOOK_REPLAY_MAX_EVENTS was reached.
+  truncated        Boolean              @default(false)
+  errorCode        String?              @map("error_code") @db.VarChar(64)
+  createdAt        DateTime             @default(now()) @map("created_at") @db.DateTime(3)
+  startedAt        DateTime?            @map("started_at") @db.DateTime(3)
+  completedAt      DateTime?            @map("completed_at") @db.DateTime(3)
+  updatedAt        DateTime             @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization Organization        @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  subscription WebhookSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Restrict)
+
+  @@index([status, createdAt])
+  @@index([subscriptionId, status])
+  @@index([organizationId, id])
+  @@map("webhook_replays")
+}
+
+/// Tenant security-alert settings (step 6.2 N2, §6.3): strict `notificationSettingsSchema` of
+/// @email-gateway/webhooks, every key optional (`{}` = defaults). Written by the api only
+/// (`PUT /notifications/settings`, CAS on `row_version`); read by the webhook-worker fanout
+/// (cached) and the notification-worker. No message data.
+model NotificationSettings {
+  id              BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId  BigInt   @unique @map("organization_id") @db.UnsignedBigInt
+  settings        Json
+  /// Hex SHA-256 of the canonical settings JSON.
+  settingsSha256  String   @map("settings_sha256") @db.Char(64)
+  rowVersion      Int      @default(1) @map("row_version") @db.UnsignedInt
+  updatedByUserId BigInt?  @map("updated_by_user_id") @db.UnsignedBigInt
+  createdAt       DateTime @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization  Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  updatedByUser User?        @relation("NotificationSettingsUpdatedBy", fields: [updatedByUserId], references: [id], onDelete: SetNull)
+
+  @@map("notification_settings")
+}
+
+/// Per-user notification preferences (step 6.2 N3): strict `notificationPreferencesSchema`
+/// (`{ optOut: PreferenceKind[] }`). Written by the api only (self route); read by the
+/// notification-worker at send time. The quarantine digest opt-out stays in
+/// quarantine_user_preferences.digest_opt_out (one source of truth).
+model NotificationUserPreference {
+  id             BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId BigInt   @map("organization_id") @db.UnsignedBigInt
+  userId         BigInt   @unique @map("user_id") @db.UnsignedBigInt
+  preferences    Json
+  rowVersion     Int      @default(1) @map("row_version") @db.UnsignedInt
+  createdAt      DateTime @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  user         User         @relation("NotificationUserPreferenceUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@map("notification_user_preferences")
+}
+
+/// Security-alert throttle window (step 6.2 N2): one row per organization, alert kind, scope
+/// (`-` for threat_detected, the domain public id for domain_dns_failed, the subscription public
+/// id for webhook_disabled) and window start (`alertWindowStart`, UTC floor). Upserted by the
+/// webhook-worker in the producing transaction (`event_count + 1`); only the first event of a
+/// window writes the `notification.alert_requested.v1` outbox row (`alert_event_id`). Purged
+/// after 7 days (W13). Ids and counts only.
+model NotificationAlertWindow {
+  id                 BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId     BigInt   @map("organization_id") @db.UnsignedBigInt
+  kind               String   @db.VarChar(32)
+  scopeKey           String   @map("scope_key") @db.VarChar(64)
+  windowStart        DateTime @map("window_start") @db.DateTime(3)
+  eventCount         Int      @default(1) @map("event_count") @db.UnsignedInt
+  firstSourceEventId String   @map("first_source_event_id") @db.Char(36)
+  alertEventId       String?  @map("alert_event_id") @db.Char(36)
+  createdAt          DateTime @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt          DateTime @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  @@unique([organizationId, kind, scopeKey, windowStart])
+  @@index([createdAt])
+  @@map("notification_alert_windows")
 }
 
 /// Platform configuration data (seeded): provider presets for destination servers (step 2.3

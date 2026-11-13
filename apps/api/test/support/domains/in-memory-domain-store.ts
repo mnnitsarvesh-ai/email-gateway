@@ -55,7 +55,11 @@ import type {
   VerificationsRepository,
   VerificationWrite,
 } from '../../../src/modules/domains/repositories/verifications.repository';
-import type { DomainStatusChangedV1 } from '@email-gateway/event-contracts';
+import {
+  type DomainDnsRecordsChangedV1,
+  domainDnsRecordsChangedV1,
+  type DomainStatusChangedV1,
+} from '@email-gateway/event-contracts';
 
 const OWNED: ReadonlySet<DomainStatus> = new Set(['verified', 'active', 'suspended']);
 
@@ -68,6 +72,13 @@ export interface OutboxRow {
   organizationId: bigint;
   correlationId: string;
   payload: DomainStatusChangedV1;
+}
+
+/** A `domain.dns.records_changed.v1` outbox row (step 6.2 §4.1), kept apart from `outbox`. */
+export interface RecordsChangedRow {
+  organizationId: bigint;
+  correlationId: string;
+  payload: DomainDnsRecordsChangedV1;
 }
 
 const clone = <T>(value: T): T => structuredClone(value);
@@ -86,6 +97,7 @@ export class InMemoryDomainStore {
   keys: StoredKey[] = [];
   mx: StoredMx[] = [];
   outbox: OutboxRow[] = [];
+  recordsChanged: RecordsChangedRow[] = [];
   audits: AuditEntry[] = [];
   organizationStatus = new Map<bigint, OrganizationStatus>();
   /** `max_domains` per organization (absent = unlimited). */
@@ -570,6 +582,20 @@ export class InMemoryDomainStore {
         event: { organizationId: bigint; correlationId: string; payload: DomainStatusChangedV1 },
       ) => {
         this.outbox.push(clone(event));
+        return Promise.resolve(randomUUID());
+      },
+      insertRecordsChanged: (
+        _tx: unknown,
+        event: {
+          organizationId: bigint;
+          correlationId: string;
+          payload: DomainDnsRecordsChangedV1;
+        },
+      ) => {
+        // The production repository parses the contract; so does the double.
+        this.recordsChanged.push(
+          clone({ ...event, payload: domainDnsRecordsChangedV1.parse(event.payload) }),
+        );
         return Promise.resolve(randomUUID());
       },
       // Step 2.3: the domain onboarding flows never change destinations.

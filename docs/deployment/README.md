@@ -105,6 +105,10 @@ The inbound `rspamd` is both the SMTP-time milter of the inbound Postfix (reject
 
 The `policy-engine` (EKS Deployment, ≥ 2 replicas) consumes `email.policy.evaluate` as `eg-policy-engine` and is the **only automatic producer of delivery approvals**; the delivery-worker's development pass-through is removed (`DELIVERY_DEV_PASSTHROUGH_ENABLED=true` is refused). The `notification-worker` consumes `email.notifications` as `eg-notification` and sends policy alerts and sender notices through the transactional relay. Rollout order (migration → topology v9 + broker users → api → policy-engine → delivery-worker → notification-worker), the backlog of held `scanned` messages evaluated at activation, the S3 lifecycle rule `eg-policy-copy-expiry`, IAM, Kubernetes and the new Secret keys `rabbitmq-policy-engine-url` / `rabbitmq-notification-url`: [policy-engine.md](policy-engine.md). Runbook: [policy-engine](../runbooks/policy-engine.md).
 
+### Webhooks and security alerts (step 6.2)
+
+The `webhook-worker` image runs as two Deployments: `webhook-fanout` (consumes `email.webhooks` as `eg-webhook` and projects internal events into public webhook events, deliveries and security alert requests) and `webhook-delivery` (signs and POSTs through the SSRF-guarded client; the **only** workload with Internet egress for webhooks, TCP 443 to public addresses). Rollout order (migration → topology v11 + `eg-webhook` → api → webhook-worker → notification-worker), the new Secret `email-gateway-webhook-secret-key` (api encrypts, webhook-delivery decrypts) and the Secret key `rabbitmq-webhook-url`, egress, DNS and sizing: [webhooks.md](webhooks.md). Runbook: [webhooks](../runbooks/webhooks.md).
+
 ## Terraform
 
 See `infrastructure/terraform/README.md`. Remote state is per AWS account, and `backend.hcl` is not committed.

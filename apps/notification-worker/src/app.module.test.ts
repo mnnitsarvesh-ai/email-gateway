@@ -8,6 +8,7 @@ import {
 import { describe, expect, it } from 'vitest';
 import { AppModule } from './app.module';
 import { loadWorkerConfig } from './config';
+import { AlertNotificationHandler } from './notifications/alert-notification.handler';
 import { PolicyNotificationHandler } from './notifications/policy-notification.handler';
 
 const config = loadWorkerConfig({
@@ -50,11 +51,14 @@ describe('AppModule wiring', () => {
       const report = await moduleRef.get(HealthService).readiness();
       expect(report.checks.map((c) => c.name)).toEqual(['mysql', 'rabbitmq']);
       expect(moduleRef.get(PolicyNotificationHandler)).toBeInstanceOf(PolicyNotificationHandler);
+      expect(moduleRef.get(AlertNotificationHandler)).toBeInstanceOf(AlertNotificationHandler);
       expect(setups).toBeGreaterThanOrEqual(1);
       expect(JSON.stringify(topology)).toContain('email.notifications');
       const text = await moduleRef.get(MetricsService).metrics();
       expect(text).toContain('notification_policy_messages_total');
       expect(text).toContain('notification_send_duration_seconds');
+      expect(text).toContain('notification_alert_messages_total');
+      expect(text).toContain('notification_alerts_suppressed_total');
     } finally {
       await moduleRef.close();
     }

@@ -5,6 +5,7 @@ import type { Logger } from '@email-gateway/logger';
 import type { NoticeMailer } from './mailer';
 import type { NotificationMetrics, NoticeResult } from './notification-metrics';
 import type { NotificationReads } from './notification-reads';
+import type { PreferenceFilter } from './preference-filter';
 import {
   noticeMessageId,
   type NoticeFacts,
@@ -31,7 +32,8 @@ export function addressDomain(raw: string): { address: string; domain: string } 
 /**
  * Handles one `mail.policy.notification_requested.v1` (step 5.2 P25) inside the consumer's
  * idempotency transaction (`processOnceHandler`, ledger `notification-worker.policy`): resolves
- * the recipients on the writer (`policy_alert`: the organization's policy administrators;
+ * the recipients on the writer (`policy_alert`: the organization's policy administrators minus
+ * those who opted out of `policy_alert`, step 6.2 N4;
  * `sender_non_delivery`: the message's envelope sender, only when its domain is an active domain
  * of the organization, never an external address), renders a fixed plain-text notice without
  * message content and sends it through the relay with a deterministic Message-ID. The send runs
@@ -46,6 +48,7 @@ export class PolicyNotificationHandler {
     private readonly metrics: NotificationMetrics,
     private readonly logger: Logger,
     private readonly options: PolicyNotificationOptions,
+    private readonly preferences: PreferenceFilter,
   ) {}
 
   async handle(
@@ -130,7 +133,14 @@ export class PolicyNotificationHandler {
     envelopeFrom: string,
   ): Promise<string[]> {
     if (p.kind === 'policy_alert') {
-      return this.reads.alertRecipients(tx, organizationId, this.options.maxRecipients);
+      const { emails } = await this.preferences.collect(
+        tx,
+        organizationId,
+        'policy_alert',
+        (afterId, take) => this.reads.alertRecipients(tx, organizationId, take, afterId),
+        this.options.maxRecipients,
+      );
+      return emails;
     }
     // Sender notice: only the organization's own sender (P25), never an external address.
     if (p.direction === 'inbound' || p.disposition !== 'reject') return [];

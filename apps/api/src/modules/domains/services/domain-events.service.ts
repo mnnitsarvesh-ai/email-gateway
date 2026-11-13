@@ -1,6 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
-import type { DomainStatus, Prisma } from '@email-gateway/database';
+import type {
+  DnsRecordPurpose,
+  DnsRecordStatus,
+  DomainStatus,
+  Prisma,
+} from '@email-gateway/database';
 import { getCorrelationId } from '@email-gateway/logger';
 import { type AuditActor, AuditService } from '../../../audit/audit.service';
 import { DOMAIN_RESOURCE_TYPE, type DomainAuditAction } from '../domains.constants';
@@ -35,6 +40,20 @@ export interface DomainAuditRecord {
   actor: AuditActor;
   sourceIp?: string | null;
   metadata?: Record<string, unknown>;
+}
+
+export interface DomainRecordsChangedRecord {
+  organizationId: bigint;
+  domain: DomainRef;
+  /** The domain's lifecycle status after the check. */
+  domainStatus: DomainStatus;
+  changes: ReadonlyArray<{
+    recordKey: string;
+    purpose: DnsRecordPurpose;
+    previousStatus: DnsRecordStatus;
+    status: DnsRecordStatus;
+  }>;
+  checkedAt: Date;
 }
 
 /**
@@ -75,6 +94,31 @@ export class DomainEventsService {
         status: record.to,
         reason: record.reason,
         changedAt: record.at.toISOString(),
+      },
+    });
+  }
+
+  /**
+   * One `domain.dns.records_changed.v1` outbox row for the record status transitions of a check
+   * (step 6.2 §4.1), same correlation as the status event; nothing when nothing changed.
+   */
+  async recordsChanged(tx: Client, record: DomainRecordsChangedRecord): Promise<void> {
+    if (record.changes.length === 0) return;
+    await this.outbox.insertRecordsChanged(tx, {
+      organizationId: record.organizationId,
+      correlationId: getCorrelationId() ?? `domain:${randomUUID()}`,
+      payload: {
+        domainId: record.domain.id.toString(10),
+        domainPublicId: record.domain.publicId,
+        name: record.domain.name,
+        domainStatus: record.domainStatus,
+        changes: record.changes.map((c) => ({
+          recordKey: c.recordKey,
+          purpose: c.purpose,
+          previousStatus: c.previousStatus,
+          status: c.status,
+        })),
+        checkedAt: record.checkedAt.toISOString(),
       },
     });
   }

@@ -1977,6 +1977,149 @@ export const attachmentSandboxCompletedV1 = z
   });
 export type AttachmentSandboxCompletedV1 = z.infer<typeof attachmentSandboxCompletedV1>;
 
+/** `domain_dns_records.purpose` values (DnsRecordPurpose, step 2.1). */
+export const DNS_RECORD_PURPOSE_VALUES = [
+  'verification',
+  'mx',
+  'spf',
+  'dkim',
+  'dmarc',
+  'mta_sts',
+  'tls_rpt',
+] as const;
+/** `domain_dns_records.status` values (DnsRecordStatus, step 2.1). */
+export const DNS_RECORD_STATUS_VALUES = ['pending', 'valid', 'invalid', 'missing'] as const;
+/** At most this many record changes in one `domain.dns.records_changed.v1`. */
+export const DOMAIN_DNS_RECORDS_CHANGED_MAX_CHANGES = 32;
+
+/**
+ * A stored DNS record status transition of a domain (step 6.2 §1.2, §4.1): written by the api
+ * domains module in `DomainVerificationService.applyInTransaction` (through `message_outbox`,
+ * `aggregate_type = 'domain'`, `aggregate_id` = the decimal domain id) only when at least one
+ * record's stored status changes — never per check; an indeterminate check changes nothing.
+ * Published to `email.events`; consumed by the webhook-worker fanout (`email.webhooks`), which
+ * projects record failures of verified/active domains to `domain.dns.failed`.
+ *
+ * Strict: record keys, purposes and statuses only — no observed or expected values, no evidence.
+ * Each change is a real transition (`previousStatus` ≠ `status`); record keys are unique.
+ */
+export const domainDnsRecordsChangedV1 = z
+  .strictObject({
+    domainId: decimalIdSchema,
+    domainPublicId: z.uuid(),
+    /** Normalized ASCII (punycode) name, as stored. */
+    name: z
+      .string()
+      .min(1)
+      .max(253)
+      .regex(/^[\x21-\x7e]+$/, 'Expected an ASCII domain name'),
+    /** The domain's lifecycle status at check time (`domains.status`). */
+    domainStatus: z.string().min(1).max(32),
+    changes: z
+      .array(
+        z.strictObject({
+          recordKey: z.string().min(1).max(191),
+          purpose: z.enum(DNS_RECORD_PURPOSE_VALUES),
+          previousStatus: z.enum(DNS_RECORD_STATUS_VALUES),
+          status: z.enum(DNS_RECORD_STATUS_VALUES),
+        }),
+      )
+      .min(1)
+      .max(DOMAIN_DNS_RECORDS_CHANGED_MAX_CHANGES),
+    checkedAt: z.iso.datetime(),
+  })
+  .superRefine((payload, ctx) => {
+    const keys = new Set<string>();
+    payload.changes.forEach((change, index) => {
+      if (change.previousStatus === change.status) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['changes', index, 'status'],
+          message: 'A change has previousStatus ≠ status',
+        });
+      }
+      if (keys.has(change.recordKey)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['changes', index, 'recordKey'],
+          message: 'Duplicate recordKey',
+        });
+      }
+      keys.add(change.recordKey);
+    });
+  });
+export type DomainDnsRecordsChangedV1 = z.infer<typeof domainDnsRecordsChangedV1>;
+
+/** Security alert kinds of `notification.alert_requested.v1` (step 6.2 N1, N2). */
+export const NOTIFICATION_ALERT_KIND_VALUES = [
+  'threat_detected',
+  'domain_dns_failed',
+  'webhook_disabled',
+] as const;
+/** Public event severities (step 6.2 §5). */
+export const NOTIFICATION_ALERT_SEVERITY_VALUES = ['info', 'low', 'medium', 'high'] as const;
+
+/** Which `refs` each alert kind requires (§4.1). */
+const NOTIFICATION_ALERT_REQUIRED_REFS: Readonly<
+  Record<(typeof NOTIFICATION_ALERT_KIND_VALUES)[number], readonly string[]>
+> = {
+  threat_detected: ['webhookEventId', 'messageId', 'receivedAt'],
+  domain_dns_failed: ['webhookEventId', 'domainId'],
+  webhook_disabled: ['subscriptionId'],
+};
+
+/**
+ * A security alert request (step 6.2 N2, §4.1): the first event of a throttle window
+ * (`notification_alert_windows`) of an organization, kind and scope. Written by the
+ * webhook-worker (fanout: `threat_detected`, `domain_dns_failed`; delivery role auto-disable:
+ * `webhook_disabled`) through `message_outbox` (`aggregate_type = 'organization'`,
+ * `aggregate_id` = the decimal organization id); published to `email.policy` and consumed from
+ * `email.notifications` by the notification-worker, which reads what it renders at send time.
+ *
+ * Strict; ids, codes, times and counts only (no address, subject, URL, name or secret). Each
+ * kind carries the refs it needs (threat: the public event id, message id and received time;
+ * DNS: the public event id and domain id; webhook disabled: the subscription public id);
+ * `messageId` and `receivedAt` go together; `window.from` precedes `window.to`.
+ */
+export const notificationAlertRequestedV1 = z
+  .strictObject({
+    kind: z.enum(NOTIFICATION_ALERT_KIND_VALUES),
+    severity: z.enum(NOTIFICATION_ALERT_SEVERITY_VALUES),
+    refs: z.strictObject({
+      webhookEventId: z.uuid().optional(),
+      messageId: decimalIdSchema.optional(),
+      receivedAt: z.iso.datetime().optional(),
+      domainId: decimalIdSchema.optional(),
+      subscriptionId: z.uuid().optional(),
+    }),
+    window: z.strictObject({ from: z.iso.datetime(), to: z.iso.datetime() }),
+    counts: z.strictObject({ suppressedBefore: z.number().int().min(0).max(4_294_967_295) }),
+    requestedAt: z.iso.datetime(),
+  })
+  .superRefine((payload, ctx) => {
+    const refs = payload.refs as Record<string, unknown>;
+    for (const field of NOTIFICATION_ALERT_REQUIRED_REFS[payload.kind]) {
+      if (refs[field] === undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['refs', field],
+          message: `A ${payload.kind} alert names ${field}`,
+        });
+      }
+    }
+    if ((payload.refs.messageId === undefined) !== (payload.refs.receivedAt === undefined)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['refs', 'receivedAt'],
+        message: 'messageId and receivedAt go together',
+      });
+    }
+    if (Date.parse(payload.window.from) >= Date.parse(payload.window.to)) {
+      ctx.addIssue({ code: 'custom', path: ['window'], message: 'window.from precedes window.to' });
+    }
+  });
+export type NotificationAlertRequestedV1 = z.infer<typeof notificationAlertRequestedV1>;
+
 export const EventTypes = {
   MessageReceived: 'mail.message.received.v1',
   MessageScanned: 'mail.message.scanned.v1',
@@ -2002,4 +2145,6 @@ export const EventTypes = {
   PolicyNotificationRequested: 'mail.policy.notification_requested.v1',
   QuarantineReleaseRequested: 'mail.quarantine.release_requested.v1',
   QuarantineNotificationRequested: 'mail.quarantine.notification_requested.v1',
+  DomainDnsRecordsChanged: 'domain.dns.records_changed.v1',
+  NotificationAlertRequested: 'notification.alert_requested.v1',
 } as const;

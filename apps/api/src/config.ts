@@ -884,6 +884,83 @@ export type RestApiConfigKeys = {
   [K in keyof typeof restApiConfigShape]: z.output<(typeof restApiConfigShape)[K]>;
 };
 
+/** `WEBHOOK_ALLOWED_PORTS`: comma list of ports 1–65535 (deduplicated, at least one). */
+const webhookPorts = z
+  .string()
+  .default('443')
+  .transform((value, ctx): number[] => {
+    const entries = splitList(value);
+    const ports = entries.map((entry) => (/^\d{1,5}$/.test(entry) ? Number(entry) : NaN));
+    if (ports.length === 0 || ports.some((p) => !Number.isInteger(p) || p < 1 || p > 65_535)) {
+      ctx.addIssue({ code: 'custom', message: 'must be a comma-separated list of ports 1..65535' });
+      return z.NEVER;
+    }
+    return [...new Set(ports)];
+  });
+
+/**
+ * Webhooks and notifications (step 6.2 §4.4, docs/plan/steps/19-webhooks-notifications.md W5–W7,
+ * W12): the AES-256-GCM key that ENCRYPTS webhook signing secrets (64 hex characters, required,
+ * `_FILE` accepted; the webhook-worker decrypts, nobody else holds it; the previous key is
+ * accepted for decryption by the worker only, the api never decrypts), the endpoint URL rules
+ * (allowed ports; plain `http` is a TEST-ONLY seam refused outside APP_ENV local/ci), the
+ * per-organization subscription cap, the default rotation overlap, the delivery history and
+ * replay bounds and the route limits of the test and range-replay routes. `URL_CLICK_BASE_URL`
+ * (the existing click-service key, optional here) adds the click-service host to the endpoint
+ * deny list. Start-up errors name the key, never the value.
+ */
+export const webhookConfigShape = {
+  WEBHOOK_SECRET_ENCRYPTION_KEY: aesKey,
+  /** Decryption-only key of the webhook-worker while rotating; validated here, never used. */
+  WEBHOOK_SECRET_ENCRYPTION_KEY_PREVIOUS: aesKey.optional(),
+  WEBHOOK_ALLOWED_PORTS: webhookPorts,
+  WEBHOOK_ALLOW_HTTP: bool.default(false),
+  WEBHOOK_MAX_SUBSCRIPTIONS_PER_ORG: int(1, 100).default(10),
+  WEBHOOK_SECRET_OVERLAP_HOURS_DEFAULT: int(0, 168).default(24),
+  WEBHOOK_HISTORY_MAX_RANGE_DAYS: int(1, 62).default(31),
+  WEBHOOK_REPLAY_MAX_RANGE_HOURS: int(1, 168).default(72),
+  WEBHOOK_REPLAY_MAX_PER_DELIVERY: int(1, 50).default(10),
+  WEBHOOK_REPLAY_REQUESTS_PER_HOUR: int(1, 100).default(10),
+  WEBHOOK_TEST_REQUESTS_PER_MINUTE: int(1, 60).default(6),
+  /** The click-service base URL (step 4.3); its host is refused as a webhook endpoint. */
+  URL_CLICK_BASE_URL: z.url({ protocol: /^https?$/ }).optional(),
+};
+
+export type WebhookConfigKeys = {
+  [K in keyof typeof webhookConfigShape]: z.output<(typeof webhookConfigShape)[K]>;
+};
+
+/**
+ * Cross-field rules of the webhook keys: plain `http` endpoints only in APP_ENV local/ci (a
+ * TEST-ONLY seam), and a previous cipher key that differs from the current one.
+ */
+export function validateWebhookConfig(
+  cfg: Pick<WebhookConfigKeys, 'WEBHOOK_ALLOW_HTTP' | 'WEBHOOK_SECRET_ENCRYPTION_KEY'> & {
+    WEBHOOK_SECRET_ENCRYPTION_KEY_PREVIOUS?: string | undefined;
+    APP_ENV: string;
+  },
+  ctx: z.RefinementCtx,
+): void {
+  if (cfg.WEBHOOK_ALLOW_HTTP && cfg.APP_ENV !== 'local' && cfg.APP_ENV !== 'ci') {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['WEBHOOK_ALLOW_HTTP'],
+      message: 'is a test seam and is refused outside APP_ENV local/ci',
+    });
+  }
+  if (
+    cfg.WEBHOOK_SECRET_ENCRYPTION_KEY_PREVIOUS !== undefined &&
+    cfg.WEBHOOK_SECRET_ENCRYPTION_KEY_PREVIOUS.toLowerCase() ===
+      cfg.WEBHOOK_SECRET_ENCRYPTION_KEY.toLowerCase()
+  ) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['WEBHOOK_SECRET_ENCRYPTION_KEY_PREVIOUS'],
+      message: 'must differ from WEBHOOK_SECRET_ENCRYPTION_KEY',
+    });
+  }
+}
+
 /** `API_RATE_TENANT_MIN_PER_MINUTE <= API_RATE_TENANT_DEFAULT_PER_MINUTE <= …_MAX_PER_MINUTE`. */
 export function validateRestApiConfig(
   cfg: Pick<
@@ -1009,6 +1086,7 @@ export const apiConfigSchema = baseConfigSchema
   .extend(policyConfigShape)
   .extend(quarantineConfigShape)
   .extend(restApiConfigShape)
+  .extend(webhookConfigShape)
   .extend({
     /** Comma-separated allow-list of admin portal origins. */
     CORS_ORIGINS: z
@@ -1032,6 +1110,7 @@ export const apiConfigSchema = baseConfigSchema
     validateSandboxConfig(cfg, ctx);
     validateQuarantineConfig(cfg, ctx);
     validateRestApiConfig(cfg, ctx);
+    validateWebhookConfig(cfg, ctx);
     if (cfg.AUTH_SESSION_MAX_AGE_SECONDS < cfg.AUTH_REFRESH_TOKEN_TTL_SECONDS) {
       ctx.addIssue({
         code: 'custom',

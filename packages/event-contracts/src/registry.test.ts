@@ -63,6 +63,10 @@ describe('EVENT_REGISTRY', () => {
       // (aggregate quarantine: the organization).
       'mail.quarantine.release_requested.v1': ['email.policy', 'message'],
       'mail.quarantine.notification_requested.v1': ['email.policy', 'quarantine'],
+      // Step 6.2 §4.1: DNS record transitions (aggregate domain) and security alert requests
+      // (aggregate organization).
+      'domain.dns.records_changed.v1': ['email.events', 'domain'],
+      'notification.alert_requested.v1': ['email.policy', 'organization'],
     });
     for (const definition of Object.values(EVENT_REGISTRY)) {
       expect(EXCHANGE_NAMES).toContain(definition.exchange);

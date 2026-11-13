@@ -113,6 +113,50 @@ export interface PlannedKeyActivation {
 
 export type CheckOutcomeSummary = 'verified' | 'failed' | 'indeterminate' | 'checked';
 
+/** A definitive status transition of one DNS record (step 6.2 §4.1). */
+export interface RecordStatusChange {
+  recordKey: string;
+  purpose: DnsRecordPurpose;
+  previousStatus: DnsRecordStatus;
+  status: DnsRecordStatus;
+}
+
+/** Most changes one `domain.dns.records_changed.v1` event carries (the contract's bound). */
+export const MAX_RECORD_CHANGES = 32;
+
+const FAILED_RECORD_STATUSES: ReadonlySet<DnsRecordStatus> = new Set(['invalid', 'missing']);
+
+/**
+ * The record status transitions of a plan (step 6.2 §1.2, §4.1): stored status vs the planned
+ * definitive status, for every record whose status changes. Indeterminate results never change
+ * a status, so they never appear. Records that stopped validating (`valid` → `invalid` /
+ * `missing`) come first, so the bound of 32 never drops one of them before another change.
+ */
+export function recordStatusChanges(
+  state: Pick<StoredDomainState, 'records'>,
+  updates: readonly RecordUpdate[],
+): RecordStatusChange[] {
+  const planned = new Map(updates.map((u) => [u.id, u.data.status]));
+  const changes: RecordStatusChange[] = [];
+  for (const row of state.records) {
+    const status = planned.get(row.id);
+    if (status === undefined || status === row.status) continue;
+    changes.push({
+      recordKey: row.recordKey,
+      purpose: row.purpose,
+      previousStatus: row.status,
+      status,
+    });
+  }
+  const failing = (c: RecordStatusChange) =>
+    c.previousStatus === 'valid' && FAILED_RECORD_STATUSES.has(c.status) ? 0 : 1;
+  return changes
+    .map((change, index) => ({ change, index }))
+    .sort((a, b) => failing(a.change) - failing(b.change) || a.index - b.index)
+    .slice(0, MAX_RECORD_CHANGES)
+    .map(({ change }) => change);
+}
+
 export interface ApplyPlan {
   records: RecordUpdate[];
   verification: VerificationUpdate | null;
@@ -124,6 +168,8 @@ export interface ApplyPlan {
   ownershipRecordMissing: { outcome: DnsCheckOutcome } | null;
   /** Observed MX hosts to store; null when the primary MX result was indeterminate. */
   mxObservations: MxAnswer[] | null;
+  /** Definitive record status transitions (one `domain.dns.records_changed.v1` when any). */
+  recordChanges: RecordStatusChange[];
   outcome: CheckOutcomeSummary;
 }
 
@@ -398,6 +444,7 @@ export function planReportApplication(
     keyActivations,
     ownershipRecordMissing,
     mxObservations: report.mx.observed,
+    recordChanges: recordStatusChanges(state, records),
     outcome,
   };
 }

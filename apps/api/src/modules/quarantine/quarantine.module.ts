@@ -64,5 +64,8 @@ import { QuarantineWriter } from './services/quarantine-writer';
     QuarantineBulkService,
     QuarantineSettingsService,
   ],
+  // Step 6.2 N3: the notification preference center checks `digest.allowOptOut` of the same
+  // effective settings before writing `quarantine_user_preferences.digest_opt_out`.
+  exports: [QuarantineContext],
 })
 export class QuarantineModule {}

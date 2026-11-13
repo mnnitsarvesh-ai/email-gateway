@@ -154,6 +154,37 @@ describe('redaction of DKIM key material (step 2.1 §6)', () => {
   });
 });
 
+describe('redaction of webhook secret ciphertexts (step 6.2 W7)', () => {
+  it.each(['secretCiphertext', 'previousSecretCiphertext'])(
+    'censors %s at the top level and one level down',
+    (field) => {
+      const out = capture();
+      const logger = createLogger({ service: 'test-svc', destination: out.stream });
+      const top = `v1.k1.${field}-top-ciphertext`;
+      const nested = `v1.k1.${field}-nested-ciphertext`;
+      logger.info({ [field]: top, subscription: { publicId: 'sub-1', [field]: nested } }, 'wh');
+      const line = out.lines()[0]!;
+      const serialized = JSON.stringify(line);
+      expect(serialized).not.toContain(top);
+      expect(serialized).not.toContain(nested);
+      expect(line[field]).toBe('[REDACTED]');
+      expect((line.subscription as Record<string, unknown>)[field]).toBe('[REDACTED]');
+      expect((line.subscription as Record<string, unknown>).publicId).toBe('sub-1');
+    },
+  );
+
+  it('lists the paths and their *. variants', () => {
+    expect(REDACT_PATHS).toEqual(
+      expect.arrayContaining([
+        'secretCiphertext',
+        '*.secretCiphertext',
+        'previousSecretCiphertext',
+        '*.previousSecretCiphertext',
+      ]),
+    );
+  });
+});
+
 describe('redaction of mail content (step 3.1 M15)', () => {
   const fields = [
     'subject',

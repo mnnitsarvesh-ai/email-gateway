@@ -6,8 +6,17 @@ import { NoticeSendError } from './mailer';
 import type { NotificationMetrics } from './notification-metrics';
 import type { NotificationReads } from './notification-reads';
 import { addressDomain, PolicyNotificationHandler } from './policy-notification.handler';
+import { PreferenceFilter } from './preference-filter';
 
-const tx = {} as never;
+/** Stored `notification_user_preferences` rows the fake transaction returns (step 6.2 N4). */
+let preferenceRows: Array<{ organizationId: bigint; userId: bigint; preferences: unknown }> = [];
+const tx = {
+  notificationUserPreference: {
+    findMany: vi.fn((args: { where: { userId: { in: bigint[] } } }) =>
+      Promise.resolve(preferenceRows.filter((r) => args.where.userId.in.includes(r.userId))),
+    ),
+  },
+} as never;
 const logger = { child: () => logger, info: vi.fn(), warn: vi.fn() } as never;
 
 function event(
@@ -66,24 +75,35 @@ function setup(options: { configured?: boolean; fail?: boolean; message?: boolea
     ),
     organizationName: vi.fn(() => Promise.resolve('Acme')),
     policyName: vi.fn(() => Promise.resolve('Cards')),
-    alertRecipients: vi.fn(() => Promise.resolve(['admin1@acme.example', 'admin2@acme.example'])),
+    alertRecipients: vi.fn(() =>
+      Promise.resolve([
+        { id: 1n, email: 'admin1@acme.example' },
+        { id: 2n, email: 'admin2@acme.example' },
+      ]),
+    ),
     activeDomain: vi.fn((_tx: unknown, _org: bigint, domain: string) =>
       Promise.resolve(domain === 'acme.example'),
     ),
   };
   const counts: Array<Record<string, string>> = [];
+  const suppressed: Array<[Record<string, string>, number]> = [];
   const metrics = {
     messages: { inc: (labels: Record<string, string>) => counts.push(labels) },
+    alertsSuppressed: {
+      inc: (labels: Record<string, string>, n: number) => suppressed.push([labels, n]),
+    },
     sendDuration: { startTimer: () => () => 0 },
   } as unknown as NotificationMetrics;
+  preferenceRows = [];
   const handler = new PolicyNotificationHandler(
     reads as unknown as NotificationReads,
     mailer,
     metrics,
     logger,
     { maxRecipients: 50, portalUrl: 'https://portal.example' },
+    new PreferenceFilter(metrics),
   );
-  return { handler, reads, sent, counts };
+  return { handler, reads, sent, counts, suppressed };
 }
 
 describe('PolicyNotificationHandler (P25)', () => {
@@ -96,7 +116,7 @@ describe('PolicyNotificationHandler (P25)', () => {
       501n,
       new Date('2026-11-11T10:00:00.000Z'),
     );
-    expect(ctx.reads.alertRecipients).toHaveBeenCalledWith(tx, 7n, 50);
+    expect(ctx.reads.alertRecipients).toHaveBeenCalledWith(tx, 7n, 50, null);
     expect(ctx.sent).toHaveLength(1);
     expect(ctx.sent[0]).toMatchObject({
       recipients: ['admin1@acme.example', 'admin2@acme.example'],
@@ -107,6 +127,26 @@ describe('PolicyNotificationHandler (P25)', () => {
     );
     expect(ctx.sent[0]!.text).not.toContain('alice');
     expect(ctx.counts).toEqual([{ kind: 'policy_alert', result: 'sent' }]);
+  });
+
+  it('leaves out administrators who opted out of policy_alert (step 6.2 N4) and counts them', async () => {
+    const ctx = setup();
+    preferenceRows = [
+      { organizationId: 7n, userId: 1n, preferences: { optOut: ['policy_alert'] } },
+      { organizationId: 7n, userId: 2n, preferences: { optOut: ['threat_detected'] } },
+    ];
+    expect(await ctx.handler.handle(event(), tx)).toBe('sent');
+    expect(ctx.sent[0]!.recipients).toEqual(['admin2@acme.example']);
+    expect(ctx.suppressed).toEqual([[{ kind: 'policy_alert', reason: 'opt_out' }, 1]]);
+    // Every administrator opted out: nothing is sent.
+    const all = setup();
+    preferenceRows = [1n, 2n].map((userId) => ({
+      organizationId: 7n,
+      userId,
+      preferences: { optOut: ['policy_alert'] },
+    }));
+    expect(await all.handler.handle(event(), tx)).toBe('no_recipients');
+    expect(all.sent).toHaveLength(0);
   });
 
   it('counts no_recipients without administrators and disabled without a relay', async () => {

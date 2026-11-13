@@ -408,4 +408,27 @@ export const EXAMPLE_EVENT_PAYLOADS: Readonly<Record<RegisteredEventType, unknow
     hosts: ['mx1.acme.example', 'acme-example.mail.protection.outlook.com'],
     changedAt: '2026-11-03T09:00:00.000Z',
   },
+  'domain.dns.records_changed.v1': {
+    domainId: '77',
+    domainPublicId: '01890a5d-ac96-774b-bcce-b302099a8057',
+    name: 'acme.example',
+    domainStatus: 'active',
+    changes: [
+      { recordKey: 'spf', purpose: 'spf', previousStatus: 'valid', status: 'invalid' },
+      { recordKey: 'dmarc', purpose: 'dmarc', previousStatus: 'valid', status: 'missing' },
+    ],
+    checkedAt: '2026-11-13T09:00:00.000Z',
+  },
+  'notification.alert_requested.v1': {
+    kind: 'threat_detected',
+    severity: 'high',
+    refs: {
+      webhookEventId: '0193a1b2-7c3d-8e4f-9a0b-1c2d3e4f5a6b',
+      messageId,
+      receivedAt,
+    },
+    window: { from: '2026-11-01T10:00:00.000Z', to: '2026-11-01T11:00:00.000Z' },
+    counts: { suppressedBefore: 3 },
+    requestedAt: '2026-11-01T10:15:31.000Z',
+  },
 };

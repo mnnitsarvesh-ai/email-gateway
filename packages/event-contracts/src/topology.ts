@@ -7,11 +7,11 @@ import {
 } from './registry';
 
 /**
- * RabbitMQ topology v10 as data (step 3.2 §3, ADR-0024; v2: step 3.3 L7, ADR-0025; v3: step 4.1
+ * RabbitMQ topology v11 as data (step 3.2 §3, ADR-0024; v2: step 3.3 L7, ADR-0025; v3: step 4.1
  * S2, ADR-0026; v4: step 4.2 A2, ADR-0028; v5: step 4.3 U2, ADR-0029; v6: step 4.4 B3,
  * ADR-0033; v7: step 4.5 D2, ADR-0036; v8: step 4.6 X11, ADR-0040; v9: step 5.2 P15, ADR-0044;
- * v10: step 5.3 Q27, ADR-0046):
- * exactly six topic exchanges and twenty quorum queues in the vhost `email-gateway`. v2 added the bindings of `mail.message.rescan_requested.v1`
+ * v10: step 5.3 Q27, ADR-0046; v11: step 6.2 §4.3, ADR-0055):
+ * exactly six topic exchanges and twenty-one quorum queues in the vhost `email-gateway`. v2 added the bindings of `mail.message.rescan_requested.v1`
  * (`email.security`) to the five scan queues, and `mail.message.state_changed.v1`
  * (`email.events`) reaches only the `email.analytics` firehose. v3 makes `scan.spam` a work queue
  * (the Rspamd engine of the email-worker scan role, ledger consumer `email-worker.scan.rspamd`)
@@ -87,6 +87,23 @@ import {
  * releases, admin alerts, sender notices). Twenty queues as before; the exchanges and the other
  * queues are unchanged.
  *
+ * v11 (step 6.2 W1, §4.3, ADR-0055) adds `email.webhooks`, the **work** queue of the
+ * webhook-worker's `fanout` role (ledger consumer `webhook-worker.fanout`; broker user
+ * `eg-webhook`). Its home exchange is `email.events`; it binds the eight internal events the
+ * public webhook events are projected from, each on the exchange the event is published to:
+ * `mail.message.received.v1` (`email.ingestion`), `mail.message.scanned.v1` and
+ * `mail.attachment.sandbox_completed.v1` (`email.security`), `mail.policy.decided.v1`
+ * (`email.policy`), `mail.delivery.approved.v1` (`email.delivery`), and on `email.events`
+ * `mail.message.state_changed.v1`, `domain.status.changed.v1` and the new
+ * `domain.dns.records_changed.v1` (registered by v11: stored DNS record status transitions,
+ * producer api); plus its plain retry binding `retry.email.webhooks.#` (no other queue name
+ * starts with `email.webhooks.`). Policy `work` (reject-publish at 1 000 000: a webhook-worker
+ * outage queues, never drops; the `WebhookFanoutBacklog` alert warns long before the bound).
+ * `email.webhooks` is **not** reconciled (`RECONCILE_QUEUES`): the fanout writes ledger rows only
+ * for events it acted on, so the reconciler would re-drive every no-op event. `email.notifications`
+ * also binds the new `notification.alert_requested.v1` on `email.policy` (security alerts of the
+ * webhook-worker). Twenty-one queues; the exchanges and the other queues are unchanged.
+ *
  * `infrastructure/rabbitmq/definitions.json` is
  * generated from `TOPOLOGY` (`pnpm --filter @email-gateway/event-contracts topology:export`) and
  * imported by `infrastructure/rabbitmq/init.mjs`; services never declare, they verify passively.
@@ -95,7 +112,7 @@ import {
  * target, overflow, length limits) is a per-queue policy `eg.<queue>` (Q4), so it changes without
  * re-declaring a queue.
  */
-export const TOPOLOGY_VERSION = 10;
+export const TOPOLOGY_VERSION = 11;
 export const DEFAULT_VHOST = 'email-gateway';
 
 /** The six exchanges of the topology (ADR-0024): all topic, durable, not internal. */
@@ -128,6 +145,7 @@ export const QUEUE_NAMES = [
   'email.quarantine',
   'email.archive',
   'email.notifications',
+  'email.webhooks',
   'email.analytics',
   'email.dead-letter',
 ] as const;
@@ -773,6 +791,8 @@ export const TOPOLOGY: Topology = {
         eventBinding('email.policy', 'mail.policy.notification_requested.v1'),
         // v10 (step 5.3 Q20): quarantine digests, approvals, blocked releases, alerts, notices.
         eventBinding('email.policy', 'mail.quarantine.notification_requested.v1'),
+        // v11 (step 6.2 N2): security alerts requested by the webhook-worker.
+        eventBinding('email.policy', 'notification.alert_requested.v1'),
         retryBinding('email.policy', 'email.notifications'),
       ],
       consumer: {
@@ -789,7 +809,42 @@ export const TOPOLOGY: Topology = {
       },
       policy: policyFor('work', 'email.notifications'),
       description:
-        'Policy alert and sender non-delivery notifications (step 5.2) and quarantine notifications (step 5.3)',
+        'Policy alert and sender non-delivery notifications (step 5.2), quarantine notifications (step 5.3) and security alerts (step 6.2)',
+    },
+    {
+      // v11 (step 6.2 W1, W3, §4.3, ADR-0055): the webhook-worker fanout projects these internal
+      // events to public webhook events, matches subscriptions and requests security alerts. A
+      // work queue (reject-publish): webhook events are never dropped while the worker is down.
+      // Not in RECONCILE_QUEUES (no-op events leave no ledger row).
+      name: 'email.webhooks',
+      role: 'work',
+      homeExchange: 'email.events',
+      bindings: [
+        eventBinding('email.ingestion', 'mail.message.received.v1'),
+        eventBinding('email.security', 'mail.message.scanned.v1'),
+        eventBinding('email.security', 'mail.attachment.sandbox_completed.v1'),
+        eventBinding('email.policy', 'mail.policy.decided.v1'),
+        eventBinding('email.delivery', 'mail.delivery.approved.v1'),
+        eventBinding('email.events', 'mail.message.state_changed.v1'),
+        eventBinding('email.events', 'domain.status.changed.v1'),
+        eventBinding('email.events', 'domain.dns.records_changed.v1'),
+        retryBinding('email.events', 'email.webhooks'),
+      ],
+      consumer: {
+        kind: 'ledger',
+        ledgerName: 'webhook-worker.fanout',
+        service: 'webhook-worker',
+      },
+      retry: {
+        strategy: 'hold',
+        maxAttempts: 10,
+        baseDelayMs: 2 * SECOND,
+        maxDelayMs: MINUTE,
+        maxRetryAgeMs: 24 * HOUR,
+      },
+      policy: policyFor('work', 'email.webhooks'),
+      description:
+        'Internal events projected to public webhook events and security alerts by the webhook-worker (step 6.2)',
     },
     dormant(
       'email.analytics',

@@ -1,0 +1,137 @@
+# Webhook and security-alert alerts (step 6.2, docs/plan/steps/19-webhooks-notifications.md §4.3,
+# W8–W13, N4; ADR-0055, ADR-0056). Series: the RabbitMQ per-queue series of the job
+# `rabbitmq-detailed` (rabbitmq_detailed_queue_messages_ready{vhost,queue}), the webhook-worker's
+# webhook_* series (job `webhook-worker`; Kubernetes: the webhook-fanout and webhook-delivery
+# Deployments) and the notification-worker's notification_alert_messages_total{kind,result}.
+# Labels are bounded enums only (never a tenant, subscription, URL or event id). The backlog
+# gauges are written by the maintenance leader only (GET_LOCK): they are aggregated with max()
+# over the replicas, so the non-leaders (whose gauges stay 0) never page.
+# Every alert links its section of docs/runbooks/webhooks.md.
+# Validate with `promtool check rules` and `promtool test rules tests/webhooks.rules.test.yml`.
+groups:
+  - name: webhooks
+    rules:
+      - alert: WebhookFanoutBacklog
+        # email.webhooks receives ~10 events per message; at 1 000 000 messages the queue's
+        # reject-publish policy nacks the relay's publishes (every queue of the publish waits).
+        expr: >-
+          max(rabbitmq_detailed_queue_messages_ready{vhost="email-gateway",queue="email.webhooks"})
+          > 100000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: email.webhooks backlog above 100000
+          description: >-
+            The webhook fanout is not keeping up (or is down): more than 100000 events are ready in
+            email.webhooks. At 1000000 the queue rejects publishes and the outbox relay stalls for
+            every consumer. Scale webhook-fanout or check its readiness.
+          runbook_url: docs/runbooks/webhooks.md#webhookfanoutbacklog
+      - alert: WebhookFanoutBacklog
+        expr: >-
+          max(rabbitmq_detailed_queue_messages_ready{vhost="email-gateway",queue="email.webhooks"})
+          > 500000
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: email.webhooks backlog above 500000
+          description: >-
+            email.webhooks is half way to its reject-publish bound (1000000). Scale webhook-fanout
+            now; if it cannot drain, follow the unbind procedure of the runbook before the relay is
+            nacked.
+          runbook_url: docs/runbooks/webhooks.md#webhookfanoutbacklog
+      - alert: WebhookDeliveryStalled
+        # Due deliveries exist but no replica records an attempt: the delivery role is down, has
+        # no Redis (fail closed) or cannot reach the writer.
+        expr: >-
+          max(webhook_due_backlog) > 0
+          and
+          (sum(increase(webhook_delivery_attempts_total[10m])) or vector(0)) == 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: Webhook deliveries are due but none is attempted
+          description: >-
+            Pending webhook deliveries are due and no delivery attempt was recorded for 20 minutes.
+            Check webhook-delivery (readiness: mysql, redis), its logs and
+            webhook_rate_limit_store_errors_total.
+          runbook_url: docs/runbooks/webhooks.md#webhookdeliverystalled
+      - alert: WebhookOldestDueAge
+        expr: max(webhook_oldest_due_age_seconds) > 900
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: The oldest due webhook delivery waits more than 15 minutes
+          description: >-
+            A due delivery has waited more than 900 s past its scheduled attempt. The delivery
+            replicas are saturated (WEBHOOK_DELIVERY_CONCURRENCY), capped per organization or
+            subscription, or slowed by endpoints that time out.
+          runbook_url: docs/runbooks/webhooks.md#webhookoldestdueage
+      - alert: WebhookDeadLetters
+        expr: sum(increase(webhook_deliveries_dead_total[1h])) > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: More than 100 webhook deliveries became dead in an hour
+          description: >-
+            Deliveries exhausted their retries (WEBHOOK_MAX_ATTEMPTS / WEBHOOK_MAX_RETRY_AGE_HOURS)
+            or were inserted dead by the per-subscription backlog bound. Tenants can replay them;
+            check which endpoints fail.
+          runbook_url: docs/runbooks/webhooks.md#webhookdeadletters
+      - alert: WebhookSsrfBlockedSpike
+        expr: sum(increase(webhook_ssrf_blocked_total[15m])) > 50
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: The SSRF guard blocked more than 50 webhook attempts in 15 minutes
+          description: >-
+            Webhook endpoints resolve to internal, metadata or otherwise blocked addresses. Blocked
+            deliveries fail at once and count toward auto-disable. Look for a tenant probing
+            internal addresses or a DNS change of a popular endpoint.
+          runbook_url: docs/runbooks/webhooks.md#webhookssrfblockedspike
+      - alert: WebhookFanoutErrors
+        # `unsafe`: a public payload failed the payload guard (a programming error; the source
+        # event was dead-lettered). `error`: retried failures (inconsistent reads, outages).
+        expr: >-
+          (sum by (result) (increase(webhook_fanout_events_total{result="unsafe"}[15m])) > 0)
+          or
+          (sum by (result) (increase(webhook_fanout_events_total{result="error"}[15m])) > 10)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Webhook fanout failures ({{ $labels.result }})
+          description: >-
+            The fanout reported {{ $labels.result }} results in the last 15 minutes. unsafe means a
+            payload was refused by the payload guard and its source event dead-lettered; error means
+            retried failures (writer reads, broker or database outages).
+          runbook_url: docs/runbooks/webhooks.md#webhookfanouterrors
+      - alert: WebhookRateLimitStoreErrors
+        expr: sum(increase(webhook_rate_limit_store_errors_total[10m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: The webhook delivery loop cannot reach Redis
+          description: >-
+            Delivery ticks found Redis (in-flight and rate counters) unavailable and sent nothing
+            (fail closed). Deliveries wait; nothing is lost. Check Redis and the delivery replicas.
+          runbook_url: docs/runbooks/webhooks.md#webhookratelimitstoreerrors
+      - alert: SecurityAlertNotificationFailures
+        # notification_alert_messages_total is emitted by the notification-worker (step 6.2 N4).
+        expr: sum(increase(notification_alert_messages_total{result="failed"}[30m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Security alert e-mails failed
+          description: >-
+            The notification-worker failed to send security alert e-mails (threat detected, DNS
+            failure, webhook disabled) in the last 30 minutes; they are retried by the queue and
+            dead-lettered after the retry policy. Check the notification relay (postfix-notify).
+          runbook_url: docs/runbooks/webhooks.md#securityalertnotificationfailures

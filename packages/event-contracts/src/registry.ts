@@ -4,6 +4,7 @@ import {
   attachmentSandboxRequestedV1,
   deliveryApprovedV1,
   deliveryStatusChangedV1,
+  domainDnsRecordsChangedV1,
   domainRoutingChangedV1,
   domainStatusChangedV1,
   EventTypes,
@@ -16,6 +17,7 @@ import {
   messageScannedV1,
   messageScanStageReadyV1,
   messageStateChangedV1,
+  notificationAlertRequestedV1,
   policyDecidedV1,
   policyNotificationRequestedV1,
   quarantineNotificationRequestedV1,
@@ -41,8 +43,11 @@ import type { ExchangeName } from './topology';
  * 4.6 X11): the aggregate is a sandbox analysis (`aggregate_id` = `sandbox_analyses.id`;
  * `message_outbox.aggregate_type` is VARCHAR(64), no DDL). `quarantine` (step 5.3 Q20): a
  * quarantine notification of an organization (`aggregate_id` = the decimal organization id).
+ * `organization` (step 6.2 §4.1): a security alert request of an organization (`aggregate_id` =
+ * the decimal organization id).
  */
-export type AggregateType = 'message' | 'domain' | 'attachment' | 'sandbox_analysis' | 'quarantine';
+export type AggregateType =
+  'message' | 'domain' | 'attachment' | 'sandbox_analysis' | 'quarantine' | 'organization';
 
 export interface EventDefinition<S extends z.ZodType = z.ZodType> {
   type: string;
@@ -245,6 +250,22 @@ export const EVENT_REGISTRY = {
     'email.security',
     attachmentSandboxCompletedV1,
     'attachment',
+  ),
+  // Step 6.2 §4.1: producer api (domains check transaction) through the outbox, only on stored
+  // record status transitions; bound to email.webhooks (consumer: webhook-worker fanout).
+  [EventTypes.DomainDnsRecordsChanged]: define(
+    EventTypes.DomainDnsRecordsChanged,
+    'email.events',
+    domainDnsRecordsChangedV1,
+    'domain',
+  ),
+  // Step 6.2 N2, §4.1: producer webhook-worker through the outbox (first event of a throttle
+  // window); bound to email.notifications (consumer: notification-worker).
+  [EventTypes.NotificationAlertRequested]: define(
+    EventTypes.NotificationAlertRequested,
+    'email.policy',
+    notificationAlertRequestedV1,
+    'organization',
   ),
 } as const satisfies Record<string, EventDefinition>;
 

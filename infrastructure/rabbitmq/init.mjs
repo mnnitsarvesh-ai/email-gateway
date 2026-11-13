@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// RabbitMQ provisioning for topology v10 (step 3.2 Q5, Q10, ADR-0024; v2: step 3.3 L7; v3: step
+// RabbitMQ provisioning for topology v11 (step 3.2 Q5, Q10, ADR-0024; v2: step 3.3 L7; v3: step
 // 4.1 S2, ADR-0026; v4: step 4.2 A2, ADR-0028; v5: step 4.3 U2, ADR-0029; v6: step 4.4 B3,
 // ADR-0033; v7: step 4.5 D2, ADR-0036; v8: step 4.6 X11, ADR-0040; v9: step 5.2 P15, ADR-0044;
-// v10: step 5.3 Q27, ADR-0046).
+// v10: step 5.3 Q27, ADR-0046; v11: step 6.2 §4.3, ADR-0055).
 // The only code that declares broker objects: services verify passively and their users cannot
 // configure.
 //
@@ -31,7 +31,7 @@
 //   6. --cleanup-legacy: delete the ADR-0005 objects on vhost "/" only when empty (queues with
 //      no messages and no consumers; RabbitMQ 4.x refuses `if-empty` deletes of quorum queues,
 //      so emptiness is checked first); --legacy-vhost points it at another vhost (tests only);
-//   7. verify: exactly the 6 exchanges and 20 quorum queues, exactly the bindings of the
+//   7. verify: exactly the 6 exchanges and 21 quorum queues, exactly the bindings of the
 //      definitions (no missing and no extra binding), every policy applied, and (--users) each
 //      role user's permissions and topic permissions exactly.
 // Exits non-zero on any failure. Logs object names and counts only: never a password, never a
@@ -111,6 +111,17 @@ const topic = (exchange, write) => ({ exchange, write, read: '^$' });
  * covers the two new event types). ops may replay email.quarantine. `email.quarantine` is no
  * dot-prefix of another queue name, and `email.policy.evaluate` / `email.quarantine` never share a
  * prefix, so the alternation cannot reach another queue's hops.
+ *
+ * Topology v11 (step 6.2 §4.3, ADR-0055) adds the webhook-worker user (`eg-webhook`): it reads
+ * only email.webhooks (the fanout's work queue, home exchange email.events) and publishes only
+ * that queue's retry and dead-letter hops, both on email.events; its public webhook deliveries
+ * are HTTP, and its alert requests (notification.alert_requested.v1) go through the outbox and the
+ * relay. It configures nothing. The relay needs nothing new: its topic grant is the `org.<id>.`
+ * prefix on all six exchanges (EVENT_KEYS), which covers the two new event types
+ * (domain.dns.records_changed.v1 on email.events, notification.alert_requested.v1 on
+ * email.policy). ops may replay email.webhooks: it gains write on email.events, limited by its
+ * topic permission to the `retry.email.webhooks.` hops (never `org.` keys or dead letters).
+ * `email.webhooks` is no dot-prefix of another queue name.
  */
 const SCANNER_QUEUES =
   '(spam|attachment|url|url\\.results|bec|dlp|sandbox\\.submissions|sandbox\\.results)';
@@ -229,6 +240,19 @@ const ROLE_USERS = [
     ],
   },
   {
+    // Step 6.2 W1, §4.3 (v11): the webhook-worker fanout. Reads its one queue; publishes only the
+    // retry and dead-letter hops of email.webhooks (home exchange email.events).
+    role: 'webhook-worker',
+    userKey: 'RABBITMQ_WEBHOOK_USER',
+    passwordKey: 'RABBITMQ_WEBHOOK_PASSWORD',
+    configure: '^$',
+    write: '^email\\.events$',
+    read: '^email\\.webhooks$',
+    topics: [
+      topic('email.events', '^(retry\\.email\\.webhooks\\.|dead-letter\\.email\\.webhooks(\\.|$))'),
+    ],
+  },
+  {
     role: 'ops',
     userKey: 'RABBITMQ_OPS_USER',
     passwordKey: 'RABBITMQ_OPS_PASSWORD',
@@ -237,8 +261,9 @@ const ROLE_USERS = [
     // scan.spam, v4 scan.attachment, v5 scan.url, scan.url.inspect and scan.url.results, v6
     // scan.bec, v7 scan.dlp, v8 scan.sandbox, scan.sandbox.submissions and scan.sandbox.results
     // (home exchange email.security), v9 email.policy.evaluate and email.notifications, v10
-    // email.quarantine (home exchange email.policy).
-    write: '^email\\.(ingestion|delivery|security|policy)$',
+    // email.quarantine (home exchange email.policy), v11 email.webhooks (home exchange
+    // email.events; its topic grant there is the retry prefix only).
+    write: '^email\\.(ingestion|delivery|security|policy|events)$',
     read: '^email\\.dead-letter$',
     topics: [
       topic('email.ingestion', '^retry\\.email\\.received\\.'),
@@ -248,6 +273,7 @@ const ROLE_USERS = [
         '^retry\\.scan\\.(spam|attachment|url|url\\.inspect|url\\.results|bec|dlp|sandbox|sandbox\\.submissions|sandbox\\.results)\\.',
       ),
       topic('email.policy', '^retry\\.email\\.(policy\\.evaluate|notifications|quarantine)\\.'),
+      topic('email.events', '^retry\\.email\\.webhooks\\.'),
     ],
   },
 ];

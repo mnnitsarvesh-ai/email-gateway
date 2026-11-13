@@ -36,9 +36,9 @@ const daily = (...names: string[]): ExistingPartition[] => [
 const utc = (iso: string) => new Date(iso);
 
 describe('registry', () => {
-  it('lists the 31 partitioned tables (D3, steps 2.3, 3.1, 4.1, 4.2, 4.3, 4.4, 4.5 and 5.1) with their retention', () => {
-    expect(PARTITION_REGISTRY).toHaveLength(31);
-    expect(new Set(PARTITION_REGISTRY.map((s) => s.table)).size).toBe(31);
+  it('lists the 33 partitioned tables (D3, steps 2.3, 3.1, 4.1, 4.2, 4.3, 4.4, 4.5, 5.1 and 6.2) with their retention', () => {
+    expect(PARTITION_REGISTRY).toHaveLength(33);
+    expect(new Set(PARTITION_REGISTRY.map((s) => s.table)).size).toBe(33);
     const byTable = Object.fromEntries(PARTITION_REGISTRY.map((s) => [s.table, s]));
     expect(byTable.email_messages).toMatchObject({
       column: 'received_at',
@@ -156,6 +156,25 @@ describe('registry', () => {
     });
     expect(byTable.message_risk_scores!.retention).toBe(byTable.email_scans!.retention);
     expect(byTable.message_risk_scores!.guard).toBeUndefined();
+    // Step 6.2: stored webhook events and delivery attempts live as long as the deliveries.
+    expect(byTable.webhook_events).toMatchObject({
+      column: 'occurred_at',
+      granularity: 'month',
+      retention: 2,
+      drop: true,
+      tier: 'operational',
+    });
+    expect(byTable.webhook_delivery_attempts).toMatchObject({
+      column: 'attempted_at',
+      granularity: 'month',
+      retention: 2,
+      drop: true,
+      tier: 'operational',
+    });
+    for (const table of ['webhook_events', 'webhook_delivery_attempts']) {
+      expect(byTable[table]!.retention).toBe(byTable.webhook_deliveries!.retention);
+      expect(byTable[table]!.guard).toBeUndefined();
+    }
     expect(byTable.audit_logs).toMatchObject({
       column: 'created_at',
       retention: null,

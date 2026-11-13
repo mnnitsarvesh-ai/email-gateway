@@ -21,7 +21,7 @@ import { stack } from './support/env';
 /**
  * The provisioned vhost `email-gateway` matches the topology exactly (step 3.2 Q1, Q4, §3; v2:
  * step 3.3 L7; v3: step 4.1 S2; v4: step 4.2 A2; v5: step 4.3 U2; v6: step 4.4 B3; v7: step 4.5
- * D2; v8: step 4.6 X11; v9: step 5.2 P15): checks through the management API. The prune case adds one stray binding to the dormant
+ * D2; v8: step 4.6 X11; v9: step 5.2 P15; v10: step 5.3 Q27; v11: step 6.2 §4.3): checks through the management API. The prune case adds one stray binding to the dormant
  * `scan.auth` and lets `init.mjs` remove it again.
  */
 /**
@@ -33,9 +33,12 @@ import { stack } from './support/env';
  * scan.sandbox.results add two each: 45 (40 queue + 5 exchange bindings). v9 (step 5.2 P15):
  * email.policy.evaluate keeps its three bindings, email.archive keeps two
  * (archive_requested.v1 on email.archive replaces policy.decided.v1 on email.policy, pruned by
- * init.mjs) and email.notifications adds two: 47 (42 queue + 5 exchange bindings).
+ * init.mjs) and email.notifications adds two: 47 (42 queue + 5 exchange bindings). v10 (step 5.3
+ * Q27): email.notifications adds one: 48. v11 (step 6.2 §4.3): email.webhooks adds nine (eight
+ * event bindings + its retry binding) and email.notifications one (alert_requested.v1): 58 (53
+ * queue + 5 exchange bindings).
  */
-const TOPOLOGY_BINDINGS = 48;
+const TOPOLOGY_BINDINGS = 58;
 const api = new ManagementApi();
 const vhost = stack.rabbitmqVhost();
 
@@ -67,8 +70,8 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
     }
   });
 
-  it('has exactly the twenty durable quorum queues, each under its policy eg.<queue>', () => {
-    expect(QUEUE_NAMES).toHaveLength(20);
+  it('has exactly the twenty-one durable quorum queues, each under its policy eg.<queue>', () => {
+    expect(QUEUE_NAMES).toHaveLength(21);
     expect(queues.map((q) => q.name).sort()).toEqual([...QUEUE_NAMES].sort());
     for (const queue of queues) {
       expect(queue.type, queue.name).toBe('quorum');
@@ -136,10 +139,10 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
     expect(bindings.filter((b) => b.destination_type === 'exchange')).toHaveLength(5);
   });
 
-  it('is topology v10: the vhost description and the rescan bindings (steps 4.1 S2, 4.2 A2, 4.3 U2, 4.4 B3, 4.5 D2, 4.6 X11, 5.2 P15, 5.3 Q27)', async () => {
-    expect(TOPOLOGY_VERSION).toBe(10);
+  it('is topology v11: the vhost description and the rescan bindings (steps 4.1 S2, 4.2 A2, 4.3 U2, 4.4 B3, 4.5 D2, 4.6 X11, 5.2 P15, 5.3 Q27, 6.2)', async () => {
+    expect(TOPOLOGY_VERSION).toBe(11);
     const info = await api.get<{ description?: string }>(`/vhosts/${encodeURIComponent(vhost)}`);
-    expect(info.description).toBe('email-gateway topology v10');
+    expect(info.description).toBe('email-gateway topology v11');
     const rescan = bindings
       .filter(
         (b) =>
@@ -479,7 +482,7 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
     }
   });
 
-  it('routes the sandbox events on the live bindings (v8): submission → dispatcher, task → controller, result → results consumer, completion → firehose only', () => {
+  it('routes the sandbox events on the live bindings (v8): submission → dispatcher, task → controller, result → results consumer, completion → firehose (and v11 webhook fanout)', () => {
     const route = (type: string) => {
       const key = `org.42.${type}`;
       const fromSecurity = bindings
@@ -500,7 +503,11 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
       'exchange:email.events',
       'queue:scan.sandbox.results',
     ]);
-    expect(route('mail.attachment.sandbox_completed.v1')).toEqual(['exchange:email.events']);
+    // v11 (step 6.2 §4.3): the late sandbox verdict also reaches the webhook fanout.
+    expect(route('mail.attachment.sandbox_completed.v1')).toEqual([
+      'exchange:email.events',
+      'queue:email.webhooks',
+    ]);
     // Retry hops reach exactly their own queue.
     const retry = (queue: string) =>
       bindings
@@ -554,6 +561,8 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
         'email.policy [org.*.mail.policy.notification_requested.v1]',
         // v10 (step 5.3 Q20).
         'email.policy [org.*.mail.quarantine.notification_requested.v1]',
+        // v11 (step 6.2 N2).
+        'email.policy [org.*.notification.alert_requested.v1]',
         'email.policy [retry.email.notifications.#]',
       ].sort(),
     );
@@ -590,14 +599,18 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
     for (const user of await consumerUsers('email.quarantine')) expect(user).toBe(engine);
   });
 
-  it('routes the policy and quarantine events on the live bindings (v10): decision → firehose only, release request → email.quarantine, archive request → archive (8.1), notifications → email.notifications', () => {
+  it('routes the policy and quarantine events on the live bindings (v10/v11): decision → firehose and webhook fanout, release request → email.quarantine, archive request → archive (8.1), notifications → email.notifications', () => {
     const route = (exchange: string, type: string) =>
       bindings
         .filter((b) => b.source === exchange && topicMatches(b.routing_key, `org.42.${type}`))
         .map((b) => `${b.destination_type}:${b.destination}`)
         .sort();
     // v10 (step 5.3 Q2): the decision is a firehose event only.
-    expect(route('email.policy', 'mail.policy.decided.v1')).toEqual(['exchange:email.events']);
+    // v11 (step 6.2 §4.3): and the webhook fanout.
+    expect(route('email.policy', 'mail.policy.decided.v1')).toEqual([
+      'exchange:email.events',
+      'queue:email.webhooks',
+    ]);
     expect(route('email.policy', 'mail.quarantine.release_requested.v1')).toEqual([
       'exchange:email.events',
       'queue:email.quarantine',
@@ -636,6 +649,76 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
         .map((b) => b.destination);
       expect(reached, queue).toEqual([queue]);
     }
+  });
+
+  it('email.webhooks is a work queue (v11) for the webhook-worker fanout (eg-webhook) only', async () => {
+    expect(queueDefinition('email.webhooks')).toMatchObject({
+      role: 'work',
+      homeExchange: 'email.events',
+      consumer: { kind: 'ledger', ledgerName: 'webhook-worker.fanout', service: 'webhook-worker' },
+    });
+    expect(queueDefinition('email.webhooks').lossy).toBeUndefined();
+    expect(bindingsOf('email.webhooks')).toEqual(
+      [
+        'email.ingestion [org.*.mail.message.received.v1]',
+        'email.security [org.*.mail.message.scanned.v1]',
+        'email.security [org.*.mail.attachment.sandbox_completed.v1]',
+        'email.policy [org.*.mail.policy.decided.v1]',
+        'email.delivery [org.*.mail.delivery.approved.v1]',
+        'email.events [org.*.mail.message.state_changed.v1]',
+        'email.events [org.*.domain.status.changed.v1]',
+        'email.events [org.*.domain.dns.records_changed.v1]',
+        'email.events [retry.email.webhooks.#]',
+      ].sort(),
+    );
+    // Never dropped: work policy (reject-publish at 1 000 000), dead letters to email.events.
+    expect(queues.find((q) => q.name === 'email.webhooks')?.effective_policy_definition).toEqual(
+      policyFor('work', 'email.webhooks'),
+    );
+    // Consumers (from WP2 on): the webhook-worker role user only.
+    const worker = process.env.RABBITMQ_WEBHOOK_USER || 'eg-webhook';
+    for (const user of await consumerUsers('email.webhooks')) expect(user).toBe(worker);
+  });
+
+  it('routes the v11 events on the live bindings: each source event once into email.webhooks, alerts to email.notifications, hops to their own queue', () => {
+    const route = (exchange: string, key: string) =>
+      bindings
+        .filter((b) => b.source === exchange && topicMatches(b.routing_key, key))
+        .map((b) => `${b.destination_type}:${b.destination}`)
+        .sort();
+    const onEvents = (key: string) =>
+      bindings
+        .filter((b) => b.source === 'email.events' && topicMatches(b.routing_key, key))
+        .map((b) => b.destination)
+        .sort();
+    for (const [exchange, type] of [
+      ['email.ingestion', 'mail.message.received.v1'],
+      ['email.security', 'mail.message.scanned.v1'],
+      ['email.policy', 'mail.policy.decided.v1'],
+      ['email.delivery', 'mail.delivery.approved.v1'],
+    ] as const) {
+      expect(route(exchange, `org.42.${type}`), type).toContain('queue:email.webhooks');
+      // The email.events copy of a forwarded event does not reach email.webhooks a second time.
+      expect(onEvents(`org.42.${type}`), type).not.toContain('email.webhooks');
+    }
+    for (const type of [
+      'mail.message.state_changed.v1',
+      'domain.status.changed.v1',
+      'domain.dns.records_changed.v1',
+    ]) {
+      expect(onEvents(`org.42.${type}`), type).toEqual(['email.analytics', 'email.webhooks']);
+    }
+    expect(route('email.policy', 'org.42.notification.alert_requested.v1')).toEqual([
+      'exchange:email.events',
+      'queue:email.notifications',
+    ]);
+    expect(onEvents('retry.email.webhooks.org.42.domain.dns.records_changed.v1')).toEqual([
+      'email.webhooks',
+    ]);
+    expect(onEvents('dead-letter.email.webhooks.org.42.mail.message.received.v1')).toEqual([
+      'email.dead-letter',
+    ]);
+    expect(onEvents('dead-letter.email.webhooks')).toEqual(['email.dead-letter']);
   });
 
   it('init.mjs prunes a binding on a topology queue that the definitions do not have', async () => {

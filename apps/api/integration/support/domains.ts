@@ -368,7 +368,30 @@ export async function domainEvents(
     select: { id: true },
   });
   return ctx.prisma.messageOutbox.findMany({
-    where: { aggregateType: 'domain', aggregateId: id.toString(10) },
+    where: {
+      aggregateType: 'domain',
+      aggregateId: id.toString(10),
+      eventType: 'domain.status.changed.v1',
+    },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+  });
+}
+
+/** `domain.dns.records_changed.v1` outbox rows of one domain (step 6.2 §4.1), oldest first. */
+export async function domainRecordEvents(
+  ctx: IntegrationApp,
+  publicId: string,
+): Promise<MessageOutbox[]> {
+  const { id } = await ctx.prisma.domain.findUniqueOrThrow({
+    where: { publicId },
+    select: { id: true },
+  });
+  return ctx.prisma.messageOutbox.findMany({
+    where: {
+      aggregateType: 'domain',
+      aggregateId: id.toString(10),
+      eventType: 'domain.dns.records_changed.v1',
+    },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
   });
 }

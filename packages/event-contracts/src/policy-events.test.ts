@@ -133,8 +133,11 @@ describe('mail.policy.decided.v1 (step 5.2 P15, redefined in place)', () => {
     expect(parseEvent(inEnvelope(type, decided), policyDecidedV1).payload).toEqual(decided);
   });
 
-  it('routes to the firehose only (topology v10: the email.quarantine binding is removed)', () => {
-    expect(routeMessage('email.policy', eventRoutingKey('42', type))).toEqual(['email.analytics']);
+  it('routes to the firehose and the webhook fanout (v10: email.quarantine unbound; v11: email.webhooks)', () => {
+    expect(routeMessage('email.policy', eventRoutingKey('42', type))).toEqual([
+      'email.analytics',
+      'email.webhooks',
+    ]);
   });
 
   it('has exactly the P15 fields and is strict', () => {

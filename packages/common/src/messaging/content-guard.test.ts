@@ -28,8 +28,8 @@ function refusal(value: unknown): { code: ContentGuardCode; path: string } {
 describe('assertMetadataOnly: valid envelopes pass', () => {
   const types = Object.keys(EVENT_REGISTRY) as RegisteredEventType[];
 
-  it('covers all twenty-four registered event types (two added by step 3.3, one by step 4.2, three by step 4.3, one by step 4.4, one by step 4.5, three by step 4.6, two by step 5.2, two by step 5.3)', () => {
-    expect(types).toHaveLength(24);
+  it('covers all twenty-six registered event types (two added by step 3.3, one by step 4.2, three by step 4.3, one by step 4.4, one by step 4.5, three by step 4.6, two by step 5.2, two by step 5.3, two by step 6.2)', () => {
+    expect(types).toHaveLength(26);
     expect(types).toContain('mail.message.dlp_incident.v1');
     expect(types).toEqual(
       expect.arrayContaining([
@@ -43,6 +43,9 @@ describe('assertMetadataOnly: valid envelopes pass', () => {
         // Step 5.3 Q27.
         'mail.quarantine.release_requested.v1',
         'mail.quarantine.notification_requested.v1',
+        // Step 6.2 §4.1.
+        'domain.dns.records_changed.v1',
+        'notification.alert_requested.v1',
       ]),
     );
   });
