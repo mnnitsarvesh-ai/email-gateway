@@ -4538,9 +4538,28 @@ describe('REST API schema (step 6.1, docs/plan/steps/18-rest-api.md §3.1)', () 
       columns: ['organization_id', 'final_verdict', 'received_at', 'id'],
       unique: false,
     });
-    // final_action since migration rest_api_index_coverage (index-only threats outcomes).
+    // final_action since migration rest_api_index_coverage (index-only threats outcomes);
+    // domain_id since admin_portal_reports (step 7.1 §3.2: index-only top attacked domains).
     expect(messages.get('email_messages_org_received_dir_verdict_idx')).toEqual({
-      columns: ['organization_id', 'received_at', 'direction', 'final_verdict', 'final_action'],
+      columns: [
+        'organization_id',
+        'received_at',
+        'direction',
+        'final_verdict',
+        'final_action',
+        'domain_id',
+      ],
+      unique: false,
+    });
+    // Step 7.1 §3.2 (admin_portal_reports): the delivery and processing reports, index-only.
+    expect(
+      (await indexes('email_deliveries')).get('email_deliveries_org_received_status_idx'),
+    ).toEqual({
+      columns: ['organization_id', 'received_at', 'status', 'delivered_at'],
+      unique: false,
+    });
+    expect((await indexes('email_scans')).get('email_scans_org_received_kind_status_idx')).toEqual({
+      columns: ['organization_id', 'received_at', 'scan_kind', 'status', 'completed_at'],
       unique: false,
     });
     // received_at, id since rest_api_index_coverage: the hash search keyset without a filesort.

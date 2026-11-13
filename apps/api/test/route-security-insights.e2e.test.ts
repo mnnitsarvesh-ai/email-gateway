@@ -1,5 +1,6 @@
 /**
- * Step 6.1 WP3 route security (docs/plan/steps/18-rest-api.md §3.3, §3.5, §3.6): the exact
+ * Step 6.1 WP3 route security (docs/plan/steps/18-rest-api.md §3.3, §3.5, §3.6; the step 7.1
+ * reports of docs/plan/steps/20-admin-portal.md §3.3): the exact
  * authorization requirement, MFA, user-only, rate class, idempotency and cursor metadata of every
  * insight route, discovered from the running app, and that every one of them answers 401 without
  * credentials.
@@ -9,6 +10,9 @@
 // @covers get /api/v1/reports/traffic
 // @covers get /api/v1/reports/threats
 // @covers get /api/v1/reports/url-clicks
+// @covers get /api/v1/reports/delivery
+// @covers get /api/v1/reports/processing
+// @covers get /api/v1/reports/top-domains
 // @covers get /api/v1/usage
 // @covers get /api/v1/billing/plan
 // @covers get /api/v1/billing/usage
@@ -55,6 +59,28 @@ const EXPECTED: Record<string, Expected> = {
     cursor: null,
   },
   'get /api/v1/reports/url-clicks': {
+    permissions: ['report:read'],
+    mfa: false,
+    userOnly: false,
+    rateClass: 'expensive',
+    cursor: null,
+  },
+  // Step 7.1 §3.3 (docs/plan/steps/20-admin-portal.md).
+  'get /api/v1/reports/delivery': {
+    permissions: ['report:read'],
+    mfa: false,
+    userOnly: false,
+    rateClass: 'expensive',
+    cursor: null,
+  },
+  'get /api/v1/reports/processing': {
+    permissions: ['report:read'],
+    mfa: false,
+    userOnly: false,
+    rateClass: 'expensive',
+    cursor: null,
+  },
+  'get /api/v1/reports/top-domains': {
     permissions: ['report:read'],
     mfa: false,
     userOnly: false,

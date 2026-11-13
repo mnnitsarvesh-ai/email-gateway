@@ -2,7 +2,16 @@ import { createHash } from 'node:crypto';
 import { canonicalJson } from '../../../http/idempotency/idempotency-key';
 
 /** Reports with a cache entry and metrics (`report` label of the D16 series). */
-export const REPORT_NAMES = ['traffic', 'threats', 'url_clicks', 'billing_usage'] as const;
+export const REPORT_NAMES = [
+  'traffic',
+  'threats',
+  'url_clicks',
+  'billing_usage',
+  // Step 7.1 §3.3.2 (docs/plan/steps/20-admin-portal.md).
+  'delivery',
+  'processing',
+  'top-domains',
+] as const;
 export type ReportName = (typeof REPORT_NAMES)[number];
 
 export const REPORT_CACHE_PREFIX = 'rpt:v1';

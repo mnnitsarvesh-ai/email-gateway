@@ -217,6 +217,10 @@ export async function createInsightApp(
     outcomes: () => Promise.resolve([]),
     quarantine: () => Promise.resolve([]),
     clicks: () => Promise.resolve([]),
+    deliveries: () => Promise.resolve([]),
+    scanRounds: () => Promise.resolve([]),
+    domainVerdicts: () => Promise.resolve([]),
+    domains: () => Promise.resolve(new Map()),
   } as InsightDoubles['reports'];
   const billing = {
     plan: () =>

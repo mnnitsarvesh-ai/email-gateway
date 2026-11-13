@@ -1259,7 +1259,7 @@ services:
       API_RATE_TENANT_MIN_PER_MINUTE: ${API_RATE_TENANT_MIN_PER_MINUTE:-10}
       API_RATE_TENANT_MAX_PER_MINUTE: ${API_RATE_TENANT_MAX_PER_MINUTE:-10000}
       API_RATE_SENSITIVE_PER_MINUTE: ${API_RATE_SENSITIVE_PER_MINUTE:-30}
-      API_RATE_EXPENSIVE_PER_MINUTE: ${API_RATE_EXPENSIVE_PER_MINUTE:-20}
+      API_RATE_EXPENSIVE_PER_MINUTE: ${API_RATE_EXPENSIVE_PER_MINUTE:-60}
       API_RATE_LIMIT_CACHE_SECONDS: ${API_RATE_LIMIT_CACHE_SECONDS:-60}
       API_IDEMPOTENCY_LEGACY_MODE: ${API_IDEMPOTENCY_LEGACY_MODE:-enforce}
       API_IDEMPOTENCY_PENDING_TTL_SECONDS: ${API_IDEMPOTENCY_PENDING_TTL_SECONDS:-300}
@@ -1284,6 +1284,9 @@ services:
       WEBHOOK_REPLAY_MAX_PER_DELIVERY: ${WEBHOOK_REPLAY_MAX_PER_DELIVERY:-10}
       WEBHOOK_REPLAY_REQUESTS_PER_HOUR: ${WEBHOOK_REPLAY_REQUESTS_PER_HOUR:-10}
       WEBHOOK_TEST_REQUESTS_PER_MINUTE: ${WEBHOOK_TEST_REQUESTS_PER_MINUTE:-6}
+      # Admin portal (step 7.1 P5, ADR-0060): the trusted client-IP forwarder secret shared with
+      # the portal BFF (empty = off: X-EG-* headers ignored and stripped).
+      API_TRUSTED_FORWARDER_TOKEN: ${API_TRUSTED_FORWARDER_TOKEN:-}
     ports: ['127.0.0.1:${API_HOST_PORT:-3000}:3000']
     healthcheck:
       <<: *node-healthcheck
@@ -2221,7 +2224,18 @@ services:
     build: { context: ., dockerfile: infrastructure/docker/admin-portal.Dockerfile }
     image: email-gateway/admin-portal:local
     environment:
+      # Step 7.1 §3.5 (docs/plan/steps/20-admin-portal.md): the BFF talks to the api over the
+      # Compose network; the browser reaches the portal at PORTAL_PUBLIC_URL (localhost: http is
+      # allowed only with APP_ENV local/ci). The portal holds no data-store credentials.
+      APP_ENV: local
       API_INTERNAL_URL: http://api:3000
+      PORTAL_PUBLIC_URL: ${PORTAL_PUBLIC_URL:-http://localhost:3001}
+      PORTAL_SESSION_KEY: ${PORTAL_SESSION_KEY:?append the admin portal keys from .env.example}
+      PORTAL_SESSION_KEY_PREVIOUS: ${PORTAL_SESSION_KEY_PREVIOUS:-}
+      API_TRUSTED_FORWARDER_TOKEN: ${API_TRUSTED_FORWARDER_TOKEN:?append the admin portal keys from .env.example}
+      # The browser connects to the portal directly (no proxy in front of it locally).
+      PORTAL_TRUST_PROXY_HOPS: 0
+      PORTAL_API_TIMEOUT_MS: ${PORTAL_API_TIMEOUT_MS:-15000}
     ports: ['127.0.0.1:${ADMIN_PORTAL_HOST_PORT:-3001}:3001']
     depends_on:
       api: { condition: service_healthy }

@@ -6,7 +6,7 @@ function Card({ className, ...props }: React.ComponentProps<'div'>) {
     <div
       data-slot="card"
       className={cn(
-        'flex flex-col gap-4 rounded-xl border bg-card py-5 text-card-foreground shadow-sm',
+        'flex flex-col gap-4 rounded-lg border bg-card py-5 text-card-foreground shadow-xs',
         className,
       )}
       {...props}
@@ -15,14 +15,23 @@ function Card({ className, ...props }: React.ComponentProps<'div'>) {
 }
 
 function CardHeader({ className, ...props }: React.ComponentProps<'div'>) {
-  return <div data-slot="card-header" className={cn('grid gap-1.5 px-5', className)} {...props} />;
+  return (
+    <div
+      data-slot="card-header"
+      className={cn(
+        'grid auto-rows-min gap-1.5 px-5 has-[[data-slot=card-action]]:grid-cols-[1fr_auto]',
+        className,
+      )}
+      {...props}
+    />
+  );
 }
 
 function CardTitle({ className, ...props }: React.ComponentProps<'div'>) {
   return (
     <div
       data-slot="card-title"
-      className={cn('font-semibold leading-none', className)}
+      className={cn('text-base leading-tight font-semibold', className)}
       {...props}
     />
   );
@@ -38,8 +47,28 @@ function CardDescription({ className, ...props }: React.ComponentProps<'div'>) {
   );
 }
 
+function CardAction({ className, ...props }: React.ComponentProps<'div'>) {
+  return (
+    <div
+      data-slot="card-action"
+      className={cn('col-start-2 row-span-2 row-start-1 self-start justify-self-end', className)}
+      {...props}
+    />
+  );
+}
+
 function CardContent({ className, ...props }: React.ComponentProps<'div'>) {
   return <div data-slot="card-content" className={cn('px-5', className)} {...props} />;
 }
 
-export { Card, CardContent, CardDescription, CardHeader, CardTitle };
+function CardFooter({ className, ...props }: React.ComponentProps<'div'>) {
+  return (
+    <div
+      data-slot="card-footer"
+      className={cn('flex items-center gap-2 px-5', className)}
+      {...props}
+    />
+  );
+}
+
+export { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle };

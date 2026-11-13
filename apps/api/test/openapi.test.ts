@@ -197,8 +197,9 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     expect(failures).toEqual([]);
     // 231 operations before step 6.1, minus the two probes (D13), plus the 20 new routes of
     // §3.3 (step 6.1 §1.2): 249; plus the 17 webhook and notification routes of step 6.2
-    // (docs/plan/steps/19-webhooks-notifications.md §6.1): 266, all under /api/v1.
-    expect(count).toBe(266);
+    // (docs/plan/steps/19-webhooks-notifications.md §6.1): 266; plus the 3 reports of step 7.1
+    // (docs/plan/steps/20-admin-portal.md §3.3): 269, all under /api/v1.
+    expect(count).toBe(269);
   });
 
   it('gives every /api/v1 operation a tag', () => {
@@ -828,7 +829,7 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     }
   });
 
-  it('documents the 20 step 6.1 routes with their module tags (§3.3, D14)', () => {
+  it('documents the 20 step 6.1 routes and the 3 step 7.1 reports with their module tags (§3.3, D14)', () => {
     const expected: Record<string, string> = {
       'GET /api/v1/messages': 'messages',
       'GET /api/v1/messages/{messageId}': 'messages',
@@ -850,12 +851,34 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
       'GET /api/v1/billing/plan': 'billing',
       'GET /api/v1/billing/usage': 'billing',
       'GET /api/v1/threat-intelligence/lookup': 'threat-intelligence',
+      // Step 7.1 §3.3 (docs/plan/steps/20-admin-portal.md).
+      'GET /api/v1/reports/delivery': 'reports',
+      'GET /api/v1/reports/processing': 'reports',
+      'GET /api/v1/reports/top-domains': 'reports',
     };
     const byKey = new Map(operations(doc).map((op) => [op.key, op]));
     for (const [key, tag] of Object.entries(expected)) {
       expect(byKey.get(key)?.tags, key).toEqual([tag]);
       expect(byKey.get(key)?.security.length, key).toBeGreaterThan(0);
     }
+  });
+
+  it('names the step 7.1 report operations and keeps the forwarder headers internal (ADR-0060)', () => {
+    const ids = Object.fromEntries(
+      ['delivery', 'processing', 'top-domains'].map((p) => [
+        p,
+        (doc.paths[`/api/v1/reports/${p}`]?.get as { operationId?: string } | undefined)
+          ?.operationId,
+      ]),
+    );
+    expect(ids).toEqual({
+      delivery: 'ReportsController_delivery_v1',
+      processing: 'ReportsController_processing_v1',
+      'top-domains': 'ReportsController_topDomains_v1',
+    });
+    const text = JSON.stringify(doc).toLowerCase();
+    expect(text).not.toContain('x-eg-client-ip');
+    expect(text).not.toContain('x-eg-forwarder-token');
   });
 
   it('marks every Idempotency-Key operation with x-eg-idempotency (step 6.1 D9)', () => {

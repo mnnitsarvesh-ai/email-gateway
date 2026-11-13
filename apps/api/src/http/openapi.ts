@@ -416,7 +416,9 @@ export const OPENAPI_TAGS: ReadonlyArray<{ name: string; description: string }> 
     name: 'reports',
     description:
       'Step 6.1: traffic, threat and URL-click aggregates computed on the replica over bounded ' +
-      'ranges, cached per organization (`503 report_timeout` instead of an overloaded replica).',
+      'ranges, cached per organization (`503 report_timeout` instead of an overloaded replica). ' +
+      'Step 7.1: the threats `outcomes` matrix and the delivery, processing (time to verdict) ' +
+      'and top attacked domains reports of the admin dashboard.',
   },
   {
     name: 'usage',

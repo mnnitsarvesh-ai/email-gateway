@@ -25,11 +25,17 @@ export function summarizeHealth(report: HealthReport | null): PlatformHealth {
  * `API_INTERNAL_URL` is the API **origin** (e.g. `http://api:3000`). Probes are unprefixed
  * (`/health/ready`); business calls use `${API_INTERNAL_URL}/api/v1/...` (ADR-0015).
  */
-export async function fetchPlatformHealth(): Promise<PlatformHealth> {
-  const baseUrl = process.env.API_INTERNAL_URL;
+export async function fetchPlatformHealth(
+  options: {
+    baseUrl?: string;
+    fetchImpl?: (url: string, init: RequestInit) => Promise<Response>;
+  } = {},
+): Promise<PlatformHealth> {
+  const baseUrl = options.baseUrl ?? process.env.API_INTERNAL_URL;
+  const fetchImpl = options.fetchImpl ?? fetch;
   if (!baseUrl) return summarizeHealth(null);
   try {
-    const res = await fetch(`${baseUrl.replace(/\/$/, '')}/health/ready`, {
+    const res = await fetchImpl(`${baseUrl.replace(/\/$/, '')}/health/ready`, {
       cache: 'no-store',
       signal: AbortSignal.timeout(2_000),
     });

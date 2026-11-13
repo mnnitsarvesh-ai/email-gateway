@@ -24,7 +24,8 @@
  *
  * Step 6.2 (docs/plan/steps/19-webhooks-notifications.md §6.2) adds the 17 webhook and
  * notification routes (`NEW_IN_6_2`, examples required, lists v1), five transactional keyed
- * routes and the `SECRET_BEARING_REDACTED_REPLAY` allow-list.
+ * routes and the `SECRET_BEARING_REDACTED_REPLAY` allow-list. Step 7.1
+ * (docs/plan/steps/20-admin-portal.md §3.3) adds three expensive report routes (`NEW_IN_7_1`).
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -200,6 +201,16 @@ const SENSITIVE_LEGACY = [
   'post /api/v1/platform/threat-indicators',
 ];
 
+/**
+ * Step 7.1 §3.3 (docs/plan/steps/20-admin-portal.md): the three reports of the admin dashboard
+ * (examples required, class `expensive`, in the insights manifest).
+ */
+const NEW_IN_7_1 = [
+  'get /api/v1/reports/delivery',
+  'get /api/v1/reports/processing',
+  'get /api/v1/reports/top-domains',
+];
+
 /** D9: secret-bearing responses (sensitive class, never idempotency-stored). */
 const SECRET_BEARING = [
   'post /api/v1/api-keys',
@@ -215,6 +226,7 @@ const EXPENSIVE = [
   'get /api/v1/reports/traffic',
   'get /api/v1/reports/threats',
   'get /api/v1/reports/url-clicks',
+  ...NEW_IN_7_1,
   'get /api/v1/billing/usage',
   'get /api/v1/threat-intelligence/lookup',
   'get /api/v1/attachments',
@@ -378,10 +390,10 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     await api?.close();
   });
 
-  it('discovers every route once (266 operations under /api/v1 plus the 3 internal endpoints)', () => {
+  it('discovers every route once (269 operations under /api/v1 plus the 3 internal endpoints)', () => {
     expect(facts.length).toBe(byKey.size);
-    // 249 after step 6.1, plus the 17 routes of step 6.2.
-    expect(facts.filter((f) => f.key.includes(' /api/v1/')).length).toBe(266);
+    // 249 after step 6.1, plus the 17 routes of step 6.2, plus the 3 reports of step 7.1.
+    expect(facts.filter((f) => f.key.includes(' /api/v1/')).length).toBe(269);
     expect(
       facts
         .filter((f) => isInternal(f.key))
@@ -476,9 +488,9 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     }
   });
 
-  it('gives every route new in 6.1 and 6.2 explicit response examples (D14)', () => {
+  it('gives every route new in 6.1, 6.2 and 7.1 explicit response examples (D14)', () => {
     const failures: string[] = [];
-    for (const key of [...NEW_IN_6_1, ...NEW_IN_6_2]) {
+    for (const key of [...NEW_IN_6_1, ...NEW_IN_6_2, ...NEW_IN_7_1]) {
       const op = operation(key);
       if (!op) {
         failures.push(`${key}: missing`);
@@ -509,8 +521,15 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
         'get /api/v1/messages/:messageId/scans',
       ].sort(),
     );
-    expect(COVERAGE_BY_AREA.insights.every((c) => NEW_IN_6_1.includes(c.route))).toBe(true);
+    expect(
+      COVERAGE_BY_AREA.insights.every(
+        (c) => NEW_IN_6_1.includes(c.route) || NEW_IN_7_1.includes(c.route),
+      ),
+    ).toBe(true);
     expect(NEW_IN_6_1).toHaveLength(20);
+    expect(NEW_IN_7_1.every((r) => COVERAGE_BY_AREA.insights.some((c) => c.route === r))).toBe(
+      true,
+    );
     // NEW_IN_6_2 is exactly the step 6.2 manifest.
     expect(COVERAGE_BY_AREA.webhooks.map((c) => c.route).sort()).toEqual([...NEW_IN_6_2].sort());
     expect(NEW_IN_6_2).toHaveLength(17);
@@ -527,6 +546,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     for (const route of COVERAGE_BY_AREA.legacy.map((c) => c.route)) {
       expect(NEW_IN_6_1.includes(route), route).toBe(false);
       expect(NEW_IN_6_2.includes(route), route).toBe(false);
+      expect(NEW_IN_7_1.includes(route), route).toBe(false);
     }
   });
 
@@ -569,8 +589,11 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
       if ((coverage.get(key)?.cursor ?? null) !== route.cursor) {
         failures.push(`${key}: manifest cursor ${coverage.get(key)?.cursor} ≠ ${route.cursor}`);
       }
-      if ((NEW_IN_6_1.includes(key) || NEW_IN_6_2.includes(key)) && route.cursor === 'v0')
-        failures.push(`${key}: 6.1/6.2 list on v0`);
+      if (
+        (NEW_IN_6_1.includes(key) || NEW_IN_6_2.includes(key) || NEW_IN_7_1.includes(key)) &&
+        route.cursor === 'v0'
+      )
+        failures.push(`${key}: 6.1/6.2/7.1 list on v0`);
       if (route.cursor !== null && operation(key)!['x-eg-cursor'] !== route.cursor) {
         failures.push(`${key}: x-eg-cursor not documented`);
       }

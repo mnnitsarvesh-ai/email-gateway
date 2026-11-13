@@ -62,3 +62,19 @@ groups:
             lagging, or tenants request wide ranges at high volume; see which report with sum by
             (report) (increase(api_report_timeouts_total[15m])).
           runbook_url: docs/runbooks/api-rate-limits-and-reports.md#apireporttimeouts
+      - alert: ApiTrustedForwarderRejected
+        # Step 7.1 P5, ADR-0060: requests carrying the portal's X-EG-* headers with a missing or
+        # wrong forwarder token (the forged client IP is ignored; the socket address is used).
+        expr: sum(rate(api_trusted_forwarder_total{outcome="rejected"}[5m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: The API keeps rejecting trusted-forwarder tokens
+          description: >-
+            For 10 minutes the api received requests with X-EG-Client-IP / X-EG-Forwarder-Token
+            whose token did not match API_TRUSTED_FORWARDER_TOKEN. Either the api and the admin
+            portal hold different tokens after a rotation (portal users then share the portal's
+            per-IP login limits), or an internal caller is trying to choose its client IP. Compare
+            the Secret mounted in both workloads and restart both after a rotation.
+          runbook_url: docs/runbooks/api-rate-limits-and-reports.md#apitrustedforwarderrejected

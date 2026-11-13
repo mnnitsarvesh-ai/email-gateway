@@ -334,27 +334,27 @@ Existing keys used by new routes: `message:read`, `delivery:read`, `audit:read`,
 
 ### 3.7 Configuration (api; `.env.example` section "REST API conventions (step 6.1)", working values appended to `.env`, Compose `api.environment`, Kubernetes `api.yaml`)
 
-| Key                                   | Bounds                             | Default           | Meaning                                         |
-| ------------------------------------- | ---------------------------------- | ----------------- | ----------------------------------------------- |
-| `API_CURSOR_KEY`                      | 64 hex, required, `_FILE` accepted | `__GENERATE_64__` | HMAC key of v1 cursors                          |
-| `API_CURSOR_KEY_PREVIOUS`             | 64 hex or empty                    | empty             | Accepted for verification during rotation       |
-| `API_CURSOR_TTL_SECONDS`              | 300–604 800                        | 86 400            | Max cursor age                                  |
-| `API_RATE_PRINCIPAL_PER_MINUTE`       | 10–10 000                          | 600               | Per user / API key                              |
-| `API_RATE_TENANT_DEFAULT_PER_MINUTE`  | 10–100 000                         | 300               | Organization without `api_requests_per_minute`  |
-| `API_RATE_TENANT_MIN_PER_MINUTE`      | 1–100 000                          | 10                | Lower clamp of tenant values                    |
-| `API_RATE_TENANT_MAX_PER_MINUTE`      | 10–1 000 000                       | 10 000            | Upper clamp of tenant values (bounded override) |
-| `API_RATE_SENSITIVE_PER_MINUTE`       | 1–600                              | 30                | `sensitive` class per principal                 |
-| `API_RATE_EXPENSIVE_PER_MINUTE`       | 1–600                              | 20                | `expensive` class per principal                 |
-| `API_RATE_LIMIT_CACHE_SECONDS`        | 5–300                              | 60                | Tenant limit cache                              |
-| `API_IDEMPOTENCY_LEGACY_MODE`         | `enforce` / `warn`                 | `enforce`         | Deprecation switch for legacy routes (D9)       |
-| `API_IDEMPOTENCY_PENDING_TTL_SECONDS` | 30–3 600                           | 300               | Reservation lifetime                            |
-| `API_LIST_SCAN_BUDGET_ROWS`           | 1 000–50 000                       | 5 000             | D6                                              |
-| `API_MESSAGES_MAX_RANGE_DAYS`         | 1–92                               | 31                | Messages, attachments search                    |
-| `API_AUDIT_MAX_RANGE_DAYS`            | 1–366                              | 90                | Audit logs                                      |
-| `REPORTS_MAX_RANGE_DAYS`              | 1–92                               | 31                | Reports                                         |
-| `REPORTS_CACHE_TTL_SECONDS`           | 10–900                             | 60                | Report cache                                    |
-| `REPORTS_QUERY_TIMEOUT_MS`            | 1 000–30 000                       | 10 000            | `MAX_EXECUTION_TIME`                            |
-| `RECIPIENT_SUPPRESSIONS_MAX_MANUAL`   | 1–1 000 000                        | 100 000           | Manual suppressions per organization            |
+| Key                                   | Bounds                             | Default                | Meaning                                         |
+| ------------------------------------- | ---------------------------------- | ---------------------- | ----------------------------------------------- |
+| `API_CURSOR_KEY`                      | 64 hex, required, `_FILE` accepted | `__GENERATE_64__`      | HMAC key of v1 cursors                          |
+| `API_CURSOR_KEY_PREVIOUS`             | 64 hex or empty                    | empty                  | Accepted for verification during rotation       |
+| `API_CURSOR_TTL_SECONDS`              | 300–604 800                        | 86 400                 | Max cursor age                                  |
+| `API_RATE_PRINCIPAL_PER_MINUTE`       | 10–10 000                          | 600                    | Per user / API key                              |
+| `API_RATE_TENANT_DEFAULT_PER_MINUTE`  | 10–100 000                         | 300                    | Organization without `api_requests_per_minute`  |
+| `API_RATE_TENANT_MIN_PER_MINUTE`      | 1–100 000                          | 10                     | Lower clamp of tenant values                    |
+| `API_RATE_TENANT_MAX_PER_MINUTE`      | 10–1 000 000                       | 10 000                 | Upper clamp of tenant values (bounded override) |
+| `API_RATE_SENSITIVE_PER_MINUTE`       | 1–600                              | 30                     | `sensitive` class per principal                 |
+| `API_RATE_EXPENSIVE_PER_MINUTE`       | 1–600                              | 20 (60 since step 7.1) | `expensive` class per principal                 |
+| `API_RATE_LIMIT_CACHE_SECONDS`        | 5–300                              | 60                     | Tenant limit cache                              |
+| `API_IDEMPOTENCY_LEGACY_MODE`         | `enforce` / `warn`                 | `enforce`              | Deprecation switch for legacy routes (D9)       |
+| `API_IDEMPOTENCY_PENDING_TTL_SECONDS` | 30–3 600                           | 300                    | Reservation lifetime                            |
+| `API_LIST_SCAN_BUDGET_ROWS`           | 1 000–50 000                       | 5 000                  | D6                                              |
+| `API_MESSAGES_MAX_RANGE_DAYS`         | 1–92                               | 31                     | Messages, attachments search                    |
+| `API_AUDIT_MAX_RANGE_DAYS`            | 1–366                              | 90                     | Audit logs                                      |
+| `REPORTS_MAX_RANGE_DAYS`              | 1–92                               | 31                     | Reports                                         |
+| `REPORTS_CACHE_TTL_SECONDS`           | 10–900                             | 60                     | Report cache                                    |
+| `REPORTS_QUERY_TIMEOUT_MS`            | 1 000–30 000                       | 10 000                 | `MAX_EXECUTION_TIME`                            |
+| `RECIPIENT_SUPPRESSIONS_MAX_MANUAL`   | 1–1 000 000                        | 100 000                | Manual suppressions per organization            |
 
 Tenant overrides: only `api_requests_per_minute` (existing limit key, platform catalog), clamped by the min/max above. No other tenant knob.
 

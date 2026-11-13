@@ -9,8 +9,11 @@
  *   uses, applied to the configured app), outside production it does;
  * - every Ingress of the rendered Kubernetes base (every YAML document of
  *   infrastructure/kubernetes/base/*.yaml) routes only the click-service's documented public
- *   paths or the api's `Prefix /api/v1/`, and nothing routes `/metrics`, `/health`, `/docs` or a
- *   worker Service.
+ *   paths, the api's `Prefix /api/v1/` or (step 7.1, ADR-0060, superseding decision 4 of
+ *   ADR-0053) the admin portal's `Prefix /` on its own host, distinct from the api host; nothing
+ *   routes `/metrics`, `/health`, `/docs`, a root path of any other Service or a worker Service;
+ * - the trusted-forwarder Secret is mounted only by the api and admin-portal Deployments and the
+ *   portal session Secret only by admin-portal (ADR-0060, step 7.1 §3.5).
  */
 import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -28,6 +31,14 @@ const ALLOWED_INGRESS_PATHS: Record<string, Record<string, string>> = {
   'click-service': { '/c/': 'Prefix', '/static/click.css': 'Exact' },
   // Step 6.1 D13, ADR-0053: the business API only.
   api: { '/api/v1/': 'Prefix' },
+  // Step 7.1, ADR-0060: the admin portal on its own host (pages, BFF, its own /api/health).
+  'admin-portal': { '/': 'Prefix' },
+};
+
+/** ADR-0060: the only workloads that mount each step 7.1 Secret. */
+const SECRET_MOUNTERS: Record<string, string[]> = {
+  'email-gateway-api-trusted-forwarder': ['admin-portal', 'api'],
+  'email-gateway-admin-portal-session': ['admin-portal'],
 };
 
 interface K8sObject {
@@ -82,7 +93,7 @@ function ingressPaths(objects: K8sObject[]): IngressPath[] {
     });
 }
 
-describe('public / internal boundary (step 6.1 D13, e2e, dependencies stubbed)', () => {
+describe('public / internal boundary (step 6.1 D13, step 7.1 ADR-0060, e2e, dependencies stubbed)', () => {
   let api: StubbedApiApp;
 
   beforeAll(async () => {
@@ -176,13 +187,13 @@ describe('public / internal boundary (step 6.1 D13, e2e, dependencies stubbed)',
       (name) => name !== 'api' && name !== 'click-service' && name !== 'admin-portal',
     );
 
-    it('parses every YAML document of the base and finds the api and click-service Ingresses', () => {
+    it('parses every YAML document of the base and finds the admin-portal, api and click-service Ingresses', () => {
       expect(objects.length).toBeGreaterThan(50);
       const ingresses = objects.filter((o) => o.kind === 'Ingress').map((o) => o.metadata?.name);
-      expect(ingresses.sort()).toEqual(['api', 'click-service']);
+      expect(ingresses.sort()).toEqual(['admin-portal', 'api', 'click-service']);
     });
 
-    it('routes only the documented paths: click-service /c/ and /static/click.css, api Prefix /api/v1/', () => {
+    it('routes only the documented paths: click-service /c/ and /static/click.css, api Prefix /api/v1/, admin-portal Prefix /', () => {
       const failures: string[] = [];
       for (const p of paths) {
         const allowed = p.service ? ALLOWED_INGRESS_PATHS[p.service] : undefined;
@@ -200,11 +211,40 @@ describe('public / internal boundary (step 6.1 D13, e2e, dependencies stubbed)',
       expect(paths.filter((p) => p.service === 'api')).toEqual([
         expect.objectContaining({ path: '/api/v1/', pathType: 'Prefix', port: { name: 'http' } }),
       ]);
+      expect(paths.filter((p) => p.service === 'admin-portal')).toEqual([
+        expect.objectContaining({ path: '/', pathType: 'Prefix', port: { name: 'http' } }),
+      ]);
     });
 
-    it('no Ingress routes /metrics, /health, /docs or a worker Service', () => {
-      const internal = /^\/(api\/)?(metrics|health|docs)(\/|-|$)|^\/$/;
+    it('the portal host differs from the api host and its Ingress serves the portal only (ADR-0060)', () => {
+      const hostsOf = (service: string) =>
+        new Set(paths.filter((p) => p.service === service).map((p) => p.host));
+      const portalHosts = hostsOf('admin-portal');
+      const apiHosts = hostsOf('api');
+      expect(portalHosts.size).toBe(1);
+      for (const host of portalHosts) expect(apiHosts.has(host), host).toBe(false);
+      // No other Service shares the portal host (its `/` would otherwise shadow nothing safely).
+      expect(paths.filter((p) => portalHosts.has(p.host) && p.service !== 'admin-portal')).toEqual(
+        [],
+      );
+      const ingress = objects.find(
+        (o) => o.kind === 'Ingress' && o.metadata?.name === 'admin-portal',
+      ) as {
+        spec: { ingressClassName?: string; tls?: Array<{ hosts: string[]; secretName: string }> };
+      };
+      expect(ingress.spec.ingressClassName).toBe('nginx');
+      expect(ingress.spec.tls).toEqual([
+        { hosts: [...portalHosts], secretName: 'admin-portal-tls' },
+      ]);
+    });
+
+    it('no Ingress routes /metrics, /health, /docs, a root path of another Service or a worker Service', () => {
+      const internal = /^\/(api\/)?(metrics|health|docs)(\/|-|$)/;
       expect(paths.filter((p) => internal.test(p.path)).map((p) => p.path)).toEqual([]);
+      // `/` is refused for every Service except the portal on its own host (ADR-0060).
+      expect(
+        paths.filter((p) => p.path === '/' && p.service !== 'admin-portal').map((p) => p.ingress),
+      ).toEqual([]);
       expect(paths.filter((p) => workerServices.includes(p.service ?? ''))).toEqual([]);
       // The api Ingress cannot match an internal path: /api/v1/ never prefixes one.
       for (const internalPath of [
@@ -256,6 +296,67 @@ describe('public / internal boundary (step 6.1 D13, e2e, dependencies stubbed)',
         expect(env.get(key)?.value, key).toMatch(/\S/);
       }
       expect(env.get('API_IDEMPOTENCY_LEGACY_MODE')?.value).toBe('enforce');
+    });
+
+    it('mounts the forwarder Secret only in api and admin-portal, the session Secret only in admin-portal', () => {
+      type Pod = {
+        containers: Array<{
+          env?: Array<{
+            name: string;
+            value?: string;
+            valueFrom?: { secretKeyRef?: { name: string } };
+          }>;
+        }>;
+        volumes?: Array<{ name: string; secret?: { secretName: string } }>;
+      };
+      const workloads = objects.filter((o) =>
+        ['Deployment', 'StatefulSet', 'DaemonSet', 'Job', 'CronJob'].includes(o.kind ?? ''),
+      );
+      const podOf = (o: K8sObject): Pod => {
+        const spec = o.spec as {
+          template?: { spec: Pod };
+          jobTemplate?: { spec: { template: { spec: Pod } } };
+        };
+        return spec.template?.spec ?? spec.jobTemplate!.spec.template.spec;
+      };
+      for (const [secret, allowed] of Object.entries(SECRET_MOUNTERS)) {
+        const users = workloads
+          .filter((o) => {
+            const pod = podOf(o);
+            const volume = (pod.volumes ?? []).some((v) => v.secret?.secretName === secret);
+            const env = pod.containers.some((c) =>
+              (c.env ?? []).some((e) => e.valueFrom?.secretKeyRef?.name === secret),
+            );
+            return volume || env;
+          })
+          .map((o) => o.metadata?.name)
+          .sort();
+        expect(users, secret).toEqual(allowed);
+      }
+      const envOf = (name: string) =>
+        new Map(
+          (
+            podOf(objects.find((o) => o.kind === 'Deployment' && o.metadata?.name === name)!)
+              .containers[0]!.env ?? []
+          ).map((e) => [e.name, e]),
+        );
+      const api = envOf('api');
+      const portal = envOf('admin-portal');
+      for (const env of [api, portal]) {
+        expect(env.get('API_TRUSTED_FORWARDER_TOKEN_FILE')?.value).toBe(
+          '/var/run/secrets/api-trusted-forwarder/token',
+        );
+        // Never the secret value itself in the manifest.
+        expect(env.has('API_TRUSTED_FORWARDER_TOKEN')).toBe(false);
+      }
+      expect(portal.get('PORTAL_SESSION_KEY_FILE')?.value).toBe(
+        '/var/run/secrets/admin-portal-session/key',
+      );
+      expect(portal.has('PORTAL_SESSION_KEY')).toBe(false);
+      expect(portal.get('PORTAL_SESSION_KEY_PREVIOUS')?.valueFrom?.secretKeyRef?.name).toBe(
+        'email-gateway-admin-portal-session',
+      );
+      expect(portal.get('PORTAL_TRUST_PROXY_HOPS')?.value).toBe('1');
     });
   });
 });

@@ -124,3 +124,36 @@ tests:
       - eval_time: 20m
         alertname: ApiReportTimeouts
         exp_alerts: []
+
+  - name: 'forwarder tokens rejected for 10 minutes - warning (step 7.1, ADR-0060)'
+    interval: 1m
+    input_series:
+      - series: 'api_trusted_forwarder_total{job="api",instance="a",outcome="rejected"}'
+        values: '0+3x30'
+      - series: 'api_trusted_forwarder_total{job="api",instance="a",outcome="accepted"}'
+        values: '0+100x30'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ApiTrustedForwarderRejected
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ApiTrustedForwarderRejected
+        exp_alerts:
+          - exp_labels:
+              severity: 'warning'
+            exp_annotations:
+              summary: 'The API keeps rejecting trusted-forwarder tokens'
+              description: "For 10 minutes the api received requests with X-EG-Client-IP / X-EG-Forwarder-Token whose token did not match API_TRUSTED_FORWARDER_TOKEN. Either the api and the admin portal hold different tokens after a rotation (portal users then share the portal's per-IP login limits), or an internal caller is trying to choose its client IP. Compare the Secret mounted in both workloads and restart both after a rotation."
+              runbook_url: 'docs/runbooks/api-rate-limits-and-reports.md#apitrustedforwarderrejected'
+
+  - name: 'only accepted forwarder requests - quiet'
+    interval: 1m
+    input_series:
+      - series: 'api_trusted_forwarder_total{job="api",instance="a",outcome="rejected"}'
+        values: '0x30'
+      - series: 'api_trusted_forwarder_total{job="api",instance="a",outcome="accepted"}'
+        values: '0+100x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ApiTrustedForwarderRejected
+        exp_alerts: []

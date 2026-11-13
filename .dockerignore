@@ -9,6 +9,12 @@
 .env.*
 !.env.example
 docs
+# The admin-portal build checks its generated client against the OpenAPI snapshot (step 7.1 P7).
+!docs/api/openapi.json
 infrastructure/terraform
 infrastructure/kubernetes
 **/*.log
+# Admin portal e2e run artifacts (step 7.1 WP6): generated per-run credentials and traces.
+tests/portal-e2e/.auth
+tests/portal-e2e/test-results
+tests/portal-e2e/playwright-report

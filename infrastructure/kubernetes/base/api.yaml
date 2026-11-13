@@ -84,7 +84,7 @@ spec:
             - { name: API_RATE_TENANT_MIN_PER_MINUTE, value: '10' }
             - { name: API_RATE_TENANT_MAX_PER_MINUTE, value: '10000' }
             - { name: API_RATE_SENSITIVE_PER_MINUTE, value: '30' }
-            - { name: API_RATE_EXPENSIVE_PER_MINUTE, value: '20' }
+            - { name: API_RATE_EXPENSIVE_PER_MINUTE, value: '60' }
             - { name: API_RATE_LIMIT_CACHE_SECONDS, value: '60' }
             - { name: API_IDEMPOTENCY_LEGACY_MODE, value: enforce }
             - { name: API_IDEMPOTENCY_PENDING_TTL_SECONDS, value: '300' }
@@ -143,6 +143,14 @@ spec:
               valueFrom:
                 secretKeyRef:
                   { name: email-gateway-webhook-secret-key, key: previous-key, optional: true }
+            # Trusted client-IP forwarder (step 7.1 P5, ADR-0060): the secret shared with the
+            # admin portal BFF only (its own Secret, mounted in api and admin-portal only). With
+            # it, X-EG-Client-IP from the portal becomes the request's client IP. Rotation:
+            # update the Secret, restart api and admin-portal (docs/runbooks/api-rate-limits-and-reports.md).
+            - {
+                name: API_TRUSTED_FORWARDER_TOKEN_FILE,
+                value: /var/run/secrets/api-trusted-forwarder/token,
+              }
           volumeMounts:
             - { name: secrets, mountPath: /var/run/secrets/gateway, readOnly: true }
             - { name: dlp-evidence-key, mountPath: /var/run/secrets/dlp-evidence, readOnly: true }
@@ -155,6 +163,11 @@ spec:
             - {
                 name: webhook-secret-key,
                 mountPath: /var/run/secrets/webhook-secret-key,
+                readOnly: true,
+              }
+            - {
+                name: api-trusted-forwarder,
+                mountPath: /var/run/secrets/api-trusted-forwarder,
                 readOnly: true,
               }
             - { name: tmp, mountPath: /tmp }
@@ -196,6 +209,10 @@ spec:
           secret:
             secretName: email-gateway-webhook-secret-key
             items: [{ key: key, path: key }]
+        - name: api-trusted-forwarder
+          secret:
+            secretName: email-gateway-api-trusted-forwarder
+            items: [{ key: token, path: token }]
         - name: tmp
           emptyDir: {}
 ---

@@ -6,7 +6,7 @@ The control-plane REST API (`apps/api`). Decisions: [ADR-0015](../architecture/a
 
 - Business routes live under the `/api` prefix and are versioned in the URI: `/api/v1/...` ([ADR-0015](../architecture/adr/0015-api-base-path.md)). Breaking changes ship as `/api/v2` alongside `/api/v1` until clients migrate. The old unprefixed `/v1/...` paths return `404`.
 - Operational routes stay unprefixed and unversioned: `GET /health/live`, `GET /health/ready` (probes and Compose health checks do not change) and `GET /metrics`. They are **internal** ([ADR-0053](../architecture/adr/0053-public-internal-api-boundary.md)): never routed by the Ingress (which routes only `Prefix /api/v1/`) and not in the public OpenAPI document. `/api/health/*`, `/api/metrics`, `/api/docs` and `/api/v1/metrics` are `404 route_not_found`.
-- In non-production environments, OpenAPI is served at `/docs` (Swagger UI) and `/docs-json`; never in production (`NODE_ENV=production`). The document lists only `/api/v1/*` (249 operations at step 6.1, 266 since step 6.2), describes every tag (the step that built it and its deferrals) and carries the portal extensions `x-eg-permissions`, `x-eg-rate-class`, `x-eg-idempotency`, `x-eg-cursor`, `x-eg-returns-secret` and (step 6.2) `x-eg-secret-replay: redacted`. The document declares two security schemes: `access-token` (HTTP bearer, JWT) and `api-key` (`X-API-Key` header). Every protected operation names the schemes it accepts and carries a tag; every request and response schema is generated from the zod schemas that validate it.
+- In non-production environments, OpenAPI is served at `/docs` (Swagger UI) and `/docs-json`; never in production (`NODE_ENV=production`). The document lists only `/api/v1/*` (249 operations at step 6.1, 266 since step 6.2, 269 since step 7.1), describes every tag (the step that built it and its deferrals) and carries the portal extensions `x-eg-permissions`, `x-eg-rate-class`, `x-eg-idempotency`, `x-eg-cursor`, `x-eg-returns-secret` and (step 6.2) `x-eg-secret-replay: redacted`. The document declares two security schemes: `access-token` (HTTP bearer, JWT) and `api-key` (`X-API-Key` header). Every protected operation names the schemes it accepts and carries a tag; every request and response schema is generated from the zod schemas that validate it.
 - A snapshot of the document is committed as [docs/api/openapi.json](openapi.json). `apps/api/test/openapi.test.ts` fails when the running API and the snapshot differ; after an intended change regenerate it with `UPDATE_OPENAPI=1 pnpm --filter @email-gateway/api test:e2e -- openapi` and review the diff.
 - `API_INTERNAL_URL` (portal → api) is the api **origin**; callers append `/api/v1/...`.
 
@@ -30,6 +30,17 @@ Every route except the health probes, `GET /api/v1/meta` and the public authenti
 **Platform override.** Platform staff reach a customer organization only through `POST /platform/overrides { organizationId, reason, durationMinutes }` (permission `platform:tenant_override`, MFA session). The returned access token is scoped to that one organization, carries tenant permissions only (all `platform:*` permissions are stripped), cannot be refreshed, expires with the override, ends on `DELETE /platform/overrides/{id}`, and every request made with it is written to `audit_logs` as `platform.override_request`. Mutations made under an override also carry `metadata.override = { id, reason }` in their own audit rows.
 
 **Organization catalog.** Users of the platform organization holding `platform:organizations` (without an override) manage the organization catalog (`/organizations`): create, plan, status, features, limits, deletion. This is a platform function, not an override: no reason is required and every mutation is audited.
+
+### Clients behind the admin portal (internal)
+
+The admin portal (step 7.1) calls this API from its server-side BFF, so every browser request reaches the api from the portal's address. To keep per-IP limits (login 20/min, MFA verify 20/min, refresh 60/min, the IP failure block) and audit IPs per browser, the BFF sends two **internal** headers ([ADR-0060](../architecture/adr/0060-portal-ingress-and-trusted-client-ip-forwarding.md)):
+
+| Header                 | Value                                                                 |
+| ---------------------- | --------------------------------------------------------------------- |
+| `X-EG-Client-IP`       | The browser's address (IPv4 or IPv6 literal; `::ffff:a.b.c.d` = IPv4) |
+| `X-EG-Forwarder-Token` | The shared secret `API_TRUSTED_FORWARDER_TOKEN` (32–256 characters)   |
+
+When the token matches (SHA-256 digests, constant-time) and the address is valid, the api uses that address as the request's client IP (`login_audit_logs.ip_address`, `audit_logs.source_ip`, session IPs, per-IP limits). Otherwise both headers are ignored and the socket / `HTTP_TRUST_PROXY` address is used; they are removed from every request either way and never reach a handler or a log. They are not part of the public OpenAPI document and not a client feature: API clients send neither (a forged `X-EG-Client-IP` without the token changes nothing). Outcomes are counted in `api_trusted_forwarder_total{outcome}`.
 
 ## Tenancy
 
@@ -758,15 +769,57 @@ curl -s "$API/api/v1/audit/logs?actionPrefix=quarantine.&from=2026-11-01T00:00:0
 
 Computed on the read replica from recorded rows (no estimates, no rollup tables) over a bounded UTC window aligned to bucket boundaries; every bucket is listed (empty ones with zeros); cached per organization and normalized query for `REPORTS_CACHE_TTL_SECONDS` (`generatedAt` shows when). Class `expensive`. A query stopped by `REPORTS_QUERY_TIMEOUT_MS` (`MAX_EXECUTION_TIME`) is `503 report_timeout`: narrow the range.
 
-| Method | Path                  | Permission       | Notes                                                                                                                                                                                                           |
-| ------ | --------------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| GET    | `/reports/traffic`    | `report:read`, K | `granularity=hour` (≤ 7 days, default the last 24 h) or `day` (≤ `REPORTS_MAX_RANGE_DAYS`, default 7 days), `direction?`; buckets `{ start, total, inbound, outbound, internal, verdicts: {…, none} }` + totals |
-| GET    | `/reports/threats`    | `report:read`, K | Messages by final verdict and final action, quarantine entries by reason and primary engine (default 7 days)                                                                                                    |
-| GET    | `/reports/url-clicks` | `report:read`, K | Clicks per bucket by decision (`allowed`, `warned`, `blocked`, `continued`, `expired`, `not_found`); window rules of the traffic report                                                                         |
+| Method | Path                   | Permission       | Notes                                                                                                                                                                                                           |
+| ------ | ---------------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/reports/traffic`     | `report:read`, K | `granularity=hour` (≤ 7 days, default the last 24 h) or `day` (≤ `REPORTS_MAX_RANGE_DAYS`, default 7 days), `direction?`; buckets `{ start, total, inbound, outbound, internal, verdicts: {…, none} }` + totals |
+| GET    | `/reports/threats`     | `report:read`, K | Messages by final verdict and final action, the verdict × action matrix `outcomes` (step 7.1), quarantine entries by reason and primary engine (default 7 days, aligned to whole hours)                         |
+| GET    | `/reports/url-clicks`  | `report:read`, K | Clicks per bucket by decision (`allowed`, `warned`, `blocked`, `continued`, `expired`, `not_found`); window rules of the traffic report                                                                         |
+| GET    | `/reports/delivery`    | `report:read`, K | Step 7.1. Deliveries by bucket and status, `successRate`, delivery latency histogram; window rules of the traffic report                                                                                        |
+| GET    | `/reports/processing`  | `report:read`, K | Step 7.1. Initial scan rounds by bucket and status, time to verdict (histogram, mean, p50/p95 upper bounds); window rules of the traffic report                                                                 |
+| GET    | `/reports/top-domains` | `report:read`, K | Step 7.1. Inbound messages with a threat verdict per tenant domain, `limit` 1–25 (default 10); default 7 days, aligned to whole hours                                                                           |
 
 ```bash
 curl -s "$API/api/v1/reports/traffic?granularity=day&from=2026-11-01T00:00:00Z&to=2026-11-12T00:00:00Z" -H "X-API-Key: $API_KEY"
 # → {"from":"2026-11-01T00:00:00.000Z","to":"2026-11-12T00:00:00.000Z","granularity":"day","buckets":[…],"totals":{…},"generatedAt":"…"}
+```
+
+**Threats `outcomes` (step 7.1).** `GET /reports/threats` also returns `outcomes: [{ verdict, action, count }]`: the messages of the window by final verdict × final action (`none` = not decided yet), non-zero pairs only, ordered by `count` descending, then `verdict` and `action` alphabetically. The pairs add up to `messages.verdicts` and `messages.actions`. Example: spam blocked = Σ `count` where `verdict ∈ {spam, bulk}` and `action ∈ {quarantine, discard, reject}`.
+
+```json
+"outcomes": [
+  { "verdict": "clean", "action": "deliver", "count": 1180 },
+  { "verdict": "spam", "action": "quarantine", "count": 25 },
+  { "verdict": "none", "action": "none", "count": 4 }
+]
+```
+
+**Delivery report (step 7.1).** One row per recipient delivery chain (`email_deliveries`) of the messages **received** in the window, bucketed by the message's receipt. `statuses` lists `pending, in_progress, queued, deferred, delivered, bounced, expired, failed, suppressed, unknown`. `successRate = delivered ÷ (delivered + bounced + failed + expired)`, rounded to 4 decimals, `null` when none of those final states occurred (in-flight, deferred and suppressed deliveries do not count either way). `latency` covers `delivered` deliveries with a delivery time: `delivered_at − received_at`.
+
+```bash
+curl -s "$API/api/v1/reports/delivery?granularity=day&from=2026-11-10T00:00:00Z&to=2026-11-12T00:00:00Z" -H "X-API-Key: $API_KEY"
+# → {"granularity":"day","buckets":[{"start":"2026-11-10T00:00:00.000Z","total":1040,"statuses":{…,"delivered":1000,"bounced":12,…},"successRate":0.9843},…],
+#    "totals":{"total":1560,"statuses":{…},"successRate":0.9862},
+#    "latency":{"delivered":1500,"averageMs":4210,"p50UpperBoundMs":1000,"p95UpperBoundMs":30000,"histogram":[{"leMs":1000,"count":900},…,{"leMs":null,"count":0}]},…}
+```
+
+**Processing report (step 7.1).** The initial scan round (`email_scans.scan_kind = 'initial'`; rescans and release re-validations are not counted) of every message received in the window, by bucket and status (`pending, running, completed, failed, timed_out`). The time to verdict is receipt (`email_scans.received_at`) to the round's completion (`completed_at`), completed rounds only; each bucket carries its `averageMs` and `p95UpperBoundMs`, the totals add `p50UpperBoundMs` and the histogram. `definition` repeats this in the response.
+
+```bash
+curl -s "$API/api/v1/reports/processing?granularity=hour" -H "X-API-Key: $API_KEY"
+# → {"granularity":"hour","buckets":[{"start":"…","rounds":120,"statuses":{…,"completed":117,…},"averageMs":1830,"p95UpperBoundMs":5000},…],
+#    "totals":{"rounds":200,…,"p50UpperBoundMs":1000,"p95UpperBoundMs":5000,"histogram":[{"leMs":250,"count":20},…]},"definition":"…"}
+```
+
+**Latency histograms.** The bounds are fixed (milliseconds): processing `250, 500, 1000, 2000, 5000, 10000, 30000, 60000, 120000, 300000, 900000`; delivery `1000, 5000, 10000, 30000, 60000, 300000, 900000, 3600000, 14400000, 86400000`. `histogram` lists the samples per bucket (not cumulative): `leMs` is the inclusive upper bound, the last entry `leMs: null` counts the samples above the last bound. MySQL has no percentile function, so `p50UpperBoundMs` / `p95UpperBoundMs` are **histogram upper bounds**: the smallest bound that 50 % / 95 % of the samples do not exceed ("p95 ≤ 5 s"), exact for the histogram, never an estimate; `null` without samples or when the percentile lies above the last bound ("> 15 min"). `averageMs` is the mean, rounded to whole milliseconds (a negative clock skew counts as 0).
+
+**Top attacked domains (step 7.1).** Inbound messages (`direction = inbound`) of the window per domain of the organization, with the threat verdicts `spam, phishing, malware, bec, suspicious` (`threatVerdicts`). Only domains with at least one threat are listed, ordered by `threats` and `inbound` (descending), then `name`; at most `limit`. Each entry carries the public `domainId`, `name`, `status` and `deleted` (a domain deleted after its mail arrived is still listed, with `deleted: true`). Messages without a tenant domain are counted in `unattributed`. A message that references a domain outside the organization is never shown: the report answers `503 inconsistent_read`.
+
+```bash
+curl -s "$API/api/v1/reports/top-domains?limit=5" -H "X-API-Key: $API_KEY"
+# → {"threatVerdicts":["spam","phishing","malware","bec","suspicious"],
+#    "domains":[{"domainId":"0193…","name":"alpha.example.test","status":"active","deleted":false,"inbound":812,"threats":37,
+#                "verdicts":{"spam":30,"phishing":3,"malware":1,"bec":0,"suspicious":3}}],
+#    "unattributed":{"inbound":4,"threats":1},…}
 ```
 
 ### Usage and billing (`usage`, `billing` tags, step 6.1)
@@ -1362,7 +1415,7 @@ Every authenticated request counts against fixed 60-second windows in Redis ([AD
 | `principal` | each user or API key (override sessions count as the user)                                        | `API_RATE_PRINCIPAL_PER_MINUTE` (600)                                                                                                                                                                                                       |
 | `tenant`    | each organization (under an override: the target)                                                 | the organization's `api_requests_per_minute` (plan: 60 / 300 / 1 200 / 3 000; platform overrides possible), clamped to `[API_RATE_TENANT_MIN_PER_MINUTE, …_MAX_…]` (10, 10 000); `API_RATE_TENANT_DEFAULT_PER_MINUTE` (300) without a value |
 | `sensitive` | per principal, the [sensitive mutations](#idempotency) and secret-bearing routes                  | `API_RATE_SENSITIVE_PER_MINUTE` (30)                                                                                                                                                                                                        |
-| `expensive` | per principal: reports, `/billing/usage`, threat lookup, `/attachments`, policy test and dry-runs | `API_RATE_EXPENSIVE_PER_MINUTE` (20)                                                                                                                                                                                                        |
+| `expensive` | per principal: reports, `/billing/usage`, threat lookup, `/attachments`, policy test and dry-runs | `API_RATE_EXPENSIVE_PER_MINUTE` (60)                                                                                                                                                                                                        |
 | `route`     | route-specific limits (authentication, BEC feedback, DLP tests, domain checks, quarantine, …)     | per route, unchanged; since step 6.2 also `POST /webhooks/{id}/test` per webhook (`WEBHOOK_TEST_REQUESTS_PER_MINUTE`, 6) and `POST /webhooks/{id}/replays` per organization (`WEBHOOK_REPLAY_REQUESTS_PER_HOUR`, 10 per hour)               |
 
 Every authenticated response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset` of the most restrictive counter. Over a limit: `429 rate_limited` with `scope` and `Retry-After`; wait that long. Public routes (login and the other **P** routes, `GET /meta`) keep their per-IP limits. When the rate-limit store is unreachable the api answers `503 service_unavailable` (fail closed). Operations: [runbook](../runbooks/api-rate-limits-and-reports.md).
@@ -1402,6 +1455,10 @@ Every mutation writes an `audit_logs` row in its transaction. Since step 6.1 the
 | `sort` and the shared filter operators on the 33 v0 lists                                                                                                                        | Not offered in 6.1: fixed order and module-specific filters ([Filtering and sorting](#filtering-and-sorting)); follow-up with the portal (7.x)                  |
 
 ## Changelog
+
+### Step 7.1 (2026-11-13)
+
+Additive only: 3 new operations (269 in total) under the `reports` tag — `GET /reports/delivery`, `GET /reports/processing` and `GET /reports/top-domains` (`report:read`, API keys accepted, class `expensive`, cached, `503 report_timeout`) — and the new field `outcomes` (verdict × action matrix) on `GET /reports/threats`. No existing field or operation changed. Internal only: the trusted client-IP forwarder headers of the admin portal ([Clients behind the admin portal](#clients-behind-the-admin-portal-internal)).
 
 ### Step 6.2 (2026-11-13)
 

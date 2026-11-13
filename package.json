@@ -15,7 +15,8 @@
     "dev": "turbo run dev --parallel",
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
-    "test": "turbo run test",
+    "test": "turbo run test --filter=!@email-gateway/portal-e2e",
+    "test:portal": "turbo run build --filter=@email-gateway/database... --output-logs=errors-only && pnpm --filter @email-gateway/portal-e2e run typecheck && pnpm --filter @email-gateway/portal-e2e run test",
     "test:e2e": "turbo run test:e2e",
     "test:integration": "turbo run build --filter=@email-gateway/api^... --filter=@email-gateway/message-lifecycle... --filter=@email-gateway/mail-routing... --filter=@email-gateway/delivery-worker^... --filter=@email-gateway/email-worker^... --filter=@email-gateway/event-relay^... --filter=@email-gateway/integration-tests^... --filter=@email-gateway/clamav... --filter=@email-gateway/url-security... --filter=@email-gateway/dlp... --filter=@email-gateway/click-service^... --filter=@email-gateway/sandbox-controller... --filter=@email-gateway/policy-engine^... --filter=@email-gateway/notification-worker^... --filter=@email-gateway/webhooks... --filter=@email-gateway/webhook-worker^... --output-logs=errors-only && pnpm --filter @email-gateway/integration-tests run test:integration && pnpm --filter @email-gateway/api run test:integration && pnpm --filter @email-gateway/smtp-adapter run test:integration && pnpm --filter @email-gateway/message-lifecycle run test:integration && pnpm --filter @email-gateway/mail-routing run test:integration && pnpm --filter @email-gateway/rspamd run test:integration && pnpm --filter @email-gateway/clamav run test:integration && pnpm --filter @email-gateway/delivery-worker run --if-present test:integration && pnpm --filter @email-gateway/policy-engine run test:integration && pnpm --filter @email-gateway/notification-worker run test:integration && pnpm --filter @email-gateway/webhook-worker run --if-present test:integration && pnpm --filter @email-gateway/email-worker run --if-present test:integration && pnpm --filter @email-gateway/event-relay run --if-present test:integration && pnpm --filter @email-gateway/url-security run test:integration && pnpm --filter @email-gateway/bec run test:integration && pnpm --filter @email-gateway/dlp run test:integration && pnpm --filter @email-gateway/click-service run test:integration && pnpm --filter @email-gateway/sandbox-controller run test:integration",
     "format": "prettier --write .",
@@ -50,7 +51,22 @@
   "pnpm": {
     "overrides": {
       "tldts>tldts-core": "7.4.18",
-      "pdfjs-dist>@napi-rs/canvas": "-"
+      "pdfjs-dist>@napi-rs/canvas": "-",
+      "tough-cookie@6": "6.0.2",
+      "parse5@8": "8.1.0",
+      "immer@11": "11.2.9",
+      "@inquirer/core@12": "12.0.6",
+      "@inquirer/type@4": "4.2.1",
+      "@inquirer/figures@2": "2.0.10",
+      "@inquirer/ansi@2": "2.0.10",
+      "@inquirer/confirm@6": "6.3.5",
+      "@babel/helpers@7": "7.29.13",
+      "@babel/helper-string-parser@7": "7.29.13",
+      "@babel/traverse@7": "7.29.13",
+      "@babel/helper-module-transforms@7": "7.29.13",
+      "@babel/parser@7": "7.29.13",
+      "@babel/generator@7": "7.29.13",
+      "@babel/types@7": "7.29.11"
     }
   }
 }

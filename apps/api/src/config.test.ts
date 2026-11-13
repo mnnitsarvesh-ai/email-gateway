@@ -1078,7 +1078,7 @@ describe('loadApiConfig: REST API conventions (step 6.1 §3.7)', () => {
       API_RATE_TENANT_MIN_PER_MINUTE: 10,
       API_RATE_TENANT_MAX_PER_MINUTE: 10_000,
       API_RATE_SENSITIVE_PER_MINUTE: 30,
-      API_RATE_EXPENSIVE_PER_MINUTE: 20,
+      API_RATE_EXPENSIVE_PER_MINUTE: 60,
       API_RATE_LIMIT_CACHE_SECONDS: 60,
       API_IDEMPOTENCY_LEGACY_MODE: 'enforce',
       API_IDEMPOTENCY_PENDING_TTL_SECONDS: 300,
@@ -1362,6 +1362,53 @@ describe('loadApiConfig: webhooks and notifications (step 6.2 §4.4)', () => {
       ['WEBHOOK_ALLOW_HTTP', 'yes'],
     ] as const) {
       expect(rejection({ ...valid, [key]: value }), `${key}=${value}`).toContain(key);
+    }
+  });
+});
+
+describe('loadApiConfig: admin portal trusted forwarder (step 7.1 §3.5, ADR-0060)', () => {
+  it('is off by default and when empty', () => {
+    expect(loadApiConfig(valid).API_TRUSTED_FORWARDER_TOKEN).toBeUndefined();
+    expect(
+      loadApiConfig({ ...valid, API_TRUSTED_FORWARDER_TOKEN: '' }).API_TRUSTED_FORWARDER_TOKEN,
+    ).toBeUndefined();
+  });
+
+  it('accepts 32 to 256 characters and names the key, never the value, otherwise', () => {
+    for (const length of [32, 48, 256]) {
+      const token = 'a'.repeat(length);
+      expect(
+        loadApiConfig({ ...valid, API_TRUSTED_FORWARDER_TOKEN: token }).API_TRUSTED_FORWARDER_TOKEN,
+      ).toBe(token);
+    }
+    for (const bad of ['short-forwarder-MARKER', `MARKER${'b'.repeat(251)}`]) {
+      const message = rejection({ ...valid, API_TRUSTED_FORWARDER_TOKEN: bad });
+      expect(message).toContain('API_TRUSTED_FORWARDER_TOKEN');
+      expect(message).not.toContain('MARKER');
+    }
+  });
+
+  it('reads API_TRUSTED_FORWARDER_TOKEN from API_TRUSTED_FORWARDER_TOKEN_FILE', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'api-forwarder-token-'));
+    const file = join(dir, 'token');
+    const token = randomBytes(24).toString('hex');
+    writeFileSync(file, `${token}\n`);
+    try {
+      expect(
+        loadApiConfig({ ...valid, API_TRUSTED_FORWARDER_TOKEN_FILE: file })
+          .API_TRUSTED_FORWARDER_TOKEN,
+      ).toBe(token);
+      // An explicit value wins over the file (the shared `_FILE` rule).
+      const explicit = 'c'.repeat(40);
+      expect(
+        loadApiConfig({
+          ...valid,
+          API_TRUSTED_FORWARDER_TOKEN: explicit,
+          API_TRUSTED_FORWARDER_TOKEN_FILE: file,
+        }).API_TRUSTED_FORWARDER_TOKEN,
+      ).toBe(explicit);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

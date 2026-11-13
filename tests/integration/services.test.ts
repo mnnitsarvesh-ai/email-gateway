@@ -119,12 +119,21 @@ describe.skipIf(!running)('Application services (compose profile: apps)', () => 
     expect(value('outbox_poison_rows')).toEqual([0]);
   });
 
-  it('admin portal serves its health endpoint and dashboard', async () => {
+  it('admin portal serves its health endpoint and sends anonymous visitors to the login page', async () => {
+    // Step 7.1 (docs/plan/steps/20-admin-portal.md §1.1): the former anonymous dashboard with
+    // the api's readiness checks is gone; console routes redirect to /login.
     const port = stack.ports.services['admin-portal'];
-    expect((await fetch(`http://${stack.host}:${port}/api/health`)).status).toBe(200);
-    const page = await fetch(`http://${stack.host}:${port}/`);
-    expect(page.status).toBe(200);
-    expect(await page.text()).toContain('Operational');
+    const base = `http://${stack.host}:${port}`;
+    expect((await fetch(`${base}/api/health`)).status).toBe(200);
+    const home = await fetch(`${base}/`, { redirect: 'manual' });
+    expect([302, 303, 307, 308]).toContain(home.status);
+    expect(home.headers.get('location')).toMatch(/^\/login(\?|$)/);
+    const login = await fetch(`${base}/login`);
+    expect(login.status).toBe(200);
+    expect(login.headers.get('content-security-policy')).toContain("frame-ancestors 'none'");
+    const html = await login.text();
+    expect(html).toContain('Sign in');
+    expect(html).not.toContain('Operational');
   });
 
   it('API serves business routes under /api/v1 with correlation ids (ADR-0015)', async () => {

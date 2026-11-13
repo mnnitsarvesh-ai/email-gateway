@@ -1,0 +1,22 @@
+{
+  "name": "@email-gateway/portal-e2e",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Playwright end-to-end tests of the admin portal against the real local stack (step 7.1 WP6).",
+  "scripts": {
+    "browsers:install": "playwright install chromium",
+    "seed": "tsx seed/cli.ts seed",
+    "seed:clean": "tsx seed/cli.ts clean",
+    "test": "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 playwright test",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint ."
+  },
+  "devDependencies": {
+    "@aws-sdk/client-s3": "^3.890.0",
+    "@axe-core/playwright": "4.14.0",
+    "@email-gateway/database": "workspace:*",
+    "@playwright/test": "1.64.1",
+    "argon2": "^0.45.1",
+    "tsx": "4.23.15"
+  }
+}

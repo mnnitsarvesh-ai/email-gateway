@@ -5,13 +5,18 @@
  * audit rows, report counts, usage or billing numbers; A's cursor is refused for B; A's report
  * cache is never served to B; the platform audit route refuses organization administrators, API
  * keys, override sessions and platform users without MFA, and serves (and audits) an MFA
- * platform user.
+ * platform user. Step 7.1 (docs/plan/steps/20-admin-portal.md §9): the delivery, processing and
+ * top-domains reports and the threats outcomes count only the caller's organization (A never sees
+ * B's counts or domain names) and their cache entries are never shared.
  */
 // @covers get /api/v1/audit/logs
 // @covers get /api/v1/platform/audit/logs
 // @covers get /api/v1/reports/traffic
 // @covers get /api/v1/reports/threats
 // @covers get /api/v1/reports/url-clicks
+// @covers get /api/v1/reports/delivery
+// @covers get /api/v1/reports/processing
+// @covers get /api/v1/reports/top-domains
 // @covers get /api/v1/usage
 // @covers get /api/v1/billing/plan
 // @covers get /api/v1/billing/usage
@@ -29,8 +34,11 @@ import {
   HOUR_MS,
   insertAuditRows,
   insertClicks,
+  insertDeliveries,
+  insertDomain,
   insertMessages,
   insertQuarantineEntries,
+  insertScanRounds,
   type MessageSpec,
   POLL,
   reader,
@@ -56,7 +64,12 @@ const auditWindow = {
 };
 const ALL = ['audit:read', 'report:read', 'organization:read', 'billing:read', 'threat_intel:read'];
 
+/** Step 7.1: each organization's own domain (top-domains report). */
+const domains = new Map<bigint, { publicId: string; name: string }>();
+
 async function seed(org: FixtureOrganization, n: number): Promise<void> {
+  const domain = await insertDomain(ctx, org, `isolation-${org.slug}.example.test`);
+  domains.set(org.id, domain);
   const messages: MessageSpec[] = [];
   for (let i = 0; i < n; i += 1) {
     messages.push({
@@ -64,9 +77,21 @@ async function seed(org: FixtureOrganization, n: number): Promise<void> {
       direction: i % 2 === 0 ? 'inbound' : 'outbound',
       verdict: i % 3 === 0 ? 'phishing' : 'clean',
       action: 'deliver',
+      domainId: domain.id,
     });
   }
-  await insertMessages(ctx, org, messages);
+  const inserted = await insertMessages(ctx, org, messages);
+  // Step 7.1: one delivered delivery and one completed initial scan round per message.
+  await insertDeliveries(
+    ctx,
+    org,
+    inserted.map((message) => ({ message, status: 'delivered', deliveredAfterMs: 2000 })),
+  );
+  await insertScanRounds(
+    ctx,
+    org,
+    inserted.map((message) => ({ message, status: 'completed', completedAfterMs: 400 })),
+  );
   await insertQuarantineEntries(
     ctx,
     org,
@@ -96,10 +121,12 @@ async function seed(org: FixtureOrganization, n: number): Promise<void> {
       (await reader(ctx).emailMessage.count({ where: { organizationId: org.id } })) +
       (await reader(ctx).quarantineMessage.count({ where: { organizationId: org.id } })) +
       (await reader(ctx).urlClickEvent.count({ where: { organizationId: org.id } })) +
+      (await reader(ctx).emailDelivery.count({ where: { organizationId: org.id } })) +
+      (await reader(ctx).emailScan.count({ where: { organizationId: org.id } })) +
       (await reader(ctx).auditLog.count({
         where: { resourceId: { startsWith: `${marker}-${org.slug}` } },
       })),
-    4 * n,
+    6 * n,
   );
 }
 
@@ -192,6 +219,59 @@ describe('reports', () => {
     const clicksB = await get('/api/v1/reports/url-clicks', bearer(tokenB), range).expect(200);
     expect(clicksA.body.totals.decisions.blocked).toBe(VOLUME.A);
     expect(clicksB.body.totals.decisions.blocked).toBe(VOLUME.B);
+  });
+
+  it('step 7.1 reports count only the own organization’s deliveries, rounds and domains', async () => {
+    for (const [org, headers, n] of [
+      [orgA, bearer(tokenA), VOLUME.A],
+      [orgA, apiKeyHeader(keyA), VOLUME.A],
+      [orgB, bearer(tokenB), VOLUME.B],
+    ] as const) {
+      const delivery = await get('/api/v1/reports/delivery', headers, range).expect(200);
+      expect(delivery.body.totals.total).toBe(n);
+      expect(delivery.body.latency.delivered).toBe(n);
+      const processing = await get('/api/v1/reports/processing', headers, range).expect(200);
+      expect(processing.body.totals.rounds).toBe(n);
+      const top = await get('/api/v1/reports/top-domains', headers, range).expect(200);
+      const own = domains.get(org.id)!;
+      const other = domains.get(org.id === orgA.id ? orgB.id : orgA.id)!;
+      expect(top.body.domains.map((d: { domainId: string }) => d.domainId)).toEqual([own.publicId]);
+      // Inbound = even i; phishing = i % 3 === 0 among them.
+      const inbound = Array.from({ length: n }, (_, i) => i).filter((i) => i % 2 === 0);
+      expect(top.body.domains[0]).toMatchObject({
+        inbound: inbound.length,
+        threats: inbound.filter((i) => i % 3 === 0).length,
+      });
+      expect(JSON.stringify(top.body)).not.toContain(other.name);
+      expect(JSON.stringify(top.body)).not.toContain(other.publicId);
+      const threats = await get('/api/v1/reports/threats', headers, range).expect(200);
+      expect(
+        (threats.body.outcomes as Array<{ count: number }>).reduce((a, o) => a + o.count, 0),
+      ).toBe(n);
+    }
+  });
+
+  it('never serves organization A’s cached step 7.1 reports to organization B', async () => {
+    const params = { from: new Date(from.getTime() + HOUR_MS).toISOString(), to: to.toISOString() };
+    for (const report of ['delivery', 'processing', 'top-domains'] as const) {
+      const a1 = await get(`/api/v1/reports/${report}`, bearer(tokenA), params).expect(200);
+      const a2 = await get(`/api/v1/reports/${report}`, bearer(tokenA), params).expect(200);
+      expect(a2.body.generatedAt, report).toBe(a1.body.generatedAt);
+      const b1 = await get(`/api/v1/reports/${report}`, bearer(tokenB), params).expect(200);
+      expect(JSON.stringify(b1.body), report).not.toBe(JSON.stringify(a1.body));
+      // The cache key holds the normalized window (day-aligned for delivery and processing).
+      const window = { from: a1.body.from as string, to: a1.body.to as string };
+      const key =
+        report === 'top-domains' ? { ...window, limit: 10 } : { ...window, granularity: 'day' };
+      const kv = ctx.get(KeyValueStore);
+      for (const org of [orgA, orgB]) {
+        const entry = JSON.parse((await kv.get(reportCacheKey(org.id, report, key)))!) as {
+          organizationId: string;
+          report: string;
+        };
+        expect(entry, report).toMatchObject({ organizationId: org.id.toString(), report });
+      }
+    }
   });
 
   it('never serves organization A’s cached report to organization B', async () => {

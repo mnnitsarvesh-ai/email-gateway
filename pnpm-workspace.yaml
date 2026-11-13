@@ -2,6 +2,8 @@ packages:
   - apps/*
   - packages/*
   - tests
+  # Playwright end-to-end tests of the admin portal (step 7.1 WP6).
+  - tests/portal-e2e
   # Generated attachment test files (step 4.2 §9), built like a package.
   - tests/fixtures/attachment-corpus
 

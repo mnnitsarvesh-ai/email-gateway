@@ -56,6 +56,25 @@ export const COVERAGE: readonly RouteCoverage[] = Object.freeze([
     integration: `${INT}/insights-reports.test.ts`,
     crossTenant: ISOLATION,
   },
+  // Step 7.1 §3.3.2 (docs/plan/steps/20-admin-portal.md).
+  {
+    route: 'get /api/v1/reports/delivery',
+    e2e: `${E2E}/insights-reports.e2e.test.ts`,
+    integration: `${INT}/insights-reports.test.ts`,
+    crossTenant: ISOLATION,
+  },
+  {
+    route: 'get /api/v1/reports/processing',
+    e2e: `${E2E}/insights-reports.e2e.test.ts`,
+    integration: `${INT}/insights-reports.test.ts`,
+    crossTenant: ISOLATION,
+  },
+  {
+    route: 'get /api/v1/reports/top-domains',
+    e2e: `${E2E}/insights-reports.e2e.test.ts`,
+    integration: `${INT}/insights-reports.test.ts`,
+    crossTenant: ISOLATION,
+  },
   {
     route: 'get /api/v1/usage',
     e2e: `${E2E}/insights-billing.e2e.test.ts`,

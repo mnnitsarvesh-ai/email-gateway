@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { type Counter, type Histogram, MetricsService } from '@email-gateway/common';
+import type { TrustedForwarderOutcome } from './trusted-forwarder.middleware';
 
 /** `scope` of `api_rate_limited_total` (D8). */
 export type RateLimitScope = 'principal' | 'tenant' | 'sensitive' | 'expensive' | 'route';
@@ -25,6 +26,8 @@ export class ApiConventionMetrics {
   readonly idempotency: Counter<'outcome'>;
   readonly cursorRejected: Counter;
   readonly scanBudgetExhausted: Counter<'resource'>;
+  /** Step 7.1 §3.4: outcomes of the trusted client-IP forwarder (ADR-0060). */
+  readonly trustedForwarder: Counter<'outcome'>;
 
   constructor(metrics: MetricsService) {
     this.httpRequests = metrics.counter(
@@ -61,5 +64,19 @@ export class ApiConventionMetrics {
       'v1 list pages that ended short because the scan budget was used up, by resource',
       ['resource'],
     );
+    this.trustedForwarder = metrics.counter(
+      'api_trusted_forwarder_total',
+      'Requests carrying the admin portal forwarder headers by outcome (accepted, rejected, ' +
+        'invalid_ip, disabled); never an address label',
+      ['outcome'],
+    );
   }
 }
+
+/** Every `outcome` of `api_trusted_forwarder_total` (pre-registered at zero). */
+export const TRUSTED_FORWARDER_OUTCOMES: readonly TrustedForwarderOutcome[] = [
+  'accepted',
+  'rejected',
+  'invalid_ip',
+  'disabled',
+];

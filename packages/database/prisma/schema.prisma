@@ -1983,8 +1983,10 @@ model EmailMessage {
   /// Step 6.1 D5 plan 2: verdict-filtered message list.
   @@index([organizationId, finalVerdict, receivedAt, id], map: "email_messages_org_verdict_received_idx")
   /// Step 6.1 D12: index-only report counts (traffic, directions, and the threats outcomes by
-  /// verdict and action; final_action since migration rest_api_index_coverage).
-  @@index([organizationId, receivedAt, direction, finalVerdict, finalAction], map: "email_messages_org_received_dir_verdict_idx")
+  /// verdict and action; final_action since migration rest_api_index_coverage). Step 7.1 §3.2:
+  /// domain_id appended (migration admin_portal_reports) so the top attacked domains report
+  /// (inbound messages by domain and verdict) is index-only too.
+  @@index([organizationId, receivedAt, direction, finalVerdict, finalAction, domainId], map: "email_messages_org_received_dir_verdict_idx")
   @@map("email_messages")
 }
 
@@ -2268,6 +2270,8 @@ model EmailScan {
   @@id([id, receivedAt])
   @@unique([messageId, lifecycleRound, receivedAt])
   @@index([status, deadlineAt])
+  /// Step 7.1 §3.2: index-only processing report (initial rounds by status, time to verdict).
+  @@index([organizationId, receivedAt, scanKind, status, completedAt], map: "email_scans_org_received_kind_status_idx")
   @@map("email_scans")
 }
 
@@ -4067,6 +4071,8 @@ model EmailDelivery {
   @@index([organizationId, receivedAt, id])
   /// The recipients of one reinjection: token matching, queue-id binding, reconciler scans.
   @@index([reinjectionId, receivedAt])
+  /// Step 7.1 §3.2: index-only delivery report (status counts and delivery latency per bucket).
+  @@index([organizationId, receivedAt, status, deliveredAt], map: "email_deliveries_org_received_status_idx")
   @@map("email_deliveries")
 }
 

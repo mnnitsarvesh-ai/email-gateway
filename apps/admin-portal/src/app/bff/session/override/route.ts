@@ -1,0 +1,8 @@
+import { bffRoute } from '@/server/bff/route';
+import { endOverride, startOverride } from '@/server/bff/session-routes';
+
+export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
+
+export const POST = bffRoute(startOverride);
+export const DELETE = bffRoute(endOverride);

@@ -28,3 +28,9 @@ secrets/
 
 # Local runtime data of the Compose stack (e.g. postfix-outbound's delivery log, step 2.3).
 .local/
+
+# Admin portal end-to-end tests (step 7.1 WP6): per-run generated credentials and Playwright
+# output (traces, screenshots, reports). Never committed.
+tests/portal-e2e/.auth/
+tests/portal-e2e/test-results/
+tests/portal-e2e/playwright-report/

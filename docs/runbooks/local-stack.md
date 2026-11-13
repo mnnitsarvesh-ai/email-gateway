@@ -20,6 +20,18 @@ Profile `smtp-test` (never deployed) adds `mail-sink` (accepts every `*.test` do
 
 The stack SMTP suites (`tests/integration/smtp-*.test.ts`, part of `pnpm test:integration`) need all of the above plus a running adapter and a built api (`pnpm build`; they run its `dkim:sync` CLI, or inside the `api` container when the apps profile runs). They fail with the list of what is missing; `SMTP_STACK_TESTS=skip` skips them explicitly, `SMTP_LOAD_SESSIONS`/`SMTP_LOAD_MESSAGES` shrink the 40 × 1 000 load test. They stop and restart MinIO, Redis and `postfix` themselves and always bring them back.
 
+## Admin portal and api on the host (step 7.1)
+
+On this machine port 3000 is taken, so the api runs on the host with `HTTP_PORT=3200` (`API_HOST_PORT=3200`, the Compose `api` also publishes `127.0.0.1:3200`) and the portal on 3001. Only one process can hold each port: `docker compose stop api admin-portal` before running them on the host, `docker compose --profile apps up -d --no-deps api admin-portal` to go back to the containers.
+
+```bash
+pnpm --filter @email-gateway/api build
+(cd apps/api && HTTP_PORT=3200 node --env-file=../../.env dist/main.js)          # api on http://localhost:3200
+pnpm --filter @email-gateway/admin-portal dev                                      # portal on http://localhost:3001 (API_INTERNAL_URL=http://localhost:3200)
+```
+
+Open the portal as `http://localhost:3001` (not `127.0.0.1`: the BFF's CSRF check compares the `Origin` with `PORTAL_PUBLIC_URL`). For the portal end-to-end suite the api runs with `AUTH_ACCESS_TOKEN_TTL_SECONDS=60 DNS_SERVERS=127.0.0.1:1053` (and the shipped `expensive` budget) and the portal as a production build (`next start`); see [running and testing](../frontend/running-and-testing.md#end-to-end-suite-testsportal-e2e). Never run `next build` while `next dev` of the same tree runs (shared `.next`). Operations: [admin portal runbook](admin-portal.md).
+
 ## RabbitMQ
 
 Topology v3 (step 3.2; v2 step 3.3: `rescan_requested.v1` bindings; v3 step 4.1: `scan.spam` is a work queue, `scan.auth` lost its event bindings; [messaging-topology.md](../architecture/messaging-topology.md)) lives in the vhost `email-gateway` (`RABBITMQ_VHOST`, description `email-gateway topology v3`): 6 exchanges, 14 quorum queues, 35 bindings, one policy per queue, and the role users `eg-relay`, `eg-email-worker`, `eg-scanner` (step 4.1: the email-worker scan role, `RABBITMQ_SCANNER_USER`/`_PASSWORD`/`_URL`), `eg-delivery-worker`, `eg-ops` (no tags, least privilege). `init.mjs` removes bindings on topology queues and exchanges that the definitions no longer declare (`--prune-dry-run` lists them without changing anything); a broker provisioned with v2 loses the two `scan.auth` bindings on the next run. If `rabbitmq-init` fails with `missing environment: RABBITMQ_SCANNER_USER, RABBITMQ_SCANNER_PASSWORD`, append the security scanning keys from `.env.example` and re-run `docker compose up -d rabbitmq-init`. The one-shot `rabbitmq-init` (default profile) applies it after the broker is healthy, on every `docker compose up`; every app service waits for it.
@@ -156,7 +168,7 @@ curl -s localhost:${EVENT_RELAY_HOST_PORT:-3070}/metrics | grep -E '^lifecycle_(
 | ------------------------------- | ------------------------------------------------------------------------------------------------------- |
 | API OpenAPI                     | http://localhost:3000/docs (outside production only; the document lists `/api/v1/*` only)               |
 | API Prometheus series           | http://localhost:3000/metrics (internal; `/api/metrics` is a `404`)                                     |
-| Admin portal                    | http://localhost:3001                                                                                   |
+| Admin portal                    | http://localhost:3001 (host `next dev`/`next start` or the Compose `admin-portal`; api on 3200 here)    |
 | RabbitMQ management             | http://localhost:15672 (`RABBITMQ_USER`/`RABBITMQ_PASSWORD`; vhost `email-gateway`)                     |
 | RabbitMQ Prometheus             | http://localhost:15692/metrics (`RABBITMQ_PROMETHEUS_HOST_PORT`)                                        |
 | webhook-worker probes / metrics | http://localhost:3075/health/ready, /metrics (`WEBHOOK_WORKER_HOST_PORT`)                               |

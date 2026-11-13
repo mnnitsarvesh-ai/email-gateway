@@ -8,12 +8,15 @@ import { randomBytes, randomInt, randomUUID } from 'node:crypto';
 import { PrismaReadService } from '@email-gateway/common';
 import {
   type AuditActorType,
+  type DeliveryStatus,
   type MessageAction,
   type MessageDirection,
   type MessageVerdict,
   Prisma,
   type QuarantinePrimaryEngine,
   type QuarantineReason,
+  type ScanKind,
+  type ScanStatus,
   type Severity,
   type ThreatCategory,
   type UrlClickDecision,
@@ -33,6 +36,8 @@ export interface MessageSpec {
   direction: MessageDirection;
   verdict: MessageVerdict | null;
   action?: MessageAction | null;
+  /** Internal `domains.id` (step 7.1 top domains); default NULL. */
+  domainId?: bigint | null;
 }
 
 export interface InsertedMessage extends MessageSpec {
@@ -63,10 +68,100 @@ export async function insertMessages(
         emlSha256: 'a'.repeat(64),
         finalVerdict: row.verdict,
         finalAction: row.action ?? null,
+        domainId: row.domainId ?? null,
       })),
     });
   }
   return rows;
+}
+
+export interface DeliverySpec {
+  /** The message (its id and `received_at`) the delivery belongs to. */
+  message: Pick<InsertedMessage, 'id' | 'receivedAt'>;
+  status: DeliveryStatus;
+  /** `delivered_at − received_at` in ms; NULL when omitted. */
+  deliveredAfterMs?: number | null;
+}
+
+/** `email_deliveries` rows of `org` (one recipient each; no FK, partitioned). */
+export async function insertDeliveries(
+  ctx: IntegrationApp,
+  org: FixtureOrganization,
+  specs: readonly DeliverySpec[],
+): Promise<void> {
+  const base = idBase();
+  for (let i = 0; i < specs.length; i += 2_000) {
+    await ctx.prisma.emailDelivery.createMany({
+      data: specs.slice(i, i + 2_000).map((spec, j) => ({
+        receivedAt: spec.message.receivedAt,
+        messageId: spec.message.id,
+        recipientId: base + BigInt(i + j),
+        organizationId: org.id,
+        status: spec.status,
+        deliveredAt:
+          spec.deliveredAfterMs === undefined || spec.deliveredAfterMs === null
+            ? null
+            : new Date(spec.message.receivedAt.getTime() + spec.deliveredAfterMs),
+      })),
+    });
+  }
+}
+
+export interface ScanRoundSpec {
+  message: Pick<InsertedMessage, 'id' | 'receivedAt'>;
+  status: ScanStatus;
+  kind?: ScanKind;
+  /** Distinct per message (unique (message_id, lifecycle_round, received_at)); default 0. */
+  lifecycleRound?: number;
+  /** `completed_at − received_at` in ms; NULL when omitted. */
+  completedAfterMs?: number | null;
+}
+
+/** `email_scans` rounds of `org` (no FK, partitioned). */
+export async function insertScanRounds(
+  ctx: IntegrationApp,
+  org: FixtureOrganization,
+  specs: readonly ScanRoundSpec[],
+): Promise<void> {
+  for (let i = 0; i < specs.length; i += 2_000) {
+    await ctx.prisma.emailScan.createMany({
+      data: specs.slice(i, i + 2_000).map((spec) => ({
+        receivedAt: spec.message.receivedAt,
+        messageId: spec.message.id,
+        organizationId: org.id,
+        scanKind: spec.kind ?? 'initial',
+        status: spec.status,
+        lifecycleRound: spec.lifecycleRound ?? 0,
+        completedAt:
+          spec.completedAfterMs === undefined || spec.completedAfterMs === null
+            ? null
+            : new Date(spec.message.receivedAt.getTime() + spec.completedAfterMs),
+      })),
+    });
+  }
+}
+
+/**
+ * A `domains` row of `org` (deleted ones with status `deleted` and `deleted_at`); removed by the
+ * fixtures' organization cleanup. Never writes the generated columns.
+ */
+export async function insertDomain(
+  ctx: IntegrationApp,
+  org: FixtureOrganization,
+  name: string,
+  options: { deleted?: boolean } = {},
+): Promise<{ id: bigint; publicId: string; name: string }> {
+  const now = new Date();
+  return ctx.prisma.domain.create({
+    data: {
+      organizationId: org.id,
+      name,
+      status: options.deleted ? 'deleted' : 'active',
+      deletedAt: options.deleted ? now : null,
+      statusChangedAt: now,
+    },
+    select: { id: true, publicId: true, name: true },
+  });
 }
 
 export interface QuarantineSpec {
@@ -225,12 +320,17 @@ export async function deleteThreatFixtures(ctx: IntegrationApp, source: string):
   await ctx.prisma.malwareSignature.deleteMany({ where: { source } });
 }
 
-/** Deletes the message, quarantine and click rows of the organizations (partition-safe). */
+/**
+ * Deletes the message, delivery, scan round, quarantine and click rows of the organizations
+ * (partition-safe). Domains go with the fixtures' organization cleanup.
+ */
 export async function deleteInsightFixtures(
   ctx: IntegrationApp,
   organizationIds: readonly bigint[],
 ): Promise<void> {
   const where = { organizationId: { in: [...organizationIds] } };
+  await ctx.prisma.emailDelivery.deleteMany({ where });
+  await ctx.prisma.emailScan.deleteMany({ where });
   await ctx.prisma.quarantineMessage.deleteMany({ where });
   await ctx.prisma.urlClickEvent.deleteMany({ where });
   await ctx.prisma.emailMessage.deleteMany({ where });

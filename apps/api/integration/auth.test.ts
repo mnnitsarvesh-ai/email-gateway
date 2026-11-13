@@ -20,6 +20,7 @@
 // @covers post /api/v1/auth/refresh
 // @covers post /api/v1/platform/overrides
 // ---- end of route coverage ----
+import { randomBytes } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { generateApiKey, TokenHasher } from '../src/crypto/tokens';
 import { TransactionRunner } from '../src/database/transaction-runner';
@@ -731,5 +732,64 @@ describe('API keys and credentials', () => {
       .set(bearer(session.accessToken))
       .set(apiKeyHeader(await insertKey(org)))
       .expect(401);
+  });
+});
+
+describe('trusted client-IP forwarder (step 7.1 P5, ADR-0060)', () => {
+  // A second app with the forwarder enabled (independent of the local .env), same database.
+  const token = randomBytes(24).toString('hex');
+  let fwd: IntegrationApp;
+
+  beforeAll(async () => {
+    fwd = await createIntegrationApp({ API_TRUSTED_FORWARDER_TOKEN: token });
+  });
+  afterAll(async () => {
+    await fwd?.close();
+  });
+
+  const loginThrough = (user: FixtureUser, headers: Record<string, string>) =>
+    fwd.http
+      .post('/api/v1/auth/login')
+      .set(headers)
+      .send({ email: user.email, password: user.password, organization: user.organization.slug });
+
+  it('records the forwarded address in login_audit_logs and the session', async () => {
+    const user = await fx.createUser(org, { roles: ['read_only_user'] });
+    const portal = uniqueIp();
+    const browser = uniqueIp();
+    await loginThrough(user, {
+      ...fromIp(portal),
+      'X-EG-Client-IP': browser,
+      'X-EG-Forwarder-Token': token,
+    }).expect(200);
+    const rows = await fwd.prisma.loginAuditLog.findMany({ where: { userId: user.id } });
+    expect(rows.map((r) => [r.outcome, r.ipAddress])).toEqual([['success', browser]]);
+    const session = await fwd.prisma.userSession.findFirst({
+      where: { userId: user.id },
+      select: { ipAddress: true },
+    });
+    expect(session?.ipAddress).toBe(browser);
+  });
+
+  it('ignores a forged client IP without or with a wrong token (the proxy address is kept)', async () => {
+    const user = await fx.createUser(org, { roles: ['read_only_user'] });
+    const portal = uniqueIp();
+    await loginThrough(user, { ...fromIp(portal), 'X-EG-Client-IP': uniqueIp() }).expect(200);
+    await loginThrough(user, {
+      ...fromIp(portal),
+      'X-EG-Client-IP': uniqueIp(),
+      'X-EG-Forwarder-Token': `${token.slice(1)}0`,
+    }).expect(200);
+    const rows = await fwd.prisma.loginAuditLog.findMany({ where: { userId: user.id } });
+    expect(rows.map((r) => r.ipAddress)).toEqual([portal, portal]);
+    const metrics = await fwd.http.get('/metrics').expect(200);
+    expect(metrics.text).toMatch(
+      /^api_trusted_forwarder_total\{[^}]*outcome="rejected"[^}]*\} [1-9]/m,
+    );
+    expect(metrics.text).toMatch(
+      /^api_trusted_forwarder_total\{[^}]*outcome="accepted"[^}]*\} [1-9]/m,
+    );
+    // Neither header value ever reaches a log line.
+    expect(fwd.logs.join('\n')).not.toContain(token);
   });
 });

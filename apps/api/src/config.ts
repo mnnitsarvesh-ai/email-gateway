@@ -867,7 +867,9 @@ export const restApiConfigShape = {
   API_RATE_TENANT_MIN_PER_MINUTE: int(1, 100_000).default(10),
   API_RATE_TENANT_MAX_PER_MINUTE: int(10, 1_000_000).default(10_000),
   API_RATE_SENSITIVE_PER_MINUTE: int(1, 600).default(30),
-  API_RATE_EXPENSIVE_PER_MINUTE: int(1, 600).default(20),
+  // 60: the admin dashboard makes 5 cached report calls per load (step 7.1); 20 allowed only 4
+  // loads (sign-in plus 3 range changes) a minute before every widget answered 429.
+  API_RATE_EXPENSIVE_PER_MINUTE: int(1, 600).default(60),
   API_RATE_LIMIT_CACHE_SECONDS: int(5, 300).default(60),
   API_IDEMPOTENCY_LEGACY_MODE: z.enum(['enforce', 'warn']).default('enforce'),
   API_IDEMPOTENCY_PENDING_TTL_SECONDS: int(30, 3600).default(300),
@@ -882,6 +884,24 @@ export const restApiConfigShape = {
 
 export type RestApiConfigKeys = {
   [K in keyof typeof restApiConfigShape]: z.output<(typeof restApiConfigShape)[K]>;
+};
+
+/**
+ * Admin portal (step 7.1 P5, docs/plan/steps/20-admin-portal.md §3.4, §3.5, ADR-0060): the
+ * shared secret of the trusted client-IP forwarder. Empty = off (the `X-EG-*` headers are then
+ * ignored and stripped); otherwise 32–256 characters, `_FILE` accepted. Known to the api and the
+ * portal BFF only. Start-up errors name the key, never the value.
+ */
+export const portalConfigShape = {
+  API_TRUSTED_FORWARDER_TOKEN: z
+    .string()
+    .min(32, 'must be empty or 32 to 256 characters')
+    .max(256, 'must be empty or 32 to 256 characters')
+    .optional(),
+};
+
+export type PortalConfigKeys = {
+  [K in keyof typeof portalConfigShape]: z.output<(typeof portalConfigShape)[K]>;
 };
 
 /** `WEBHOOK_ALLOWED_PORTS`: comma list of ports 1–65535 (deduplicated, at least one). */
@@ -1087,6 +1107,7 @@ export const apiConfigSchema = baseConfigSchema
   .extend(quarantineConfigShape)
   .extend(restApiConfigShape)
   .extend(webhookConfigShape)
+  .extend(portalConfigShape)
   .extend({
     /** Comma-separated allow-list of admin portal origins. */
     CORS_ORIGINS: z
