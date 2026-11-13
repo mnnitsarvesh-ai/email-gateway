@@ -472,10 +472,10 @@ export const WEBHOOK_EXAMPLES = {
     statuses: ['failed', 'dead'],
   },
   item: exampleWebhook,
-  created: { ...exampleWebhook, secret: 'whsec_Q2hhbmdlTWVBZnRlckNvcHlpbmdUaGlzRXhhbXBsZQ' },
+  created: { ...exampleWebhook, secret: 'whsec_EXAMPLE-shown-once-store-it-now' },
   rotated: {
     id: exampleWebhook.id,
-    secret: 'whsec_TmV3U2VjcmV0U2hvd25PbmNlT25seUluVGhpc1Jlc3A',
+    secret: 'whsec_EXAMPLE-rotated-shown-once',
     secretVersion: 2,
     secretRotatedAt: '2026-11-13T10:00:00.000Z',
     previousSecretExpiresAt: '2026-11-14T10:00:00.000Z',
