@@ -78,6 +78,36 @@ describe('states', () => {
     expect(screen.getByText('Something went wrong')).toBeInTheDocument();
   });
 
+  it('ErrorState counts a 429 down from Retry-After before Retry is enabled', async () => {
+    const onRetry = vi.fn();
+    const { user } = renderWithProviders(
+      <ErrorState
+        error={
+          new ApiError({
+            status: 429,
+            code: 'rate_limited',
+            message: 'Too many requests',
+            retryAfterSeconds: 1,
+          })
+        }
+        onRetry={onRetry}
+      />,
+    );
+    expect(screen.getByText('Too many requests', { selector: 'span' })).toBeInTheDocument();
+    expect(screen.getByText('Try again in 1 s.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeDisabled();
+    expect(
+      await screen.findByText('You can try again now.', {}, { timeout: 2_000 }),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(onRetry).toHaveBeenCalled();
+  });
+
+  it('ErrorState can leave out the operation requirement of a 403 decided by another rule', () => {
+    renderWithProviders(<ErrorState error={apiError(403, 'forbidden')} showRequirement={false} />);
+    expect(screen.queryByText('domain:manage')).not.toBeInTheDocument();
+  });
+
   it('UnavailableState names the step and the plan, or "Not offered"', async () => {
     const { container, rerender } = renderWithProviders(
       <UnavailableState

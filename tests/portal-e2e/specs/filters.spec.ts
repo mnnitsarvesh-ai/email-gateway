@@ -1,7 +1,8 @@
 /**
  * Filters write the URL and narrow the api results (design P8): domains (q, status), quarantine
  * entries (state, reason; a filter change resets the cursor stack to page 1), audit logs (exact
- * action, action prefix) and the email explorer (direction, verdict).
+ * action, action prefix) and the email explorer (direction, verdict; every other explorer
+ * filter and search is covered by explorer.spec.ts).
  */
 import type { Locator, Page } from '@playwright/test';
 import { signIn } from '../support/auth';
@@ -18,6 +19,13 @@ async function choose(page: Page, label: string, option: string): Promise<void> 
     .first()
     .click();
   await page.getByRole('option', { name: option, exact: true }).click();
+}
+
+/** Checks or unchecks one option of a multi-select filter (a menu of checkbox items). */
+async function toggle(page: Page, label: string, option: string): Promise<void> {
+  await page.getByRole('button', { name: new RegExp(`^${label}`) }).click();
+  await page.getByRole('menuitemcheckbox', { name: option, exact: true }).click();
+  await page.keyboard.press('Escape');
 }
 
 /** Every body row of the main table contains `text` (and there is at least one row). */
@@ -103,17 +111,19 @@ test('audit logs: exact action and action prefix', async ({ page }) => {
 
 test('email explorer: direction and verdict', async ({ page }) => {
   await signIn(page, 'alphaAnalyst', { next: '/messages?range=7d' });
-  await expect(table(page)).toContainText('Alpha clean message 000');
+  // Subjects are masked since step 7.2; the envelope senders are in clear.
+  await expect(table(page)).toContainText('external.e2e-portal.test');
 
-  await choose(page, 'Direction', 'Outbound');
+  // Direction and verdict are multi-selects (step 7.2 §2 E10).
+  await toggle(page, 'Direction', 'Outbound');
   await expect(page).toHaveURL(/[?&]direction=outbound/);
   await everyRowContains(page, 'Outbound');
 
-  await choose(page, 'Direction', 'Inbound');
-  await page.getByRole('button', { name: /^Verdict/ }).click();
-  await page.getByRole('menuitemcheckbox', { name: 'Phishing' }).click();
-  await page.keyboard.press('Escape');
+  await toggle(page, 'Direction', 'Outbound');
+  await toggle(page, 'Direction', 'Inbound');
+  await expect(page).toHaveURL(/[?&]direction=inbound/);
+  await toggle(page, 'Verdict', 'Phishing');
   await expect(page).toHaveURL(/[?&]verdict=phishing/);
   await everyRowContains(page, 'Phishing');
-  await expect(table(page)).not.toContainText('Alpha clean message');
+  await expect(table(page)).not.toContainText('Clean');
 });

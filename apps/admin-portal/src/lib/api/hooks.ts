@@ -84,7 +84,13 @@ export interface CursorListState<Id extends OperationId> {
 export function useCursorList<Id extends OperationId>(
   operationId: Id,
   filters: QueryParams<Id> | undefined,
-  options: { path?: OperationInput<Id>['path']; limit?: number; enabled?: boolean } = {},
+  options: {
+    path?: OperationInput<Id>['path'];
+    limit?: number;
+    enabled?: boolean;
+    /** Query options of the list (e.g. `refetchOnWindowFocus: false`, a custom `retry`). */
+    queryOptions?: Pick<QueryOpts<Id>, 'staleTime' | 'refetchOnWindowFocus' | 'retry'>;
+  } = {},
 ): CursorListState<Id> {
   const op = operations[operationId];
   if (!op.listKey) throw new Error(`${operationId} is not a list operation`);
@@ -112,7 +118,11 @@ export function useCursorList<Id extends OperationId>(
   const result = useApiQuery(
     operationId,
     { path: options.path, query },
-    { placeholderData: keepPreviousData, enabled: options.enabled ?? true },
+    {
+      placeholderData: keepPreviousData,
+      enabled: options.enabled ?? true,
+      ...options.queryOptions,
+    },
   );
   const body = result.data as Record<string, unknown> | undefined;
   const rows = useMemo(

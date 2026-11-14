@@ -1287,6 +1287,12 @@ services:
       # Admin portal (step 7.1 P5, ADR-0060): the trusted client-IP forwarder secret shared with
       # the portal BFF (empty = off: X-EG-* headers ignored and stripped).
       API_TRUSTED_FORWARDER_TOKEN: ${API_TRUSTED_FORWARDER_TOKEN:-}
+      # Email explorer and details (step 7.2 §2 E16): the capped subject-prefix search, the
+      # saved views per user and the audited reveal operations per principal and minute.
+      API_MESSAGES_SEARCH_MAX_MATCHES: ${API_MESSAGES_SEARCH_MAX_MATCHES:-5000}
+      API_MESSAGES_SEARCH_TIMEOUT_MS: ${API_MESSAGES_SEARCH_TIMEOUT_MS:-5000}
+      SAVED_VIEWS_MAX_PER_USER: ${SAVED_VIEWS_MAX_PER_USER:-50}
+      API_MESSAGES_REVEAL_PER_MINUTE: ${API_MESSAGES_REVEAL_PER_MINUTE:-30}
     ports: ['127.0.0.1:${API_HOST_PORT:-3000}:3000']
     healthcheck:
       <<: *node-healthcheck

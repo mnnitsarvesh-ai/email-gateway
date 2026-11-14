@@ -50,7 +50,7 @@ test('alpha admin: beta ids are 404, lists hold alpha data only', async ({ page 
 
   const lists: Array<[string, string]> = [
     ['/domains', s.alpha.domainName],
-    ['/messages?range=7d', 'Alpha'],
+    ['/messages?range=7d', 'external.e2e-portal.test'],
     ['/quarantine?tab=entries', s.alpha.domainName],
     ['/users', `@${s.alpha.domainName}`],
     ['/audit-logs?range=7d&action=user.invited', 'user.invited'],
@@ -88,9 +88,10 @@ test('platform override: reason, banner, target data, end, audit row', async ({ 
   // The target's data, through the override token.
   await page.goto('/domains');
   await expect(page.getByRole('table').first()).toContainText(s.beta.domainName);
+  // Subjects are masked (step 7.2; platform_admin has no message:reveal): beta's own senders.
   await page.goto('/messages?range=7d');
-  await expect(page.getByRole('table').first()).toContainText(s.beta.marker);
-  await expect(page.locator('main')).not.toContainText('Alpha spam message');
+  await expect(page.getByRole('table').first()).toContainText(`@${s.beta.domainName}`);
+  await expect(page.locator('main')).not.toContainText(`@${s.alpha.domainName}`);
 
   await banner.getByRole('button', { name: 'End now' }).click();
   await expect(banner).toHaveCount(0);
@@ -101,4 +102,31 @@ test('platform override: reason, banner, target data, end, audit row', async ({ 
   );
   const table = page.getByRole('table', { name: /platform audit log entries/i });
   await expect(table).toContainText('platform.override_started');
+});
+
+test('explorer: searches shared with the beta tenant and saved views stay in alpha', async ({
+  page,
+}) => {
+  const s = readState();
+  await signIn(page, 'alphaAnalyst', { next: '/messages' });
+  // Beta's twin message has the same envelope sender and Message-ID as alpha search message 1.
+  for (const query of [
+    'sender=invoices%40vendor-one.e2e-portal.test',
+    'messageId=%3Cinv-4471.e2e%40vendor-one.e2e-portal.test%3E',
+    'subject=RE%3A%20Invoice%204471%20for%20October',
+  ]) {
+    await page.goto(`/messages?${query}`);
+    const rows = page.locator('main table tbody tr');
+    await expect(rows.first()).toBeVisible();
+    await expect(page.locator('main [aria-busy="true"]')).toHaveCount(0);
+    await page.getByRole('switch', { name: 'Show subjects' }).click();
+    await expect(page.locator('main table tbody')).toContainText('Invoice 4471');
+    const text = await page.locator('main').innerText();
+    expect(text, `${query} shows no beta data`).not.toContain(s.beta.marker);
+    expect(text).not.toContain(s.beta.domainName);
+  }
+  // The analyst's saved views never include the beta administrator's.
+  const res = await page.request.get('/bff/api/v1/saved-views?kind=message_explorer');
+  expect(res.status()).toBe(200);
+  expect(await res.text()).not.toContain(s.beta.savedViewId);
 });

@@ -1,4 +1,4 @@
-export { MessageExplorer } from './message-explorer';
-export { MessageDetail } from './message-detail';
+export { MessageExplorer } from './explorer';
+export { MessageDetails } from './details';
 export { ScanDetails } from './scan-details';
-export { attachmentSearchHref, messageHref, scansHref } from './links';
+export { attachmentSearchHref, detailSectionHref, messageHref, scansHref } from './links';

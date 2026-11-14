@@ -206,6 +206,18 @@ export const PERMISSIONS = Object.freeze([
     key: 'webhook:read',
     description: 'View webhook subscriptions, event catalogue and delivery history (step 6.2)',
   },
+  // Step 7.2 (docs/plan/steps/21-email-explorer-details.md §2 E5, §3.5, ADR-0062): sensitive
+  // message metadata is masked for every caller and revealed only through the audited reveal
+  // action; subject searches of GET /messages need it too (ADR-0061). organization_admin and
+  // super_admin hold it through TENANT_PERMISSIONS / ALL_PERMISSIONS; security_analyst and
+  // compliance_auditor get it explicitly. NOT in TENANT_READ_PERMISSIONS (read_only_user,
+  // platform_admin) and not held by domain_admin, quarantine_reviewer or mailbox_user.
+  {
+    key: 'message:reveal',
+    description:
+      'Reveal masked message metadata (subjects, recipient addresses, To/Cc/Subject header ' +
+      'values) through the audited reveal action (step 7.2)',
+  },
 ] as const satisfies readonly PermissionDef[]);
 
 /** Every permission key of the catalog. */
@@ -373,6 +385,7 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'dlp:evidence_read',
       'threat_intel:read',
       'webhook:read',
+      'message:reveal',
     ],
   },
   {
@@ -406,6 +419,7 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'dlp:evidence_read',
       'billing:read',
       'webhook:read',
+      'message:reveal',
     ],
   },
   {

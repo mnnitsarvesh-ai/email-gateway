@@ -40,6 +40,7 @@ import {
   entrySummary,
   type EntryRow,
   releaseView,
+  seesRecipientInClear,
 } from '../domain/entry';
 import type {
   ApprovalListQuery,
@@ -60,6 +61,7 @@ import {
   approvalNotFound,
   cursorInvalid,
   entryNotFound,
+  filterForbidden,
   releaseNotFound,
   searchRangeInvalid,
 } from '../quarantine.errors';
@@ -94,7 +96,12 @@ export const levelsFrom = (min: (typeof QUARANTINE_RISK_LEVELS)[number]): string
  * range and a filter-bound cursor, one `quarantine.searched` audit row per search (filter hash
  * and count, never the filter values); entry detail with `allowedActions` and a `view` action +
  * `quarantine.entry_viewed` audit row; history, releases, approvals, the bounded summary and the
- * catalog. Subjects are shown only to `quarantine:preview` holders and on self routes.
+ * catalog. Subjects are shown only to `quarantine:preview` holders and on self routes. Step 7.2
+ * (§2 E8, ADR-0062): recipients are clear only for quarantine deciders and `message:reveal`
+ * holders (`RECIPIENT_CLEAR_PERMISSIONS`) and on self routes, masked (`recipientMasked`) for
+ * other `quarantine:read` holders, who may not search by an exact recipient either (`403
+ * quarantine_filter_forbidden`: the search would confirm the masked address). A search by
+ * `messageId` may leave out the range: the message's entries are read by its unique key.
  */
 @Injectable()
 export class QuarantineQueryService {
@@ -115,6 +122,13 @@ export class QuarantineQueryService {
     query: EntrySearchQuery,
     client: ClientContext,
   ): Promise<Page<QuarantineEntrySummary>> {
+    const maskRecipient = !seesRecipientInClear(principal.permissions);
+    // Step 7.2 (ADR-0062): an exact recipient search by a caller who reads recipients masked
+    // would confirm the masked address. Refused before anything is read or audited.
+    if (query.recipient !== undefined && maskRecipient) {
+      this.metrics.request('search', 'filter_forbidden');
+      throw filterForbidden('recipient');
+    }
     const filter: Omit<EntrySearch, 'from' | 'to' | 'after' | 'take'> = {
       ...(query.state !== undefined && { states: query.state }),
       ...(query.kind !== undefined && { kind: query.kind }),
@@ -142,6 +156,7 @@ export class QuarantineQueryService {
       query,
       filter: { ...filter, ...(messageId !== undefined && { messageId }) },
       showSubject: principal.permissions.has(QUARANTINE_PERMISSIONS.preview),
+      maskRecipient,
       self: false,
     });
   }
@@ -163,6 +178,8 @@ export class QuarantineQueryService {
         recipient: caller.address,
       },
       showSubject: true,
+      // The caller's own address (Q15): never masked.
+      maskRecipient: false,
       self: true,
     });
   }
@@ -172,19 +189,28 @@ export class QuarantineQueryService {
     scope: TenantScope,
     client: ClientContext,
     s: {
-      query: { from: string; to: string; cursor?: string; limit?: number } & Record<
+      query: { from?: string; to?: string; cursor?: string; limit?: number } & Record<
         string,
         unknown
       >;
       filter: Omit<EntrySearch, 'from' | 'to' | 'after' | 'take'>;
       showSubject: boolean;
+      maskRecipient: boolean;
       self: boolean;
     },
   ): Promise<Page<QuarantineEntrySummary>> {
-    const from = new Date(s.query.from);
-    const to = new Date(s.query.to);
     const maxDays = this.config.QUARANTINE_SEARCH_MAX_RANGE_DAYS;
-    if (!checkSearchRange(from, to, maxDays)) throw searchRangeInvalid(maxDays);
+    // Without a range only the entries of one message are searched (the query schema allows it
+    // only with `messageId`; checked again here so no other filter can run unbounded).
+    let range: { from: Date; to: Date } | undefined;
+    if (s.query.from !== undefined || s.query.to !== undefined) {
+      const from = new Date(s.query.from ?? Number.NaN);
+      const to = new Date(s.query.to ?? Number.NaN);
+      if (!checkSearchRange(from, to, maxDays)) throw searchRangeInvalid(maxDays);
+      range = { from, to };
+    } else if (s.filter.messageId === undefined) {
+      throw searchRangeInvalid(maxDays);
+    }
     const limit = Math.min(
       s.query.limit ?? QUARANTINE_SEARCH_DEFAULT_PAGE_SIZE,
       this.config.QUARANTINE_SEARCH_MAX_PAGE_SIZE,
@@ -198,13 +224,12 @@ export class QuarantineQueryService {
     }
     const rows = await this.reads.search(scope, {
       ...s.filter,
-      from,
-      to,
+      ...range,
       ...(after !== undefined && { after }),
       take: limit + 1,
     });
     const page = rows.slice(0, limit);
-    const items = await this.summaries(scope, page, s.showSubject);
+    const items = await this.summaries(scope, page, s.showSubject, s.maskRecipient);
     const last = page[page.length - 1];
     const nextCursor =
       rows.length > limit && last !== undefined
@@ -231,6 +256,7 @@ export class QuarantineQueryService {
     scope: TenantScope,
     rows: readonly EntryRow[],
     showSubject: boolean,
+    maskRecipient: boolean,
   ): Promise<QuarantineEntrySummary[]> {
     const [messages, approvals, subjects] = await Promise.all([
       this.reads.messagePublicIds(
@@ -257,6 +283,7 @@ export class QuarantineQueryService {
           approvalPublicId:
             r.approvalRequestId === null ? null : (approvals.get(r.approvalRequestId) ?? null),
           subject: showSubject ? (subjects.get(r.messageId) ?? null) : null,
+          maskRecipient,
         }),
       ];
     });
@@ -276,6 +303,7 @@ export class QuarantineQueryService {
     return this.detailOf(principal, scope, entry, settings, client, {
       isSelf: false,
       showSubject: principal.permissions.has(QUARANTINE_PERMISSIONS.preview),
+      maskRecipient: !seesRecipientInClear(principal.permissions),
     });
   }
 
@@ -310,6 +338,7 @@ export class QuarantineQueryService {
     return this.detailOf(principal, scope, entry, settings, client, {
       isSelf: true,
       showSubject: true,
+      maskRecipient: false,
     });
   }
 
@@ -319,7 +348,7 @@ export class QuarantineQueryService {
     entry: EntryRow,
     settings: QuarantineSettings,
     client: ClientContext,
-    o: { isSelf: boolean; showSubject: boolean },
+    o: { isSelf: boolean; showSubject: boolean; maskRecipient: boolean },
   ): Promise<QuarantineEntryDetail> {
     const [messages, approvals, subjects, releases] = await Promise.all([
       this.reads.messagePublicIds(scope, [entry.messageId]),
@@ -358,6 +387,7 @@ export class QuarantineQueryService {
             ? null
             : (approvals.get(entry.approvalRequestId) ?? null),
         subject: subjects.get(entry.messageId) ?? null,
+        maskRecipient: o.maskRecipient,
       },
       releases,
       allowed,

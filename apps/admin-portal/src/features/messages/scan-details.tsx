@@ -8,15 +8,15 @@ import { PageHeader } from '@/components/page-header';
 import { EmptyState } from '@/components/states/empty-state';
 import { ErrorState } from '@/components/states/error-state';
 import { LoadingState } from '@/components/states/loading-state';
-import { UnavailableState } from '@/components/states/unavailable-state';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useUrlState } from '@/hooks/use-url-state';
 import { useApiQuery, useCursorList } from '@/lib/api/hooks';
 import type { ListItem, SuccessBody } from '@/lib/api/types';
+import { useHasPermission } from '@/lib/auth/me';
 import { RouteGate } from '@/lib/auth/route-gate';
 import { formatBytes, formatDuration, formatNumber, humanize } from '@/lib/format';
 import { CodeList, CursorPager, DetailList, EnumBadge, Section, YesNo } from './controls';
-import { attachmentSearchHref, messageHref } from './links';
+import { attachmentSearchHref, detailSectionHref, messageHref } from './links';
 import {
   AUTH_RESULT_TONE,
   DISPOSITION_TONE,
@@ -62,7 +62,7 @@ function ScanDetailsContent({ messageId }: { messageId: string }) {
           { label: 'Message', href: messageHref(messageId) },
           { label: 'Security scans' },
         ]}
-        description="Scan rounds, per-engine results, attachments, URLs and policy evaluations of one message. Symbol options, filenames and URLs come from the message and are shown as text only."
+        description="Scan rounds, per-engine results, attachments, URLs and policy evaluations of one message. Symbol options, filenames and URLs come from the message and are shown as text only; addresses in symbol options are masked for every user."
       />
       <Tabs value={state.tab} onValueChange={(tab) => setState({ tab: tab as typeof state.tab })}>
         <TabsList aria-label="Scan detail views">
@@ -85,11 +85,14 @@ function ScanDetailsContent({ messageId }: { messageId: string }) {
           <PolicyEvaluations messageId={messageId} />
         </TabsContent>
       </Tabs>
-      <UnavailableState
-        step="7.2"
-        title="DLP evidence"
-        description="Masked DLP findings and the audited evidence view are available in step 7.2; they are not shown here."
-      />
+      <p className="text-xs text-muted-foreground">
+        Masked DLP findings, the audited evidence view, risk contributions and the quarantine
+        actions are in the{' '}
+        <Link href={messageHref(messageId)} className="text-primary underline underline-offset-2">
+          email details
+        </Link>
+        .
+      </p>
     </div>
   );
 }
@@ -115,7 +118,7 @@ function ScanRounds({ messageId }: { messageId: string }) {
   return (
     <div className="grid gap-4">
       {list.rows.map((round) => (
-        <RoundCard key={round.scanId} round={round} />
+        <RoundCard key={round.scanId} round={round} messageId={messageId} />
       ))}
       <CursorPager
         label="Scan rounds"
@@ -134,13 +137,45 @@ function ScanRounds({ messageId }: { messageId: string }) {
   );
 }
 
+const ROUND_LINKS = [
+  ['authentication', 'Authentication'],
+  ['spam', 'Spam'],
+  ['phishing', 'Phishing'],
+  ['urls', 'URLs'],
+  ['attachments', 'Attachments'],
+  ['dlp', 'DLP'],
+  ['risk', 'Risk'],
+] as const;
+
+/** Links from a round to the matching sections of the email details (same round). */
+function RoundDetailLinks({ messageId, round }: { messageId: string; round: number }) {
+  const dlp = useHasPermission('dlp:read');
+  return (
+    <nav aria-label={`Email details sections for round ${round}`} className="text-xs">
+      <span className="text-muted-foreground">In the email details: </span>
+      <ul className="inline-flex flex-wrap gap-x-3 gap-y-1">
+        {ROUND_LINKS.filter(([section]) => section !== 'dlp' || dlp).map(([section, label]) => (
+          <li key={section}>
+            <Link
+              href={detailSectionHref(messageId, section, round)}
+              className="text-primary underline-offset-2 hover:underline"
+            >
+              {label}
+            </Link>
+          </li>
+        ))}
+      </ul>
+    </nav>
+  );
+}
+
 function durationOf(start: string | null, end: string | null): string {
   if (!start || !end) return '';
   const ms = Date.parse(end) - Date.parse(start);
   return Number.isFinite(ms) && ms >= 0 ? formatDuration(ms) : '';
 }
 
-function RoundCard({ round }: { round: ScanRound }) {
+function RoundCard({ round, messageId }: { round: ScanRound; messageId: string }) {
   const risk = round.risk.length > 0 ? round.risk[round.risk.length - 1] : undefined;
   return (
     <Section
@@ -181,6 +216,7 @@ function RoundCard({ round }: { round: ScanRound }) {
           { label: 'Reason codes', value: <CodeList codes={round.reasonCodes} /> },
         ]}
       />
+      <RoundDetailLinks messageId={messageId} round={round.round} />
       {round.auth ? <AuthResults auth={round.auth} /> : null}
       <EnginesTable engines={round.engines} round={round.round} />
       {risk ? <RiskSummary risk={risk} /> : null}
@@ -194,7 +230,7 @@ function RoundCard({ round }: { round: ScanRound }) {
   );
 }
 
-function AuthResults({ auth }: { auth: NonNullable<ScanRound['auth']> }) {
+export function AuthResults({ auth }: { auth: NonNullable<ScanRound['auth']> }) {
   return (
     <div className="grid gap-2 rounded-md border p-3">
       <h3 className="text-sm font-semibold">Authentication results</h3>
@@ -260,7 +296,14 @@ function EnginesTable({ engines, round }: { engines: readonly Engine[]; round: n
   }
   return (
     <div className="grid gap-2">
-      <div className="overflow-x-auto rounded-md border">
+      <div
+        className="relative overflow-x-auto rounded-md border"
+        role="group"
+        aria-label={`Engine results of round ${round}`}
+        // A scrollable region on phones: keyboard users must be able to scroll it (WCAG 2.1.1).
+        // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- a scrollable region
+        tabIndex={0}
+      >
         <table className="w-full text-sm">
           <caption className="sr-only">Engine results of round {round}</caption>
           <thead className="bg-muted/50 text-left text-xs text-muted-foreground">
@@ -360,7 +403,8 @@ function EnginesTable({ engines, round }: { engines: readonly Engine[]; round: n
               {humanize(engine.engine)} symbols ({engine.symbols.length})
             </summary>
             <p className="mt-2 text-xs text-muted-foreground">
-              Symbol options can contain addresses or URLs of the message; they are shown as text.
+              Symbol options can contain URLs of the message; they are shown as text. Addresses in
+              them are masked for every user and never revealed.
             </p>
             <ul className="mt-2 grid gap-1" aria-label={`${humanize(engine.engine)} symbols`}>
               {engine.symbols.map((symbol, index) => (
@@ -379,7 +423,7 @@ function EnginesTable({ engines, round }: { engines: readonly Engine[]; round: n
         ))}
       {engines.some((engine) => engine.engine === 'dlp') ? (
         <p className="text-xs text-muted-foreground">
-          DLP findings are not shown here (available in step 7.2).
+          DLP findings are listed in the DLP results section of the email details.
         </p>
       ) : null}
     </div>
@@ -429,14 +473,14 @@ function RiskSummary({ risk }: { risk: RiskRevision }) {
         ]}
       />
       <p className="text-xs text-muted-foreground">
-        A recommendation, not a decision: the policy decides. Signal contributions arrive with the
-        risk breakdown in step 7.2.
+        A recommendation, not a decision: the policy decides. Signal contributions and groups are in
+        the Risk score section of the email details.
       </p>
     </div>
   );
 }
 
-function EvaluationSummary({ evaluation }: { evaluation: Evaluation }) {
+export function EvaluationSummary({ evaluation }: { evaluation: Evaluation }) {
   return (
     <DetailList
       items={[
@@ -554,7 +598,7 @@ function PolicyEvaluations({ messageId }: { messageId: string }) {
   );
 }
 
-const ATTACHMENT_COLUMNS: DataTableColumn<AttachmentRow>[] = [
+export const ATTACHMENT_COLUMNS: DataTableColumn<AttachmentRow>[] = [
   {
     id: 'part',
     header: 'Part',
@@ -694,7 +738,7 @@ function AttachmentsTable({ messageId }: { messageId: string }) {
   );
 }
 
-const URL_COLUMNS: DataTableColumn<UrlRow>[] = [
+export const URL_COLUMNS: DataTableColumn<UrlRow>[] = [
   {
     id: 'seq',
     header: '#',

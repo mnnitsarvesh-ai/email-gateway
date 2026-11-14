@@ -101,8 +101,9 @@ export class QuarantineSelfController {
     summary: 'Search my quarantined mail',
     description:
       'The caller’s own entries (recipient = the caller’s verified email), newest first, over ' +
-      'a required bounded range, filtered by state and reason; subjects included. Empty when ' +
-      'the organization disabled end-user access (`endUser.enabled`).' +
+      'a required bounded range, filtered by state and reason; subjects and the own address ' +
+      'included (`recipientMasked: false`). Empty when the organization disabled end-user ' +
+      'access (`endUser.enabled`).' +
       SELF_NOTE,
   })
   @ApiQueryOf(SelfSearchQuerySchema, ['from', 'to'])
@@ -129,7 +130,8 @@ export class QuarantineSelfController {
     summary: 'Get one of my quarantined messages',
     description:
       'The entry with the actions the caller may take (`preview`, `release`, ' +
-      '`request_release`). Audited as `quarantine.entry_viewed`.' +
+      '`request_release`); the own address in clear (`recipientMasked: false`). Audited as ' +
+      '`quarantine.entry_viewed`.' +
       SELF_NOTE,
   })
   @ApiEntryId()

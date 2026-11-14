@@ -508,13 +508,26 @@ export class QuarantineWorld {
       client: {},
       search: (
         scope: TenantScope,
-        f: { from: Date; to: Date; states?: string[]; recipient?: string; take: number },
+        f: {
+          from?: Date;
+          to?: Date;
+          states?: string[];
+          recipient?: string;
+          messageId?: bigint;
+          take: number;
+        },
       ) =>
         Promise.resolve(
           inScope(scope, this.entries)
-            .filter((e) => e.quarantinedAt >= f.from && e.quarantinedAt < f.to)
+            .filter(
+              (e) =>
+                f.from === undefined ||
+                f.to === undefined ||
+                (e.quarantinedAt >= f.from && e.quarantinedAt < f.to),
+            )
             .filter((e) => f.states === undefined || f.states.includes(e.state))
             .filter((e) => f.recipient === undefined || e.recipientAddress === f.recipient)
+            .filter((e) => f.messageId === undefined || e.messageId === f.messageId)
             .sort((a, b) => b.quarantinedAt.getTime() - a.quarantinedAt.getTime())
             .slice(0, f.take),
         ),

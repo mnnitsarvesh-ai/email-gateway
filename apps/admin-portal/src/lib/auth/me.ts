@@ -48,6 +48,18 @@ export function useCan(operationId: OperationId): boolean {
   return me.isSuccess && canPerform(operationId, permissions);
 }
 
+/**
+ * Whether the current user holds **every** given permission (UI only; the api decides). For
+ * rules that are not one operation's `x-eg-permissions`, such as the filter-level permissions of
+ * `GET /messages` (`subject` needs `message:reveal`, `deliveryStatus` needs `delivery:read`; step
+ * 7.2 §2 E2). `false` while `GET /auth/me` loads.
+ */
+export function useHasPermission(...required: readonly string[]): boolean {
+  const permissions = usePermissions();
+  const me = useMe();
+  return me.isSuccess && required.every((permission) => permissions.has(permission));
+}
+
 /** Starts an audited tenant override; every query cache is cleared on success (P11). */
 /**
  * Drops every cached tenant response when the acting tenant changes (design P11): inactive

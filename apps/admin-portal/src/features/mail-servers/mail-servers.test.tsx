@@ -337,7 +337,8 @@ describe('MailServersPage', () => {
             {
               messageId: '0193c000-0000-7000-8000-000000000001',
               rcptSeq: 0,
-              recipient: 'a@example.com',
+              recipient: 'a***@example.com',
+              recipientMasked: true,
               direction: 'outbound',
               status: 'deferred',
               attemptCount: 3,
@@ -354,8 +355,14 @@ describe('MailServersPage', () => {
       route: '/mail-servers?tab=deliveries&range=24h',
     });
     expect(
-      await screen.findByRole('link', { name: /Open message of the delivery to a@example.com/ }),
+      await screen.findByRole('link', {
+        name: /Open message of the delivery to a\*\*\*@example.com/,
+      }),
     ).toHaveAttribute('href', '/messages/0193c000-0000-7000-8000-000000000001');
+    // Recipients are masked by the api since step 7.2 (lock icon, masked form, sr-only text).
+    const masked = screen.getByText('a***@example.com').closest('[data-sensitive]');
+    expect(masked).toHaveAttribute('data-sensitive', 'masked');
+    expect(within(masked as HTMLElement).getByText('(masked)')).toHaveClass('sr-only');
     const first = requests[0]!;
     expect(
       Date.parse(first.searchParams.get('to')!) - Date.parse(first.searchParams.get('from')!),

@@ -8,6 +8,7 @@ import {
   type FixtureRequest,
   type FixtureResponse,
 } from '../types';
+import { maskAddress, registerQuarantineStates } from './message-dataset';
 import { FIXTURE_MESSAGES, fixtureGuard } from './messages';
 import { resolveFixturePrincipal } from './session';
 
@@ -139,43 +140,21 @@ function buildState(): QuarantineState {
   const approvals = new Map<string, ApprovalRecord>();
   const releases = new Map<string, ReleaseRecord>();
   let n = 0;
-  // Self-service owners in fixture mode: the dev users `mailbox_user@example.com` (only
-  // quarantine:self) and `organization_admin@example.com` get their own held entries.
-  const selfOwners = [
-    'mailbox_user@example.com',
-    'mailbox_user@example.com',
-    'mailbox_user@example.com',
-    'mailbox_user@example.com',
-    'organization_admin@example.com',
-  ];
+  // Entries follow the dataset's per-recipient quarantine plan (step 7.2 E14), so the explorer's
+  // `quarantineStatus` filter and these pages agree. The self-service owners of fixture mode
+  // (`mailbox_user@example.com`, `organization_admin@example.com`) are dataset recipients.
   for (const message of FIXTURE_MESSAGES) {
     const d = message.detail;
-    const held = d.status === 'quarantined' || d.status === 'held_for_review';
-    if (!held && !(n % 7 === 0 && d.finalVerdict === 'spam')) continue;
-    const recipients =
-      d.status === 'quarantined' && selfOwners.length > 0
-        ? [...message.recipients, selfOwners.shift() ?? 'mailbox_user@example.com']
-        : message.recipients;
-    recipients.forEach((recipient, rcpt) => {
+    message.recipientRows.forEach(({ address: recipient, rcptSeq: rcpt, quarantine }) => {
+      if (!quarantine) return;
       n += 1;
       const id = stableUuid(`qentry:${d.id}:${rcpt}`);
       const review = d.status === 'held_for_review';
       const reason = REASON_OF[d.finalVerdict ?? ''] ?? 'policy';
       const hardBlocks = d.finalVerdict === 'malware' ? ['hb.malware_attachment'] : [];
       const quarantinedAt = new Date(Date.parse(d.receivedAt) + 5_000).toISOString();
-      // A spread of states for the UI: most held, some decided already.
-      const state: Detail['state'] = review
-        ? 'pending_approval'
-        : n % 11 === 0
-          ? 'released'
-          : n % 13 === 0
-            ? 'rejected'
-            : n % 17 === 0
-              ? 'deleted'
-              : n % 19 === 0
-                ? 'expired'
-                : 'held';
-      const approvalId = review ? stableUuid(`qapproval:${id}`) : null;
+      const state: Detail['state'] = quarantine;
+      const approvalId = state === 'pending_approval' ? stableUuid(`qapproval:${id}`) : null;
       const detail: EntryRecord['detail'] = {
         id,
         messageId: d.id,
@@ -186,6 +165,8 @@ function buildState(): QuarantineState {
         reason,
         direction: d.direction,
         recipient,
+        // Per caller in `recipientOf` (step 7.2 E8); stored in clear.
+        recipientMasked: false,
         sender: { envelope: d.envelopeFrom, headerFrom: d.headerFrom },
         subject: d.subject,
         receivedAt: d.receivedAt,
@@ -319,6 +300,21 @@ function state(): QuarantineState {
   return globalState.__egDevFixtureQuarantine;
 }
 
+// The explorer's `quarantineStatus` filter reads the live entry states (releases, rejections).
+// Entries are created once (buildState), so the per-message index is built once too.
+let entriesByMessage: Map<string, EntryRecord[]> | null = null;
+registerQuarantineStates((messageId) => {
+  if (!entriesByMessage) {
+    entriesByMessage = new Map();
+    for (const entry of state().entries.values()) {
+      const list = entriesByMessage.get(entry.detail.messageId) ?? [];
+      list.push(entry);
+      entriesByMessage.set(entry.detail.messageId, list);
+    }
+  }
+  return (entriesByMessage.get(messageId) ?? []).map((entry) => entry.detail.state);
+});
+
 function effective(): Settings['effective'] {
   const raw = state().raw;
   return {
@@ -447,11 +443,41 @@ function selfAllowed(record: EntryRecord): Detail['allowedActions'] {
   return out;
 }
 
-function detailFor(record: EntryRecord, request: FixtureRequest): Detail {
+/**
+ * Step 7.2 E8: an operator sees the recipient in clear only with a quarantine decision
+ * permission or `message:reveal`; otherwise it is masked (`recipientMasked`). Self routes show
+ * the caller's own address.
+ */
+const RECIPIENT_CLEAR_PERMISSIONS = [
+  'quarantine:release',
+  'quarantine:approve',
+  'quarantine:reject',
+  'quarantine:delete',
+  'quarantine:request_release',
+  'quarantine:manage',
+  'message:reveal',
+];
+
+const seesRecipientInClear = (request: FixtureRequest): boolean =>
+  RECIPIENT_CLEAR_PERMISSIONS.some((permission) => has(request, permission));
+
+function recipientOf(
+  record: EntryRecord,
+  request: FixtureRequest,
+  self: boolean,
+): { recipient: string; recipientMasked: boolean } {
+  const clear = self || seesRecipientInClear(request);
+  return clear
+    ? { recipient: record.detail.recipient, recipientMasked: false }
+    : { recipient: maskAddress(record.detail.recipient), recipientMasked: true };
+}
+
+function detailFor(record: EntryRecord, request: FixtureRequest, self = false): Detail {
   return {
     ...record.detail,
-    subject: has(request, 'quarantine:preview') ? record.detail.subject : null,
-    allowedActions: allowedActions(record, request),
+    ...recipientOf(record, request, self),
+    subject: self || has(request, 'quarantine:preview') ? record.detail.subject : null,
+    allowedActions: self ? selfAllowed(record) : allowedActions(record, request),
   };
 }
 
@@ -465,6 +491,7 @@ function summaryFor(record: EntryRecord, request: FixtureRequest, self = false):
   void contentAvailable;
   return {
     ...summary,
+    ...recipientOf(record, request, self),
     subject: self || has(request, 'quarantine:preview') ? summary.subject : null,
   };
 }
@@ -848,7 +875,21 @@ function searchEntries(
 ): FixtureResponse {
   runExecutor();
   const q = request.query;
-  const range = rangeOf(q);
+  // Step 7.2 (ADR-0062): a caller who reads recipients masked may not confirm one by search.
+  if (!self && q.get('recipient') && !seesRecipientInClear(request)) {
+    return apiError(
+      403,
+      'quarantine_filter_forbidden',
+      'The recipient filter requires a quarantine decision permission or message:reveal',
+      { filter: 'recipient' },
+    );
+  }
+  // Step 7.2 (§13 closer): an operator search by `messageId` may leave out the range (every
+  // entry of the message, whenever it was quarantined), as the api's unique-key search.
+  const range =
+    !self && !q.has('from') && !q.has('to') && q.get('messageId')
+      ? { from: -Infinity, to: Infinity }
+      : rangeOf(q);
   if ('status' in range) return range;
   const states = listParam(q, 'state');
   const reasons = listParam(q, 'reason');
@@ -1468,6 +1509,7 @@ export const fixtures: FixtureHandlers = {
     (record) =>
       ok('QuarantineSelfController_detail_v1', {
         ...record.detail,
+        recipientMasked: false,
         allowedActions: selfAllowed(record),
       }),
     true,

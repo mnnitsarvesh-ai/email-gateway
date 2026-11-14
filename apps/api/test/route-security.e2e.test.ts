@@ -650,6 +650,67 @@ describe('route security (e2e, dependencies stubbed)', () => {
     ).toEqual({ mode: 'all', permissions: ['quarantine:release'] });
   });
 
+  it('the step 7.2 saved views routes require message:read, users only, no class or idempotency (§3.3)', () => {
+    const expected = [
+      'get /api/v1/saved-views',
+      'post /api/v1/saved-views',
+      'get /api/v1/saved-views/:viewId',
+      'put /api/v1/saved-views/:viewId',
+      'delete /api/v1/saved-views/:viewId',
+    ];
+    expect(
+      routes
+        .filter((r) => r.path.startsWith('/api/v1/saved-views'))
+        .map((r) => `${r.method} ${r.path}`)
+        .sort(),
+    ).toEqual([...expected].sort());
+    for (const key of expected) {
+      const route = routes.find((r) => `${r.method} ${r.path}` === key);
+      expect(route?.isPublic, key).toBe(false);
+      expect(route?.requirement, key).toEqual({ mode: 'all', permissions: ['message:read'] });
+      expect(route?.userOnly, key).toBe(true);
+      expect(route?.requireMfa, key).toBe(false);
+      expect(route?.idempotency, key).toBeNull();
+      expect(route?.returnsSecret, key).toBe(false);
+    }
+    // GET /messages keeps message:read at the route; its filter-level permissions are checked
+    // in the service (403 message_filter_forbidden, §2 E2).
+    expect(
+      routes.find((r) => `${r.method} ${r.path}` === 'get /api/v1/messages')?.requirement,
+    ).toEqual({ mode: 'all', permissions: ['message:read'] });
+  });
+
+  it('the step 7.2 WP2 headers and reveal routes: exact permission, API keys allowed, the reveal limit, no key (§2 E6, E7)', () => {
+    const expected: Record<string, [string, string | null]> = {
+      'get /api/v1/messages/:messageId/headers': ['message:read', null],
+      'post /api/v1/messages/reveal': ['message:reveal', 'message-reveal'],
+      'post /api/v1/messages/:messageId/reveal': ['message:reveal', 'message-reveal'],
+    };
+    for (const [key, [permission, revealRate]] of Object.entries(expected)) {
+      const route = routes.find((r) => `${r.method} ${r.path}` === key);
+      expect(route?.isPublic, key).toBe(false);
+      expect(route?.requirement, key).toEqual({ mode: 'all', permissions: [permission] });
+      // User tokens and API keys (no user-only flag), no MFA step-up.
+      expect(route?.userOnly, key).toBe(false);
+      expect(route?.requireMfa, key).toBe(false);
+      // No Idempotency-Key: a read with an audit side effect, not a §3.5 sensitive mutation.
+      expect(route?.idempotency, key).toBeNull();
+      expect(route?.rateClass, key).toBeNull();
+      expect(route?.returnsSecret, key).toBe(false);
+      expect(route?.rateLimits, key).toEqual([]);
+      expect(route?.quarantineRate, key).toBeNull();
+      expect(route?.revealRate, key).toBe(revealRate);
+      expect(route?.cursor, key).toBeNull();
+    }
+    // Only the two reveal operations carry the reveal limit.
+    expect(
+      routes
+        .filter((r) => r.revealRate !== null)
+        .map((r) => `${r.method} ${r.path}`)
+        .sort(),
+    ).toEqual(['post /api/v1/messages/:messageId/reveal', 'post /api/v1/messages/reveal']);
+  });
+
   it('every §3.5 legacy sensitive mutation is @Idempotent (legacy) in the sensitive class (step 6.1 D9, D10)', () => {
     for (const [key, operation] of Object.entries(LEGACY_SENSITIVE)) {
       const route = routes.find((r) => `${r.method} ${r.path}` === key);

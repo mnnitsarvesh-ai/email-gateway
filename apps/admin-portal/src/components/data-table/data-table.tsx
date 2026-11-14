@@ -130,6 +130,27 @@ export interface DataTableProps<Row> {
   mobileCard?: (row: Row) => ReactNode;
   stickyFirstColumn?: boolean;
   className?: string;
+  /**
+   * Controlled column visibility (e.g. a saved view applies its column set). The caller persists
+   * it (`readColumnVisibility` / `writeColumnVisibility` use the table's own preference key);
+   * without it the table keeps and persists the column menu itself.
+   */
+  columnVisibility?: VisibilityState;
+  onColumnVisibilityChange?: (next: VisibilityState) => void;
+  /**
+   * Body for an error without rows; return `null`/`undefined` to use the standard `ErrorState`
+   * (e.g. a search refusal that the page explains next to the search).
+   */
+  errorState?: (error: unknown) => ReactNode;
+}
+
+/** The per-viewer column visibility of a table (localStorage, design P2). */
+export function readColumnVisibility(tableId: string): VisibilityState {
+  return readPreference(`table:${tableId}:columns`, {}, isBooleanRecord);
+}
+
+export function writeColumnVisibility(tableId: string, visibility: VisibilityState): void {
+  writePreference(`table:${tableId}:columns`, visibility);
 }
 
 function sortState(
@@ -160,18 +181,24 @@ export function DataTable<Row>({
   mobileCard,
   stickyFirstColumn = true,
   className,
+  columnVisibility: controlledVisibility,
+  onColumnVisibilityChange,
+  errorState,
 }: DataTableProps<Row>) {
   const isMobile = useMediaQuery(MOBILE_QUERY);
   const captionId = useId();
-  const [columnVisibility, setColumnVisibility] = useState<VisibilityState>({});
+  const [ownVisibility, setOwnVisibility] = useState<VisibilityState>({});
+  const controlled = controlledVisibility !== undefined;
+  const columnVisibility = controlledVisibility ?? ownVisibility;
   const [comfortable, setComfortable] = useState(false);
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
   const [searchText, setSearchText] = useState(search?.value ?? '');
   const debouncedSearch = useDebouncedValue(searchText, 300);
 
   useEffect(() => {
-    setColumnVisibility(readPreference(`table:${tableId}:columns`, {}, isBooleanRecord));
+    if (!controlled) setOwnVisibility(readColumnVisibility(tableId));
     setComfortable(readPreference(`table:${tableId}:comfortable`, false, isBoolean));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- read once per table
   }, [tableId]);
 
   useEffect(() => {
@@ -252,9 +279,14 @@ export function DataTable<Row>({
     manualSorting: true,
     state: { columnVisibility, rowSelection },
     onColumnVisibilityChange: (updater) => {
-      setColumnVisibility((current) => {
+      if (controlled) {
+        const next = typeof updater === 'function' ? updater(columnVisibility) : updater;
+        onColumnVisibilityChange?.(next);
+        return;
+      }
+      setOwnVisibility((current) => {
         const next = typeof updater === 'function' ? updater(current) : updater;
-        writePreference(`table:${tableId}:columns`, next);
+        writeColumnVisibility(tableId, next);
         return next;
       });
     },
@@ -296,6 +328,8 @@ export function DataTable<Row>({
       );
     }
     if (error && !hasRows) {
+      const custom = errorState?.(error);
+      if (custom !== null && custom !== undefined) return custom;
       return <ErrorState error={error} onRetry={() => void list.query.refetch()} className="m-3" />;
     }
     if (!hasRows) {
@@ -346,7 +380,16 @@ export function DataTable<Row>({
       );
     }
     return (
-      <div className="relative w-full overflow-x-auto" data-testid="data-table-scroll">
+      // A named, focusable group: a wide table scrolls horizontally on a tablet or phone and
+      // keyboard users must be able to scroll it even when no cell holds a link (WCAG 2.1.1).
+      <div
+        className="relative w-full overflow-x-auto"
+        data-testid="data-table-scroll"
+        role="group"
+        aria-labelledby={captionId}
+        // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- a scrollable region
+        tabIndex={0}
+      >
         <table
           className="w-full border-collapse text-sm"
           aria-labelledby={captionId}

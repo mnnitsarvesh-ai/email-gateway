@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { useMemo, useState } from 'react';
 import { z } from 'zod';
 import { DataTable, type DataTableColumn } from '@/components/data-table';
-import { CopyableId, DateTime, UntrustedText } from '@/components/domain';
+import { CopyableId, DateTime, SensitiveValue, UntrustedText } from '@/components/domain';
 import { PageHeader } from '@/components/page-header';
 import { EmptyState } from '@/components/states/empty-state';
 import { ErrorState } from '@/components/states/error-state';
@@ -418,7 +418,16 @@ function ApprovalDetailContent({ approvalId }: { approvalId: string }) {
                   />
                 ),
               },
-              { label: 'Recipient', value: <UntrustedText value={entry.data.recipient} /> },
+              {
+                label: 'Recipient',
+                value: (
+                  <SensitiveValue
+                    value={entry.data.recipient}
+                    masked={entry.data.recipientMasked}
+                    kind="address"
+                  />
+                ),
+              },
               {
                 label: 'Sender',
                 value: (

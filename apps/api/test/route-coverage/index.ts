@@ -7,12 +7,14 @@
  * - `messages.ts` (WP2): the messages module (pre-6.1 lifecycle and scans, the 6.1 data routes);
  * - `insights.ts` (WP3): audit logs, reports, usage, billing, threat-intelligence lookup;
  * - `webhooks.ts` (step 6.2 WP3): webhooks, delivery history, replays, notification settings
- *   and preferences.
+ *   and preferences;
+ * - `explorer.ts` (step 7.2): saved views (WP1), headers and reveal (WP2).
  *
  * Consumed by `test/route-inventory.e2e.test.ts`, which fails when a served route has no entry,
  * when an entry names a route that does not exist, or when a named test file is missing or does
  * not carry the marker comment `@covers <method> <path>`.
  */
+import { COVERAGE as EXPLORER } from './explorer';
 import { COVERAGE as INSIGHTS } from './insights';
 import { COVERAGE as LEGACY } from './legacy';
 import { COVERAGE as MESSAGES } from './messages';
@@ -32,14 +34,21 @@ export interface RouteCoverage {
 }
 
 /** Which manifest an entry comes from (reported by the inventory on a failure). */
-export type CoverageArea = 'legacy' | 'messages' | 'insights' | 'webhooks';
+export type CoverageArea = 'legacy' | 'messages' | 'insights' | 'webhooks' | 'explorer';
 
 export const COVERAGE_BY_AREA: Readonly<Record<CoverageArea, readonly RouteCoverage[]>> =
-  Object.freeze({ legacy: LEGACY, messages: MESSAGES, insights: INSIGHTS, webhooks: WEBHOOKS });
+  Object.freeze({
+    legacy: LEGACY,
+    messages: MESSAGES,
+    insights: INSIGHTS,
+    webhooks: WEBHOOKS,
+    explorer: EXPLORER,
+  });
 
 export const COVERAGE: readonly RouteCoverage[] = Object.freeze([
   ...LEGACY,
   ...MESSAGES,
   ...INSIGHTS,
   ...WEBHOOKS,
+  ...EXPLORER,
 ]);

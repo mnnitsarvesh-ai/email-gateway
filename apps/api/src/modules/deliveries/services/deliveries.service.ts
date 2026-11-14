@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import type { TenantScope } from '../../../auth-contracts/tenant-scope';
 import { decodeCursor, encodeCursor, type Page } from '../../../http/pagination';
+import { maskAddress, maskAddressesInNullableText } from '../../messages/domain/sensitive-masking';
 import {
   decodeDeliveryCursor,
   deliveryRange,
@@ -25,6 +26,10 @@ export const MESSAGE_NOT_FOUND = 'Message not found';
 
 const iso = (value: Date | null): string | null => (value === null ? null : value.toISOString());
 
+/**
+ * One delivery as the API view. Step 7.2 (§2 E5, E9, ADR-0062): the recipient is masked and the
+ * addresses inside the remote reply are masked for every caller.
+ */
 export function toDeliveryView(
   row: DeliveryRow,
   recipient: RecipientRow | undefined,
@@ -32,7 +37,8 @@ export function toDeliveryView(
   return {
     rcptSeq: recipient?.rcptSeq ?? 0,
     deliverySeq: row.deliverySeq,
-    recipient: recipient?.address ?? '',
+    recipient: maskAddress(recipient?.address ?? ''),
+    recipientMasked: true,
     direction: row.direction ?? recipient?.direction ?? null,
     status: row.status,
     attemptCount: row.attemptCount,
@@ -41,7 +47,7 @@ export function toDeliveryView(
     remoteHost: row.remoteHost,
     finalSmtpCode: row.finalSmtpCode,
     enhancedStatus: row.enhancedStatus,
-    finalSmtpResponse: row.finalSmtpResponse,
+    finalSmtpResponse: maskAddressesInNullableText(row.finalSmtpResponse),
     lastErrorClass: row.lastErrorClass,
     failureReason: row.failureReason,
     dsnGenerated: row.dsnQueueId !== null,
@@ -52,7 +58,8 @@ export function toDeliveryView(
 /**
  * Per-recipient delivery status and its audit trail (step 2.3 R13), read from the replica.
  * Tenant from the scope only: another organization's message is `404`. Responses carry public
- * ids and sequence numbers, never internal ids.
+ * ids and sequence numbers, never internal ids. Since step 7.2 (ADR-0062) recipients are masked
+ * and SMTP texts address-masked for every caller.
  */
 @Injectable()
 export class DeliveriesService {
@@ -132,7 +139,7 @@ export class DeliveriesService {
             enhancedStatus: event.enhancedStatus,
             remoteHost: event.remoteHost,
             errorClass: event.errorClass,
-            detail: event.detail,
+            detail: maskAddressesInNullableText(event.detail),
           },
         ];
       }),
@@ -180,7 +187,8 @@ export class DeliveriesService {
           {
             messageId: publicId,
             rcptSeq: recipient.rcptSeq,
-            recipient: recipient.address,
+            recipient: maskAddress(recipient.address),
+            recipientMasked: true,
             direction: row.direction ?? recipient.direction ?? null,
             status: row.status,
             attemptCount: row.attemptCount,

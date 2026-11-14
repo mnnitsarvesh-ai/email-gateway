@@ -65,6 +65,23 @@ describe('Quarantine entry (/quarantine/[entryId])', () => {
     await expectNoAxeViolations(container);
   });
 
+  it('shows a masked recipient without a copy button to a non-decider (step 7.2 E8)', async () => {
+    mockEntry(
+      entryDetail({
+        recipient: 'p***@alpha.example.test',
+        recipientMasked: true,
+        allowedActions: [],
+      }),
+    );
+    const { container } = renderWithProviders(<EntryDetail entryId={ENTRY_ID} />, {
+      role: 'read_only_user',
+    });
+    const masked = await screen.findByText('p***@alpha.example.test');
+    expect(masked.closest('[data-sensitive]')).toHaveAttribute('data-sensitive', 'masked');
+    expect(screen.queryByRole('button', { name: 'Copy recipient' })).not.toBeInTheDocument();
+    await expectNoAxeViolations(container);
+  });
+
   it('explains a pending approval and links to it', async () => {
     mockEntry(
       entryDetail({

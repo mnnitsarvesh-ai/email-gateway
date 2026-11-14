@@ -20,8 +20,10 @@ import {
   type ApprovalReason,
   APPROVAL_REASONS,
   type EntryAction,
+  QUARANTINE_PERMISSIONS,
 } from '@email-gateway/quarantine';
 import { z } from 'zod';
+import { maskAddress } from '../../messages/domain/sensitive-masking';
 
 /**
  * One `quarantine_messages` row as the quarantine services read it (step 5.3 §3; the SQL column
@@ -165,11 +167,41 @@ export function approvalReasonList(value: unknown): ApprovalReason[] {
 
 const iso = (d: Date): string => d.toISOString();
 
-/** Q26 `QuarantineEntrySummary` (subject only when the caller may see it, already looked up). */
-export function entrySummary(
-  row: EntryRow,
-  refs: { messagePublicId: string; approvalPublicId: string | null; subject: string | null },
-): QuarantineEntrySummary {
+/**
+ * Step 7.2 (§2 E8, ADR-0062): the permissions that show an entry's recipient in clear on the
+ * operator routes — every quarantine decision permission (the reviewer acts for a recipient; its
+ * reads are audited since 5.3) and `message:reveal`. Other `quarantine:read` holders see it
+ * masked. Self routes always show the caller's own address.
+ */
+export const RECIPIENT_CLEAR_PERMISSIONS: readonly string[] = Object.freeze([
+  QUARANTINE_PERMISSIONS.release,
+  QUARANTINE_PERMISSIONS.approve,
+  QUARANTINE_PERMISSIONS.reject,
+  QUARANTINE_PERMISSIONS.delete,
+  QUARANTINE_PERMISSIONS.requestRelease,
+  QUARANTINE_PERMISSIONS.manage,
+  'message:reveal',
+]);
+
+/** True when an operator-route caller with these permissions sees recipients in clear. */
+export const seesRecipientInClear = (permissions: ReadonlySet<string>): boolean =>
+  RECIPIENT_CLEAR_PERMISSIONS.some((permission) => permissions.has(permission));
+
+/** What an entry view shows besides the row: public ids, the subject, the recipient rule. */
+export interface EntryRefs {
+  messagePublicId: string;
+  approvalPublicId: string | null;
+  /** Already looked up only when the caller may see it (5.3: `quarantine:preview`, self). */
+  subject: string | null;
+  /** Step 7.2 (§2 E8): mask the recipient (the caller may not see it in clear). */
+  maskRecipient: boolean;
+}
+
+/**
+ * Q26 `QuarantineEntrySummary` (subject only when the caller may see it, already looked up;
+ * since step 7.2 the recipient masked unless the caller may see it, `recipientMasked`).
+ */
+export function entrySummary(row: EntryRow, refs: EntryRefs): QuarantineEntrySummary {
   return {
     id: row.publicId,
     messageId: refs.messagePublicId,
@@ -179,7 +211,8 @@ export function entrySummary(
     origin: row.origin,
     reason: row.reason,
     direction: row.direction,
-    recipient: row.recipientAddress,
+    recipient: refs.maskRecipient ? maskAddress(row.recipientAddress) : row.recipientAddress,
+    recipientMasked: refs.maskRecipient,
     sender: {
       envelope: row.envelopeFrom === '' ? null : row.envelopeFrom,
       headerFrom: row.headerFrom,
@@ -211,7 +244,7 @@ const linesSchema = z.array(explanationLineSchema).max(24);
 /** Q10 `QuarantineEntryDetail`. */
 export function entryDetail(
   row: EntryRow,
-  refs: { messagePublicId: string; approvalPublicId: string | null; subject: string | null },
+  refs: EntryRefs,
   releases: readonly ReleaseRow[],
   allowedActions: EntryAction[],
 ): QuarantineEntryDetail {

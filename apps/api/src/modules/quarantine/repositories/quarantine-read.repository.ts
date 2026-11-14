@@ -18,10 +18,14 @@ export interface Keyset {
   id: bigint;
 }
 
-/** The search filter as the repository applies it (Q9; built by the service). */
+/**
+ * The search filter as the repository applies it (Q9; built by the service). `from`/`to` bound
+ * `quarantined_at`; the service leaves them out only with `messageId` (step 7.2: the entries of
+ * one message by the unique key `(message_id, lifecycle_round, rcpt_seq)`).
+ */
 export interface EntrySearch {
-  from: Date;
-  to: Date;
+  from?: Date;
+  to?: Date;
   states?: QuarantineStatus[];
   kind?: 'quarantine' | 'review';
   direction?: 'inbound' | 'outbound' | 'internal';
@@ -97,7 +101,10 @@ export class QuarantineReadRepository {
     }
     const rows = await this.db.quarantineMessage.findMany({
       where: tenantWhere(scope, {
-        quarantinedAt: { gte: f.from, lt: f.to },
+        ...(f.from !== undefined &&
+          f.to !== undefined && {
+            quarantinedAt: { gte: f.from, lt: f.to },
+          }),
         ...(f.states !== undefined && { status: { in: f.states } }),
         ...(f.kind !== undefined && { kind: f.kind }),
         ...(f.direction !== undefined && { direction: f.direction }),

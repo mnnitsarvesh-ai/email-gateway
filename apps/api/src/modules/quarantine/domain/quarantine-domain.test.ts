@@ -23,8 +23,10 @@ import {
   entryDetail,
   entrySummary,
   hardBlockIds,
+  RECIPIENT_CLEAR_PERMISSIONS,
   releaseView,
   revalidationSummary,
+  seesRecipientInClear,
   stringList,
   uuidOrNull,
 } from './entry';
@@ -34,6 +36,7 @@ const refs = {
   messagePublicId: '0190a5b2-7c3d-7e4f-8a1b-000000000abc',
   approvalPublicId: null,
   subject: null,
+  maskRecipient: false,
 };
 
 describe('entry views (Q26 DTOs)', () => {
@@ -52,6 +55,55 @@ describe('entry views (Q26 DTOs)', () => {
     expect(entryDetail({ ...row, explanation: 'broken' }, refs, [], []).explanation.lines).toEqual(
       [],
     );
+    expect(summary).toMatchObject({ recipient: row.recipientAddress, recipientMasked: false });
+  });
+
+  it('masks the recipient when the caller may not see it (step 7.2 §2 E8)', () => {
+    const row = world.addEntry({});
+    const masked = entrySummary(
+      { ...row, recipientAddress: 'alice.w@corp.example' },
+      {
+        ...refs,
+        maskRecipient: true,
+      },
+    );
+    expect(quarantineEntrySummarySchema.parse(masked)).toEqual(masked);
+    expect(masked).toMatchObject({ recipient: 'a***@corp.example', recipientMasked: true });
+    const detail = entryDetail(
+      { ...row, recipientAddress: 'alice.w@corp.example' },
+      {
+        ...refs,
+        maskRecipient: true,
+      },
+      [],
+      [],
+    );
+    expect(quarantineEntryDetailSchema.parse(detail)).toEqual(detail);
+    expect(detail).toMatchObject({ recipient: 'a***@corp.example', recipientMasked: true });
+  });
+
+  it('shows recipients in clear exactly for deciders and message:reveal (step 7.2 §2 E8)', () => {
+    const clear = [
+      'quarantine:release',
+      'quarantine:approve',
+      'quarantine:reject',
+      'quarantine:delete',
+      'quarantine:request_release',
+      'quarantine:manage',
+      'message:reveal',
+    ];
+    for (const permission of clear) {
+      expect(seesRecipientInClear(new Set(['quarantine:read', permission])), permission).toBe(true);
+    }
+    for (const permissions of [
+      ['quarantine:read'],
+      ['quarantine:read', 'quarantine:preview', 'quarantine:download'],
+      ['quarantine:read', 'message:read', 'message:read_content'],
+      ['quarantine:self'],
+    ]) {
+      expect(seesRecipientInClear(new Set(permissions)), permissions.join()).toBe(false);
+    }
+    expect([...RECIPIENT_CLEAR_PERMISSIONS].sort()).toEqual([...clear].sort());
   });
 
   it('release and approval views', () => {

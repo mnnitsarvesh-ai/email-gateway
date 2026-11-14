@@ -173,6 +173,7 @@ export function FilterText({
   type = 'text',
   inputMode,
   className,
+  inputClassName,
   description,
 }: {
   label: string;
@@ -182,6 +183,8 @@ export function FilterText({
   type?: 'text' | 'email' | 'number';
   inputMode?: 'text' | 'email' | 'numeric';
   className?: string;
+  /** Width of the input (default at least 10rem). */
+  inputClassName?: string;
   description?: string;
 }) {
   const id = useId();
@@ -210,7 +213,7 @@ export function FilterText({
             commit();
           }
         }}
-        className="h-8 min-w-40"
+        className={cn('h-8', inputClassName ?? 'min-w-40')}
         aria-describedby={description ? `${id}-desc` : undefined}
       />
       {description ? (

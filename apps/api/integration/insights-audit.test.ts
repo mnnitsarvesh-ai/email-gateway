@@ -3,13 +3,20 @@
  * (docs/plan/steps/18-rest-api.md §3.3, D3, D6, D7, D11) against seeded `audit_logs` rows of two
  * organizations and the platform: pages equal to SQL ground truth in both sort orders, filters,
  * the scan budget with real rows, the audit rows of the searches themselves, the platform route
- * for an MFA platform user, and EXPLAIN FORMAT=JSON of the search statements.
+ * for an MFA platform user, and EXPLAIN FORMAT=JSON of the search statements. Step 7.2 §2 E3
+ * adds the resource plan (`resourceType` + `resourceId` over
+ * `audit_logs_org_resource_created_idx`): pages equal to SQL ground truth, exact comparisons,
+ * residual filters, the platform rows, and its EXPLAIN.
  */
 // @covers get /api/v1/audit/logs
 // @covers get /api/v1/platform/audit/logs
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { auditSql, type AuditSearch } from '../src/modules/audit-logs/audit-logs.repository';
+import {
+  AUDIT_RESOURCE_INDEX,
+  auditSql,
+  type AuditSearch,
+} from '../src/modules/audit-logs/audit-logs.repository';
 import { createIntegrationApp, type IntegrationApp } from './support/app';
 import {
   createFixtures,
@@ -393,6 +400,197 @@ describe('search statements (EXPLAIN FORMAT=JSON)', () => {
       const boundary = await explain(ctx, auditSql.boundary(searchOf(owner), 5000));
       const b = boundary.tables.find((x) => x.table_name === 'audit_logs')!;
       expect(b.key).toBe('audit_logs_organization_id_created_at_idx');
+      expect(b.using_index, boundary.text).toBe(true);
+      expect(boundary.text).not.toMatch(/"using_filesort": true/);
+    }
+  });
+});
+
+describe('the resource plan (step 7.2 §2 E3)', () => {
+  // Outside the main window of the suite (base + 3 days … base + 3.5 days).
+  const rBase = base + 3 * DAY_MS;
+  const rFrom = new Date(rBase - HOUR_MS).toISOString();
+  const rTo = new Date(rBase + DAY_MS).toISOString();
+  const messageId = `${marker}-msg`;
+  const orgResource = `${marker}-org`;
+
+  beforeAll(async () => {
+    const rows: AuditSpec[] = [];
+    for (let i = 0; i < 7; i += 1) {
+      rows.push({
+        organizationId: orgA.id,
+        createdAt: new Date(rBase + i * HOUR_MS),
+        action: i % 2 === 0 ? 'message.revealed' : 'message.rescan_requested',
+        resourceType: 'message',
+        resourceId: messageId,
+      });
+      // Interleaved rows of other resources of the same organization.
+      rows.push({
+        organizationId: orgA.id,
+        createdAt: new Date(rBase + i * HOUR_MS + 1),
+        action: 'message.revealed',
+        resourceType: 'message',
+        resourceId: `${marker}-other-${i}`,
+      });
+    }
+    // The same resource id under another type, in another organization and as platform rows.
+    rows.push({
+      organizationId: orgA.id,
+      createdAt: new Date(rBase + 2 * HOUR_MS),
+      action: 'dlp.evidence_read',
+      resourceType: 'dlp_evidence',
+      resourceId: messageId,
+    });
+    rows.push({
+      organizationId: orgB.id,
+      createdAt: new Date(rBase + 2 * HOUR_MS),
+      action: 'message.revealed',
+      resourceType: 'message',
+      resourceId: messageId,
+    });
+    for (let i = 0; i < 3; i += 1) {
+      rows.push({
+        organizationId: null,
+        createdAt: new Date(rBase + i * HOUR_MS),
+        action: 'platform.organization_updated',
+        resourceType: 'organization',
+        resourceId: orgResource,
+      });
+    }
+    await insertAuditRows(ctx, rows);
+    await waitFor(
+      () =>
+        reader(ctx).auditLog.count({
+          where: { resourceId: { in: [messageId, orgResource] } },
+        }),
+      12,
+    );
+  });
+
+  const truthOf = async (organizationId: bigint | null, extra: Record<string, unknown>) =>
+    (
+      await ctx.prisma.auditLog.findMany({
+        where: {
+          organizationId,
+          createdAt: { gte: new Date(rFrom), lt: new Date(rTo) },
+          ...extra,
+        },
+        select: { id: true },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      })
+    ).map((r) => r.id.toString());
+
+  it('pages a resource history exactly (no short pages), equal to SQL ground truth', async () => {
+    const { ids, pages } = await allPages({
+      from: rFrom,
+      to: rTo,
+      resourceType: 'message',
+      resourceId: messageId,
+      limit: '2',
+    });
+    expect(ids).toEqual(await truthOf(orgA.id, { resourceType: 'message', resourceId: messageId }));
+    expect(ids).toHaveLength(7);
+    expect(pages).toBe(4);
+    // Every page but the last is full: the plan never returns a short page.
+    const first = await search({
+      from: rFrom,
+      to: rTo,
+      resourceType: 'message',
+      resourceId: messageId,
+      limit: '3',
+    }).expect(200);
+    expect(first.body.data).toHaveLength(3);
+  });
+
+  it('applies the other filters as residuals and keeps the exact comparisons', async () => {
+    const revealed = await allPages({
+      from: rFrom,
+      to: rTo,
+      resourceType: 'message',
+      resourceId: messageId,
+      action: 'message.revealed',
+    });
+    expect(revealed.ids).toEqual(
+      await truthOf(orgA.id, {
+        resourceType: 'message',
+        resourceId: messageId,
+        action: 'message.revealed',
+      }),
+    );
+    expect(revealed.ids).toHaveLength(4);
+    const dlp = await allPages({
+      from: rFrom,
+      to: rTo,
+      resourceType: 'dlp_evidence',
+      resourceId: messageId,
+    });
+    expect(dlp.ids).toHaveLength(1);
+    for (const params of [
+      { resourceType: 'MESSAGE', resourceId: messageId },
+      { resourceType: 'message', resourceId: messageId.toUpperCase() },
+      { resourceType: 'message', resourceId: `${messageId} ` },
+    ]) {
+      const res = await search({ from: rFrom, to: rTo, ...params }).expect(200);
+      expect(res.body.data).toEqual([]);
+    }
+  });
+
+  it('serves the platform rows (scope=platform) through the same index', async () => {
+    const res = await search(
+      {
+        from: rFrom,
+        to: rTo,
+        scope: 'platform',
+        resourceType: 'organization',
+        resourceId: orgResource,
+      },
+      platformToken,
+      '/api/v1/platform/audit/logs',
+    ).expect(200);
+    expect(res.body.data.map((r: { id: string }) => r.id)).toEqual(
+      await truthOf(null, { resourceType: 'organization', resourceId: orgResource }),
+    );
+    expect(res.body.data).toHaveLength(3);
+  });
+
+  it('EXPLAIN: the resource index, pruned partitions, no filesort; boundary index-only', async () => {
+    const all = await partitionsOf(ctx, 'audit_logs');
+    const searchOf = (owner: AuditSearch['owner']): AuditSearch => ({
+      owner,
+      from: new Date(rFrom),
+      to: new Date(rTo),
+      direction: 'desc',
+      after: { createdAt: new Date(rBase + 5 * HOUR_MS), id: 1n << 40n },
+    });
+    for (const [owner, resource] of [
+      [
+        { kind: 'organization', organizationId: orgA.id } as const,
+        { type: 'message', id: messageId },
+      ],
+      [{ kind: 'platform' } as const, { type: 'organization', id: orgResource }],
+    ] as const) {
+      for (const sql of [
+        auditSql.resourcePage(searchOf(owner), resource, 26),
+        auditSql.resourceFiltered(
+          searchOf(owner),
+          resource,
+          { action: 'message.revealed' },
+          null,
+          26,
+        ),
+      ]) {
+        const { tables, text } = await explain(ctx, sql);
+        const t = tables.find((x) => x.table_name === 'audit_logs')!;
+        expect(t.key, text).toBe(AUDIT_RESOURCE_INDEX);
+        expect(t.partitions!.length, text).toBeLessThan(all.length);
+        expect(text).not.toMatch(/"using_filesort": true/);
+      }
+      const boundary = await explain(
+        ctx,
+        auditSql.resourceBoundary(searchOf(owner), resource, 5000),
+      );
+      const b = boundary.tables.find((x) => x.table_name === 'audit_logs')!;
+      expect(b.key, boundary.text).toBe(AUDIT_RESOURCE_INDEX);
       expect(b.using_index, boundary.text).toBe(true);
       expect(boundary.text).not.toMatch(/"using_filesort": true/);
     }

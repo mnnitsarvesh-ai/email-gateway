@@ -92,7 +92,7 @@ export interface paths {
     };
     /**
      * Search the audit log
-     * @description Audit rows of the caller’s organization (mutations, audited reads, platform override requests into it). Window `[from, to)` default the last 7 days, at most `API_AUDIT_MAX_RANGE_DAYS`. Keyset `(createdAt, id)` in the `sort` direction (`-createdAt` default), read from the replica. Filters: `action` (exact) or `actionPrefix`, `resourceType`, `resourceId`, `actorType`, `actorId`; with any filter a page scans at most `API_LIST_SCAN_BUDGET_ROWS` entries and may be short (even empty) while `nextCursor` is non-null: follow `nextCursor` until it is null. Cursors are signed and bound to the caller, filters, sort and first window (`400 cursor_invalid` otherwise). The first page of each search is itself audited (`audit.searched`: filter names, filter hash, row count).
+     * @description Audit rows of the caller’s organization (mutations, audited reads, platform override requests into it). Window `[from, to)` default the last 7 days, at most `API_AUDIT_MAX_RANGE_DAYS`. Keyset `(createdAt, id)` in the `sort` direction (`-createdAt` default), read from the replica. Filters: `action` (exact) or `actionPrefix`, `resourceType`, `resourceId`, `actorType`, `actorId`. With `resourceType` and `resourceId` together (a resource’s history, e.g. `resourceType=message&resourceId=<message id>`) the search reads the resource index in keyset order: pages are exact, and other filters scan at most `API_LIST_SCAN_BUDGET_ROWS` of the resource’s entries. With any other filter a page scans at most `API_LIST_SCAN_BUDGET_ROWS` entries and may be short (even empty) while `nextCursor` is non-null: follow `nextCursor` until it is null. Cursors are signed and bound to the caller, filters, sort and first window (`400 cursor_invalid` otherwise). The first page of each search is itself audited (`audit.searched`: filter names, filter hash, row count).
      */
     get: operations['AuditLogsController_search_v1'];
     put?: never;
@@ -1469,8 +1469,8 @@ export interface paths {
       cookie?: never;
     };
     /**
-     * List messages
-     * @description Message metadata of your organization received in `[from, to)` (default the last 24 hours, at most API_MESSAGES_MAX_RANGE_DAYS days, default 31), newest first (`sort=-receivedAt`) or oldest first (`sort=receivedAt`), from the read replica (a few seconds behind the writer). Filters: `direction`, `status`, `verdict`, `action` (comma lists), `domainId`, `sender` (exact envelope sender), `headerFrom`, `recipient`, `internetMessageId` (exact values), `riskScore` (`.gte`, `.lte`, `.gt`, `.lt`; 0-1000) and `hasAttachments`. No filter, exactly one `verdict` or only `recipient` read an index in keyset order; every other filter or combination is scan-bounded. Pages follow the v1 list contract: `{ data, nextCursor }`, no totals. When filters need non-indexed columns, each request examines at most API_LIST_SCAN_BUDGET_ROWS index entries (default 5 000), so a page may hold fewer rows than `limit` (even none) while `nextCursor` is set; follow `nextCursor` until it is null. The cursor is signed and bound to the filters, the sort, your organization and the first page’s time window: repeat the same filters (or omit `from`/`to`) with it, anything else is `400 cursor_invalid`. A search with `sender`, `headerFrom`, `recipient` or `internetMessageId` is audited (`message.searched`, first page only; the values only as SHA-256). Subjects and addresses are attacker-controlled text; bodies and attachments are never returned.
+     * List and search messages
+     * @description Message metadata of your organization received in `[from, to)` (default the last 24 hours, at most API_MESSAGES_MAX_RANGE_DAYS days, default 31), newest first (`sort=-receivedAt`) or oldest first (`sort=receivedAt`), from the read replica (a few seconds behind the writer). **Search drivers (step 7.2).** The first present filter of `internetMessageId` > `sender` > `headerFrom` > `recipient` > `subject` > `senderDomain` > `recipientDomain` > `subjectPrefix` > `quarantineStatus` > `deliveryStatus` > `verdict` (exactly one value) drives the search: its index is read in time order, so a page with no other filter is exact (no short pages). Every other filter is a residual: with residuals each request examines at most API_LIST_SCAN_BUDGET_ROWS (default 5 000) entries of the driver’s index and may return a short or empty page with a `nextCursor`; with residuals only (no driver) the whole range is scanned that way. A message matched by several recipients, deliveries or quarantine entries is listed once. `subjectPrefix` reads at most API_MESSAGES_SEARCH_MAX_MATCHES (default 5 000) matching messages of the range: more is `422 message_search_too_broad` (type more, use the exact `subject` or narrow the range); a prefix search that takes longer than API_MESSAGES_SEARCH_TIMEOUT_MS is `503 message_search_timeout`. **Filter permissions.** `recipient`, `subject` and `subjectPrefix` require `message:reveal`, `deliveryStatus` requires `delivery:read`, `quarantineStatus` requires `quarantine:read` (`403 message_filter_forbidden` naming the filter and permission, before anything is read). Pages follow the v1 list contract: `{ data, nextCursor }`, no totals. When filters need non-indexed columns, each request examines at most API_LIST_SCAN_BUDGET_ROWS index entries (default 5 000), so a page may hold fewer rows than `limit` (even none) while `nextCursor` is set; follow `nextCursor` until it is null. The cursor is signed and bound to the filters, the sort, your organization and the first page’s time window: repeat the same filters (or omit `from`/`to`) with it, anything else is `400 cursor_invalid`. The cursor is also bound to the search driver: after a deploy that changes driver selection an old cursor is `400 cursor_invalid` once; restart the list. A search with `sender`, `headerFrom`, `recipient`, `internetMessageId`, `subject` or `subjectPrefix` is audited (`message.searched`, first page only; values only as SHA-256, subjects normalized first). Subjects and addresses are attacker-controlled text; bodies and attachments are never returned.
      */
     get: operations['MessagesController_list_v1'];
     put?: never;
@@ -1553,6 +1553,26 @@ export interface paths {
      * @description Every status signal of the message’s deliveries, applied or not (stale, conflicting and duplicate-state signals are kept with `applied: false`), oldest first, cursor-paginated; `rcptSeq` limits it to one recipient. Sources: `planner`, `reinjection`, `postfix_log` (the MTA delivery log), `bounce_notice` (DSN copies), `reconciler`.
      */
     get: operations['DeliveriesController_events_v1'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/messages/{messageId}/headers': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get the stored headers of a message
+     * @description The headers the gateway stores for the message (the step 3.1 allow-list: From, Sender, Reply-To, To, Cc, Subject, Message-ID, Date, In-Reply-To, References, Return-Path, Authentication-Results; decoded, at most 2 048 characters each, kept 3 months) in `seq` order, from the read replica. **Safe subset in clear:** From, Sender, Reply-To, Return-Path, Date, Message-ID, In-Reply-To, References and Authentication-Results. **Withheld for every caller** (`value: null`, `masked: true`): To, Cc, Subject and any other name; holders of `message:reveal` read them through the audited `POST /messages/{messageId}/reveal` (`fields: ["headers"]`). `availability`: `available`, `not_parsed` (the MIME parse is missing, still running or failed), `none_stored` (parsed, nothing on the allow-list) or `retention_expired` (the message is older than the 3-month header retention). The full header block stays in the stored message in object storage and is never fetched or returned. Values are attacker-controlled text, returned as stored and never interpreted. Not audited.
+     */
+    get: operations['MessageHeadersController_headers_v1'];
     put?: never;
     post?: never;
     delete?: never;
@@ -1681,6 +1701,26 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/api/v1/messages/{messageId}/reveal': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Reveal the masked metadata of a message
+     * @description The clear values the reads withhold, per `fields`: `subject` (the stored subject or null), `headers` (the stored To, Cc and Subject rows in `seq` order) and `recipients` (one page of the envelope recipients in RCPT order with the matched user’s public id; `recipientsLimit` 1-100, default 100; continue with `recipientsCursor` = `recipients.nextCursor`, a signed v1 cursor bound to this message and your organization: any other is `400 cursor_invalid`). `recipientsCursor` and `recipientsLimit` are refused without `recipients`. Addresses inside SMTP replies, delivery event details and Rspamd symbol options stay masked (match deliveries by `rcptSeq`). One audit row `message.revealed` (`metadata: { fields, headerCount?, recipients?: { count, firstRcptSeq, lastRcptSeq } }`). Unknown ids and ids of other organizations are `404 message_not_found`. Requires `message:reveal` (user tokens and API keys holding it; platform override sessions are audited with the override). Values are read from the read replica, then one `message.revealed` audit row per revealed message (resource `message`/`<id>`; the fields and counts, never the values) is committed on the writer **before** the response is sent; if that write fails the answer is `503 service_unavailable` and no value is returned. `Cache-Control: no-store`: never cache, log or forward the response. Both reveal operations share one per-user/API-key limit of API_MESSAGES_REVEAL_PER_MINUTE (default 30) requests per minute (`429 rate_limited` with `Retry-After`). No Idempotency-Key (a read with an audit record, repeated calls are new reveals). Values are attacker-controlled text, returned as stored.
+     */
+    post: operations['MessageRevealController_reveal_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/api/v1/messages/{messageId}/scans': {
     parameters: {
       query?: never;
@@ -1799,6 +1839,26 @@ export interface paths {
     get: operations['UrlProtectionController_ofMessage_v1'];
     put?: never;
     post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/messages/reveal': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Reveal the subjects of messages
+     * @description The stored subjects of up to 100 messages of your organization (`messageIds`, distinct; e.g. one explorer page), in request order. Unknown ids and ids of other organizations are omitted from `data` (they look the same). One audit row `message.revealed` per revealed message (`metadata: { fields: ["subject"], bulk: true }`). Requires `message:reveal` (user tokens and API keys holding it; platform override sessions are audited with the override). Values are read from the read replica, then one `message.revealed` audit row per revealed message (resource `message`/`<id>`; the fields and counts, never the values) is committed on the writer **before** the response is sent; if that write fails the answer is `503 service_unavailable` and no value is returned. `Cache-Control: no-store`: never cache, log or forward the response. Both reveal operations share one per-user/API-key limit of API_MESSAGES_REVEAL_PER_MINUTE (default 30) requests per minute (`429 rate_limited` with `Retry-After`). No Idempotency-Key (a read with an audit record, repeated calls are new reveals). Values are attacker-controlled text, returned as stored.
+     */
+    post: operations['MessageRevealController_revealMany_v1'];
     delete?: never;
     options?: never;
     head?: never;
@@ -2200,7 +2260,7 @@ export interface paths {
     };
     /**
      * Search any organization’s audit log (platform)
-     * @description For users of the platform organization only (API keys, override sessions and customer users are refused), in an MFA session. Exactly one target: `organizationId` (any organization, `404 organization_not_found` when unknown) or `scope=platform` (rows without an organization). Window `[from, to)` default the last 7 days, at most `API_AUDIT_MAX_RANGE_DAYS`. Keyset `(createdAt, id)` in the `sort` direction (`-createdAt` default), read from the replica. Filters: `action` (exact) or `actionPrefix`, `resourceType`, `resourceId`, `actorType`, `actorId`; with any filter a page scans at most `API_LIST_SCAN_BUDGET_ROWS` entries and may be short (even empty) while `nextCursor` is non-null: follow `nextCursor` until it is null. Cursors are signed and bound to the caller, filters, sort and first window (`400 cursor_invalid` otherwise). The first page of each search is audited as `platform.audit_searched` in the searched organization’s trail (platform rows for `scope=platform`).
+     * @description For users of the platform organization only (API keys, override sessions and customer users are refused), in an MFA session. Exactly one target: `organizationId` (any organization, `404 organization_not_found` when unknown) or `scope=platform` (rows without an organization). Window `[from, to)` default the last 7 days, at most `API_AUDIT_MAX_RANGE_DAYS`. Keyset `(createdAt, id)` in the `sort` direction (`-createdAt` default), read from the replica. Filters: `action` (exact) or `actionPrefix`, `resourceType`, `resourceId`, `actorType`, `actorId`. With `resourceType` and `resourceId` together (a resource’s history, e.g. `resourceType=message&resourceId=<message id>`) the search reads the resource index in keyset order: pages are exact, and other filters scan at most `API_LIST_SCAN_BUDGET_ROWS` of the resource’s entries. With any other filter a page scans at most `API_LIST_SCAN_BUDGET_ROWS` entries and may be short (even empty) while `nextCursor` is non-null: follow `nextCursor` until it is null. Cursors are signed and bound to the caller, filters, sort and first window (`400 cursor_invalid` otherwise). The first page of each search is audited as `platform.audit_searched` in the searched organization’s trail (platform rows for `scope=platform`).
      */
     get: operations['PlatformAuditLogsController_search_v1'];
     put?: never;
@@ -2833,7 +2893,7 @@ export interface paths {
     };
     /**
      * Search quarantine entries
-     * @description Keyset-paginated search (newest `quarantinedAt` first) over a required, bounded range (`to - from` ≤ QUARANTINE_SEARCH_MAX_RANGE_DAYS) with optional filters: state, kind, direction, reason, riskLevel or minRiskLevel, primaryEngine, decisive policyId/ruleId, exact envelope sender (`sender`, index-backed) or header From (`headerFrom`), senderDomain, exact recipient, hasAttachments, hasHardBlock, messageId. No free-text or subject search. The cursor is bound to the filters (`400 quarantine_cursor_invalid` with other filters). `subject` is returned only to holders of `quarantine:preview`. Read replica: an entry just created may be missing for the replication lag. Audited as `quarantine.searched` (filter hash and count only).
+     * @description Keyset-paginated search (newest `quarantinedAt` first) over a bounded range (`to - from` ≤ QUARANTINE_SEARCH_MAX_RANGE_DAYS), required unless `messageId` is given (then every entry of that message, any recipient and round, whenever it was quarantined; read by the message-led unique key), with optional filters: state, kind, direction, reason, riskLevel or minRiskLevel, primaryEngine, decisive policyId/ruleId, exact envelope sender (`sender`, index-backed) or header From (`headerFrom`), senderDomain, exact recipient, hasAttachments, hasHardBlock, messageId. No free-text or subject search. The cursor is bound to the filters (`400 quarantine_cursor_invalid` with other filters). `subject` is returned only to holders of `quarantine:preview`. `recipient` is in clear only for holders of a quarantine decision permission (`quarantine:release`, `quarantine:approve`, `quarantine:reject`, `quarantine:delete`, `quarantine:request_release`, `quarantine:manage`) or `message:reveal`; for every other caller it is masked (`f***@example.com`) and `recipientMasked` is true (step 7.2). The exact `recipient` filter needs the same permissions (a caller who reads recipients masked gets `403 quarantine_filter_forbidden`: the search would confirm the masked address; ADR-0062). Read replica: an entry just created may be missing for the replication lag. Audited as `quarantine.searched` (filter hash and count only).
      */
     get: operations['QuarantineEntriesController_search_v1'];
     put?: never;
@@ -2857,7 +2917,7 @@ export interface paths {
     };
     /**
      * Get a quarantine entry
-     * @description The entry with its explanation lines, floor reasons, reason codes, decisive rule, release attempts, `allowedActions` for the caller (advisory; every route re-checks) and `contentAvailable`. `subject` only with `quarantine:preview`. Read replica; each call writes a `view` action and the audit row `quarantine.entry_viewed`.
+     * @description The entry with its explanation lines, floor reasons, reason codes, decisive rule, release attempts, `allowedActions` for the caller (advisory; every route re-checks) and `contentAvailable`. `subject` only with `quarantine:preview`. `recipient` is in clear only for holders of a quarantine decision permission (`quarantine:release`, `quarantine:approve`, `quarantine:reject`, `quarantine:delete`, `quarantine:request_release`, `quarantine:manage`) or `message:reveal`; for every other caller it is masked (`f***@example.com`) and `recipientMasked` is true (step 7.2). Read replica; each call writes a `view` action and the audit row `quarantine.entry_viewed`.
      */
     get: operations['QuarantineEntriesController_detail_v1'];
     put?: never;
@@ -3017,7 +3077,7 @@ export interface paths {
     };
     /**
      * Search my quarantined mail
-     * @description The caller’s own entries (recipient = the caller’s verified email), newest first, over a required bounded range, filtered by state and reason; subjects included. Empty when the organization disabled end-user access (`endUser.enabled`). Mailbox users (`quarantine:self`) with a verified email only: API keys and platform overrides are refused (`403`); the scope is the organization and the caller’s own address (another address’s entry is `404`).
+     * @description The caller’s own entries (recipient = the caller’s verified email), newest first, over a required bounded range, filtered by state and reason; subjects and the own address included (`recipientMasked: false`). Empty when the organization disabled end-user access (`endUser.enabled`). Mailbox users (`quarantine:self`) with a verified email only: API keys and platform overrides are refused (`403`); the scope is the organization and the caller’s own address (another address’s entry is `404`).
      */
     get: operations['QuarantineSelfController_search_v1'];
     put?: never;
@@ -3037,7 +3097,7 @@ export interface paths {
     };
     /**
      * Get one of my quarantined messages
-     * @description The entry with the actions the caller may take (`preview`, `release`, `request_release`). Audited as `quarantine.entry_viewed`. Mailbox users (`quarantine:self`) with a verified email only: API keys and platform overrides are refused (`403`); the scope is the organization and the caller’s own address (another address’s entry is `404`).
+     * @description The entry with the actions the caller may take (`preview`, `release`, `request_release`); the own address in clear (`recipientMasked: false`). Audited as `quarantine.entry_viewed`. Mailbox users (`quarantine:self`) with a verified email only: API keys and platform overrides are refused (`403`); the scope is the organization and the caller’s own address (another address’s entry is `404`).
      */
     get: operations['QuarantineSelfController_detail_v1'];
     put?: never;
@@ -3557,6 +3617,58 @@ export interface paths {
     post?: never;
     /** Delete a custom role (`409` while assigned or for system roles) */
     delete: operations['RolesController_remove_v1'];
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/saved-views': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List my saved views
+     * @description Your saved views of `kind` (`message_explorer`), newest first (keyset `id`), v1 cursor (signed, bound to you and your organization). For users who are members of the organization: API keys get `403 user_required`, a platform override session `403 saved_views_member_only`. Read from the writer, not the replica: a saved view is the caller’s own setting and is read right after it is written.
+     */
+    get: operations['SavedViewsController_list_v1'];
+    put?: never;
+    /**
+     * Save a view
+     * @description Saves an explorer view: `kind` (`message_explorer`), `name` (1-80 characters, unique among your views of the kind, case-insensitive: `409 saved_view_name_taken`) and the strict `definition` `{ version: 1, filters, sort, range, columns }`. `filters` are `GET /messages` query parameters (at most 24, values as strings) and are validated with the same rules as the list, including its filter-level permissions; the JSON is at most 8 192 bytes. At most SAVED_VIEWS_MAX_PER_USER (default 50) views per user and kind (`409 saved_view_limit_reached`). Audited `saved_view.created` (id and kind only: names and filters may hold addresses). For users who are members of the organization: API keys get `403 user_required`, a platform override session `403 saved_views_member_only`.
+     */
+    post: operations['SavedViewsController_create_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/saved-views/{viewId}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get a saved view
+     * @description One of your saved views. For users who are members of the organization: API keys get `403 user_required`, a platform override session `403 saved_views_member_only`. Read from the writer, not the replica: a saved view is the caller’s own setting and is read right after it is written.
+     */
+    get: operations['SavedViewsController_get_v1'];
+    /**
+     * Replace a saved view
+     * @description Replaces the name and the definition (same rules as create) with `expectedRowVersion` (`409 saved_view_conflict` with `currentRowVersion` when the view changed). The kind never changes. Audited `saved_view.updated` (id and kind only). For users who are members of the organization: API keys get `403 user_required`, a platform override session `403 saved_views_member_only`. Read from the writer, not the replica: a saved view is the caller’s own setting and is read right after it is written.
+     */
+    put: operations['SavedViewsController_update_v1'];
+    post?: never;
+    /**
+     * Delete a saved view
+     * @description Deletes one of your saved views. Audited `saved_view.deleted`. For users who are members of the organization: API keys get `403 user_required`, a platform override session `403 saved_views_member_only`.
+     */
+    delete: operations['SavedViewsController_remove_v1'];
     options?: never;
     head?: never;
     patch?: never;
@@ -11518,7 +11630,10 @@ export interface operations {
               /** Format: uuid */
               messageId: string;
               rcptSeq: number;
+              /** @description Masked since step 7.2 (`f***@example.com`: the first character of the local part and the domain); the clear address only through the audited `POST /messages/{messageId}/reveal` (`message:reveal`), joined by `rcptSeq` */
               recipient: string;
+              /** @description Step 7.2: true (the recipient is masked on every read) */
+              recipientMasked: boolean;
               /** @enum {string} */
               status:
                 | 'pending'
@@ -22988,6 +23103,8 @@ export interface operations {
         action?: string;
         /** @description `nextCursor` of the previous page (signed, bound to the filters, sort and caller) */
         cursor?: string;
+        /** @description One delivery status: at least one delivery of the message (any recipient, any delivery sequence) is currently in it. Requires `delivery:read` */
+        deliveryStatus?: string;
         /** @description `inbound`, `outbound`, `internal`; comma list */
         direction?: string;
         /** @description Public id of one of your domains (`404 domain_not_found` otherwise) */
@@ -22996,14 +23113,18 @@ export interface operations {
         from?: string;
         /** @description `true` or `false` */
         hasAttachments?: string;
-        /** @description Exact `From:` header value as stored. Audited (hashed) */
+        /** @description Exact From address as stored (the address inside `<…>` of the first `From:` header, else its raw value), case-insensitive (index driver). Audited (hashed) */
         headerFrom?: string;
-        /** @description Exact `Message-ID` header value. Audited (hashed) */
+        /** @description Message-ID, angle brackets optional (matched on its first 255 characters without `<` and `>`; index driver). Audited (hashed) */
         internetMessageId?: string;
-        /** @description Page size, 1-100 (default 25). A page may hold fewer rows (see the scan budget). */
+        /** @description Page size, 1-100 (default 25). A page may hold fewer rows when residual filters are combined with a search driver (scan budget) */
         limit?: string;
-        /** @description Exact recipient address, compared lower-cased. Audited (hashed) */
+        /** @description One quarantine entry state: at least one entry of the message (any recipient and round) is currently in it. Requires `quarantine:read` */
+        quarantineStatus?: string;
+        /** @description Exact envelope recipient address, case-insensitive (index driver). Requires `message:reveal` (`403 message_filter_forbidden`): recipient addresses are masked on every read, so only holders of the reveal permission may confirm one by search. Audited (hashed) */
         recipient?: string;
+        /** @description Domain of any envelope recipient (`example.com` or `@example.com`; IDNs in A-label form; index driver) */
+        recipientDomain?: string;
         /** @description Exact risk score (0-1000) */
         riskScore?: string;
         /** @description Risk score above (0-1000) */
@@ -23014,15 +23135,21 @@ export interface operations {
         'riskScore.lt'?: string;
         /** @description Risk score at most (0-1000) */
         'riskScore.lte'?: string;
-        /** @description Exact envelope sender (MAIL FROM), compared lower-cased. Audited (hashed) */
+        /** @description Exact envelope sender (MAIL FROM), compared case-insensitively (index driver). Audited (hashed) */
         sender?: string;
+        /** @description Domain of the envelope sender (`example.com` or `@example.com`; IDNs in A-label form; index driver) */
+        senderDomain?: string;
         /** @description `-receivedAt` (default, newest first) or `receivedAt` */
         sort?: '-receivedAt' | 'receivedAt';
         /** @description Lifecycle state(s), comma list of at most 5 */
         status?: string;
+        /** @description Exact subject, ignoring leading reply/forward markers (`Re:`, `Fwd:`, `AW:`, `RE[2]:`, …), white space runs, case and accents; matched on the first 128 characters (index driver). Requires `message:reveal` (`403 message_filter_forbidden`). Audited (SHA-256 of the normalized value) */
+        subject?: string;
+        /** @description Subject starts with (normalized like `subject`, 3-128 characters). Refused with `422 message_search_too_broad` when more than API_MESSAGES_SEARCH_MAX_MATCHES messages of the range match. Requires `message:reveal`. Audited (SHA-256 of the normalized value) */
+        subjectPrefix?: string;
         /** @description End of the range (exclusive); default now. At most API_MESSAGES_MAX_RANGE_DAYS days */
         to?: string;
-        /** @description Final verdict(s), comma list of at most 5 (one value uses the verdict index) */
+        /** @description Final verdict(s), comma list of at most 5 (exactly one value drives the search) */
         verdict?: string;
       };
       header?: never;
@@ -23105,8 +23232,10 @@ export interface operations {
                 | 'expired';
               /** Format: date-time */
               statusChangedAt: string;
-              /** @description Attacker-controlled text, returned as stored */
+              /** @description Always `null` since step 7.2: the subject is withheld on every read (field kept for compatibility). `subjectMasked` says whether one exists; holders of `message:reveal` read it through the audited `POST /messages/reveal` or `POST /messages/{messageId}/reveal` */
               subject: string | null;
+              /** @description Step 7.2: true when the message has a subject (withheld in `subject`) */
+              subjectMasked: boolean;
             }[];
             /** @description Null on the last page; may be set on a short or empty page (scan budget) */
             nextCursor: string | null;
@@ -23156,7 +23285,7 @@ export interface operations {
           };
         };
       };
-      /** @description Authenticated but not allowed (permission, MFA, enrollment restriction) */
+      /** @description Missing `message:read` (`forbidden`), or a filter needs a permission you do not hold (`message_filter_forbidden`: `recipient`/`subject`/`subjectPrefix` need `message:reveal`, `deliveryStatus` needs `delivery:read`, `quarantineStatus` needs `quarantine:read`; `filter` and `permission` name it) */
       403: {
         headers: {
           'RateLimit-Limit': components['headers']['RateLimit-Limit'];
@@ -23168,10 +23297,17 @@ export interface operations {
         };
         content: {
           'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'message_filter_forbidden';
             correlationId?: string;
             error: string;
-            message: string | string[];
-            statusCode: number;
+            filter?: string;
+            message: string;
+            permission?: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
           };
         };
       };
@@ -23196,6 +23332,31 @@ export interface operations {
             requestId?: string;
             /** @enum {integer} */
             statusCode: 404;
+          };
+        };
+      };
+      /** @description `subjectPrefix` matches more than API_MESSAGES_SEARCH_MAX_MATCHES messages of the range (`maxMatches`): type more of the subject, use `subject` or narrow the range */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'message_search_too_broad';
+            correlationId?: string;
+            error: string;
+            maxMatches?: number;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
           };
         };
       };
@@ -23228,7 +23389,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description The replica returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency is unavailable */
+      /** @description The replica returned a row that does not echo the query (`inconsistent_read`, retry), a `subjectPrefix` search exceeded API_MESSAGES_SEARCH_TIMEOUT_MS (`message_search_timeout`), or a dependency is unavailable */
       503: {
         headers: {
           'RateLimit-Limit': components['headers']['RateLimit-Limit'];
@@ -23241,7 +23402,7 @@ export interface operations {
         content: {
           'application/json': {
             /** @enum {string} */
-            code: 'inconsistent_read' | 'service_unavailable';
+            code: 'inconsistent_read' | 'message_search_timeout' | 'service_unavailable';
             correlationId?: string;
             error: string;
             message: string;
@@ -23345,8 +23506,10 @@ export interface operations {
             /** Format: date-time */
             statusChangedAt: string;
             statusReason: string | null;
-            /** @description Attacker-controlled text, returned as stored */
+            /** @description Always `null` since step 7.2: the subject is withheld on every read (field kept for compatibility). `subjectMasked` says whether one exists; holders of `message:reveal` read it through the audited `POST /messages/reveal` or `POST /messages/{messageId}/reveal` */
             subject: string | null;
+            /** @description Step 7.2: true when the message has a subject (withheld in `subject`) */
+            subjectMasked: boolean;
             version: number;
           };
         };
@@ -24012,12 +24175,16 @@ export interface operations {
               /** @description Gateway-side reason (e.g. direction_changed) */
               failureReason: string | null;
               finalSmtpCode: number | null;
+              /** @description Last remote SMTP reply text. Since step 7.2 the local part of every address in the text is masked (`f***@example.com`) for every caller; never revealed */
               finalSmtpResponse: string | null;
               /** Format: date-time */
               lastAttemptAt: string | null;
               lastErrorClass: string | null;
               rcptSeq: number;
+              /** @description Masked since step 7.2 (`f***@example.com`: the first character of the local part and the domain); the clear address only through the audited `POST /messages/{messageId}/reveal` (`message:reveal`), joined by `rcptSeq` */
               recipient: string;
+              /** @description Step 7.2: true (the recipient is masked on every read) */
+              recipientMasked: boolean;
               remoteHost: string | null;
               /** @enum {string} */
               status:
@@ -24217,7 +24384,7 @@ export interface operations {
               /** @description false for stale, conflicting or same-state signals */
               applied: boolean;
               deliverySeq: number;
-              /** @description Remote reply or reason text; never message content */
+              /** @description Remote reply or reason text; never message content. Since step 7.2 the local part of every address in the text is masked (`f***@example.com`) for every caller; never revealed */
               detail: string | null;
               enhancedStatus: string | null;
               errorClass: string | null;
@@ -24376,6 +24543,190 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+    };
+  };
+  MessageHeadersController_headers_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Message public id */
+        messageId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /**
+             * @description `available` (rows stored), `not_parsed` (the MIME parse did not finish or failed), `none_stored` (parsed, no allow-listed header), `retention_expired` (older than the 3-month header retention)
+             * @enum {string}
+             */
+            availability: 'available' | 'not_parsed' | 'none_stored' | 'retention_expired';
+            /** @description Stored rows in `seq` order (at most 500) */
+            headers: {
+              /** @description True for To, Cc, Subject and any name outside the safe subset; reveal with `POST /messages/{messageId}/reveal` (`headers`, `message:reveal`) */
+              masked: boolean;
+              /** @description Canonical header name (the step 3.1 allow-list) */
+              name: string;
+              /** @description Position among the stored headers */
+              seq: number;
+              /** @description Decoded value as stored (attacker-controlled text, never parsed by the api) for the safe subset; null when `masked` */
+              value: string | null;
+            }[];
+            /** Format: uuid */
+            messageId: string;
+            /** @description The names whose values are returned in clear */
+            safeHeaderNames: string[];
+            /** @description The allow-list of headers the gateway stores (step 3.1); others are never stored */
+            storedHeaderNames: string[];
+          };
+        };
+      };
+      /** @description Validation failed (`message` lists `"<path>: <issue>"`) or the token is invalid/expired */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Authenticated but not allowed (permission, MFA, enrollment restriction) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Unknown message, or a message of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'message_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The replica returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
         };
       };
     };
@@ -25363,7 +25714,10 @@ export interface operations {
         content: {
           'application/json': {
             data: {
+              /** @description Masked since step 7.2 (`f***@example.com`: the first character of the local part and the domain); the clear address only through the audited `POST /messages/{messageId}/reveal` (`message:reveal`) */
               address: string;
+              /** @description Step 7.2: true (the address is masked on every read) */
+              addressMasked: boolean;
               /**
                * @description Routed direction; null before step 2.3
                * @enum {string|null}
@@ -25411,7 +25765,7 @@ export interface operations {
                 | 'bounced';
               /**
                * Format: uuid
-               * @description Public id of the matched user, or null
+               * @description Always `null` since step 7.2: the matched user is withheld (it maps to an address); revealed with the address by `POST /messages/{messageId}/reveal`
                */
               userId: string | null;
             }[];
@@ -26068,6 +26422,239 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+    };
+  };
+  MessageRevealController_reveal_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Message public id */
+        messageId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @description What to reveal: `subject`, `headers` (To, Cc, Subject rows), `recipients` */
+          fields: ('subject' | 'headers' | 'recipients')[];
+          /** @description `recipients.nextCursor` of the previous reveal of this message */
+          recipientsCursor?: string;
+          /** @description Recipients per reveal, 1-100 (default 100) */
+          recipientsLimit?: number;
+        };
+      };
+    };
+    responses: {
+      /** @description The revealed values of the requested fields */
+      200: {
+        headers: {
+          /** @description Never cache, log or forward a reveal response */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @description With `headers`: the stored To, Cc and Subject rows in `seq` order */
+            headers?: {
+              /** @description `To`, `Cc` or `Subject` */
+              name: string;
+              /** @description Position among the stored headers */
+              seq: number;
+              /** @description Decoded value as stored (attacker-controlled text) */
+              value: string;
+            }[];
+            /** Format: uuid */
+            messageId: string;
+            /** @description With `recipients`: one page of recipients */
+            recipients?: {
+              /** @description In RCPT order (keyset `rcptSeq`) */
+              data: {
+                /** @description The envelope recipient address as stored */
+                address: string;
+                /** @description Position in the RCPT TO list */
+                rcptSeq: number;
+                /**
+                 * Format: uuid
+                 * @description Public id of the matched user, or null
+                 */
+                userId: string | null;
+              }[];
+              /** @description Pass as `recipientsCursor` to reveal the next recipients; null at the end */
+              nextCursor: string | null;
+            };
+            /**
+             * Format: date-time
+             * @description When the reveal was recorded in the audit log
+             */
+            revealedAt: string;
+            /** @description With `subject`: the stored subject, or null when none */
+            subject?: string | null;
+          };
+        };
+      };
+      /** @description `validation_failed` (`messageId` is not a UUID, or the body is not strict JSON of the documented shape; `message` lists `"<path>: <issue>"`) or `cursor_invalid` (the `recipientsCursor` is invalid, expired, of another message or of another organization) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'cursor_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Missing `message:reveal` (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown message, or a message of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'message_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description More than API_MESSAGES_REVEAL_PER_MINUTE reveals by this user or API key in the current minute (`scope: route`; `Retry-After` gives the seconds to wait), or a global limit (`scope: principal | tenant`) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'rate_limited';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {string} */
+            scope?: 'principal' | 'tenant' | 'route';
+            /** @enum {integer} */
+            statusCode: 429;
+          };
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The audit rows could not be written (`service_unavailable`, no value returned), the rate-limit store is unavailable (`service_unavailable`), or the replica returned a row that does not echo the query (`inconsistent_read`); retry */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'service_unavailable' | 'inconsistent_read';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
         };
       };
     };
@@ -27538,7 +28125,7 @@ export interface operations {
                 /** @description Rspamd symbols, by |score| descending */
                 symbols: {
                   name: string;
-                  /** @description At most 5 options of at most 200 characters (may contain addresses or URLs) */
+                  /** @description At most 5 options of at most 200 characters (may contain URLs). Since step 7.2 the local part of every address inside an option is masked (`f***@example.com`) for every caller; never revealed */
                   options: string[];
                   score: number;
                 }[];
@@ -31465,6 +32052,188 @@ export interface operations {
           'application/json': {
             /** @enum {string} */
             code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  MessageRevealController_revealMany_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @description Message public ids (1-100, distinct), e.g. the ids of one explorer page */
+          messageIds: string[];
+        };
+      };
+    };
+    responses: {
+      /** @description The revealed subjects */
+      200: {
+        headers: {
+          /** @description Never cache, log or forward a reveal response */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @description In request order, for the ids found in your organization; unknown and other organizations’ ids are omitted (indistinguishable) */
+            data: {
+              /**
+               * Format: uuid
+               * @description Message public id
+               */
+              id: string;
+              /** @description The stored subject (attacker-controlled text, as stored), or null when none */
+              subject: string | null;
+            }[];
+            /**
+             * Format: date-time
+             * @description When the reveal was recorded in the audit log
+             */
+            revealedAt: string;
+          };
+        };
+      };
+      /** @description `validation_failed`: the body is not strict JSON of the documented shape (1-100 distinct UUIDs; `message` lists `"<path>: <issue>"`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Missing `message:reveal` (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description More than API_MESSAGES_REVEAL_PER_MINUTE reveals by this user or API key in the current minute (`scope: route`; `Retry-After` gives the seconds to wait), or a global limit (`scope: principal | tenant`) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'rate_limited';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {string} */
+            scope?: 'principal' | 'tenant' | 'route';
+            /** @enum {integer} */
+            statusCode: 429;
+          };
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The audit rows could not be written (`service_unavailable`, no value returned), the rate-limit store is unavailable (`service_unavailable`), or the replica returned a row that does not echo the query (`inconsistent_read`); retry */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'service_unavailable' | 'inconsistent_read';
             correlationId?: string;
             error: string;
             message: string;
@@ -45442,10 +46211,10 @@ export interface operations {
   };
   QuarantineEntriesController_search_v1: {
     parameters: {
-      query: {
+      query?: {
         cursor?: string;
         direction?: 'inbound' | 'outbound' | 'internal';
-        from: string;
+        from?: string;
         hasAttachments?: 'true' | 'false';
         hasHardBlock?: 'true' | 'false';
         headerFrom?: string;
@@ -45462,7 +46231,7 @@ export interface operations {
         sender?: string;
         senderDomain?: string;
         state?: string | string[];
-        to: string;
+        to?: string;
       };
       header?: never;
       path?: never;
@@ -45525,6 +46294,7 @@ export interface operations {
               /** Format: date-time */
               receivedAt: string;
               recipient: string;
+              recipientMasked: boolean;
               /** @enum {string|null} */
               riskLevel: 'none' | 'low' | 'medium' | 'high' | 'critical' | null;
               riskScore: number | null;
@@ -45592,7 +46362,7 @@ export interface operations {
           };
         };
       };
-      /** @description Authenticated but not allowed (permission, MFA, enrollment restriction) */
+      /** @description Missing `quarantine:read` (`forbidden`), or an exact `recipient` filter from a caller who reads recipients masked (`quarantine_filter_forbidden`, `filter` names it) */
       403: {
         headers: {
           'RateLimit-Limit': components['headers']['RateLimit-Limit'];
@@ -45604,10 +46374,16 @@ export interface operations {
         };
         content: {
           'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'quarantine_filter_forbidden';
             correlationId?: string;
             error: string;
-            message: string | string[];
-            statusCode: number;
+            filter?: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
           };
         };
       };
@@ -45988,6 +46764,7 @@ export interface operations {
             /** Format: date-time */
             receivedAt: string;
             recipient: string;
+            recipientMasked: boolean;
             releases: {
               approvalRequestId: string | null;
               /** Format: date-time */
@@ -47983,6 +48760,7 @@ export interface operations {
               /** Format: date-time */
               receivedAt: string;
               recipient: string;
+              recipientMasked: boolean;
               /** @enum {string|null} */
               riskLevel: 'none' | 'low' | 'medium' | 'high' | 'critical' | null;
               riskScore: number | null;
@@ -48207,6 +48985,7 @@ export interface operations {
             /** Format: date-time */
             receivedAt: string;
             recipient: string;
+            recipientMasked: boolean;
             releases: {
               approvalRequestId: string | null;
               /** Format: date-time */
@@ -57025,6 +57804,1115 @@ export interface operations {
             error: string;
             message: string | string[];
             statusCode: number;
+          };
+        };
+      };
+    };
+  };
+  SavedViewsController_list_v1: {
+    parameters: {
+      query: {
+        /** @description `nextCursor` of the previous page */
+        cursor?: string;
+        /** @description `message_explorer` (required; the only kind) */
+        kind: string;
+        /** @description Page size, 1-100 (default 25) */
+        limit?: string;
+        /** @description `-createdAt` (the only order: newest first) */
+        sort?: '-createdAt';
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            data: {
+              /** Format: date-time */
+              createdAt: string;
+              definition: {
+                /** @description Visible explorer columns in order, or null for the default set */
+                columns: string[] | null;
+                /** @description `GET /messages` query parameters (except `limit`, `cursor`, `sort`, `from`, `to`) and their values as strings, e.g. `{ "verdict": "phishing,malware", "senderDomain": "example.com" }` */
+                filters: {
+                  [key: string]: string;
+                };
+                /** @description `{ kind: "relative", preset }` (1h, 24h, 7d, 30d) or `{ kind: "absolute", from, to }` (ISO 8601, at most API_MESSAGES_MAX_RANGE_DAYS days) */
+                range:
+                  | {
+                      /** @enum {string} */
+                      kind: 'relative';
+                      /** @enum {string} */
+                      preset: '1h' | '24h' | '7d' | '30d';
+                    }
+                  | {
+                      /** Format: date-time */
+                      from: string;
+                      /** @enum {string} */
+                      kind: 'absolute';
+                      /** Format: date-time */
+                      to: string;
+                    };
+                /** @enum {string} */
+                sort: '-receivedAt' | 'receivedAt';
+                /** @enum {number} */
+                version: 1;
+              };
+              /**
+               * Format: uuid
+               * @description Saved view public id
+               */
+              id: string;
+              /** @enum {string} */
+              kind: 'message_explorer';
+              name: string;
+              /** @description Optimistic concurrency token of PUT */
+              rowVersion: number;
+              /** Format: date-time */
+              updatedAt: string;
+            }[];
+            nextCursor: string | null;
+          };
+        };
+      };
+      /** @description Validation failed (`validation_failed`: unknown parameter or operator, wrong type, too many values, range too long; `message` lists `"<path>: <issue>"`) or the cursor is invalid, expired or belongs to other filters, another sort or another caller (`cursor_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'cursor_invalid';
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Missing `message:read` (`forbidden`), an API key (`user_required`), a platform override session (`saved_views_member_only`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'user_required' | 'saved_views_member_only';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  SavedViewsController_create_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          definition: {
+            /** @description Visible explorer columns in order, or null for the default set */
+            columns: string[] | null;
+            /** @description `GET /messages` query parameters (except `limit`, `cursor`, `sort`, `from`, `to`) and their values as strings, e.g. `{ "verdict": "phishing,malware", "senderDomain": "example.com" }` */
+            filters: {
+              [key: string]: string;
+            };
+            /** @description `{ kind: "relative", preset }` (1h, 24h, 7d, 30d) or `{ kind: "absolute", from, to }` (ISO 8601, at most API_MESSAGES_MAX_RANGE_DAYS days) */
+            range:
+              | {
+                  /** @enum {string} */
+                  kind: 'relative';
+                  /** @enum {string} */
+                  preset: '1h' | '24h' | '7d' | '30d';
+                }
+              | {
+                  /** Format: date-time */
+                  from: string;
+                  /** @enum {string} */
+                  kind: 'absolute';
+                  /** Format: date-time */
+                  to: string;
+                };
+            /** @enum {string} */
+            sort: '-receivedAt' | 'receivedAt';
+            /** @enum {number} */
+            version: 1;
+          };
+          /** @enum {string} */
+          kind: 'message_explorer';
+          name: string;
+        };
+      };
+    };
+    responses: {
+      /** @description The saved view */
+      201: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** Format: date-time */
+            createdAt: string;
+            definition: {
+              /** @description Visible explorer columns in order, or null for the default set */
+              columns: string[] | null;
+              /** @description `GET /messages` query parameters (except `limit`, `cursor`, `sort`, `from`, `to`) and their values as strings, e.g. `{ "verdict": "phishing,malware", "senderDomain": "example.com" }` */
+              filters: {
+                [key: string]: string;
+              };
+              /** @description `{ kind: "relative", preset }` (1h, 24h, 7d, 30d) or `{ kind: "absolute", from, to }` (ISO 8601, at most API_MESSAGES_MAX_RANGE_DAYS days) */
+              range:
+                | {
+                    /** @enum {string} */
+                    kind: 'relative';
+                    /** @enum {string} */
+                    preset: '1h' | '24h' | '7d' | '30d';
+                  }
+                | {
+                    /** Format: date-time */
+                    from: string;
+                    /** @enum {string} */
+                    kind: 'absolute';
+                    /** Format: date-time */
+                    to: string;
+                  };
+              /** @enum {string} */
+              sort: '-receivedAt' | 'receivedAt';
+              /** @enum {number} */
+              version: 1;
+            };
+            /**
+             * Format: uuid
+             * @description Saved view public id
+             */
+            id: string;
+            /** @enum {string} */
+            kind: 'message_explorer';
+            name: string;
+            /** @description Optimistic concurrency token of PUT */
+            rowVersion: number;
+            /** Format: date-time */
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description `validation_failed`: the body is not strict JSON of the documented shape, or the definition breaks a rule (`message` lists `"<path>: <issue>"` with paths under `definition`, e.g. `definition.filters.subjectPrefix: must be 3 to 128 characters …`, `definition.filters: Unrecognized key: "foo"`, `definition: must be at most 8192 bytes as JSON`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Missing `message:read` (`forbidden`), an API key (`user_required`), a platform override session (`saved_views_member_only`), or a filter of the definition needs a permission you do not hold (`message_filter_forbidden`: `recipient`/`subject`/`subjectPrefix` need `message:reveal`, `deliveryStatus` `delivery:read`, `quarantineStatus` `quarantine:read`; `filter` and `permission` name it) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              | 'forbidden'
+              | 'user_required'
+              | 'saved_views_member_only'
+              | 'message_filter_forbidden';
+            correlationId?: string;
+            error: string;
+            filter?: string;
+            message: string;
+            permission?: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description `saved_view_name_taken` or `saved_view_limit_reached` (`limit`: the per-user maximum) */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'saved_view_name_taken' | 'saved_view_limit_reached';
+            correlationId?: string;
+            error: string;
+            limit?: number;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  SavedViewsController_get_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Saved view public id */
+        viewId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** Format: date-time */
+            createdAt: string;
+            definition: {
+              /** @description Visible explorer columns in order, or null for the default set */
+              columns: string[] | null;
+              /** @description `GET /messages` query parameters (except `limit`, `cursor`, `sort`, `from`, `to`) and their values as strings, e.g. `{ "verdict": "phishing,malware", "senderDomain": "example.com" }` */
+              filters: {
+                [key: string]: string;
+              };
+              /** @description `{ kind: "relative", preset }` (1h, 24h, 7d, 30d) or `{ kind: "absolute", from, to }` (ISO 8601, at most API_MESSAGES_MAX_RANGE_DAYS days) */
+              range:
+                | {
+                    /** @enum {string} */
+                    kind: 'relative';
+                    /** @enum {string} */
+                    preset: '1h' | '24h' | '7d' | '30d';
+                  }
+                | {
+                    /** Format: date-time */
+                    from: string;
+                    /** @enum {string} */
+                    kind: 'absolute';
+                    /** Format: date-time */
+                    to: string;
+                  };
+              /** @enum {string} */
+              sort: '-receivedAt' | 'receivedAt';
+              /** @enum {number} */
+              version: 1;
+            };
+            /**
+             * Format: uuid
+             * @description Saved view public id
+             */
+            id: string;
+            /** @enum {string} */
+            kind: 'message_explorer';
+            name: string;
+            /** @description Optimistic concurrency token of PUT */
+            rowVersion: number;
+            /** Format: date-time */
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description Validation failed (`message` lists `"<path>: <issue>"`) or the token is invalid/expired */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Missing `message:read` (`forbidden`), an API key (`user_required`), a platform override session (`saved_views_member_only`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'user_required' | 'saved_views_member_only';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown id, or a view of another user or organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'saved_view_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  SavedViewsController_update_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Saved view public id */
+        viewId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          definition: {
+            /** @description Visible explorer columns in order, or null for the default set */
+            columns: string[] | null;
+            /** @description `GET /messages` query parameters (except `limit`, `cursor`, `sort`, `from`, `to`) and their values as strings, e.g. `{ "verdict": "phishing,malware", "senderDomain": "example.com" }` */
+            filters: {
+              [key: string]: string;
+            };
+            /** @description `{ kind: "relative", preset }` (1h, 24h, 7d, 30d) or `{ kind: "absolute", from, to }` (ISO 8601, at most API_MESSAGES_MAX_RANGE_DAYS days) */
+            range:
+              | {
+                  /** @enum {string} */
+                  kind: 'relative';
+                  /** @enum {string} */
+                  preset: '1h' | '24h' | '7d' | '30d';
+                }
+              | {
+                  /** Format: date-time */
+                  from: string;
+                  /** @enum {string} */
+                  kind: 'absolute';
+                  /** Format: date-time */
+                  to: string;
+                };
+            /** @enum {string} */
+            sort: '-receivedAt' | 'receivedAt';
+            /** @enum {number} */
+            version: 1;
+          };
+          /** @description `rowVersion` of the view you edited */
+          expectedRowVersion: number;
+          name: string;
+        };
+      };
+    };
+    responses: {
+      200: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** Format: date-time */
+            createdAt: string;
+            definition: {
+              /** @description Visible explorer columns in order, or null for the default set */
+              columns: string[] | null;
+              /** @description `GET /messages` query parameters (except `limit`, `cursor`, `sort`, `from`, `to`) and their values as strings, e.g. `{ "verdict": "phishing,malware", "senderDomain": "example.com" }` */
+              filters: {
+                [key: string]: string;
+              };
+              /** @description `{ kind: "relative", preset }` (1h, 24h, 7d, 30d) or `{ kind: "absolute", from, to }` (ISO 8601, at most API_MESSAGES_MAX_RANGE_DAYS days) */
+              range:
+                | {
+                    /** @enum {string} */
+                    kind: 'relative';
+                    /** @enum {string} */
+                    preset: '1h' | '24h' | '7d' | '30d';
+                  }
+                | {
+                    /** Format: date-time */
+                    from: string;
+                    /** @enum {string} */
+                    kind: 'absolute';
+                    /** Format: date-time */
+                    to: string;
+                  };
+              /** @enum {string} */
+              sort: '-receivedAt' | 'receivedAt';
+              /** @enum {number} */
+              version: 1;
+            };
+            /**
+             * Format: uuid
+             * @description Saved view public id
+             */
+            id: string;
+            /** @enum {string} */
+            kind: 'message_explorer';
+            name: string;
+            /** @description Optimistic concurrency token of PUT */
+            rowVersion: number;
+            /** Format: date-time */
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description `validation_failed`: the body is not strict JSON of the documented shape, or the definition breaks a rule (`message` lists `"<path>: <issue>"` with paths under `definition`, e.g. `definition.filters.subjectPrefix: must be 3 to 128 characters …`, `definition.filters: Unrecognized key: "foo"`, `definition: must be at most 8192 bytes as JSON`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Missing `message:read` (`forbidden`), an API key (`user_required`), a platform override session (`saved_views_member_only`), or a filter of the definition needs a permission you do not hold (`message_filter_forbidden`: `recipient`/`subject`/`subjectPrefix` need `message:reveal`, `deliveryStatus` `delivery:read`, `quarantineStatus` `quarantine:read`; `filter` and `permission` name it) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              | 'forbidden'
+              | 'user_required'
+              | 'saved_views_member_only'
+              | 'message_filter_forbidden';
+            correlationId?: string;
+            error: string;
+            filter?: string;
+            message: string;
+            permission?: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown id, or a view of another user or organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'saved_view_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description `saved_view_conflict` (`currentRowVersion`) or `saved_view_name_taken` */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'saved_view_conflict' | 'saved_view_name_taken';
+            correlationId?: string;
+            currentRowVersion?: number;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  SavedViewsController_remove_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Saved view public id */
+        viewId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Deleted */
+      204: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Validation failed (`message` lists `"<path>: <issue>"`) or the token is invalid/expired */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Missing `message:read` (`forbidden`), an API key (`user_required`), a platform override session (`saved_views_member_only`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'user_required' | 'saved_views_member_only';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown id, or a view of another user or organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'saved_view_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
           };
         };
       };

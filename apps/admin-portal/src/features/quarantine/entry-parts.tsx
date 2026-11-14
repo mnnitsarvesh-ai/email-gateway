@@ -4,6 +4,7 @@ import { AlertTriangleIcon, CheckCircle2Icon, ClockIcon, LockIcon } from 'lucide
 import Link from 'next/link';
 import type { ReactNode } from 'react';
 import {
+  SensitiveValue,
   CopyableId,
   DateTime,
   DirectionBadge,
@@ -42,7 +43,15 @@ export function EntryMetadata({ entry, self = false }: { entry: AnyDetail; self?
           },
           {
             label: 'Recipient',
-            value: <UntrustedText value={entry.recipient} copy copyLabel="Copy recipient" />,
+            value: (
+              <SensitiveValue
+                value={entry.recipient}
+                masked={entry.recipientMasked}
+                kind="address"
+                copy={!entry.recipientMasked}
+                copyLabel="Copy recipient"
+              />
+            ),
           },
           {
             label: 'Envelope sender',

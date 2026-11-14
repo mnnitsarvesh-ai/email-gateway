@@ -46,6 +46,7 @@ import { UsageModule } from './modules/usage/usage.module';
 import { UsersModule } from './modules/users/users.module';
 import { WebhooksModule } from './modules/webhooks/webhooks.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
+import { SavedViewsModule } from './modules/saved-views/saved-views.module';
 
 export const SERVICE_NAME = 'api';
 
@@ -121,6 +122,8 @@ export class AppModule {
         // and the personal preference center.
         WebhooksModule,
         NotificationsModule,
+        // Step 7.2: saved Email Explorer views (per user, tenant-scoped).
+        SavedViewsModule,
       ],
       providers: [{ provide: API_CONFIG, useValue: config }],
       exports: [API_CONFIG],

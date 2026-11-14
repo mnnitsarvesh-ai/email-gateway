@@ -24,7 +24,18 @@ import type { E2eState, E2eUser, UserKey } from '../support/state';
 import { writeState } from '../support/state';
 import { cleanup } from './cleanup';
 import { mailBucket, reader, writer } from './db';
-import { DAY, type MessagePlan, expectDashboard, planMessages, planSpecialAlpha } from './plan';
+import { historyOf, requiredEnginesOf, scanVerdictOf, writeMessageDetails } from './details';
+import {
+  DAY,
+  type DeliveryPlan,
+  type MessagePlan,
+  expectDashboard,
+  planExplorerAlpha,
+  planExplorerBeta,
+  planMessages,
+  planSpecialAlpha,
+  recipientsOf,
+} from './plan';
 
 const sha = (text: string) => createHash('sha256').update(text).digest('hex');
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -36,6 +47,10 @@ export const ALPHA_DELETED_DOMAIN = 'old.alpha.e2e-portal.test';
 export const BETA_DOMAIN = 'beta.e2e-portal.test';
 export const MEMBER_COUNT = 32;
 export const ALPHA_AUDIT_ROWS = 70;
+/** Alpha's tenant request budget (the enterprise plan value; standard is 300). */
+export const ALPHA_API_REQUESTS_PER_MINUTE = 1_200;
+/** Users of the role table below that belong to alpha (every role key starting with `alpha`). */
+export const ALPHA_ROLE_USERS = 9;
 
 function generatePassword(): string {
   return `E2e-${randomBytes(12).toString('base64url')}-7a`;
@@ -170,11 +185,14 @@ const pad = (n: number) => String(n).padStart(2, '0');
 const datePath = (d: Date) =>
   `${d.getUTCFullYear()}/${pad(d.getUTCMonth() + 1)}/${pad(d.getUTCDate())}`;
 
-interface SeededMessage {
+export interface SeededMessage {
   plan: MessagePlan;
   id: bigint;
   publicId: string;
-  recipientId: bigint;
+  /** Recipient row ids in `rcpt_seq` order. */
+  recipientIds: bigint[];
+  /** The initial scan round (`email_scans.id`), when the plan has one. */
+  scanId: bigint | null;
   emlObjectKey: string;
   entry?: { id: bigint; publicId: string };
 }
@@ -185,15 +203,20 @@ function messageStatus(plan: MessagePlan) {
   return 'delivered' as const;
 }
 
-function recipientStatus(plan: MessagePlan): RecipientStatus {
+function recipientStatus(plan: MessagePlan, rcptSeq: number): RecipientStatus {
   if (plan.action === 'quarantine') return 'quarantined';
   if (plan.action === 'reject' || plan.action === 'discard') return 'discarded';
-  const delivery = plan.deliveries[0]?.status;
+  const delivery = plan.deliveries.find((d) => (d.rcptSeq ?? 0) === rcptSeq)?.status;
   if (delivery === 'delivered') return 'delivered';
   if (delivery === 'bounced') return 'bounced';
   if (delivery === 'deferred') return 'deferred';
   if (delivery === 'failed' || delivery === 'expired') return 'failed';
   return 'pending';
+}
+
+/** Final SMTP codes per delivery status (fixture values). */
+function smtpCodeOf(status: DeliveryPlan['status']): number {
+  return status === 'delivered' ? 250 : status === 'deferred' ? 451 : 550;
 }
 
 async function insertMessages(
@@ -226,6 +249,8 @@ async function insertMessages(
       emlObjectKey: `org/${org.id.toString()}/eml/${datePath(plan.receivedAt)}/${identity.id.toString()}.eml`,
     };
   });
+  // Explicit columns only: the generated search keys (subject_key, sender_domain,
+  // message_id_key, address_domain) are computed by MySQL and never written (step 7.2 §3.1).
   await p.emailMessage.createMany({
     data: rows.map(({ plan, id, emlObjectKey }) => ({
       id,
@@ -240,15 +265,16 @@ async function insertMessages(
       direction: plan.direction,
       status: messageStatus(plan),
       statusChangedAt: plan.receivedAt,
-      version: plan.role === 'approval' ? 2 : 3,
+      version: historyOf(plan).length - 1,
       lifecycleRound: 0,
       envelopeFrom: plan.envelopeFrom,
-      headerFrom: `Sender <${plan.envelopeFrom}>`,
+      // The address inside <…> of the first From header, as the smtp-adapter stores it.
+      headerFrom: plan.headerFrom ?? plan.envelopeFrom,
       subject: plan.subject,
-      internetMessageId: `<${randomUUID()}@external.e2e-portal.test>`,
-      sizeBytes: 2048,
-      recipientCount: 1,
-      attachmentCount: 0,
+      internetMessageId: plan.internetMessageId ?? `<${randomUUID()}@external.e2e-portal.test>`,
+      sizeBytes: 2048 + (plan.attachments ?? []).reduce((sum, a) => sum + a.sizeBytes, 0),
+      recipientCount: recipientsOf(plan).length,
+      attachmentCount: (plan.attachments ?? []).length,
       emlObjectKey,
       emlSha256: sha(emlObjectKey),
       clientIp: '198.51.100.7',
@@ -259,37 +285,46 @@ async function insertMessages(
     })),
   });
   await p.emailRecipient.createMany({
-    data: rows.map(({ plan, id }) => ({
-      receivedAt: plan.receivedAt,
-      messageId: id,
-      organizationId: org.id,
-      rcptSeq: 0,
-      address: plan.recipient,
-      status: recipientStatus(plan),
-      finalAction: plan.action,
-      direction: plan.direction,
-    })),
+    data: rows.flatMap(({ plan, id }) =>
+      recipientsOf(plan).map((address, rcptSeq) => ({
+        receivedAt: plan.receivedAt,
+        messageId: id,
+        organizationId: org.id,
+        rcptSeq,
+        address,
+        status: recipientStatus(plan, rcptSeq),
+        finalAction: plan.action,
+        direction: plan.direction,
+      })),
+    ),
   });
   const recipients = await p.emailRecipient.findMany({
     where: { organizationId: org.id, messageId: { in: rows.map((r) => r.id) } },
-    select: { id: true, messageId: true },
+    select: { id: true, messageId: true, rcptSeq: true },
+    orderBy: [{ messageId: 'asc' }, { rcptSeq: 'asc' }],
   });
-  const recipientOf = new Map(recipients.map((r) => [r.messageId, r.id]));
+  const recipientsOfMessage = new Map<bigint, bigint[]>();
+  for (const r of recipients) {
+    const list = recipientsOfMessage.get(r.messageId) ?? [];
+    list[r.rcptSeq] = r.id;
+    recipientsOfMessage.set(r.messageId, list);
+  }
   const seeded: SeededMessage[] = rows.map((row) => ({
     ...row,
-    recipientId: recipientOf.get(row.id)!,
+    recipientIds: recipientsOfMessage.get(row.id)!,
+    scanId: null,
   }));
 
   await p.emailDelivery.createMany({
-    data: seeded.flatMap(({ plan, id, recipientId }) =>
-      plan.deliveries.map((d, deliverySeq) => ({
+    data: seeded.flatMap(({ plan, id, recipientIds }) =>
+      plan.deliveries.map((d) => ({
         receivedAt: plan.receivedAt,
         messageId: id,
-        recipientId,
+        recipientId: recipientIds[d.rcptSeq ?? 0]!,
         organizationId: org.id,
-        deliverySeq,
+        deliverySeq: 0,
         status: d.status,
-        finalSmtpCode: d.status === 'delivered' ? 250 : d.status === 'deferred' ? 451 : 550,
+        finalSmtpCode: smtpCodeOf(d.status),
         deliveredAt:
           d.deliveredAfterMs === null
             ? null
@@ -309,8 +344,8 @@ async function insertMessages(
               scanKind: 'initial' as const,
               status: plan.scan.status,
               lifecycleRound: 0,
-              scanVerdict: plan.scan.status === 'completed' ? 'clean' : null,
-              requiredEngines: ['rspamd'],
+              scanVerdict: plan.scan.status === 'completed' ? scanVerdictOf(plan) : null,
+              requiredEngines: requiredEnginesOf(plan),
               reasonCodes: [],
               startedAt: plan.receivedAt,
               completedAt:
@@ -323,16 +358,17 @@ async function insertMessages(
         : [],
     ),
   });
-  // A lifecycle history for the approval message (received → persisted → quarantined), so the
-  // release executor finds a consistent message (lifecycle.ts insertLifecycleMessage).
-  for (const row of seeded.filter((r) => r.plan.role === 'approval')) {
-    const steps = [
-      { from: null, to: 'received' as const, reason: 'smtp_accepted' },
-      { from: 'received' as const, to: 'persisted' as const, reason: 'committed' },
-      { from: 'persisted' as const, to: 'quarantined' as const, reason: null },
-    ];
+  const scans = await p.emailScan.findMany({
+    where: { organizationId: org.id, messageId: { in: seeded.map((m) => m.id) } },
+    select: { id: true, messageId: true },
+  });
+  const scanOf = new Map(scans.map((scan) => [scan.messageId, scan.id]));
+  for (const row of seeded) row.scanId = scanOf.get(row.id) ?? null;
+  // A lifecycle history for the special messages (the release executor needs a consistent
+  // message, lifecycle.ts insertLifecycleMessage) and for the details messages (step 7.2).
+  for (const row of seeded.filter((r) => r.plan.role === 'approval' || r.plan.details)) {
     await p.emailMessageStatusHistory.createMany({
-      data: steps.map((step, version) => ({
+      data: historyOf(row.plan).map((step, version) => ({
         receivedAt: row.plan.receivedAt,
         messageId: row.id,
         organizationId: org.id,
@@ -341,8 +377,8 @@ async function insertMessages(
         toStatus: step.to,
         reasonCode: step.reason,
         changedAt: new Date(row.plan.receivedAt.getTime() + version * 1000),
-        actorRole: version < 2 ? 'ingestion' : 'policy',
-        actorService: version < 2 ? 'smtp-adapter' : 'policy-engine',
+        actorRole: step.role,
+        actorService: step.service,
         actorType: 'system' as const,
         transitionKey: sha(`e2e-portal:${row.id.toString()}:${version}`),
         occurredAt: new Date(row.plan.receivedAt.getTime() + version * 1000),
@@ -361,7 +397,7 @@ async function insertMessages(
         messageId: row.id,
         messageReceivedAt: row.plan.receivedAt,
         lifecycleRound: 0,
-        recipientId: row.recipientId,
+        recipientId: row.recipientIds[0]!,
         rcptSeq: 0,
         recipientAddress: row.plan.recipient,
         userId: users.get(row.plan.recipient) ?? null,
@@ -372,8 +408,8 @@ async function insertMessages(
         status: q.state,
         envelopeFrom: row.plan.envelopeFrom,
         headerFrom: null,
-        hasAttachments: false,
-        attachmentCount: 0,
+        hasAttachments: (row.plan.attachments ?? []).length > 0,
+        attachmentCount: (row.plan.attachments ?? []).length,
         sizeBytes: 2048,
         riskScore: row.plan.riskScore,
         riskLevel:
@@ -502,6 +538,16 @@ export async function seed(): Promise<SeedSummary> {
 
     const alpha = await createOrganization(p, ALPHA.slug, ALPHA.name);
     const beta = await createOrganization(p, BETA.slug, BETA.name);
+    // The suite drives alpha's whole traffic through ten users within minutes (step 7.2 adds 14
+    // details sections per role): the tenant budget of the standard plan (300 requests per
+    // minute for the whole organization) would answer `429` to later specs. Alpha gets the
+    // enterprise plan's tenant budget, as a platform operator would raise a tenant's limit; the
+    // per-principal, sensitive and expensive limits stay at the shipped defaults, and the tenant
+    // limit itself is verified by the api suites (apps/api/integration/conventions.test.ts).
+    await p.organizationLimit.updateMany({
+      where: { organizationId: alpha.id, limitKey: 'api_requests_per_minute' },
+      data: { limitValue: BigInt(ALPHA_API_REQUESTS_PER_MINUTE) },
+    });
     const alphaDomain = await createDomain(p, alpha, ALPHA_DOMAIN);
     const alphaDeleted = await createDomain(p, alpha, ALPHA_DELETED_DOMAIN, true);
     const betaDomain = await createDomain(p, beta, BETA_DOMAIN);
@@ -538,6 +584,12 @@ export async function seed(): Promise<SeedSummary> {
         roles: ['quarantine_reviewer'],
         org: 'alpha',
         name: 'Alpha Reviewer',
+      },
+      alphaAuditor: {
+        email: `auditor@${ALPHA_DOMAIN}`,
+        roles: ['compliance_auditor'],
+        org: 'alpha',
+        name: 'Alpha Auditor',
       },
       alphaDomainAdmin: {
         email: `domains@${ALPHA_DOMAIN}`,
@@ -616,8 +668,12 @@ export async function seed(): Promise<SeedSummary> {
     const alphaPlans = [
       ...planMessages('alpha', ALPHA_DOMAIN, now, mailbox),
       ...planSpecialAlpha(now, ALPHA_DOMAIN, mailbox),
+      ...planExplorerAlpha(now, ALPHA_DOMAIN),
     ];
-    const betaPlans = planMessages('beta', BETA_DOMAIN, now, `user0@${BETA_DOMAIN}`);
+    const betaPlans = [
+      ...planMessages('beta', BETA_DOMAIN, now, `user0@${BETA_DOMAIN}`),
+      ...planExplorerBeta(now),
+    ];
     const alphaMessages = await insertMessages(
       p,
       alpha,
@@ -632,6 +688,15 @@ export async function seed(): Promise<SeedSummary> {
       { primary: betaDomain.id, deleted: null },
       userIds,
     );
+
+    // Step 7.2: attachments, URLs and the engine rows of the details sections.
+    await writeMessageDetails(p, alpha.id, alphaMessages);
+    await writeMessageDetails(p, beta.id, betaMessages);
+    const byKey = (key: string) => {
+      const found = [...alphaMessages, ...betaMessages].find((m) => m.plan.key === key);
+      if (!found) throw new Error(`seed plan has no message ${key}`);
+      return found;
+    };
 
     // Objects: the EML of the special messages and the decoded HTML part of the preview message
     // (the preview sanitizer drops the script and defangs the link, step 5.3 Q11).
@@ -657,7 +722,9 @@ export async function seed(): Promise<SeedSummary> {
         completedAt: preview.plan.receivedAt,
       },
     });
-    for (const m of [preview, approval]) {
+    // The details approval target is released by the quarantine executor after the approval
+    // in details.spec, like the 7.1 approval message: it needs its EML too.
+    for (const m of [preview, approval, byKey('alpha-detail-approval')]) {
       const eml = syntheticEml(
         m.plan,
         `${m.plan.subject}\r\nSynthetic e2e message; no real content.`,
@@ -799,6 +866,46 @@ export async function seed(): Promise<SeedSummary> {
       })),
     });
 
+    // Step 7.2: message-resource audit rows of the details phish message (audit history
+    // section), and a saved view of the beta administrator (isolation target).
+    const phish = byKey('alpha-detail-phish');
+    await p.auditLog.createMany({
+      data: [
+        { action: 'message.rescan_requested', minutesAgo: 19 },
+        { action: 'message.revealed', minutesAgo: 18 },
+      ].map((row) => ({
+        createdAt: new Date(now - row.minutesAgo * 60_000),
+        organizationId: alpha.id,
+        actorType: 'user' as const,
+        actorId: null,
+        action: row.action,
+        resourceType: 'message',
+        resourceId: phish.publicId,
+        correlationId: `e2e-portal-${runId}`,
+        sourceIp: '203.0.113.50',
+        metadata:
+          row.action === 'message.revealed'
+            ? { fixture: 'e2e-portal', fields: ['subject'], bulk: true }
+            : { fixture: 'e2e-portal' },
+      })),
+    });
+    const betaView = await p.savedView.create({
+      data: {
+        organizationId: beta.id,
+        userId: betaAdminId,
+        kind: 'message_explorer',
+        name: 'Beta inbound (e2e)',
+        definition: {
+          version: 1,
+          filters: { direction: 'inbound' },
+          sort: '-receivedAt',
+          range: { kind: 'relative', preset: '24h' },
+          columns: null,
+        },
+      },
+      select: { publicId: true },
+    });
+
     const webhookId = await createWebhook(
       users.betaAdmin.email,
       users.betaAdmin.password,
@@ -834,9 +941,9 @@ export async function seed(): Promise<SeedSummary> {
       ]);
       return (
         messages === alphaMessages.length &&
-        audits === ALPHA_AUDIT_ROWS &&
+        audits === ALPHA_AUDIT_ROWS + 2 &&
         approvalRow === 1 &&
-        members === MEMBER_COUNT + 8
+        members === MEMBER_COUNT + ALPHA_ROLE_USERS
       );
     }, `alpha rows (last message ${lastAlpha.publicId})`);
 
@@ -853,7 +960,7 @@ export async function seed(): Promise<SeedSummary> {
         domainName: ALPHA_DOMAIN,
         deletedDomainName: ALPHA_DELETED_DOMAIN,
         memberCount: MEMBER_COUNT,
-        userCount: MEMBER_COUNT + 8,
+        userCount: MEMBER_COUNT + ALPHA_ROLE_USERS,
         messagesLast24h: alphaPlans.filter((m) => m.receivedAt.getTime() >= now - DAY).length,
         messageId: alphaMessages[0]!.publicId,
         approvalEntryId: approval.entry!.publicId,
@@ -864,6 +971,19 @@ export async function seed(): Promise<SeedSummary> {
         webhookId: alphaWebhookId,
         pendingApprovalId: alphaPending.publicId,
         memberUserId: memberIds[0]!,
+        explorer: Object.fromEntries(
+          alphaMessages
+            .filter(
+              (m) =>
+                m.plan.key.startsWith('alpha-search-') || m.plan.key.startsWith('alpha-detail-'),
+            )
+            .map((m) => [m.plan.key, m.publicId]),
+        ),
+        previewMessageId: preview.publicId,
+        recentReceivedAt: alphaPlans
+          .filter((m) => m.receivedAt.getTime() >= now - 2 * 3_600_000)
+          .map((m) => m.receivedAt.toISOString())
+          .sort(),
       },
       beta: {
         domainId: betaDomain.publicId,
@@ -873,6 +993,8 @@ export async function seed(): Promise<SeedSummary> {
         approvalId: betaApproval.publicId,
         webhookId,
         marker: 'BETA-ONLY',
+        twinMessageId: byKey('beta-search-twin').publicId,
+        savedViewId: betaView.publicId,
       },
       expected: { dashboard7d },
     };
@@ -882,7 +1004,7 @@ export async function seed(): Promise<SeedSummary> {
       messages: alphaMessages.length + betaMessages.length,
       users: Object.keys(users).length + MEMBER_COUNT,
       quarantineEntries: [...alphaMessages, ...betaMessages].filter((m) => m.entry).length,
-      auditRows: ALPHA_AUDIT_ROWS + 5,
+      auditRows: ALPHA_AUDIT_ROWS + 2 + 5,
       durationMs: Date.now() - started,
     };
   } finally {

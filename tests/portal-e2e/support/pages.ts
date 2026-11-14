@@ -46,6 +46,8 @@ export interface PageCheck {
   unavailable?: string[];
   /** "Not offered" states (no step delivers them). */
   notOffered?: number;
+  /** Text that must not appear (e.g. a removed "arrives in step N" state, a masked value). */
+  absent?: string[];
 }
 
 export async function checkPage(page: Page, check: PageCheck): Promise<void> {
@@ -71,6 +73,9 @@ export async function checkPage(page: Page, check: PageCheck): Promise<void> {
     await expect
       .soft(main.getByText('Not offered', { exact: true }), `${check.path} not offered`)
       .toHaveCount(check.notOffered);
+  }
+  for (const text of check.absent ?? []) {
+    await expect.soft(main.getByText(text), `${check.path} has no ${text}`).toHaveCount(0);
   }
   await expectSettled(page, check.path);
   await expectNoSeriousA11yViolations(page, check.path);

@@ -7,13 +7,17 @@ import {
   type FixtureRequest,
   type FixtureResponse,
 } from '../types';
+import { revealAuditRows } from './messages';
 import { withPrincipal } from './reports';
 
 export { DEV_MOCK_MARKER } from '../types';
 
 /**
  * Audit trail and sign-in events (WP3): 150 synthetic entries per organization over 30 days,
- * filtered and paged like the api (range, action / actionPrefix, resource, actor, sort).
+ * filtered and paged like the api (range, action / actionPrefix, resource, actor, sort), plus
+ * the rows of the message fixtures (step 7.2): `message.revealed`, `message.rescan_requested`
+ * (resource `message`) and `dlp_evidence.read` (resource `dlp_evidence`, the message id), which
+ * the details page's audit history reads with `resourceType` + `resourceId`.
  * Metadata is synthetic and contains markup on purpose (the portal renders it as text).
  */
 
@@ -131,6 +135,16 @@ function loginRows(scope: string): LoginRow[] {
   });
 }
 
+/**
+ * The synthetic trail plus the rows of the message fixtures (`messages.ts`, step 7.2 E14:
+ * reveals, rescans, DLP evidence reads, the dataset's historic rescans), newest first.
+ */
+function withReveals(organizationId: string): AuditRow[] {
+  return [...revealAuditRows(organizationId), ...auditRows(organizationId)].sort(
+    (a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id),
+  );
+}
+
 function searchResponse(
   rows: AuditRow[] | FixtureResponse,
   request: FixtureRequest,
@@ -142,7 +156,7 @@ function searchResponse(
 export const fixtures: FixtureHandlers = {
   AuditLogsController_search_v1: (request) =>
     withPrincipal(request, (p) =>
-      searchResponse(filterAudit(auditRows(p.organizationId), request.query), request),
+      searchResponse(filterAudit(withReveals(p.organizationId), request.query), request),
     ),
 
   LoginEventsController_list_v1: (request) =>

@@ -25,6 +25,8 @@ import {
   type AuditSearch,
   hasAuditFilters,
   ownerOfScope,
+  residualOf,
+  resourceOf,
 } from './audit-logs.repository';
 import {
   ACTION_PREFIX_PATTERN,
@@ -121,8 +123,10 @@ interface SearchPlan {
  * Window `[from, to)` default 7 days, at most `API_AUDIT_MAX_RANGE_DAYS`; keyset `(created_at,
  * id)` in the sort direction with v1 cursors bound to the caller's organization, the filters, the
  * sort and the target (filter hash) and the first page's window. Without column filters a page is
- * a plain keyset page; with filters it is scan-bounded (`API_LIST_SCAN_BUDGET_ROWS`, D6) and may
- * be short. The first page of a search (no cursor) is audited: `audit.searched` /
+ * a plain keyset page; with `resourceType` and `resourceId` (step 7.2 §2 E3, ADR-0061 decision 6)
+ * the resource plan reads `audit_logs_org_resource_created_idx` in keyset order (exact, or
+ * budgeted over the resource's entries when other filters are present); with other filters it is
+ * scan-bounded (`API_LIST_SCAN_BUDGET_ROWS`, D6) and may be short. The first page of a search (no cursor) is audited: `audit.searched` /
  * `platform.audit_searched` with the filter names, the filter hash, SHA-256 of identifying
  * filter values and the row count, never the values.
  */
@@ -268,7 +272,33 @@ export class AuditLogsService {
     const keyOf = (row: AuditLogRecord): AuditKey => ({ createdAt: row.createdAt, id: row.id });
     let rows: AuditLogRecord[];
     let next: AuditKey | null;
-    if (!hasAuditFilters(plan.filter)) {
+    const resource = resourceOf(plan.filter);
+    if (resource) {
+      // Step 7.2 §2 E3: the resource plan over (owner, resource_type, resource_id, created_at,
+      // id): exact without other filters, budgeted over the resource's entries with them.
+      const residual = residualOf(plan.filter);
+      if (!hasAuditFilters(residual)) {
+        const fetched = await this.repository.resourcePage(search, resource, limit + 1);
+        const decision = decideKeysetPage({ fetched, limit, keyOf });
+        rows = fetched.slice(0, decision.rows);
+        next = decision.next;
+      } else {
+        const budget = this.config.API_LIST_SCAN_BUDGET_ROWS;
+        const boundary = await this.repository.resourceBoundary(search, resource, budget);
+        const fetched = await this.repository.resourceFiltered(
+          search,
+          resource,
+          residual,
+          boundary,
+          limit + 1,
+        );
+        const decision = decideScanPage({ fetched, limit, boundary, keyOf });
+        if (decision.budgetExhausted)
+          this.metrics.scanBudgetExhausted.inc({ resource: plan.resource });
+        rows = fetched.slice(0, decision.rows);
+        next = decision.next;
+      }
+    } else if (!hasAuditFilters(plan.filter)) {
       const fetched = await this.repository.page(search, limit + 1);
       const decision = decideKeysetPage({ fetched, limit, keyOf });
       rows = fetched.slice(0, decision.rows);

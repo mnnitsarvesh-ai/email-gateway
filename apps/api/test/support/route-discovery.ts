@@ -1,8 +1,8 @@
 /**
  * Route discovery for the route-level suites (route security, the step 6.1 conventions and the
  * WP5 inventory): every controller route of the running app (Nest discovery) with its
- * authorization, rate-limit, rate-class, idempotency, secret and cursor metadata, and the routes
- * Express actually serves.
+ * authorization, rate-limit (including the config-driven quarantine and reveal limits),
+ * rate-class, idempotency, secret and cursor metadata, and the routes Express actually serves.
  */
 import { type INestApplication, RequestMethod, VERSION_NEUTRAL } from '@nestjs/common';
 import { METHOD_METADATA, PATH_METADATA, VERSION_METADATA } from '@nestjs/common/constants';
@@ -17,6 +17,7 @@ import {
 } from '../../src/auth-contracts/decorators';
 import { API_GLOBAL_PREFIX } from '../../src/http/configure-api-app';
 import type { IdempotentOptions } from '../../src/http/idempotency/idempotency.interceptor';
+import { MESSAGE_REVEAL_RATE_LIMIT_KEY } from '../../src/modules/messages/message-reveal-rate-limit';
 import { QUARANTINE_RATE_LIMIT_KEY } from '../../src/modules/quarantine/quarantine-rate-limit';
 import {
   IDEMPOTENT_KEY,
@@ -43,6 +44,8 @@ export interface DiscoveredRoute {
   rateLimits: RateLimitOptions[];
   /** Config-driven quarantine rate limit kind (step 5.3), if any. */
   quarantineRate: string | null;
+  /** Config-driven reveal limit bucket (step 7.2 §2 E6), if any. */
+  revealRate: string | null;
   /** `@RateClass()` of the route (step 6.1 D8), if any. */
   rateClass: RateClass | null;
   /** `@Idempotent()` options (step 6.1 D9), if any. */
@@ -100,6 +103,9 @@ export function discoverRoutes(app: INestApplication): DiscoveredRoute[] {
             rateLimits: (Reflect.getMetadata(RATE_LIMIT_KEY, handler) as RateLimitOptions[]) ?? [],
             quarantineRate:
               (Reflect.getMetadata(QUARANTINE_RATE_LIMIT_KEY, handler) as string | undefined) ??
+              null,
+            revealRate:
+              (Reflect.getMetadata(MESSAGE_REVEAL_RATE_LIMIT_KEY, handler) as string | undefined) ??
               null,
             rateClass:
               reflector.getAllAndOverride<RateClass | undefined>(RATE_CLASS_KEY, targets) ?? null,

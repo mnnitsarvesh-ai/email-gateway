@@ -85,3 +85,55 @@ export const DOMAIN_NOT_FOUND = 'domain_not_found';
 
 export const domainNotFound = (): CodedHttpException =>
   new CodedHttpException(HttpStatus.NOT_FOUND, DOMAIN_NOT_FOUND, 'Domain not found');
+
+/** Step 7.2 (§2 E1, E2, §3.3): refusals of the message search. */
+export const MESSAGE_FILTER_FORBIDDEN = 'message_filter_forbidden';
+export const MESSAGE_SEARCH_TOO_BROAD = 'message_search_too_broad';
+export const MESSAGE_SEARCH_TIMEOUT = 'message_search_timeout';
+
+/**
+ * A filter the caller's permissions do not cover (§2 E2): `recipient`/`subject`/`subjectPrefix`
+ * need `message:reveal`, `deliveryStatus` needs `delivery:read`, `quarantineStatus` needs
+ * `quarantine:read`. Names the filter and the permission, never the value.
+ */
+export const messageFilterForbidden = (filter: string, permission: string): CodedHttpException =>
+  new CodedHttpException(
+    HttpStatus.FORBIDDEN,
+    MESSAGE_FILTER_FORBIDDEN,
+    `The ${filter} filter requires the ${permission} permission`,
+    { filter, permission },
+  );
+
+/** More subject keys than the cap start with the prefix in the range (§2 E1). */
+export const messageSearchTooBroad = (maxMatches: number): CodedHttpException =>
+  new CodedHttpException(
+    HttpStatus.UNPROCESSABLE_ENTITY,
+    MESSAGE_SEARCH_TOO_BROAD,
+    `More than ${maxMatches} messages in this range start with that subject; type more of it, ` +
+      'use the exact subject or narrow the range',
+    { maxMatches },
+  );
+
+/** A subject-prefix statement hit `MAX_EXECUTION_TIME` (MySQL 3024). */
+export const messageSearchTimeout = (): CodedHttpException =>
+  new CodedHttpException(
+    HttpStatus.SERVICE_UNAVAILABLE,
+    MESSAGE_SEARCH_TIMEOUT,
+    'The subject search took too long; type more of the subject, use the exact subject or ' +
+      'narrow the range',
+  );
+
+/** Step 7.2 (§2 E6): the code of a reveal whose audit rows could not be written. */
+export const SERVICE_UNAVAILABLE = 'service_unavailable';
+
+/**
+ * The `message.revealed` audit rows could not be committed (§2 E6, ADR-0062): the reveal answers
+ * no value. Uses the generic `service_unavailable` code (§3.3: reveal adds no error code).
+ */
+export const revealNotRecorded = (): CodedHttpException =>
+  new CodedHttpException(
+    HttpStatus.SERVICE_UNAVAILABLE,
+    SERVICE_UNAVAILABLE,
+    'The reveal could not be recorded in the audit log, so no value was returned; retry the ' +
+      'request',
+  );

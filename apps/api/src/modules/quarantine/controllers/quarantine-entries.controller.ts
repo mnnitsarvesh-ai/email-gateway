@@ -104,6 +104,16 @@ export function reply<T>(res: Response, result: IdempotentResult<T>): T {
 const searchQueryPipe = new ZodValidationPipe(EntrySearchQuerySchema);
 
 /**
+ * Step 7.2 (§2 E8, ADR-0062): the recipient rule of the operator entry reads, for the operation
+ * descriptions.
+ */
+const RECIPIENT_RULE =
+  '`recipient` is in clear only for holders of a quarantine decision permission ' +
+  '(`quarantine:release`, `quarantine:approve`, `quarantine:reject`, `quarantine:delete`, ' +
+  '`quarantine:request_release`, `quarantine:manage`) or `message:reveal`; for every other ' +
+  'caller it is masked (`f***@example.com`) and `recipientMasked` is true (step 7.2).';
+
+/**
  * Quarantine entries of the caller's organization (step 5.3 Q7, Q9–Q13, Q16, Q17, Q26):
  * search, manual quarantine, detail, history, preview, download grants, release, release
  * requests, reject and delete. Translation only; the tenant comes from the authenticated scope,
@@ -127,23 +137,37 @@ export class QuarantineEntriesController {
   @ApiOperation({
     summary: 'Search quarantine entries',
     description:
-      'Keyset-paginated search (newest `quarantinedAt` first) over a required, bounded range ' +
-      '(`to - from` ≤ QUARANTINE_SEARCH_MAX_RANGE_DAYS) with optional filters: state, kind, ' +
+      'Keyset-paginated search (newest `quarantinedAt` first) over a bounded range ' +
+      '(`to - from` ≤ QUARANTINE_SEARCH_MAX_RANGE_DAYS), required unless `messageId` is given ' +
+      '(then every entry of that message, any recipient and round, whenever it was quarantined; ' +
+      'read by the message-led unique key), with optional filters: state, kind, ' +
       'direction, reason, riskLevel or minRiskLevel, primaryEngine, decisive policyId/ruleId, ' +
       'exact envelope sender (`sender`, index-backed) or header From (`headerFrom`), ' +
       'senderDomain, exact recipient, hasAttachments, ' +
       'hasHardBlock, messageId. No free-text or subject search. The cursor is bound to the ' +
       'filters (`400 quarantine_cursor_invalid` with other filters). `subject` is returned only ' +
-      'to holders of `quarantine:preview`. Read replica: an entry just created may be missing ' +
-      'for the replication lag. Audited as `quarantine.searched` (filter hash and count only).',
+      'to holders of `quarantine:preview`. ' +
+      RECIPIENT_RULE +
+      ' The exact `recipient` filter needs the same permissions (a caller who reads ' +
+      'recipients masked gets `403 quarantine_filter_forbidden`: the search would confirm the ' +
+      'masked address; ADR-0062). Read replica: an entry ' +
+      'just created may be missing for the replication lag. Audited as `quarantine.searched` ' +
+      '(filter hash and count only).',
   })
-  @ApiQueryOf(EntrySearchQuerySchema, ['from', 'to'])
+  @ApiQueryOf(EntrySearchQuerySchema)
   @ApiOkResponse({ schema: zodToOpenApi(EntryPageSchema), headers: NO_STORE_HEADER })
-  @ApiErrors(400, 401, 403)
+  @ApiErrors(400, 401)
   @ApiCodedError(400, 'Invalid range or cursor', [
     'quarantine_search_range_invalid',
     'quarantine_cursor_invalid',
   ])
+  @ApiCodedError(
+    403,
+    'Missing `quarantine:read` (`forbidden`), or an exact `recipient` filter from a caller who ' +
+      'reads recipients masked (`quarantine_filter_forbidden`, `filter` names it)',
+    ['forbidden', 'quarantine_filter_forbidden'],
+    { filter: { type: 'string' } },
+  )
   search(
     @CurrentPrincipal() principal: Principal,
     @CurrentScope() scope: TenantScope,
@@ -194,8 +218,10 @@ export class QuarantineEntriesController {
     description:
       'The entry with its explanation lines, floor reasons, reason codes, decisive rule, ' +
       'release attempts, `allowedActions` for the caller (advisory; every route re-checks) and ' +
-      '`contentAvailable`. `subject` only with `quarantine:preview`. Read replica; each call ' +
-      'writes a `view` action and the audit row `quarantine.entry_viewed`.',
+      '`contentAvailable`. `subject` only with `quarantine:preview`. ' +
+      RECIPIENT_RULE +
+      ' Read replica; each call writes a `view` action and the audit row ' +
+      '`quarantine.entry_viewed`.',
   })
   @ApiEntryId()
   @ApiOkResponse({ schema: zodToOpenApi(EntryDetailSchema), headers: NO_STORE_HEADER })

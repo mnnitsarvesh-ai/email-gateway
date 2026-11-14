@@ -174,6 +174,46 @@ describe('Quarantine entries (/quarantine)', () => {
     ).not.toBeInTheDocument();
   });
 
+  it('shows the masked recipient to non-deciders and the clear one to deciders (step 7.2 E8)', async () => {
+    mockEntries({
+      first: {
+        items: [entrySummary({ recipient: 'p***@alpha.example.test', recipientMasked: true })],
+        nextCursor: null,
+      },
+    });
+    const { container, unmount } = renderWithProviders(<QuarantinePage />, {
+      role: 'read_only_user',
+      route: '/quarantine',
+    });
+    const masked = await screen.findByText('p***@alpha.example.test');
+    expect(masked.closest('[data-sensitive]')).toHaveAttribute('data-sensitive', 'masked');
+    await expectNoAxeViolations(container);
+    unmount();
+    mockEntries({ first: { items: [entrySummary()], nextCursor: null } });
+    renderWithProviders(<QuarantinePage />, { role: 'security_analyst', route: '/quarantine' });
+    const clear = await screen.findByText('priya.rao4@alpha.example.test');
+    expect(clear.closest('[data-sensitive]')).toBeNull();
+    expect(screen.getByLabelText('Recipient (exact)')).toBeInTheDocument();
+  });
+
+  it('a masked caller gets no exact recipient filter; a shared link with one is not sent (ADR-0062)', async () => {
+    mockEntries({
+      first: {
+        items: [entrySummary({ recipient: 'p***@alpha.example.test', recipientMasked: true })],
+        nextCursor: null,
+      },
+    });
+    renderWithProviders(<QuarantinePage />, {
+      role: 'read_only_user',
+      route: '/quarantine?recipient=priya.rao4%40alpha.example.test&state=held',
+    });
+    await screen.findByText('p***@alpha.example.test');
+    expect(screen.queryByLabelText('Recipient (exact)')).not.toBeInTheDocument();
+    expect(screen.getByText(/recipient filter of this link was not applied/)).toBeInTheDocument();
+    expect(lastSearch().get('state')).toBe('held');
+    expect(lastSearch().has('recipient')).toBe(false);
+  });
+
   it('shows empty, filtered-empty and error states', async () => {
     mockEntries({ first: { items: [], nextCursor: null } });
     renderWithProviders(<QuarantinePage />, { role: 'security_analyst', route: '/quarantine' });

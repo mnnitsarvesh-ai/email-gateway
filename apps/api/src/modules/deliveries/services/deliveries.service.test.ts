@@ -82,7 +82,12 @@ function harness(found: DeliveryMessageRow | null = message) {
     findMessage: vi.fn(() => Promise.resolve(found)),
     deliveriesOf: vi.fn(() =>
       Promise.resolve([
-        delivery(12n, 2n, { status: 'bounced', dsnQueueId: 'DSN1', direction: 'outbound' }),
+        delivery(12n, 2n, {
+          status: 'bounced',
+          dsnQueueId: 'DSN1',
+          direction: 'outbound',
+          finalSmtpResponse: '550 5.1.1 <b@y.test>: Recipient address rejected',
+        }),
         delivery(11n, 1n),
         delivery(99n, 999n),
       ]),
@@ -93,7 +98,7 @@ function harness(found: DeliveryMessageRow | null = message) {
     eventsOf: vi.fn(() =>
       Promise.resolve([
         event(5n, 11n, 'delivered'),
-        event(6n, 12n, 'bounced'),
+        { ...event(6n, 12n, 'bounced'), detail: 'host mx.example said: 550 bob.y@y.test unknown' },
         event(7n, 12n, 'bounced'),
       ]),
     ),
@@ -108,7 +113,7 @@ function harness(found: DeliveryMessageRow | null = message) {
 }
 
 describe('DeliveriesService', () => {
-  it('returns every delivery of the message by rcptSeq, without internal ids', async () => {
+  it('returns every delivery of the message by rcptSeq, without internal ids, masked (7.2)', async () => {
     const h = harness();
     const view = await h.service.forMessage(scope, message.publicId);
     expect(view.message).toEqual({
@@ -121,10 +126,16 @@ describe('DeliveriesService', () => {
     expect(
       view.deliveries.map((d) => [d.rcptSeq, d.recipient, d.status, d.dsnGenerated, d.direction]),
     ).toEqual([
-      [0, 'a@x.test', 'delivered', false, 'outbound'],
-      [1, 'b@y.test', 'bounced', true, 'outbound'],
+      [0, 'a***@x.test', 'delivered', false, 'outbound'],
+      [1, 'b***@y.test', 'bounced', true, 'outbound'],
+    ]);
+    expect(view.deliveries.every((d) => d.recipientMasked)).toBe(true);
+    expect(view.deliveries.map((d) => d.finalSmtpResponse)).toEqual([
+      '250 2.0.0 Ok',
+      '550 5.1.1 <b***@y.test>: Recipient address rejected',
     ]);
     expect(JSON.stringify(view)).not.toMatch(/"id":"?1[12]\b|recipientId|deliveryId/);
+    expect(JSON.stringify(view)).not.toMatch(/a@x\.test|b@y\.test/);
   });
 
   it('404 for a message that is not the organization’s', async () => {
@@ -143,6 +154,11 @@ describe('DeliveriesService', () => {
     expect(page.data.map((e) => [e.rcptSeq, e.toStatus])).toEqual([
       [0, 'delivered'],
       [1, 'bounced'],
+    ]);
+    // Step 7.2 (§2 E9): addresses inside the detail are masked.
+    expect(page.data.map((e) => e.detail)).toEqual([
+      null,
+      'host mx.example said: 550 b***@y.test unknown',
     ]);
     expect(page.nextCursor).toBe(encodeCursor(6n));
     expect(h.repository.eventsOf).toHaveBeenCalledWith(scope, message, { take: 3 });
@@ -172,9 +188,9 @@ describe('DeliveriesService', () => {
       direction: 'outbound',
       limit: 2,
     });
-    expect(page.data.map((d) => [d.messageId, d.rcptSeq, d.recipient])).toEqual([
-      [message.publicId, 1, 'b@y.test'],
-      [message.publicId, 0, 'a@x.test'],
+    expect(page.data.map((d) => [d.messageId, d.rcptSeq, d.recipient, d.recipientMasked])).toEqual([
+      [message.publicId, 1, 'b***@y.test', true],
+      [message.publicId, 0, 'a***@x.test', true],
     ]);
     expect(page.nextCursor).not.toBeNull();
     expect(h.repository.list).toHaveBeenCalledWith(

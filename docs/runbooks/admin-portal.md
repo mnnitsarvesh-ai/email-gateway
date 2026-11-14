@@ -1,8 +1,8 @@
 # Runbook: admin portal
 
-Operating `apps/admin-portal` (step 7.1): a Next.js 15 application whose same-origin BFF (`/bff/*`) holds the api tokens in a sealed httpOnly cookie and forwards to the api over the internal network ([ADR-0058](../architecture/adr/0058-admin-portal-architecture.md), [ADR-0060](../architecture/adr/0060-portal-ingress-and-trusted-client-ip-forwarding.md), [design note](../plan/steps/20-admin-portal.md)). Local commands: [running and testing](../frontend/running-and-testing.md). Pages: [page inventory](../frontend/page-inventory.md).
+Operating `apps/admin-portal` (steps 7.1 and 7.2): a Next.js 15 application whose same-origin BFF (`/bff/*`) holds the api tokens in a sealed httpOnly cookie and forwards to the api over the internal network ([ADR-0058](../architecture/adr/0058-admin-portal-architecture.md), [ADR-0060](../architecture/adr/0060-portal-ingress-and-trusted-client-ip-forwarding.md), [design note](../plan/steps/20-admin-portal.md)). Local commands: [running and testing](../frontend/running-and-testing.md). Pages: [page inventory](../frontend/page-inventory.md).
 
-Contents: [deploy](#deploy) · [configuration and secrets](#configuration-and-secrets) · [session key rotation](#session-key-rotation) · [forwarder token rotation](#forwarder-token-rotation) · [health checks](#health-checks) · [logs](#logs) · [CSP problems](#csp-problems) · [login problems](#login-problems) · [refresh and session expiry](#refresh-and-session-expiry) · [rollback](#rollback)
+Contents: [deploy](#deploy) · [configuration and secrets](#configuration-and-secrets) · [session key rotation](#session-key-rotation) · [forwarder token rotation](#forwarder-token-rotation) · [health checks](#health-checks) · [logs](#logs) · [CSP problems](#csp-problems) · [login problems](#login-problems) · [refresh and session expiry](#refresh-and-session-expiry) · [email explorer and details](#email-explorer-and-details-step-72) · [rollback](#rollback)
 
 ## Deploy
 
@@ -81,6 +81,15 @@ The policy is set per request by `src/middleware.ts`: `script-src 'self' 'nonce-
 - **Unexpected logouts with "Your session expired":** the refresh was refused (`401` from `/auth/refresh`): the refresh token expired (`AUTH_REFRESH_TOKEN_TTL_SECONDS` idle / `AUTH_SESSION_MAX_AGE_SECONDS` absolute), the user or an administrator signed out everywhere, the account was disabled, or **refresh-token reuse** was detected (two refreshes of one token, e.g. a browser that does not support Web Locks with many tabs, or a proxy that replays requests). Reuse revokes the whole session family; the api logs and audits it.
 - **Many refreshes per minute in the api log:** more than about two per tab per minute means the proactive timer misbehaves (it is bounded to ≥ 5 s and to half the token lifetime); the api's refresh limit is 60/min per IP.
 - **Override ended unexpectedly:** override tokens are never refreshed; at `expiresAt` the BFF drops the override and the user continues as the operator.
+
+## Email explorer and details (step 7.2)
+
+Pages 9 (`/messages`) and 10 (`/messages/[messageId]`) are operated through the api: search refusals (`422 message_search_too_broad`, `503 message_search_timeout`), `403 message_filter_forbidden`, the reveal limit (`429` with a countdown in the page), the `message.revealed` audit rows, saved-view limits and conflicts, the index rollout and the cursor invalidation after a deploy are in the [Email Explorer runbook](email-explorer.md). Portal-side facts:
+
+- Subjects, recipient addresses and To/Cc/Subject header values arrive masked from the api for every user; clear values exist only in the page's component state after an explicit **Show subjects** / **Reveal** (CSRF-protected `POST`s, `no-store`), never in the query cache, the URL or browser storage, and they are gone after "Hide again", switching off or leaving the page. A report of "subjects visible after reload" is a defect.
+- The explorer keeps its filters in the URL (shareable); a shared link with filters the recipient may not use is applied without them and says so. Column visibility is per viewer (browser storage); saved views are server-side (`/saved-views`) and not available inside a platform override (`403 saved_views_member_only`, stated in the Views menu).
+- Each details section loads only when opened; a section the user may not open renders "You do not have access to this section" without loading data. The sanitized preview of a quarantined copy is requested only after the explicit click (each preview read is audited, step 5.3).
+- The tenant's api budget (`organization_limits.api_requests_per_minute`, standard plan 300/min, shared by every user of the tenant) applies to the portal like any client: a details page costs one request per opened section plus the shared detail and scan reads.
 
 ## Rollback
 

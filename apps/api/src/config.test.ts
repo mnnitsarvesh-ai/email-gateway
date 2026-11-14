@@ -1412,3 +1412,45 @@ describe('loadApiConfig: admin portal trusted forwarder (step 7.1 §3.5, ADR-006
     }
   });
 });
+
+describe('loadApiConfig: email explorer and details (step 7.2 §2 E16)', () => {
+  it('defaults the search cap, the search timeout, the saved views per user and the reveal limit', () => {
+    expect(loadApiConfig(valid)).toMatchObject({
+      API_MESSAGES_SEARCH_MAX_MATCHES: 5000,
+      API_MESSAGES_SEARCH_TIMEOUT_MS: 5000,
+      SAVED_VIEWS_MAX_PER_USER: 50,
+      API_MESSAGES_REVEAL_PER_MINUTE: 30,
+    });
+  });
+
+  it('accepts the bounds', () => {
+    for (const [key, value] of [
+      ['API_MESSAGES_SEARCH_MAX_MATCHES', '500'],
+      ['API_MESSAGES_SEARCH_MAX_MATCHES', '50000'],
+      ['API_MESSAGES_SEARCH_TIMEOUT_MS', '1000'],
+      ['API_MESSAGES_SEARCH_TIMEOUT_MS', '30000'],
+      ['SAVED_VIEWS_MAX_PER_USER', '1'],
+      ['SAVED_VIEWS_MAX_PER_USER', '200'],
+      ['API_MESSAGES_REVEAL_PER_MINUTE', '1'],
+      ['API_MESSAGES_REVEAL_PER_MINUTE', '600'],
+    ] as const) {
+      expect(loadApiConfig({ ...valid, [key]: value })[key], `${key}=${value}`).toBe(Number(value));
+    }
+  });
+
+  it.each([
+    ['API_MESSAGES_SEARCH_MAX_MATCHES', '499'],
+    ['API_MESSAGES_SEARCH_MAX_MATCHES', '50001'],
+    ['API_MESSAGES_SEARCH_MAX_MATCHES', 'many'],
+    ['API_MESSAGES_SEARCH_TIMEOUT_MS', '999'],
+    ['API_MESSAGES_SEARCH_TIMEOUT_MS', '30001'],
+    ['SAVED_VIEWS_MAX_PER_USER', '0'],
+    ['SAVED_VIEWS_MAX_PER_USER', '201'],
+    ['SAVED_VIEWS_MAX_PER_USER', '1.5'],
+    ['API_MESSAGES_REVEAL_PER_MINUTE', '0'],
+    ['API_MESSAGES_REVEAL_PER_MINUTE', '601'],
+    ['API_MESSAGES_REVEAL_PER_MINUTE', 'lots'],
+  ])('refuses %s=%s naming the key', (key, value) => {
+    expect(rejection({ ...valid, [key]: value })).toContain(key);
+  });
+});

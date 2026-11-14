@@ -202,9 +202,16 @@ describe.skipIf(gate.skip)('SMTP stack: connection limits', { timeout: 120_000 }
       }
       expect(refused().length).toBeGreaterThan(0);
       expect(refused()[0]!.received).toMatch(/421[ -]4\.7\.0 .*too many connections/i);
-      // The sessions within the limit were greeted normally.
-      const greeted = probes.filter((p) => /^220[ -]/.test(p.received)).length;
-      expect(greeted).toBeGreaterThan(0);
+      // The sessions within the limit are greeted normally. postscreen refuses the excess
+      // sessions at once, but hands the others to smtpd, which greets only after its process has
+      // started: with a cold process pool (smtpd processes exit after max_idle) the 220s arrive
+      // about a second after the first 421, so they are awaited like the refusals above.
+      const greeted = () => probes.filter((p) => /^220[ -]/.test(p.received)).length;
+      const greetDeadline = Date.now() + 30_000;
+      while (greeted() === 0 && Date.now() < greetDeadline) {
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      expect(greeted()).toBeGreaterThan(0);
     } finally {
       for (const probe of probes) probe.socket.destroy();
     }

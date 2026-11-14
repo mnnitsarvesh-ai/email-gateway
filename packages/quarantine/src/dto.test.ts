@@ -28,6 +28,7 @@ const summary: QuarantineEntrySummary = {
   reason: 'phishing',
   direction: 'inbound',
   recipient: 'a@corp.example',
+  recipientMasked: false,
   sender: { envelope: 'x@ext.example', headerFrom: null },
   subject: null,
   receivedAt: T,
@@ -49,6 +50,14 @@ describe('DTO schemas (Q26)', () => {
   it('summary, detail, release, approval and page', () => {
     expect(quarantineEntrySummarySchema.parse(summary)).toEqual(summary);
     expect(() => quarantineEntrySummarySchema.parse({ ...summary, body: 'x' })).toThrow();
+    // Step 7.2 (§2 E8): `recipientMasked` is required; a masked recipient parses.
+    const masked = { ...summary, recipient: 'a***@corp.example', recipientMasked: true };
+    expect(quarantineEntrySummarySchema.parse(masked)).toEqual(masked);
+    const { recipientMasked: _omitted, ...withoutFlag } = summary;
+    expect(() => quarantineEntrySummarySchema.parse(withoutFlag)).toThrow();
+    expect(() =>
+      quarantineEntrySummarySchema.parse({ ...summary, recipientMasked: 'yes' }),
+    ).toThrow();
     expect(() =>
       quarantineEntrySummarySchema.parse({ ...summary, state: 'quarantined' }),
     ).toThrow();

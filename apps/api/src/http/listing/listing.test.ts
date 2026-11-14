@@ -155,6 +155,64 @@ describe('defineListQuery (step 6.1 D4)', () => {
   });
 });
 
+describe('the domain filter type (step 7.2 §2 E2)', () => {
+  const DomainQuery = defineListQuery({
+    filters: { senderDomain: { type: 'domain' } },
+    sorts: ['-receivedAt'],
+    defaultSort: '-receivedAt',
+  });
+  const parsed = (value: string) => DomainQuery.parse({ senderDomain: value }).filters.senderDomain;
+  const refused = (value: string) => {
+    const result = DomainQuery.safeParse({ senderDomain: value });
+    if (result.success) return expect.fail(`expected ${JSON.stringify(value)} to be refused`);
+    return formatZodIssues(result.error);
+  };
+
+  it('trims, lower-cases and strips one leading @', () => {
+    expect(parsed('Example.COM')).toEqual({ values: ['example.com'] });
+    expect(parsed('  @Mail.Example.org ')).toEqual({ values: ['mail.example.org'] });
+    expect(parsed('xn--bcher-kva.example')).toEqual({ values: ['xn--bcher-kva.example'] });
+    expect(parsed('a-b.c-d.example')).toEqual({ values: ['a-b.c-d.example'] });
+    expect(parsed('1.2.example')).toEqual({ values: ['1.2.example'] });
+  });
+
+  it('accepts labels of 63 characters and names of 253 characters', () => {
+    const label63 = `a${'b'.repeat(61)}c`;
+    expect(parsed(`${label63}.example`)).toEqual({ values: [`${label63}.example`] });
+    // 4 labels of 63 + 3 dots = 255 > 253; 3 × 63 + 61 + 3 dots = 253.
+    const name253 = [label63, label63, label63, 'd'.repeat(61)].join('.');
+    expect(name253).toHaveLength(253);
+    expect(parsed(name253)).toEqual({ values: [name253] });
+    expect(refused(`${name253.slice(0, -1)}de`).join(' ')).toContain('senderDomain');
+  });
+
+  it.each([
+    ['', 'empty'],
+    ['@', 'only the @'],
+    ['@@example.com', 'two @'],
+    ['localhost', 'one label'],
+    ['-bad.example', 'leading hyphen'],
+    ['bad-.example', 'trailing hyphen'],
+    ['exa mple.com', 'space'],
+    ['example..com', 'empty label'],
+    ['.example.com', 'leading dot'],
+    ['example.com.', 'trailing dot'],
+    ['bücher.example', 'U-label (not A-label)'],
+    ['user@example.com', 'an address'],
+    [`${'a'.repeat(64)}.example`, 'label of 64'],
+    ['exa_mple.com', 'underscore'],
+  ])('refuses %j (%s), naming the parameter and never echoing the value', (value) => {
+    const messages = refused(value);
+    expect(messages.join(' ')).toContain('senderDomain');
+    if (value.length > 3) expect(messages.join(' ')).not.toContain(value);
+  });
+
+  it('is a single value (no comma lists) and has no range operators', () => {
+    expect(refused('a.example,b.example').join(' ')).toContain('senderDomain');
+    expect(DomainQuery.safeParse({ 'senderDomain.gte': 'a.example' }).success).toBe(false);
+  });
+});
+
 describe('filterHash (step 6.1 D3)', () => {
   it('is 16 hex characters and independent of key and value order', () => {
     const a = Query.parse({ verdict: 'spam,phishing', direction: 'inbound' });

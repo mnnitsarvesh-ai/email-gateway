@@ -26,6 +26,9 @@
  * notification routes (`NEW_IN_6_2`, examples required, lists v1), five transactional keyed
  * routes and the `SECRET_BEARING_REDACTED_REPLAY` allow-list. Step 7.1
  * (docs/plan/steps/20-admin-portal.md §3.3) adds three expensive report routes (`NEW_IN_7_1`).
+ * Step 7.2 (docs/plan/steps/21-email-explorer-details.md §3.3) adds the five saved views routes
+ * (WP1) and the headers route and the two audited reveal operations (WP2) (`NEW_IN_7_2`,
+ * examples required, the list v1, in the explorer manifest).
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -211,6 +214,22 @@ const NEW_IN_7_1 = [
   'get /api/v1/reports/top-domains',
 ];
 
+/**
+ * Step 7.2 §3.3 (docs/plan/steps/21-email-explorer-details.md), WP1: the saved views routes; WP2:
+ * the headers route and the two reveal operations (examples required, the list v1, exactly the
+ * explorer manifest).
+ */
+const NEW_IN_7_2 = [
+  'get /api/v1/saved-views',
+  'post /api/v1/saved-views',
+  'get /api/v1/saved-views/:viewId',
+  'put /api/v1/saved-views/:viewId',
+  'delete /api/v1/saved-views/:viewId',
+  'get /api/v1/messages/:messageId/headers',
+  'post /api/v1/messages/reveal',
+  'post /api/v1/messages/:messageId/reveal',
+];
+
 /** D9: secret-bearing responses (sensitive class, never idempotency-stored). */
 const SECRET_BEARING = [
   'post /api/v1/api-keys',
@@ -390,10 +409,11 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     await api?.close();
   });
 
-  it('discovers every route once (269 operations under /api/v1 plus the 3 internal endpoints)', () => {
+  it('discovers every route once (277 operations under /api/v1 plus the 3 internal endpoints)', () => {
     expect(facts.length).toBe(byKey.size);
-    // 249 after step 6.1, plus the 17 routes of step 6.2, plus the 3 reports of step 7.1.
-    expect(facts.filter((f) => f.key.includes(' /api/v1/')).length).toBe(269);
+    // 249 after step 6.1, plus the 17 routes of step 6.2, plus the 3 reports of step 7.1, plus
+    // the 5 saved views routes (WP1) and the headers and two reveal routes (WP2) of step 7.2.
+    expect(facts.filter((f) => f.key.includes(' /api/v1/')).length).toBe(277);
     expect(
       facts
         .filter((f) => isInternal(f.key))
@@ -488,9 +508,9 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     }
   });
 
-  it('gives every route new in 6.1, 6.2 and 7.1 explicit response examples (D14)', () => {
+  it('gives every route new in 6.1, 6.2, 7.1 and 7.2 explicit response examples (D14)', () => {
     const failures: string[] = [];
-    for (const key of [...NEW_IN_6_1, ...NEW_IN_6_2, ...NEW_IN_7_1]) {
+    for (const key of [...NEW_IN_6_1, ...NEW_IN_6_2, ...NEW_IN_7_1, ...NEW_IN_7_2]) {
       const op = operation(key);
       if (!op) {
         failures.push(`${key}: missing`);
@@ -533,6 +553,8 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     // NEW_IN_6_2 is exactly the step 6.2 manifest.
     expect(COVERAGE_BY_AREA.webhooks.map((c) => c.route).sort()).toEqual([...NEW_IN_6_2].sort());
     expect(NEW_IN_6_2).toHaveLength(17);
+    // NEW_IN_7_2 is exactly the step 7.2 explorer manifest (WP1, WP2).
+    expect(COVERAGE_BY_AREA.explorer.map((c) => c.route).sort()).toEqual([...NEW_IN_7_2].sort());
   });
 
   it('has one coverage entry per served route and none for a route that does not exist (§3.8)', () => {
@@ -547,6 +569,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
       expect(NEW_IN_6_1.includes(route), route).toBe(false);
       expect(NEW_IN_6_2.includes(route), route).toBe(false);
       expect(NEW_IN_7_1.includes(route), route).toBe(false);
+      expect(NEW_IN_7_2.includes(route), route).toBe(false);
     }
   });
 
@@ -590,10 +613,13 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
         failures.push(`${key}: manifest cursor ${coverage.get(key)?.cursor} ≠ ${route.cursor}`);
       }
       if (
-        (NEW_IN_6_1.includes(key) || NEW_IN_6_2.includes(key) || NEW_IN_7_1.includes(key)) &&
+        (NEW_IN_6_1.includes(key) ||
+          NEW_IN_6_2.includes(key) ||
+          NEW_IN_7_1.includes(key) ||
+          NEW_IN_7_2.includes(key)) &&
         route.cursor === 'v0'
       )
-        failures.push(`${key}: 6.1/6.2/7.1 list on v0`);
+        failures.push(`${key}: 6.1/6.2/7.1/7.2 list on v0`);
       if (route.cursor !== null && operation(key)!['x-eg-cursor'] !== route.cursor) {
         failures.push(`${key}: x-eg-cursor not documented`);
       }
@@ -601,9 +627,9 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     expect(failures).toEqual([]);
     const counts = { v0: 0, v1: 0 };
     for (const { route } of facts) if (route.cursor) counts[route.cursor] += 1;
-    // 33 pre-6.1 lists keep the unsigned v0 cursors; the 9 lists of 6.1 and the 2 of 6.2
-    // (webhooks, deliveries) are signed v1.
-    expect(counts).toEqual({ v0: 33, v1: 11 });
+    // 33 pre-6.1 lists keep the unsigned v0 cursors; the 9 lists of 6.1, the 2 of 6.2
+    // (webhooks, deliveries) and the saved views list of 7.2 are signed v1.
+    expect(counts).toEqual({ v0: 33, v1: 12 });
   });
 
   it('every body and query schema of every route is strict at every object node (D1)', () => {

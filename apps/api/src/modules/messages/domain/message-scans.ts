@@ -56,6 +56,7 @@ import type {
   UrlRewriteView,
   UrlScanView,
 } from '../dto/message-scans.schemas';
+import { maskAddressesInText } from './sensitive-masking';
 import type {
   AttachmentPartRow,
   AttachmentResultRow,
@@ -104,7 +105,11 @@ const symbolSchema = z.object({
   options: z.array(z.string().max(200)).max(5).default([]),
 });
 
-/** `evidence.signals` (S9) as symbols; invalid entries are skipped, at most 200. */
+/**
+ * `evidence.signals` (S9) as symbols; invalid entries are skipped, at most 200. Step 7.2 (§2 E9,
+ * ADR-0062): the local part of every address inside an option is masked for every caller (Rspamd
+ * options carry envelope and header addresses; never revealed).
+ */
 export function symbolsOf(evidence: unknown): ScanSymbol[] {
   if (evidence === null || typeof evidence !== 'object' || Array.isArray(evidence)) return [];
   const signals = (evidence as { signals?: unknown }).signals;
@@ -112,7 +117,9 @@ export function symbolsOf(evidence: unknown): ScanSymbol[] {
   const out: ScanSymbol[] = [];
   for (const signal of signals) {
     const parsed = symbolSchema.safeParse(signal);
-    if (parsed.success) out.push(parsed.data);
+    if (parsed.success) {
+      out.push({ ...parsed.data, options: parsed.data.options.map(maskAddressesInText) });
+    }
     if (out.length >= MAX_SYMBOLS) break;
   }
   return out;

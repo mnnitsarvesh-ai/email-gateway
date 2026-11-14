@@ -198,6 +198,8 @@ export async function apiSession(
       // Roles, sessions and tokens cascade with the user; login audit rows reference the
       // organization (fixture data, removed like the api suites remove theirs).
       await prisma.loginAuditLog.deleteMany({ where: { organizationId: organization.id } });
+      // Step 7.2: the user's saved views (they would also cascade with the user).
+      await prisma.savedView.deleteMany({ where: { userId: user.id } });
       await prisma.user.deleteMany({ where: { id: user.id } });
       if (!existingSettings) {
         await prisma.organizationSetting.deleteMany({ where: { organizationId: organization.id } });

@@ -546,6 +546,8 @@ export class SmtpFixtures {
         // Step 6.2: webhook and notification rows (RESTRICT keys on organizations; the
         // partitioned delivery tables have none).
         await this.deleteWebhookTenantRows(ids);
+        // Step 7.2: saved explorer views (foreign key to organizations, Restrict).
+        await this.prisma.savedView.deleteMany({ where });
         await this.prisma.organizationLimit.deleteMany({ where });
         // Plan features a suite switched on (step 4.6: attachment_sandbox; Restrict).
         await this.prisma.organizationFeature.deleteMany({ where });

@@ -1,41 +1,49 @@
+import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import { PrismaReadService } from '@email-gateway/common';
 import { Prisma } from '@email-gateway/database';
 import { tenantWhere, type TenantScope } from '../../../auth-contracts/tenant-scope';
 import type { CursorDirection } from '../../../http/cursor/cursor-codec';
 import { assertEcho, InconsistentReadError } from '../../../http/listing/echo-check';
-import { boundaryOffset } from '../../../http/listing/scan-budget';
+import { isQueryTimeout } from '../../reports/domain/report-errors';
 import { MessagesRepository } from '../../tenant-data/messages.repository';
 import { clampTake } from '../../tenant-data/page';
 import type { TimeIdKey } from '../domain/v1-list';
-import type { MessageListFilters } from '../dto/message-data.schemas';
-import { afterKey, allOf, column, keysetOrder, upToKey } from './keyset-sql';
+import { messageSearchTimeout } from '../messages.errors';
+import {
+  type ForeignDriver,
+  foreignBoundarySql,
+  foreignKeysSql,
+  foreignPageSql,
+  messagesBoundarySql,
+  messagesByKeysSql,
+  type MessagesTableDriver,
+  messagesPageSql,
+  prefixPageSql,
+  prefixProbeSql,
+  recipientBoundarySql,
+  recipientPageSql,
+  recipientRowsSql,
+  type ResolvedResiduals,
+  residualSql,
+} from './message-list-drivers';
+
+export { MESSAGE_INDEXES } from './message-list-drivers';
 
 /**
- * Reads of the step 6.1 message data routes (WP2, D5, D15) on the replica
- * (`PrismaReadService`): the four plans of `GET /messages`, the detail, the recipients with
- * their latest delivery, and the public ids of the domains and users the rows reference. Every
- * query matches the scope's organization first and every partitioned table is read with its
- * `received_at`; every returned row is echo-checked (organization and queried key) and a
- * mismatch is `503 inconsistent_read`. SQL identifiers are code constants; values are bound.
- * The SQL builders are exported for the EXPLAIN checks (integration/messages-explain.test.ts).
+ * Reads of the message data routes (step 6.1 WP2, D5, D15; the step 7.2 search drivers, §2 E1,
+ * §3.2) on the replica (`PrismaReadService`): the driver statements of `GET /messages` (SQL in
+ * `message-list-drivers.ts`), the detail, the recipients with their latest delivery, and the
+ * public ids of the domains and users the rows reference. Every query matches the scope's
+ * organization first and every partitioned table is read with its `received_at`. Every returned
+ * row is echo-checked (D15): the organization, the range, the per-statement `echo_nonce` of the
+ * driver statements and, where the key is exact-valued (verdict, delivery and quarantine
+ * states), the key; a mismatch is `503 inconsistent_read`. The subject-prefix statements carry
+ * `MAX_EXECUTION_TIME`; a timeout is `503 message_search_timeout`.
  */
 
-/** Index names (code constants, step 1.1 baseline and the step 6.1 `rest_api` migration). */
-export const MESSAGE_INDEXES = {
-  orgReceived: 'email_messages_organization_id_received_at_id_idx',
-  orgVerdict: 'email_messages_org_verdict_received_idx',
-  recipientAddress: 'email_recipients_organization_id_address_received_at_idx',
-} as const;
-
-const RECEIVED_AT = column('received_at');
-const ID = column('id');
-
-const MESSAGE_COLUMNS = Prisma.sql`id, received_at, organization_id, domain_id, direction, status,
-  status_changed_at, subject, envelope_from, header_from, recipient_count, attachment_count,
-  size_bytes, final_verdict, final_action, risk_score`;
-
 interface RawMessageRow {
+  echo_nonce?: string;
   id: bigint;
   received_at: Date;
   organization_id: bigint;
@@ -93,7 +101,7 @@ const toRow = (raw: RawMessageRow): MessageListRow => ({
   riskScore: raw.risk_score === null ? null : Number(raw.risk_score),
 });
 
-/** What every plan reads: the scope, the resolved window and the keyset position. */
+/** What every driver reads: the resolved window, the keyset position and the order. */
 export interface MessagePlanInput {
   organizationId: bigint;
   range: { from: Date; to: Date };
@@ -103,138 +111,26 @@ export interface MessagePlanInput {
   take: number;
 }
 
-/** A filter of the scan plan, resolved (the domain public id already turned into its row id). */
-export interface ResolvedMessageFilters extends Omit<MessageListFilters, 'domainId'> {
-  domainId?: bigint;
+/** A page of the `recipient` driver with residuals: message rows with their recipient row id. */
+export interface RecipientPageRow extends MessageListRow {
+  rid: bigint;
 }
 
-const forceIndex = (name: string) => Prisma.raw(`FORCE INDEX (${name})`);
-
-/**
- * Plan 1 (D5): no filter, keyset `(received_at, id)` over `(organization_id, received_at, id)`;
- * the statement shape of MessagesRepository.listRecent (Q1) with the index named. Without the
- * hint MySQL 8.4 picks `email_messages_org_verdict_received_idx` for that statement and sorts
- * (EXPLAIN in integration/messages-explain.test.ts), so the list states the index.
- */
-export function indexPlanSql(input: MessagePlanInput): Prisma.Sql {
-  return Prisma.sql`SELECT ${MESSAGE_COLUMNS} FROM email_messages ${forceIndex(MESSAGE_INDEXES.orgReceived)}
-    WHERE organization_id = ${input.organizationId}
-      AND received_at >= ${input.range.from} AND received_at < ${input.range.to}
-      AND ${afterKey(RECEIVED_AT, ID, input.after, input.direction)}
-    ${keysetOrder(RECEIVED_AT, ID, input.direction)} LIMIT ${clampTake(input.take)}`;
+/** A grouped key of a foreign driver: the message's `(received_at, id)`. */
+export interface ForeignKeyRow {
+  receivedAt: Date;
+  id: bigint;
 }
 
-/** Plan 2 (D5): one verdict over `email_messages_org_verdict_received_idx`. */
-export function verdictPlanSql(input: MessagePlanInput & { verdict: string }): Prisma.Sql {
-  return Prisma.sql`SELECT ${MESSAGE_COLUMNS} FROM email_messages ${forceIndex(MESSAGE_INDEXES.orgVerdict)}
-    WHERE organization_id = ${input.organizationId} AND final_verdict = ${input.verdict}
-      AND received_at >= ${input.range.from} AND received_at < ${input.range.to}
-      AND ${afterKey(RECEIVED_AT, ID, input.after, input.direction)}
-    ${keysetOrder(RECEIVED_AT, ID, input.direction)} LIMIT ${clampTake(input.take)}`;
+/** A key row of a boundary or foreign statement. */
+interface KeyRow {
+  echo_nonce: string;
+  organization_id: bigint;
+  received_at: Date;
+  id: bigint;
 }
 
-/** Plan 3 (D5), step 1: the recipient rows of one address (keyset `(received_at, id)`). */
-export function recipientPlanSql(input: MessagePlanInput & { address: string }): Prisma.Sql {
-  return Prisma.sql`SELECT id, received_at, message_id, organization_id
-    FROM email_recipients ${forceIndex(MESSAGE_INDEXES.recipientAddress)}
-    WHERE organization_id = ${input.organizationId} AND address = ${input.address}
-      AND received_at >= ${input.range.from} AND received_at < ${input.range.to}
-      AND ${afterKey(RECEIVED_AT, ID, input.after, input.direction)}
-    ${keysetOrder(RECEIVED_AT, ID, input.direction)} LIMIT ${clampTake(input.take)}`;
-}
-
-/**
- * Plan 3, step 2: the messages of the recipient rows by `(id, received_at)` (primary key, one
- * partition each). An OR of `(id = ? AND received_at = ?)` terms: MySQL 8.4 answered the
- * equivalent row-constructor `(id, received_at) IN ((?, ?), …)` with an empty result on the
- * first execution of a new prepared statement with several pairs (observed locally, 2026-11-12).
- */
-export function messagesByKeysSql(
-  organizationId: bigint,
-  keys: ReadonlyArray<{ id: bigint; receivedAt: Date }>,
-): Prisma.Sql {
-  const terms = Prisma.join(
-    keys.map((k) => Prisma.sql`(id = ${k.id} AND received_at = ${k.receivedAt})`),
-    ' OR ',
-  );
-  return Prisma.sql`SELECT ${MESSAGE_COLUMNS} FROM email_messages
-    WHERE organization_id = ${organizationId} AND (${terms})`;
-}
-
-/**
- * Plan 4 (D5, D6), step 1: the key of the `budget`-th index entry after the cursor
- * (index-only on `(organization_id, received_at, id)`); none when fewer entries are left.
- */
-export function scanBoundarySql(input: MessagePlanInput & { budget: number }): Prisma.Sql {
-  return Prisma.sql`SELECT received_at, id FROM email_messages ${forceIndex(MESSAGE_INDEXES.orgReceived)}
-    WHERE organization_id = ${input.organizationId}
-      AND received_at >= ${input.range.from} AND received_at < ${input.range.to}
-      AND ${afterKey(RECEIVED_AT, ID, input.after, input.direction)}
-    ${keysetOrder(RECEIVED_AT, ID, input.direction)} LIMIT 1 OFFSET ${boundaryOffset(input.budget)}`;
-}
-
-/** The filter predicates of the scan plan; columns from code constants, values bound. */
-export function messageFilterSql(
-  organizationId: bigint,
-  filters: ResolvedMessageFilters,
-): Prisma.Sql[] {
-  const parts: Prisma.Sql[] = [];
-  const inList = (col: string, values: readonly string[] | undefined) => {
-    if (values && values.length > 0)
-      parts.push(Prisma.sql`${column(col)} IN (${Prisma.join(values)})`);
-  };
-  inList('direction', filters.direction?.values);
-  inList('status', filters.status?.values);
-  inList('final_verdict', filters.verdict?.values);
-  inList('final_action', filters.action?.values);
-  if (filters.domainId !== undefined) parts.push(Prisma.sql`domain_id = ${filters.domainId}`);
-  const sender = filters.sender?.values?.[0];
-  if (sender !== undefined) parts.push(Prisma.sql`envelope_from = ${sender}`);
-  const headerFrom = filters.headerFrom?.values?.[0];
-  if (headerFrom !== undefined) parts.push(Prisma.sql`header_from = ${headerFrom}`);
-  const internetMessageId = filters.internetMessageId?.values?.[0];
-  if (internetMessageId !== undefined) {
-    parts.push(Prisma.sql`internet_message_id = ${internetMessageId}`);
-  }
-  const risk = filters.riskScore;
-  if (risk) {
-    if (risk.values && risk.values.length > 0) {
-      parts.push(Prisma.sql`risk_score IN (${Prisma.join(risk.values)})`);
-    }
-    if (risk.gte !== undefined) parts.push(Prisma.sql`risk_score >= ${risk.gte}`);
-    if (risk.gt !== undefined) parts.push(Prisma.sql`risk_score > ${risk.gt}`);
-    if (risk.lte !== undefined) parts.push(Prisma.sql`risk_score <= ${risk.lte}`);
-    if (risk.lt !== undefined) parts.push(Prisma.sql`risk_score < ${risk.lt}`);
-  }
-  const hasAttachments = filters.hasAttachments?.values?.[0];
-  if (hasAttachments !== undefined) {
-    parts.push(
-      hasAttachments ? Prisma.sql`attachment_count > 0` : Prisma.sql`attachment_count = 0`,
-    );
-  }
-  const recipient = filters.recipient?.values?.[0];
-  if (recipient !== undefined) {
-    parts.push(Prisma.sql`EXISTS (SELECT 1 FROM email_recipients r
-      WHERE r.organization_id = ${organizationId} AND r.message_id = email_messages.id
-        AND r.received_at = email_messages.received_at AND r.address = ${recipient})`);
-  }
-  return parts;
-}
-
-/** Plan 4, step 2: the filtered rows between the cursor and the boundary (inclusive). */
-export function scanPageSql(
-  input: MessagePlanInput & { boundary: TimeIdKey | null; filters: ResolvedMessageFilters },
-): Prisma.Sql {
-  return Prisma.sql`SELECT ${MESSAGE_COLUMNS} FROM email_messages ${forceIndex(MESSAGE_INDEXES.orgReceived)}
-    WHERE organization_id = ${input.organizationId}
-      AND received_at >= ${input.range.from} AND received_at < ${input.range.to}
-      AND ${afterKey(RECEIVED_AT, ID, input.after, input.direction)}
-      AND ${upToKey(RECEIVED_AT, ID, input.boundary, input.direction)}
-      AND ${allOf(messageFilterSql(input.organizationId, input.filters))}
-    ${keysetOrder(RECEIVED_AT, ID, input.direction)} LIMIT ${clampTake(input.take)}`;
-}
-
-/** A recipient row of plan 3 (keyset and message key). */
+/** A recipient row of the exact `recipient` driver (keyset and message key). */
 export interface RecipientKeyRow {
   id: bigint;
   receivedAt: Date;
@@ -321,97 +217,240 @@ export class MessageDataRepository {
     return this.reader.client;
   }
 
-  /** Plan 1 (D5). */
-  async indexPlan(scope: TenantScope, input: MessagePlanInput): Promise<MessageListRow[]> {
-    const rows = await this.messageRows(
-      input.range,
-      indexPlanSql({ ...input, organizationId: scope.organizationId }),
-    );
-    assertEcho('messages.indexPlan', rows, { organizationId: scope.organizationId });
-    return rows;
-  }
-
   /** Registry public ids of the scope's messages (a row without one is never served). */
   publicIds(scope: TenantScope, ids: readonly bigint[]): Promise<Map<bigint, string>> {
     return this.messages.publicIdMap(scope, ids);
   }
 
-  /** Plan 2. */
-  async verdictPlan(
+  /**
+   * A page of an `email_messages` driver (`none`, `scan`, `verdict`, `internetMessageId`,
+   * `sender`, `headerFrom`, `subject`, `senderDomain`): exact without a boundary and residuals,
+   * budgeted with them.
+   */
+  async messagesPage(
     scope: TenantScope,
-    input: MessagePlanInput & { verdict: string },
+    input: MessagePlanInput & {
+      driver: MessagesTableDriver;
+      key?: string | undefined;
+      boundary?: TimeIdKey | null;
+      residuals?: ResolvedResiduals;
+    },
   ): Promise<MessageListRow[]> {
-    const rows = await this.messageRows(
-      input.range,
-      verdictPlanSql({ ...input, organizationId: scope.organizationId }),
+    const nonce = randomUUID();
+    const { residuals, ...rest } = input;
+    const raw = await this.db.$queryRaw<RawMessageRow[]>(
+      messagesPageSql({
+        ...rest,
+        organizationId: scope.organizationId,
+        nonce,
+        ...(residuals && { residuals: residualSql(scope.organizationId, residuals) }),
+      }),
     );
-    assertEcho('messages.verdictPlan', rows, {
-      organizationId: scope.organizationId,
-      finalVerdict: input.verdict,
-    });
+    const read = `messages.${input.driver}`;
+    const rows = this.messageRows(read, raw, nonce, input.range);
+    if (input.driver === 'verdict') {
+      assertEcho(read, rows, { organizationId: scope.organizationId, finalVerdict: input.key! });
+    }
     return rows;
   }
 
-  /** Plan 3, step 1: recipient rows of the address (keyset order). */
+  /** Budget step 1 of an `email_messages` driver (index-only). */
+  async messagesBoundary(
+    scope: TenantScope,
+    input: Omit<MessagePlanInput, 'take'> & {
+      driver: MessagesTableDriver;
+      key?: string | undefined;
+      budget: number;
+    },
+  ): Promise<TimeIdKey | null> {
+    const nonce = randomUUID();
+    const raw = await this.db.$queryRaw<KeyRow[]>(
+      messagesBoundarySql({ ...input, organizationId: scope.organizationId, nonce }),
+    );
+    return this.boundaryOf(`messages.${input.driver}.boundary`, raw, nonce, scope, input.range);
+  }
+
+  /** The exact `recipient` driver (6.1 plan 3 step 1): recipient rows of the address. */
   async recipientRows(
     scope: TenantScope,
     input: MessagePlanInput & { address: string },
   ): Promise<RecipientKeyRow[]> {
+    const nonce = randomUUID();
     const raw = await this.db.$queryRaw<
-      Array<{ id: bigint; received_at: Date; message_id: bigint; organization_id: bigint }>
-    >(recipientPlanSql({ ...input, organizationId: scope.organizationId }));
+      Array<{
+        echo_nonce: string;
+        id: bigint;
+        received_at: Date;
+        message_id: bigint;
+        organization_id: bigint;
+      }>
+    >(recipientRowsSql({ ...input, organizationId: scope.organizationId, nonce }));
+    this.assertNonce('messages.recipient', raw, nonce);
     const rows = raw.map((r) => ({
       id: BigInt(r.id),
       receivedAt: r.received_at,
       messageId: BigInt(r.message_id),
       organizationId: BigInt(r.organization_id),
     }));
-    assertEcho('messages.recipientPlan', rows, { organizationId: scope.organizationId });
-    this.assertInRange('messages.recipientPlan', rows, input.range);
+    assertEcho('messages.recipient', rows, { organizationId: scope.organizationId });
+    this.assertInRange('messages.recipient', rows, input.range);
     return rows;
   }
 
-  /** Plan 3, step 2: the messages of recipient rows (one query by `(id, received_at)`). */
+  /** Budget step 1 of the `recipient` driver (keyset `(received_at, recipient row id)`). */
+  async recipientBoundary(
+    scope: TenantScope,
+    input: Omit<MessagePlanInput, 'take'> & { address: string; budget: number },
+  ): Promise<TimeIdKey | null> {
+    const nonce = randomUUID();
+    const raw = await this.db.$queryRaw<KeyRow[]>(
+      recipientBoundarySql({ ...input, organizationId: scope.organizationId, nonce }),
+    );
+    return this.boundaryOf('messages.recipient.boundary', raw, nonce, scope, input.range);
+  }
+
+  /** Budgeted page of the `recipient` driver: message rows with their recipient row id. */
+  async recipientPage(
+    scope: TenantScope,
+    input: MessagePlanInput & {
+      address: string;
+      boundary: TimeIdKey | null;
+      residuals: ResolvedResiduals;
+    },
+  ): Promise<RecipientPageRow[]> {
+    const nonce = randomUUID();
+    const raw = await this.db.$queryRaw<Array<RawMessageRow & { rid: bigint }>>(
+      recipientPageSql({
+        ...input,
+        organizationId: scope.organizationId,
+        nonce,
+        residuals: residualSql(scope.organizationId, input.residuals),
+      }),
+    );
+    const rows = this.messageRows('messages.recipient.page', raw, nonce, input.range);
+    return rows.map((row, i) => ({ ...row, rid: BigInt(raw[i]!.rid) }));
+  }
+
+  /** Exact page of a foreign driver: grouped `(received_at, message id)` keys. */
+  async foreignKeys(
+    scope: TenantScope,
+    input: MessagePlanInput & { driver: ForeignDriver; key: string },
+  ): Promise<ForeignKeyRow[]> {
+    const nonce = randomUUID();
+    const read = `messages.${input.driver}`;
+    const raw = await this.db.$queryRaw<Array<KeyRow & { driver_key: string }>>(
+      foreignKeysSql({ ...input, organizationId: scope.organizationId, nonce }),
+    );
+    this.assertNonce(read, raw, nonce);
+    const rows = raw.map((r) => ({
+      organizationId: BigInt(r.organization_id),
+      driverKey: r.driver_key,
+      receivedAt: r.received_at,
+      id: BigInt(r.id),
+    }));
+    assertEcho(read, rows, {
+      organizationId: scope.organizationId,
+      // Delivery and quarantine states are exact enum values; a recipient domain is compared
+      // under the column collation (the nonce binds the rows to this statement).
+      ...(input.driver !== 'recipientDomain' && { driverKey: input.key }),
+    });
+    this.assertInRange(read, rows, input.range);
+    return rows.map((r) => ({ receivedAt: r.receivedAt, id: r.id }));
+  }
+
+  /** Budget step 1 of a foreign driver (raw index entries). */
+  async foreignBoundary(
+    scope: TenantScope,
+    input: Omit<MessagePlanInput, 'take'> & { driver: ForeignDriver; key: string; budget: number },
+  ): Promise<TimeIdKey | null> {
+    const nonce = randomUUID();
+    const raw = await this.db.$queryRaw<KeyRow[]>(
+      foreignBoundarySql({ ...input, organizationId: scope.organizationId, nonce }),
+    );
+    return this.boundaryOf(`messages.${input.driver}.boundary`, raw, nonce, scope, input.range);
+  }
+
+  /** Budgeted page of a foreign driver: the messages of the grouped keys, residuals applied. */
+  async foreignPage(
+    scope: TenantScope,
+    input: MessagePlanInput & {
+      driver: ForeignDriver;
+      key: string;
+      boundary: TimeIdKey | null;
+      residuals: ResolvedResiduals;
+    },
+  ): Promise<MessageListRow[]> {
+    const nonce = randomUUID();
+    const raw = await this.db.$queryRaw<RawMessageRow[]>(
+      foreignPageSql({
+        ...input,
+        organizationId: scope.organizationId,
+        nonce,
+        residuals: residualSql(scope.organizationId, input.residuals),
+      }),
+    );
+    return this.messageRows(`messages.${input.driver}.page`, raw, nonce, input.range);
+  }
+
+  /** The messages of a page of keys (one query by `(id, received_at)`). */
   async messagesByKeys(
     scope: TenantScope,
     range: { from: Date; to: Date },
     keys: ReadonlyArray<{ id: bigint; receivedAt: Date }>,
   ): Promise<MessageListRow[]> {
     if (keys.length === 0) return [];
-    const rows = await this.messageRows(range, messagesByKeysSql(scope.organizationId, keys));
+    const raw = await this.db.$queryRaw<RawMessageRow[]>(
+      messagesByKeysSql(scope.organizationId, keys),
+    );
+    const rows = raw.map(toRow);
+    this.assertInRange('messages.byKeys', rows, range);
     assertEcho('messages.byKeys', rows, {
       organizationId: scope.organizationId,
       id: keys.map((k) => k.id),
     });
+    const wanted = new Set(keys.map((k) => `${k.id}:${k.receivedAt.getTime()}`));
+    if (rows.some((r) => !wanted.has(`${r.id}:${r.receivedAt.getTime()}`))) {
+      throw new InconsistentReadError('messages.byKeys');
+    }
     return rows;
   }
 
-  /** Plan 4, step 1. */
-  async scanBoundary(
+  /**
+   * Probe of the subject-prefix driver: true when more than `cap` subject keys of the window
+   * (after the cursor) start with the prefix (the `(cap + 1)`-th entry exists). A
+   * `MAX_EXECUTION_TIME` timeout is `503 message_search_timeout`.
+   */
+  async prefixProbe(
     scope: TenantScope,
-    input: MessagePlanInput & { budget: number },
-  ): Promise<TimeIdKey | null> {
-    const raw = await this.db.$queryRaw<Array<{ received_at: Date; id: bigint }>>(
-      scanBoundarySql({ ...input, organizationId: scope.organizationId }),
+    input: Omit<MessagePlanInput, 'take'> & { pattern: string; cap: number; timeoutMs: number },
+  ): Promise<boolean> {
+    const nonce = randomUUID();
+    const raw = await this.timed(() =>
+      this.db.$queryRaw<KeyRow[]>(
+        prefixProbeSql({ ...input, organizationId: scope.organizationId, nonce }),
+      ),
     );
-    const row = raw[0];
-    if (!row) return null;
-    const key = { at: row.received_at, id: BigInt(row.id) };
-    this.assertInRange('messages.scanBoundary', [{ receivedAt: key.at }], input.range);
-    return key;
+    if (raw.length > 1) throw new InconsistentReadError('messages.subjectPrefix.probe');
+    return this.boundaryOf('messages.subjectPrefix.probe', raw, nonce, scope, input.range) !== null;
   }
 
-  /** Plan 4, step 2. */
-  async scanPage(
+  /** Page of the subject-prefix driver (sorted within the cap, residuals applied). */
+  async prefixPage(
     scope: TenantScope,
-    input: MessagePlanInput & { boundary: TimeIdKey | null; filters: ResolvedMessageFilters },
+    input: MessagePlanInput & { pattern: string; timeoutMs: number; residuals: ResolvedResiduals },
   ): Promise<MessageListRow[]> {
-    const rows = await this.messageRows(
-      input.range,
-      scanPageSql({ ...input, organizationId: scope.organizationId }),
+    const nonce = randomUUID();
+    const raw = await this.timed(() =>
+      this.db.$queryRaw<RawMessageRow[]>(
+        prefixPageSql({
+          ...input,
+          organizationId: scope.organizationId,
+          nonce,
+          residuals: residualSql(scope.organizationId, input.residuals),
+        }),
+      ),
     );
-    assertEcho('messages.scanPage', rows, { organizationId: scope.organizationId });
-    return rows;
+    return this.messageRows('messages.subjectPrefix.page', raw, nonce, input.range);
   }
 
   /** Public ids of the scope's domains by internal id (any status: the message's domain). */
@@ -556,13 +595,49 @@ export class MessageDataRepository {
     return new Map(rows.map((r) => [r.id, r.publicId]));
   }
 
-  private async messageRows(
+  /** Rows of a driver statement: nonce, organization and range checked (D15). */
+  private messageRows(
+    read: string,
+    raw: readonly RawMessageRow[],
+    nonce: string,
     range: { from: Date; to: Date },
-    sql: Prisma.Sql,
-  ): Promise<MessageListRow[]> {
-    const rows = (await this.db.$queryRaw<RawMessageRow[]>(sql)).map(toRow);
-    this.assertInRange('messages.rows', rows, range);
+  ): MessageListRow[] {
+    this.assertNonce(read, raw, nonce);
+    const rows = raw.map(toRow);
+    this.assertInRange(read, rows, range);
     return rows;
+  }
+
+  /** The boundary key of a budget step 1, checked like a row. */
+  private boundaryOf(
+    read: string,
+    raw: readonly KeyRow[],
+    nonce: string,
+    scope: TenantScope,
+    range: { from: Date; to: Date },
+  ): TimeIdKey | null {
+    const row = raw[0];
+    if (!row) return null;
+    this.assertNonce(read, raw, nonce);
+    const key = { organizationId: BigInt(row.organization_id), receivedAt: row.received_at };
+    assertEcho(read, [key], { organizationId: scope.organizationId });
+    this.assertInRange(read, [key], range);
+    return { at: row.received_at, id: BigInt(row.id) };
+  }
+
+  /** Every row carries this statement's nonce (the result is not another statement's). */
+  private assertNonce(read: string, rows: ReadonlyArray<{ echo_nonce?: string }>, nonce: string) {
+    if (rows.some((r) => r.echo_nonce !== nonce)) throw new InconsistentReadError(read);
+  }
+
+  /** `MAX_EXECUTION_TIME` interruptions (MySQL 3024) as `503 message_search_timeout`. */
+  private async timed<T>(run: () => Promise<T>): Promise<T> {
+    try {
+      return await run();
+    } catch (err) {
+      if (isQueryTimeout(err)) throw messageSearchTimeout();
+      throw err;
+    }
   }
 
   private assertInRange(

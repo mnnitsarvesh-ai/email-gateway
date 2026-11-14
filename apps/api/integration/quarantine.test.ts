@@ -275,6 +275,50 @@ describe('search (Q9)', () => {
     expect(await q({ messageId: a.message.publicId })).toEqual([a.entry.publicId]);
     expect(await q({ messageId: other.message.publicId })).toEqual([]);
 
+    // Step 7.2 (§13 closer): by messageId the range may be left out, so an entry quarantined
+    // long after receipt (a manual quarantine or a rescan) is found by the details page. The
+    // message was received 100 days ago; its entry about 70 minutes ago (outside the window `w`
+    // of this test), so outside any 62-day window that starts at receipt.
+    const late = await message(orgA, {
+      state: 'quarantined',
+      receivedAt: new Date(Date.now() - 100 * 86_400_000),
+      recipients: [{ address: 'late@acme.example', status: 'quarantined' }],
+    });
+    const lateEntry = await insertEntry(ctx, late, { quarantinedAt: new Date(base - 600_000) });
+    const fromReceipt = late.receivedAt.getTime() - 60_000;
+    const oldWindow = {
+      from: new Date(fromReceipt).toISOString(),
+      to: new Date(fromReceipt + 62 * 86_400_000).toISOString(),
+    };
+    const windowed = await analystApi
+      .get('/entries', { ...oldWindow, messageId: late.publicId })
+      .expect(200);
+    expect(windowed.body.items).toEqual([]);
+    const byMessage = await analystApi.get('/entries', { messageId: late.publicId }).expect(200);
+    expect(byMessage.body.items.map((i: { id: string }) => i.id)).toEqual([lateEntry.publicId]);
+    // Another tenant's message id: empty; without messageId the range stays required.
+    expect(
+      (await adminBApi.get('/entries', { messageId: late.publicId }).expect(200)).body.items,
+    ).toEqual([]);
+    expect((await analystApi.get('/entries', { state: 'held' }).expect(400)).body.code).toBe(
+      'validation_failed',
+    );
+
+    // Step 7.2 (ADR-0062): an exact recipient search by a caller who reads recipients masked
+    // (an API key with quarantine:read only) is refused; deciders filter by it.
+    const masked = await readerKeyApi
+      .get('/entries', { ...w, recipient: 'p2@acme.example' })
+      .expect(403);
+    expect(masked.body).toMatchObject({
+      code: 'quarantine_filter_forbidden',
+      filter: 'recipient',
+    });
+    expect(JSON.stringify(masked.body)).not.toContain('p2@acme.example');
+    const asDecider = await reviewerApi
+      .get('/entries', { ...w, recipient: 'p2@acme.example' })
+      .expect(200);
+    expect(asDecider.body.items.map((i: { id: string }) => i.id)).toEqual([b.entry.publicId]);
+
     // Keyset pagination: 2 + 2, the cursor bound to the filters.
     const p1 = await analystApi.get('/entries', { ...w, limit: '2' }).expect(200);
     expect(p1.body.items).toHaveLength(2);
@@ -321,12 +365,13 @@ describe('search (Q9)', () => {
   it(`EXPLAIN: the api's search SQL uses the (organization_id, …, quarantined_at) indexes on ${PERF_ROWS} rows`, async () => {
     perfOrg = await fx.createOrganization();
     const started = Date.now();
+    const firstMessageId = 8_000_000_000_000n + BigInt(Math.floor(Math.random() * 1e9)) * 1000n;
     const loaded = await loadQuarantineEntries(ctx.prisma, {
       organizationId: perfOrg.id,
       count: PERF_ROWS,
       now: new Date(),
       days: 60,
-      firstMessageId: 8_000_000_000_000n + BigInt(Math.floor(Math.random() * 1e9)) * 1000n,
+      firstMessageId,
     });
     expect(loaded.rows).toBeGreaterThanOrEqual(PERF_ROWS);
     await ctx.prisma.$executeRawUnsafe('ANALYZE TABLE quarantine_messages');
@@ -402,6 +447,29 @@ describe('search (Q9)', () => {
         expect(plan.key ?? '', `${label}: ${JSON.stringify(plans[label])}`).toMatch(expectedKey);
         expect(plan.Extra, label).not.toContain('Using filesort');
       }
+      // Step 7.2 (§13 closer): the entries of one message without a range (the details page)
+      // are read by the message-led unique key, never by an organization-wide ordered scan; the
+      // sort covers only that message's entries (recipients × rounds).
+      queries.length = 0;
+      const ofMessage = await repo.search(scope, { messageId: firstMessageId + 7n, take: 11 });
+      expect(ofMessage.length).toBeGreaterThan(0);
+      const select = queries.find((qq) => /FROM `[^`]+`\.`quarantine_messages`/.test(qq.query));
+      expect(select).toBeDefined();
+      expect(select!.query).not.toContain('quarantined_at` >=');
+      const [raw] = await ctx.prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
+        `EXPLAIN ${select!.query}`,
+        ...(JSON.parse(select!.params) as unknown[]),
+      );
+      plans['message (no range)'] = {
+        key: (raw!.f6 as string | null) ?? null,
+        rows: Number(raw!.f9),
+        extra: (raw!.f11 as string | null) ?? '',
+      };
+      expect(
+        plans['message (no range)'].key ?? '',
+        JSON.stringify(plans['message (no range)']),
+      ).toMatch(/message_id_lifecycle_round_rcpt_seq_key/);
+      expect(plans['message (no range)'].rows).toBeLessThanOrEqual(10);
       // Recorded in the package note (rows estimate and keys per shape).
       process.stdout.write(
         `${JSON.stringify({ quarantinePlanCheck: { rows: loaded.rows, loadMs, plans } })}\n`,

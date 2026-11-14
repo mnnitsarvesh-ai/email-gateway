@@ -14,7 +14,9 @@ export function messageRow(
     direction: 'inbound',
     status: 'quarantined',
     statusChangedAt: '2026-11-12T09:14:08.000Z',
-    subject: 'Quarterly report',
+    // Since step 7.2 the api withholds every subject (`subject: null`, `subjectMasked`).
+    subject: null,
+    subjectMasked: true,
     envelopeFrom: 'alex.lee12@example.com',
     headerFrom: 'alex.lee12@example.com',
     recipientCount: 2,

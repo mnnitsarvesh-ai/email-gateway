@@ -8,107 +8,15 @@ import {
   okJson,
   renderWithProviders,
 } from '@/test';
-import { MessageDetail } from './message-detail';
 import { ScanDetails } from './scan-details';
 import {
-  HOSTILE_SUBJECT,
   MESSAGE_ID,
   attachmentRow,
   evaluation,
   expectNoInjectedMarkup,
-  messageDetail,
   scanRound,
   urlRow,
 } from './test-data';
-
-describe('Email details (/messages/[messageId])', () => {
-  it('shows every metadata field, copyable ids, the scan link and the 7.2 tabs; passes axe', async () => {
-    mockApi({
-      MessagesController_detail_v1: ({ params }) =>
-        params.messageId === MESSAGE_ID
-          ? okJson(messageDetail({ subject: HOSTILE_SUBJECT, clientHelo: '<b>helo</b>' }))
-          : apiErrorJson(404, 'message_not_found', 'Message not found'),
-    });
-    const { container, user } = renderWithProviders(<MessageDetail messageId={MESSAGE_ID} />, {
-      role: 'security_analyst',
-      route: `/messages/${MESSAGE_ID}`,
-    });
-    expect(await screen.findByText(/window.__pwned/)).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Email details', level: 1 })).toBeInTheDocument();
-    expectNoInjectedMarkup(container);
-    for (const label of [
-      'Envelope sender',
-      'Header From',
-      'Received',
-      'Direction',
-      'Status',
-      'Status reason',
-      'Final verdict',
-      'Final action',
-      'Risk score',
-      'Recipients',
-      'Attachments',
-      'Size',
-      'Message ID',
-      'Internet Message-ID',
-      'Domain ID',
-      'Lifecycle round',
-      'Version',
-      'Client IP',
-      'Client HELO',
-      'MTA queue ID',
-    ]) {
-      expect(screen.getByText(label, { selector: 'dt' })).toBeInTheDocument();
-    }
-    expect(screen.getByText('policy_quarantine')).toBeInTheDocument();
-    expect(screen.getByText('198.51.100.7')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Copy message ID' })).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: /Security scan details/ })).toHaveAttribute(
-      'href',
-      `/messages/${MESSAGE_ID}/scans`,
-    );
-    expect(screen.getByRole('link', { name: /Quarantine entries/ })).toHaveAttribute(
-      'href',
-      `/quarantine?messageId=${MESSAGE_ID}&range=30d`,
-    );
-    expect(screen.getByText('Detailed view arrives in step 7.2.')).toBeInTheDocument();
-    await user.click(screen.getByRole('tab', { name: 'Deliveries' }));
-    await waitFor(() => expect(currentTestUrl()).toContain('tab=deliveries'));
-    expect(screen.getByRole('region', { name: 'Deliveries' })).toHaveTextContent(
-      'Arrives in step 7.2',
-    );
-    await expectNoAxeViolations(container);
-  });
-
-  it('hides the quarantine link without quarantine:read', async () => {
-    mockApi({ MessagesController_detail_v1: () => okJson(messageDetail()) });
-    renderWithProviders(<MessageDetail messageId={MESSAGE_ID} />, {
-      permissions: ['message:read'],
-    });
-    await screen.findByRole('link', { name: /Security scan details/ });
-    expect(screen.queryByRole('link', { name: /Quarantine entries/ })).not.toBeInTheDocument();
-  });
-
-  it('renders the not-found state for unknown or foreign ids, and loading first', async () => {
-    mockApi({
-      MessagesController_detail_v1: async () => {
-        await new Promise((resolve) => setTimeout(resolve, 20));
-        return apiErrorJson(404, 'message_not_found', 'Message not found', {
-          requestId: 'req-404',
-        });
-      },
-    });
-    renderWithProviders(<MessageDetail messageId="01933c3a-1b2c-7d4e-8f00-0000000000ff" />);
-    expect(screen.getByText(/Loading message/)).toBeInTheDocument();
-    const alert = await screen.findByRole('alert');
-    expect(within(alert).getByText('Not found')).toBeInTheDocument();
-    expect(
-      within(alert).getByText('It does not exist, or you do not have access to it.'),
-    ).toBeInTheDocument();
-    expect(within(alert).getByText('message_not_found')).toBeInTheDocument();
-    expect(within(alert).getByText('req-404')).toBeInTheDocument();
-  });
-});
 
 const rounds = [scanRound({ scanId: '900002', round: 1, scanKind: 'rescan' }), scanRound()];
 const fixture = {
@@ -164,11 +72,33 @@ describe('Security scan details (/messages/[messageId]/scans)', () => {
     expect(screen.getAllByText('Policy decision of this round').length).toBeGreaterThan(0);
     expect(screen.getAllByText(/<b onmouseover=alert\(1\)>/).length).toBeGreaterThan(0);
     expect(
-      screen.getAllByText('DLP findings are not shown here (available in step 7.2).').length,
+      screen.getAllByText(
+        'DLP findings are listed in the DLP results section of the email details.',
+      ).length,
     ).toBeGreaterThan(0);
-    expect(screen.getByRole('region', { name: 'DLP evidence' })).toHaveTextContent(
-      'Arrives in step 7.2',
+    expect(screen.queryByText(/Arrives in step 7\.2/)).not.toBeInTheDocument();
+    // Each round links back to the matching sections of the email details (same round).
+    const links = screen.getByRole('navigation', { name: 'Email details sections for round 1' });
+    expect(within(links).getByRole('link', { name: 'Spam' })).toHaveAttribute(
+      'href',
+      `/messages/${MESSAGE_ID}?section=spam&round=1`,
     );
+    expect(within(links).getByRole('link', { name: 'DLP' })).toHaveAttribute(
+      'href',
+      `/messages/${MESSAGE_ID}?section=dlp&round=1`,
+    );
+    expect(screen.getByRole('link', { name: 'email details' })).toHaveAttribute(
+      'href',
+      `/messages/${MESSAGE_ID}`,
+    );
+    // A link inside running text is underlined, not told apart by colour alone (WCAG 1.4.1, axe
+    // link-in-text-block; jsdom cannot compute colours, the Playwright suite checks it).
+    expect(screen.getByRole('link', { name: 'email details' })).toHaveClass('underline');
+    // The engines table's scroller contains the copy buttons' absolutely positioned live regions
+    // (otherwise they widen the page on phones; see details/parts.test.tsx).
+    for (const table of screen.getAllByRole('table', { name: /Engine results of round/ })) {
+      expect(table.parentElement).toHaveClass('relative');
+    }
     expectNoInjectedMarkup(container);
     await expectNoAxeViolations(container);
   });
@@ -231,5 +161,14 @@ describe('Security scan details (/messages/[messageId]/scans)', () => {
     await user.click(screen.getByRole('button', { name: 'Next' }));
     await screen.findByText(/Page 2/);
     expect(seen).toEqual([null, 'MTA']);
+  });
+  it('hides the DLP link without dlp:read', async () => {
+    mockScans();
+    renderWithProviders(<ScanDetails messageId={MESSAGE_ID} />, { role: 'read_only_user' });
+    const links = await screen.findByRole('navigation', {
+      name: 'Email details sections for round 1',
+    });
+    expect(within(links).queryByRole('link', { name: 'DLP' })).toBeNull();
+    expect(within(links).getByRole('link', { name: 'Risk' })).toBeInTheDocument();
   });
 });

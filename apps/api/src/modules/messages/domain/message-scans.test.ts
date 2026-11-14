@@ -83,6 +83,30 @@ describe('message scans mapping (step 4.1 S16)', () => {
     expect(symbolsOf(many)).toHaveLength(200);
   });
 
+  it('masks the local part of addresses inside symbol options (step 7.2 §2 E9)', () => {
+    expect(
+      symbolsOf({
+        signals: [
+          {
+            name: 'FROM_NEQ_ENVFROM',
+            score: 0.1,
+            options: ['billing@vendor.example', 'Billing.Team@vendor.example'],
+          },
+          { name: 'TO_DN_SOME', score: 0, options: ['<alice@acme.example>,bob@acme.example'] },
+          { name: 'DMARC_POLICY_ALLOW', score: -0.5, options: ['vendor.example', 'none'] },
+        ],
+      }),
+    ).toEqual([
+      {
+        name: 'FROM_NEQ_ENVFROM',
+        score: 0.1,
+        options: ['b***@vendor.example', 'B***@vendor.example'],
+      },
+      { name: 'TO_DN_SOME', score: 0, options: ['<a***@acme.example>,b***@acme.example'] },
+      { name: 'DMARC_POLICY_ALLOW', score: -0.5, options: ['vendor.example', 'none'] },
+    ]);
+  });
+
   it('shows an engine without a final row as not final, with its attempts', () => {
     const view = engineOf('rspamd', [row({ attempt: 2, completedAt: at(3) }), row({})]);
     expect(view).toMatchObject({

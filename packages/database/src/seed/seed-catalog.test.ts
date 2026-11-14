@@ -18,6 +18,7 @@ import {
   TENANT_PERMISSIONS,
   TENANT_READ_PERMISSIONS,
   type PermissionKey,
+  type SystemRoleKey,
 } from './catalog';
 import { decideSeed } from './guard';
 
@@ -72,7 +73,7 @@ describe('seed catalog', () => {
   const sorted = (list: readonly string[]) => [...list].sort();
   const role = (key: string) => SYSTEM_ROLES.find((r) => r.key === key)!.permissions;
 
-  it('contains the 59 permissions of D7, D8, steps 2.1 D14, 2.2, 2.3, 3.2, 3.3, 4.1, 4.2, 4.4, 4.5, 5.3, 6.1 and 6.2, without duplicates', () => {
+  it('contains the 60 permissions of D7, D8, steps 2.1 D14, 2.2, 2.3, 3.2, 3.3, 4.1, 4.2, 4.4, 4.5, 5.3, 6.1, 6.2 and 7.2, without duplicates', () => {
     expect(new Set(keys).size).toBe(keys.length);
     expect(sorted(keys)).toEqual(
       sorted([
@@ -135,14 +136,15 @@ describe('seed catalog', () => {
         'billing:read',
         'delivery:suppression_manage',
         'webhook:read',
+        'message:reveal',
       ]),
     );
-    expect(keys).toHaveLength(59);
+    expect(keys).toHaveLength(60);
     // Step 3.3 placed message:rescan next to the other message permissions (design §3.3); the
     // seed upserts by key, so on an existing database it simply gets the next id.
     expect(keys.indexOf('message:rescan')).toBe(keys.indexOf('message:read_content') + 1);
     // Otherwise appended in catalog order (permission ids follow it on a fresh database).
-    expect(keys.slice(-27)).toEqual([
+    expect(keys.slice(-28)).toEqual([
       'connector:read',
       'connector:manage',
       'domain:routing_manage',
@@ -170,6 +172,7 @@ describe('seed catalog', () => {
       'billing:read',
       'delivery:suppression_manage',
       'webhook:read',
+      'message:reveal',
     ]);
     // `resource:action`; the resource may contain underscores since step 6.1 (`threat_intel`).
     for (const key of keys) expect(key).toMatch(/^[a-z]+(?:_[a-z]+)*:[a-z_]+$/);
@@ -245,6 +248,44 @@ describe('seed catalog', () => {
         .map((r) => r.key)
         .sort(),
     ).toEqual(['organization_admin', 'super_admin']);
+  });
+
+  it('grants message:reveal (step 7.2 §2 E5, §3.5, ADR-0062) exactly as the 7.2 matrix says', () => {
+    const permission = PERMISSIONS.find((p) => p.key === 'message:reveal');
+    expect(permission?.description).toBe(
+      'Reveal masked message metadata (subjects, recipient addresses, To/Cc/Subject header ' +
+        'values) through the audited reveal action (step 7.2)',
+    );
+    expect(permission!.description.length).toBeLessThanOrEqual(255);
+    // Appended last (append-only catalog order: permission ids follow it on a fresh database).
+    expect(keys.at(-1)).toBe('message:reveal');
+    const matrix: Record<SystemRoleKey, boolean> = {
+      super_admin: true,
+      platform_admin: false,
+      organization_admin: true,
+      domain_admin: false,
+      security_analyst: true,
+      quarantine_reviewer: false,
+      compliance_auditor: true,
+      read_only_user: false,
+      mailbox_user: false,
+    };
+    for (const key of SYSTEM_ROLE_KEYS) {
+      expect((role(key) as readonly string[]).includes('message:reveal'), key).toBe(matrix[key]);
+    }
+    // Through every tenant permission (organization_admin) and every permission (super_admin);
+    // granted explicitly to the two investigating roles; never part of the read-only set.
+    expect(TENANT_PERMISSIONS).toContain('message:reveal');
+    expect(PLATFORM_PERMISSIONS).not.toContain('message:reveal');
+    expect(TENANT_READ_PERMISSIONS).not.toContain('message:reveal');
+    // message:read_content keeps its holders (not reused for the reveal, §4).
+    expect(
+      SYSTEM_ROLES.filter((r) =>
+        (r.permissions as readonly string[]).includes('message:read_content'),
+      )
+        .map((r) => r.key)
+        .sort(),
+    ).toEqual(['organization_admin', 'security_analyst', 'super_admin']);
   });
 
   it('has exactly the 8 system roles of D8 plus mailbox_user (5.3), each referencing existing permissions only', () => {
@@ -347,6 +388,7 @@ describe('seed catalog', () => {
         'dlp:evidence_read',
         'threat_intel:read',
         'webhook:read',
+        'message:reveal',
       ],
       quarantine_reviewer: [
         'organization:read',
@@ -369,6 +411,7 @@ describe('seed catalog', () => {
         'dlp:evidence_read',
         'billing:read',
         'webhook:read',
+        'message:reveal',
       ],
       read_only_user: read,
       mailbox_user: ['quarantine:self'],

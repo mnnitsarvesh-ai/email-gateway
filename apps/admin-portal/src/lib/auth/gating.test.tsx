@@ -2,7 +2,30 @@ import { screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { apiErrorJson, expectNoAxeViolations, mockApi, renderWithProviders } from '@/test';
 import { Can } from './can';
+import { useHasPermission } from './me';
 import { RouteGate } from './route-gate';
+
+function PermissionProbe({ required }: { required: string[] }) {
+  return <p>{useHasPermission(...required) ? 'granted' : 'denied'}</p>;
+}
+
+describe('useHasPermission (step 7.2 filter-level permissions)', () => {
+  it('is true only when every permission is held', () => {
+    const { rerender } = renderWithProviders(<PermissionProbe required={['message:reveal']} />, {
+      role: 'security_analyst',
+    });
+    expect(screen.getByText('granted')).toBeInTheDocument();
+    rerender(<PermissionProbe required={['message:reveal', 'user:manage']} />);
+    expect(screen.getByText('denied')).toBeInTheDocument();
+  });
+
+  it('is false for roles without the permission and while no user is known', () => {
+    renderWithProviders(<PermissionProbe required={['message:reveal']} />, {
+      role: 'read_only_user',
+    });
+    expect(screen.getByText('denied')).toBeInTheDocument();
+  });
+});
 
 describe('<Can> and <RouteGate> (design P11)', () => {
   it('Can hides actions the user cannot perform', () => {

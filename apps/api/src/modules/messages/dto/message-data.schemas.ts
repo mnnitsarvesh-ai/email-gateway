@@ -4,9 +4,17 @@ import type {
   MessageVerdict,
   RecipientStatus,
 } from '@email-gateway/database';
-import { MESSAGE_STATES } from '@email-gateway/event-contracts';
+import { DELIVERY_STATUSES, MESSAGE_STATES } from '@email-gateway/event-contracts';
+import { QUARANTINE_STATES } from '@email-gateway/quarantine';
 import { z } from 'zod';
 import { defineListQuery } from '../../../http/listing/list-query';
+import {
+  codePointLength,
+  normalizeMessageIdKey,
+  normalizeSubjectKey,
+  normalizeSubjectPrefix,
+  SUBJECT_KEY_LENGTH,
+} from '../domain/search-keys';
 import {
   DeliveryStatusSchema,
   DirectionSchema,
@@ -54,7 +62,17 @@ export const MESSAGE_RECIPIENTS_RESOURCE = 'message_recipients';
 /** `email_messages.risk_score` is 0–1000 (step 5.1 R3). */
 export const RISK_SCORE_MAX = 1000;
 
-/** `GET /messages` (D4, D5): range, allow-listed filters and the two sorts. */
+/** Bounds of the normalized `subjectPrefix` (§2 E2): 3–128 code points. */
+export const SUBJECT_PREFIX_MIN = 3;
+export const SUBJECT_PREFIX_MAX = SUBJECT_KEY_LENGTH;
+
+/**
+ * `GET /messages` (6.1 D4, D5; step 7.2 §2 E1, E2): range, allow-listed filters and the two
+ * sorts. Step 7.2 adds `subject`, `subjectPrefix`, `senderDomain`, `recipientDomain`,
+ * `deliveryStatus` and `quarantineStatus`, and matches `internetMessageId` on its key (angle
+ * brackets optional). The refinement checks the normalized search values (a subject of reply
+ * markers only, a prefix outside 3–128 characters, a bracket-only Message-ID are `400`).
+ */
 export const MessageListQuerySchema = defineListQuery({
   filters: {
     direction: { type: 'enum', values: MESSAGE_DIRECTIONS, maxValues: 3 },
@@ -68,36 +86,104 @@ export const MessageListQuerySchema = defineListQuery({
     riskScore: { type: 'int', min: 0, max: RISK_SCORE_MAX, range: true },
     hasAttachments: { type: 'bool' },
     internetMessageId: { type: 'string', maxLength: 998 },
+    subject: { type: 'string', maxLength: 998 },
+    subjectPrefix: { type: 'string', maxLength: 998 },
+    senderDomain: { type: 'domain' },
+    recipientDomain: { type: 'domain' },
+    deliveryStatus: { type: 'enum', values: DELIVERY_STATUSES },
+    quarantineStatus: { type: 'enum', values: QUARANTINE_STATES },
   },
   sorts: ['-receivedAt', 'receivedAt'],
   defaultSort: '-receivedAt',
   range: true,
+}).superRefine((query, ctx) => {
+  const subject = query.filters.subject?.values?.[0];
+  if (subject !== undefined && normalizeSubjectKey(subject) === '') {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['subject'],
+      message: 'must contain text besides reply markers and white space',
+    });
+  }
+  const prefix = query.filters.subjectPrefix?.values?.[0];
+  if (prefix !== undefined) {
+    const length = codePointLength(normalizeSubjectPrefix(prefix));
+    if (length < SUBJECT_PREFIX_MIN || length > SUBJECT_PREFIX_MAX) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['subjectPrefix'],
+        message:
+          `must be ${SUBJECT_PREFIX_MIN} to ${SUBJECT_PREFIX_MAX} characters once reply ` +
+          'markers are removed and white space is collapsed',
+      });
+    }
+  }
+  const messageId = query.filters.internetMessageId?.values?.[0];
+  if (messageId !== undefined && normalizeMessageIdKey(messageId) === '') {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['internetMessageId'],
+      message: 'must contain more than angle brackets and spaces',
+    });
+  }
 });
 export type MessageListQuery = z.output<typeof MessageListQuerySchema>;
 export type MessageListFilters = MessageListQuery['filters'];
 
 /** Documentation of each query parameter of `GET /messages` (OpenAPI). */
 export const MESSAGE_LIST_PARAMETERS: Record<string, string> = {
-  limit: 'Page size, 1-100 (default 25). A page may hold fewer rows (see the scan budget).',
+  limit:
+    'Page size, 1-100 (default 25). A page may hold fewer rows when residual filters are ' +
+    'combined with a search driver (scan budget)',
   cursor: '`nextCursor` of the previous page (signed, bound to the filters, sort and caller)',
   sort: '`-receivedAt` (default, newest first) or `receivedAt`',
   from: 'Start of the range (ISO 8601 with offset, inclusive); default `to` − 24 h',
   to: 'End of the range (exclusive); default now. At most API_MESSAGES_MAX_RANGE_DAYS days',
   direction: '`inbound`, `outbound`, `internal`; comma list',
   status: 'Lifecycle state(s), comma list of at most 5',
-  verdict: 'Final verdict(s), comma list of at most 5 (one value uses the verdict index)',
+  verdict: 'Final verdict(s), comma list of at most 5 (exactly one value drives the search)',
   action: 'Final action(s), comma list of at most 5',
   domainId: 'Public id of one of your domains (`404 domain_not_found` otherwise)',
-  sender: 'Exact envelope sender (MAIL FROM), compared lower-cased. Audited (hashed)',
-  headerFrom: 'Exact `From:` header value as stored. Audited (hashed)',
-  recipient: 'Exact recipient address, compared lower-cased. Audited (hashed)',
+  sender:
+    'Exact envelope sender (MAIL FROM), compared case-insensitively (index driver). Audited ' +
+    '(hashed)',
+  headerFrom:
+    'Exact From address as stored (the address inside `<…>` of the first `From:` header, else ' +
+    'its raw value), case-insensitive (index driver). Audited (hashed)',
+  recipient:
+    'Exact envelope recipient address, case-insensitive (index driver). Requires ' +
+    '`message:reveal` (`403 message_filter_forbidden`): recipient addresses are masked on every ' +
+    'read, so only holders of the reveal permission may confirm one by search. Audited (hashed)',
   riskScore: 'Exact risk score (0-1000)',
   'riskScore.gte': 'Risk score at least (0-1000)',
   'riskScore.lte': 'Risk score at most (0-1000)',
   'riskScore.gt': 'Risk score above (0-1000)',
   'riskScore.lt': 'Risk score below (0-1000)',
   hasAttachments: '`true` or `false`',
-  internetMessageId: 'Exact `Message-ID` header value. Audited (hashed)',
+  internetMessageId:
+    'Message-ID, angle brackets optional (matched on its first 255 characters without `<` and ' +
+    '`>`; index driver). Audited (hashed)',
+  subject:
+    'Exact subject, ignoring leading reply/forward markers (`Re:`, `Fwd:`, `AW:`, `RE[2]:`, …), ' +
+    'white space runs, case and accents; matched on the first 128 characters (index driver). ' +
+    'Requires `message:reveal` (`403 message_filter_forbidden`). Audited (SHA-256 of the ' +
+    'normalized value)',
+  subjectPrefix:
+    'Subject starts with (normalized like `subject`, 3-128 characters). Refused with `422 ' +
+    'message_search_too_broad` when more than API_MESSAGES_SEARCH_MAX_MATCHES messages of the ' +
+    'range match. Requires `message:reveal`. Audited (SHA-256 of the normalized value)',
+  senderDomain:
+    'Domain of the envelope sender (`example.com` or `@example.com`; IDNs in A-label form; ' +
+    'index driver)',
+  recipientDomain:
+    'Domain of any envelope recipient (`example.com` or `@example.com`; IDNs in A-label form; ' +
+    'index driver)',
+  deliveryStatus:
+    'One delivery status: at least one delivery of the message (any recipient, any delivery ' +
+    'sequence) is currently in it. Requires `delivery:read`',
+  quarantineStatus:
+    'One quarantine entry state: at least one entry of the message (any recipient and round) ' +
+    'is currently in it. Requires `quarantine:read`',
 };
 
 const IsoDate = z.iso.datetime();
@@ -108,7 +194,17 @@ export const MessageListItemSchema = z.object({
   direction: DirectionSchema,
   status: MessageStatusSchema,
   statusChangedAt: IsoDate,
-  subject: z.string().nullable().describe('Attacker-controlled text, returned as stored'),
+  subject: z
+    .string()
+    .nullable()
+    .describe(
+      'Always `null` since step 7.2: the subject is withheld on every read (field kept for ' +
+        'compatibility). `subjectMasked` says whether one exists; holders of `message:reveal` ' +
+        'read it through the audited `POST /messages/reveal` or `POST /messages/{messageId}/reveal`',
+    ),
+  subjectMasked: z
+    .boolean()
+    .describe('Step 7.2: true when the message has a subject (withheld in `subject`)'),
   envelopeFrom: z.string(),
   headerFrom: z.string().nullable(),
   recipientCount: z.number().int().min(0),
@@ -154,11 +250,24 @@ export const RECIPIENT_STATUSES =
 
 export const MessageRecipientItemSchema = z.object({
   rcptSeq: z.number().int().min(0).describe('Position in the RCPT TO list'),
-  address: z.string(),
+  address: z
+    .string()
+    .describe(
+      'Masked since step 7.2 (`f***@example.com`: the first character of the local part and the ' +
+        'domain); the clear address only through the audited `POST /messages/{messageId}/reveal` ' +
+        '(`message:reveal`)',
+    ),
+  addressMasked: z.boolean().describe('Step 7.2: true (the address is masked on every read)'),
   status: RecipientStatusSchema,
   finalAction: z.enum(MESSAGE_ACTIONS).nullable(),
   direction: DirectionSchema.nullable().describe('Routed direction; null before step 2.3'),
-  userId: z.uuid().nullable().describe('Public id of the matched user, or null'),
+  userId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'Always `null` since step 7.2: the matched user is withheld (it maps to an address); ' +
+        'revealed with the address by `POST /messages/{messageId}/reveal`',
+    ),
   latestDelivery: z
     .object({
       deliverySeq: z.number().int().min(0),

@@ -22722,7 +22722,14 @@
                             "maximum": 9007199254740991,
                             "description": "0 = the initial delivery; releases use 1, 2, …"
                           },
-                          "recipient": { "type": "string" },
+                          "recipient": {
+                            "type": "string",
+                            "description": "Masked since step 7.2 (`f***@example.com`: the first character of the local part and the domain); the clear address only through the audited `POST /messages/{messageId}/reveal` (`message:reveal`), joined by `rcptSeq`"
+                          },
+                          "recipientMasked": {
+                            "type": "boolean",
+                            "description": "Step 7.2: true (the recipient is masked on every read)"
+                          },
                           "direction": {
                             "nullable": true,
                             "type": "string",
@@ -22769,7 +22776,11 @@
                             "maximum": 9007199254740991
                           },
                           "enhancedStatus": { "nullable": true, "type": "string" },
-                          "finalSmtpResponse": { "nullable": true, "type": "string" },
+                          "finalSmtpResponse": {
+                            "nullable": true,
+                            "description": "Last remote SMTP reply text. Since step 7.2 the local part of every address in the text is masked (`f***@example.com`) for every caller; never revealed",
+                            "type": "string"
+                          },
                           "lastErrorClass": { "nullable": true, "type": "string" },
                           "failureReason": {
                             "nullable": true,
@@ -22791,6 +22802,7 @@
                           "rcptSeq",
                           "deliverySeq",
                           "recipient",
+                          "recipientMasked",
                           "direction",
                           "status",
                           "attemptCount",
@@ -23108,7 +23120,7 @@
                           "errorClass": { "nullable": true, "type": "string" },
                           "detail": {
                             "nullable": true,
-                            "description": "Remote reply or reason text; never message content",
+                            "description": "Remote reply or reason text; never message content. Since step 7.2 the local part of every address in the text is masked (`f***@example.com`) for every caller; never revealed",
                             "type": "string"
                           }
                         },
@@ -23401,7 +23413,14 @@
                             "minimum": -9007199254740991,
                             "maximum": 9007199254740991
                           },
-                          "recipient": { "type": "string" },
+                          "recipient": {
+                            "type": "string",
+                            "description": "Masked since step 7.2 (`f***@example.com`: the first character of the local part and the domain); the clear address only through the audited `POST /messages/{messageId}/reveal` (`message:reveal`), joined by `rcptSeq`"
+                          },
+                          "recipientMasked": {
+                            "type": "boolean",
+                            "description": "Step 7.2: true (the recipient is masked on every read)"
+                          },
                           "direction": {
                             "nullable": true,
                             "type": "string",
@@ -23439,6 +23458,7 @@
                           "messageId",
                           "rcptSeq",
                           "recipient",
+                          "recipientMasked",
                           "direction",
                           "status",
                           "attemptCount",
@@ -23603,14 +23623,14 @@
     },
     "/api/v1/messages": {
       "get": {
-        "description": "Message metadata of your organization received in `[from, to)` (default the last 24 hours, at most API_MESSAGES_MAX_RANGE_DAYS days, default 31), newest first (`sort=-receivedAt`) or oldest first (`sort=receivedAt`), from the read replica (a few seconds behind the writer). Filters: `direction`, `status`, `verdict`, `action` (comma lists), `domainId`, `sender` (exact envelope sender), `headerFrom`, `recipient`, `internetMessageId` (exact values), `riskScore` (`.gte`, `.lte`, `.gt`, `.lt`; 0-1000) and `hasAttachments`. No filter, exactly one `verdict` or only `recipient` read an index in keyset order; every other filter or combination is scan-bounded. Pages follow the v1 list contract: `{ data, nextCursor }`, no totals. When filters need non-indexed columns, each request examines at most API_LIST_SCAN_BUDGET_ROWS index entries (default 5 000), so a page may hold fewer rows than `limit` (even none) while `nextCursor` is set; follow `nextCursor` until it is null. The cursor is signed and bound to the filters, the sort, your organization and the first page’s time window: repeat the same filters (or omit `from`/`to`) with it, anything else is `400 cursor_invalid`. A search with `sender`, `headerFrom`, `recipient` or `internetMessageId` is audited (`message.searched`, first page only; the values only as SHA-256). Subjects and addresses are attacker-controlled text; bodies and attachments are never returned.",
+        "description": "Message metadata of your organization received in `[from, to)` (default the last 24 hours, at most API_MESSAGES_MAX_RANGE_DAYS days, default 31), newest first (`sort=-receivedAt`) or oldest first (`sort=receivedAt`), from the read replica (a few seconds behind the writer). **Search drivers (step 7.2).** The first present filter of `internetMessageId` > `sender` > `headerFrom` > `recipient` > `subject` > `senderDomain` > `recipientDomain` > `subjectPrefix` > `quarantineStatus` > `deliveryStatus` > `verdict` (exactly one value) drives the search: its index is read in time order, so a page with no other filter is exact (no short pages). Every other filter is a residual: with residuals each request examines at most API_LIST_SCAN_BUDGET_ROWS (default 5 000) entries of the driver’s index and may return a short or empty page with a `nextCursor`; with residuals only (no driver) the whole range is scanned that way. A message matched by several recipients, deliveries or quarantine entries is listed once. `subjectPrefix` reads at most API_MESSAGES_SEARCH_MAX_MATCHES (default 5 000) matching messages of the range: more is `422 message_search_too_broad` (type more, use the exact `subject` or narrow the range); a prefix search that takes longer than API_MESSAGES_SEARCH_TIMEOUT_MS is `503 message_search_timeout`. **Filter permissions.** `recipient`, `subject` and `subjectPrefix` require `message:reveal`, `deliveryStatus` requires `delivery:read`, `quarantineStatus` requires `quarantine:read` (`403 message_filter_forbidden` naming the filter and permission, before anything is read). Pages follow the v1 list contract: `{ data, nextCursor }`, no totals. When filters need non-indexed columns, each request examines at most API_LIST_SCAN_BUDGET_ROWS index entries (default 5 000), so a page may hold fewer rows than `limit` (even none) while `nextCursor` is set; follow `nextCursor` until it is null. The cursor is signed and bound to the filters, the sort, your organization and the first page’s time window: repeat the same filters (or omit `from`/`to`) with it, anything else is `400 cursor_invalid`. The cursor is also bound to the search driver: after a deploy that changes driver selection an old cursor is `400 cursor_invalid` once; restart the list. A search with `sender`, `headerFrom`, `recipient`, `internetMessageId`, `subject` or `subjectPrefix` is audited (`message.searched`, first page only; values only as SHA-256, subjects normalized first). Subjects and addresses are attacker-controlled text; bodies and attachments are never returned.",
         "operationId": "MessagesController_list_v1",
         "parameters": [
           {
             "name": "limit",
             "required": false,
             "in": "query",
-            "description": "Page size, 1-100 (default 25). A page may hold fewer rows (see the scan budget).",
+            "description": "Page size, 1-100 (default 25). A page may hold fewer rows when residual filters are combined with a search driver (scan budget)",
             "schema": { "type": "string", "pattern": "^\\d{1,3}$" }
           },
           {
@@ -23667,7 +23687,7 @@
             "name": "verdict",
             "required": false,
             "in": "query",
-            "description": "Final verdict(s), comma list of at most 5 (one value uses the verdict index)",
+            "description": "Final verdict(s), comma list of at most 5 (exactly one value drives the search)",
             "schema": { "type": "string" }
           },
           {
@@ -23688,21 +23708,21 @@
             "name": "sender",
             "required": false,
             "in": "query",
-            "description": "Exact envelope sender (MAIL FROM), compared lower-cased. Audited (hashed)",
+            "description": "Exact envelope sender (MAIL FROM), compared case-insensitively (index driver). Audited (hashed)",
             "schema": { "type": "string" }
           },
           {
             "name": "headerFrom",
             "required": false,
             "in": "query",
-            "description": "Exact `From:` header value as stored. Audited (hashed)",
+            "description": "Exact From address as stored (the address inside `<…>` of the first `From:` header, else its raw value), case-insensitive (index driver). Audited (hashed)",
             "schema": { "type": "string" }
           },
           {
             "name": "recipient",
             "required": false,
             "in": "query",
-            "description": "Exact recipient address, compared lower-cased. Audited (hashed)",
+            "description": "Exact envelope recipient address, case-insensitive (index driver). Requires `message:reveal` (`403 message_filter_forbidden`): recipient addresses are masked on every read, so only holders of the reveal permission may confirm one by search. Audited (hashed)",
             "schema": { "type": "string" }
           },
           {
@@ -23751,7 +23771,49 @@
             "name": "internetMessageId",
             "required": false,
             "in": "query",
-            "description": "Exact `Message-ID` header value. Audited (hashed)",
+            "description": "Message-ID, angle brackets optional (matched on its first 255 characters without `<` and `>`; index driver). Audited (hashed)",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "subject",
+            "required": false,
+            "in": "query",
+            "description": "Exact subject, ignoring leading reply/forward markers (`Re:`, `Fwd:`, `AW:`, `RE[2]:`, …), white space runs, case and accents; matched on the first 128 characters (index driver). Requires `message:reveal` (`403 message_filter_forbidden`). Audited (SHA-256 of the normalized value)",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "subjectPrefix",
+            "required": false,
+            "in": "query",
+            "description": "Subject starts with (normalized like `subject`, 3-128 characters). Refused with `422 message_search_too_broad` when more than API_MESSAGES_SEARCH_MAX_MATCHES messages of the range match. Requires `message:reveal`. Audited (SHA-256 of the normalized value)",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "senderDomain",
+            "required": false,
+            "in": "query",
+            "description": "Domain of the envelope sender (`example.com` or `@example.com`; IDNs in A-label form; index driver)",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "recipientDomain",
+            "required": false,
+            "in": "query",
+            "description": "Domain of any envelope recipient (`example.com` or `@example.com`; IDNs in A-label form; index driver)",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "deliveryStatus",
+            "required": false,
+            "in": "query",
+            "description": "One delivery status: at least one delivery of the message (any recipient, any delivery sequence) is currently in it. Requires `delivery:read`",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "quarantineStatus",
+            "required": false,
+            "in": "query",
+            "description": "One quarantine entry state: at least one entry of the message (any recipient and round) is currently in it. Requires `quarantine:read`",
             "schema": { "type": "string" }
           }
         ],
@@ -23810,8 +23872,12 @@
                           },
                           "subject": {
                             "nullable": true,
-                            "description": "Attacker-controlled text, returned as stored",
+                            "description": "Always `null` since step 7.2: the subject is withheld on every read (field kept for compatibility). `subjectMasked` says whether one exists; holders of `message:reveal` read it through the audited `POST /messages/reveal` or `POST /messages/{messageId}/reveal`",
                             "type": "string"
+                          },
+                          "subjectMasked": {
+                            "type": "boolean",
+                            "description": "Step 7.2: true when the message has a subject (withheld in `subject`)"
                           },
                           "envelopeFrom": { "type": "string" },
                           "headerFrom": { "nullable": true, "type": "string" },
@@ -23880,6 +23946,7 @@
                           "status",
                           "statusChangedAt",
                           "subject",
+                          "subjectMasked",
                           "envelopeFrom",
                           "headerFrom",
                           "recipientCount",
@@ -23909,7 +23976,8 @@
                         "direction": "inbound",
                         "status": "delivered",
                         "statusChangedAt": "2026-11-12T08:15:33.004Z",
-                        "subject": "Quarterly invoice",
+                        "subject": null,
+                        "subjectMasked": true,
                         "envelopeFrom": "billing@vendor.example",
                         "headerFrom": "Vendor Billing <billing@vendor.example>",
                         "recipientCount": 2,
@@ -23995,23 +24063,22 @@
             }
           },
           "403": {
-            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "description": "Missing `message:read` (`forbidden`), or a filter needs a permission you do not hold (`message_filter_forbidden`: `recipient`/`subject`/`subjectPrefix` need `message:reveal`, `deliveryStatus` needs `delivery:read`, `quarantineStatus` needs `quarantine:read`; `filter` and `permission` name it)",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "statusCode": { "type": "integer" },
+                    "statusCode": { "type": "integer", "enum": [403] },
                     "error": { "type": "string" },
-                    "message": {
-                      "oneOf": [
-                        { "type": "string" },
-                        { "type": "array", "items": { "type": "string" } }
-                      ]
-                    },
-                    "correlationId": { "type": "string" }
+                    "code": { "type": "string", "enum": ["forbidden", "message_filter_forbidden"] },
+                    "message": { "type": "string" },
+                    "filter": { "type": "string" },
+                    "permission": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
                   },
-                  "required": ["statusCode", "error", "message"]
+                  "required": ["statusCode", "error", "code", "message"]
                 }
               }
             },
@@ -24034,6 +24101,33 @@
                     "error": { "type": "string" },
                     "code": { "type": "string", "enum": ["domain_not_found"] },
                     "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "422": {
+            "description": "`subjectPrefix` matches more than API_MESSAGES_SEARCH_MAX_MATCHES messages of the range (`maxMatches`): type more of the subject, use `subject` or narrow the range",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [422] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["message_search_too_broad"] },
+                    "message": { "type": "string" },
+                    "maxMatches": { "type": "integer" },
                     "correlationId": { "type": "string" },
                     "requestId": { "type": "string", "format": "uuid" }
                   },
@@ -24079,7 +24173,7 @@
             }
           },
           "503": {
-            "description": "The replica returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency is unavailable",
+            "description": "The replica returned a row that does not echo the query (`inconsistent_read`, retry), a `subjectPrefix` search exceeded API_MESSAGES_SEARCH_TIMEOUT_MS (`message_search_timeout`), or a dependency is unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -24089,7 +24183,7 @@
                     "error": { "type": "string" },
                     "code": {
                       "type": "string",
-                      "enum": ["inconsistent_read", "service_unavailable"]
+                      "enum": ["inconsistent_read", "message_search_timeout", "service_unavailable"]
                     },
                     "message": { "type": "string" },
                     "correlationId": { "type": "string" },
@@ -24109,7 +24203,7 @@
           }
         },
         "security": [{ "api-key": [] }, { "access-token": [] }],
-        "summary": "List messages",
+        "summary": "List and search messages",
         "tags": ["messages"],
         "x-eg-cursor": "v1",
         "x-eg-permissions": { "mode": "all", "permissions": ["message:read"] }
@@ -24175,8 +24269,12 @@
                     },
                     "subject": {
                       "nullable": true,
-                      "description": "Attacker-controlled text, returned as stored",
+                      "description": "Always `null` since step 7.2: the subject is withheld on every read (field kept for compatibility). `subjectMasked` says whether one exists; holders of `message:reveal` read it through the audited `POST /messages/reveal` or `POST /messages/{messageId}/reveal`",
                       "type": "string"
+                    },
+                    "subjectMasked": {
+                      "type": "boolean",
+                      "description": "Step 7.2: true when the message has a subject (withheld in `subject`)"
                     },
                     "envelopeFrom": { "type": "string" },
                     "headerFrom": { "nullable": true, "type": "string" },
@@ -24252,6 +24350,7 @@
                     "status",
                     "statusChangedAt",
                     "subject",
+                    "subjectMasked",
                     "envelopeFrom",
                     "headerFrom",
                     "recipientCount",
@@ -24276,7 +24375,8 @@
                     "direction": "inbound",
                     "status": "delivered",
                     "statusChangedAt": "2026-11-12T08:15:33.004Z",
-                    "subject": "Quarterly invoice",
+                    "subject": null,
+                    "subjectMasked": true,
                     "envelopeFrom": "billing@vendor.example",
                     "headerFrom": "Vendor Billing <billing@vendor.example>",
                     "recipientCount": 2,
@@ -24536,7 +24636,14 @@
                             "maximum": 9007199254740991,
                             "description": "Position in the RCPT TO list"
                           },
-                          "address": { "type": "string" },
+                          "address": {
+                            "type": "string",
+                            "description": "Masked since step 7.2 (`f***@example.com`: the first character of the local part and the domain); the clear address only through the audited `POST /messages/{messageId}/reveal` (`message:reveal`)"
+                          },
+                          "addressMasked": {
+                            "type": "boolean",
+                            "description": "Step 7.2: true (the address is masked on every read)"
+                          },
                           "status": {
                             "type": "string",
                             "enum": [
@@ -24570,7 +24677,7 @@
                           },
                           "userId": {
                             "nullable": true,
-                            "description": "Public id of the matched user, or null",
+                            "description": "Always `null` since step 7.2: the matched user is withheld (it maps to an address); revealed with the address by `POST /messages/{messageId}/reveal`",
                             "type": "string",
                             "format": "uuid",
                             "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
@@ -24620,6 +24727,7 @@
                         "required": [
                           "rcptSeq",
                           "address",
+                          "addressMasked",
                           "status",
                           "finalAction",
                           "direction",
@@ -24637,11 +24745,12 @@
                     "data": [
                       {
                         "rcptSeq": 0,
-                        "address": "alice@acme.example",
+                        "address": "a***@acme.example",
+                        "addressMasked": true,
                         "status": "delivered",
                         "finalAction": "deliver",
                         "direction": "inbound",
-                        "userId": "0192e111-2a3b-7c4d-8e5f-6a7b8c9d0e1f",
+                        "userId": null,
                         "latestDelivery": {
                           "deliverySeq": 0,
                           "status": "delivered",
@@ -26473,7 +26582,7 @@
                                       "options": {
                                         "type": "array",
                                         "items": { "type": "string" },
-                                        "description": "At most 5 options of at most 200 characters (may contain addresses or URLs)"
+                                        "description": "At most 5 options of at most 200 characters (may contain URLs). Since step 7.2 the local part of every address inside an option is masked (`f***@example.com`) for every caller; never revealed"
                                       }
                                     },
                                     "required": ["name", "score", "options"],
@@ -31570,6 +31679,966 @@
         "tags": ["messages"],
         "x-eg-cursor": "v0",
         "x-eg-permissions": { "mode": "all", "permissions": ["message:read"] }
+      }
+    },
+    "/api/v1/messages/{messageId}/headers": {
+      "get": {
+        "description": "The headers the gateway stores for the message (the step 3.1 allow-list: From, Sender, Reply-To, To, Cc, Subject, Message-ID, Date, In-Reply-To, References, Return-Path, Authentication-Results; decoded, at most 2 048 characters each, kept 3 months) in `seq` order, from the read replica. **Safe subset in clear:** From, Sender, Reply-To, Return-Path, Date, Message-ID, In-Reply-To, References and Authentication-Results. **Withheld for every caller** (`value: null`, `masked: true`): To, Cc, Subject and any other name; holders of `message:reveal` read them through the audited `POST /messages/{messageId}/reveal` (`fields: [\"headers\"]`). `availability`: `available`, `not_parsed` (the MIME parse is missing, still running or failed), `none_stored` (parsed, nothing on the allow-list) or `retention_expired` (the message is older than the 3-month header retention). The full header block stays in the stored message in object storage and is never fetched or returned. Values are attacker-controlled text, returned as stored and never interpreted. Not audited.",
+        "operationId": "MessageHeadersController_headers_v1",
+        "parameters": [
+          {
+            "name": "messageId",
+            "required": true,
+            "in": "path",
+            "description": "Message public id",
+            "schema": { "format": "uuid", "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "messageId": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "availability": {
+                      "type": "string",
+                      "enum": ["available", "not_parsed", "none_stored", "retention_expired"],
+                      "description": "`available` (rows stored), `not_parsed` (the MIME parse did not finish or failed), `none_stored` (parsed, no allow-listed header), `retention_expired` (older than the 3-month header retention)"
+                    },
+                    "storedHeaderNames": {
+                      "type": "array",
+                      "items": { "type": "string" },
+                      "description": "The allow-list of headers the gateway stores (step 3.1); others are never stored"
+                    },
+                    "safeHeaderNames": {
+                      "type": "array",
+                      "items": { "type": "string" },
+                      "description": "The names whose values are returned in clear"
+                    },
+                    "headers": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "seq": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991,
+                            "description": "Position among the stored headers"
+                          },
+                          "name": {
+                            "type": "string",
+                            "description": "Canonical header name (the step 3.1 allow-list)"
+                          },
+                          "value": {
+                            "nullable": true,
+                            "description": "Decoded value as stored (attacker-controlled text, never parsed by the api) for the safe subset; null when `masked`",
+                            "type": "string"
+                          },
+                          "masked": {
+                            "type": "boolean",
+                            "description": "True for To, Cc, Subject and any name outside the safe subset; reveal with `POST /messages/{messageId}/reveal` (`headers`, `message:reveal`)"
+                          }
+                        },
+                        "required": ["seq", "name", "value", "masked"],
+                        "additionalProperties": false
+                      },
+                      "description": "Stored rows in `seq` order (at most 500)"
+                    }
+                  },
+                  "required": [
+                    "messageId",
+                    "availability",
+                    "storedHeaderNames",
+                    "safeHeaderNames",
+                    "headers"
+                  ],
+                  "additionalProperties": false,
+                  "example": {
+                    "messageId": "0193a1b2-7c3d-7e4f-8a5b-6c7d8e9f0a1b",
+                    "availability": "available",
+                    "storedHeaderNames": [
+                      "From",
+                      "Sender",
+                      "Reply-To",
+                      "To",
+                      "Cc",
+                      "Subject",
+                      "Message-ID",
+                      "Date",
+                      "In-Reply-To",
+                      "References",
+                      "Return-Path",
+                      "Authentication-Results"
+                    ],
+                    "safeHeaderNames": [
+                      "From",
+                      "Sender",
+                      "Reply-To",
+                      "Return-Path",
+                      "Date",
+                      "Message-ID",
+                      "In-Reply-To",
+                      "References",
+                      "Authentication-Results"
+                    ],
+                    "headers": [
+                      {
+                        "seq": 0,
+                        "name": "From",
+                        "value": "Vendor Billing <billing@vendor.example>",
+                        "masked": false
+                      },
+                      { "seq": 1, "name": "To", "value": null, "masked": true },
+                      { "seq": 2, "name": "Subject", "value": null, "masked": true },
+                      {
+                        "seq": 3,
+                        "name": "Date",
+                        "value": "Thu, 12 Nov 2026 08:15:29 +0000",
+                        "masked": false
+                      },
+                      {
+                        "seq": 4,
+                        "name": "Message-ID",
+                        "value": "<20261112081530.1234@vendor.example>",
+                        "masked": false
+                      },
+                      {
+                        "seq": 5,
+                        "name": "Authentication-Results",
+                        "value": "mx.acme.example; spf=pass smtp.mailfrom=vendor.example; dkim=pass",
+                        "masked": false
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "404": {
+            "description": "Unknown message, or a message of another organization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [404] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["message_not_found"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "429": {
+            "description": "Too many requests (rate_limited, with scope and Retry-After)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RateLimitedErrorBody" }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" },
+              "Retry-After": { "$ref": "#/components/headers/Retry-After" }
+            }
+          },
+          "500": {
+            "description": "Unexpected error (internal_error; no details are disclosed)",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "503": {
+            "description": "The replica returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [503] },
+                    "error": { "type": "string" },
+                    "code": {
+                      "type": "string",
+                      "enum": ["inconsistent_read", "service_unavailable"]
+                    },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "Get the stored headers of a message",
+        "tags": ["messages"],
+        "x-eg-permissions": { "mode": "all", "permissions": ["message:read"] }
+      }
+    },
+    "/api/v1/messages/reveal": {
+      "post": {
+        "description": "The stored subjects of up to 100 messages of your organization (`messageIds`, distinct; e.g. one explorer page), in request order. Unknown ids and ids of other organizations are omitted from `data` (they look the same). One audit row `message.revealed` per revealed message (`metadata: { fields: [\"subject\"], bulk: true }`). Requires `message:reveal` (user tokens and API keys holding it; platform override sessions are audited with the override). Values are read from the read replica, then one `message.revealed` audit row per revealed message (resource `message`/`<id>`; the fields and counts, never the values) is committed on the writer **before** the response is sent; if that write fails the answer is `503 service_unavailable` and no value is returned. `Cache-Control: no-store`: never cache, log or forward the response. Both reveal operations share one per-user/API-key limit of API_MESSAGES_REVEAL_PER_MINUTE (default 30) requests per minute (`429 rate_limited` with `Retry-After`). No Idempotency-Key (a read with an audit record, repeated calls are new reveals). Values are attacker-controlled text, returned as stored.",
+        "operationId": "MessageRevealController_revealMany_v1",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "messageIds": {
+                    "minItems": 1,
+                    "maxItems": 100,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "description": "Message public ids (1-100, distinct), e.g. the ids of one explorer page"
+                  }
+                },
+                "required": ["messageIds"],
+                "additionalProperties": false
+              },
+              "examples": {
+                "page": {
+                  "value": {
+                    "messageIds": [
+                      "0193a1b2-7c3d-7e4f-8a5b-6c7d8e9f0a1b",
+                      "0193a1b2-7c3d-7e4f-8a5b-6c7d8e9f0a1c"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The revealed subjects",
+            "headers": {
+              "Cache-Control": {
+                "description": "Never cache, log or forward a reveal response",
+                "schema": { "type": "string", "enum": ["no-store"] }
+              },
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "revealedAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$",
+                      "description": "When the reveal was recorded in the audit log"
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                            "description": "Message public id"
+                          },
+                          "subject": {
+                            "nullable": true,
+                            "description": "The stored subject (attacker-controlled text, as stored), or null when none",
+                            "type": "string"
+                          }
+                        },
+                        "required": ["id", "subject"],
+                        "additionalProperties": false
+                      },
+                      "description": "In request order, for the ids found in your organization; unknown and other organizations’ ids are omitted (indistinguishable)"
+                    }
+                  },
+                  "required": ["revealedAt", "data"],
+                  "additionalProperties": false,
+                  "example": {
+                    "revealedAt": "2026-11-12T09:02:11.418Z",
+                    "data": [
+                      {
+                        "id": "0193a1b2-7c3d-7e4f-8a5b-6c7d8e9f0a1b",
+                        "subject": "EXAMPLE quarterly invoice"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`validation_failed`: the body is not strict JSON of the documented shape (1-100 distinct UUIDs; `message` lists `\"<path>: <issue>\"`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [400] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["validation_failed"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "403": {
+            "description": "Missing `message:reveal` (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [403] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["forbidden"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "429": {
+            "description": "More than API_MESSAGES_REVEAL_PER_MINUTE reveals by this user or API key in the current minute (`scope: route`; `Retry-After` gives the seconds to wait), or a global limit (`scope: principal | tenant`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [429] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["rate_limited"] },
+                    "message": { "type": "string" },
+                    "scope": { "type": "string", "enum": ["principal", "tenant", "route"] },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" },
+              "Retry-After": { "$ref": "#/components/headers/Retry-After" }
+            }
+          },
+          "500": {
+            "description": "Unexpected error (internal_error; no details are disclosed)",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "503": {
+            "description": "The audit rows could not be written (`service_unavailable`, no value returned), the rate-limit store is unavailable (`service_unavailable`), or the replica returned a row that does not echo the query (`inconsistent_read`); retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [503] },
+                    "error": { "type": "string" },
+                    "code": {
+                      "type": "string",
+                      "enum": ["service_unavailable", "inconsistent_read"]
+                    },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "Reveal the subjects of messages",
+        "tags": ["messages"],
+        "x-eg-permissions": { "mode": "all", "permissions": ["message:reveal"] }
+      }
+    },
+    "/api/v1/messages/{messageId}/reveal": {
+      "post": {
+        "description": "The clear values the reads withhold, per `fields`: `subject` (the stored subject or null), `headers` (the stored To, Cc and Subject rows in `seq` order) and `recipients` (one page of the envelope recipients in RCPT order with the matched user’s public id; `recipientsLimit` 1-100, default 100; continue with `recipientsCursor` = `recipients.nextCursor`, a signed v1 cursor bound to this message and your organization: any other is `400 cursor_invalid`). `recipientsCursor` and `recipientsLimit` are refused without `recipients`. Addresses inside SMTP replies, delivery event details and Rspamd symbol options stay masked (match deliveries by `rcptSeq`). One audit row `message.revealed` (`metadata: { fields, headerCount?, recipients?: { count, firstRcptSeq, lastRcptSeq } }`). Unknown ids and ids of other organizations are `404 message_not_found`. Requires `message:reveal` (user tokens and API keys holding it; platform override sessions are audited with the override). Values are read from the read replica, then one `message.revealed` audit row per revealed message (resource `message`/`<id>`; the fields and counts, never the values) is committed on the writer **before** the response is sent; if that write fails the answer is `503 service_unavailable` and no value is returned. `Cache-Control: no-store`: never cache, log or forward the response. Both reveal operations share one per-user/API-key limit of API_MESSAGES_REVEAL_PER_MINUTE (default 30) requests per minute (`429 rate_limited` with `Retry-After`). No Idempotency-Key (a read with an audit record, repeated calls are new reveals). Values are attacker-controlled text, returned as stored.",
+        "operationId": "MessageRevealController_reveal_v1",
+        "parameters": [
+          {
+            "name": "messageId",
+            "required": true,
+            "in": "path",
+            "description": "Message public id",
+            "schema": { "format": "uuid", "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "fields": {
+                    "minItems": 1,
+                    "maxItems": 3,
+                    "type": "array",
+                    "items": { "type": "string", "enum": ["subject", "headers", "recipients"] },
+                    "description": "What to reveal: `subject`, `headers` (To, Cc, Subject rows), `recipients`"
+                  },
+                  "recipientsCursor": {
+                    "description": "`recipients.nextCursor` of the previous reveal of this message",
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512
+                  },
+                  "recipientsLimit": {
+                    "description": "Recipients per reveal, 1-100 (default 100)",
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100
+                  }
+                },
+                "required": ["fields"],
+                "additionalProperties": false
+              },
+              "examples": {
+                "all": {
+                  "value": {
+                    "fields": ["subject", "headers", "recipients"],
+                    "recipientsLimit": 100
+                  }
+                },
+                "moreRecipients": {
+                  "value": {
+                    "fields": ["recipients"],
+                    "recipientsCursor": "EXAMPLE-recipients-nextCursor-of-the-previous-reveal"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The revealed values of the requested fields",
+            "headers": {
+              "Cache-Control": {
+                "description": "Never cache, log or forward a reveal response",
+                "schema": { "type": "string", "enum": ["no-store"] }
+              },
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "messageId": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "revealedAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$",
+                      "description": "When the reveal was recorded in the audit log"
+                    },
+                    "subject": {
+                      "description": "With `subject`: the stored subject, or null when none",
+                      "nullable": true,
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "With `headers`: the stored To, Cc and Subject rows in `seq` order",
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "seq": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991,
+                            "description": "Position among the stored headers"
+                          },
+                          "name": { "type": "string", "description": "`To`, `Cc` or `Subject`" },
+                          "value": {
+                            "type": "string",
+                            "description": "Decoded value as stored (attacker-controlled text)"
+                          }
+                        },
+                        "required": ["seq", "name", "value"],
+                        "additionalProperties": false
+                      }
+                    },
+                    "recipients": {
+                      "description": "With `recipients`: one page of recipients",
+                      "type": "object",
+                      "properties": {
+                        "data": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "rcptSeq": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991,
+                                "description": "Position in the RCPT TO list"
+                              },
+                              "address": {
+                                "type": "string",
+                                "description": "The envelope recipient address as stored"
+                              },
+                              "userId": {
+                                "nullable": true,
+                                "description": "Public id of the matched user, or null",
+                                "type": "string",
+                                "format": "uuid",
+                                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                              }
+                            },
+                            "required": ["rcptSeq", "address", "userId"],
+                            "additionalProperties": false
+                          },
+                          "description": "In RCPT order (keyset `rcptSeq`)"
+                        },
+                        "nextCursor": {
+                          "nullable": true,
+                          "description": "Pass as `recipientsCursor` to reveal the next recipients; null at the end",
+                          "type": "string"
+                        }
+                      },
+                      "required": ["data", "nextCursor"],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": ["messageId", "revealedAt"],
+                  "additionalProperties": false,
+                  "example": {
+                    "messageId": "0193a1b2-7c3d-7e4f-8a5b-6c7d8e9f0a1b",
+                    "revealedAt": "2026-11-12T09:02:11.418Z",
+                    "subject": "EXAMPLE quarterly invoice",
+                    "headers": [
+                      {
+                        "seq": 1,
+                        "name": "To",
+                        "value": "Alice <alice@acme.example>, bob@acme.example"
+                      },
+                      { "seq": 2, "name": "Subject", "value": "EXAMPLE quarterly invoice" }
+                    ],
+                    "recipients": {
+                      "data": [
+                        {
+                          "rcptSeq": 0,
+                          "address": "alice@acme.example",
+                          "userId": "0192e111-2a3b-7c4d-8e5f-6a7b8c9d0e1f"
+                        },
+                        { "rcptSeq": 1, "address": "bob@acme.example", "userId": null }
+                      ],
+                      "nextCursor": null
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`validation_failed` (`messageId` is not a UUID, or the body is not strict JSON of the documented shape; `message` lists `\"<path>: <issue>\"`) or `cursor_invalid` (the `recipientsCursor` is invalid, expired, of another message or of another organization)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [400] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["validation_failed", "cursor_invalid"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "403": {
+            "description": "Missing `message:reveal` (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [403] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["forbidden"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "404": {
+            "description": "Unknown message, or a message of another organization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [404] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["message_not_found"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "429": {
+            "description": "More than API_MESSAGES_REVEAL_PER_MINUTE reveals by this user or API key in the current minute (`scope: route`; `Retry-After` gives the seconds to wait), or a global limit (`scope: principal | tenant`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [429] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["rate_limited"] },
+                    "message": { "type": "string" },
+                    "scope": { "type": "string", "enum": ["principal", "tenant", "route"] },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" },
+              "Retry-After": { "$ref": "#/components/headers/Retry-After" }
+            }
+          },
+          "500": {
+            "description": "Unexpected error (internal_error; no details are disclosed)",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "503": {
+            "description": "The audit rows could not be written (`service_unavailable`, no value returned), the rate-limit store is unavailable (`service_unavailable`), or the replica returned a row that does not echo the query (`inconsistent_read`); retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [503] },
+                    "error": { "type": "string" },
+                    "code": {
+                      "type": "string",
+                      "enum": ["service_unavailable", "inconsistent_read"]
+                    },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          }
+        },
+        "security": [{ "api-key": [] }, { "access-token": [] }],
+        "summary": "Reveal the masked metadata of a message",
+        "tags": ["messages"],
+        "x-eg-permissions": { "mode": "all", "permissions": ["message:reveal"] }
       }
     },
     "/api/v1/platform/dead-letters": {
@@ -85816,7 +86885,7 @@
     },
     "/api/v1/quarantine/me/entries": {
       "get": {
-        "description": "The caller’s own entries (recipient = the caller’s verified email), newest first, over a required bounded range, filtered by state and reason; subjects included. Empty when the organization disabled end-user access (`endUser.enabled`). Mailbox users (`quarantine:self`) with a verified email only: API keys and platform overrides are refused (`403`); the scope is the organization and the caller’s own address (another address’s entry is `404`).",
+        "description": "The caller’s own entries (recipient = the caller’s verified email), newest first, over a required bounded range, filtered by state and reason; subjects and the own address included (`recipientMasked: false`). Empty when the organization disabled end-user access (`endUser.enabled`). Mailbox users (`quarantine:self`) with a verified email only: API keys and platform overrides are refused (`403`); the scope is the organization and the caller’s own address (another address’s entry is `404`).",
         "operationId": "QuarantineSelfController_search_v1",
         "parameters": [
           {
@@ -85934,6 +87003,7 @@
                             "enum": ["inbound", "outbound", "internal"]
                           },
                           "recipient": { "type": "string", "minLength": 1, "maxLength": 320 },
+                          "recipientMasked": { "type": "boolean" },
                           "sender": {
                             "type": "object",
                             "properties": {
@@ -86054,6 +87124,7 @@
                           "reason",
                           "direction",
                           "recipient",
+                          "recipientMasked",
                           "sender",
                           "subject",
                           "receivedAt",
@@ -86220,7 +87291,7 @@
     },
     "/api/v1/quarantine/me/entries/{entryId}": {
       "get": {
-        "description": "The entry with the actions the caller may take (`preview`, `release`, `request_release`). Audited as `quarantine.entry_viewed`. Mailbox users (`quarantine:self`) with a verified email only: API keys and platform overrides are refused (`403`); the scope is the organization and the caller’s own address (another address’s entry is `404`).",
+        "description": "The entry with the actions the caller may take (`preview`, `release`, `request_release`); the own address in clear (`recipientMasked: false`). Audited as `quarantine.entry_viewed`. Mailbox users (`quarantine:self`) with a verified email only: API keys and platform overrides are refused (`403`); the scope is the organization and the caller’s own address (another address’s entry is `404`).",
         "operationId": "QuarantineSelfController_detail_v1",
         "parameters": [
           {
@@ -86288,6 +87359,7 @@
                     },
                     "direction": { "type": "string", "enum": ["inbound", "outbound", "internal"] },
                     "recipient": { "type": "string", "minLength": 1, "maxLength": 320 },
+                    "recipientMasked": { "type": "boolean" },
                     "sender": {
                       "type": "object",
                       "properties": {
@@ -86630,6 +87702,7 @@
                     "reason",
                     "direction",
                     "recipient",
+                    "recipientMasked",
                     "sender",
                     "subject",
                     "receivedAt",
@@ -89941,29 +91014,29 @@
     },
     "/api/v1/quarantine/entries": {
       "get": {
-        "description": "Keyset-paginated search (newest `quarantinedAt` first) over a required, bounded range (`to - from` ≤ QUARANTINE_SEARCH_MAX_RANGE_DAYS) with optional filters: state, kind, direction, reason, riskLevel or minRiskLevel, primaryEngine, decisive policyId/ruleId, exact envelope sender (`sender`, index-backed) or header From (`headerFrom`), senderDomain, exact recipient, hasAttachments, hasHardBlock, messageId. No free-text or subject search. The cursor is bound to the filters (`400 quarantine_cursor_invalid` with other filters). `subject` is returned only to holders of `quarantine:preview`. Read replica: an entry just created may be missing for the replication lag. Audited as `quarantine.searched` (filter hash and count only).",
+        "description": "Keyset-paginated search (newest `quarantinedAt` first) over a bounded range (`to - from` ≤ QUARANTINE_SEARCH_MAX_RANGE_DAYS), required unless `messageId` is given (then every entry of that message, any recipient and round, whenever it was quarantined; read by the message-led unique key), with optional filters: state, kind, direction, reason, riskLevel or minRiskLevel, primaryEngine, decisive policyId/ruleId, exact envelope sender (`sender`, index-backed) or header From (`headerFrom`), senderDomain, exact recipient, hasAttachments, hasHardBlock, messageId. No free-text or subject search. The cursor is bound to the filters (`400 quarantine_cursor_invalid` with other filters). `subject` is returned only to holders of `quarantine:preview`. `recipient` is in clear only for holders of a quarantine decision permission (`quarantine:release`, `quarantine:approve`, `quarantine:reject`, `quarantine:delete`, `quarantine:request_release`, `quarantine:manage`) or `message:reveal`; for every other caller it is masked (`f***@example.com`) and `recipientMasked` is true (step 7.2). The exact `recipient` filter needs the same permissions (a caller who reads recipients masked gets `403 quarantine_filter_forbidden`: the search would confirm the masked address; ADR-0062). Read replica: an entry just created may be missing for the replication lag. Audited as `quarantine.searched` (filter hash and count only).",
         "operationId": "QuarantineEntriesController_search_v1",
         "parameters": [
           {
             "name": "from",
-            "required": true,
+            "required": false,
             "in": "query",
             "schema": {
+              "description": "Inclusive lower bound of quarantinedAt (required unless `messageId` is given)",
               "type": "string",
               "format": "date-time",
-              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
-              "description": "Inclusive lower bound of quarantinedAt (required)"
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
             }
           },
           {
             "name": "to",
-            "required": true,
+            "required": false,
             "in": "query",
             "schema": {
+              "description": "Exclusive upper bound of quarantinedAt (required unless `messageId` is given; to - from ≤ the max range)",
               "type": "string",
               "format": "date-time",
-              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
-              "description": "Exclusive upper bound of quarantinedAt (required; to - from ≤ the max range)"
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
             }
           },
           {
@@ -90098,7 +91171,7 @@
             "required": false,
             "in": "query",
             "schema": {
-              "description": "Message public id",
+              "description": "Message public id. With it `from`/`to` may be left out: every entry of the message (any recipient and round) is searched, whenever it was quarantined",
               "type": "string",
               "format": "uuid",
               "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
@@ -90188,6 +91261,7 @@
                             "enum": ["inbound", "outbound", "internal"]
                           },
                           "recipient": { "type": "string", "minLength": 1, "maxLength": 320 },
+                          "recipientMasked": { "type": "boolean" },
                           "sender": {
                             "type": "object",
                             "properties": {
@@ -90308,6 +91382,7 @@
                           "reason",
                           "direction",
                           "recipient",
+                          "recipientMasked",
                           "sender",
                           "subject",
                           "receivedAt",
@@ -90394,23 +91469,24 @@
             }
           },
           "403": {
-            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "description": "Missing `quarantine:read` (`forbidden`), or an exact `recipient` filter from a caller who reads recipients masked (`quarantine_filter_forbidden`, `filter` names it)",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "statusCode": { "type": "integer" },
+                    "statusCode": { "type": "integer", "enum": [403] },
                     "error": { "type": "string" },
-                    "message": {
-                      "oneOf": [
-                        { "type": "string" },
-                        { "type": "array", "items": { "type": "string" } }
-                      ]
+                    "code": {
+                      "type": "string",
+                      "enum": ["forbidden", "quarantine_filter_forbidden"]
                     },
-                    "correlationId": { "type": "string" }
+                    "message": { "type": "string" },
+                    "filter": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
                   },
-                  "required": ["statusCode", "error", "message"]
+                  "required": ["statusCode", "error", "code", "message"]
                 }
               }
             },
@@ -90824,7 +91900,7 @@
     },
     "/api/v1/quarantine/entries/{entryId}": {
       "get": {
-        "description": "The entry with its explanation lines, floor reasons, reason codes, decisive rule, release attempts, `allowedActions` for the caller (advisory; every route re-checks) and `contentAvailable`. `subject` only with `quarantine:preview`. Read replica; each call writes a `view` action and the audit row `quarantine.entry_viewed`.",
+        "description": "The entry with its explanation lines, floor reasons, reason codes, decisive rule, release attempts, `allowedActions` for the caller (advisory; every route re-checks) and `contentAvailable`. `subject` only with `quarantine:preview`. `recipient` is in clear only for holders of a quarantine decision permission (`quarantine:release`, `quarantine:approve`, `quarantine:reject`, `quarantine:delete`, `quarantine:request_release`, `quarantine:manage`) or `message:reveal`; for every other caller it is masked (`f***@example.com`) and `recipientMasked` is true (step 7.2). Read replica; each call writes a `view` action and the audit row `quarantine.entry_viewed`.",
         "operationId": "QuarantineEntriesController_detail_v1",
         "parameters": [
           {
@@ -90892,6 +91968,7 @@
                     },
                     "direction": { "type": "string", "enum": ["inbound", "outbound", "internal"] },
                     "recipient": { "type": "string", "minLength": 1, "maxLength": 320 },
+                    "recipientMasked": { "type": "boolean" },
                     "sender": {
                       "type": "object",
                       "properties": {
@@ -91234,6 +92311,7 @@
                     "reason",
                     "direction",
                     "recipient",
+                    "recipientMasked",
                     "sender",
                     "subject",
                     "receivedAt",
@@ -97022,7 +98100,7 @@
     },
     "/api/v1/audit/logs": {
       "get": {
-        "description": "Audit rows of the caller’s organization (mutations, audited reads, platform override requests into it). Window `[from, to)` default the last 7 days, at most `API_AUDIT_MAX_RANGE_DAYS`. Keyset `(createdAt, id)` in the `sort` direction (`-createdAt` default), read from the replica. Filters: `action` (exact) or `actionPrefix`, `resourceType`, `resourceId`, `actorType`, `actorId`; with any filter a page scans at most `API_LIST_SCAN_BUDGET_ROWS` entries and may be short (even empty) while `nextCursor` is non-null: follow `nextCursor` until it is null. Cursors are signed and bound to the caller, filters, sort and first window (`400 cursor_invalid` otherwise). The first page of each search is itself audited (`audit.searched`: filter names, filter hash, row count).",
+        "description": "Audit rows of the caller’s organization (mutations, audited reads, platform override requests into it). Window `[from, to)` default the last 7 days, at most `API_AUDIT_MAX_RANGE_DAYS`. Keyset `(createdAt, id)` in the `sort` direction (`-createdAt` default), read from the replica. Filters: `action` (exact) or `actionPrefix`, `resourceType`, `resourceId`, `actorType`, `actorId`. With `resourceType` and `resourceId` together (a resource’s history, e.g. `resourceType=message&resourceId=<message id>`) the search reads the resource index in keyset order: pages are exact, and other filters scan at most `API_LIST_SCAN_BUDGET_ROWS` of the resource’s entries. With any other filter a page scans at most `API_LIST_SCAN_BUDGET_ROWS` entries and may be short (even empty) while `nextCursor` is non-null: follow `nextCursor` until it is null. Cursors are signed and bound to the caller, filters, sort and first window (`400 cursor_invalid` otherwise). The first page of each search is itself audited (`audit.searched`: filter names, filter hash, row count).",
         "operationId": "AuditLogsController_search_v1",
         "parameters": [
           {
@@ -97339,7 +98417,7 @@
     },
     "/api/v1/platform/audit/logs": {
       "get": {
-        "description": "For users of the platform organization only (API keys, override sessions and customer users are refused), in an MFA session. Exactly one target: `organizationId` (any organization, `404 organization_not_found` when unknown) or `scope=platform` (rows without an organization). Window `[from, to)` default the last 7 days, at most `API_AUDIT_MAX_RANGE_DAYS`. Keyset `(createdAt, id)` in the `sort` direction (`-createdAt` default), read from the replica. Filters: `action` (exact) or `actionPrefix`, `resourceType`, `resourceId`, `actorType`, `actorId`; with any filter a page scans at most `API_LIST_SCAN_BUDGET_ROWS` entries and may be short (even empty) while `nextCursor` is non-null: follow `nextCursor` until it is null. Cursors are signed and bound to the caller, filters, sort and first window (`400 cursor_invalid` otherwise). The first page of each search is audited as `platform.audit_searched` in the searched organization’s trail (platform rows for `scope=platform`).",
+        "description": "For users of the platform organization only (API keys, override sessions and customer users are refused), in an MFA session. Exactly one target: `organizationId` (any organization, `404 organization_not_found` when unknown) or `scope=platform` (rows without an organization). Window `[from, to)` default the last 7 days, at most `API_AUDIT_MAX_RANGE_DAYS`. Keyset `(createdAt, id)` in the `sort` direction (`-createdAt` default), read from the replica. Filters: `action` (exact) or `actionPrefix`, `resourceType`, `resourceId`, `actorType`, `actorId`. With `resourceType` and `resourceId` together (a resource’s history, e.g. `resourceType=message&resourceId=<message id>`) the search reads the resource index in keyset order: pages are exact, and other filters scan at most `API_LIST_SCAN_BUDGET_ROWS` of the resource’s entries. With any other filter a page scans at most `API_LIST_SCAN_BUDGET_ROWS` entries and may be short (even empty) while `nextCursor` is non-null: follow `nextCursor` until it is null. Cursors are signed and bound to the caller, filters, sort and first window (`400 cursor_invalid` otherwise). The first page of each search is audited as `platform.audit_searched` in the searched organization’s trail (platform rows for `scope=platform`).",
         "operationId": "PlatformAuditLogsController_search_v1",
         "parameters": [
           {
@@ -108607,6 +109685,1739 @@
         "summary": "Replace my notification preferences",
         "tags": ["notifications"]
       }
+    },
+    "/api/v1/saved-views": {
+      "get": {
+        "description": "Your saved views of `kind` (`message_explorer`), newest first (keyset `id`), v1 cursor (signed, bound to you and your organization). For users who are members of the organization: API keys get `403 user_required`, a platform override session `403 saved_views_member_only`. Read from the writer, not the replica: a saved view is the caller’s own setting and is read right after it is written.",
+        "operationId": "SavedViewsController_list_v1",
+        "parameters": [
+          {
+            "name": "limit",
+            "required": false,
+            "in": "query",
+            "description": "Page size, 1-100 (default 25)",
+            "schema": { "type": "string", "pattern": "^\\d{1,3}$" }
+          },
+          {
+            "name": "cursor",
+            "required": false,
+            "in": "query",
+            "description": "`nextCursor` of the previous page",
+            "schema": { "type": "string", "minLength": 1, "maxLength": 512 }
+          },
+          {
+            "name": "sort",
+            "required": false,
+            "in": "query",
+            "description": "`-createdAt` (the only order: newest first)",
+            "schema": { "type": "string", "enum": ["-createdAt"] }
+          },
+          {
+            "name": "kind",
+            "required": true,
+            "in": "query",
+            "description": "`message_explorer` (required; the only kind)",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                            "description": "Saved view public id"
+                          },
+                          "kind": { "type": "string", "enum": ["message_explorer"] },
+                          "name": { "type": "string" },
+                          "definition": {
+                            "type": "object",
+                            "properties": {
+                              "version": { "type": "number", "enum": [1] },
+                              "filters": {
+                                "type": "object",
+                                "additionalProperties": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 998
+                                },
+                                "description": "`GET /messages` query parameters (except `limit`, `cursor`, `sort`, `from`, `to`) and their values as strings, e.g. `{ \"verdict\": \"phishing,malware\", \"senderDomain\": \"example.com\" }`"
+                              },
+                              "sort": { "type": "string", "enum": ["-receivedAt", "receivedAt"] },
+                              "range": {
+                                "oneOf": [
+                                  {
+                                    "type": "object",
+                                    "properties": {
+                                      "kind": { "type": "string", "enum": ["relative"] },
+                                      "preset": {
+                                        "type": "string",
+                                        "enum": ["1h", "24h", "7d", "30d"]
+                                      }
+                                    },
+                                    "required": ["kind", "preset"],
+                                    "additionalProperties": false
+                                  },
+                                  {
+                                    "type": "object",
+                                    "properties": {
+                                      "kind": { "type": "string", "enum": ["absolute"] },
+                                      "from": {
+                                        "type": "string",
+                                        "format": "date-time",
+                                        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                                      },
+                                      "to": {
+                                        "type": "string",
+                                        "format": "date-time",
+                                        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                                      }
+                                    },
+                                    "required": ["kind", "from", "to"],
+                                    "additionalProperties": false
+                                  }
+                                ],
+                                "description": "`{ kind: \"relative\", preset }` (1h, 24h, 7d, 30d) or `{ kind: \"absolute\", from, to }` (ISO 8601, at most API_MESSAGES_MAX_RANGE_DAYS days)"
+                              },
+                              "columns": {
+                                "nullable": true,
+                                "description": "Visible explorer columns in order, or null for the default set",
+                                "maxItems": 24,
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "pattern": "^[a-zA-Z][a-zA-Z0-9]{0,31}$"
+                                }
+                              }
+                            },
+                            "required": ["version", "filters", "sort", "range", "columns"],
+                            "additionalProperties": false
+                          },
+                          "rowVersion": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 9007199254740991,
+                            "description": "Optimistic concurrency token of PUT"
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "updatedAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "kind",
+                          "name",
+                          "definition",
+                          "rowVersion",
+                          "createdAt",
+                          "updatedAt"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "nextCursor": { "nullable": true, "type": "string" }
+                  },
+                  "required": ["data", "nextCursor"],
+                  "additionalProperties": false,
+                  "example": {
+                    "data": [
+                      {
+                        "id": "01930c2e-7d1a-7000-8000-0000000005a1",
+                        "kind": "message_explorer",
+                        "name": "Inbound phishing, last 7 days",
+                        "definition": {
+                          "version": 1,
+                          "filters": {
+                            "verdict": "phishing,malware",
+                            "direction": "inbound",
+                            "senderDomain": "example.com"
+                          },
+                          "sort": "-receivedAt",
+                          "range": { "kind": "relative", "preset": "7d" },
+                          "columns": ["receivedAt", "from", "subject", "verdict", "riskScore"]
+                        },
+                        "rowVersion": 1,
+                        "createdAt": "2026-11-14T09:12:44.512Z",
+                        "updatedAt": "2026-11-14T09:12:44.512Z"
+                      }
+                    ],
+                    "nextCursor": null
+                  }
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`validation_failed`: unknown parameter or operator, wrong type, too many values, range too long; `message` lists `\"<path>: <issue>\"`) or the cursor is invalid, expired or belongs to other filters, another sort or another caller (`cursor_invalid`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [400] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["validation_failed", "cursor_invalid"] },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "403": {
+            "description": "Missing `message:read` (`forbidden`), an API key (`user_required`), a platform override session (`saved_views_member_only`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [403] },
+                    "error": { "type": "string" },
+                    "code": {
+                      "type": "string",
+                      "enum": ["forbidden", "user_required", "saved_views_member_only"]
+                    },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "429": {
+            "description": "Too many requests (rate_limited, with scope and Retry-After)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RateLimitedErrorBody" }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" },
+              "Retry-After": { "$ref": "#/components/headers/Retry-After" }
+            }
+          },
+          "500": {
+            "description": "Unexpected error (internal_error; no details are disclosed)",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "503": {
+            "description": "The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [503] },
+                    "error": { "type": "string" },
+                    "code": {
+                      "type": "string",
+                      "enum": ["inconsistent_read", "service_unavailable"]
+                    },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          }
+        },
+        "security": [{ "access-token": [] }],
+        "summary": "List my saved views",
+        "tags": ["saved-views"],
+        "x-eg-cursor": "v1",
+        "x-eg-permissions": { "mode": "all", "permissions": ["message:read"] }
+      },
+      "post": {
+        "description": "Saves an explorer view: `kind` (`message_explorer`), `name` (1-80 characters, unique among your views of the kind, case-insensitive: `409 saved_view_name_taken`) and the strict `definition` `{ version: 1, filters, sort, range, columns }`. `filters` are `GET /messages` query parameters (at most 24, values as strings) and are validated with the same rules as the list, including its filter-level permissions; the JSON is at most 8 192 bytes. At most SAVED_VIEWS_MAX_PER_USER (default 50) views per user and kind (`409 saved_view_limit_reached`). Audited `saved_view.created` (id and kind only: names and filters may hold addresses). For users who are members of the organization: API keys get `403 user_required`, a platform override session `403 saved_views_member_only`.",
+        "operationId": "SavedViewsController_create_v1",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "kind": { "type": "string", "enum": ["message_explorer"] },
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 80,
+                    "pattern": "^[^\\p{Cc}]*$"
+                  },
+                  "definition": {
+                    "type": "object",
+                    "properties": {
+                      "version": { "type": "number", "enum": [1] },
+                      "filters": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 998
+                        },
+                        "description": "`GET /messages` query parameters (except `limit`, `cursor`, `sort`, `from`, `to`) and their values as strings, e.g. `{ \"verdict\": \"phishing,malware\", \"senderDomain\": \"example.com\" }`"
+                      },
+                      "sort": { "type": "string", "enum": ["-receivedAt", "receivedAt"] },
+                      "range": {
+                        "oneOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "kind": { "type": "string", "enum": ["relative"] },
+                              "preset": { "type": "string", "enum": ["1h", "24h", "7d", "30d"] }
+                            },
+                            "required": ["kind", "preset"],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "kind": { "type": "string", "enum": ["absolute"] },
+                              "from": {
+                                "type": "string",
+                                "format": "date-time",
+                                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                              },
+                              "to": {
+                                "type": "string",
+                                "format": "date-time",
+                                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                              }
+                            },
+                            "required": ["kind", "from", "to"],
+                            "additionalProperties": false
+                          }
+                        ],
+                        "description": "`{ kind: \"relative\", preset }` (1h, 24h, 7d, 30d) or `{ kind: \"absolute\", from, to }` (ISO 8601, at most API_MESSAGES_MAX_RANGE_DAYS days)"
+                      },
+                      "columns": {
+                        "nullable": true,
+                        "description": "Visible explorer columns in order, or null for the default set",
+                        "maxItems": 24,
+                        "type": "array",
+                        "items": { "type": "string", "pattern": "^[a-zA-Z][a-zA-Z0-9]{0,31}$" }
+                      }
+                    },
+                    "required": ["version", "filters", "sort", "range", "columns"],
+                    "additionalProperties": false
+                  }
+                },
+                "required": ["kind", "name", "definition"],
+                "additionalProperties": false
+              },
+              "examples": {
+                "phishing": {
+                  "value": {
+                    "kind": "message_explorer",
+                    "name": "Inbound phishing, last 7 days",
+                    "definition": {
+                      "version": 1,
+                      "filters": {
+                        "verdict": "phishing,malware",
+                        "direction": "inbound",
+                        "senderDomain": "example.com"
+                      },
+                      "sort": "-receivedAt",
+                      "range": { "kind": "relative", "preset": "7d" },
+                      "columns": ["receivedAt", "from", "subject", "verdict", "riskScore"]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The saved view",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                      "description": "Saved view public id"
+                    },
+                    "kind": { "type": "string", "enum": ["message_explorer"] },
+                    "name": { "type": "string" },
+                    "definition": {
+                      "type": "object",
+                      "properties": {
+                        "version": { "type": "number", "enum": [1] },
+                        "filters": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 998
+                          },
+                          "description": "`GET /messages` query parameters (except `limit`, `cursor`, `sort`, `from`, `to`) and their values as strings, e.g. `{ \"verdict\": \"phishing,malware\", \"senderDomain\": \"example.com\" }`"
+                        },
+                        "sort": { "type": "string", "enum": ["-receivedAt", "receivedAt"] },
+                        "range": {
+                          "oneOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": { "type": "string", "enum": ["relative"] },
+                                "preset": { "type": "string", "enum": ["1h", "24h", "7d", "30d"] }
+                              },
+                              "required": ["kind", "preset"],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": { "type": "string", "enum": ["absolute"] },
+                                "from": {
+                                  "type": "string",
+                                  "format": "date-time",
+                                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                                },
+                                "to": {
+                                  "type": "string",
+                                  "format": "date-time",
+                                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                                }
+                              },
+                              "required": ["kind", "from", "to"],
+                              "additionalProperties": false
+                            }
+                          ],
+                          "description": "`{ kind: \"relative\", preset }` (1h, 24h, 7d, 30d) or `{ kind: \"absolute\", from, to }` (ISO 8601, at most API_MESSAGES_MAX_RANGE_DAYS days)"
+                        },
+                        "columns": {
+                          "nullable": true,
+                          "description": "Visible explorer columns in order, or null for the default set",
+                          "maxItems": 24,
+                          "type": "array",
+                          "items": { "type": "string", "pattern": "^[a-zA-Z][a-zA-Z0-9]{0,31}$" }
+                        }
+                      },
+                      "required": ["version", "filters", "sort", "range", "columns"],
+                      "additionalProperties": false
+                    },
+                    "rowVersion": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991,
+                      "description": "Optimistic concurrency token of PUT"
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "updatedAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "kind",
+                    "name",
+                    "definition",
+                    "rowVersion",
+                    "createdAt",
+                    "updatedAt"
+                  ],
+                  "additionalProperties": false,
+                  "example": {
+                    "id": "01930c2e-7d1a-7000-8000-0000000005a1",
+                    "kind": "message_explorer",
+                    "name": "Inbound phishing, last 7 days",
+                    "definition": {
+                      "version": 1,
+                      "filters": {
+                        "verdict": "phishing,malware",
+                        "direction": "inbound",
+                        "senderDomain": "example.com"
+                      },
+                      "sort": "-receivedAt",
+                      "range": { "kind": "relative", "preset": "7d" },
+                      "columns": ["receivedAt", "from", "subject", "verdict", "riskScore"]
+                    },
+                    "rowVersion": 1,
+                    "createdAt": "2026-11-14T09:12:44.512Z",
+                    "updatedAt": "2026-11-14T09:12:44.512Z"
+                  }
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "400": {
+            "description": "`validation_failed`: the body is not strict JSON of the documented shape, or the definition breaks a rule (`message` lists `\"<path>: <issue>\"` with paths under `definition`, e.g. `definition.filters.subjectPrefix: must be 3 to 128 characters …`, `definition.filters: Unrecognized key: \"foo\"`, `definition: must be at most 8192 bytes as JSON`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [400] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["validation_failed"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "403": {
+            "description": "Missing `message:read` (`forbidden`), an API key (`user_required`), a platform override session (`saved_views_member_only`), or a filter of the definition needs a permission you do not hold (`message_filter_forbidden`: `recipient`/`subject`/`subjectPrefix` need `message:reveal`, `deliveryStatus` `delivery:read`, `quarantineStatus` `quarantine:read`; `filter` and `permission` name it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [403] },
+                    "error": { "type": "string" },
+                    "code": {
+                      "type": "string",
+                      "enum": [
+                        "forbidden",
+                        "user_required",
+                        "saved_views_member_only",
+                        "message_filter_forbidden"
+                      ]
+                    },
+                    "message": { "type": "string" },
+                    "filter": { "type": "string" },
+                    "permission": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "409": {
+            "description": "`saved_view_name_taken` or `saved_view_limit_reached` (`limit`: the per-user maximum)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [409] },
+                    "error": { "type": "string" },
+                    "code": {
+                      "type": "string",
+                      "enum": ["saved_view_name_taken", "saved_view_limit_reached"]
+                    },
+                    "message": { "type": "string" },
+                    "limit": { "type": "integer" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "429": {
+            "description": "Too many requests (rate_limited, with scope and Retry-After)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RateLimitedErrorBody" }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" },
+              "Retry-After": { "$ref": "#/components/headers/Retry-After" }
+            }
+          },
+          "500": {
+            "description": "Unexpected error (internal_error; no details are disclosed)",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "503": {
+            "description": "The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [503] },
+                    "error": { "type": "string" },
+                    "code": {
+                      "type": "string",
+                      "enum": ["inconsistent_read", "service_unavailable"]
+                    },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          }
+        },
+        "security": [{ "access-token": [] }],
+        "summary": "Save a view",
+        "tags": ["saved-views"],
+        "x-eg-permissions": { "mode": "all", "permissions": ["message:read"] }
+      }
+    },
+    "/api/v1/saved-views/{viewId}": {
+      "get": {
+        "description": "One of your saved views. For users who are members of the organization: API keys get `403 user_required`, a platform override session `403 saved_views_member_only`. Read from the writer, not the replica: a saved view is the caller’s own setting and is read right after it is written.",
+        "operationId": "SavedViewsController_get_v1",
+        "parameters": [
+          {
+            "name": "viewId",
+            "required": true,
+            "in": "path",
+            "description": "Saved view public id",
+            "schema": { "format": "uuid", "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                      "description": "Saved view public id"
+                    },
+                    "kind": { "type": "string", "enum": ["message_explorer"] },
+                    "name": { "type": "string" },
+                    "definition": {
+                      "type": "object",
+                      "properties": {
+                        "version": { "type": "number", "enum": [1] },
+                        "filters": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 998
+                          },
+                          "description": "`GET /messages` query parameters (except `limit`, `cursor`, `sort`, `from`, `to`) and their values as strings, e.g. `{ \"verdict\": \"phishing,malware\", \"senderDomain\": \"example.com\" }`"
+                        },
+                        "sort": { "type": "string", "enum": ["-receivedAt", "receivedAt"] },
+                        "range": {
+                          "oneOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": { "type": "string", "enum": ["relative"] },
+                                "preset": { "type": "string", "enum": ["1h", "24h", "7d", "30d"] }
+                              },
+                              "required": ["kind", "preset"],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": { "type": "string", "enum": ["absolute"] },
+                                "from": {
+                                  "type": "string",
+                                  "format": "date-time",
+                                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                                },
+                                "to": {
+                                  "type": "string",
+                                  "format": "date-time",
+                                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                                }
+                              },
+                              "required": ["kind", "from", "to"],
+                              "additionalProperties": false
+                            }
+                          ],
+                          "description": "`{ kind: \"relative\", preset }` (1h, 24h, 7d, 30d) or `{ kind: \"absolute\", from, to }` (ISO 8601, at most API_MESSAGES_MAX_RANGE_DAYS days)"
+                        },
+                        "columns": {
+                          "nullable": true,
+                          "description": "Visible explorer columns in order, or null for the default set",
+                          "maxItems": 24,
+                          "type": "array",
+                          "items": { "type": "string", "pattern": "^[a-zA-Z][a-zA-Z0-9]{0,31}$" }
+                        }
+                      },
+                      "required": ["version", "filters", "sort", "range", "columns"],
+                      "additionalProperties": false
+                    },
+                    "rowVersion": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991,
+                      "description": "Optimistic concurrency token of PUT"
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "updatedAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "kind",
+                    "name",
+                    "definition",
+                    "rowVersion",
+                    "createdAt",
+                    "updatedAt"
+                  ],
+                  "additionalProperties": false,
+                  "example": {
+                    "id": "01930c2e-7d1a-7000-8000-0000000005a1",
+                    "kind": "message_explorer",
+                    "name": "Inbound phishing, last 7 days",
+                    "definition": {
+                      "version": 1,
+                      "filters": {
+                        "verdict": "phishing,malware",
+                        "direction": "inbound",
+                        "senderDomain": "example.com"
+                      },
+                      "sort": "-receivedAt",
+                      "range": { "kind": "relative", "preset": "7d" },
+                      "columns": ["receivedAt", "from", "subject", "verdict", "riskScore"]
+                    },
+                    "rowVersion": 1,
+                    "createdAt": "2026-11-14T09:12:44.512Z",
+                    "updatedAt": "2026-11-14T09:12:44.512Z"
+                  }
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "403": {
+            "description": "Missing `message:read` (`forbidden`), an API key (`user_required`), a platform override session (`saved_views_member_only`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [403] },
+                    "error": { "type": "string" },
+                    "code": {
+                      "type": "string",
+                      "enum": ["forbidden", "user_required", "saved_views_member_only"]
+                    },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "404": {
+            "description": "Unknown id, or a view of another user or organization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [404] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["saved_view_not_found"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "429": {
+            "description": "Too many requests (rate_limited, with scope and Retry-After)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RateLimitedErrorBody" }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" },
+              "Retry-After": { "$ref": "#/components/headers/Retry-After" }
+            }
+          },
+          "500": {
+            "description": "Unexpected error (internal_error; no details are disclosed)",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "503": {
+            "description": "The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [503] },
+                    "error": { "type": "string" },
+                    "code": {
+                      "type": "string",
+                      "enum": ["inconsistent_read", "service_unavailable"]
+                    },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          }
+        },
+        "security": [{ "access-token": [] }],
+        "summary": "Get a saved view",
+        "tags": ["saved-views"],
+        "x-eg-permissions": { "mode": "all", "permissions": ["message:read"] }
+      },
+      "put": {
+        "description": "Replaces the name and the definition (same rules as create) with `expectedRowVersion` (`409 saved_view_conflict` with `currentRowVersion` when the view changed). The kind never changes. Audited `saved_view.updated` (id and kind only). For users who are members of the organization: API keys get `403 user_required`, a platform override session `403 saved_views_member_only`. Read from the writer, not the replica: a saved view is the caller’s own setting and is read right after it is written.",
+        "operationId": "SavedViewsController_update_v1",
+        "parameters": [
+          {
+            "name": "viewId",
+            "required": true,
+            "in": "path",
+            "description": "Saved view public id",
+            "schema": { "format": "uuid", "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 80,
+                    "pattern": "^[^\\p{Cc}]*$"
+                  },
+                  "definition": {
+                    "type": "object",
+                    "properties": {
+                      "version": { "type": "number", "enum": [1] },
+                      "filters": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 998
+                        },
+                        "description": "`GET /messages` query parameters (except `limit`, `cursor`, `sort`, `from`, `to`) and their values as strings, e.g. `{ \"verdict\": \"phishing,malware\", \"senderDomain\": \"example.com\" }`"
+                      },
+                      "sort": { "type": "string", "enum": ["-receivedAt", "receivedAt"] },
+                      "range": {
+                        "oneOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "kind": { "type": "string", "enum": ["relative"] },
+                              "preset": { "type": "string", "enum": ["1h", "24h", "7d", "30d"] }
+                            },
+                            "required": ["kind", "preset"],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "kind": { "type": "string", "enum": ["absolute"] },
+                              "from": {
+                                "type": "string",
+                                "format": "date-time",
+                                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                              },
+                              "to": {
+                                "type": "string",
+                                "format": "date-time",
+                                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                              }
+                            },
+                            "required": ["kind", "from", "to"],
+                            "additionalProperties": false
+                          }
+                        ],
+                        "description": "`{ kind: \"relative\", preset }` (1h, 24h, 7d, 30d) or `{ kind: \"absolute\", from, to }` (ISO 8601, at most API_MESSAGES_MAX_RANGE_DAYS days)"
+                      },
+                      "columns": {
+                        "nullable": true,
+                        "description": "Visible explorer columns in order, or null for the default set",
+                        "maxItems": 24,
+                        "type": "array",
+                        "items": { "type": "string", "pattern": "^[a-zA-Z][a-zA-Z0-9]{0,31}$" }
+                      }
+                    },
+                    "required": ["version", "filters", "sort", "range", "columns"],
+                    "additionalProperties": false
+                  },
+                  "expectedRowVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991,
+                    "description": "`rowVersion` of the view you edited"
+                  }
+                },
+                "required": ["name", "definition", "expectedRowVersion"],
+                "additionalProperties": false
+              },
+              "examples": {
+                "rename": {
+                  "value": {
+                    "name": "Inbound phishing and malware, last 7 days",
+                    "definition": {
+                      "version": 1,
+                      "filters": {
+                        "verdict": "phishing,malware",
+                        "direction": "inbound",
+                        "senderDomain": "example.com"
+                      },
+                      "sort": "-receivedAt",
+                      "range": { "kind": "relative", "preset": "7d" },
+                      "columns": null
+                    },
+                    "expectedRowVersion": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                      "description": "Saved view public id"
+                    },
+                    "kind": { "type": "string", "enum": ["message_explorer"] },
+                    "name": { "type": "string" },
+                    "definition": {
+                      "type": "object",
+                      "properties": {
+                        "version": { "type": "number", "enum": [1] },
+                        "filters": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 998
+                          },
+                          "description": "`GET /messages` query parameters (except `limit`, `cursor`, `sort`, `from`, `to`) and their values as strings, e.g. `{ \"verdict\": \"phishing,malware\", \"senderDomain\": \"example.com\" }`"
+                        },
+                        "sort": { "type": "string", "enum": ["-receivedAt", "receivedAt"] },
+                        "range": {
+                          "oneOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": { "type": "string", "enum": ["relative"] },
+                                "preset": { "type": "string", "enum": ["1h", "24h", "7d", "30d"] }
+                              },
+                              "required": ["kind", "preset"],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": { "type": "string", "enum": ["absolute"] },
+                                "from": {
+                                  "type": "string",
+                                  "format": "date-time",
+                                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                                },
+                                "to": {
+                                  "type": "string",
+                                  "format": "date-time",
+                                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                                }
+                              },
+                              "required": ["kind", "from", "to"],
+                              "additionalProperties": false
+                            }
+                          ],
+                          "description": "`{ kind: \"relative\", preset }` (1h, 24h, 7d, 30d) or `{ kind: \"absolute\", from, to }` (ISO 8601, at most API_MESSAGES_MAX_RANGE_DAYS days)"
+                        },
+                        "columns": {
+                          "nullable": true,
+                          "description": "Visible explorer columns in order, or null for the default set",
+                          "maxItems": 24,
+                          "type": "array",
+                          "items": { "type": "string", "pattern": "^[a-zA-Z][a-zA-Z0-9]{0,31}$" }
+                        }
+                      },
+                      "required": ["version", "filters", "sort", "range", "columns"],
+                      "additionalProperties": false
+                    },
+                    "rowVersion": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991,
+                      "description": "Optimistic concurrency token of PUT"
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "updatedAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "kind",
+                    "name",
+                    "definition",
+                    "rowVersion",
+                    "createdAt",
+                    "updatedAt"
+                  ],
+                  "additionalProperties": false,
+                  "example": {
+                    "id": "01930c2e-7d1a-7000-8000-0000000005a1",
+                    "kind": "message_explorer",
+                    "name": "Inbound phishing, last 7 days",
+                    "definition": {
+                      "version": 1,
+                      "filters": {
+                        "verdict": "phishing,malware",
+                        "direction": "inbound",
+                        "senderDomain": "example.com"
+                      },
+                      "sort": "-receivedAt",
+                      "range": { "kind": "relative", "preset": "7d" },
+                      "columns": ["receivedAt", "from", "subject", "verdict", "riskScore"]
+                    },
+                    "rowVersion": 2,
+                    "createdAt": "2026-11-14T09:12:44.512Z",
+                    "updatedAt": "2026-11-14T09:12:44.512Z"
+                  }
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "400": {
+            "description": "`validation_failed`: the body is not strict JSON of the documented shape, or the definition breaks a rule (`message` lists `\"<path>: <issue>\"` with paths under `definition`, e.g. `definition.filters.subjectPrefix: must be 3 to 128 characters …`, `definition.filters: Unrecognized key: \"foo\"`, `definition: must be at most 8192 bytes as JSON`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [400] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["validation_failed"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "403": {
+            "description": "Missing `message:read` (`forbidden`), an API key (`user_required`), a platform override session (`saved_views_member_only`), or a filter of the definition needs a permission you do not hold (`message_filter_forbidden`: `recipient`/`subject`/`subjectPrefix` need `message:reveal`, `deliveryStatus` `delivery:read`, `quarantineStatus` `quarantine:read`; `filter` and `permission` name it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [403] },
+                    "error": { "type": "string" },
+                    "code": {
+                      "type": "string",
+                      "enum": [
+                        "forbidden",
+                        "user_required",
+                        "saved_views_member_only",
+                        "message_filter_forbidden"
+                      ]
+                    },
+                    "message": { "type": "string" },
+                    "filter": { "type": "string" },
+                    "permission": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "404": {
+            "description": "Unknown id, or a view of another user or organization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [404] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["saved_view_not_found"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "409": {
+            "description": "`saved_view_conflict` (`currentRowVersion`) or `saved_view_name_taken`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [409] },
+                    "error": { "type": "string" },
+                    "code": {
+                      "type": "string",
+                      "enum": ["saved_view_conflict", "saved_view_name_taken"]
+                    },
+                    "message": { "type": "string" },
+                    "currentRowVersion": { "type": "integer" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "429": {
+            "description": "Too many requests (rate_limited, with scope and Retry-After)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RateLimitedErrorBody" }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" },
+              "Retry-After": { "$ref": "#/components/headers/Retry-After" }
+            }
+          },
+          "500": {
+            "description": "Unexpected error (internal_error; no details are disclosed)",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "503": {
+            "description": "The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [503] },
+                    "error": { "type": "string" },
+                    "code": {
+                      "type": "string",
+                      "enum": ["inconsistent_read", "service_unavailable"]
+                    },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          }
+        },
+        "security": [{ "access-token": [] }],
+        "summary": "Replace a saved view",
+        "tags": ["saved-views"],
+        "x-eg-permissions": { "mode": "all", "permissions": ["message:read"] }
+      },
+      "delete": {
+        "description": "Deletes one of your saved views. Audited `saved_view.deleted`. For users who are members of the organization: API keys get `403 user_required`, a platform override session `403 saved_views_member_only`.",
+        "operationId": "SavedViewsController_remove_v1",
+        "parameters": [
+          {
+            "name": "viewId",
+            "required": true,
+            "in": "path",
+            "description": "Saved view public id",
+            "schema": { "format": "uuid", "type": "string" }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted",
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "403": {
+            "description": "Missing `message:read` (`forbidden`), an API key (`user_required`), a platform override session (`saved_views_member_only`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [403] },
+                    "error": { "type": "string" },
+                    "code": {
+                      "type": "string",
+                      "enum": ["forbidden", "user_required", "saved_views_member_only"]
+                    },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "404": {
+            "description": "Unknown id, or a view of another user or organization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [404] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["saved_view_not_found"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "429": {
+            "description": "Too many requests (rate_limited, with scope and Retry-After)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RateLimitedErrorBody" }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" },
+              "Retry-After": { "$ref": "#/components/headers/Retry-After" }
+            }
+          },
+          "500": {
+            "description": "Unexpected error (internal_error; no details are disclosed)",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "503": {
+            "description": "The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [503] },
+                    "error": { "type": "string" },
+                    "code": {
+                      "type": "string",
+                      "enum": ["inconsistent_read", "service_unavailable"]
+                    },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          }
+        },
+        "security": [{ "access-token": [] }],
+        "summary": "Delete a saved view",
+        "tags": ["saved-views"],
+        "x-eg-permissions": { "mode": "all", "permissions": ["message:read"] }
+      }
     }
   },
   "info": {
@@ -108663,7 +111474,7 @@
     },
     {
       "name": "messages",
-      "description": "Step 3.3: lifecycle, history, rescan, release. Step 4.1: scan results. Step 6.1: the message list (replica, signed cursors, scan budget), detail and recipients. Message content and S3 keys are never returned."
+      "description": "Step 3.3: lifecycle, history, rescan, release. Step 4.1: scan results. Step 6.1: the message list (replica, signed cursors, scan budget), detail and recipients. Step 7.2: the Email Explorer search (index drivers for sender, From, recipient, subject, Message-ID, domains, delivery and quarantine states; budgeted residual filters; the capped subject prefix; filter-level permissions), the stored headers, and sensitive metadata masked for every caller (subjects, recipient addresses, To/Cc/Subject header values) with the audited `message:reveal` operations. Message content and S3 keys are never returned."
     },
     {
       "name": "scan-settings",
@@ -108725,6 +111536,10 @@
     {
       "name": "notifications",
       "description": "Step 6.2: tenant security-alert settings (threat detected, DNS record failures, webhook disabled: enabled, severity, throttle windows) and the caller’s own notification preferences (opt-outs, quarantine digest). E-mail only; SMS, chat and push channels are not offered; portal screens: 7.x."
+    },
+    {
+      "name": "saved-views",
+      "description": "Step 7.2: the caller’s saved Email Explorer views (filters, sort, range, columns), per user and organization, `message:read`, members only (no API keys or platform overrides). Shared or organization-wide views are not offered."
     },
     {
       "name": "platform",

@@ -1,8 +1,9 @@
 /**
  * Every page of design §1.3 (22 pages, their tabs and sub-routes) and the routes linked from
  * emails (§1.2) render with the seeded data, show no error state, and pass axe (no serious or
- * critical violation). The unavailable states of steps 7.2, 7.3, 8.1, 8.2 and 8.3 and the two
- * "Not offered" states are present where the design puts them.
+ * critical violation). The unavailable states of steps 7.3, 8.1, 8.2 and 8.3 and the two "Not
+ * offered" states are present where the design puts them; since step 7.2 the explorer, the
+ * details and the scan rounds page carry no "arrives in 7.2" state any more.
  */
 import { signIn } from '../support/auth';
 import { expect, test } from '../support/fixtures';
@@ -35,22 +36,23 @@ test('organization admin: overview, mail and security pages', async ({ page }) =
     { path: '/reports?tab=delivery', heading: 'Reports' },
     { path: '/reports?tab=processing', heading: 'Reports' },
     { path: '/reports?tab=top-domains', heading: 'Reports', markers: [s.alpha.domainName] },
+    // Step 7.2: pages 9 and 10 are real (subjects masked; no "arrives in 7.2" state left).
     {
       path: '/messages?range=7d',
       heading: 'Email explorer',
-      markers: ['Alpha clean message 000'],
-      unavailable: ['7.2'],
+      markers: ['sender0@external.e2e-portal.test', 'Hidden'],
+      absent: ['Arrives in step 7.2', 'Alpha clean message 000'],
     },
     {
       path: `/messages/${s.alpha.messageId}`,
-      heading: /email details|alpha clean message 000/i,
-      markers: ['Alpha clean message 000'],
-      unavailable: ['7.2'],
+      heading: 'Email details',
+      markers: ['sender0@external.e2e-portal.test', 'Message summary'],
+      absent: ['Arrives in step 7.2', 'Detailed view arrives in 7.2', 'Alpha clean message 000'],
     },
     {
       path: `/messages/${s.alpha.messageId}/scans`,
       heading: /scan/i,
-      unavailable: ['7.2'],
+      absent: ['Arrives in step 7.2', 'arrives in 7.2'],
     },
     { path: '/quarantine', heading: 'Quarantine', markers: [s.alpha.domainName] },
     {

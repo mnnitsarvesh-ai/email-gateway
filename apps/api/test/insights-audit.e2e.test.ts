@@ -111,6 +111,23 @@ describe('GET /audit/logs', () => {
     expect(JSON.stringify(t.doubles.audit.entries.at(-1)!.metadata)).not.toContain('res-9');
   });
 
+  it('reads a resource history through the resource plan (step 7.2 §2 E3), exact pages', async () => {
+    const before = { ...t.doubles.auditLogs.calls };
+    const res = await get('/api/v1/audit/logs?resourceType=domain&resourceId=res-9&limit=1');
+    expect(res.status).toBe(200);
+    expect(res.body.data.map((r: { id: string }) => r.id)).toEqual(['9']);
+    expect(res.body.nextCursor).toBeNull();
+    expect(t.doubles.auditLogs.calls.resourcePage).toBe(before.resourcePage + 1);
+    expect(t.doubles.auditLogs.calls.boundary).toBe(before.boundary);
+    // With another filter: budgeted over the resource's entries.
+    const filtered = await get(
+      '/api/v1/audit/logs?resourceType=domain&resourceId=res-9&action=domain.created',
+    );
+    expect(filtered.body.data.map((r: { id: string }) => r.id)).toEqual(['9']);
+    expect(t.doubles.auditLogs.calls.resourceBoundary).toBe(before.resourceBoundary + 1);
+    expect(t.doubles.auditLogs.calls.resourceFiltered).toBe(before.resourceFiltered + 1);
+  });
+
   it('ends a filtered page at the scan budget with a short page and a cursor', async () => {
     const small = await createInsightApp({ API_LIST_SCAN_BUDGET_ROWS: '1000' });
     try {

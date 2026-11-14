@@ -27,6 +27,7 @@ export function entrySummary(overrides: Partial<EntrySummary> = {}): EntrySummar
     reason: 'phishing',
     direction: 'inbound',
     recipient: 'priya.rao4@alpha.example.test',
+    recipientMasked: false,
     sender: {
       envelope: 'billing@micr0soft-example.example.test',
       headerFrom: 'billing@micr0soft-example.example.test',

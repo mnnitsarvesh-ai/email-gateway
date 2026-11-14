@@ -7,6 +7,15 @@ export function scansHref(messageId: string): string {
   return `${messageHref(messageId)}/scans`;
 }
 
+/** A section of the email details (step 7.2 §3.6: `?section=` and, for scan sections, `round`). */
+export function detailSectionHref(messageId: string, section: string, round?: number): string {
+  const params = new URLSearchParams();
+  if (section !== 'summary') params.set('section', section);
+  if (round !== undefined) params.set('round', String(round));
+  const query = params.toString();
+  return query ? `${messageHref(messageId)}?${query}` : messageHref(messageId);
+}
+
 /** Attachment analysis search by hash (WP3 page `/attachments?sha256=`). */
 export function attachmentSearchHref(sha256: string): string {
   return `/attachments?sha256=${encodeURIComponent(sha256)}`;

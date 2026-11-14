@@ -474,9 +474,17 @@ export const fixtures: FixtureHandlers = {
 };
 
 /** The principal behind a fixture token (for feature fixtures that filter by role or tenant). */
-export function resolveFixturePrincipal(
-  accessToken: string | null,
-): { role: SystemRoleKey; permissions: readonly string[]; organizationId: string } | null {
+export function resolveFixturePrincipal(accessToken: string | null): {
+  role: SystemRoleKey;
+  permissions: readonly string[];
+  organizationId: string;
+  /** The signed-in fixture user (per-user state such as saved views, step 7.2). */
+  userId: string;
+  /** A platform override session acting in another organization (not a member of it). */
+  override: boolean;
+  /** The session was signed in with MFA (`403 mfa_required` routes such as the DLP evidence). */
+  mfaAuthenticated: boolean;
+} | null {
   if (!accessToken) return null;
   if (accessToken.startsWith('devovr_')) {
     const session = sessions.get(accessToken.split('_')[1] ?? '');
@@ -485,6 +493,9 @@ export function resolveFixturePrincipal(
       role: session.user.role,
       permissions: ROLE_PERMISSIONS[session.user.role].filter((p) => !p.startsWith('platform:')),
       organizationId: session.override.organizationId,
+      userId: session.user.id,
+      override: true,
+      mfaAuthenticated: session.mfaAuthenticated,
     };
   }
   const id = accessTokens.get(accessToken);
@@ -494,5 +505,8 @@ export function resolveFixturePrincipal(
     role: session.user.role,
     permissions: ROLE_PERMISSIONS[session.user.role],
     organizationId: homeOrg(session.user).id,
+    userId: session.user.id,
+    override: false,
+    mfaAuthenticated: session.mfaAuthenticated,
   };
 }

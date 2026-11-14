@@ -44,6 +44,7 @@ import {
   RedisService,
   S3Service,
 } from '@email-gateway/common';
+import { SYSTEM_ROLES } from '@email-gateway/database';
 import { createLogger } from '@email-gateway/logger';
 import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -313,6 +314,112 @@ describe('quarantine routes (e2e, in-memory world)', () => {
           )
         ).status,
       ).toBe(403);
+    });
+
+    it('recipient rule per system role and for API keys (step 7.2 §2 E8)', async () => {
+      const entry = world.addEntry({ address: 'alice.w@acme.example' });
+      const clear = { recipient: 'alice.w@acme.example', recipientMasked: false };
+      const masked = { recipient: 'a***@acme.example', recipientMasked: true };
+      const expected: Record<string, typeof clear | 403> = {
+        super_admin: clear,
+        platform_admin: masked,
+        organization_admin: clear,
+        domain_admin: masked,
+        security_analyst: clear,
+        quarantine_reviewer: clear,
+        compliance_auditor: clear,
+        read_only_user: masked,
+        mailbox_user: 403,
+      };
+      expect(Object.keys(expected).sort()).toEqual(SYSTEM_ROLES.map((r) => r.key).sort());
+      for (const role of SYSTEM_ROLES) {
+        principalWith([...role.permissions]);
+        const search = await get('/entries', window());
+        const detail = await get(`/entries/${entry.publicId}`);
+        const want = expected[role.key]!;
+        if (want === 403) {
+          expect([search.status, detail.status], role.key).toEqual([403, 403]);
+          continue;
+        }
+        expect([search.status, detail.status], role.key).toEqual([200, 200]);
+        expect(search.body.items[0], role.key).toMatchObject(want);
+        expect(detail.body, role.key).toMatchObject(want);
+      }
+      // API keys: masked without a decision permission or message:reveal, clear with one.
+      apiKeyPermissions = [P.read];
+      const keyed = await http()
+        .get(`/api/v1/quarantine/entries/${entry.publicId}`)
+        .set(apiKey)
+        .expect(200);
+      expect(keyed.body).toMatchObject(masked);
+      apiKeyPermissions = [P.read, 'message:reveal'];
+      const revealed = await http()
+        .get('/api/v1/quarantine/entries')
+        .query(window())
+        .set(apiKey)
+        .expect(200);
+      expect(revealed.body.items[0]).toMatchObject(clear);
+      // A masked caller may not confirm the address with an exact recipient search (ADR-0062);
+      // every caller who reads recipients in clear may.
+      for (const role of SYSTEM_ROLES) {
+        principalWith([...role.permissions]);
+        const filtered = await get('/entries', {
+          ...window(),
+          recipient: 'alice.w@acme.example',
+        });
+        const want = expected[role.key]!;
+        if (want === 403) expect(filtered.status, role.key).toBe(403);
+        else if (want.recipientMasked) {
+          expect(filtered.status, role.key).toBe(403);
+          expect(filtered.body, role.key).toMatchObject({
+            code: 'quarantine_filter_forbidden',
+            filter: 'recipient',
+          });
+        } else {
+          expect(filtered.status, role.key).toBe(200);
+          expect(filtered.body.items.map((i: { id: string }) => i.id)).toEqual([entry.publicId]);
+        }
+      }
+      // The refusal comes before any read: no quarantine.searched row for it.
+      principalWith([P.read]);
+      const before = world.audits.length;
+      expect(
+        (await get('/entries', { ...window(), recipient: 'alice.w@acme.example' })).status,
+      ).toBe(403);
+      expect(world.audits.length).toBe(before);
+    });
+
+    it('searches every entry of a message without a range (step 7.2 §2 E13)', async () => {
+      principalWith([P.read]);
+      // Quarantined 100 days after the window of the details page could reach (a manual
+      // quarantine or a rescan long after receipt): still found by messageId.
+      const late = world.addEntry({ quarantinedAt: new Date(Date.now() - 100 * 86_400_000) });
+      const messageId = world.messageOf(late).publicId;
+      const byMessage = await get('/entries', { messageId });
+      expect(byMessage.status).toBe(200);
+      expect(byMessage.body.items.map((i: { id: string }) => i.id)).toEqual([late.publicId]);
+      // With a range the range still applies; without messageId the range is required.
+      expect((await get('/entries', { ...window(), messageId })).body.items).toEqual([]);
+      expect((await get('/entries', { state: 'held' })).status).toBe(400);
+      expect((await get('/entries', { messageId, from: new Date().toISOString() })).status).toBe(
+        400,
+      );
+    });
+
+    it('self routes keep the own address in clear (step 7.2 §2 E8)', async () => {
+      principalWith([P.self]);
+      world.identities.set(USER_ID, { email: 'alice@acme.example', verified: true });
+      const own = world.addEntry({ address: 'alice@acme.example' });
+      const page = await get('/me/entries', window());
+      expect(page.body.items[0]).toMatchObject({
+        recipient: 'alice@acme.example',
+        recipientMasked: false,
+      });
+      const detail = await get(`/me/entries/${own.publicId}`);
+      expect(detail.body).toMatchObject({
+        recipient: 'alice@acme.example',
+        recipientMasked: false,
+      });
     });
 
     it('operators are not end users: /me answers 403 without quarantine:self, and for API keys', async () => {

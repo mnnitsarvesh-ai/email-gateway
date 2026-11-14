@@ -181,19 +181,26 @@ describe('message data routes (e2e, dependencies stubbed)', () => {
       lifecycleRound: 0,
       clientIp: '198.51.100.1',
       mtaQueueId: 'QID1',
+      // Step 7.2 (§2 E5): withheld for every caller.
+      subject: null,
+      subjectMasked: true,
     });
     expect(res.body).not.toHaveProperty('emlObjectKey');
   });
 
-  it('recipients: rcptSeq order, latest delivery, user public id, cursor paging', async () => {
+  it('recipients: rcptSeq order, latest delivery, masked address, user withheld, cursor paging', async () => {
     const first = await get(`/messages/${own.publicId}/recipients?limit=2`);
     expect(first.status).toBe(200);
     expect(first.body.data.map((r: { rcptSeq: number }) => r.rcptSeq)).toEqual([0, 1]);
+    // Step 7.2 (§2 E5): masked address, matched user withheld, for every caller.
     expect(first.body.data[0]).toMatchObject({
-      address: 'alice@acme.example',
-      userId: world.users[0]!.publicId,
+      address: 'a***@acme.example',
+      addressMasked: true,
+      userId: null,
       latestDelivery: { deliverySeq: 1, status: 'delivered', finalSmtpCode: 250 },
     });
+    expect(JSON.stringify(first.body)).not.toMatch(/alice@|bob@/);
+    expect(JSON.stringify(first.body)).not.toContain(world.users[0]!.publicId);
     expect(first.body.data[1].latestDelivery).toBeNull();
     const second = await get(
       `/messages/${own.publicId}/recipients?limit=2&cursor=${encodeURIComponent(first.body.nextCursor)}`,

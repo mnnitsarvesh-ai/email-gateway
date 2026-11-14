@@ -3,14 +3,15 @@
  * `e2e-portal-`, and the platform users of the run, `@e2e-portal.test`). Follows the cleanup
  * order of the api integration helpers (apps/api/integration/support: the quarantine purge order
  * of QuarantineTenantDataRepository, then the message graph of lifecycle.ts / messages-data.ts,
- * then Fixtures.cleanup); partitioned tables are deleted with a predicate on their partition
- * column as well (pruning), S3 objects by key under `org/<organizationId>/`. `audit_logs` stays
- * (append-only by policy, as in the integration suites). Table names come from the fixed lists
- * below, never from input.
+ * then Fixtures.cleanup; step 7.2 adds `saved_views` before the users); partitioned tables
+ * are deleted with a predicate on their partition column as well (pruning), S3 objects by key
+ * under `org/<organizationId>/`. `audit_logs` stays (append-only by policy, as in the
+ * integration suites). Table names come from the fixed lists below, never from input.
  */
 import { DeleteObjectsCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { PLATFORM_ORGANIZATION_SLUG, Prisma, type PrismaClient } from '@email-gateway/database';
 import { mailBucket } from './db';
+import { LATE_MESSAGE_AGE_DAYS } from './plan';
 
 export const ORG_SLUG_PREFIX = 'e2e-portal-';
 export const PLATFORM_EMAIL_SUFFIX = '@e2e-portal.test';
@@ -121,6 +122,8 @@ const ORDER = [
   'tenant_department_members',
   'tenant_departments',
   'notification_user_preferences',
+  // Step 7.2: saved explorer views (FK organizations RESTRICT, users CASCADE), before users.
+  'saved_views',
   'user_roles',
   'webhook_replays',
   'webhook_delivery_attempts',
@@ -162,8 +165,12 @@ const ORDER = [
   'organization_deployments',
 ] as const;
 
-/** Partitioned rows of a run are never older than this (the seeder writes ≤ 7 days back). */
-const PARTITION_CUTOFF_DAYS = 60;
+/**
+ * Partitioned rows of a run are never older than this: the seeder writes at most 7 days back,
+ * except the late-quarantine message of step 7.2 (`LATE_MESSAGE_AGE_DAYS`, 120), plus a margin.
+ * A cutoff that missed it left that message's partitioned rows behind (step 7.2 closer).
+ */
+const PARTITION_CUTOFF_DAYS = LATE_MESSAGE_AGE_DAYS + 30;
 
 function isForeignKeyError(error: unknown): boolean {
   const text = String((error as { message?: string }).message ?? error);
@@ -235,6 +242,7 @@ export async function cleanup(prisma: PrismaClient): Promise<CleanupResult> {
 
   if (userIds.length > 0) {
     const byUser = { userId: { in: userIds } };
+    await prisma.savedView.deleteMany({ where: byUser });
     await prisma.loginAuditLog.deleteMany({ where: byUser });
     await prisma.userToken.deleteMany({ where: byUser });
     await prisma.userMfaRecoveryCode.deleteMany({ where: byUser });

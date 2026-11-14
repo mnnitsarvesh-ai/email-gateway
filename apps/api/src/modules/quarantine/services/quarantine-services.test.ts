@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { HttpException } from '@nestjs/common';
 import { MetricsService } from '@email-gateway/common';
 import {
@@ -848,6 +849,98 @@ describe('QuarantineQueryService (Q9, Q10) and settings (Q24)', () => {
     expect(detail.subject).toBeNull();
     expect(t.world.actions.map((a) => a.action)).toEqual(['view']);
     expect(t.world.auditActions()).toEqual(['quarantine.entry_viewed']);
+  });
+
+  it('recipient rule (step 7.2 §2 E8): clear for deciders and message:reveal, masked otherwise', async () => {
+    const entry = t.world.addEntry({ address: 'alice.w@acme.example' });
+    const cases: Array<[string[], boolean]> = [
+      [['quarantine:read'], true],
+      [['quarantine:read', 'quarantine:preview', 'quarantine:download'], true],
+      [['quarantine:read', 'quarantine:release'], false],
+      [['quarantine:read', 'quarantine:approve'], false],
+      [['quarantine:read', 'quarantine:reject'], false],
+      [['quarantine:read', 'quarantine:delete'], false],
+      [['quarantine:read', 'quarantine:request_release'], false],
+      [['quarantine:read', 'quarantine:manage'], false],
+      [['quarantine:read', 'message:reveal'], false],
+    ];
+    for (const [permissions, masked] of cases) {
+      const caller = user(10n, permissions);
+      const page = await t.queries.search(caller, scope, window(), client);
+      const detail = await t.queries.detail(caller, scope, entry.publicId, client);
+      for (const view of [page.items.find((i) => i.id === entry.publicId)!, detail]) {
+        expect(view, permissions.join()).toMatchObject(
+          masked
+            ? { recipient: 'a***@acme.example', recipientMasked: true }
+            : { recipient: 'alice.w@acme.example', recipientMasked: false },
+        );
+      }
+    }
+    // A masked caller may not search by the exact recipient (it would confirm the masked
+    // address, ADR-0062): refused before any read or audit row.
+    const audits = t.world.audits.length;
+    await expect(
+      t.queries.search(
+        user(10n, ['quarantine:read']),
+        scope,
+        { ...window(), recipient: 'alice.w@acme.example' },
+        client,
+      ),
+    ).rejects.toMatchObject({
+      code: 'quarantine_filter_forbidden',
+      status: 403,
+      details: { filter: 'recipient' },
+    });
+    expect(t.world.audits.length).toBe(audits);
+    // A caller who reads recipients in clear filters by them.
+    for (const permissions of [
+      ['quarantine:read', 'quarantine:release'],
+      ['quarantine:read', 'message:reveal'],
+    ]) {
+      const filtered = await t.queries.search(
+        user(10n, permissions),
+        scope,
+        { ...window(), recipient: 'alice.w@acme.example' },
+        client,
+      );
+      expect(filtered.items.map((i) => [i.id, i.recipient])).toEqual([
+        [entry.publicId, 'alice.w@acme.example'],
+      ]);
+    }
+  });
+
+  it('a messageId search may leave out the range; without messageId the range is required', async () => {
+    const late = t.world.addEntry({ quarantinedAt: new Date(Date.now() - 100 * 86_400_000) });
+    t.world.addEntry();
+    const messageId = t.world.messageOf(late).publicId;
+    const reader = user(10n, ['quarantine:read']);
+    const page = await t.queries.search(reader, scope, { messageId }, client);
+    expect(page.items.map((i) => i.id)).toEqual([late.publicId]);
+    // Unknown or another tenant's message: an empty page.
+    expect(
+      (await t.queries.search(reader, scope, { messageId: randomUUID() }, client)).items,
+    ).toEqual([]);
+    await expect(
+      t.queries.search(reader, scope, { state: ['held'] }, client),
+    ).rejects.toMatchObject({ code: 'quarantine_search_range_invalid' });
+  });
+
+  it('self routes keep the own address in clear (recipientMasked false)', async () => {
+    t.world.identities.set(20n, { email: 'alice@acme.example', verified: true });
+    const entry = t.world.addEntry({ address: 'alice@acme.example' });
+    t.world.settings.set(ORG, { settings: { endUser: { enabled: true } }, rowVersion: 1 });
+    const mailbox = user(20n, ['quarantine:self']);
+    const page = await t.queries.selfSearch(mailbox, scopeFromPrincipal(mailbox), window(), client);
+    expect(page.items.map((i) => [i.recipient, i.recipientMasked])).toEqual([
+      ['alice@acme.example', false],
+    ]);
+    const detail = await t.queries.selfDetail(
+      mailbox,
+      scopeFromPrincipal(mailbox),
+      entry.publicId,
+      client,
+    );
+    expect(detail).toMatchObject({ recipient: 'alice@acme.example', recipientMasked: false });
   });
 
   it('self search is empty when end-user access is off', async () => {

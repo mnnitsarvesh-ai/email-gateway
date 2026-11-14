@@ -225,7 +225,7 @@ SELECT id, created_at, actor_type, actor_id, action, resource_type, resource_id
  LIMIT 100;
 ```
 
-Prisma: `auditLog.findMany({ where: { organizationId, createdAt: { gte: from, lt: to } }, orderBy: { createdAt: 'desc' }, take: 100 })`. **Pruning:** the partitions overlapping the range. Range scan on `(organization_id, created_at)`.
+Prisma: `auditLog.findMany({ where: { organizationId, createdAt: { gte: from, lt: to } }, orderBy: { createdAt: 'desc' }, take: 100 })`. **Pruning:** the partitions overlapping the range. Range scan on `(organization_id, created_at)`. **Since step 7.2** the table also has `(organization_id, resource_type, resource_id, created_at, id)`, and MySQL 8.4 chose it for this unhinted statement in `pnpm db:perf` (2026-11-14: `ref` on `organization_id` plus a filesort over the organization's rows of the window, 1.06 ms on the perf data). The api's audit search therefore names `FORCE INDEX (audit_logs_organization_id_created_at_idx)` on its time-range statements and `audit_logs_org_resource_created_idx` on its resource plan; new code that scans an organization's audit rows by time should do the same.
 
 ## Q13: Tenant resolution by recipient domain (mail path)
 

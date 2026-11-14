@@ -2,12 +2,16 @@
  * Responsive layout (design P11, P14) in the three projects: desktop 1440×900 (expanded
  * sidebar, collapsible), tablet 834×1112 (icon rail, expandable) and mobile 390×844 (drawer from
  * the top bar, focus-trapped, closes on navigation). No top-level page scrolls horizontally;
- * data tables stay usable (stacked cards on mobile, a scrolling table otherwise).
+ * data tables stay usable (stacked cards on mobile, a scrolling table otherwise). Step 7.2: the
+ * Email Explorer and every Email Details section fit each viewport; the section navigation is
+ * vertical tabs (desktop), a horizontal tab list (tablet) or a labelled select (mobile).
  */
 import type { Page, TestInfo } from '@playwright/test';
 import { signIn } from '../support/auth';
 import { NAV_GATES } from '../support/contract';
 import { expect, test } from '../support/fixtures';
+import { messageOf } from '../support/messages';
+import { expectNoSeriousA11yViolations } from '../support/pages';
 
 type Layout = 'desktop' | 'tablet' | 'mobile';
 
@@ -113,4 +117,74 @@ test('data tables: cards on mobile, a scrolling table otherwise', async ({ page 
     expect(await horizontalOverflow(page)).toBeLessThanOrEqual(1);
   }
   await expect(region.or(page.locator('main')).first()).toBeVisible();
+});
+
+test('email explorer and details fit the viewport; section navigation per layout', async ({
+  page,
+}, testInfo) => {
+  test.setTimeout(300_000);
+  const layout = layoutOf(testInfo);
+  await signIn(page, 'alphaAnalyst', { next: '/messages?range=7d' });
+  await expect(page.locator('main [aria-busy="true"]')).toHaveCount(0, { timeout: 20_000 });
+  if (layout === 'mobile') {
+    await expect(page.getByTestId('data-table-cards')).toBeVisible();
+  } else {
+    await expect(page.locator('main table').first()).toBeVisible();
+  }
+  // Search bar, chips and the reveal switch stay inside the viewport.
+  await page.getByRole('switch', { name: 'Show subjects' }).click();
+  await page.goto('/messages?senderDomain=vendor-one.e2e-portal.test&direction=inbound');
+  await expect(page.getByRole('list', { name: 'Active searches' })).toBeVisible();
+  expect(
+    await horizontalOverflow(page),
+    `explorer wider than the ${layout} viewport`,
+  ).toBeLessThanOrEqual(1);
+  await expectNoSeriousA11yViolations(page, `/messages (${layout})`);
+
+  const phish = messageOf('alpha-detail-phish');
+  await page.goto(`/messages/${phish}`);
+  await expect(page.getByRole('heading', { level: 1, name: 'Email details' })).toBeVisible();
+  if (layout === 'mobile') {
+    await expect(page.getByLabel('Section', { exact: true })).toBeVisible();
+    await expect(page.getByRole('tablist', { name: 'Message sections' })).toHaveCount(0);
+  } else {
+    const tabs = page.getByRole('tablist', { name: 'Message sections' });
+    await expect(tabs).toBeVisible();
+    await expect(tabs).toHaveAttribute(
+      'aria-orientation',
+      layout === 'desktop' ? 'vertical' : 'horizontal',
+    );
+  }
+  const offenders: string[] = [];
+  for (const section of [
+    'summary',
+    'people',
+    'headers',
+    'authentication',
+    'spam',
+    'phishing',
+    'urls',
+    'attachments',
+    'dlp',
+    'risk',
+    'policy',
+    'delivery',
+    'quarantine',
+    'audit',
+  ]) {
+    await page.goto(`/messages/${phish}?section=${section}`);
+    await expect(page.locator('main h2').first()).toBeVisible({ timeout: 20_000 });
+    await expect(page.locator('main [aria-busy="true"]')).toHaveCount(0, { timeout: 20_000 });
+    const overflow = await horizontalOverflow(page);
+    if (overflow > 1) offenders.push(`${section}: ${overflow}px`);
+    // Each section at each width (tables that scroll on a phone must be keyboard-scrollable).
+    await expectNoSeriousA11yViolations(page, `/messages/[id]?section=${section} (${layout})`);
+  }
+  expect(offenders, `details sections wider than the ${layout} viewport`).toEqual([]);
+  if (layout === 'mobile') {
+    // The select navigates between sections.
+    await page.getByLabel('Section', { exact: true }).selectOption({ label: 'Email headers' });
+    await expect(page).toHaveURL(/[?&]section=headers/);
+  }
+  await expectNoSeriousA11yViolations(page, `/messages/[id] (${layout})`);
 });

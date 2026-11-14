@@ -1,6 +1,7 @@
 'use client';
 
 import { AlertTriangleIcon, LockIcon, SearchXIcon } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import { CopyButton } from '@/components/copy-button';
 import { Button } from '@/components/ui/button';
 import { ApiError } from '@/lib/api/errors';
@@ -31,6 +32,7 @@ export function ErrorState({
   operationId,
   className,
   compact = false,
+  showRequirement = true,
 }: {
   error: unknown;
   onRetry?: () => void;
@@ -38,6 +40,8 @@ export function ErrorState({
   operationId?: OperationId;
   className?: string;
   compact?: boolean;
+  /** List the operation's required permissions on a 403 (off when another rule refused). */
+  showRequirement?: boolean;
 }) {
   const apiError =
     error instanceof ApiError
@@ -48,7 +52,7 @@ export function ErrorState({
           message: 'An unexpected error occurred',
         });
   const op = operationId ?? apiError.operationId;
-  const required = apiError.status === 403 && op ? describeRequirement(op) : [];
+  const required = showRequirement && apiError.status === 403 && op ? describeRequirement(op) : [];
   const Icon =
     apiError.status === 403 ? LockIcon : apiError.status === 404 ? SearchXIcon : AlertTriangleIcon;
   const message =
@@ -96,8 +100,39 @@ export function ErrorState({
           </>
         ) : null}
       </dl>
-      {onRetry && apiError.status !== 403 && apiError.status !== 404 ? (
+      {apiError.status === 429 && apiError.retryAfterSeconds ? (
+        <RetryCountdown
+          key={`${apiError.requestId ?? ''}:${apiError.retryAfterSeconds}`}
+          seconds={apiError.retryAfterSeconds}
+          onRetry={onRetry}
+        />
+      ) : onRetry && apiError.status !== 403 && apiError.status !== 404 ? (
         <Button variant="outline" size="sm" onClick={onRetry} className="mt-1">
+          Retry
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * `429` (design P8): "Try again in N s" counting down from `Retry-After`; Retry is enabled when it
+ * reaches zero (step 7.2 §2 E10).
+ */
+function RetryCountdown({ seconds, onRetry }: { seconds: number; onRetry?: () => void }) {
+  const [left, setLeft] = useState(seconds);
+  useEffect(() => {
+    if (left <= 0) return;
+    const timer = setTimeout(() => setLeft((s) => Math.max(0, s - 1)), 1000);
+    return () => clearTimeout(timer);
+  }, [left]);
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-2">
+      <p className="text-xs text-muted-foreground" aria-live="polite">
+        {left > 0 ? `Try again in ${left} s.` : 'You can try again now.'}
+      </p>
+      {onRetry ? (
+        <Button variant="outline" size="sm" onClick={onRetry} disabled={left > 0}>
           Retry
         </Button>
       ) : null}

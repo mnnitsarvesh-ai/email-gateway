@@ -15,69 +15,70 @@ All paths below are under `/api/v1`.
 
 The `permissions` table is seeded from `PERMISSIONS` in `packages/database/src/seed/catalog.ts` (the source of truth; `GET /permissions` lists it). Keys starting with `platform:` are **platform permissions** (`PLATFORM_PERMISSIONS`); all others are **tenant permissions** (`TENANT_PERMISSIONS`). `TENANT_READ_PERMISSIONS` is the read-only subset used by several default roles.
 
-| Key                            | Meaning                                                                                                  |
-| ------------------------------ | -------------------------------------------------------------------------------------------------------- |
-| `organization:read`            | View organization profile, settings and limits                                                           |
-| `organization:manage`          | Change organization profile and settings                                                                 |
-| `user:read`                    | View users and their roles                                                                               |
-| `user:manage`                  | Invite, disable and assign roles to users                                                                |
-| `role:read`                    | View roles and the permission catalog                                                                    |
-| `role:manage`                  | Create and edit custom roles                                                                             |
-| `apikey:read`                  | View API keys (never secrets)                                                                            |
-| `apikey:manage`                | Create and revoke API keys                                                                               |
-| `session:manage`               | View and revoke other users' sessions                                                                    |
-| `domain:read`                  | View domains, DNS records and mail servers                                                               |
-| `domain:manage`                | Add, verify and configure domains                                                                        |
-| `domain:dkim_rotate`           | Rotate DKIM signing keys of domains (step 2.1)                                                           |
-| `policy:read`                  | View email policies and exceptions                                                                       |
-| `policy:manage`                | Create and edit draft policies and exceptions                                                            |
-| `policy:publish`               | Publish and roll back policy versions                                                                    |
-| `message:read`                 | View message metadata, verdicts and delivery status                                                      |
-| `message:read_content`         | View message content (body and attachments) from object storage                                          |
-| `message:rescan`               | Request a rescan of a message's security pipeline (step 3.3)                                             |
-| `quarantine:read`              | View quarantined messages                                                                                |
-| `quarantine:release`           | Release quarantined messages                                                                             |
-| `quarantine:delete`            | Delete quarantined messages                                                                              |
-| `quarantine:request_release`   | Request the release of a quarantined message                                                             |
-| `report:read`                  | View dashboards and reports                                                                              |
-| `audit:read`                   | View the audit log                                                                                       |
-| `archive:read`                 | Search and view archived messages                                                                        |
-| `archive:export`               | Export archived messages                                                                                 |
-| `archive:legal_hold`           | Create and release legal holds                                                                           |
-| `webhook:manage`               | Create and edit webhook subscriptions                                                                    |
-| `settings:manage`              | Change notification, quarantine and archive settings                                                     |
-| `platform:organizations`       | Platform: create, suspend and manage customer organizations                                              |
-| `platform:operations`          | Platform: view operational health, queues and maintenance status                                         |
-| `platform:tenant_override`     | Platform: start an audited override into a customer organization                                         |
-| `connector:read`               | View SMTP connectors (never secrets) (step 2.2)                                                          |
-| `connector:manage`             | Create, rotate and disable SMTP connectors (step 2.2)                                                    |
-| `domain:routing_manage`        | Change where a domain's mail is delivered (destination servers) (step 2.3)                               |
-| `delivery:read`                | View per-recipient delivery status and the delivery audit trail (step 2.3)                               |
-| `platform:dead_letter_replay`  | Platform: replay dead-lettered pipeline messages (step 3.2)                                              |
-| `scan:settings_manage`         | Change the organization's security scan thresholds (step 4.1)                                            |
-| `platform:scan_training`       | Train the shared spam classifiers (Bayes, fuzzy) from a message (step 4.1)                               |
-| `platform:threat_intel_manage` | Manage the platform's known-threat file hashes (step 4.2) and URL/domain/IP threat indicators (step 4.3) |
-| `platform:scan_rescan`         | Start and cancel bulk attachment rescans (step 4.2)                                                      |
-| `bec:read`                     | View BEC executive/vendor profiles, trusted senders, suppressions and feedback (step 4.4)                |
-| `bec:manage`                   | Manage BEC profiles, trusted senders, suppressions and communication history (step 4.4)                  |
-| `bec:feedback`                 | Record false-positive/false-negative feedback on BEC verdicts (step 4.4)                                 |
-| `bec:feedback_export`          | Export BEC feedback features for model retraining (step 4.4)                                             |
-| `dlp:read`                     | View DLP policies, exceptions, patterns, dictionaries, compliance settings and incidents (step 4.5)      |
-| `dlp:manage`                   | Manage DLP policies, exceptions, custom patterns and dictionaries; purge DLP evidence (step 4.5)         |
-| `dlp:evidence_read`            | Read decrypted DLP evidence (audited; step 4.5)                                                          |
-| `dlp:compliance_manage`        | Record the Aadhaar detection compliance basis (step 4.5)                                                 |
-| `quarantine:preview`           | View the sanitized, DLP-masked preview of quarantined messages (step 5.3)                                |
-| `quarantine:approve`           | Approve or deny quarantine release and review requests (step 5.3)                                        |
-| `quarantine:reject`            | Reject quarantined messages (step 5.3)                                                                   |
-| `quarantine:manage`            | Manually quarantine held-for-review or policy-rejected messages (step 5.3)                               |
-| `quarantine:download`          | Download quarantined messages and attachments through single-use grants (step 5.3)                       |
-| `quarantine:self`              | View, preview and request the release of quarantined mail addressed to oneself (step 5.3)                |
-| `threat_intel:read`            | Look up platform threat intelligence (hash catalogue, indicators) (step 6.1)                             |
-| `billing:read`                 | View the plan, entitlements and metered usage (step 6.1)                                                 |
-| `delivery:suppression_manage`  | Add and remove recipient suppressions (step 6.1)                                                         |
-| `webhook:read`                 | View webhook subscriptions, event catalogue and delivery history (step 6.2)                              |
+| Key                            | Meaning                                                                                                                                  |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `organization:read`            | View organization profile, settings and limits                                                                                           |
+| `organization:manage`          | Change organization profile and settings                                                                                                 |
+| `user:read`                    | View users and their roles                                                                                                               |
+| `user:manage`                  | Invite, disable and assign roles to users                                                                                                |
+| `role:read`                    | View roles and the permission catalog                                                                                                    |
+| `role:manage`                  | Create and edit custom roles                                                                                                             |
+| `apikey:read`                  | View API keys (never secrets)                                                                                                            |
+| `apikey:manage`                | Create and revoke API keys                                                                                                               |
+| `session:manage`               | View and revoke other users' sessions                                                                                                    |
+| `domain:read`                  | View domains, DNS records and mail servers                                                                                               |
+| `domain:manage`                | Add, verify and configure domains                                                                                                        |
+| `domain:dkim_rotate`           | Rotate DKIM signing keys of domains (step 2.1)                                                                                           |
+| `policy:read`                  | View email policies and exceptions                                                                                                       |
+| `policy:manage`                | Create and edit draft policies and exceptions                                                                                            |
+| `policy:publish`               | Publish and roll back policy versions                                                                                                    |
+| `message:read`                 | View message metadata, verdicts and delivery status                                                                                      |
+| `message:read_content`         | View message content (body and attachments) from object storage                                                                          |
+| `message:rescan`               | Request a rescan of a message's security pipeline (step 3.3)                                                                             |
+| `quarantine:read`              | View quarantined messages                                                                                                                |
+| `quarantine:release`           | Release quarantined messages                                                                                                             |
+| `quarantine:delete`            | Delete quarantined messages                                                                                                              |
+| `quarantine:request_release`   | Request the release of a quarantined message                                                                                             |
+| `report:read`                  | View dashboards and reports                                                                                                              |
+| `audit:read`                   | View the audit log                                                                                                                       |
+| `archive:read`                 | Search and view archived messages                                                                                                        |
+| `archive:export`               | Export archived messages                                                                                                                 |
+| `archive:legal_hold`           | Create and release legal holds                                                                                                           |
+| `webhook:manage`               | Create and edit webhook subscriptions                                                                                                    |
+| `settings:manage`              | Change notification, quarantine and archive settings                                                                                     |
+| `platform:organizations`       | Platform: create, suspend and manage customer organizations                                                                              |
+| `platform:operations`          | Platform: view operational health, queues and maintenance status                                                                         |
+| `platform:tenant_override`     | Platform: start an audited override into a customer organization                                                                         |
+| `connector:read`               | View SMTP connectors (never secrets) (step 2.2)                                                                                          |
+| `connector:manage`             | Create, rotate and disable SMTP connectors (step 2.2)                                                                                    |
+| `domain:routing_manage`        | Change where a domain's mail is delivered (destination servers) (step 2.3)                                                               |
+| `delivery:read`                | View per-recipient delivery status and the delivery audit trail (step 2.3)                                                               |
+| `platform:dead_letter_replay`  | Platform: replay dead-lettered pipeline messages (step 3.2)                                                                              |
+| `scan:settings_manage`         | Change the organization's security scan thresholds (step 4.1)                                                                            |
+| `platform:scan_training`       | Train the shared spam classifiers (Bayes, fuzzy) from a message (step 4.1)                                                               |
+| `platform:threat_intel_manage` | Manage the platform's known-threat file hashes (step 4.2) and URL/domain/IP threat indicators (step 4.3)                                 |
+| `platform:scan_rescan`         | Start and cancel bulk attachment rescans (step 4.2)                                                                                      |
+| `bec:read`                     | View BEC executive/vendor profiles, trusted senders, suppressions and feedback (step 4.4)                                                |
+| `bec:manage`                   | Manage BEC profiles, trusted senders, suppressions and communication history (step 4.4)                                                  |
+| `bec:feedback`                 | Record false-positive/false-negative feedback on BEC verdicts (step 4.4)                                                                 |
+| `bec:feedback_export`          | Export BEC feedback features for model retraining (step 4.4)                                                                             |
+| `dlp:read`                     | View DLP policies, exceptions, patterns, dictionaries, compliance settings and incidents (step 4.5)                                      |
+| `dlp:manage`                   | Manage DLP policies, exceptions, custom patterns and dictionaries; purge DLP evidence (step 4.5)                                         |
+| `dlp:evidence_read`            | Read decrypted DLP evidence (audited; step 4.5)                                                                                          |
+| `dlp:compliance_manage`        | Record the Aadhaar detection compliance basis (step 4.5)                                                                                 |
+| `quarantine:preview`           | View the sanitized, DLP-masked preview of quarantined messages (step 5.3)                                                                |
+| `quarantine:approve`           | Approve or deny quarantine release and review requests (step 5.3)                                                                        |
+| `quarantine:reject`            | Reject quarantined messages (step 5.3)                                                                                                   |
+| `quarantine:manage`            | Manually quarantine held-for-review or policy-rejected messages (step 5.3)                                                               |
+| `quarantine:download`          | Download quarantined messages and attachments through single-use grants (step 5.3)                                                       |
+| `quarantine:self`              | View, preview and request the release of quarantined mail addressed to oneself (step 5.3)                                                |
+| `threat_intel:read`            | Look up platform threat intelligence (hash catalogue, indicators) (step 6.1)                                                             |
+| `billing:read`                 | View the plan, entitlements and metered usage (step 6.1)                                                                                 |
+| `delivery:suppression_manage`  | Add and remove recipient suppressions (step 6.1)                                                                                         |
+| `webhook:read`                 | View webhook subscriptions, event catalogue and delivery history (step 6.2)                                                              |
+| `message:reveal`               | Reveal masked message metadata (subjects, recipient addresses, To/Cc/Subject header values) through the audited reveal action (step 7.2) |
 
-The catalog has **59** permissions (58 before step 6.2, 55 before step 6.1, 49 before step 5.3).
+The catalog has **60** permissions (59 before step 7.2, 58 before step 6.2, 55 before step 6.1, 49 before step 5.3).
 
 `GET /permissions` lists `platform:*` keys only to users of the platform organization who are not under an override; customer users and API keys see the tenant permissions only.
 
@@ -161,6 +162,7 @@ Generated from the seed catalog (`SYSTEM_ROLES`); if the catalog changes, regene
 | `billing:read`                 |  ✓  |     |  ✓  |     |     |     |  ✓  |     |     |
 | `delivery:suppression_manage`  |  ✓  |     |  ✓  |  ✓  |     |     |     |     |     |
 | `webhook:read`                 |  ✓  |     |  ✓  |     |  ✓  |     |  ✓  |     |     |
+| `message:reveal`               |  ✓  |     |  ✓  |     |  ✓  |     |  ✓  |     |     |
 
 **Platform roles** are the roles that hold any `platform:*` permission: `super_admin` and `platform_admin` (`PLATFORM_ROLE_KEYS`). They can be assigned only to users of the platform organization (`kind = platform`); assigning one in a customer organization is `400`. Customer organizations never see platform roles in `GET /roles` or `GET /roles/{key}` (`404`). Domain Admin is organization-wide; per-domain scoping of roles is out of scope for now.
 
@@ -381,6 +383,51 @@ One new tenant permission ([design](../plan/steps/19-webhooks-notifications.md) 
 - **Tenant scope.** Every webhook, delivery, replay and filter domain id is resolved inside the caller's organization; another organization's id answers `404` (`422 webhook_filter_invalid` for a filter domain), exactly like a missing one (`apps/api/integration/tenant-isolation-webhooks.test.ts`).
 - **Alert recipients** (notification-worker, N3/N4): active, verified users holding `quarantine:approve` (threat detected), `domain:manage` (DNS record failures) or `webhook:manage` (webhook disabled), minus users who opted out of the kind.
 - **Audit.** `webhook.created`, `webhook.updated`, `webhook.deleted`, `webhook.secret_rotated`, `webhook.test_requested`, `webhook.delivery_replayed`, `webhook.replay_requested` (endpoint as `urlHost` + `urlSha256` only; never the URL or a secret), `webhook.auto_disabled` (system actor, the delivery worker), `notification.settings_updated` (changed paths), `notification.preferences_updated`.
+
+## Email explorer (step 7.2)
+
+One new tenant permission ([design](../plan/steps/21-email-explorer-details.md) §2 E2, E5, §3.5; [ADR-0062](../architecture/adr/0062-sensitive-message-metadata-masking-and-reveal.md)): `message:reveal`, granted to `organization_admin` (all tenant permissions), `super_admin` (all permissions), `security_analyst` and `compliance_auditor`. It is **not** part of `TENANT_READ_PERMISSIONS`, so `read_only_user` and `platform_admin` do not gain it; `domain_admin`, `quarantine_reviewer` and `mailbox_user` do not hold it either. API keys may hold it as a scope (only a creator holding it can grant it). It gates the subject search filters (WP1) and the audited reveal operations (WP2, [Sensitive message metadata](#sensitive-message-metadata-step-72)).
+
+| Permission                       | Routes                                                                                                                                                                                                                                                                                                         | Held by (system roles)                                                |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| `message:reveal`                 | The `recipient`, `subject` and `subjectPrefix` filters of `GET /messages` (filter-level: `403 message_filter_forbidden` without it) and of a saved view's definition; `POST /messages/reveal`, `POST /messages/{messageId}/reveal` (WP2); clear quarantine entry recipients and their exact `recipient` search | super_admin, organization_admin, security_analyst, compliance_auditor |
+| `message:read` (existing)        | also `GET /messages/{messageId}/headers` (WP2; safe subset in clear, To/Cc/Subject withheld)                                                                                                                                                                                                                   | every system role except mailbox_user                                 |
+| `delivery:read` (existing)       | also the `deliveryStatus` filter of `GET /messages` and of saved views (filter-level)                                                                                                                                                                                                                          | every system role except mailbox_user                                 |
+| `quarantine:read` (existing)     | also the `quarantineStatus` filter of `GET /messages` and of saved views (filter-level)                                                                                                                                                                                                                        | every system role except mailbox_user                                 |
+| `message:read` (existing), users | `GET/POST /saved-views`, `GET/PUT/DELETE /saved-views/{viewId}`: the caller's own views only; API keys `403 user_required`, platform override sessions `403 saved_views_member_only`; other users' views are `404`                                                                                             | every system role except mailbox_user                                 |
+
+## Sensitive message metadata (step 7.2)
+
+The masking and reveal rules of [ADR-0062](../architecture/adr/0062-sensitive-message-metadata-masking-and-reveal.md) ([design](../plan/steps/21-email-explorer-details.md) §1.5, §2 E5–E9). They are enforced by the api's service layer for **every** caller — users of every role, API keys, platform override sessions, the portal — never by a client.
+
+| Field                                                                                                                   | Routes                                                         | Every read since step 7.2                                                                                                                                                                                         | Clear value                                                                                          |
+| ----------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Subject                                                                                                                 | `GET /messages`, `GET /messages/{id}`                          | `subject: null`, `subjectMasked` when one exists                                                                                                                                                                  | `message:reveal`: `POST /messages/reveal` (≤ 100 messages), `POST /messages/{id}/reveal` (`subject`) |
+| Recipient address, matched user id                                                                                      | `GET /messages/{id}/recipients`; deliveries (`recipient`)      | `f***@example.com` with `addressMasked` / `recipientMasked`; `userId: null`                                                                                                                                       | `message:reveal`: `POST /messages/{id}/reveal` (`recipients`, paged)                                 |
+| Header values of To, Cc, Subject (and any name outside the safe subset)                                                 | `GET /messages/{id}/headers`                                   | `value: null`, `masked: true`                                                                                                                                                                                     | `message:reveal`: `POST /messages/{id}/reveal` (`headers`)                                           |
+| Header values of From, Sender, Reply-To, Return-Path, Date, Message-ID, In-Reply-To, References, Authentication-Results | `GET /messages/{id}/headers`                                   | in clear for `message:read` (sender side, identifiers, authentication facts)                                                                                                                                      | —                                                                                                    |
+| Addresses inside SMTP replies, delivery event details, Rspamd symbol options                                            | deliveries, delivery events, scans                             | local part masked                                                                                                                                                                                                 | never                                                                                                |
+| Quarantine entry recipient                                                                                              | `GET /quarantine/entries`, `GET /quarantine/entries/{entryId}` | clear for `quarantine:release`, `:approve`, `:reject`, `:delete`, `:request_release`, `:manage` or `message:reveal`; masked (`recipientMasked`) for other `quarantine:read` holders; self routes: the own address | —                                                                                                    |
+| Quarantine subject, sanitized preview                                                                                   | quarantine entries, `GET /quarantine/entries/{id}/preview`     | unchanged (5.3: `quarantine:preview` or self routes; the preview is audited)                                                                                                                                      | —                                                                                                    |
+| DLP matches                                                                                                             | scans (`dlp`), DLP evidence                                    | unchanged (4.5: masked samples with `dlp:read`)                                                                                                                                                                   | `dlp:evidence_read` + MFA user session, audited (ADR-0038)                                           |
+| Sender addresses (`envelopeFrom`, `headerFrom`)                                                                         | lists, details                                                 | in clear for `message:read` (triage)                                                                                                                                                                              | —                                                                                                    |
+
+Who sees what, by system role (the tenant roles directly, the platform roles under an audited override that carries their tenant permissions):
+
+| Role                                                    | Masked reads | Reveal (`message:reveal`) | Quarantine recipients |
+| ------------------------------------------------------- | :----------: | :-----------------------: | :-------------------: |
+| super_admin (override), organization_admin              |      ✓       |             ✓             |         clear         |
+| security_analyst                                        |      ✓       |             ✓             |         clear         |
+| compliance_auditor                                      |      ✓       |             ✓             |    clear (reveal)     |
+| quarantine_reviewer                                     |      ✓       |         — (`403`)         |    clear (decider)    |
+| domain_admin, read_only_user, platform_admin (override) |      ✓       |         — (`403`)         |        masked         |
+| mailbox_user                                            |  — (`403`)   |         — (`403`)         |   own address only    |
+
+- **The reveal** is an explicit `POST` (CSRF-protected in the portal, never prefetched): values are read from the replica, then one writer transaction commits one `message.revealed` audit row per revealed message (fields and counts only, never values; actor, source IP, `requestId`, `metadata.override` under an override) **before** the response is sent; an audit failure answers `503` with no value. Responses are `Cache-Control: no-store`. Per user or API key `API_MESSAGES_REVEAL_PER_MINUTE` (30) reveals per minute (`429`). Unknown and other organizations' ids look alike (bulk: omitted; single: `404 message_not_found`). No Idempotency-Key.
+- **Searches that would confirm a masked value need the permission too:** the `recipient`, `subject` and `subjectPrefix` filters of `GET /messages` (and of saved views) require `message:reveal` (`403 message_filter_forbidden`), so a role that cannot see a subject or a recipient address cannot probe it — for example a `read_only_user` listing the organization's user addresses (`user:read`) and testing each one. `recipientDomain` stays open (the masked form keeps the domain). On the quarantine operator search, a caller who reads recipients masked gets `403 quarantine_filter_forbidden` for an exact `recipient` filter (refused before any read). Both rules were added when step 7.2 was closed (step note §13 closer).
+- **Not masked (open product-owner question):** attachment file names (`GET /messages/{id}/attachments`, `GET /attachments`, scan rounds) stay in clear for every `message:read` holder, as before step 7.2 (ADR-0062 "Open product-owner questions").
+- **API keys** see exactly the same masks; a key reveals only when its scope holds `message:reveal` (granted only by a creator holding it).
+- **Not reused:** `message:read_content` keeps its meaning (body and attachment content from object storage) and gates no reveal.
 
 ## Custom roles
 

@@ -59,6 +59,14 @@ function setup(rows: AuditLogRecord[] = [], boundary: AuditKey | null = null) {
     filtered: vi.fn((_s: AuditSearch, _f: unknown, _b: unknown, take: number) =>
       Promise.resolve(rows.slice(0, take)),
     ),
+    resourcePage: vi.fn((_s: AuditSearch, _r: unknown, take: number) =>
+      Promise.resolve(rows.slice(0, take)),
+    ),
+    resourceBoundary: vi.fn(() => Promise.resolve(boundary)),
+    resourceFiltered: vi.fn(
+      (_s: AuditSearch, _r: unknown, _f: unknown, _b: unknown, take: number) =>
+        Promise.resolve(rows.slice(0, take)),
+    ),
   };
   const organizations = { findVisibleOnReader: vi.fn(() => Promise.resolve(null as unknown)) };
   const audit = {
@@ -169,6 +177,80 @@ describe('AuditLogsService.search (tenant)', () => {
     expect(metadata.filters).toEqual(['actionPrefix', 'actorId']);
     expect(JSON.stringify(metadata)).not.toContain('someone');
     expect(metadata.identifierSha256).toEqual({ actorId: expect.stringMatching(/^[0-9a-f]{64}$/) });
+  });
+
+  it('resource plan (step 7.2 §2 E3): resourceType + resourceId read the resource index exactly', async () => {
+    const p = user();
+    const { service, repo, metrics } = setup([record(9n, 1), record(8n, 2), record(7n, 3)]);
+    const first = await service.search(
+      p,
+      scopeFromPrincipal(p),
+      q({ resourceType: 'message', resourceId: 'm-1', limit: '2' }),
+      origin,
+      now,
+    );
+    expect(repo.resourcePage).toHaveBeenCalledTimes(1);
+    expect(repo.resourcePage.mock.calls[0]![1]).toEqual({ type: 'message', id: 'm-1' });
+    expect(repo.resourcePage.mock.calls[0]![2]).toBe(3);
+    expect(repo.page).not.toHaveBeenCalled();
+    expect(repo.boundary).not.toHaveBeenCalled();
+    expect(repo.filtered).not.toHaveBeenCalled();
+    expect(first.data.map((r) => r.id)).toEqual(['9', '8']);
+    // An exact page: the next cursor is the last row, never a budget boundary.
+    await service.search(
+      p,
+      scopeFromPrincipal(p),
+      q({ resourceType: 'message', resourceId: 'm-1', limit: '2', cursor: first.nextCursor! }),
+      origin,
+      now,
+    );
+    expect(repo.resourcePage.mock.calls[1]![0].after).toEqual({
+      createdAt: record(8n, 2).createdAt,
+      id: 8n,
+    });
+    expect(metrics.scanBudgetExhausted.inc).not.toHaveBeenCalled();
+  });
+
+  it('resource plan with other filters is budgeted over the resource entries', async () => {
+    const p = user();
+    const boundary = { createdAt: new Date(now.getTime() - 3_600_000), id: 100n };
+    const { service, repo, metrics } = setup([record(9n, 1)], boundary);
+    const page = await service.search(
+      p,
+      scopeFromPrincipal(p),
+      q({ resourceType: 'message', resourceId: 'm-1', actionPrefix: 'message.', limit: '10' }),
+      origin,
+      now,
+    );
+    expect(repo.resourceBoundary).toHaveBeenCalledWith(
+      expect.anything(),
+      { type: 'message', id: 'm-1' },
+      5000,
+    );
+    expect(repo.resourceFiltered.mock.calls[0]![2]).toEqual({ actionPrefix: 'message.' });
+    expect(repo.resourceFiltered.mock.calls[0]![3]).toEqual(boundary);
+    expect(page.nextCursor).not.toBeNull();
+    expect(metrics.scanBudgetExhausted.inc).toHaveBeenCalledWith({ resource: 'audit_logs' });
+    // Only one of the two resource fields: the 6.1 scan plan.
+    await service.search(p, scopeFromPrincipal(p), q({ resourceType: 'message' }), origin, now);
+    expect(repo.filtered.mock.calls[0]![1]).toEqual({ resourceType: 'message' });
+  });
+
+  it('platform scope=platform uses the resource plan with the platform owner', async () => {
+    const p = user({
+      organizationKind: 'platform',
+      permissions: new Set(['audit:read', 'platform:operations']),
+    });
+    const { service, repo } = setup([record(9n, 1, null)]);
+    await service.searchPlatform(
+      p,
+      scopeFromPrincipal(p),
+      pq({ scope: 'platform', resourceType: 'organization', resourceId: ORG }),
+      origin,
+      now,
+    );
+    expect(repo.resourcePage.mock.calls[0]![0].owner).toEqual({ kind: 'platform' });
+    expect(repo.resourcePage.mock.calls[0]![1]).toEqual({ type: 'organization', id: ORG });
   });
 
   it('refuses action with actionPrefix, malformed prefixes and foreign or altered cursors', async () => {

@@ -1,6 +1,7 @@
 'use client';
 
 import { DownloadIcon, SendIcon, ShieldXIcon, Trash2Icon, UserCheckIcon } from 'lucide-react';
+import { useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { toast } from 'sonner';
 import { DateTime, UntrustedText } from '@/components/domain';
@@ -28,13 +29,112 @@ import { ReasonConfirm } from './reason-confirm';
 import type { EntryAction, EntryDetailBody, ReleaseOutcome } from './types';
 import { useQuarantineCatalog } from './use-catalog';
 
-const ENTRY_QUERIES = [
+/** Queries a quarantine mutation makes stale (entry, history, lists, summary, approvals). */
+export const ENTRY_QUERIES = [
   'QuarantineEntriesController_detail_v1',
   'QuarantineEntriesController_history_v1',
   'QuarantineEntriesController_search_v1',
   'QuarantineToolsController_summary_v1',
   'QuarantineApprovalsController_list_v1',
 ] as const;
+
+/** Codes after which the entry is reloaded (it changed since it was read: 409 row version / state). */
+const RELOAD_CODES = new Set(['quarantine_version_conflict', 'quarantine_state_conflict']);
+
+export interface EntryActionFlags {
+  readonly release: boolean;
+  readonly request_release: boolean;
+  readonly reject: boolean;
+  readonly delete: boolean;
+  readonly download: boolean;
+  readonly preview: boolean;
+}
+
+/** What the caller may do with an entry: its permission and the entry's `allowedActions`. */
+export function useEntryActions(entry: EntryDetailBody): EntryActionFlags {
+  const allowed = new Set<EntryAction>(entry.allowedActions);
+  return {
+    release: useCan('QuarantineEntriesController_release_v1') && allowed.has('release'),
+    request_release:
+      useCan('QuarantineEntriesController_requestRelease_v1') && allowed.has('request_release'),
+    reject: useCan('QuarantineEntriesController_reject_v1') && allowed.has('reject'),
+    delete: useCan('QuarantineEntriesController_delete_v1') && allowed.has('delete'),
+    download: useCan('QuarantineEntriesController_grant_v1') && allowed.has('download'),
+    preview: useCan('QuarantineEntriesController_preview_v1') && allowed.has('preview'),
+  };
+}
+
+/** The action buttons of an entry (release, request release, download, reject, delete). */
+export function EntryActionButtons({
+  can,
+  onAction,
+  label,
+}: {
+  can: EntryActionFlags;
+  onAction: (action: EntryAction) => void;
+  /** Appended to each button's accessible name when several entries share a page. */
+  label?: string;
+}) {
+  const suffix = label ? ` ${label}` : '';
+  return (
+    <>
+      {can.release ? (
+        <Button
+          size="sm"
+          onClick={() => onAction('release')}
+          aria-label={label ? `Release${suffix}` : undefined}
+        >
+          <SendIcon aria-hidden />
+          Release
+        </Button>
+      ) : null}
+      {can.request_release ? (
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => onAction('request_release')}
+          aria-label={label ? `Request release${suffix}` : undefined}
+        >
+          <UserCheckIcon aria-hidden />
+          Request release
+        </Button>
+      ) : null}
+      {can.download ? (
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => onAction('download')}
+          aria-label={label ? `Download${suffix}` : undefined}
+        >
+          <DownloadIcon aria-hidden />
+          Download
+        </Button>
+      ) : null}
+      {can.reject ? (
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => onAction('reject')}
+          aria-label={label ? `Reject${suffix}` : undefined}
+        >
+          <ShieldXIcon aria-hidden />
+          Reject
+        </Button>
+      ) : null}
+      {can.delete ? (
+        <Button
+          size="sm"
+          variant="destructive"
+          onClick={() => onAction('delete')}
+          aria-label={label ? `Delete${suffix}` : undefined}
+        >
+          <Trash2Icon aria-hidden />
+          Delete
+        </Button>
+      ) : null}
+    </>
+  );
+}
 
 /** Quarantine entry detail (`/quarantine/[entryId]`, §1.3 row 12). */
 export function EntryDetail({ entryId }: { entryId: string }) {
@@ -79,18 +179,10 @@ function EntryView({
   entry: EntryDetailBody;
   breadcrumbs: { label: string; href?: string }[];
 }) {
-  const allowed = new Set<EntryAction>(entry.allowedActions);
-  const canPreview = useCan('QuarantineEntriesController_preview_v1') && allowed.has('preview');
+  const actions = useEntryActions(entry);
+  const { preview: canPreview, ...can } = actions;
   const [dialog, setDialog] = useState<EntryAction | null>(null);
   const [outcome, setOutcome] = useState<ReleaseOutcome | null>(null);
-  const can = {
-    release: useCan('QuarantineEntriesController_release_v1') && allowed.has('release'),
-    request_release:
-      useCan('QuarantineEntriesController_requestRelease_v1') && allowed.has('request_release'),
-    reject: useCan('QuarantineEntriesController_reject_v1') && allowed.has('reject'),
-    delete: useCan('QuarantineEntriesController_delete_v1') && allowed.has('delete'),
-    download: useCan('QuarantineEntriesController_grant_v1') && allowed.has('download'),
-  };
   const anyAction = Object.values(can).some(Boolean);
   return (
     <div className="grid gap-4">
@@ -98,40 +190,7 @@ function EntryView({
         title="Quarantine entry"
         breadcrumbs={breadcrumbs}
         description="One recipient's copy of a held message. Actions apply to this recipient only."
-        actions={
-          <>
-            {can.release ? (
-              <Button size="sm" onClick={() => setDialog('release')}>
-                <SendIcon aria-hidden />
-                Release
-              </Button>
-            ) : null}
-            {can.request_release ? (
-              <Button size="sm" variant="outline" onClick={() => setDialog('request_release')}>
-                <UserCheckIcon aria-hidden />
-                Request release
-              </Button>
-            ) : null}
-            {can.download ? (
-              <Button size="sm" variant="outline" onClick={() => setDialog('download')}>
-                <DownloadIcon aria-hidden />
-                Download
-              </Button>
-            ) : null}
-            {can.reject ? (
-              <Button size="sm" variant="outline" onClick={() => setDialog('reject')}>
-                <ShieldXIcon aria-hidden />
-                Reject
-              </Button>
-            ) : null}
-            {can.delete ? (
-              <Button size="sm" variant="destructive" onClick={() => setDialog('delete')}>
-                <Trash2Icon aria-hidden />
-                Delete
-              </Button>
-            ) : null}
-          </>
-        }
+        actions={<EntryActionButtons can={actions} onAction={setDialog} />}
       />
       <div role="status" aria-live="polite">
         {outcome ? <ReleaseOutcomeNotice outcome={outcome} /> : null}
@@ -148,7 +207,9 @@ function EntryView({
       <Section title="Release attempts">
         <ReleasesList releases={entry.releases} />
       </Section>
-      <HistorySection entryId={entry.id} />
+      <Section title="History" description="Every action on this entry, oldest first.">
+        <EntryHistory entryId={entry.id} />
+      </Section>
       <OperatorDialogs
         entry={entry}
         dialog={dialog}
@@ -159,10 +220,11 @@ function EntryView({
   );
 }
 
-function HistorySection({ entryId }: { entryId: string }) {
+/** The actions recorded on an entry (`QuarantineEntriesController_history`), oldest first. */
+export function EntryHistory({ entryId }: { entryId: string }) {
   const history = useApiQuery('QuarantineEntriesController_history_v1', { path: { entryId } });
   return (
-    <Section title="History" description="Every action on this entry, oldest first.">
+    <>
       {history.isLoading ? (
         <LoadingState label="Loading the history" rows={4} />
       ) : history.error ? (
@@ -195,11 +257,16 @@ function HistorySection({ entryId }: { entryId: string }) {
           ))}
         </ol>
       )}
-    </Section>
+    </>
   );
 }
 
-function OperatorDialogs({
+/**
+ * The 7.1 operator dialogs of an entry (reason dialogs with one Idempotency-Key per intent,
+ * reused by "Retry the same request"; the download grant). A `409` row-version or state conflict
+ * reloads the entry. Used by the entry page and the details page's quarantine section.
+ */
+export function OperatorDialogs({
   entry,
   dialog,
   onClose,
@@ -211,8 +278,19 @@ function OperatorDialogs({
   onOutcome: (outcome: ReleaseOutcome) => void;
 }) {
   const catalog = useQuarantineCatalog();
+  const queryClient = useQueryClient();
   const maxChars = catalog.data?.limits.reasonMaxChars;
   const path = { entryId: entry.id };
+  /** Reloads the entry after a conflict, so the next attempt uses its current row version. */
+  const reloading = async <T extends { ok: boolean; error?: { code: string } }>(
+    outcome: Promise<T>,
+  ): Promise<T> => {
+    const result = await outcome;
+    if (!result.ok && result.error && RELOAD_CODES.has(result.error.code)) {
+      for (const id of ENTRY_QUERIES) await queryClient.invalidateQueries({ queryKey: [id] });
+    }
+    return result;
+  };
   const release = useApiMutation('QuarantineEntriesController_release_v1', {
     invalidates: ENTRY_QUERIES,
     successMessage: null,
@@ -259,8 +337,10 @@ function OperatorDialogs({
         confirmLabel="Release"
         maxChars={maxChars}
         pending={release.isPending}
-        onSubmit={(reason) => release.submit({ path, body: releaseBody(reason, entry.rowVersion) })}
-        onRetry={() => release.retry()}
+        onSubmit={(reason) =>
+          reloading(release.submit({ path, body: releaseBody(reason, entry.rowVersion) }))
+        }
+        onRetry={() => reloading(release.retry())}
       />
       <ReasonConfirm
         open={open('request_release')}
@@ -270,8 +350,8 @@ function OperatorDialogs({
         confirmLabel="Request release"
         maxChars={maxChars}
         pending={request.isPending}
-        onSubmit={(reason) => request.submit({ path, body: requestReleaseBody(reason) })}
-        onRetry={() => request.retry()}
+        onSubmit={(reason) => reloading(request.submit({ path, body: requestReleaseBody(reason) }))}
+        onRetry={() => reloading(request.retry())}
       />
       <ReasonConfirm
         open={open('reject')}
@@ -306,15 +386,17 @@ function OperatorDialogs({
           )
         }
         onSubmit={(reason) =>
-          reject.submit({
-            path,
-            body: rejectBody(reason, {
-              notifySender: canNotify ? notify : undefined,
-              rowVersion: entry.rowVersion,
+          reloading(
+            reject.submit({
+              path,
+              body: rejectBody(reason, {
+                notifySender: canNotify ? notify : undefined,
+                rowVersion: entry.rowVersion,
+              }),
             }),
-          })
+          )
         }
-        onRetry={() => reject.retry()}
+        onRetry={() => reloading(reject.retry())}
       />
       <ReasonConfirm
         open={open('delete')}
@@ -330,8 +412,10 @@ function OperatorDialogs({
         destructive
         maxChars={maxChars}
         pending={remove.isPending}
-        onSubmit={(reason) => remove.submit({ path, body: deleteBody(reason, entry.rowVersion) })}
-        onRetry={() => remove.retry()}
+        onSubmit={(reason) =>
+          reloading(remove.submit({ path, body: deleteBody(reason, entry.rowVersion) }))
+        }
+        onRetry={() => reloading(remove.retry())}
       />
       <DownloadDialog entryId={entry.id} open={open('download')} onOpenChange={onOpenChange} />
     </>

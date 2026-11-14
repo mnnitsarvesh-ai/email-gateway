@@ -309,6 +309,9 @@ export class Fixtures {
     const emails = [...this.emails];
     const byOrgOrUser = { OR: [{ organizationId: { in: orgs } }, { userId: { in: users } }] };
     const p = this.prisma;
+    // Step 7.2: saved views reference the organization (RESTRICT) and the user (CASCADE); they
+    // go first so neither delete below is blocked.
+    await p.savedView.deleteMany({ where: byOrgOrUser });
     await p.loginAuditLog.deleteMany({
       where: { OR: [...byOrgOrUser.OR, { emailAttempted: { in: emails } }] },
     });

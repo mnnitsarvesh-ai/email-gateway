@@ -59,10 +59,27 @@ export type ListDeliveriesQuery = z.output<typeof ListDeliveriesQuerySchema>;
 
 const IsoDate = z.iso.datetime();
 
+/** Step 7.2 (§2 E5, ADR-0062): the masked recipient of the delivery views. */
+const MaskedRecipient = z
+  .string()
+  .describe(
+    'Masked since step 7.2 (`f***@example.com`: the first character of the local part and the ' +
+      'domain); the clear address only through the audited `POST /messages/{messageId}/reveal` ' +
+      '(`message:reveal`), joined by `rcptSeq`',
+  );
+const RecipientMasked = z
+  .boolean()
+  .describe('Step 7.2: true (the recipient is masked on every read)');
+/** Step 7.2 (§2 E9): free text with every address-shaped substring's local part masked. */
+const ADDRESS_MASKED_TEXT =
+  'Since step 7.2 the local part of every address in the text is masked (`f***@example.com`) ' +
+  'for every caller; never revealed';
+
 export const DeliverySchema = z.object({
   rcptSeq: z.number().int(),
   deliverySeq: z.number().int().describe('0 = the initial delivery; releases use 1, 2, …'),
-  recipient: z.string(),
+  recipient: MaskedRecipient,
+  recipientMasked: RecipientMasked,
   direction: DirectionSchema.nullable(),
   status: DeliveryStatusSchema,
   attemptCount: z.number().int().describe('Attempts against a remote server'),
@@ -71,7 +88,10 @@ export const DeliverySchema = z.object({
   remoteHost: z.string().nullable(),
   finalSmtpCode: z.number().int().nullable(),
   enhancedStatus: z.string().nullable(),
-  finalSmtpResponse: z.string().nullable(),
+  finalSmtpResponse: z
+    .string()
+    .nullable()
+    .describe(`Last remote SMTP reply text. ${ADDRESS_MASKED_TEXT}`),
   lastErrorClass: z.string().nullable(),
   failureReason: z.string().nullable().describe('Gateway-side reason (e.g. direction_changed)'),
   dsnGenerated: z.boolean().describe('Postfix sent a DSN to the original sender'),
@@ -110,7 +130,10 @@ export const DeliveryEventSchema = z.object({
   enhancedStatus: z.string().nullable(),
   remoteHost: z.string().nullable(),
   errorClass: z.string().nullable(),
-  detail: z.string().nullable().describe('Remote reply or reason text; never message content'),
+  detail: z
+    .string()
+    .nullable()
+    .describe(`Remote reply or reason text; never message content. ${ADDRESS_MASKED_TEXT}`),
 });
 export type DeliveryEventView = z.output<typeof DeliveryEventSchema>;
 
@@ -122,7 +145,8 @@ export const DeliveryEventPageSchema = z.object({
 export const DeliveryListItemSchema = z.object({
   messageId: z.uuid(),
   rcptSeq: z.number().int(),
-  recipient: z.string(),
+  recipient: MaskedRecipient,
+  recipientMasked: RecipientMasked,
   direction: DirectionSchema.nullable(),
   status: DeliveryStatusSchema,
   attemptCount: z.number().int(),

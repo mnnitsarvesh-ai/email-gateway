@@ -15,6 +15,7 @@ export const USER_KEYS = [
   'alphaAnalyst',
   'alphaReadOnly',
   'alphaReviewer',
+  'alphaAuditor',
   'alphaDomainAdmin',
   'alphaMailbox',
   'alphaMfaAdmin',
@@ -81,6 +82,12 @@ export interface E2eState {
     webhookId: string;
     pendingApprovalId: string;
     memberUserId: string;
+    /** Step 7.2: public ids of the explorer and details messages by plan key (seed/plan.ts). */
+    explorer: Record<string, string>;
+    /** The message of the quarantine entry with a sanitized HTML part (preview). */
+    previewMessageId: string;
+    /** `received_at` (ISO) of every alpha message of the last two hours, ascending. */
+    recentReceivedAt: string[];
   };
   beta: {
     domainId: string;
@@ -90,6 +97,10 @@ export interface E2eState {
     approvalId: string;
     webhookId: string;
     marker: string;
+    /** Beta's twin of alpha search message 1 (same sender and Message-ID). */
+    twinMessageId: string;
+    /** A saved explorer view of the beta administrator. */
+    savedViewId: string;
   };
   expected: { dashboard7d: DashboardExpectation };
 }

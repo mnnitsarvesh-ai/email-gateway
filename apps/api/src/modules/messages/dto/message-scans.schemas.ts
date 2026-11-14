@@ -84,7 +84,11 @@ export const ScanSymbolSchema = z.object({
   score: z.number(),
   options: z
     .array(z.string())
-    .describe('At most 5 options of at most 200 characters (may contain addresses or URLs)'),
+    .describe(
+      'At most 5 options of at most 200 characters (may contain URLs). Since step 7.2 the local ' +
+        'part of every address inside an option is masked (`f***@example.com`) for every caller; ' +
+        'never revealed',
+    ),
 });
 export type ScanSymbol = z.output<typeof ScanSymbolSchema>;
 

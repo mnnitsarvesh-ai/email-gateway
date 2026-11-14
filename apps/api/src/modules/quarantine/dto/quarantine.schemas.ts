@@ -75,12 +75,21 @@ const lowerAddress = z
 
 const Limit = z.coerce.number().int().min(1).optional();
 
-/** `GET /quarantine/entries` (Q9). `from`/`to` bound `quarantined_at` and are required. */
+/**
+ * `GET /quarantine/entries` (Q9). `from`/`to` bound `quarantined_at` and are required, except
+ * with `messageId` (step 7.2 §13 closer): the entries of one message are read by the
+ * message-led unique key `(message_id, lifecycle_round, rcpt_seq)` (at most recipients × rounds
+ * rows), so the range may be left out and every entry of the message is found, whenever it was
+ * quarantined (a manual quarantine or a rescan long after receipt).
+ */
 export const EntrySearchQuerySchema = z
   .strictObject({
-    from: IsoDate.describe('Inclusive lower bound of quarantinedAt (required)'),
-    to: IsoDate.describe(
-      'Exclusive upper bound of quarantinedAt (required; to - from ≤ the max range)',
+    from: IsoDate.optional().describe(
+      'Inclusive lower bound of quarantinedAt (required unless `messageId` is given)',
+    ),
+    to: IsoDate.optional().describe(
+      'Exclusive upper bound of quarantinedAt (required unless `messageId` is given; to - from ' +
+        '≤ the max range)',
     ),
     state: list(QUARANTINE_STATES),
     kind: z.enum(QUARANTINE_ENTRY_KINDS).optional(),
@@ -109,13 +118,27 @@ export const EntrySearchQuerySchema = z
     recipient: lowerAddress.optional().describe('Exact recipient address'),
     hasAttachments: booleanQuery,
     hasHardBlock: booleanQuery,
-    messageId: z.uuid().optional().describe('Message public id'),
+    messageId: z
+      .uuid()
+      .optional()
+      .describe(
+        'Message public id. With it `from`/`to` may be left out: every entry of the message ' +
+          '(any recipient and round) is searched, whenever it was quarantined',
+      ),
     cursor: z.string().min(1).max(512).optional(),
     limit: Limit.describe('Page size (default 50, at most QUARANTINE_SEARCH_MAX_PAGE_SIZE)'),
   })
   .refine((q) => !(q.riskLevel !== undefined && q.minRiskLevel !== undefined), {
     message: 'use either riskLevel or minRiskLevel',
     path: ['minRiskLevel'],
+  })
+  .refine((q) => (q.from === undefined) === (q.to === undefined), {
+    message: 'give both from and to, or neither (only with messageId)',
+    path: ['to'],
+  })
+  .refine((q) => q.from !== undefined || q.messageId !== undefined, {
+    message: 'from and to are required unless messageId is given',
+    path: ['from'],
   });
 export type EntrySearchQuery = z.output<typeof EntrySearchQuerySchema>;
 

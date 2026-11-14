@@ -143,6 +143,18 @@ export const cursorInvalid = (): CodedHttpException =>
     'The cursor is invalid or belongs to other filters; restart without a cursor',
   );
 
+/**
+ * Step 7.2 (ADR-0062, §13 closer): an exact `recipient` search by a caller who reads recipients
+ * masked would confirm the masked address; refused before anything is read. Names the filter,
+ * never the value.
+ */
+export const filterForbidden = (filter: string): CodedHttpException =>
+  quarantineError(
+    'quarantine_filter_forbidden',
+    `The ${filter} filter requires a quarantine decision permission or message:reveal`,
+    { filter },
+  );
+
 export const searchRangeInvalid = (maxDays: number): CodedHttpException =>
   quarantineError(
     'quarantine_search_range_invalid',

@@ -28,7 +28,11 @@ export const AUDIT_SEARCH_DESCRIPTION =
   'Window `[from, to)` default the last 7 days, at most `API_AUDIT_MAX_RANGE_DAYS`. Keyset ' +
   '`(createdAt, id)` in the `sort` direction (`-createdAt` default), read from the replica. ' +
   'Filters: `action` (exact) or `actionPrefix`, `resourceType`, `resourceId`, `actorType`, ' +
-  '`actorId`; with any filter a page scans at most `API_LIST_SCAN_BUDGET_ROWS` entries and may ' +
+  '`actorId`. With `resourceType` and `resourceId` together (a resource’s history, e.g. ' +
+  '`resourceType=message&resourceId=<message id>`) the search reads the resource index in keyset ' +
+  'order: pages are exact, and other filters scan at most `API_LIST_SCAN_BUDGET_ROWS` of the ' +
+  'resource’s entries. With any other filter a page scans at most ' +
+  '`API_LIST_SCAN_BUDGET_ROWS` entries and may ' +
   'be short (even empty) while `nextCursor` is non-null: follow `nextCursor` until it is null. ' +
   'Cursors are signed and bound to the caller, filters, sort and first window ' +
   '(`400 cursor_invalid` otherwise).';

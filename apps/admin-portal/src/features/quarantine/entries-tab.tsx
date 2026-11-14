@@ -6,6 +6,7 @@ import { useMemo, useState } from 'react';
 import { z } from 'zod';
 import { DataTable, type DataTableColumn } from '@/components/data-table';
 import {
+  SensitiveValue,
   DateTime,
   DirectionBadge,
   QuarantineStateBadge,
@@ -89,17 +90,40 @@ const FILTER_KEYS = Object.keys(ENTRIES_URL_SHAPE).filter(
   (k) => k !== 'range',
 ) as (keyof EntriesState)[];
 
+/**
+ * Permissions with which an operator reads quarantine recipients in clear (step 7.2 §2 E8,
+ * ADR-0062): a quarantine decision permission or `message:reveal`. Without one the api masks
+ * the recipients and refuses an exact recipient search (`403 quarantine_filter_forbidden`: it
+ * would confirm the masked address), so the page neither offers nor sends that filter.
+ */
+export const RECIPIENT_CLEAR_PERMISSIONS = [
+  'quarantine:release',
+  'quarantine:approve',
+  'quarantine:reject',
+  'quarantine:delete',
+  'quarantine:request_release',
+  'quarantine:manage',
+  'message:reveal',
+] as const;
+
+export const seesRecipientsInClear = (permissions: ReadonlySet<string>): boolean =>
+  RECIPIENT_CLEAR_PERMISSIONS.some((permission) => permissions.has(permission));
+
+/** The page always searches a range (`from`/`to` are optional in the api only with messageId). */
 export function entriesQuery(
   state: EntriesState,
   now = Date.now(),
-): QueryParams<'QuarantineEntriesController_search_v1'> {
+): QueryParams<'QuarantineEntriesController_search_v1'> & { from: string; to: string } {
   const window = resolvePreset(state.range, now);
   const query: Record<string, string> = { from: window.from, to: window.to };
   for (const key of FILTER_KEYS) {
     const value = state[key];
     if (value !== undefined) query[key] = String(value);
   }
-  return query as unknown as QueryParams<'QuarantineEntriesController_search_v1'>;
+  return query as unknown as QueryParams<'QuarantineEntriesController_search_v1'> & {
+    from: string;
+    to: string;
+  };
 }
 
 const COLUMNS: DataTableColumn<EntrySummary>[] = [
@@ -140,7 +164,15 @@ const COLUMNS: DataTableColumn<EntrySummary>[] = [
     id: 'recipient',
     header: 'Recipient',
     meta: { label: 'Recipient', className: 'max-w-56' },
-    cell: ({ row }) => <UntrustedText value={row.original.recipient} maxLength={50} />,
+    // Clear for quarantine deciders and message:reveal holders, masked otherwise (step 7.2 E8).
+    cell: ({ row }) => (
+      <SensitiveValue
+        value={row.original.recipient}
+        masked={row.original.recipientMasked}
+        kind="address"
+        maxLength={50}
+      />
+    ),
   },
   {
     id: 'sender',
@@ -193,11 +225,17 @@ export function EntriesTab() {
   const [state, setState] = useUrlState(ENTRIES_URL_SHAPE);
   const catalog = useQuarantineCatalog();
   const maxDays = catalog.data?.limits.searchMaxRangeDays;
-  const query = useMemo(() => entriesQuery(state), [state]);
+  const permissions = usePermissions();
+  // A shared link may carry a recipient the caller may not search by (it would be refused).
+  const recipientSearch = seesRecipientsInClear(permissions);
+  const recipientIgnored = !recipientSearch && state.recipient !== undefined;
+  const query = useMemo(
+    () => entriesQuery(recipientSearch ? state : { ...state, recipient: undefined }),
+    [state, recipientSearch],
+  );
   const list = useCursorList('QuarantineEntriesController_search_v1', query, {
     limit: Math.min(50, catalog.data?.limits.searchMaxPageSize ?? 50),
   });
-  const permissions = usePermissions();
   const bulkAllowed = (catalog.data?.bulkActions ?? []).filter(
     (action) =>
       action !== 'approve' && action !== 'deny' && permissions.has(`quarantine:${action}`),
@@ -262,12 +300,14 @@ export function EntriesTab() {
           onCommit={(sender) => setState({ sender })}
           type="email"
         />
-        <FilterText
-          label="Recipient (exact)"
-          value={state.recipient}
-          onCommit={(recipient) => setState({ recipient })}
-          type="email"
-        />
+        {recipientSearch ? (
+          <FilterText
+            label="Recipient (exact)"
+            value={state.recipient}
+            onCommit={(recipient) => setState({ recipient })}
+            type="email"
+          />
+        ) : null}
       </div>
       <Collapsible defaultOpen={advancedCount > 0}>
         <CollapsibleTrigger asChild>
@@ -338,6 +378,12 @@ export function EntriesTab() {
           Searches are limited to {maxDays} days by the platform.
         </p>
       ) : null}
+      {recipientIgnored ? (
+        <p className="text-xs text-muted-foreground">
+          The recipient filter of this link was not applied: searching by an exact recipient needs a
+          quarantine decision permission or the reveal permission (recipients are masked for you).
+        </p>
+      ) : null}
       <div role="status" aria-live="polite">
         {bulkResult ? (
           <BulkResultNotice result={bulkResult} onDismiss={() => setBulkResult(null)} />
@@ -377,7 +423,12 @@ export function EntriesTab() {
             <Link href={entryHref(row.id)} className="font-medium text-primary hover:underline">
               <UntrustedText value={row.subject} maxLength={60} emptyLabel="Open entry" />
             </Link>
-            <UntrustedText value={row.recipient} maxLength={40} />
+            <SensitiveValue
+              value={row.recipient}
+              masked={row.recipientMasked}
+              kind="address"
+              maxLength={40}
+            />
             <div className="flex flex-wrap items-center gap-2">
               <QuarantineStateBadge state={row.state} />
               <span className="text-xs">{humanize(row.reason)}</span>

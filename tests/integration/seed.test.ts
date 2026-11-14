@@ -17,11 +17,17 @@ import { stack } from './support/env';
 
 /**
  * db:seed (step 1.1 D7, step 1.2/1.3 D8 and D10) against the dev schema, with the DML account:
- * the catalog (59 permissions since step 6.2, the 9 system roles incl. mailbox_user (step 5.3 Q25), the platform organization, the step 2.3
+ * the catalog (60 permissions since step 7.2, the 9 system roles incl. mailbox_user (step 5.3 Q25), the platform organization, the step 2.3
  * destination provider presets), the retired
  * role-key remap, and idempotency (running it twice leaves the same row counts). The seeded
  * rows are dev data and are deliberately left in place.
+ *
+ * User counts cover the seeded demo users only (by their emails, step 7.2 §3.5): a local
+ * database also holds accounts created out of band (the owner's own platform super_admin, users
+ * invited through the portal), which this test never counts, deletes or modifies.
  */
+const seededEmails = (organization: 'platform' | 'demo'): string[] =>
+  DEMO.users.filter((u) => u.organization === organization).map((u) => u.email);
 const SEED_CLI = fileURLToPath(
   new URL('../../packages/database/dist/seed/cli.js', import.meta.url),
 );
@@ -60,8 +66,12 @@ async function counts() {
     demoOrganizations: await prisma.organization.count({
       where: { slug: { in: ['demo', 'platform'] } },
     }),
-    demoUsers: await prisma.user.count({ where: { organizationId } }),
-    demoUserRoles: await prisma.userRole.count({ where: { organizationId } }),
+    demoUsers: await prisma.user.count({
+      where: { organizationId, email: { in: seededEmails('demo') } },
+    }),
+    demoUserRoles: await prisma.userRole.count({
+      where: { organizationId, user: { email: { in: seededEmails('demo') } } },
+    }),
     demoLimits: await prisma.organizationLimit.count({ where: { organizationId } }),
     demoFeatures: await prisma.organizationFeature.count({ where: { organizationId } }),
     demoDeployments: await prisma.organizationDeployment.count({ where: { organizationId } }),
@@ -74,8 +84,12 @@ async function counts() {
     demoLegacyPolicyRows:
       (await prisma.policyCondition.count({ where: { organizationId } })) +
       (await prisma.policyAction.count({ where: { organizationId } })),
-    platformUsers: await prisma.user.count({ where: { organizationId: platformId } }),
-    platformUserRoles: await prisma.userRole.count({ where: { organizationId: platformId } }),
+    platformUsers: await prisma.user.count({
+      where: { organizationId: platformId, email: { in: seededEmails('platform') } },
+    }),
+    platformUserRoles: await prisma.userRole.count({
+      where: { organizationId: platformId, user: { email: { in: seededEmails('platform') } } },
+    }),
     platformSettings: await prisma.organizationSetting.count({
       where: { organizationId: platformId },
     }),
@@ -102,7 +116,7 @@ describe('db:seed', () => {
     expect(await counts()).toEqual(afterFirst);
 
     expect(afterFirst).toMatchObject({
-      permissions: 59,
+      permissions: 60,
       systemRoles: 9,
       destinationPresets: 2,
       plans: expect.any(Number) as unknown,
@@ -363,7 +377,7 @@ describe('db:seed', () => {
     );
   });
 
-  it('seeds exactly the 59 permissions and the 9 system roles (D8 + mailbox_user, 5.3), with their permissions', async () => {
+  it('seeds exactly the 60 permissions and the 9 system roles (D8 + mailbox_user, 5.3), with their permissions', async () => {
     expect(seed().status).toBe(0);
     const permissions = await prisma.permission.findMany({ select: { key: true } });
     expect(permissions.map((p) => p.key).sort()).toEqual(PERMISSIONS.map((p) => p.key).sort());
@@ -558,6 +572,13 @@ describe('db:seed', () => {
       'super_admin',
     ]);
     expect(holders('webhook:manage')).toEqual(['organization_admin', 'super_admin']);
+    // Step 7.2 (§2 E5, §3.5): the audited reveal of masked message metadata.
+    expect(holders('message:reveal')).toEqual([
+      'compliance_auditor',
+      'organization_admin',
+      'security_analyst',
+      'super_admin',
+    ]);
   });
 
   it('seeds the platform organization with mandatory MFA and the demo users', async () => {

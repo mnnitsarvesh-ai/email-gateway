@@ -16,7 +16,13 @@ import {
   type AttachmentSearchRow,
   type LatestResultRow,
 } from '../../src/modules/attachments/attachments.repository';
+import {
+  domainOf,
+  normalizeMessageIdKey,
+  normalizeSubjectKey,
+} from '../../src/modules/messages/domain/search-keys';
 import type { TimeIdKey } from '../../src/modules/messages/domain/v1-list';
+import { messageSearchTimeout } from '../../src/modules/messages/messages.errors';
 import {
   type DeliveryRow,
   MessageDataRepository,
@@ -25,8 +31,12 @@ import {
   type MessageRef,
   type RecipientKeyRow,
   type RecipientRow,
-  type ResolvedMessageFilters,
 } from '../../src/modules/messages/repositories/message-data.repository';
+import type {
+  ForeignDriver,
+  MessagesTableDriver,
+  ResolvedResiduals,
+} from '../../src/modules/messages/repositories/message-list-drivers';
 import {
   RecipientSuppressionsRepository,
   type SuppressionFilters,
@@ -102,6 +112,10 @@ export class MessagesWorld {
   scans: Array<{ id: bigint; messageId: bigint; organizationId: bigint; lifecycleRound: number }> =
     [];
   suppressions: SuppressionRow[] = [];
+  /** Quarantine entry states per message (any recipient and round), for the 7.2 filter. */
+  quarantine: Array<{ organizationId: bigint; messageId: bigint; status: string }> = [];
+  /** Step 7.2: a stub of the subject-prefix probe/page (422/503 paths); null = compute. */
+  prefixFailure: { kind: 'too_broad'; matches: number } | { kind: 'timeout' } | null = null;
   private nextId = 1000n;
 
   id(): bigint {
@@ -178,90 +192,242 @@ const listRow = (m: WorldMessage): MessageListRow => ({
   riskScore: m.riskScore,
 });
 
-function matches(world: MessagesWorld, m: WorldMessage, f: ResolvedMessageFilters): boolean {
-  const has = (values: readonly unknown[] | undefined, v: unknown) => !values || values.includes(v);
-  const risk = f.riskScore;
+/** Case-insensitive equality: the double's stand-in for the utf8mb4_unicode_ci comparison. */
+const ci = (a: string | null | undefined, b: string): boolean =>
+  a !== null && a !== undefined && a.toLowerCase() === b.toLowerCase();
+
+/** The literal prefix of a `LIKE … ESCAPE '!'` pattern ending in `%`. */
+const unlike = (pattern: string): string => pattern.slice(0, -1).replace(/!(.)/g, '$1');
+
+/** The driver key test of an `email_messages` driver (null key: none/scan). */
+function messageKeyMatches(m: WorldMessage, driver: MessagesTableDriver, key?: string): boolean {
+  if (key === undefined) return true;
+  switch (driver) {
+    case 'internetMessageId':
+      return m.internetMessageId !== null && ci(normalizeMessageIdKey(m.internetMessageId), key);
+    case 'sender':
+      return ci(m.envelopeFrom, key);
+    case 'headerFrom':
+      return ci(m.headerFrom, key);
+    case 'subject':
+      return m.subject !== null && ci(normalizeSubjectKey(m.subject), key);
+    case 'senderDomain':
+      return ci(domainOf(m.envelopeFrom), key);
+    case 'verdict':
+      return m.finalVerdict === key;
+    default:
+      return true;
+  }
+}
+
+/** The world rows of a foreign driver (recipients, deliveries, quarantine entries). */
+function foreignEntries(
+  world: MessagesWorld,
+  org: bigint,
+  driver: ForeignDriver,
+  key: string,
+): Array<{ receivedAt: Date; id: bigint }> {
+  const receivedAtOf = (messageId: bigint) =>
+    world.messages.find((m) => m.id === messageId)?.receivedAt;
+  const entries: Array<{ receivedAt: Date | undefined; id: bigint }> =
+    driver === 'recipientDomain'
+      ? world.recipients
+          .filter((r) => r.organizationId === org && ci(domainOf(r.address), key))
+          .map((r) => ({ receivedAt: r.receivedAt, id: r.messageId }))
+      : driver === 'deliveryStatus'
+        ? world.deliveries
+            .filter((d) => d.organizationId === org && d.status === key)
+            .map((d) => ({ receivedAt: receivedAtOf(d.messageId), id: d.messageId }))
+        : world.quarantine
+            .filter((q) => q.organizationId === org && q.status === key)
+            .map((q) => ({ receivedAt: receivedAtOf(q.messageId), id: q.messageId }));
+  return entries.flatMap((e) => (e.receivedAt ? [{ receivedAt: e.receivedAt, id: e.id }] : []));
+}
+
+/** The residual predicates of §3.2 over one world message. */
+function matchesResiduals(world: MessagesWorld, m: WorldMessage, r: ResolvedResiduals): boolean {
+  const inList = (values: readonly unknown[] | undefined, v: unknown) =>
+    !values || values.length === 0 || values.includes(v);
+  const risk = r.riskScore;
   const score = m.riskScore;
+  const org = m.organizationId;
   return (
-    has(f.direction?.values, m.direction) &&
-    has(f.status?.values, m.status) &&
-    has(f.verdict?.values, m.finalVerdict) &&
-    has(f.action?.values, m.finalAction) &&
-    (f.domainId === undefined || m.domainId === f.domainId) &&
-    has(f.sender?.values, m.envelopeFrom) &&
-    has(f.headerFrom?.values, m.headerFrom) &&
-    has(f.internetMessageId?.values, m.internetMessageId) &&
+    inList(r.direction, m.direction) &&
+    inList(r.status, m.status) &&
+    inList(r.verdict, m.finalVerdict) &&
+    inList(r.action, m.finalAction) &&
+    (r.domainId === undefined || m.domainId === r.domainId) &&
+    (r.sender === undefined || ci(m.envelopeFrom, r.sender)) &&
+    (r.headerFrom === undefined || ci(m.headerFrom, r.headerFrom)) &&
+    (r.messageIdKey === undefined || messageKeyMatches(m, 'internetMessageId', r.messageIdKey)) &&
+    (r.subjectKey === undefined || messageKeyMatches(m, 'subject', r.subjectKey)) &&
+    (r.subjectPrefixPattern === undefined ||
+      (m.subject !== null &&
+        normalizeSubjectKey(m.subject)
+          .toLowerCase()
+          .startsWith(unlike(r.subjectPrefixPattern).toLowerCase()))) &&
+    (r.senderDomain === undefined || ci(domainOf(m.envelopeFrom), r.senderDomain)) &&
     (!risk ||
       (score !== null &&
-        has(risk.values, score) &&
+        inList(risk.values, score) &&
         (risk.gte === undefined || score >= risk.gte) &&
         (risk.lte === undefined || score <= risk.lte) &&
         (risk.gt === undefined || score > risk.gt) &&
         (risk.lt === undefined || score < risk.lt))) &&
-    (f.hasAttachments?.values === undefined ||
-      f.hasAttachments.values[0] === m.attachmentCount > 0) &&
-    (f.recipient?.values === undefined ||
-      world.recipients.some((r) => r.messageId === m.id && r.address === f.recipient!.values![0]))
+    (r.hasAttachments === undefined || r.hasAttachments === m.attachmentCount > 0) &&
+    (r.recipient === undefined ||
+      world.recipients.some((x) => x.messageId === m.id && ci(x.address, r.recipient!))) &&
+    (r.recipientDomain === undefined ||
+      world.recipients.some(
+        (x) => x.messageId === m.id && ci(domainOf(x.address), r.recipientDomain!),
+      )) &&
+    (r.deliveryStatus === undefined ||
+      world.deliveries.some(
+        (d) => d.organizationId === org && d.messageId === m.id && d.status === r.deliveryStatus,
+      )) &&
+    (r.quarantineStatus === undefined ||
+      world.quarantine.some(
+        (q) => q.organizationId === org && q.messageId === m.id && q.status === r.quarantineStatus,
+      ))
   );
 }
 
-/** MessageDataRepository over the world (same method contract). */
+/** MessageDataRepository over the world (same method contract, step 7.2 drivers). */
 export function messageDataDouble(world: MessagesWorld): Partial<MessageDataRepository> {
   const own = (scope: TenantScope) =>
     world.messages.filter((m) => m.organizationId === scope.organizationId);
   const key = (r: { receivedAt: Date; id: bigint }) => ({ at: r.receivedAt, id: r.id });
-  return asyncDouble<MessageDataRepository>({
-    indexPlan: (scope, input) =>
-      keyset(
-        own(scope).filter((m) => inRange(m.receivedAt, input.range)),
-        key,
-        input,
-      ).map(listRow),
-    verdictPlan: (scope, input) =>
-      keyset(
-        own(scope).filter(
-          (m) => inRange(m.receivedAt, input.range) && m.finalVerdict === input.verdict,
-        ),
-        key,
-        input,
-      ).map(listRow),
-    recipientRows: (scope, input) =>
-      keyset(
-        world.recipients.filter(
-          (r) =>
-            r.organizationId === scope.organizationId &&
-            r.address === input.address &&
-            inRange(r.receivedAt, input.range),
-        ),
-        key,
-        input,
-      ).map((r): RecipientKeyRow => ({
-        id: r.id,
-        receivedAt: r.receivedAt,
-        messageId: r.messageId,
-        organizationId: r.organizationId,
-      })),
-    messagesByKeys: (scope, _range, keys) =>
-      own(scope)
-        .filter((m) => keys.some((k) => k.id === m.id))
-        .map(listRow),
-    scanBoundary: (scope, input) => {
-      const all = keyset(
-        own(scope).filter((m) => inRange(m.receivedAt, input.range)),
-        key,
-        { ...input, take: Number.MAX_SAFE_INTEGER },
-      );
-      const at = all[input.budget - 1];
-      return at ? key(at) : null;
+  const all = { take: Number.MAX_SAFE_INTEGER };
+  const boundaryOf = <R>(rows: R[], keyOf: (r: R) => TimeIdKey, budget: number) => {
+    const at = rows[budget - 1];
+    return at ? keyOf(at) : null;
+  };
+  const driverRows = (
+    scope: TenantScope,
+    input: {
+      range: { from: Date; to: Date };
+      driver: MessagesTableDriver;
+      key?: string | undefined;
     },
-    scanPage: (scope, input) =>
+  ) =>
+    own(scope).filter(
+      (m) => inRange(m.receivedAt, input.range) && messageKeyMatches(m, input.driver, input.key),
+    );
+  const recipientsOf = (scope: TenantScope, address: string, range: { from: Date; to: Date }) =>
+    world.recipients.filter(
+      (r) =>
+        r.organizationId === scope.organizationId &&
+        ci(r.address, address) &&
+        inRange(r.receivedAt, range),
+    );
+  const prefixMatches = (
+    scope: TenantScope,
+    input: { range: { from: Date; to: Date }; pattern: string },
+  ) =>
+    own(scope).filter(
+      (m) =>
+        inRange(m.receivedAt, input.range) &&
+        matchesResiduals(world, m, { subjectPrefixPattern: input.pattern }),
+    );
+  const grouped = (entries: Array<{ receivedAt: Date; id: bigint }>) => {
+    const seen = new Map<string, { receivedAt: Date; id: bigint }>();
+    for (const e of entries) seen.set(`${e.receivedAt.getTime()}:${e.id}`, e);
+    return [...seen.values()];
+  };
+  return asyncDouble<MessageDataRepository>({
+    messagesPage: (scope, input) =>
       keyset(
-        own(scope).filter(
-          (m) => inRange(m.receivedAt, input.range) && matches(world, m, input.filters),
+        driverRows(scope, input).filter(
+          (m) => !input.residuals || matchesResiduals(world, m, input.residuals),
         ),
         key,
         input,
         input.boundary,
+      ).map(listRow),
+    messagesBoundary: (scope, input) =>
+      boundaryOf(keyset(driverRows(scope, input), key, { ...input, ...all }), key, input.budget),
+    recipientRows: (scope, input) =>
+      keyset(recipientsOf(scope, input.address, input.range), key, input).map(
+        (r): RecipientKeyRow => ({
+          id: r.id,
+          receivedAt: r.receivedAt,
+          messageId: r.messageId,
+          organizationId: r.organizationId,
+        }),
+      ),
+    recipientBoundary: (scope, input) =>
+      boundaryOf(
+        keyset(recipientsOf(scope, input.address, input.range), key, { ...input, ...all }),
+        key,
+        input.budget,
+      ),
+    recipientPage: (scope, input) =>
+      keyset(
+        recipientsOf(scope, input.address, input.range),
+        key,
+        { ...input, ...all },
+        input.boundary,
+      )
+        .flatMap((r) => {
+          const m = own(scope).find((x) => x.id === r.messageId);
+          return m && matchesResiduals(world, m, input.residuals)
+            ? [{ ...listRow(m), rid: r.id }]
+            : [];
+        })
+        .slice(0, input.take),
+    foreignKeys: (scope, input) =>
+      keyset(
+        grouped(foreignEntries(world, scope.organizationId, input.driver, input.key)).filter((e) =>
+          inRange(e.receivedAt, input.range),
+        ),
+        key,
+        input,
+      ),
+    foreignBoundary: (scope, input) =>
+      boundaryOf(
+        keyset(
+          foreignEntries(world, scope.organizationId, input.driver, input.key).filter((e) =>
+            inRange(e.receivedAt, input.range),
+          ),
+          key,
+          { ...input, ...all },
+        ),
+        key,
+        input.budget,
+      ),
+    foreignPage: (scope, input) => {
+      const ids = new Set(
+        keyset(
+          grouped(foreignEntries(world, scope.organizationId, input.driver, input.key)).filter(
+            (e) => inRange(e.receivedAt, input.range),
+          ),
+          key,
+          { ...input, ...all },
+          input.boundary,
+        ).map((e) => e.id),
+      );
+      return keyset(
+        own(scope).filter((m) => ids.has(m.id) && matchesResiduals(world, m, input.residuals)),
+        key,
+        input,
+      ).map(listRow);
+    },
+    messagesByKeys: (scope, _range, keys) =>
+      own(scope)
+        .filter((m) => keys.some((k) => k.id === m.id))
+        .map(listRow),
+    prefixProbe: (scope, input) => {
+      const failure = world.prefixFailure;
+      if (failure?.kind === 'too_broad') return failure.matches > input.cap;
+      // The real repository maps MySQL 3024 (MAX_EXECUTION_TIME) to this error.
+      if (failure?.kind === 'timeout') throw messageSearchTimeout();
+      return keyset(prefixMatches(scope, input), key, { ...input, ...all }).length > input.cap;
+    },
+    prefixPage: (scope, input) =>
+      keyset(
+        prefixMatches(scope, input).filter((m) => matchesResiduals(world, m, input.residuals)),
+        key,
+        input,
       ).map(listRow),
     publicIds: (scope, ids) =>
       new Map(

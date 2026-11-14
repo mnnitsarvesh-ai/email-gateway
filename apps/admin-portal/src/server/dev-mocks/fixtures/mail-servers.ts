@@ -3,6 +3,7 @@ import type { RequestBody, SuccessBody } from '@/lib/api/types';
 import { SeededRandom, paginate, stableUuid } from '../generator';
 import { apiError, noContent, ok, type FixtureHandlers, type FixtureResponse } from '../types';
 import { DAY, HOUR, MINUTE, bodyOf, domainsOf, guarded, idempotent, isoAgo } from './domains';
+import { maskAddress } from './message-dataset';
 
 export { DEV_MOCK_MARKER } from '../types';
 
@@ -109,10 +110,13 @@ function seed(organizationId: string): OrgState {
     return {
       messageId: stableUuid(`${organizationId}:message:${Math.floor(i / 2)}`),
       rcptSeq: i % 2,
-      recipient:
+      // Masked by the api for every caller since step 7.2 (E5); revealed only per message.
+      recipient: maskAddress(
         direction === 'outbound'
           ? `contact${i}@customer${(i % 4) + 1}.example.com`
           : `user${i}@${domains[i % Math.max(1, domains.length)] ?? 'alpha-1.example.test'}`,
+      ),
+      recipientMasked: true,
       direction,
       status,
       attemptCount: status === 'deferred' ? random.int(2, 6) : 1,

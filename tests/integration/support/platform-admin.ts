@@ -69,6 +69,8 @@ export async function platformAdminSession(prisma: PrismaClient): Promise<Platfo
     await prisma.loginAuditLog.deleteMany({
       where: { OR: [{ userId: user.id }, { emailAttempted: email }] },
     });
+    // Step 7.2: the user's saved views (they would also cascade with the user).
+    await prisma.savedView.deleteMany({ where: { userId: user.id } });
     await prisma.user.deleteMany({ where: { id: user.id } });
   };
   try {

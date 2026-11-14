@@ -158,7 +158,14 @@ const engineRow = (attempt: number, isFinal: boolean) => ({
   settingsVersion: isFinal ? 'rspamd-map/1;p=abc;t=none' : null,
   durationMs: 1200,
   evidence: isFinal
-    ? { signals: [{ name: 'EG_TEST_RBL', score: 5, options: ['66.2.0.192'] }, { bad: true }] }
+    ? {
+        signals: [
+          { name: 'EG_TEST_RBL', score: 5, options: ['66.2.0.192'] },
+          { bad: true },
+          // Step 7.2 (§2 E9): addresses inside options are masked for every caller.
+          { name: 'FROM_NEQ_ENVFROM', score: 0.1, options: ['billing.team@vendor.scan.test'] },
+        ],
+      }
     : null,
   attempt,
   isFinal,
@@ -626,7 +633,10 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
                 requiredScore: 15,
                 action: 'no action',
                 reasonCodes: ['spam.score'],
-                symbols: [{ name: 'EG_TEST_RBL', score: 5, options: ['66.2.0.192'] }],
+                symbols: [
+                  { name: 'EG_TEST_RBL', score: 5, options: ['66.2.0.192'] },
+                  { name: 'FROM_NEQ_ENVFROM', score: 0.1, options: ['b***@vendor.scan.test'] },
+                ],
                 attempts: [
                   {
                     attempt: 1,

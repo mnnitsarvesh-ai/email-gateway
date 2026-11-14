@@ -105,7 +105,9 @@ describe('GET /messages/{messageId}/deliveries', () => {
     expect(res.body.deliveries[0]).toEqual({
       rcptSeq: 0,
       deliverySeq: 0,
-      recipient: 'colleague@acme.example',
+      // Step 7.2 (§2 E5): masked for every caller.
+      recipient: 'c***@acme.example',
+      recipientMasked: true,
       direction: 'internal',
       status: 'delivered',
       attemptCount: 1,
@@ -189,7 +191,8 @@ describe('GET /deliveries', () => {
     expect(res.body.data[0]).toEqual({
       messageId: mixed.publicId,
       rcptSeq: 1,
-      recipient: 'gone@partner.example',
+      recipient: 'g***@partner.example',
+      recipientMasked: true,
       direction: 'outbound',
       status: 'bounced',
       attemptCount: 1,
@@ -201,11 +204,11 @@ describe('GET /deliveries', () => {
   it('filters by status and direction, and by an explicit range', async () => {
     const internal = await api.list('?direction=internal').expect(200);
     expect(internal.body.data.map((d: { recipient: string }) => d.recipient)).toEqual([
-      'colleague@acme.example',
+      'c***@acme.example',
     ]);
     const bounced = await api.list('?status=bounced').expect(200);
     expect(bounced.body.data.map((d: { recipient: string }) => d.recipient)).toEqual([
-      'gone@partner.example',
+      'g***@partner.example',
     ]);
     const from = new Date(Date.now() - 5 * 86_400_000).toISOString();
     // `to` defaults to now.

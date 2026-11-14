@@ -65,6 +65,9 @@ export default tseslint.config(
       '**/.next/**',
       '**/coverage/**',
       '**/next-env.d.ts',
+      // Playwright artifacts of the portal e2e run (git-ignored; trace viewer bundles).
+      '**/playwright-report/**',
+      '**/test-results/**',
       // Generated from docs/api/openapi.json (apps/admin-portal/scripts/generate-api.mjs).
       'apps/admin-portal/src/lib/api/*.gen.ts',
       '**/*.config.{js,mjs,cjs}',

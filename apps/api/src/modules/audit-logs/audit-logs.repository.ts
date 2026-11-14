@@ -140,6 +140,57 @@ function where(search: AuditSearch, extra: Prisma.Sql[]): Prisma.Sql {
 export const hasAuditFilters = (filter: AuditFilter): boolean =>
   Object.values(filter).some((v) => v !== undefined);
 
+/** The index of the resource plan (step 7.2 §2 E3, migration `email_explorer_search`). */
+export const AUDIT_RESOURCE_INDEX = 'audit_logs_org_resource_created_idx';
+
+/** The resource a search is about (`resourceType` and `resourceId` both given). */
+export interface AuditResource {
+  type: string;
+  id: string;
+}
+
+/** The resource of a filter when both of its fields are present (the resource plan), else null. */
+export function resourceOf(filter: AuditFilter): AuditResource | null {
+  return filter.resourceType !== undefined && filter.resourceId !== undefined
+    ? { type: filter.resourceType, id: filter.resourceId }
+    : null;
+}
+
+/** The filter without the resource fields: the residuals of the resource plan. */
+export function residualOf(filter: AuditFilter): AuditFilter {
+  const { resourceType: _type, resourceId: _id, ...rest } = filter;
+  return rest;
+}
+
+/**
+ * The resource plan's key (§3.2 audit): the column-collation equalities seek the index
+ * `(organization_id, resource_type, resource_id, created_at, id)`; the exact
+ * `utf8mb4_0900_bin` comparisons of every audit filter (same rule as `filterPredicates`) are
+ * evaluated on the same index entries (index condition pushdown), so the plan keeps the exact
+ * semantics of the 6.1 filters without reading rows that only match case-insensitively.
+ */
+function resourcePredicates(resource: AuditResource): Prisma.Sql[] {
+  return [
+    Prisma.sql`resource_type = ${resource.type}`,
+    Prisma.sql`resource_id = ${resource.id}`,
+    Prisma.sql`resource_type = ${resource.type} ${EXACT}`,
+    Prisma.sql`resource_id = ${resource.id} ${EXACT}`,
+  ];
+}
+
+const RESOURCE_HINT = Prisma.raw(`FORCE INDEX (${AUDIT_RESOURCE_INDEX})`);
+
+/** The index of the 6.1 search statements (step 1.1 `(organization_id, created_at)`). */
+export const AUDIT_TIME_INDEX = 'audit_logs_organization_id_created_at_idx';
+
+/**
+ * Since step 7.2 the 6.1 statements name their index: with the resource index
+ * `(organization_id, resource_type, resource_id, created_at, id)` present, MySQL 8.4 chose it
+ * for an organization + time-range scan (`ref` on `organization_id` and a filesort; perf query
+ * Q12 of `pnpm db:perf`, 2026-11-14), which at volume sorts every row of the window.
+ */
+const TIME_HINT = Prisma.raw(`FORCE INDEX (${AUDIT_TIME_INDEX})`);
+
 /**
  * The audit search SQL (step 6.1 D3–D6), exported so the integration suite EXPLAINs exactly what
  * runs. The owner predicate comes first, the `created_at` range prunes the monthly partitions,
@@ -150,7 +201,7 @@ export const hasAuditFilters = (filter: AuditFilter): boolean =>
 export const auditSql = {
   /** A page without filters: the next `take` rows after the cursor. */
   page(search: AuditSearch, take: number): Prisma.Sql {
-    return Prisma.sql`SELECT ${COLUMNS} FROM audit_logs
+    return Prisma.sql`SELECT ${COLUMNS} FROM audit_logs ${TIME_HINT}
       WHERE ${where(search, [])} ${ORDER[search.direction]} LIMIT ${take}`;
   },
 
@@ -160,7 +211,7 @@ export const auditSql = {
    */
   boundary(search: AuditSearch, budget: number): Prisma.Sql {
     return Prisma.sql`SELECT id, created_at AS createdAt, organization_id AS organizationId
-      FROM audit_logs WHERE ${where(search, [])} ${ORDER[search.direction]}
+      FROM audit_logs ${TIME_HINT} WHERE ${where(search, [])} ${ORDER[search.direction]}
       LIMIT 1 OFFSET ${boundaryOffset(budget)}`;
   },
 
@@ -175,7 +226,42 @@ export const auditSql = {
       ...(boundary ? [untilKey(search.direction, boundary)] : []),
       ...filterPredicates(filter),
     ];
-    return Prisma.sql`SELECT ${COLUMNS} FROM audit_logs
+    return Prisma.sql`SELECT ${COLUMNS} FROM audit_logs ${TIME_HINT}
+      WHERE ${where(search, extra)} ${ORDER[search.direction]} LIMIT ${take}`;
+  },
+
+  /**
+   * Resource plan (step 7.2 §2 E3): one resource's rows in keyset order `(created_at, id)` over
+   * `audit_logs_org_resource_created_idx` (the owner first; `organization_id IS NULL` for the
+   * platform rows uses the same index). Without other filters the page is exact.
+   */
+  resourcePage(search: AuditSearch, resource: AuditResource, take: number): Prisma.Sql {
+    return Prisma.sql`SELECT ${COLUMNS} FROM audit_logs ${RESOURCE_HINT}
+      WHERE ${where(search, resourcePredicates(resource))} ${ORDER[search.direction]} LIMIT ${take}`;
+  },
+
+  /** Resource plan with other filters, budget step 1: the budget-th resource entry (index-only). */
+  resourceBoundary(search: AuditSearch, resource: AuditResource, budget: number): Prisma.Sql {
+    return Prisma.sql`SELECT id, created_at AS createdAt, organization_id AS organizationId
+      FROM audit_logs ${RESOURCE_HINT}
+      WHERE ${where(search, resourcePredicates(resource))} ${ORDER[search.direction]}
+      LIMIT 1 OFFSET ${boundaryOffset(budget)}`;
+  },
+
+  /** Resource plan, budget step 2: the resource rows up to the boundary passing the residuals. */
+  resourceFiltered(
+    search: AuditSearch,
+    resource: AuditResource,
+    residual: AuditFilter,
+    boundary: AuditKey | null,
+    take: number,
+  ): Prisma.Sql {
+    const extra = [
+      ...resourcePredicates(resource),
+      ...(boundary ? [untilKey(search.direction, boundary)] : []),
+      ...filterPredicates(residual),
+    ];
+    return Prisma.sql`SELECT ${COLUMNS} FROM audit_logs ${RESOURCE_HINT}
       WHERE ${where(search, extra)} ${ORDER[search.direction]} LIMIT ${take}`;
   },
 };
@@ -225,6 +311,62 @@ export class AuditLogsRepository {
     const rows = await this.reader.client.$queryRaw<RawRow[]>(
       auditSql.filtered(search, filter, boundary, take),
     );
+    return this.checkedFiltered(search, filter, rows);
+  }
+
+  /** Resource plan page (step 7.2 §2 E3); rows echo the owner, range and the resource. */
+  async resourcePage(
+    search: AuditSearch,
+    resource: AuditResource,
+    take: number,
+  ): Promise<AuditLogRecord[]> {
+    const rows = await this.reader.client.$queryRaw<RawRow[]>(
+      auditSql.resourcePage(search, resource, take),
+    );
+    return this.checkedFiltered(
+      search,
+      { resourceType: resource.type, resourceId: resource.id },
+      rows,
+    );
+  }
+
+  async resourceBoundary(
+    search: AuditSearch,
+    resource: AuditResource,
+    budget: number,
+  ): Promise<AuditKey | null> {
+    const rows = await this.reader.client.$queryRaw<
+      Array<{ id: bigint; createdAt: Date; organizationId: bigint | null }>
+    >(auditSql.resourceBoundary(search, resource, budget));
+    const row = rows[0];
+    if (row === undefined) return null;
+    this.echo(search, row);
+    return { createdAt: row.createdAt, id: BigInt(row.id) };
+  }
+
+  async resourceFiltered(
+    search: AuditSearch,
+    resource: AuditResource,
+    residual: AuditFilter,
+    boundary: AuditKey | null,
+    take: number,
+  ): Promise<AuditLogRecord[]> {
+    const rows = await this.reader.client.$queryRaw<RawRow[]>(
+      auditSql.resourceFiltered(search, resource, residual, boundary, take),
+    );
+    return this.checkedFiltered(
+      search,
+      { ...residual, resourceType: resource.type, resourceId: resource.id },
+      rows,
+    );
+  }
+
+  /** `checked` plus the exact echo of every filter (as the SQL compares them). */
+  private checkedFiltered(
+    search: AuditSearch,
+    filter: AuditFilter,
+    rows: RawRow[],
+  ): AuditLogRecord[] {
     const checked = this.checked(search, rows);
     for (const row of checked) {
       for (const [name, column] of Object.entries(FILTER_COLUMNS) as [

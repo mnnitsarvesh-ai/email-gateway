@@ -198,8 +198,10 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     // 231 operations before step 6.1, minus the two probes (D13), plus the 20 new routes of
     // §3.3 (step 6.1 §1.2): 249; plus the 17 webhook and notification routes of step 6.2
     // (docs/plan/steps/19-webhooks-notifications.md §6.1): 266; plus the 3 reports of step 7.1
-    // (docs/plan/steps/20-admin-portal.md §3.3): 269, all under /api/v1.
-    expect(count).toBe(269);
+    // (docs/plan/steps/20-admin-portal.md §3.3): 269; plus the 5 saved views routes of step 7.2
+    // WP1 (docs/plan/steps/21-email-explorer-details.md §3.3): 274; plus the headers route and the
+    // two reveal operations of step 7.2 WP2: 277, all under /api/v1.
+    expect(count).toBe(277);
   });
 
   it('gives every /api/v1 operation a tag', () => {
@@ -424,7 +426,10 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
         !op.key.endsWith('/dlp-evidence') &&
         !op.key.endsWith('/risk/dry-run') &&
         !op.key.endsWith('/policy/dry-run') &&
-        !op.key.endsWith('/policy-evaluations'),
+        !op.key.endsWith('/policy-evaluations') &&
+        // Step 7.2 WP2 (asserted in its own test below).
+        !op.key.endsWith('/headers') &&
+        !op.key.endsWith('/reveal'),
     );
     expect(messageOps.map((op) => op.key).sort()).toEqual([...expected].sort());
 
@@ -950,6 +955,95 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     expect(tags.get('webhooks')).toContain('Step 6.2');
     expect(tags.get('notifications')).toContain('Step 6.2');
     expect(doc.info.description).toContain('x-eg-secret-replay: redacted');
+  });
+
+  it('documents the step 7.2 WP2 headers and reveal operations and the masked fields (§2 E5-E8, ADR-0062)', () => {
+    type RawOp = Record<string, unknown> & {
+      operationId?: string;
+      tags?: string[];
+      security?: Array<Record<string, unknown>>;
+      requestBody?: { content?: Record<string, { schema?: unknown; examples?: unknown }> };
+      responses: Record<
+        string,
+        { headers?: Record<string, unknown>; content?: Record<string, { schema?: unknown }> }
+      >;
+    };
+    const raw = (method: string, path: string) =>
+      (doc.paths[path] as Record<string, RawOp>)[method]!;
+    const expected: Array<[string, string, string, string]> = [
+      [
+        'get',
+        '/api/v1/messages/{messageId}/headers',
+        'MessageHeadersController_headers_v1',
+        'message:read',
+      ],
+      [
+        'post',
+        '/api/v1/messages/reveal',
+        'MessageRevealController_revealMany_v1',
+        'message:reveal',
+      ],
+      [
+        'post',
+        '/api/v1/messages/{messageId}/reveal',
+        'MessageRevealController_reveal_v1',
+        'message:reveal',
+      ],
+    ];
+    for (const [method, path, operationId, permission] of expected) {
+      const op = raw(method, path);
+      expect(op.operationId, path).toBe(operationId);
+      expect(op.tags, path).toEqual(['messages']);
+      expect(op['x-eg-permissions'], path).toEqual({ mode: 'all', permissions: [permission] });
+      const schemes = (op.security ?? []).flatMap((s) => Object.keys(s)).sort();
+      expect(schemes, path).toEqual([ACCESS_TOKEN_SCHEME, API_KEY_SCHEME].sort());
+      expect(op['x-eg-idempotency'], path).toBeUndefined();
+      expect(op['x-eg-rate-class'], path).toBeUndefined();
+    }
+    for (const path of ['/api/v1/messages/reveal', '/api/v1/messages/{messageId}/reveal']) {
+      const op = raw('post', path);
+      expect(Object.keys(op.responses).sort(), path).toEqual(
+        expect.arrayContaining(['200', '400', '401', '403', '429', '500', '503']),
+      );
+      expect(op.responses['201'], path).toBeUndefined();
+      expect(op.responses['200']!.headers, path).toHaveProperty('Cache-Control');
+      expect(op.responses['429']!.headers, path).toHaveProperty('Retry-After');
+      expect(op.requestBody?.content?.['application/json']?.examples, path).toBeDefined();
+      const text = JSON.stringify(op);
+      for (const word of ['API_MESSAGES_REVEAL_PER_MINUTE', 'message.revealed', 'no-store']) {
+        expect(text, `${path} ${word}`).toContain(word);
+      }
+      // Examples are obvious placeholders.
+      expect(text, path).toContain('EXAMPLE');
+    }
+    expect(JSON.stringify(raw('post', '/api/v1/messages/{messageId}/reveal').responses)).toContain(
+      'cursor_invalid',
+    );
+    expect(JSON.stringify(raw('post', '/api/v1/messages/{messageId}/reveal').responses)).toContain(
+      'message_not_found',
+    );
+    const headersOp = JSON.stringify(raw('get', '/api/v1/messages/{messageId}/headers'));
+    for (const word of ['retention_expired', 'not_parsed', 'none_stored', 'masked']) {
+      expect(headersOp, word).toContain(word);
+    }
+    // The changed read operations describe the masked fields.
+    const item = JSON.stringify(raw('get', '/api/v1/messages'));
+    expect(item).toContain('subjectMasked');
+    expect(item).toContain('withheld');
+    expect(JSON.stringify(raw('get', '/api/v1/messages/{messageId}/recipients'))).toContain(
+      'addressMasked',
+    );
+    for (const path of ['/api/v1/messages/{messageId}/deliveries', '/api/v1/deliveries']) {
+      expect(JSON.stringify(raw('get', path)), path).toContain('recipientMasked');
+    }
+    expect(JSON.stringify(raw('get', '/api/v1/messages/{messageId}/deliveries/events'))).toContain(
+      'local part',
+    );
+    for (const path of ['/api/v1/quarantine/entries', '/api/v1/quarantine/entries/{entryId}']) {
+      const text = JSON.stringify(raw('get', path));
+      expect(text, path).toContain('recipientMasked');
+      expect(text, path).toContain('message:reveal');
+    }
   });
 
   it('matches the committed snapshot docs/api/openapi.json', async () => {

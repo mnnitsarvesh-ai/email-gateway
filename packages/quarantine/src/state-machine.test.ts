@@ -149,7 +149,8 @@ describe('entry state machine (Q3)', () => {
 
 describe('error codes (Q26)', () => {
   it('every code with its status', () => {
-    expect(Object.keys(QUARANTINE_ERROR_CODES)).toHaveLength(29);
+    expect(Object.keys(QUARANTINE_ERROR_CODES)).toHaveLength(30);
+    expect(quarantineErrorStatus('quarantine_filter_forbidden')).toBe(403);
     expect(quarantineErrorStatus('quarantine_entry_not_found')).toBe(404);
     expect(quarantineErrorStatus('quarantine_reauth_failed')).toBe(401);
     expect(quarantineErrorStatus('quarantine_download_token_used')).toBe(410);

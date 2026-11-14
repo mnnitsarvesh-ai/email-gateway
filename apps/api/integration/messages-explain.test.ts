@@ -1,13 +1,17 @@
 /**
- * EXPLAIN checks of the step 6.1 WP2 list queries (§9, D5, D6) on the read replica at volume:
- * ≥ 50 000 messages over 4 days in one fixture organization (plus 5 000 in a second one), with
- * recipients, attachments of one hot hash and clicks. For each of the four `GET /messages` plans,
- * the URL clicks and the attachment hash search, `EXPLAIN FORMAT=JSON` of the exact statement the
- * repository runs (the index plan's statement is captured from Prisma's query log) must show the
- * chosen key, pruned partitions, no filesort for the index and verdict plans, and, for the
- * scan-bounded plan, at most API_LIST_SCAN_BUDGET_ROWS rows read per statement (session handler
- * counters on the replica connection). Each API page is also timed; the numbers are printed (a
- * local Docker baseline, not a production capacity statement).
+ * EXPLAIN checks of the message list (step 6.1 WP2 §9, D5, D6; step 7.2 §2 E1, §3.2, §9) on the
+ * read replica at volume: ≥ 50 000 messages over 4 days in one fixture organization (plus 5 000
+ * in a second one), with subjects, From headers, Message-IDs, recipients, a delivery per
+ * message in rotating statuses, quarantine entries on every tenth message, attachments of one hot
+ * hash and clicks. For every step 7.2 search driver, `EXPLAIN FORMAT=JSON` of the exact
+ * statement the repository runs (message-list-drivers.ts) must show the chosen key, pruned
+ * partitions and no filesort for exact drivers without residuals; the session handler counters
+ * on the replica connection bound the rows read (≈ limit for exact pages, the budget for
+ * budgeted statements); the foreign drivers group without a temporary table or a sort; the
+ * subject prefix probe is index-only and is refused above the cap; a probe interrupted by
+ * `MAX_EXECUTION_TIME` is `503 message_search_timeout`. The URL clicks and the attachment hash
+ * search are checked as in 6.1. Each API page is also timed; the numbers are printed (a local
+ * Docker baseline, not a production capacity statement).
  */
 // @covers get /api/v1/messages
 // @covers get /api/v1/attachments
@@ -21,15 +25,27 @@ import {
   attachmentSearchSql,
   ATTACHMENT_SHA256_INDEX,
 } from '../src/modules/attachments/attachments.repository';
+import { MessageDataRepository } from '../src/modules/messages/repositories/message-data.repository';
 import {
-  indexPlanSql,
+  type DriverWindow,
+  foreignBoundarySql,
+  foreignKeysSql,
+  foreignPageSql,
   MESSAGE_INDEXES,
+  messagesBoundarySql,
   messagesByKeysSql,
-  recipientPlanSql,
-  scanBoundarySql,
-  scanPageSql,
-  verdictPlanSql,
-} from '../src/modules/messages/repositories/message-data.repository';
+  MESSAGES_DRIVERS,
+  type MessagesTableDriver,
+  messagesPageSql,
+  prefixPageSql,
+  prefixProbeSql,
+  recipientBoundarySql,
+  recipientPageSql,
+  recipientRowsSql,
+  residualSql,
+  FOREIGN_DRIVERS,
+} from '../src/modules/messages/repositories/message-list-drivers';
+import { subjectPrefixPattern } from '../src/modules/messages/domain/search-keys';
 import { MessagesRepository } from '../src/modules/tenant-data/messages.repository';
 import {
   clicksBoundarySql,
@@ -42,6 +58,7 @@ import { apiKeyHeader } from './support/http';
 import { bulkMessages, deleteMessagesData, getAs } from './support/messages-data';
 
 const COUNT = 50_000;
+const DELIVERY_ROTATION = ['delivered', 'delivered', 'deferred', 'bounced'] as const;
 const OTHER_COUNT = 5_000;
 const BUDGET = 5_000;
 const DAY = 86_400_000;
@@ -67,29 +84,36 @@ interface ExplainTable {
   partitions?: string[];
   rows_examined_per_scan?: number;
   access_type?: string;
+  using_index?: boolean;
 }
 
 /** Every `table` node of an EXPLAIN FORMAT=JSON tree and whether any node uses a filesort. */
-function walk(node: unknown, tables: ExplainTable[] = [], state = { filesort: false }) {
+function walk(
+  node: unknown,
+  tables: ExplainTable[] = [],
+  state = { filesort: false, temporary: false },
+) {
   if (Array.isArray(node)) {
     for (const item of node) walk(item, tables, state);
   } else if (node && typeof node === 'object') {
     for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
       if (k === 'using_filesort' && v === true) state.filesort = true;
+      if (k === 'using_temporary_table' && v === true) state.temporary = true;
       if (k === 'table' && v && typeof v === 'object' && 'table_name' in v) {
         tables.push(v as ExplainTable);
       }
       walk(v, tables, state);
     }
   }
-  return { tables, filesort: state.filesort };
+  return { tables, filesort: state.filesort, temporary: state.temporary };
 }
 
 async function explain(sql: Prisma.Sql) {
   const rows = await replica.$queryRaw<Array<Record<string, string>>>(
     Prisma.sql`EXPLAIN FORMAT=JSON ${sql}`,
   );
-  return walk(JSON.parse(explainText(rows)));
+  const text = explainText(rows);
+  return { ...walk(JSON.parse(text)), text };
 }
 
 /** The single column of an EXPLAIN FORMAT=JSON result. */
@@ -133,7 +157,14 @@ beforeAll(async () => {
   fx = createFixtures(ctx);
   [org, other] = [await fx.createOrganization(), await fx.createOrganization()];
   fx.registerCleanup(() => deleteMessagesData(ctx, [org.id, other.id]));
-  key = apiKeyHeader(await fx.createApiKey(org, ['message:read']));
+  key = apiKeyHeader(
+    await fx.createApiKey(org, [
+      'message:read',
+      'message:reveal',
+      'delivery:read',
+      'quarantine:read',
+    ]),
+  );
   const client = new PrismaClient({
     datasourceUrl: process.env.DATABASE_READ_URL,
     log: [{ emit: 'event', level: 'query' }],
@@ -158,6 +189,13 @@ beforeAll(async () => {
     verdicts: [...verdicts],
     hotAddress: hot,
     recipientEvery: 97,
+    // Step 7.2: 50 subjects (1 000 messages each), 97 From headers, unique Message-IDs, one
+    // delivery per message in rotating statuses, a quarantine entry on every tenth message.
+    subjectOf: (k) => `Re: Bulk subject ${run} ${k % 50}`,
+    headerFromOf: (k) => `Bulk ${k % 97} <bulk${k % 97}@sender.example>`,
+    messageIdOf: (k) => `<bulk-${run}-${k}@sender.example>`,
+    deliveryOf: (k) => DELIVERY_ROTATION[k % DELIVERY_ROTATION.length]!,
+    quarantineOf: (k) => (k % 10 === 0 ? (k % 20 === 0 ? 'held' : 'released') : null),
   });
   await bulkMessages(ctx, other, {
     count: OTHER_COUNT,
@@ -190,6 +228,14 @@ beforeAll(async () => {
       })),
     });
   }
+  // Fresh optimizer statistics of the driver tables (step 7.2 WP2 fix, §13): InnoDB recalculates
+  // persistent statistics in the background after bulk changes, so a run that follows other
+  // suites could EXPLAIN with stale estimates (5 rows of quarantine_messages → a loose index scan
+  // with a temporary table and a filesort). ANALYZE TABLE is replicated; the click rows written
+  // after it (awaited on the replica below) prove that the replica applied it.
+  await ctx.prisma.$queryRawUnsafe(
+    'ANALYZE TABLE `email_messages`, `email_recipients`, `email_deliveries`, `quarantine_messages`',
+  );
   const clickTargets = withAttachment.slice(0, 4_000);
   for (let i = 0; i < clickTargets.length; i += 2_000) {
     await ctx.prisma.urlClickEvent.createMany({
@@ -232,9 +278,19 @@ afterAll(async () => {
   await ctx?.close();
 }, 600_000);
 
-const base = () => ({ organizationId: org.id, range, direction: 'desc' as const, take: 26 });
+const window = (): DriverWindow => ({
+  organizationId: org.id,
+  range,
+  direction: 'desc',
+  nonce: 'n',
+});
+/** A cursor position one day back (the page then spans a partition boundary at most once). */
+const deepAfter = () => ({ at: new Date(now - DAY), id: 2n ** 62n });
+/** Exact pages read `limit + 1` entries plus one boundary step per pruned partition and one. */
+const exactBound = (tables: ExplainTable[]) =>
+  26 + Math.max(...tables.map((t) => t.partitions?.length ?? 1)) + 2;
 
-describe('EXPLAIN on the replica (step 6.1 D5, D6)', () => {
+describe('EXPLAIN on the replica (step 6.1 D5, D6; step 7.2 §2 E1, §9)', () => {
   it('reads from the replica (read_only)', async () => {
     const [row] = await replica.$queryRaw<
       Array<{ ro: number | bigint }>
@@ -243,18 +299,18 @@ describe('EXPLAIN on the replica (step 6.1 D5, D6)', () => {
     expect(await replica.emailMessage.count({ where: { organizationId: org.id } })).toBe(COUNT);
   });
 
-  it('plan 1 (index): (organization_id, received_at, id), pruned, no filesort, reads ≈ limit', async () => {
-    const sql = indexPlanSql({ ...base(), after: { at: new Date(now - DAY), id: 2n ** 62n } });
+  it('driver none (6.1 index plan): (organization_id, received_at, id), pruned, no filesort, reads ≈ limit', async () => {
+    const sql = messagesPageSql({ ...window(), driver: 'none', take: 26, after: deepAfter() });
     const { tables, filesort } = await explain(sql);
     expect(tables[0]!.key).toBe(MESSAGE_INDEXES.orgReceived);
     expect(tables[0]!.partitions!.length).toBeLessThan(partitionCount);
     expect(filesort).toBe(false);
-    expect(await handlerReads(sql)).toBeLessThanOrEqual(30);
+    expect(await handlerReads(sql)).toBeLessThanOrEqual(exactBound(tables));
     timings.push(
-      `plan index EXPLAIN: key=${tables[0]!.key} partitions=${tables[0]!.partitions!.join(',')}`,
+      `driver none EXPLAIN: key=${tables[0]!.key} partitions=${tables[0]!.partitions!.join(',')}`,
     );
 
-    // Why plan 1 names its index: the same statement through MessagesRepository.listRecent
+    // Why the drivers name their index: the 6.1 statement through MessagesRepository.listRecent
     // (Prisma, no hint), recorded for the step notes (the optimizer's choice is not asserted).
     const repo = new MessagesRepository(
       {} as PrismaService,
@@ -277,24 +333,75 @@ describe('EXPLAIN on the replica (step 6.1 D5, D6)', () => {
     );
   });
 
-  it('plan 2 (verdict): email_messages_org_verdict_received_idx, pruned, no filesort', async () => {
-    const sql = verdictPlanSql({
-      ...base(),
-      verdict: 'phishing',
-      after: { at: new Date(now - DAY), id: 2n ** 62n },
-    });
-    const { tables, filesort } = await explain(sql);
-    expect(tables[0]!.key).toBe(MESSAGE_INDEXES.orgVerdict);
-    expect(tables[0]!.partitions!.length).toBeLessThan(partitionCount);
-    expect(filesort).toBe(false);
-    expect(await handlerReads(sql)).toBeLessThanOrEqual(30);
-    timings.push(
-      `plan verdict EXPLAIN: key=${tables[0]!.key} partitions=${tables[0]!.partitions!.join(',')}`,
-    );
+  const EXACT_DRIVERS: Array<[MessagesTableDriver, string]> = [
+    ['internetMessageId', `bulk-${run}-25000@sender.example`],
+    ['sender', 'bulk5@sender.example'],
+    ['headerFrom', 'Bulk 5 <bulk5@sender.example>'],
+    ['subject', `Bulk subject ${run} 7`],
+    ['senderDomain', 'sender.example'],
+    ['verdict', 'phishing'],
+  ];
+  it.each(EXACT_DRIVERS)(
+    'exact %s driver: its index, pruned, no filesort, reads ≈ limit',
+    async (driver, driverKey) => {
+      const sql = messagesPageSql({
+        ...window(),
+        driver,
+        key: driverKey,
+        take: 26,
+        after: deepAfter(),
+      });
+      const { tables, filesort } = await explain(sql);
+      expect(tables[0]!.key).toBe(MESSAGES_DRIVERS[driver].index);
+      expect(tables[0]!.partitions!.length).toBeLessThan(partitionCount);
+      expect(filesort).toBe(false);
+      const reads = await handlerReads(sql);
+      expect(reads).toBeLessThanOrEqual(exactBound(tables));
+      const rows = await replica.$queryRaw<unknown[]>(sql);
+      if (driver !== 'internetMessageId') expect(rows).toHaveLength(26);
+      timings.push(
+        `driver ${driver} EXPLAIN: key=${tables[0]!.key} partitions=${tables[0]!.partitions!.length} reads=${reads}`,
+      );
+    },
+  );
+
+  it('budgeted email_messages driver: boundary index-only at the budget, page within the budget', async () => {
+    for (const driver of ['subject', 'senderDomain', 'scan'] as const) {
+      const key =
+        driver === 'subject'
+          ? `Bulk subject ${run} 7`
+          : driver === 'senderDomain'
+            ? 'sender.example'
+            : undefined;
+      const boundarySql = messagesBoundarySql({ ...window(), driver, key, budget: BUDGET });
+      const boundary = await explain(boundarySql);
+      expect(boundary.tables[0]!.key).toBe(MESSAGES_DRIVERS[driver as MessagesTableDriver].index);
+      expect(boundary.tables[0]!.using_index).toBe(true);
+      expect(boundary.filesort).toBe(false);
+      const boundaryReads = await handlerReads(boundarySql);
+      expect(boundaryReads).toBeLessThanOrEqual(BUDGET + 2);
+      const [edge] = await replica.$queryRaw<Array<{ received_at: Date; id: bigint }>>(boundarySql);
+      const pageSql = messagesPageSql({
+        ...window(),
+        driver,
+        key,
+        take: 26,
+        boundary: edge ? { at: edge.received_at, id: BigInt(edge.id) } : null,
+        residuals: residualSql(org.id, { direction: ['outbound'], hasAttachments: true }),
+      });
+      const page = await explain(pageSql);
+      expect(page.tables[0]!.key).toBe(MESSAGES_DRIVERS[driver as MessagesTableDriver].index);
+      expect(page.tables[0]!.partitions!.length).toBeLessThan(partitionCount);
+      const pageReads = await handlerReads(pageSql);
+      expect(pageReads).toBeLessThanOrEqual(BUDGET + 2);
+      timings.push(
+        `driver ${driver} budgeted: boundary reads=${boundaryReads}, page reads=${pageReads} (budget ${BUDGET})`,
+      );
+    }
   });
 
-  it('plan 3 (recipient): the address index, then messages by primary key', async () => {
-    const step1 = recipientPlanSql({ ...base(), address: hot });
+  it('recipient driver: the address index (exact), budgeted join ordered by the recipient keyset', async () => {
+    const step1 = recipientRowsSql({ ...window(), address: hot, take: 26 });
     const one = await explain(step1);
     expect(one.tables[0]!.key).toBe(MESSAGE_INDEXES.recipientAddress);
     expect(one.tables[0]!.partitions!.length).toBeLessThan(partitionCount);
@@ -307,35 +414,121 @@ describe('EXPLAIN on the replica (step 6.1 D5, D6)', () => {
     const two = await explain(step2);
     expect(two.tables[0]!.key).toBe('PRIMARY');
     expect(await handlerReads(step2)).toBeLessThanOrEqual(60);
+    const boundarySql = recipientBoundarySql({ ...window(), address: hot, budget: 200 });
+    expect((await explain(boundarySql)).tables[0]!.key).toBe(MESSAGE_INDEXES.recipientAddress);
+    const [edge] = await replica.$queryRaw<Array<{ received_at: Date; id: bigint }>>(boundarySql);
+    const pageSql = recipientPageSql({
+      ...window(),
+      address: hot,
+      take: 26,
+      boundary: edge ? { at: edge.received_at, id: BigInt(edge.id) } : null,
+      residuals: residualSql(org.id, { verdict: ['clean', 'phishing'] }),
+    });
+    const page = await explain(pageSql);
+    const r = page.tables.find((t) => t.table_name === 'r')!;
+    const m = page.tables.find((t) => t.table_name === 'm')!;
+    expect(r.key).toBe(MESSAGE_INDEXES.recipientAddress);
+    expect(m.key).toBe('PRIMARY');
+    // Budget entries plus at most one primary-key lookup of the message each.
+    const reads = await handlerReads(pageSql);
+    expect(reads).toBeLessThanOrEqual(2 * (200 + 2));
     timings.push(
-      `plan recipient EXPLAIN: step1 key=${one.tables[0]!.key} filesort=${one.filesort}; step2 key=${two.tables[0]!.key}`,
+      `driver recipient: step1 key=${one.tables[0]!.key}; budgeted page r=${r.key} m=${m.key} reads=${reads} (budget 200)`,
     );
   });
 
-  it('plan 4 (scan-bounded): both statements read at most the budget', async () => {
-    const boundarySql = scanBoundarySql({ ...base(), budget: BUDGET });
-    const boundary = await explain(boundarySql);
-    expect(boundary.tables[0]!.key).toBe(MESSAGE_INDEXES.orgReceived);
-    expect(boundary.filesort).toBe(false);
-    const boundaryReads = await handlerReads(boundarySql);
-    expect(boundaryReads).toBeLessThanOrEqual(BUDGET + 2);
-    const [edge] = await replica.$queryRaw<Array<{ received_at: Date; id: bigint }>>(boundarySql);
-    const pageSql = scanPageSql({
-      ...base(),
-      boundary: { at: edge!.received_at, id: BigInt(edge!.id) },
-      filters: {
-        sender: { values: ['nobody@nowhere.example'] },
-        direction: { values: ['inbound'] },
-      },
+  it.each([
+    ['recipientDomain', 'acme.example'],
+    ['deliveryStatus', 'bounced'],
+    ['quarantineStatus', 'held'],
+  ] as const)(
+    'foreign %s driver: grouped keys in index order (no temporary table, no filesort), budgeted join',
+    async (driver, key) => {
+      const sql = foreignKeysSql({ ...window(), driver, key, take: 26, after: deepAfter() });
+      const plan = await explain(sql);
+      const t = plan.tables.find((x) => x.table_name === 't')!;
+      expect(t.key).toBe(FOREIGN_DRIVERS[driver].index);
+      expect(t.partitions?.length ?? 0).toBeLessThanOrEqual(partitionCount);
+      expect(plan.filesort, plan.text).toBe(false);
+      expect(plan.temporary, plan.text).toBe(false);
+      const reads = await handlerReads(sql);
+      // One driver entry per message in this fixture: ≈ limit groups.
+      expect(reads).toBeLessThanOrEqual(exactBound(plan.tables));
+      const keys = await replica.$queryRaw<Array<{ id: bigint; received_at: Date }>>(sql);
+      expect(keys).toHaveLength(26);
+      const boundarySql = foreignBoundarySql({ ...window(), driver, key, budget: BUDGET });
+      const boundary = await explain(boundarySql);
+      expect(boundary.tables[0]!.key).toBe(FOREIGN_DRIVERS[driver].index);
+      expect(boundary.tables[0]!.using_index).toBe(true);
+      const boundaryReads = await handlerReads(boundarySql);
+      expect(boundaryReads).toBeLessThanOrEqual(BUDGET + 2);
+      const [edge] = await replica.$queryRaw<Array<{ received_at: Date; id: bigint }>>(boundarySql);
+      const pageSql = foreignPageSql({
+        ...window(),
+        driver,
+        key,
+        take: 26,
+        boundary: edge ? { at: edge.received_at, id: BigInt(edge.id) } : null,
+        residuals: residualSql(org.id, { direction: ['outbound'] }),
+      });
+      const page = await explain(pageSql);
+      expect(page.tables.find((x) => x.table_name === 't')!.key).toBe(
+        FOREIGN_DRIVERS[driver].index,
+      );
+      expect(page.tables.find((x) => x.table_name === 'm')!.key).toBe('PRIMARY');
+      // The budget's index entries, the grouped keys read back from the materialized derived
+      // table (at most the budget) and one primary-key lookup of the message each.
+      const pageReads = await handlerReads(pageSql);
+      expect(pageReads).toBeLessThanOrEqual(3 * (BUDGET + 2));
+      timings.push(
+        `driver ${driver}: exact reads=${reads}; budgeted boundary reads=${boundaryReads}, page reads=${pageReads} (budget ${BUDGET})`,
+      );
+    },
+  );
+
+  it('subject prefix driver: index-only probe bounded by the cap, sorted page within the cap', async () => {
+    const pattern = subjectPrefixPattern(`Bulk subject ${run} 4`);
+    // "… 4" matches subjects 4 and 40-49: 11 × 1 000 = 11 000 messages, above the default cap.
+    const probe = prefixProbeSql({ ...window(), pattern, cap: 5_000, timeoutMs: 5_000 });
+    const plan = await explain(probe);
+    const t = plan.tables.find((x) => x.table_name === 'm')!;
+    expect(t.key).toBe(MESSAGE_INDEXES.subjectKey);
+    expect(t.using_index).toBe(true);
+    expect(plan.filesort).toBe(false);
+    const probeReads = await handlerReads(probe);
+    expect(probeReads).toBeLessThanOrEqual(5_000 + 2);
+    // The 5 001st match exists: too broad.
+    expect(await replica.$queryRaw<unknown[]>(probe)).toHaveLength(1);
+    // An exact-length prefix of one subject (1 000 matches) sorts within the cap.
+    const narrow = subjectPrefixPattern(`Bulk subject ${run} 7`);
+    const pageSql = prefixPageSql({
+      ...window(),
+      pattern: narrow,
+      take: 26,
+      timeoutMs: 5_000,
+      residuals: [],
     });
     const page = await explain(pageSql);
-    expect(page.tables[0]!.key).toBe(MESSAGE_INDEXES.orgReceived);
-    expect(page.tables[0]!.partitions!.length).toBeLessThan(partitionCount);
+    expect(page.tables[0]!.key).toBe(MESSAGE_INDEXES.subjectKey);
     const pageReads = await handlerReads(pageSql);
-    expect(pageReads).toBeLessThanOrEqual(BUDGET + 2);
+    expect(pageReads).toBeLessThanOrEqual(5_000 + 2);
     timings.push(
-      `plan scan: boundary reads=${boundaryReads}, filtered page reads=${pageReads} (budget ${BUDGET})`,
+      `driver subjectPrefix: probe key=${t.key} index-only=${t.using_index} reads=${probeReads}; page filesort=${page.filesort} reads=${pageReads}`,
     );
+  });
+
+  it('a probe interrupted by MAX_EXECUTION_TIME is 503 message_search_timeout', async () => {
+    const repo = ctx.get(MessageDataRepository);
+    await expect(
+      repo.prefixProbe(systemScope(org.id), {
+        organizationId: org.id,
+        range,
+        direction: 'desc',
+        pattern: subjectPrefixPattern('Bul'),
+        cap: 49_000,
+        timeoutMs: 1,
+      }),
+    ).rejects.toMatchObject({ code: 'message_search_timeout', status: 503 });
   });
 
   it('URL clicks: (organization_id, clicked_at), pruned, no filesort; filtered within the budget', async () => {
@@ -399,30 +592,77 @@ describe('EXPLAIN on the replica (step 6.1 D5, D6)', () => {
     );
   });
 
-  it('times the API pages of every plan', async () => {
+  it('times the API pages of every driver', async () => {
     const from = range.from.toISOString();
-    const first = await timed('GET /messages (index, 4 days)', `/messages?from=${from}`);
+    const first = await timed('GET /messages (none, 4 days)', `/messages?from=${from}`);
     await timed(
-      'GET /messages (index, page 2)',
+      'GET /messages (none, page 2)',
       `/messages?from=${from}&cursor=${encodeURIComponent(first.body.nextCursor)}`,
     );
     await timed('GET /messages?verdict=phishing', `/messages?from=${from}&verdict=phishing`);
     await timed('GET /messages?recipient=', `/messages?from=${from}&recipient=${hot}`);
+    await timed(
+      'GET /messages?internetMessageId=',
+      `/messages?from=${from}&internetMessageId=${encodeURIComponent(`bulk-${run}-25000@sender.example`)}`,
+    );
+    await timed('GET /messages?sender=', `/messages?from=${from}&sender=bulk5@sender.example`);
+    await timed(
+      'GET /messages?headerFrom=',
+      `/messages?from=${from}&headerFrom=${encodeURIComponent('Bulk 5 <bulk5@sender.example>')}`,
+    );
+    await timed(
+      'GET /messages?subject=',
+      `/messages?from=${from}&subject=${encodeURIComponent(`Bulk subject ${run} 7`)}`,
+    );
+    await timed(
+      'GET /messages?senderDomain=',
+      `/messages?from=${from}&senderDomain=sender.example`,
+    );
+    await timed(
+      'GET /messages?recipientDomain=',
+      `/messages?from=${from}&recipientDomain=acme.example`,
+    );
+    await timed(
+      'GET /messages?subjectPrefix= (1 000 matches)',
+      `/messages?from=${from}&subjectPrefix=${encodeURIComponent(`Bulk subject ${run} 7`)}`,
+    );
+    const broad = await getAs(
+      ctx,
+      key,
+      `/messages?from=${from}&subjectPrefix=${encodeURIComponent(`Bulk subject ${run} 4`)}`,
+    );
+    expect(broad.status).toBe(422);
+    expect(broad.body.code).toBe('message_search_too_broad');
+    await timed(
+      'GET /messages?quarantineStatus=held',
+      `/messages?from=${from}&quarantineStatus=held`,
+    );
+    await timed(
+      'GET /messages?deliveryStatus=bounced',
+      `/messages?from=${from}&deliveryStatus=bounced`,
+    );
+    await timed(
+      'GET /messages?deliveryStatus=bounced&direction=outbound (budgeted)',
+      `/messages?from=${from}&deliveryStatus=bounced&direction=outbound`,
+    );
     const scan = await timed(
       'GET /messages?direction=outbound (scan)',
       `/messages?from=${from}&direction=outbound&limit=100`,
     );
     expect(scan.body.data.length).toBeGreaterThan(0);
+    // A sender that never sent: an exact driver answers an empty last page at once.
     const sparse = await timed(
-      'GET /messages?sender=<none> (scan, short page)',
+      'GET /messages?sender=<none> (exact, empty)',
       `/messages?from=${from}&sender=nobody@nowhere.example`,
     );
     expect(sparse.body.data).toEqual([]);
-    expect(sparse.body.nextCursor).toEqual(expect.any(String));
-    await timed(
-      'GET /messages?sender=<none> page 2',
-      `/messages?from=${from}&sender=nobody@nowhere.example&cursor=${encodeURIComponent(sparse.body.nextCursor)}`,
+    expect(sparse.body.nextCursor).toBeNull();
+    // Residuals only, a rare match: the budget ends short pages.
+    const rare = await timed(
+      'GET /messages?riskScore.gte=999 (scan, short page)',
+      `/messages?from=${from}&riskScore.gte=999`,
     );
+    expect(rare.body.nextCursor).toEqual(expect.any(String));
     await timed('GET /url-protection/clicks', `/url-protection/clicks?from=${from}`);
     await timed(
       'GET /url-protection/clicks?decision=blocked',

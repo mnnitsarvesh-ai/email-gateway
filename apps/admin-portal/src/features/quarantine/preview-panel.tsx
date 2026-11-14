@@ -148,24 +148,46 @@ export function PreviewContent({ preview }: { preview: PreviewBody }) {
   );
 }
 
+/**
+ * Query options of the sanitized preview (step 7.2 §2 E11): fetched once after the explicit
+ * click, never refetched (focus, mount, reconnect) and not kept after the section unmounts
+ * (`gcTime: 0`): every fetch is audited (`quarantine.previewed`) and rate limited.
+ */
+const PREVIEW_QUERY = {
+  staleTime: Infinity,
+  gcTime: 0,
+  refetchOnWindowFocus: false,
+  refetchOnMount: false,
+  refetchOnReconnect: false,
+} as const;
+
 /** The preview section: loaded on demand (each preview is audited and rate limited). */
-export function PreviewSection({ entryId, self = false }: { entryId: string; self?: boolean }) {
+export function PreviewSection({
+  entryId,
+  self = false,
+  headingLevel = 2,
+}: {
+  entryId: string;
+  self?: boolean;
+  headingLevel?: 2 | 3;
+}) {
   const [requested, setRequested] = useState(false);
   const operator = useApiQuery(
     'QuarantineEntriesController_preview_v1',
     { path: { entryId } },
-    { enabled: requested && !self, staleTime: Infinity, refetchOnWindowFocus: false },
+    { ...PREVIEW_QUERY, enabled: requested && !self },
   );
   const own = useApiQuery(
     'QuarantineSelfController_preview_v1',
     { path: { entryId } },
-    { enabled: requested && self, staleTime: Infinity, refetchOnWindowFocus: false },
+    { ...PREVIEW_QUERY, enabled: requested && self },
   );
   const query = self ? own : operator;
   return (
     <Section
       title="Sanitized preview"
       description="Text only, produced and sanitized by the platform. Opening it is audited."
+      headingLevel={headingLevel}
     >
       {!requested ? (
         <Button

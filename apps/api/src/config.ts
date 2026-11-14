@@ -904,6 +904,26 @@ export type PortalConfigKeys = {
   [K in keyof typeof portalConfigShape]: z.output<(typeof portalConfigShape)[K]>;
 };
 
+/**
+ * Email explorer and details (step 7.2 §2 E1, E4, E6, E16, docs/plan/steps/21-email-explorer-details.md):
+ * the capped subject-prefix search (at most `API_MESSAGES_SEARCH_MAX_MATCHES` matching messages
+ * in the range, else `422 message_search_too_broad`; both statements bounded by
+ * `MAX_EXECUTION_TIME(API_MESSAGES_SEARCH_TIMEOUT_MS)`, else `503 message_search_timeout`), the
+ * number of saved explorer views per user and kind, and the audited reveal operations per
+ * principal and minute (`POST /messages/reveal` and `POST /messages/{id}/reveal` share one
+ * bucket; over it `429 rate_limited`). No secret.
+ */
+export const explorerConfigShape = {
+  API_MESSAGES_SEARCH_MAX_MATCHES: int(500, 50_000).default(5000),
+  API_MESSAGES_SEARCH_TIMEOUT_MS: int(1000, 30_000).default(5000),
+  SAVED_VIEWS_MAX_PER_USER: int(1, 200).default(50),
+  API_MESSAGES_REVEAL_PER_MINUTE: int(1, 600).default(30),
+};
+
+export type ExplorerConfigKeys = {
+  [K in keyof typeof explorerConfigShape]: z.output<(typeof explorerConfigShape)[K]>;
+};
+
 /** `WEBHOOK_ALLOWED_PORTS`: comma list of ports 1–65535 (deduplicated, at least one). */
 const webhookPorts = z
   .string()
@@ -1108,6 +1128,7 @@ export const apiConfigSchema = baseConfigSchema
   .extend(restApiConfigShape)
   .extend(webhookConfigShape)
   .extend(portalConfigShape)
+  .extend(explorerConfigShape)
   .extend({
     /** Comma-separated allow-list of admin portal origins. */
     CORS_ORIGINS: z

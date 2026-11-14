@@ -1,5 +1,6 @@
 /**
- * `GET /api/v1/messages` (step 6.1 WP2, D3–D6, D11) against the real MySQL writer and replica,
+ * `GET /api/v1/messages` (step 6.1 WP2, D3–D6, D11; the step 7.2 drivers in
+ * messages-search.test.ts) against the real MySQL writer and replica,
  * Redis and the in-process api: every plan of D5 (index, verdict, recipient, scan-bounded) over
  * seeded rows (replica visibility polled), pagination with the signed cursor and the pinned
  * window, the scan budget's short pages, the domain filter, the audited searches
@@ -176,7 +177,13 @@ describe('GET /messages against the replica', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ resourceType: 'message', actorType: 'user' });
     const metadata = rows[0]!.metadata as Record<string, unknown>;
-    expect(metadata).toMatchObject({ filters: ['sender'], plan: 'scan', resultCount: 1 });
+    // Step 7.2: `sender` drives the search over its own index (exact page).
+    expect(metadata).toMatchObject({
+      filters: ['sender'],
+      plan: 'sender',
+      budgeted: false,
+      resultCount: 1,
+    });
     expect(JSON.stringify(metadata)).not.toContain(sender);
     expect(
       await ctx.prisma.auditLog.count({

@@ -1,13 +1,16 @@
 /**
- * `GET /api/v1/messages` (step 6.1 WP2, D3–D6, D11) over HTTP with MySQL, Redis and S3 stubbed
- * and the WP2 repositories replaced by in-memory doubles (test/support/messages-fixtures.ts):
- * the list shape, the plans by filter, v1 cursor pagination and its refusals, strict query
- * validation, the domain filter, RBAC (users and API keys), the audited searches, the 429 of the
- * global limiter, and the operation in the OpenAPI document. The SQL plans, EXPLAIN checks and the
- * real replica run in integration/messages-list.test.ts and messages-explain.test.ts.
+ * `GET /api/v1/messages` (step 6.1 WP2, D3–D6, D11; step 7.2 §2 E1, E2) over HTTP with MySQL,
+ * Redis and S3 stubbed and the repositories replaced by in-memory doubles
+ * (test/support/messages-fixtures.ts): the list shape, the search drivers by filter, v1 cursor
+ * pagination and its refusals, strict query validation, the domain filter, RBAC (users and API
+ * keys), the filter-level permissions per system role, the 422/503 refusals of the subject prefix,
+ * the audited searches, the 429 of the global limiter, and the operation in the OpenAPI document.
+ * The SQL drivers, EXPLAIN checks and the real replica run in integration/messages-list.test.ts,
+ * messages-search.test.ts and messages-explain.test.ts.
  */
 // @covers get /api/v1/messages
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { SYSTEM_ROLES } from '@email-gateway/database';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { buildOpenApiDocument } from '../src/http/openapi';
 import { createStubbedApiApp, type StubbedApiApp } from './support/api-test-app';
@@ -19,6 +22,7 @@ import {
 } from './support/messages-fixtures';
 
 const READ = 'message:read';
+const REVEAL = 'message:reveal';
 const OTHER_ORG = 2n;
 const HOUR = 3_600_000;
 
@@ -94,9 +98,15 @@ describe('GET /api/v1/messages (e2e, dependencies stubbed)', () => {
         'status',
         'statusChangedAt',
         'subject',
+        'subjectMasked',
       ].sort(),
     );
     expect(res.body.data[0].domainId).toBe(domainId);
+    // Step 7.2 (§2 E5): the subject is withheld for every caller.
+    for (const item of res.body.data as Array<{ subject: unknown; subjectMasked: boolean }>) {
+      expect(item.subject).toBeNull();
+      expect(item.subjectMasked).toBe(true);
+    }
     expect(JSON.stringify(res.body)).not.toMatch(/emlObjectKey|organizationId/);
     expect(res.headers['cache-control']).toBe('no-store');
   });
@@ -121,7 +131,18 @@ describe('GET /api/v1/messages (e2e, dependencies stubbed)', () => {
       ((await list(query)).body as { data: unknown[] }).data.length;
     expect(await count('?verdict=spam')).toBe(3);
     expect(await count('?verdict=spam,clean')).toBe(5);
-    expect(await count('?recipient=Carol@Acme.example')).toBe(1);
+    // The exact recipient needs message:reveal (it confirms a masked address, ADR-0062).
+    const revealer = await api.principals.user([READ, REVEAL]).bearer();
+    const byRecipient = await list('?recipient=Carol@Acme.example', revealer);
+    expect(byRecipient.body.data).toHaveLength(1);
+    const refused = await list('?recipient=Carol@Acme.example');
+    expect(refused.status).toBe(403);
+    expect(refused.body).toMatchObject({
+      code: 'message_filter_forbidden',
+      filter: 'recipient',
+      permission: REVEAL,
+    });
+    expect(await count('?recipientDomain=Acme.example')).toBe(5);
     expect(await count('?direction=outbound')).toBe(1);
     expect(await count(`?domainId=${domainId}`)).toBe(1);
     expect(await count('?riskScore.gte=400&riskScore.lt=800')).toBe(2);
@@ -139,7 +160,7 @@ describe('GET /api/v1/messages (e2e, dependencies stubbed)', () => {
   });
 
   it.each([
-    ['?subject=hello', 'Unrecognized key'],
+    ['?subjectKey=hello', 'Unrecognized key'],
     ['?verdict.gte=spam', 'Unrecognized key'],
     ['?status=received,persisted,scanning,scanned,approved,expired', 'status'],
     ['?verdict=nonsense', 'verdict'],
@@ -197,7 +218,8 @@ describe('GET /api/v1/messages (e2e, dependencies stubbed)', () => {
   });
 
   it('audits identifying searches on the first page only, never the value in clear', async () => {
-    const first = await list('?limit=1&recipient=alice@acme.example');
+    const revealer = await api.principals.user([READ, REVEAL]).bearer();
+    const first = await list('?limit=1&recipient=alice@acme.example', revealer);
     expect(first.status).toBe(200);
     expect(audit.entries).toHaveLength(1);
     expect(audit.entries[0]).toMatchObject({
@@ -209,6 +231,7 @@ describe('GET /api/v1/messages (e2e, dependencies stubbed)', () => {
     expect(JSON.stringify(audit.entries[0]!.metadata)).not.toContain('alice@acme.example');
     await list(
       `?limit=1&recipient=alice@acme.example&cursor=${encodeURIComponent(first.body.nextCursor)}`,
+      revealer,
     );
     await list('?verdict=spam');
     expect(audit.entries).toHaveLength(1);
@@ -267,5 +290,262 @@ describe('GET /api/v1/messages 429 (principal limit)', () => {
     expect(res.body).toMatchObject({ code: 'rate_limited', scope: 'principal' });
     expect(res.headers['ratelimit-remaining']).toBe('0');
     expect(Number(res.headers['retry-after'])).toBeGreaterThan(0);
+  });
+});
+
+describe('GET /api/v1/messages search drivers and filters (step 7.2, e2e)', () => {
+  let api: StubbedApiApp;
+  let world: MessagesWorld;
+  const audit = new RecordingAuditService();
+  const ALL = ['message:read', 'message:reveal', 'delivery:read', 'quarantine:read'];
+  const ids: Record<string, string> = {};
+
+  beforeAll(async () => {
+    world = new MessagesWorld();
+    api = await createStubbedApiApp({}, { override: (b) => overrideMessagesData(b, world, audit) });
+  });
+  afterAll(async () => {
+    await api?.close();
+  });
+
+  beforeEach(() => {
+    world.messages = [];
+    world.recipients = [];
+    world.deliveries = [];
+    world.quarantine = [];
+    world.prefixFailure = null;
+    audit.entries.length = 0;
+    api.kv.entries.clear();
+    const org = api.principals.organizationId;
+    const now = Date.now();
+    const add = (name: string, i: number, over: Parameters<MessagesWorld['addMessage']>[1]) => {
+      const m = world.addMessage(org, { receivedAt: new Date(now - (i + 1) * HOUR), ...over });
+      ids[name] = m.publicId;
+      return m;
+    };
+    add('invoice', 0, {
+      subject: 'RE: Fwd:  Invoice 100%  overdue',
+      envelopeFrom: 'billing@vendor.example',
+      headerFrom: 'Billing <billing@vendor.example>',
+      internetMessageId: '<inv-1@vendor.example>',
+      recipients: ['ap@partner.example'],
+    });
+    const bounced = add('bounced', 1, {
+      subject: 'Weekly report',
+      envelopeFrom: 'reports@corp.example',
+      recipients: ['ceo@corp.example', 'cfo@corp.example'],
+    });
+    world.deliveries.push({
+      organizationId: org,
+      messageId: bounced.id,
+      recipientId: 1n,
+      deliverySeq: 0,
+      status: 'bounced',
+      finalSmtpCode: 550,
+      deliveredAt: null,
+    } as never);
+    const held = add('held', 2, { subject: 'Invoice reminder', envelopeFrom: 'x@evil.example' });
+    world.quarantine.push({ organizationId: org, messageId: held.id, status: 'held' });
+    // Another organization's identical message: never listed.
+    world.addMessage(2n, {
+      receivedAt: new Date(now - HOUR),
+      subject: 'Invoice 100% overdue',
+      envelopeFrom: 'billing@vendor.example',
+    });
+  });
+
+  const list = async (query: string, permissions: string[] = ALL) =>
+    api
+      .http()
+      .get(`/api/v1/messages${query}`)
+      .set(await api.principals.user(permissions).bearer());
+  const listed = async (query: string) => {
+    const res = await list(query);
+    expect(res.status, query).toBe(200);
+    return (res.body.data as Array<{ id: string }>).map((d) => d.id);
+  };
+
+  it('every new filter finds its messages (exact drivers, no short pages)', async () => {
+    expect(await listed('?subject=invoice%20100%25%20overdue')).toEqual([ids.invoice]);
+    expect(await listed('?subjectPrefix=Re:%20invoice')).toEqual([ids.invoice, ids.held]);
+    expect(await listed('?senderDomain=@Vendor.example')).toEqual([ids.invoice]);
+    expect(await listed('?recipientDomain=corp.example')).toEqual([ids.bounced]);
+    expect(await listed('?deliveryStatus=bounced')).toEqual([ids.bounced]);
+    expect(await listed('?quarantineStatus=held')).toEqual([ids.held]);
+    expect(await listed('?internetMessageId=inv-1@vendor.example')).toEqual([ids.invoice]);
+    expect(await listed('?internetMessageId=%3Cinv-1@vendor.example%3E')).toEqual([ids.invoice]);
+    expect(await listed('?headerFrom=billing%20%3Cbilling@vendor.example%3E')).toEqual([
+      ids.invoice,
+    ]);
+    // A driver with residuals.
+    expect(await listed('?subjectPrefix=invoice&senderDomain=evil.example')).toEqual([ids.held]);
+    expect(await listed('?recipientDomain=corp.example&deliveryStatus=delivered')).toEqual([]);
+  });
+
+  it.each([
+    ['?subject=', 'subject'],
+    ['?subject=Re:%20', 'subject: must contain text besides reply markers'],
+    ['?subjectPrefix=ab', 'subjectPrefix: must be 3 to 128 characters'],
+    [`?subjectPrefix=${'x'.repeat(129)}`, 'subjectPrefix'],
+    ['?senderDomain=bad_domain', 'senderDomain'],
+    ['?recipientDomain=a@b.example', 'recipientDomain'],
+    ['?deliveryStatus=bounced,failed', 'deliveryStatus'],
+    ['?deliveryStatus=lost', 'deliveryStatus'],
+    ['?quarantineStatus=quarantined', 'quarantineStatus'],
+    ['?internetMessageId=%3C%3E', 'internetMessageId'],
+    ['?senderDomain=a.example&senderDomain=b.example', 'senderDomain'],
+  ])('refuses %s with 400 validation_failed', async (query, text) => {
+    const res = await list(query);
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('validation_failed');
+    expect(JSON.stringify(res.body.message)).toContain(text);
+  });
+
+  it('applies the filter-level permissions of every system role (403 message_filter_forbidden)', async () => {
+    const gated: Array<[string, string]> = [
+      ['?recipient=alice%40corp.example', 'message:reveal'],
+      ['?subject=Weekly%20report', 'message:reveal'],
+      ['?subjectPrefix=Wee', 'message:reveal'],
+      ['?deliveryStatus=bounced', 'delivery:read'],
+      ['?quarantineStatus=held', 'quarantine:read'],
+    ];
+    for (const role of SYSTEM_ROLES) {
+      const permissions = [...role.permissions] as string[];
+      for (const [query, permission] of gated) {
+        const res = await list(query, permissions);
+        if (!permissions.includes('message:read')) {
+          expect(res.status, `${role.key} ${query}`).toBe(403);
+          expect(res.body.code).toBe('forbidden');
+        } else if (permissions.includes(permission)) {
+          expect(res.status, `${role.key} ${query}`).toBe(200);
+        } else {
+          expect(res.status, `${role.key} ${query}`).toBe(403);
+          expect(res.body).toMatchObject({
+            code: 'message_filter_forbidden',
+            permission,
+            requestId: expect.any(String),
+          });
+        }
+      }
+    }
+    // The ungated new filters work with message:read alone.
+    expect((await list('?senderDomain=vendor.example', ['message:read'])).status).toBe(200);
+    expect(audit.entries.every((e) => e.action === 'message.searched')).toBe(true);
+  });
+
+  it('API keys: a subject search needs message:reveal in the key scope', async () => {
+    api.principals.apiKeyWith(['message:read']);
+    const denied = await api
+      .http()
+      .get('/api/v1/messages?subject=Weekly%20report')
+      .set(api.principals.apiKeyHeaders);
+    expect(denied.status).toBe(403);
+    expect(denied.body).toMatchObject({ code: 'message_filter_forbidden', filter: 'subject' });
+    api.principals.apiKeyWith(['message:read', 'message:reveal']);
+    const ok = await api
+      .http()
+      .get('/api/v1/messages?subject=Weekly%20report')
+      .set(api.principals.apiKeyHeaders);
+    expect(ok.status).toBe(200);
+    expect(ok.body.data.map((d: { id: string }) => d.id)).toEqual([ids.bounced]);
+  });
+
+  it('maps a too broad prefix to 422 and a timeout to 503 (coded, with requestId)', async () => {
+    world.prefixFailure = { kind: 'too_broad', matches: 5001 };
+    const broad = await list('?subjectPrefix=Inv');
+    expect(broad.status).toBe(422);
+    expect(broad.body).toMatchObject({
+      code: 'message_search_too_broad',
+      maxMatches: 5000,
+      requestId: expect.any(String),
+    });
+    world.prefixFailure = { kind: 'timeout' };
+    const slow = await list('?subjectPrefix=Inv');
+    expect(slow.status).toBe(503);
+    expect(slow.body).toMatchObject({
+      code: 'message_search_timeout',
+      requestId: expect.any(String),
+    });
+  });
+
+  it('audits subject searches with the SHA-256 of the normalized value', async () => {
+    await list('?subject=RE:%20%20Weekly%20%20report');
+    expect(audit.entries).toHaveLength(1);
+    expect(audit.entries[0]!.metadata).toMatchObject({
+      filters: ['subject'],
+      plan: 'subject',
+      budgeted: false,
+      valueSha256: {
+        subject: createHash('sha256').update('Weekly report').digest('hex'),
+      },
+    });
+    expect(JSON.stringify(audit.entries[0]!.metadata)).not.toContain('Weekly');
+    await list('?senderDomain=corp.example&deliveryStatus=bounced');
+    expect(audit.entries).toHaveLength(1);
+  });
+
+  it('cursors are bound to the filters (and driver): another filter set, a tampered or another installation’s cursor is 400 cursor_invalid', async () => {
+    const first = await list('?senderDomain=corp.example&limit=1');
+    expect(first.status).toBe(200);
+    world.addMessage(api.principals.organizationId, {
+      receivedAt: new Date(Date.now() - 5 * HOUR),
+      envelopeFrom: 'other@corp.example',
+    });
+    const page = await list('?senderDomain=corp.example&limit=1');
+    const cursor: string = page.body.nextCursor;
+    expect(cursor).toEqual(expect.any(String));
+    const next = await list(
+      `?senderDomain=corp.example&limit=1&cursor=${encodeURIComponent(cursor)}`,
+    );
+    expect(next.status).toBe(200);
+    for (const query of [
+      // Same filter value, another driver: senderDomain alone vs with a sender (sender drives).
+      `?senderDomain=corp.example&sender=reports@corp.example&limit=1&cursor=${encodeURIComponent(cursor)}`,
+      `?recipientDomain=corp.example&limit=1&cursor=${encodeURIComponent(cursor)}`,
+      `?senderDomain=corp.example&limit=1&cursor=${encodeURIComponent(`${cursor.slice(0, -3)}xyz`)}`,
+    ]) {
+      const res = await list(query);
+      expect(res.status, query).toBe(400);
+      expect(res.body.code).toBe('cursor_invalid');
+    }
+    // A cursor signed by another installation (another key and organization).
+    const other = await createStubbedApiApp(
+      {},
+      { override: (b) => overrideMessagesData(b, world, audit) },
+    );
+    try {
+      const foreign = await other
+        .http()
+        .get(
+          `/api/v1/messages?senderDomain=corp.example&limit=1&cursor=${encodeURIComponent(cursor)}`,
+        )
+        .set(await other.principals.user(ALL).bearer());
+      expect(foreign.status).toBe(400);
+      expect(foreign.body.code).toBe('cursor_invalid');
+    } finally {
+      await other.close();
+    }
+  });
+
+  it('documents the new parameters, the filter permissions and the refusals', () => {
+    const doc = buildOpenApiDocument(api.app);
+    const op = doc.paths['/api/v1/messages']?.get as unknown as OpenApiOperation;
+    const names = op.parameters.map((p) => p.name);
+    for (const name of [
+      'subject',
+      'subjectPrefix',
+      'senderDomain',
+      'recipientDomain',
+      'deliveryStatus',
+      'quarantineStatus',
+      'internetMessageId',
+    ]) {
+      expect(names).toContain(name);
+    }
+    expect(op.description).toContain('message:reveal');
+    expect(op.description).toContain('API_MESSAGES_SEARCH_MAX_MATCHES');
+    expect(JSON.stringify(op.responses['403'])).toContain('message_filter_forbidden');
+    expect(JSON.stringify(op.responses['422'])).toContain('message_search_too_broad');
+    expect(JSON.stringify(op.responses['503'])).toContain('message_search_timeout');
   });
 });

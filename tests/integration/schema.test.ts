@@ -24,8 +24,9 @@ import { stack } from './support/env';
  * tables and columns of step 4.6 (14-sandbox.md §3), the risk scoring tables and column of
  * step 5.1 (15-risk-scoring.md §3), the policy engine tables and columns of step 5.2
  * (16-policy-engine.md §3), the quarantine tables and columns of step 5.3
- * (17-quarantine.md §3) and the webhook and notification tables and columns of step 6.2
- * (19-webhooks-notifications.md §3).
+ * (17-quarantine.md §3), the webhook and notification tables and columns of step 6.2
+ * (19-webhooks-notifications.md §3) and the explorer search keys, driver indexes and saved views
+ * of step 7.2 (21-email-explorer-details.md §3.1).
  */
 const prisma = new PrismaClient({ datasourceUrl: stack.databaseUrl() });
 
@@ -227,17 +228,19 @@ const TENANT_OWNED = [
   'notification_user_preferences',
   'notification_alert_windows',
   'api_idempotency_keys',
+  // Step 7.2 §3.1.
+  'saved_views',
 ];
 
 const ALL_TABLES = [...NOT_TENANT_OWNED, ...TENANT_OWNED];
 
 describe('MySQL schema', () => {
-  it('has exactly the 120 data-model tables plus _prisma_migrations', async () => {
+  it('has exactly the 121 data-model tables plus _prisma_migrations', async () => {
     const rows = await prisma.$queryRaw<{ name: string }[]>`
       SELECT TABLE_NAME AS name FROM information_schema.TABLES
       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'`;
-    expect(ALL_TABLES).toHaveLength(120);
-    expect(new Set(ALL_TABLES).size).toBe(120);
+    expect(ALL_TABLES).toHaveLength(121);
+    expect(new Set(ALL_TABLES).size).toBe(121);
     expect(rows.map((r) => r.name).sort()).toEqual([...ALL_TABLES, '_prisma_migrations'].sort());
   });
 
@@ -1592,8 +1595,9 @@ describe('message lifecycle schema (step 3.3, §3.1, §3.2)', () => {
       nullable: 'YES',
       columnDefault: null,
     });
-    // 27 since step 3.3; step 4.1 §3 adds client_name.
-    expect(cols.size).toBe(28);
+    // 27 since step 3.3; step 4.1 §3 adds client_name; step 7.2 §3.1 the three generated search
+    // keys subject_key, sender_domain and message_id_key.
+    expect(cols.size).toBe(31);
   });
 
   it('adds the actor, correlation, idempotency and occurrence columns to the history', async () => {
@@ -4288,6 +4292,8 @@ describe('quarantine schema (step 5.3, docs/plan/steps/17-quarantine.md §3)', (
         'status,state_changed_at',
         'user_id',
         'decided_by_user_id',
+        // Step 7.2 §3.1: the explorer's quarantineStatus driver.
+        'organization_id,status,message_received_at,message_id',
       ].sort(),
     );
     expect(await foreignKeys('quarantine_messages')).toEqual([
@@ -5056,5 +5062,266 @@ describe('webhooks and notifications schema (step 6.2, docs/plan/steps/19-webhoo
         await prisma.notificationSettings.findUnique({ where: { id: settings.id } }),
       ).toMatchObject({ updatedByUserId: null });
     });
+  });
+});
+
+describe('email explorer schema (step 7.2, docs/plan/steps/21-email-explorer-details.md §3.1)', () => {
+  const foreignKeys = async (table: string) =>
+    prisma.$queryRaw<{ columnName: string; referenced: string; onDelete: string }[]>`
+      SELECT k.COLUMN_NAME AS columnName, k.REFERENCED_TABLE_NAME AS referenced,
+             r.DELETE_RULE AS onDelete
+      FROM information_schema.KEY_COLUMN_USAGE k
+      JOIN information_schema.REFERENTIAL_CONSTRAINTS r
+        ON r.CONSTRAINT_SCHEMA = k.TABLE_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+      WHERE k.TABLE_SCHEMA = DATABASE() AND k.TABLE_NAME = ${table}
+        AND k.REFERENCED_TABLE_NAME IS NOT NULL
+      ORDER BY k.COLUMN_NAME`;
+
+  it('adds the four search keys as nullable VIRTUAL generated columns', async () => {
+    const rows = await prisma.$queryRaw<
+      {
+        tableName: string;
+        columnName: string;
+        columnType: string;
+        nullable: string;
+        extra: string;
+        expression: string;
+        collation: string;
+      }[]
+    >`
+      SELECT TABLE_NAME AS tableName, COLUMN_NAME AS columnName, COLUMN_TYPE AS columnType,
+             IS_NULLABLE AS nullable, EXTRA AS extra, GENERATION_EXPRESSION AS expression,
+             COLLATION_NAME AS collation
+      FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND COLUMN_NAME IN ('subject_key', 'sender_domain', 'message_id_key', 'address_domain')
+      ORDER BY TABLE_NAME, COLUMN_NAME`;
+    const byKey = new Map(rows.map((r) => [`${r.tableName}.${r.columnName}`, r]));
+    expect([...byKey.keys()].sort()).toEqual([
+      'email_messages.message_id_key',
+      'email_messages.sender_domain',
+      'email_messages.subject_key',
+      'email_recipients.address_domain',
+    ]);
+    const expected: Record<string, string> = {
+      'email_messages.subject_key': 'varchar(128)',
+      'email_messages.sender_domain': 'varchar(253)',
+      'email_messages.message_id_key': 'varchar(255)',
+      'email_recipients.address_domain': 'varchar(253)',
+    };
+    for (const [key, columnType] of Object.entries(expected)) {
+      const row = byKey.get(key)!;
+      expect(row.columnType, key).toBe(columnType);
+      expect(row.nullable, key).toBe('YES');
+      expect(row.extra, key).toContain('VIRTUAL GENERATED');
+      // Case and accents are ignored by the collation (§2 E1).
+      expect(row.collation, key).toBe('utf8mb4_unicode_ci');
+    }
+    // The linear (possessive) reply-marker pattern of the migration (§13 WP1 deviation).
+    expect(byKey.get('email_messages.subject_key')!.expression).toContain('*+');
+    expect(byKey.get('email_messages.sender_domain')!.expression).toMatch(/substring_index/i);
+    expect(byKey.get('email_messages.message_id_key')!.expression).toMatch(/trim/i);
+    expect(byKey.get('email_recipients.address_domain')!.expression).toMatch(/substring_index/i);
+  });
+
+  it('has the nine driver and resource indexes with their exact columns', async () => {
+    const expected: Record<string, Record<string, string[]>> = {
+      email_messages: {
+        email_messages_org_envelope_from_received_idx: [
+          'organization_id',
+          'envelope_from',
+          'received_at',
+          'id',
+        ],
+        email_messages_org_header_from_received_idx: [
+          'organization_id',
+          'header_from',
+          'received_at',
+          'id',
+        ],
+        email_messages_org_sender_domain_received_idx: [
+          'organization_id',
+          'sender_domain',
+          'received_at',
+          'id',
+        ],
+        email_messages_org_subject_key_received_idx: [
+          'organization_id',
+          'subject_key',
+          'received_at',
+          'id',
+        ],
+        email_messages_org_message_id_key_received_idx: [
+          'organization_id',
+          'message_id_key',
+          'received_at',
+          'id',
+        ],
+      },
+      email_recipients: {
+        email_recipients_org_address_domain_received_idx: [
+          'organization_id',
+          'address_domain',
+          'received_at',
+          'message_id',
+        ],
+      },
+      email_deliveries: {
+        email_deliveries_org_status_received_message_idx: [
+          'organization_id',
+          'status',
+          'received_at',
+          'message_id',
+        ],
+      },
+      quarantine_messages: {
+        quarantine_messages_org_status_received_message_idx: [
+          'organization_id',
+          'status',
+          'message_received_at',
+          'message_id',
+        ],
+      },
+      audit_logs: {
+        audit_logs_org_resource_created_idx: [
+          'organization_id',
+          'resource_type',
+          'resource_id',
+          'created_at',
+          'id',
+        ],
+      },
+    };
+    let count = 0;
+    for (const [table, byName] of Object.entries(expected)) {
+      const idx = await indexes(table);
+      for (const [name, columnList] of Object.entries(byName)) {
+        expect(idx.get(name), name).toEqual({ columns: columnList, unique: false });
+        count += 1;
+      }
+    }
+    expect(count).toBe(9);
+  });
+
+  it('creates saved_views (not partitioned) with its keys and foreign keys', async () => {
+    const cols = await columns(['saved_views']);
+    const expected: Record<string, [string, string]> = {
+      id: ['bigint unsigned', 'NO'],
+      public_id: ['char(36)', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      user_id: ['bigint unsigned', 'NO'],
+      kind: ["enum('message_explorer')", 'NO'],
+      name: ['varchar(80)', 'NO'],
+      definition: ['json', 'NO'],
+      row_version: ['int unsigned', 'NO'],
+      created_at: ['datetime(3)', 'NO'],
+      updated_at: ['datetime(3)', 'NO'],
+    };
+    expect([...cols.keys()].map((k) => k.split('.')[1]!).sort()).toEqual(
+      Object.keys(expected).sort(),
+    );
+    for (const [column, [columnType, nullable]] of Object.entries(expected)) {
+      expect(cols.get(`saved_views.${column}`), column).toMatchObject({ columnType, nullable });
+    }
+    expect(cols.get('saved_views.row_version')?.columnDefault).toBe('1');
+    expect(PARTITIONED).not.toHaveProperty('saved_views');
+    const idx = await indexes('saved_views');
+    expect(idx.get('saved_views_public_id_key')).toEqual({ columns: ['public_id'], unique: true });
+    expect(idx.get('saved_views_organization_id_user_id_kind_name_key')).toEqual({
+      columns: ['organization_id', 'user_id', 'kind', 'name'],
+      unique: true,
+    });
+    expect(idx.get('saved_views_organization_id_user_id_kind_id_idx')).toEqual({
+      columns: ['organization_id', 'user_id', 'kind', 'id'],
+      unique: false,
+    });
+    expect(idx.get('saved_views_user_id_idx')).toEqual({ columns: ['user_id'], unique: false });
+    expect(await foreignKeys('saved_views')).toEqual([
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+      { columnName: 'user_id', referenced: 'users', onDelete: 'CASCADE' },
+    ]);
+  });
+
+  it('derives the keys, refuses writes to them, and keeps saved view names unique per user and kind', async () => {
+    const { suffix, ids, cleanup } = await scratchOrganizations(1);
+    const organizationId = ids[0]!;
+    const receivedAt = new Date();
+    const messageId = BigInt(Date.now()) * 1000n + 7n;
+    const base = {
+      id: messageId,
+      receivedAt,
+      organizationId,
+      direction: 'inbound' as const,
+      statusChangedAt: receivedAt,
+      sizeBytes: 10,
+      recipientCount: 1,
+      emlObjectKey: `it/${suffix}.eml`,
+      emlSha256: 'a'.repeat(64),
+    };
+    const user = await prisma.user.create({
+      data: { organizationId, email: `sv-${suffix}@example.test`, displayName: 'IT' },
+    });
+    try {
+      await expect(
+        prisma.emailMessage.create({
+          data: { ...base, envelopeFrom: 'a@b.test', subjectKey: 'x' },
+        }),
+      ).rejects.toThrow(/generated column/i);
+      await expect(
+        prisma.emailMessage.create({
+          data: { ...base, envelopeFrom: 'a@b.test', senderDomain: 'b.test' },
+        }),
+      ).rejects.toThrow(/generated column/i);
+      await prisma.emailMessage.create({
+        data: {
+          ...base,
+          envelopeFrom: 'Alice@Mail.Example.Test',
+          subject: '  RE: Fwd:\tQuarterly   report ',
+          internetMessageId: ' <abc@mx.example.test> ',
+        },
+      });
+      const message = await prisma.emailMessage.findFirstOrThrow({
+        where: { id: messageId, receivedAt },
+        select: { subjectKey: true, senderDomain: true, messageIdKey: true },
+      });
+      expect(message).toEqual({
+        subjectKey: 'Quarterly report',
+        senderDomain: 'Mail.Example.Test',
+        messageIdKey: 'abc@mx.example.test',
+      });
+      await prisma.emailRecipient.create({
+        data: {
+          receivedAt,
+          messageId,
+          organizationId,
+          rcptSeq: 0,
+          address: 'bob@partner.example.test',
+        },
+      });
+      const recipient = await prisma.emailRecipient.findFirstOrThrow({
+        where: { messageId, receivedAt },
+        select: { addressDomain: true },
+      });
+      expect(recipient.addressDomain).toBe('partner.example.test');
+
+      const view = { organizationId, userId: user.id, kind: 'message_explorer' as const };
+      await prisma.savedView.create({ data: { ...view, name: 'Phishing', definition: {} } });
+      // Case-insensitive by collation: the same name in another case is a duplicate.
+      await expect(
+        prisma.savedView.create({ data: { ...view, name: 'PHISHING', definition: {} } }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+      await expect(
+        prisma.organization.delete({ where: { id: organizationId } }),
+      ).rejects.toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+      // Deleting the user removes their views (CASCADE).
+      await prisma.user.delete({ where: { id: user.id } });
+      expect(await prisma.savedView.count({ where: { organizationId } })).toBe(0);
+    } finally {
+      await prisma.savedView.deleteMany({ where: { organizationId } });
+      await prisma.emailRecipient.deleteMany({ where: { organizationId, receivedAt } });
+      await prisma.emailMessage.deleteMany({ where: { organizationId, receivedAt } });
+      await prisma.user.deleteMany({ where: { organizationId } });
+      await cleanup();
+    }
   });
 });

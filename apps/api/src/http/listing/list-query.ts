@@ -33,6 +33,11 @@ export type FilterSpec =
   | { type: 'string'; maxLength: number; maxValues?: number }
   /** Exact address-like string, trimmed and lower-cased (`envelope_from`, recipients). */
   | { type: 'email'; maxLength?: number }
+  /**
+   * A domain name (step 7.2 §2 E2): trimmed, lower-cased, one leading `@` removed, then
+   * `DOMAIN_NAME_PATTERN` and at most 253 characters (IDNs in A-label form). A single value.
+   */
+  | { type: 'domain' }
   /** A public id (UUID). */
   | { type: 'publicId'; maxValues?: number }
   /** An integer within bounds; `range: true` adds `.gte/.lte/.gt/.lt` (and keeps equality). */
@@ -86,8 +91,30 @@ const RESERVED = new Set(['limit', 'cursor', 'sort', 'from', 'to']);
 
 const isoInstant = z.iso.datetime({ offset: true });
 
+/**
+ * A domain name of the `domain` filter type (step 7.2 §2 E2): LDH labels of 1–63 characters
+ * that neither start nor end with `-`, at least two labels, lower case (the input is lower-cased
+ * first). IDNs are accepted in A-label form (`xn--…`) only.
+ */
+export const DOMAIN_NAME_PATTERN =
+  /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
+export const DOMAIN_NAME_MAX_LENGTH = 253;
+
+/** The `domain` filter normalization: trim, lower-case, strip one leading `@`. */
+export const normalizeDomainInput = (raw: string): string => {
+  const lower = raw.trim().toLowerCase();
+  return lower.startsWith('@') ? lower.slice(1) : lower;
+};
+
 function maxValuesOf(spec: FilterSpec): number {
-  if (spec.type === 'datetime' || spec.type === 'bool' || spec.type === 'email') return 1;
+  if (
+    spec.type === 'datetime' ||
+    spec.type === 'bool' ||
+    spec.type === 'email' ||
+    spec.type === 'domain'
+  ) {
+    return 1;
+  }
   return spec.maxValues ?? 1;
 }
 
@@ -113,6 +140,17 @@ function rawValueSchema(spec: FilterSpec): z.ZodType {
         .max(spec.maxLength ?? 320)
         .regex(/^[^\s@]+@[^\s@]+$/, 'must be an address')
         .transform((v) => v.toLowerCase());
+    case 'domain':
+      return z
+        .string()
+        .transform(normalizeDomainInput)
+        .pipe(
+          z
+            .string()
+            .min(1)
+            .max(DOMAIN_NAME_MAX_LENGTH)
+            .regex(DOMAIN_NAME_PATTERN, 'must be a domain name (IDNs in A-label form)'),
+        );
     case 'publicId':
       return z.uuid();
     case 'int':

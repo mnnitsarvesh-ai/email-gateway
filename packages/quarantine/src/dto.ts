@@ -41,7 +41,14 @@ export const quarantineEntrySummarySchema = z.strictObject({
   origin: z.enum(QUARANTINE_ORIGINS),
   reason: z.enum(QUARANTINE_REASONS),
   direction: z.enum(QUARANTINE_DIRECTIONS),
+  /**
+   * Step 7.2 (ADR-0062, §2 E8): in clear for callers holding a quarantine decision permission
+   * (release, approve, reject, delete, request_release, manage) or `message:reveal`, and on the
+   * self routes (the caller's own address); otherwise masked (`f***@example.com`).
+   */
   recipient: address,
+  /** Step 7.2: true when `recipient` is masked (always false on the self routes). */
+  recipientMasked: z.boolean(),
   sender: z.strictObject({ envelope: address.nullable(), headerFrom: address.nullable() }),
   /** Sanitized (control/bidi removed, ≤ 256); only with `quarantine:preview` or on self routes. */
   subject: z.string().max(256).nullable(),

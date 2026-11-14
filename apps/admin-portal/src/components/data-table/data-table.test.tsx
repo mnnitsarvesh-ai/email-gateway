@@ -94,6 +94,12 @@ describe('DataTable (design §9)', () => {
     expect(await screen.findByRole('cell', { name: 'd1.example.test' })).toBeInTheDocument();
     expect(screen.getByRole('table', { name: 'Domains' })).toBeInTheDocument();
     expect(screen.getByText('Page 1 · 2 rows')).toBeInTheDocument();
+    // The horizontal scroller is a named, focusable group: on a tablet a wide table scrolls and
+    // keyboard users must reach it even when no cell holds a link (axe
+    // scrollable-region-focusable, found by the step 7.2 Playwright suite at 834 px).
+    const scroller = screen.getByRole('group', { name: 'Domains' });
+    expect(scroller).toHaveAttribute('tabindex', '0');
+    expect(scroller).toContainElement(screen.getByRole('table', { name: 'Domains' }));
     await expectNoAxeViolations(container);
   });
 
@@ -222,6 +228,63 @@ describe('DataTable (design §9)', () => {
     renderWithProviders(<DomainsTable />);
     expect(await screen.findByText('card d1.example.test')).toBeInTheDocument();
     expect(screen.queryByRole('table')).not.toBeInTheDocument();
+  });
+});
+
+function ControlledTable({ initial }: { initial: Record<string, boolean> }) {
+  const [visibility, setVisibility] = useState<Record<string, boolean>>(initial);
+  const list = useCursorList('DomainsController_list_v1', {}, { limit: 2 });
+  return (
+    <>
+      <button type="button" onClick={() => setVisibility({})}>
+        Apply default columns
+      </button>
+      <output aria-label="visibility">{JSON.stringify(visibility)}</output>
+      <DataTable
+        tableId="domains-controlled"
+        caption="Domains"
+        columns={columns}
+        list={list}
+        getRowId={(row) => row.id}
+        columnVisibility={visibility}
+        onColumnVisibilityChange={setVisibility}
+        errorState={(error) =>
+          error instanceof Error && 'code' in error && error.code === 'search_refused' ? (
+            <p>Refused: explained next to the search</p>
+          ) : null
+        }
+      />
+    </>
+  );
+}
+
+describe('DataTable controlled columns and custom error bodies (step 7.2)', () => {
+  it('uses the caller’s column visibility and reports menu changes to it', async () => {
+    pagedDomains(2);
+    const { user } = renderWithProviders(<ControlledTable initial={{ status: false }} />);
+    await screen.findByRole('cell', { name: 'd1.example.test' });
+    expect(screen.queryByRole('columnheader', { name: 'Status' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Columns' }));
+    await user.click(await screen.findByRole('menuitemcheckbox', { name: 'Status' }));
+    await user.keyboard('{Escape}');
+    expect(screen.getByRole('columnheader', { name: 'Status' })).toBeInTheDocument();
+    expect(screen.getByLabelText('visibility')).toHaveTextContent('{"status":true}');
+    // The controlled table does not write the preference itself (the caller persists it).
+    expect(localStorage.getItem('eg:table:domains-controlled:columns')).toBeNull();
+  });
+
+  it('renders a custom error body when the caller provides one, the ErrorState otherwise', async () => {
+    mockApi({
+      DomainsController_list_v1: () => apiErrorJson(422, 'search_refused', 'Too broad'),
+    });
+    renderWithProviders(<ControlledTable initial={{}} />);
+    expect(await screen.findByText('Refused: explained next to the search')).toBeInTheDocument();
+    mockApi({
+      DomainsController_list_v1: () =>
+        apiErrorJson(500, 'internal_error', 'Down', { requestId: 'req-dt-9' }),
+    });
+    renderWithProviders(<ControlledTable initial={{}} />);
+    expect(await screen.findByText('req-dt-9')).toBeInTheDocument();
   });
 });
 

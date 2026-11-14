@@ -95,6 +95,13 @@ spec:
             - { name: REPORTS_CACHE_TTL_SECONDS, value: '60' }
             - { name: REPORTS_QUERY_TIMEOUT_MS, value: '10000' }
             - { name: RECIPIENT_SUPPRESSIONS_MAX_MANUAL, value: '100000' }
+            # Email explorer and details (step 7.2 §2 E16): the capped subject-prefix search
+            # (422 above the cap, 503 on MAX_EXECUTION_TIME), the saved views per user and the
+            # audited reveal operations per principal and minute (429 above).
+            - { name: API_MESSAGES_SEARCH_MAX_MATCHES, value: '5000' }
+            - { name: API_MESSAGES_SEARCH_TIMEOUT_MS, value: '5000' }
+            - { name: SAVED_VIEWS_MAX_PER_USER, value: '50' }
+            - { name: API_MESSAGES_REVEAL_PER_MINUTE, value: '30' }
             # HMAC key of the signed v1 list cursors (step 6.1 D3; 64 hex characters): the api is
             # its only holder; its own Secret, mounted here only. The previous key (rotation,
             # verification only) is optional; see docs/runbooks/api-rate-limits-and-reports.md.

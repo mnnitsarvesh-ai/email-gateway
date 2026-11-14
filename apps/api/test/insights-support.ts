@@ -44,7 +44,14 @@ export const OTHER_ORG_PUBLIC_ID = '01930c2e-7d1a-7000-8000-00000000b0b0';
 /** Audit rows in memory with the semantics of `auditSql` (owner, range, keyset, filters). */
 export class InMemoryAuditLogs {
   rows: AuditLogRecord[] = [];
-  calls = { page: 0, boundary: 0, filtered: 0 };
+  calls = {
+    page: 0,
+    boundary: 0,
+    filtered: 0,
+    resourcePage: 0,
+    resourceBoundary: 0,
+    resourceFiltered: 0,
+  };
 
   private visible(search: AuditSearch): AuditLogRecord[] {
     const sign = search.direction === 'desc' ? -1 : 1;
@@ -90,6 +97,41 @@ export class InMemoryAuditLogs {
         (filter.actorType === undefined || r.actorType === filter.actorType) &&
         (filter.actorId === undefined || r.actorId === filter.actorId);
       return Promise.resolve(all.slice(0, end).filter(match).slice(0, take));
+    },
+    // Step 7.2 §2 E3: the resource plan (the resource's rows in keyset order).
+    resourcePage: (search: AuditSearch, resource: { type: string; id: string }, take: number) => {
+      this.calls.resourcePage += 1;
+      return Promise.resolve(
+        this.visible(search)
+          .filter((r) => r.resourceType === resource.type && r.resourceId === resource.id)
+          .slice(0, take),
+      );
+    },
+    resourceBoundary: (
+      search: AuditSearch,
+      resource: { type: string; id: string },
+      budget: number,
+    ) => {
+      this.calls.resourceBoundary += 1;
+      const row = this.visible(search).filter(
+        (r) => r.resourceType === resource.type && r.resourceId === resource.id,
+      )[budget - 1];
+      return Promise.resolve(row ? { createdAt: row.createdAt, id: row.id } : null);
+    },
+    resourceFiltered: (
+      search: AuditSearch,
+      resource: { type: string; id: string },
+      filter: AuditFilter,
+      boundary: AuditKey | null,
+      take: number,
+    ) => {
+      this.calls.resourceFiltered += 1;
+      return this.repository.filtered(
+        search,
+        { ...filter, resourceType: resource.type, resourceId: resource.id },
+        boundary,
+        take,
+      );
     },
   };
 }

@@ -1,6 +1,7 @@
 /**
  * SQL fixtures of the step 6.1 WP2 integration suites (messages-list, messages-data,
- * recipient-suppressions, tenant-isolation-messages-data, messages-explain): a message graph
+ * recipient-suppressions, tenant-isolation-messages-data, messages-explain; step 7.2
+ * messages-search and the search keys): a message graph
  * (registry row, message, recipients, deliveries, one scan round, attachments with results,
  * URLs with results, a rewrite and clicks) inserted on the writer with the partition rules of
  * integration/support/lifecycle.ts (every child row copies the message's `received_at`; clicks
@@ -9,9 +10,11 @@
  */
 import { createHash, randomUUID } from 'node:crypto';
 import type {
+  DeliveryStatus,
   MessageAction,
   MessageDirection,
   MessageVerdict,
+  QuarantineStatus,
   UrlClickDecision,
 } from '@email-gateway/database';
 import type { IntegrationApp } from './app';
@@ -54,6 +57,13 @@ export interface SeedMessageOptions {
   attachments?: SeedAttachment[];
   urls?: SeedUrl[];
   clicks?: SeedClick[];
+  /**
+   * Step 7.2: one delivery (sequence 0) per recipient in this status, by recipient position;
+   * default: the first recipient's deferred then delivered sequences.
+   */
+  deliveryStatuses?: DeliveryStatus[];
+  /** Step 7.2: quarantine entries of the message (round 0) by recipient position and state. */
+  quarantine?: Array<{ rcptSeq: number; status: QuarantineStatus }>;
 }
 
 export interface SeededMessage {
@@ -132,7 +142,25 @@ export async function seedMessage(
       orderBy: { rcptSeq: 'asc' },
     })
   ).map((r) => r.id);
-  if (recipientIds[0] !== undefined) {
+  if (options.deliveryStatuses) {
+    await p.emailDelivery.createMany({
+      data: options.deliveryStatuses.flatMap((status, i) =>
+        recipientIds[i] === undefined
+          ? []
+          : [
+              {
+                receivedAt,
+                messageId: id,
+                recipientId: recipientIds[i],
+                organizationId: org.id,
+                deliverySeq: 0,
+                status,
+                statusChangedAt: receivedAt,
+              },
+            ],
+      ),
+    });
+  } else if (recipientIds[0] !== undefined) {
     await p.emailDelivery.createMany({
       data: [0, 1].map((deliverySeq) => ({
         receivedAt,
@@ -145,6 +173,29 @@ export async function seedMessage(
         deliveredAt: deliverySeq === 0 ? null : receivedAt,
         statusChangedAt: receivedAt,
       })),
+    });
+  }
+  for (const entry of options.quarantine ?? []) {
+    await p.quarantineMessage.create({
+      data: {
+        organizationId: org.id,
+        messageId: id,
+        messageReceivedAt: receivedAt,
+        lifecycleRound: 0,
+        recipientId: recipientIds[entry.rcptSeq] ?? BigInt(900_000 + entry.rcptSeq),
+        rcptSeq: entry.rcptSeq,
+        recipientAddress: (recipients[entry.rcptSeq] ?? 'alice@acme.example').toLowerCase(),
+        direction,
+        kind: 'quarantine',
+        origin: 'policy',
+        reason: 'spam',
+        status: entry.status,
+        envelopeFrom: options.envelopeFrom ?? `sender@${org.slug}.example`,
+        emlObjectKey: `org/${org.id}/eml/fixture/${randomUUID()}.eml`,
+        quarantinedAt: receivedAt,
+        expiresAt: new Date(receivedAt.getTime() + 30 * 86_400_000),
+        stateChangedAt: receivedAt,
+      },
     });
   }
   const scan = await p.emailScan.create({
@@ -309,6 +360,14 @@ export async function bulkMessages(
     verdicts: MessageVerdict[];
     hotAddress: string;
     recipientEvery: number;
+    /** Step 7.2: the subject, From header and Message-ID of message `k` (default none). */
+    subjectOf?: (k: number) => string | null;
+    headerFromOf?: (k: number) => string | null;
+    messageIdOf?: (k: number) => string | null;
+    /** Step 7.2: one delivery (sequence 0) of the recipient of message `k` in this status. */
+    deliveryOf?: (k: number) => DeliveryStatus | null;
+    /** Step 7.2: one quarantine entry (round 0, recipient 0) of message `k` in this state. */
+    quarantineOf?: (k: number) => QuarantineStatus | null;
   },
 ): Promise<void> {
   const p = ctx.prisma;
@@ -354,19 +413,71 @@ export async function bulkMessages(
         finalVerdict: options.verdicts[r.k % options.verdicts.length]!,
         finalAction: 'deliver' as const,
         riskScore: r.k % 1000,
+        subject: options.subjectOf?.(r.k) ?? null,
+        headerFrom: options.headerFromOf?.(r.k) ?? null,
+        internetMessageId: options.messageIdOf?.(r.k) ?? null,
       })),
     });
+    const addressOf = (k: number) =>
+      k % options.recipientEvery === 0 ? options.hotAddress : `user${k % 500}@acme.example`;
     await p.emailRecipient.createMany({
       data: rows.map((r) => ({
         receivedAt: r.receivedAt,
         messageId: idOf.get(r.ingestKey)!,
         organizationId: org.id,
         rcptSeq: 0,
-        address:
-          r.k % options.recipientEvery === 0 ? options.hotAddress : `user${r.k % 500}@acme.example`,
+        address: addressOf(r.k),
         status: 'delivered' as const,
       })),
     });
+    const withDelivery = rows.filter((r) => (options.deliveryOf?.(r.k) ?? null) !== null);
+    const withEntry = rows.filter((r) => (options.quarantineOf?.(r.k) ?? null) !== null);
+    if (withDelivery.length === 0 && withEntry.length === 0) continue;
+    const recipientRows = await p.emailRecipient.findMany({
+      where: {
+        organizationId: org.id,
+        messageId: { in: [...withDelivery, ...withEntry].map((r) => idOf.get(r.ingestKey)!) },
+      },
+      select: { id: true, messageId: true },
+    });
+    const recipientOf = new Map(recipientRows.map((r) => [r.messageId, r.id]));
+    if (withDelivery.length > 0) {
+      await p.emailDelivery.createMany({
+        data: withDelivery.map((r) => ({
+          receivedAt: r.receivedAt,
+          messageId: idOf.get(r.ingestKey)!,
+          recipientId: recipientOf.get(idOf.get(r.ingestKey)!)!,
+          organizationId: org.id,
+          deliverySeq: 0,
+          status: options.deliveryOf!(r.k)!,
+          statusChangedAt: r.receivedAt,
+        })),
+      });
+    }
+    if (withEntry.length > 0) {
+      await p.quarantineMessage.createMany({
+        data: withEntry.map((r) => ({
+          organizationId: org.id,
+          messageId: idOf.get(r.ingestKey)!,
+          messageReceivedAt: r.receivedAt,
+          lifecycleRound: 0,
+          recipientId: recipientOf.get(idOf.get(r.ingestKey)!)!,
+          rcptSeq: 0,
+          recipientAddress: addressOf(r.k),
+          direction: 'inbound' as const,
+          kind: 'quarantine' as const,
+          origin: 'policy' as const,
+          reason: 'spam' as const,
+          status: options.quarantineOf!(r.k)!,
+          envelopeFrom: `bulk${r.k % 97}@sender.example`,
+          emlObjectKey: `org/${org.id}/eml/bulk/${tag}/${r.k}.eml`,
+          quarantinedAt: r.receivedAt,
+          expiresAt: new Date(r.receivedAt.getTime() + 30 * 86_400_000),
+          stateChangedAt: r.receivedAt,
+          publicId: randomUUID(),
+        })),
+      });
+    }
   }
 }
 
@@ -377,6 +488,15 @@ export async function deleteMessagesData(
 ): Promise<void> {
   const where = { organizationId: { in: [...organizationIds] } };
   const p = ctx.prisma;
+  // Step 7.2: quarantine entries of the search fixtures (FK organizations, RESTRICT; their
+  // `view` actions cascade).
+  await p.quarantineMessage.deleteMany({ where });
+  // Step 7.2 WP2: the headers, parse rows, delivery events and engine results of the sensitive
+  // metadata suite (partitioned, no FKs).
+  await p.emailHeader.deleteMany({ where });
+  await p.emailMessageParse.deleteMany({ where });
+  await p.deliveryStatusEvent.deleteMany({ where });
+  await p.scanEngineResult.deleteMany({ where });
   await p.urlClickEvent.deleteMany({ where });
   await p.urlRewrite.deleteMany({ where });
   await p.urlScanResult.deleteMany({ where });

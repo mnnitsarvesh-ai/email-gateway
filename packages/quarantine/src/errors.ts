@@ -28,6 +28,8 @@ export const QUARANTINE_ERROR_CODES = Object.freeze({
   quarantine_bulk_rate_limited: 429,
   quarantine_cursor_invalid: 400,
   quarantine_search_range_invalid: 400,
+  // Step 7.2 (ADR-0062): a caller who sees recipients masked may not search by an exact one.
+  quarantine_filter_forbidden: 403,
   quarantine_settings_invalid: 400,
   quarantine_settings_conflict: 409,
   quarantine_hard_block_release_disabled: 409,

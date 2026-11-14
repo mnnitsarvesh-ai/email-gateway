@@ -102,7 +102,10 @@ describe('message data routes against the replica', () => {
     const first = await get(`/messages/${message.publicId}/recipients?limit=2`);
     expect(first.body.data[0]).toMatchObject({
       rcptSeq: 0,
-      address: 'alice@acme.example',
+      // Step 7.2 (§2 E5): masked, matched user withheld, for every caller.
+      address: 'a***@acme.example',
+      addressMasked: true,
+      userId: null,
       status: 'delivered',
       latestDelivery: { deliverySeq: 1, status: 'delivered', finalSmtpCode: 250 },
     });

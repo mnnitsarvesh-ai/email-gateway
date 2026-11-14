@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { DataTable, type DataTableColumn } from '@/components/data-table';
 import { DeliveryStatusBadge, DirectionBadge } from '@/components/domain/badges';
 import { DateTime } from '@/components/domain/date-time';
-import { UntrustedText } from '@/components/domain/untrusted-text';
+import { SensitiveValue } from '@/components/domain/sensitive-value';
 import { RangePicker, useRangeState } from '@/components/range-picker';
 import { EmptyState } from '@/components/states/empty-state';
 import { useUrlState } from '@/hooks/use-url-state';
@@ -52,7 +52,15 @@ export function DeliveriesTab() {
         id: 'recipient',
         header: 'Recipient',
         meta: { label: 'Recipient' },
-        cell: ({ row }) => <UntrustedText value={row.original.recipient} maxLength={60} />,
+        // Masked by the api since step 7.2 (`recipientMasked`); revealed only per message.
+        cell: ({ row }) => (
+          <SensitiveValue
+            value={row.original.recipient}
+            masked={row.original.recipientMasked}
+            kind="address"
+            maxLength={60}
+          />
+        ),
       },
       {
         id: 'status',
@@ -152,7 +160,7 @@ export function DeliveriesTab() {
         }
         mobileCard={(row) => (
           <div className="grid gap-1">
-            <UntrustedText value={row.recipient} />
+            <SensitiveValue value={row.recipient} masked={row.recipientMasked} kind="address" />
             <span className="flex flex-wrap items-center gap-2">
               <DeliveryStatusBadge status={row.status} />
               <DateTime value={row.statusChangedAt} className="text-xs" />

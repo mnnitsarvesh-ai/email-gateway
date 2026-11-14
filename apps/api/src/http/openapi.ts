@@ -363,8 +363,13 @@ export const OPENAPI_TAGS: ReadonlyArray<{ name: string; description: string }> 
     name: 'messages',
     description:
       'Step 3.3: lifecycle, history, rescan, release. Step 4.1: scan results. Step 6.1: the ' +
-      'message list (replica, signed cursors, scan budget), detail and recipients. Message ' +
-      'content and S3 keys are never returned.',
+      'message list (replica, signed cursors, scan budget), detail and recipients. Step 7.2: ' +
+      'the Email Explorer search (index drivers for sender, From, recipient, subject, ' +
+      'Message-ID, domains, delivery and quarantine states; budgeted residual filters; the ' +
+      'capped subject prefix; filter-level permissions), the stored headers, and sensitive ' +
+      'metadata masked for every caller (subjects, recipient addresses, To/Cc/Subject header ' +
+      'values) with the audited `message:reveal` operations. Message content and S3 keys are ' +
+      'never returned.',
   },
   {
     name: 'scan-settings',
@@ -453,6 +458,13 @@ export const OPENAPI_TAGS: ReadonlyArray<{ name: string; description: string }> 
       'webhook disabled: enabled, severity, throttle windows) and the caller’s own notification ' +
       'preferences (opt-outs, quarantine digest). E-mail only; SMS, chat and push channels are ' +
       'not offered; portal screens: 7.x.',
+  },
+  {
+    name: 'saved-views',
+    description:
+      'Step 7.2: the caller’s saved Email Explorer views (filters, sort, range, columns), per ' +
+      'user and organization, `message:read`, members only (no API keys or platform ' +
+      'overrides). Shared or organization-wide views are not offered.',
   },
   {
     name: 'platform',
