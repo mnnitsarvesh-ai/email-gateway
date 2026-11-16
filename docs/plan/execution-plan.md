@@ -11,7 +11,7 @@ This plan maps every prompt in the product brief to a delivery step, ordered by 
   3. A **verifier** runs migrations, lint, typecheck, unit, e2e and integration tests and fixes failures.
   4. **Adversarial reviewers** (security, correctness and tenant-isolation lenses) review the diff, and confirmed findings are fixed.
 - **Commits:** one or more commits per step on the `build/platform` branch. Nothing is pushed without approval.
-- **Order (confirmed by the product owner on 2026-11-16):** 7.3 → 8.1 → 8.4 → the ATP steps → 8.2 → 8.5 → 8.3 → 9.1–9.2 → 10.1–10.3 → 14.1. Step numbers follow the phases, not the order. The design of the next step may run read-only while the current step is being built; implementation is one step at a time, because steps share the working tree and the local stack.
+- **Order (confirmed by the product owner on 2026-11-16; ATP moved after 8.5 the same day):** 7.3 → 8.1 → 8.4 → 8.2 → 8.5 → the ATP steps → 8.3 → 9.1–9.2 → 10.1–10.3 → 14.1. Step numbers follow the phases, not the order. The design of the next step may run read-only while the current step is being built; implementation is one step at a time, because steps share the working tree and the local stack.
 
 ## Cross-cutting decision: read/write database split
 
