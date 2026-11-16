@@ -880,6 +880,8 @@ Relative to the plan: 8.1 (journaling) can run before or after ATP-1–ATP-3 bec
 
 ## 5. Decisions needed from the product owner
 
+**Approved by the product owner on 2026-11-16:** the plan of §4 (steps ATP-1 to ATP-9, built after 8.5) and the recommended option of every decision that has one (D3, D4, D6–D12, D14–D16). Still open, needed before the step that uses them: D2 and D13 before ATP-1, D5 before ATP-4 (the step design proposes retention periods for approval), D1 before ATP-6.
+
 | #   | Decision                                        | Options (a recommendation is marked where one is made)                                                                                                                                                                                                                                               |
 | --- | ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | D1  | Sandbox product and hosting                     | Self-hosted CAPE-style deployment on dedicated x86 KVM hosts we operate; a commercial on-premises appliance; a commercial cloud API (samples leave the platform). No recommendation before the security review (§3.1); each option needs licences (Windows, Office, product) and an operations owner |
