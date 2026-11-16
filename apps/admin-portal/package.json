@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "node --env-file-if-exists=../../.env node_modules/next/dist/bin/next dev --port 3001",
-    "build": "node scripts/generate-api.mjs --check && next build && node scripts/assert-no-mock-layer.mjs",
+    "build": "node scripts/generate-api.mjs --check && next build && node scripts/assert-no-mock-layer.mjs && node scripts/assert-no-policy-evaluator.mjs",
     "start": "next start --port 3001",
     "typecheck": "node scripts/generate-api.mjs --check && tsc --noEmit",
     "lint": "eslint src",

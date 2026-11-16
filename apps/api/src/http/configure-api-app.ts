@@ -2,6 +2,7 @@ import { type INestApplication, Logger, RequestMethod } from '@nestjs/common';
 import type { ApiConfig } from '../config';
 import { ApiExceptionFilter } from './api-exception.filter';
 import { ApiConventionMetrics, TRUSTED_FORWARDER_OUTCOMES } from './api-metrics';
+import { usePolicyBodyLimit } from './policy-body-limit';
 import { trustedForwarderMiddleware } from './trusted-forwarder.middleware';
 
 /** The business API lives under `/api/v1/...` (ADR-0015). */
@@ -41,6 +42,9 @@ export function configureApiApp(
         'the portal address (shared per-IP limits). Set it in production (ADR-0060).',
     );
   }
+  // Step 7.3 §14.8 (B16): the policy routes accept JSON bodies up to the DSL's document limit
+  // plus the request wrapper; registered before Nest's global 100 KiB parser (at init).
+  usePolicyBodyLimit(app);
   app.setGlobalPrefix(API_GLOBAL_PREFIX, {
     exclude: [
       { path: 'health/live', method: RequestMethod.GET },

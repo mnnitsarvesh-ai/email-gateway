@@ -1,8 +1,9 @@
 import 'server-only';
-import type { ListItem, SuccessBody } from '@/lib/api/types';
-import { fixtureAnchor, stableUuid } from '../generator';
+import type { ListItem, RequestBody, SuccessBody } from '@/lib/api/types';
+import { fixtureAnchor, paginate, stableUuid } from '../generator';
 import {
   apiError,
+  noContent,
   ok,
   type FixtureHandler,
   type FixtureHandlers,
@@ -10,283 +11,62 @@ import {
   type FixtureResponse,
 } from '../types';
 import { fixtures as attachmentFixtures } from './attachments';
+import { fixtures as auditFixtures } from './audit';
 import { FIXTURE_MESSAGES, fixtureGuard, guarded } from './messages';
+import { riskFixtures } from './policy-risk';
+import {
+  audit,
+  cannedViolations,
+  findPolicy,
+  findVersion,
+  hasOverrideRules,
+  idempotent,
+  isRecord,
+  liveVersionCount,
+  nextVersionNo,
+  POLICY_LIMIT,
+  policyOrg,
+  policyRowView,
+  policyView,
+  ruleCountOf,
+  seededPolicyId,
+  settingsView,
+  sha256,
+  VERSION_LIMIT,
+  versionRowView,
+  versionView,
+  type AuditRow,
+  type PolicyOrgState,
+  type StoredPolicy,
+  type StoredVersion,
+} from './policy-store';
+import { toolFixtures } from './policy-tools';
+import { withPrincipal, type Principal } from './reports';
 import { fixtures as settingsFixtures } from './settings';
 import { fixtures as urlProtectionFixtures } from './url-protection';
 
 export { DEV_MOCK_MARKER } from '../types';
 
 /**
- * Dev fixtures of the policy pages (WP5, read-only in 7.1): email policies with versions and DSL
- * definitions, the execution history (derived from the message fixtures' evaluations), policy
- * settings, the risk profile and its versions, the DSL catalogue, DLP and BEC lists. Scan settings
- * are owned by the Settings fixtures (WP3); a read-only list is provided here only when no other
- * fixture file defines it. Everything is synthetic.
+ * Dev fixtures of the policy pages (7.1 WP5; step 7.3 WP3, design B15): email policies with
+ * their versions in an in-memory per-process store (`policy-store.ts`: create, rename, enable,
+ * disable, delete, drafts, publish, activate and roll back with row-version compare-and-set,
+ * immutable published versions, Idempotency-Key replays and generation increments), the policy
+ * settings, the execution history (derived from the message fixtures' evaluations), the
+ * catalogue snapshot and canned validate/test/dry-run answers (`policy-tools.ts`, never an
+ * evaluation), the risk profile and its drafts (`policy-risk.ts`), the audit rows of policy and
+ * risk changes, and the DLP and BEC lists (replaced by WP5's `dlp-bec.ts`, registered later).
+ * Scan settings are owned by the Settings fixtures; a read-only list is provided here only when
+ * no other fixture file defines it. Everything is synthetic.
  */
 
-type Policy = SuccessBody<'PolicyManagementController_get_v1'>;
-type PolicyRow = ListItem<'PolicyManagementController_list_v1'>;
-type Version = SuccessBody<'PolicyManagementController_getVersion_v1'>;
 type Execution = ListItem<'PolicyToolsController_history_v1'>;
+type Violation = { path: string; code: string; message: string };
 
 const anchor = fixtureAnchor();
 const DAY = 86_400_000;
 const iso = (offsetDays: number) => new Date(anchor - offsetDays * DAY).toISOString();
-const sha = (seed: string) =>
-  Array.from({ length: 2 }, (_, i) => stableUuid(`${seed}:${i}`).replace(/-/g, ''))
-    .join('')
-    .slice(0, 64);
 const ADMIN = stableUuid('user:organization_admin');
-
-interface PolicySeed {
-  readonly key: string;
-  readonly name: string;
-  readonly description: string | null;
-  readonly status: Policy['status'];
-  readonly direction: Policy['direction'];
-  readonly priority: number;
-  readonly versions: number;
-  readonly active: number | null;
-  readonly definition: Record<string, unknown>;
-}
-
-const SEEDS: readonly PolicySeed[] = [
-  {
-    key: 'inbound-threats',
-    name: 'Inbound threats',
-    description: 'Quarantine high-risk inbound mail; approval for BEC suspicions.',
-    status: 'active',
-    direction: 'inbound',
-    priority: 10,
-    versions: 3,
-    active: 3,
-    definition: {
-      dslVersion: 'policy-dsl/1',
-      direction: 'inbound',
-      priority: 10,
-      rules: [
-        {
-          id: 'block-high-risk',
-          priority: 10,
-          description: 'High and critical risk is quarantined',
-          when: { field: 'risk.level', op: 'in', value: ['high', 'critical'] },
-          actions: [{ type: 'QUARANTINE' }],
-        },
-        {
-          id: 'bec-review',
-          priority: 20,
-          when: { field: 'verdict.final', op: 'equals', value: 'bec' },
-          actions: [{ type: 'REQUIRE_APPROVAL' }, { type: 'ALERT', severity: 'warning' }],
-        },
-      ],
-    },
-  },
-  {
-    key: 'exec-impersonation',
-    name: 'Executive impersonation warning',
-    description: 'Warn when mail claims to come from executives but fails DMARC.',
-    status: 'active',
-    direction: 'inbound',
-    priority: 30,
-    versions: 2,
-    active: 2,
-    definition: {
-      dslVersion: 'policy-dsl/1',
-      direction: 'inbound',
-      priority: 30,
-      rules: [
-        {
-          id: 'exec-impersonation',
-          priority: 10,
-          when: {
-            all: [
-              { field: 'sender.header_from.address', op: 'in', value: ['ceo@alpha.example.test'] },
-              { field: 'auth.dmarc', op: 'in', value: ['fail', 'none'] },
-            ],
-          },
-          actions: [
-            { type: 'WARN', level: 'danger', text: 'Possible executive impersonation <script>' },
-          ],
-        },
-      ],
-    },
-  },
-  {
-    key: 'outbound-cards',
-    name: 'Outbound card numbers need approval',
-    description: null,
-    status: 'active',
-    direction: 'outbound',
-    priority: 40,
-    versions: 1,
-    active: 1,
-    definition: {
-      dslVersion: 'policy-dsl/1',
-      direction: 'outbound',
-      priority: 40,
-      rules: [
-        {
-          id: 'cards-external',
-          priority: 10,
-          when: { field: 'dlp.categories', op: 'contains_any', value: ['payment_card'] },
-          actions: [{ type: 'REQUIRE_APPROVAL' }],
-        },
-      ],
-    },
-  },
-  {
-    key: 'partner-allow',
-    name: 'Partner newsletters',
-    description: 'Allow authenticated partner mail over level-only recommendations.',
-    status: 'disabled',
-    direction: 'inbound',
-    priority: 50,
-    versions: 2,
-    active: 2,
-    definition: {
-      dslVersion: 'policy-dsl/1',
-      direction: 'inbound',
-      priority: 50,
-      rules: [
-        {
-          id: 'partner-allow',
-          priority: 10,
-          when: {
-            field: 'sender.authenticated.domain',
-            op: 'domain_in',
-            value: ['partner.example.test'],
-          },
-          actions: [{ type: 'ALLOW' }],
-          override: true,
-        },
-      ],
-    },
-  },
-  {
-    key: 'internal-archive',
-    name: 'Archive internal finance mail',
-    description: 'Draft for the archive rollout (step 8.1).',
-    status: 'draft',
-    direction: 'internal',
-    priority: 60,
-    versions: 1,
-    active: null,
-    definition: { dslVersion: 'policy-dsl/1', direction: 'internal', priority: 60, rules: [] },
-  },
-  {
-    key: 'any-attachments',
-    name: 'Risky attachments everywhere',
-    description: 'Tag executables in any direction.',
-    status: 'active',
-    direction: 'any',
-    priority: 70,
-    versions: 4,
-    active: 4,
-    definition: {
-      dslVersion: 'policy-dsl/1',
-      direction: 'any',
-      priority: 70,
-      rules: [
-        {
-          id: 'tag-executables',
-          priority: 10,
-          when: {
-            field: 'attachments.type_family',
-            op: 'in',
-            value: ['executable', 'script'],
-            quantifier: 'any',
-          },
-          actions: [{ type: 'TAG', value: 'risky-attachment' }],
-        },
-      ],
-    },
-  },
-];
-
-function policyOf(seed: PolicySeed, index: number): Policy {
-  const id = stableUuid(`policy:${seed.key}`);
-  return {
-    id,
-    name: seed.name,
-    description: seed.description,
-    status: seed.status,
-    direction: seed.direction,
-    priority: seed.priority,
-    activeVersionNo: seed.active,
-    latestVersionNo: seed.versions,
-    rowVersion: seed.versions + 1,
-    createdByUserId: ADMIN,
-    updatedByUserId: ADMIN,
-    createdAt: iso(120 - index * 3),
-    updatedAt: iso(10 - index),
-    activeVersion: seed.active
-      ? {
-          versionNo: seed.active,
-          definitionSha256: sha(`${seed.key}:${seed.active}`),
-          ruleCount: (seed.definition.rules as unknown[]).length,
-          hasOverrideRules: seed.key === 'partner-allow',
-          publishedAt: iso(12 - index),
-        }
-      : null,
-    counts: {
-      drafts: seed.active === null ? 1 : 0,
-      published: seed.active === null ? 0 : 1,
-      superseded: Math.max(0, seed.versions - 1),
-      limit: 50,
-    },
-  };
-}
-
-function versionOf(seed: PolicySeed, versionNo: number): Version {
-  const policyId = stableUuid(`policy:${seed.key}`);
-  const status: Version['status'] =
-    seed.active === null ? 'draft' : versionNo === seed.active ? 'published' : 'superseded';
-  const rules = seed.definition.rules as unknown[];
-  return {
-    policyId,
-    versionNo,
-    status,
-    active: versionNo === seed.active,
-    dslVersion: 'policy-dsl/1',
-    definitionSha256: sha(`${seed.key}:${versionNo}`),
-    ruleCount: rules.length,
-    hasOverrideRules: seed.key === 'partner-allow',
-    references: null,
-    changeNote: versionNo === 1 ? 'Initial version' : `Tuned thresholds (v${versionNo})`,
-    rowVersion: 1,
-    createdByUserId: ADMIN,
-    updatedByUserId: ADMIN,
-    publishedByUserId: status === 'draft' ? null : ADMIN,
-    publishedAt: status === 'draft' ? null : iso(40 - versionNo * 5),
-    createdAt: iso(45 - versionNo * 5),
-    updatedAt: iso(41 - versionNo * 5),
-    definition: {
-      ...seed.definition,
-      priority: (seed.definition.priority as number) + versionNo - 1,
-    },
-    validation:
-      seed.key === 'exec-impersonation' && versionNo === 1
-        ? {
-            valid: false,
-            violations: [
-              { path: 'rules[0].when', code: 'field_unknown', message: 'The field was renamed' },
-            ],
-          }
-        : { valid: true, violations: [] },
-  };
-}
-
-const POLICIES = SEEDS.map(policyOf);
-const BY_ID = new Map(
-  SEEDS.map((seed, i) => [stableUuid(`policy:${seed.key}`), { seed, policy: POLICIES[i] }]),
-);
-
-function rowOf(policy: Policy): PolicyRow {
-  const { activeVersion, counts, ...row } = policy;
-  void activeVersion;
-  void counts;
-  return row;
-}
 
 function v0Page<T>(
   items: readonly T[],
@@ -304,6 +84,10 @@ function v0Page<T>(
   };
 }
 
+// ---------------------------------------------------------------------------------------------
+// Execution history (the message fixtures' stored evaluations)
+// ---------------------------------------------------------------------------------------------
+
 const EXECUTIONS: Execution[] = FIXTURE_MESSAGES.flatMap((m) =>
   m.evaluations.map((e): Execution => ({
     messageId: m.detail.id,
@@ -316,7 +100,7 @@ const EXECUTIONS: Execution[] = FIXTURE_MESSAGES.flatMap((m) =>
     finalAction: e.finalAction,
     decisive: {
       source: e.decisive.source,
-      policyId: e.decisive.policyPublicId ? stableUuid('policy:inbound-threats') : null,
+      policyId: e.decisive.policyPublicId ? 'inbound-threats' : null,
       versionNo: e.decisive.versionNo,
       ruleId: e.decisive.ruleId,
     },
@@ -330,7 +114,8 @@ const EXECUTIONS: Execution[] = FIXTURE_MESSAGES.flatMap((m) =>
   })),
 ).sort((a, b) => b.evaluatedAt.localeCompare(a.evaluatedAt));
 
-function executions(request: FixtureRequest): FixtureResponse {
+/** The history of the caller's organization: tenant decisions name its seeded main policy. */
+function executions(request: FixtureRequest, p: Principal): FixtureResponse {
   const q = request.query;
   const from = Date.parse(q.get('from') ?? '');
   const to = Date.parse(q.get('to') ?? '');
@@ -339,8 +124,11 @@ function executions(request: FixtureRequest): FixtureResponse {
   }
   if (to - from > 31 * DAY)
     return apiError(400, 'validation_failed', ['to: the range is at most 31 days']);
+  const mainPolicy = seededPolicyId(p.organizationId, 'inbound-threats');
   const eq = (name: string, value: string | null) => !q.get(name) || q.get(name) === value;
-  const rows = EXECUTIONS.filter((row) => {
+  const rows = EXECUTIONS.map((row) =>
+    row.decisive.policyId ? { ...row, decisive: { ...row.decisive, policyId: mainPolicy } } : row,
+  ).filter((row) => {
     const t = Date.parse(row.evaluatedAt);
     return (
       t >= from &&
@@ -357,363 +145,600 @@ function executions(request: FixtureRequest): FixtureResponse {
   return ok('PolicyToolsController_history_v1', v0Page(rows, q));
 }
 
-type Field = SuccessBody<'PolicyToolsController_catalog_v1'>['fields'][number];
-const ALL_DIRECTIONS: Field['directions'] = ['inbound', 'outbound', 'internal'];
-function field(
-  name: string,
-  type: Field['type'],
-  scope: Field['scope'],
-  ops: Field['ops'],
-  description: string,
-  extra: Partial<Field> = {},
-): Field {
-  return {
-    name,
-    type,
-    scope,
-    ops,
-    quantified: scope !== 'message',
-    authenticatedIdentity: false,
-    senderIdentity: null,
-    aiDerived: false,
-    directions: ALL_DIRECTIONS,
-    values: null,
-    ordered: false,
-    min: null,
-    max: null,
-    description,
-    ...extra,
-  };
+// ---------------------------------------------------------------------------------------------
+// Policies, versions and settings (the store's rules: CAS, immutability, generation)
+// ---------------------------------------------------------------------------------------------
+
+const RESOURCE_POLICY = 'email_policy';
+const RESOURCE_VERSION = 'policy_version';
+const RESOURCE_SETTINGS = 'policy_settings';
+
+const policyNotFound = () => apiError(404, 'policy_not_found', 'Policy not found');
+const versionNotFound = () => apiError(404, 'policy_version_not_found', 'Policy version not found');
+const conflict = (current: number) =>
+  apiError(409, 'policy_conflict', 'The policy changed since it was read; read it and retry', {
+    currentRowVersion: current,
+  });
+const immutable = () =>
+  apiError(
+    409,
+    'policy_version_immutable',
+    'The version is published; a published version is never changed or deleted',
+  );
+const definitionInvalid = (violations: Violation[]) =>
+  apiError(400, 'policy_definition_invalid', 'The definition breaks the policy-dsl/1 schema', {
+    violations,
+  });
+
+const bodyOf = (request: FixtureRequest): Record<string, unknown> =>
+  isRecord(request.body) ? request.body : {};
+const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+const now = () => new Date().toISOString();
+
+function withOrg(
+  handler: (state: PolicyOrgState, p: Principal, request: FixtureRequest) => FixtureResponse,
+): FixtureHandler {
+  return (request) =>
+    withPrincipal(request, (p) => handler(policyOrg(p.organizationId), p, request));
 }
 
-const CATALOG: SuccessBody<'PolicyToolsController_catalog_v1'> = {
-  versions: { dsl: 'policy-dsl/1', input: 'policy-input/1', evaluator: 'policy-eval/2' },
-  platformDefault: {
-    id: 'platform-default/1',
-    description: 'Follow the risk recommendation within the strictness floor.',
-  },
-  fields: [
-    field('direction', 'enum', 'message', ['equals', 'in', 'not_in'], 'Direction of the message.', {
-      values: ['inbound', 'outbound', 'internal'],
-    }),
-    field(
-      'sender.envelope.address',
-      'address',
-      'message',
-      ['equals', 'in', 'not_in', 'glob', 'regex'],
-      'Envelope sender (MAIL FROM), raw.',
-      { senderIdentity: 'raw' },
-    ),
-    field(
-      'sender.envelope.domain',
-      'domain',
-      'message',
-      ['equals', 'in', 'not_in', 'domain_in'],
-      'Domain of the envelope sender, raw.',
-      { senderIdentity: 'raw' },
-    ),
-    field(
-      'sender.header_from.address',
-      'address',
-      'message',
-      ['equals', 'in', 'not_in', 'glob', 'regex'],
-      'Header From address, raw (spoofable).',
-      { senderIdentity: 'raw' },
-    ),
-    field(
-      'sender.authenticated.domain',
-      'domain',
-      'message',
-      ['equals', 'in', 'domain_in'],
-      'Sender domain proven by DMARC alignment.',
-      { senderIdentity: 'authenticated', authenticatedIdentity: true },
-    ),
-    field(
-      'sender.trusted',
-      'bool',
-      'message',
-      ['is'],
-      'Sender is on the tenant trusted-sender list.',
-    ),
-    field(
-      'recipient.address',
-      'address',
-      'recipients',
-      ['equals', 'in', 'not_in', 'glob'],
-      'Each recipient address.',
-    ),
-    field(
-      'recipient.department',
-      'id',
-      'recipients',
-      ['in', 'not_in'],
-      'Departments of each recipient (tenant directory).',
-    ),
-    field('auth.spf', 'enum', 'message', ['equals', 'in', 'not_in'], 'SPF result.', {
-      values: ['pass', 'fail', 'softfail', 'neutral', 'none', 'temperror', 'permerror'],
-    }),
-    field('auth.dmarc', 'enum', 'message', ['equals', 'in', 'not_in'], 'DMARC result.', {
-      values: ['pass', 'fail', 'none', 'temperror', 'permerror'],
-    }),
-    field('client.ip', 'ip', 'message', ['in_cidr'], 'IP address of the connecting client.', {
-      directions: ['inbound'],
-    }),
-    field(
-      'risk.score',
-      'int',
-      'message',
-      ['eq', 'gt', 'gte', 'lt', 'lte', 'between'],
-      'Risk score of the round (0–1000).',
-      { min: 0, max: 1000 },
-    ),
-    field('risk.level', 'enum', 'message', ['equals', 'in', 'not_in'], 'Risk level of the round.', {
-      values: ['none', 'low', 'medium', 'high', 'critical'],
-      ordered: true,
-    }),
-    field(
-      'verdict.final',
-      'enum',
-      'message',
-      ['equals', 'in', 'not_in'],
-      'Aggregate verdict of the scan.',
-      {
-        values: [
-          'clean',
-          'spam',
-          'bulk',
-          'phishing',
-          'malware',
-          'bec',
-          'dlp_violation',
-          'suspicious',
-          'unknown',
-        ],
-      },
-    ),
-    field(
-      'reason_codes',
-      'codes',
-      'message',
-      ['contains_any', 'contains_all'],
-      'Reason codes of every engine.',
-    ),
-    field(
-      'attachments.count',
-      'int',
-      'message',
-      ['eq', 'gt', 'gte', 'lt', 'lte'],
-      'Number of attachments.',
-      { min: 0, max: 1000 },
-    ),
-    field(
-      'attachments.type_family',
-      'enum',
-      'attachments',
-      ['in', 'not_in'],
-      'Detected type family of each attachment.',
-      {
-        values: [
-          'document',
-          'archive',
-          'executable',
-          'script',
-          'disk_image',
-          'image',
-          'markup',
-          'text',
-          'other',
-        ],
-      },
-    ),
-    field(
-      'attachments.filename',
-      'string',
-      'attachments',
-      ['glob', 'regex'],
-      'Sanitized filename of each attachment (sender-chosen).',
-    ),
-    field('urls.verdict', 'enum', 'urls', ['in', 'not_in'], 'Verdict of each URL.', {
-      values: ['clean', 'suspicious', 'malicious', 'unknown'],
-    }),
-    field('urls.host', 'domain', 'urls', ['domain_in', 'glob'], 'Host of each URL.'),
-    field(
-      'dlp.categories',
-      'codes',
-      'message',
-      ['contains_any', 'contains_all'],
-      'DLP categories found.',
-    ),
-    field('bec.ai_label', 'enum', 'message', ['in'], 'Label of the AI layer (raise-only).', {
-      aiDerived: true,
-      values: ['benign', 'impersonation', 'payment_fraud'],
-    }),
-    field('received_at', 'time', 'message', ['within'], 'Receipt time in the tenant time zone.'),
-  ],
-  operators: [
-    'equals',
-    'in',
-    'not_in',
-    'domain_in',
-    'glob',
-    'regex',
-    'in_cidr',
-    'eq',
-    'gt',
-    'gte',
-    'lt',
-    'lte',
-    'between',
-    'contains_any',
-    'contains_all',
-    'exists',
-    'is',
-    'within',
-  ],
-  actions: [
-    'ALLOW',
-    'REJECT',
-    'QUARANTINE',
-    'TAG',
-    'WARN',
-    'REQUIRE_APPROVAL',
-    'URL_REWRITE',
-    'ARCHIVE',
-    'ALERT',
-  ],
-  nonTerminalActions: ['TAG', 'WARN', 'URL_REWRITE', 'ARCHIVE', 'ALERT'],
-  dispositions: ['allow', 'require_approval', 'quarantine', 'reject'],
-  limits: {
-    maxPolicies: 50,
-    maxVersionsPerPolicy: 50,
-    maxActiveRules: 500,
-    maxRulesPerPolicy: 100,
-    maxConditionDepth: 8,
-  },
-  settingsDefaults: {
-    allowRecommendationOverrides: false,
-    recipientSplit: true,
-    notices: { senderNonDelivery: true },
-    alerts: { enabled: true },
-    tagging: { platformTagHeader: true, platformTagOutbound: false },
-  },
-  enforcement:
-    'Dispositions are enforced; ARCHIVE and ALERT are requested; WARN and URL_REWRITE apply to the delivered copy when possible.',
+function withStoredPolicy(
+  handler: (
+    state: PolicyOrgState,
+    policy: StoredPolicy,
+    p: Principal,
+    request: FixtureRequest,
+  ) => FixtureResponse,
+): FixtureHandler {
+  return withOrg((state, p, request) => {
+    const policy = findPolicy(state, request.params.policyId);
+    return policy ? handler(state, policy, p, request) : policyNotFound();
+  });
+}
+
+const nameTaken = (state: PolicyOrgState, name: string, except?: string) =>
+  state.policies.some(
+    (other) => other.id !== except && other.name.trim().toLowerCase() === name.trim().toLowerCase(),
+  );
+
+/** Activation (P17): pointer, status `active`, policy row version and generation incremented. */
+function activate(
+  state: PolicyOrgState,
+  policy: StoredPolicy,
+  version: StoredVersion,
+  p: Principal,
+): void {
+  const previousVersionNo = policy.activeVersionNo;
+  const previousStatus = policy.status;
+  policy.activeVersionNo = version.versionNo;
+  policy.status = 'active';
+  policy.rowVersion += 1;
+  policy.updatedAt = now();
+  policy.updatedBy = p.userId;
+  state.generation += 1;
+  audit(state, p.userId, 'policy.version_activated', RESOURCE_VERSION, policy.id, {
+    policyId: policy.id,
+    versionNo: version.versionNo,
+    definitionSha256: sha256(version.definition),
+    previousVersionNo,
+    previousStatus,
+    rowVersion: policy.rowVersion,
+    generation: state.generation,
+  });
+}
+
+function newVersion(
+  policy: StoredPolicy,
+  definition: unknown,
+  changeNote: string | null,
+  p: Principal,
+): StoredVersion {
+  const at = now();
+  const version: StoredVersion = {
+    versionNo: nextVersionNo(policy),
+    status: 'draft',
+    definition,
+    changeNote,
+    rowVersion: 1,
+    createdBy: p.userId,
+    updatedBy: p.userId,
+    publishedBy: null,
+    createdAt: at,
+    updatedAt: at,
+    publishedAt: null,
+    deleted: false,
+  };
+  policy.versions.push(version);
+  return version;
+}
+
+const SETTINGS_KEYS: Readonly<Record<string, readonly string[] | null>> = {
+  allowRecommendationOverrides: null,
+  recipientSplit: null,
+  notices: ['senderNonDelivery'],
+  alerts: ['enabled'],
+  tagging: ['platformTagHeader', 'platformTagOutbound'],
 };
 
-const RISK_PROFILE: SuccessBody<'RiskProfilesController_profile_v1'> = {
-  id: stableUuid('risk-profile'),
-  profileVersion: 3,
-  platformProfile: 'rsk-default/1',
-  active: {
-    source: 'tenant',
-    versionId: stableUuid('risk-version:2'),
-    versionNo: 2,
-    profileId: `rsk-default/1+t:${stableUuid('risk-version:2')}#2`,
-    sha256: sha('risk:2'),
-    fallback: null,
-    violations: [],
-  },
-  effectiveProfile: {
-    base: 'rsk-default/1',
-    thresholds: { low: 150, medium: 300, high: 600, critical: 800 },
-    actions: {
-      none: 'deliver',
-      low: 'deliver',
-      medium: 'tag',
-      high: 'quarantine',
-      critical: 'block',
-    },
-    groupMultipliersPermille: {
-      auth_dmarc: 1000,
-      auth_other: 1000,
-      spam: 1000,
-      reputation_ip: 1000,
-      reputation_domain: 1000,
-      url_threat: 1200,
-      lookalike: 1000,
-      credential: 1000,
-      url_structure: 1000,
-      phishing_content: 1000,
-      attachment_malware: 1000,
-      attachment_risky: 1000,
-      bec_impersonation: 1100,
-      bec_identity: 1000,
-      bec_intent: 1000,
-      bec_history: 1000,
-      dlp: 1000,
-      coverage: 1000,
-      engine_failure: 1000,
-      engine_unknown: 1000,
-      sandbox: 1000,
-    },
-    hardBlocks: {
-      'hb.malware_attachment': { enabled: true, action: 'block' },
-      'hb.malware_url': { enabled: true, action: 'block' },
-      'hb.malware_sandbox': { enabled: true, action: 'quarantine' },
-      'hb.dlp_block': { enabled: true, action: 'block' },
-      'hb.known_phishing': { enabled: true, action: 'quarantine' },
-      'hb.tenant_domain_spoof': { enabled: true, action: 'quarantine' },
-      'hb.url_tenant_blocked': { enabled: true, action: 'quarantine' },
-      'hb.bec_malicious': { enabled: true, action: 'require_approval' },
-      'hb.dmarc_reject': { enabled: false, action: 'quarantine' },
-    },
-    failures: {
-      engineFailureWeight: 200,
-      groupCap: 400,
-      unknownWeight: 100,
-      minLevel: 'medium',
-      unknownMinLevel: 'low',
-      action: 'quarantine',
-      unknownAction: 'tag',
-    },
-    floors: { engineMalicious: 'high', becSuspicious: 'medium' },
-    trust: { mode: 'reduce_content', contentFactorPermille: 500 },
-    ai: { tagOnAiOnlyRaise: true },
-  },
-  counts: { drafts: 1, published: 2, limit: 20 },
-  updatedByUserId: ADMIN,
-  updatedAt: iso(9),
+/** `400 policy_settings_invalid`: unknown keys or a value that is not a boolean (by path). */
+function settingsViolations(settings: unknown): Violation[] {
+  if (!isRecord(settings)) {
+    return [{ path: 'settings', code: 'value_invalid', message: 'must be an object' }];
+  }
+  const out: Violation[] = [];
+  for (const [key, value] of Object.entries(settings)) {
+    const nested = SETTINGS_KEYS[key];
+    if (nested === undefined) {
+      out.push({ path: key, code: 'unknown_key', message: 'unknown key' });
+    } else if (nested === null) {
+      if (typeof value !== 'boolean') {
+        out.push({ path: key, code: 'value_invalid', message: 'must be a boolean' });
+      }
+    } else if (!isRecord(value)) {
+      out.push({ path: key, code: 'value_invalid', message: 'must be an object' });
+    } else {
+      for (const [sub, subValue] of Object.entries(value)) {
+        if (!nested.includes(sub)) {
+          out.push({ path: `${key}.${sub}`, code: 'unknown_key', message: 'unknown key' });
+        } else if (typeof subValue !== 'boolean') {
+          out.push({ path: `${key}.${sub}`, code: 'value_invalid', message: 'must be a boolean' });
+        }
+      }
+    }
+  }
+  return out;
+}
+
+const managementFixtures: FixtureHandlers = {
+  PolicyManagementController_list_v1: withOrg((state, _p, request) => {
+    const q = request.query;
+    const rows = state.policies
+      .filter((policy) => !policy.archived)
+      .map(policyRowView)
+      .filter(
+        (row) =>
+          (!q.get('status') || q.get('status') === row.status) &&
+          (!q.get('direction') || q.get('direction') === row.direction),
+      )
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    return ok('PolicyManagementController_list_v1', {
+      ...v0Page(rows, q),
+      generation: String(state.generation),
+    });
+  }),
+
+  PolicyManagementController_get_v1: withStoredPolicy((_state, policy) =>
+    ok('PolicyManagementController_get_v1', policyView(policy)),
+  ),
+
+  PolicyManagementController_create_v1: withOrg((state, p, request) => {
+    const body = bodyOf(request) as Partial<RequestBody<'PolicyManagementController_create_v1'>>;
+    const name = typeof body.name === 'string' ? body.name.trim() : '';
+    if (name.length < 1 || name.length > 128) {
+      return apiError(400, 'validation_failed', ['name: between 1 and 128 characters']);
+    }
+    if (nameTaken(state, name)) {
+      return apiError(
+        409,
+        'policy_name_taken',
+        'A policy with this name exists in the organization',
+      );
+    }
+    if (state.policies.filter((policy) => !policy.archived).length >= POLICY_LIMIT) {
+      return apiError(
+        409,
+        'policy_limit_reached',
+        'The organization reached its limit of policies',
+        {
+          limit: POLICY_LIMIT,
+        },
+      );
+    }
+    const violations = cannedViolations(body.definition);
+    if (violations.length > 0) return definitionInvalid(violations);
+    const at = now();
+    const policy: StoredPolicy = {
+      id: stableUuid(`${p.organizationId}:policy:${name}:${at}`),
+      name,
+      description: typeof body.description === 'string' ? body.description : null,
+      status: 'draft',
+      activeVersionNo: null,
+      rowVersion: 1,
+      archived: false,
+      createdBy: p.userId,
+      updatedBy: p.userId,
+      createdAt: at,
+      updatedAt: at,
+      versions: [],
+    };
+    const version = newVersion(
+      policy,
+      clone(body.definition),
+      typeof body.changeNote === 'string' ? body.changeNote : null,
+      p,
+    );
+    state.policies.push(policy);
+    audit(state, p.userId, 'policy.created', RESOURCE_POLICY, policy.id, {
+      policyId: policy.id,
+      rowVersion: policy.rowVersion,
+      versionNo: version.versionNo,
+      definitionSha256: sha256(version.definition),
+    });
+    return ok(
+      'PolicyManagementController_create_v1',
+      { policy: policyView(policy), version: versionView(policy, version) },
+      201,
+    );
+  }),
+
+  PolicyManagementController_update_v1: withStoredPolicy((state, policy, p, request) => {
+    const body = bodyOf(request) as Partial<RequestBody<'PolicyManagementController_update_v1'>>;
+    if (body.expectedRowVersion !== policy.rowVersion) return conflict(policy.rowVersion);
+    const changed: string[] = [];
+    if (typeof body.name === 'string' && body.name.trim() !== policy.name) {
+      const name = body.name.trim();
+      if (name.length < 1 || name.length > 128) {
+        return apiError(400, 'validation_failed', ['name: between 1 and 128 characters']);
+      }
+      if (nameTaken(state, name, policy.id)) {
+        return apiError(
+          409,
+          'policy_name_taken',
+          'A policy with this name exists in the organization',
+        );
+      }
+      policy.name = name;
+      changed.push('name');
+    }
+    if (body.description !== undefined && body.description !== policy.description) {
+      policy.description = body.description ?? null;
+      changed.push('description');
+    }
+    if (changed.length > 0) {
+      policy.rowVersion += 1;
+      policy.updatedAt = now();
+      policy.updatedBy = p.userId;
+      audit(state, p.userId, 'policy.updated', RESOURCE_POLICY, policy.id, {
+        policyId: policy.id,
+        rowVersion: policy.rowVersion,
+        changedPaths: changed,
+      });
+    }
+    return ok('PolicyManagementController_update_v1', policyView(policy));
+  }),
+
+  PolicyManagementController_remove_v1: withStoredPolicy((state, policy, p, request) => {
+    const expected = request.query.get('expectedRowVersion');
+    if (expected !== null && Number(expected) !== policy.rowVersion) {
+      return conflict(policy.rowVersion);
+    }
+    const wasActive = policy.status === 'active';
+    policy.archived = true;
+    policy.rowVersion += 1;
+    if (wasActive) state.generation += 1;
+    audit(state, p.userId, 'policy.deleted', RESOURCE_POLICY, policy.id, {
+      policyId: policy.id,
+      rowVersion: policy.rowVersion,
+      wasActive,
+      generation: state.generation,
+    });
+    return noContent();
+  }),
+
+  PolicyManagementController_enable_v1: withStoredPolicy((state, policy, p, request) => {
+    const body = bodyOf(request) as Partial<RequestBody<'PolicyManagementController_enable_v1'>>;
+    if (body.expectedRowVersion !== undefined && body.expectedRowVersion !== policy.rowVersion) {
+      return conflict(policy.rowVersion);
+    }
+    if (policy.activeVersionNo === null) {
+      return apiError(409, 'policy_no_active_version', 'Publish and activate a version first');
+    }
+    if (policy.status !== 'active') {
+      policy.status = 'active';
+      policy.rowVersion += 1;
+      policy.updatedAt = now();
+      policy.updatedBy = p.userId;
+      state.generation += 1;
+      audit(state, p.userId, 'policy.enabled', RESOURCE_POLICY, policy.id, {
+        policyId: policy.id,
+        rowVersion: policy.rowVersion,
+        versionNo: policy.activeVersionNo,
+        generation: state.generation,
+      });
+    }
+    return ok('PolicyManagementController_enable_v1', policyView(policy));
+  }),
+
+  PolicyManagementController_disable_v1: withStoredPolicy((state, policy, p, request) => {
+    const body = bodyOf(request) as Partial<RequestBody<'PolicyManagementController_disable_v1'>>;
+    if (body.expectedRowVersion !== undefined && body.expectedRowVersion !== policy.rowVersion) {
+      return conflict(policy.rowVersion);
+    }
+    if (policy.status === 'active') {
+      policy.status = 'disabled';
+      policy.rowVersion += 1;
+      policy.updatedAt = now();
+      policy.updatedBy = p.userId;
+      state.generation += 1;
+      audit(state, p.userId, 'policy.disabled', RESOURCE_POLICY, policy.id, {
+        policyId: policy.id,
+        rowVersion: policy.rowVersion,
+        generation: state.generation,
+      });
+    }
+    return ok('PolicyManagementController_disable_v1', policyView(policy));
+  }),
+
+  PolicyManagementController_listVersions_v1: withStoredPolicy((_state, policy, _p, request) => {
+    const status = request.query.get('status');
+    const rows = policy.versions
+      .filter((v) => !v.deleted && (!status || v.status === status))
+      .sort((a, b) => b.versionNo - a.versionNo)
+      .map((v) => versionRowView(policy, v));
+    return ok('PolicyManagementController_listVersions_v1', v0Page(rows, request.query));
+  }),
+
+  PolicyManagementController_getVersion_v1: withStoredPolicy((_state, policy, _p, request) => {
+    const version = findVersion(policy, request.params.versionNo);
+    return version
+      ? ok('PolicyManagementController_getVersion_v1', versionView(policy, version))
+      : versionNotFound();
+  }),
+
+  PolicyManagementController_createDraft_v1: withStoredPolicy((state, policy, p, request) => {
+    const body = bodyOf(request) as Partial<
+      RequestBody<'PolicyManagementController_createDraft_v1'>
+    >;
+    let definition: unknown = body.definition;
+    if (definition === undefined) {
+      if (body.basedOnVersionNo === undefined) {
+        return apiError(400, 'validation_failed', [
+          'definition: give a definition or basedOnVersionNo',
+        ]);
+      }
+      const source = findVersion(policy, String(body.basedOnVersionNo));
+      if (!source) return versionNotFound();
+      definition = clone(source.definition);
+    }
+    const violations = cannedViolations(definition);
+    if (violations.length > 0) return definitionInvalid(violations);
+    if (liveVersionCount(policy) >= VERSION_LIMIT) {
+      return apiError(
+        409,
+        'policy_version_limit_reached',
+        'The policy reached its limit of versions',
+        {
+          limit: VERSION_LIMIT,
+        },
+      );
+    }
+    const version = newVersion(
+      policy,
+      clone(definition),
+      typeof body.changeNote === 'string' ? body.changeNote : null,
+      p,
+    );
+    audit(state, p.userId, 'policy.version_draft_created', RESOURCE_VERSION, policy.id, {
+      policyId: policy.id,
+      versionNo: version.versionNo,
+      rowVersion: version.rowVersion,
+      definitionSha256: sha256(version.definition),
+    });
+    return ok('PolicyManagementController_createDraft_v1', versionView(policy, version), 201);
+  }),
+
+  PolicyManagementController_updateDraft_v1: withStoredPolicy((state, policy, p, request) => {
+    const version = findVersion(policy, request.params.versionNo);
+    if (!version) return versionNotFound();
+    if (version.status !== 'draft') return immutable();
+    const body = bodyOf(request) as Partial<
+      RequestBody<'PolicyManagementController_updateDraft_v1'>
+    >;
+    if (body.expectedRowVersion !== version.rowVersion) return conflict(version.rowVersion);
+    const violations = cannedViolations(body.definition);
+    if (violations.length > 0) return definitionInvalid(violations);
+    const before = sha256(version.definition);
+    version.definition = clone(body.definition);
+    if (body.changeNote !== undefined) version.changeNote = body.changeNote ?? null;
+    version.rowVersion += 1;
+    version.updatedAt = now();
+    version.updatedBy = p.userId;
+    audit(state, p.userId, 'policy.version_draft_updated', RESOURCE_VERSION, policy.id, {
+      policyId: policy.id,
+      versionNo: version.versionNo,
+      rowVersion: version.rowVersion,
+      definitionSha256Before: before,
+      definitionSha256: sha256(version.definition),
+    });
+    return ok('PolicyManagementController_updateDraft_v1', versionView(policy, version));
+  }),
+
+  PolicyManagementController_deleteDraft_v1: withStoredPolicy((state, policy, p, request) => {
+    const version = findVersion(policy, request.params.versionNo);
+    if (!version) return versionNotFound();
+    if (version.status !== 'draft') return immutable();
+    const expected = request.query.get('expectedRowVersion');
+    if (expected !== null && Number(expected) !== version.rowVersion) {
+      return conflict(version.rowVersion);
+    }
+    version.deleted = true;
+    audit(state, p.userId, 'policy.version_draft_deleted', RESOURCE_VERSION, policy.id, {
+      policyId: policy.id,
+      versionNo: version.versionNo,
+      rowVersion: version.rowVersion,
+    });
+    return noContent();
+  }),
+
+  PolicyManagementController_publish_v1: withStoredPolicy((state, policy, p, request) =>
+    idempotent(state, request, () => {
+      const version = findVersion(policy, request.params.versionNo);
+      if (!version) return versionNotFound();
+      if (version.status !== 'draft') return immutable();
+      const body = bodyOf(request) as Partial<RequestBody<'PolicyManagementController_publish_v1'>>;
+      if (body.expectedRowVersion !== version.rowVersion) return conflict(version.rowVersion);
+      const violations = cannedViolations(version.definition);
+      if (violations.length > 0) return definitionInvalid(violations);
+      version.status = 'published';
+      version.rowVersion += 1;
+      version.publishedAt = now();
+      version.publishedBy = p.userId;
+      version.updatedAt = version.publishedAt;
+      audit(state, p.userId, 'policy.version_published', RESOURCE_VERSION, policy.id, {
+        policyId: policy.id,
+        versionNo: version.versionNo,
+        rowVersion: version.rowVersion,
+        definitionSha256: sha256(version.definition),
+        ruleCount: ruleCountOf(version.definition),
+      });
+      if (hasOverrideRules(version.definition)) {
+        audit(state, p.userId, 'policy.override_rules_published', RESOURCE_VERSION, policy.id, {
+          policyId: policy.id,
+          versionNo: version.versionNo,
+        });
+      }
+      if (body.activate !== false) activate(state, policy, version, p);
+      return ok('PolicyManagementController_publish_v1', {
+        version: versionView(policy, version),
+        policy: policyView(policy),
+        generation: String(state.generation),
+      });
+    }),
+  ),
+
+  PolicyManagementController_activate_v1: withStoredPolicy((state, policy, p, request) =>
+    idempotent(state, request, () => {
+      const version = findVersion(policy, request.params.versionNo);
+      if (!version) return versionNotFound();
+      const body = bodyOf(request) as Partial<
+        RequestBody<'PolicyManagementController_activate_v1'>
+      >;
+      if (body.expectedRowVersion !== undefined && body.expectedRowVersion !== policy.rowVersion) {
+        return conflict(policy.rowVersion);
+      }
+      if (version.status !== 'published') {
+        return apiError(
+          409,
+          'policy_version_not_published',
+          'Only a published version can be activated',
+        );
+      }
+      if (!(policy.activeVersionNo === version.versionNo && policy.status === 'active')) {
+        activate(state, policy, version, p);
+      }
+      return ok('PolicyManagementController_activate_v1', {
+        version: versionView(policy, version),
+        policy: policyView(policy),
+        generation: String(state.generation),
+      });
+    }),
+  ),
+
+  PolicySettingsController_get_v1: withOrg((state) =>
+    ok('PolicySettingsController_get_v1', settingsView(state)),
+  ),
+
+  PolicySettingsController_put_v1: withOrg((state, p, request) => {
+    const body = bodyOf(request) as Partial<RequestBody<'PolicySettingsController_put_v1'>>;
+    if (body.expectedRowVersion !== state.settings.rowVersion) {
+      return conflict(state.settings.rowVersion);
+    }
+    const violations = settingsViolations(body.settings);
+    if (violations.length > 0) {
+      return apiError(400, 'policy_settings_invalid', 'The policy settings are invalid', {
+        violations,
+      });
+    }
+    const next = clone(body.settings ?? {}) as Record<string, unknown>;
+    if (sha256(next) === sha256(state.settings.stored)) {
+      return ok('PolicySettingsController_put_v1', settingsView(state));
+    }
+    const before = settingsView(state).effective.allowRecommendationOverrides;
+    const beforeSha =
+      Object.keys(state.settings.stored).length > 0 ? sha256(state.settings.stored) : null;
+    state.settings = {
+      stored: next,
+      rowVersion: state.settings.rowVersion + 1,
+      updatedAt: now(),
+      updatedBy: p.userId,
+    };
+    state.generation += 1;
+    const resourceId = stableUuid(`${p.organizationId}:policy-settings`);
+    audit(state, p.userId, 'policy.settings_updated', RESOURCE_SETTINGS, resourceId, {
+      rowVersion: state.settings.rowVersion,
+      generation: state.generation,
+      settingsSha256Before: beforeSha,
+      settingsSha256: sha256(next),
+    });
+    if (!before && settingsView(state).effective.allowRecommendationOverrides) {
+      audit(state, p.userId, 'policy.settings_overrides_enabled', RESOURCE_SETTINGS, resourceId, {
+        rowVersion: state.settings.rowVersion,
+        generation: state.generation,
+      });
+    }
+    return ok('PolicySettingsController_put_v1', settingsView(state));
+  }),
+
+  PolicyToolsController_history_v1: (request) =>
+    withPrincipal(request, (p) => executions(request, p)),
 };
 
-const RISK_VERSIONS: ListItem<'RiskProfilesController_listVersions_v1'>[] = [3, 2, 1].map((n) => ({
-  id: stableUuid(`risk-version:${n}`),
-  versionNo: n,
-  status: n === 3 ? 'draft' : 'published',
-  baseProfile: 'rsk-default/1',
-  overridesSha256: sha(`risk-overrides:${n}`),
-  profileSha256: n === 3 ? null : sha(`risk:${n}`),
-  changeNote:
-    n === 3
-      ? 'Raise URL threat weight further'
-      : n === 2
-        ? 'URL threat weight 1.2'
-        : 'Initial tenant profile',
-  rowVersion: 1,
-  active: n === 2,
-  createdByUserId: ADMIN,
-  updatedByUserId: ADMIN,
-  publishedByUserId: n === 3 ? null : ADMIN,
-  publishedAt: n === 3 ? null : iso(30 - n * 10),
-  createdAt: iso(35 - n * 10),
-  updatedAt: iso(31 - n * 10),
-}));
+// ---------------------------------------------------------------------------------------------
+// Audit rows of policy and risk changes (the policy detail's Audit tab, the Audit logs page)
+// ---------------------------------------------------------------------------------------------
 
-const POLICY_SETTINGS: SuccessBody<'PolicySettingsController_get_v1'> = {
-  settings: { allowRecommendationOverrides: true },
-  effective: {
-    allowRecommendationOverrides: true,
-    recipientSplit: true,
-    notices: { senderNonDelivery: true },
-    alerts: { enabled: true },
-    tagging: { platformTagHeader: true, platformTagOutbound: false },
-  },
-  violations: [],
-  generation: '42',
-  rowVersion: 3,
-  settingsSha256: sha('policy-settings'),
-  updatedByUserId: ADMIN,
-  updatedAt: iso(14),
-};
+const STORE_RESOURCES = new Set([
+  'email_policy',
+  'policy_version',
+  'policy_settings',
+  'risk_scoring_profile',
+  'risk_scoring_profile_version',
+]);
+const STORE_PREFIXES = ['policy.', 'risk_profile.'];
+
+/** Rows of the store when the request asks for policy or risk resources; else the audit fixture. */
+function auditSearch(request: FixtureRequest): FixtureResponse | Promise<FixtureResponse> {
+  const q = request.query;
+  const resourceType = q.get('resourceType');
+  const prefix = q.get('actionPrefix');
+  const action = q.get('action');
+  const fromStore =
+    (resourceType !== null && STORE_RESOURCES.has(resourceType)) ||
+    (prefix !== null && STORE_PREFIXES.includes(prefix)) ||
+    (action !== null && STORE_PREFIXES.some((p) => action.startsWith(p)));
+  const fallback = auditFixtures.AuditLogsController_search_v1;
+  if (!fromStore && fallback) return fallback(request);
+  return withPrincipal(request, (p) => {
+    const state = policyOrg(p.organizationId);
+    const to = q.get('to') ? Date.parse(q.get('to') ?? '') : Date.now() + 3_600_000;
+    const from = q.get('from') ? Date.parse(q.get('from') ?? '') : to - 7 * DAY;
+    if (!Number.isFinite(from) || !Number.isFinite(to)) {
+      return apiError(400, 'validation_failed', ['from: must be an ISO 8601 date-time']);
+    }
+    if (to - from > 90 * DAY) {
+      return apiError(400, 'validation_failed', ['from: the range is longer than 90 days']);
+    }
+    const rows = state.audit.filter((row: AuditRow) => {
+      const t = Date.parse(row.createdAt);
+      return (
+        t >= from &&
+        t < to &&
+        (!action || row.action === action) &&
+        (!prefix || row.action.startsWith(prefix)) &&
+        (!resourceType || row.resourceType === resourceType) &&
+        (!q.get('resourceId') || row.resourceId === q.get('resourceId')) &&
+        (!q.get('actorType') || row.actor.type === q.get('actorType')) &&
+        (!q.get('actorId') || row.actor.id === q.get('actorId'))
+      );
+    });
+    const ordered = q.get('sort') === 'createdAt' ? [...rows].reverse() : rows;
+    return { status: 200, body: paginate(ordered, q) };
+  });
+}
+
+// ---------------------------------------------------------------------------------------------
+// DLP and BEC lists (7.1, unchanged; WP5's dlp-bec.ts replaces these handlers)
+// ---------------------------------------------------------------------------------------------
 
 const dlpBase = (key: string, i: number) => ({
   id: stableUuid(`dlp:${key}:${i}`),
@@ -985,16 +1010,6 @@ function filtered<T>(
 const flag = (q: URLSearchParams, name: string, value: boolean) =>
   !q.get(name) || q.get(name) === String(value);
 
-function withPolicy(
-  handler: (seed: PolicySeed, policy: Policy, request: FixtureRequest) => FixtureResponse,
-): FixtureHandler {
-  return guarded((request) => {
-    const found = BY_ID.get(request.params.policyId ?? '');
-    if (!found?.policy) return apiError(404, 'policy_not_found', 'Policy not found');
-    return handler(found.seed, found.policy, request);
-  });
-}
-
 /** Read-only scan settings, used only when no other fixture file (Settings, WP3) defines them. */
 const SCAN_SETTINGS: SuccessBody<'ScanSettingsController_list_v1'> = {
   note: 'Tenant overrides apply to the next scan round; platform bounds always win.',
@@ -1041,53 +1056,10 @@ const scanSettingsOwned =
   'ScanSettingsController_list_v1' in attachmentFixtures;
 
 export const fixtures: FixtureHandlers = {
-  PolicyManagementController_list_v1: guarded((request) => {
-    const q = request.query;
-    const rows = POLICIES.filter(
-      (p) =>
-        (!q.get('status') || q.get('status') === p.status) &&
-        (!q.get('direction') || q.get('direction') === p.direction),
-    ).map(rowOf);
-    return ok('PolicyManagementController_list_v1', { ...v0Page(rows, q), generation: '42' });
-  }),
-  PolicyManagementController_get_v1: withPolicy((_seed, policy) =>
-    ok('PolicyManagementController_get_v1', policy),
-  ),
-  PolicyManagementController_listVersions_v1: withPolicy((seed, _policy, request) => {
-    const status = request.query.get('status');
-    const versions = Array.from({ length: seed.versions }, (_, i) =>
-      versionOf(seed, seed.versions - i),
-    )
-      .filter((v) => !status || v.status === status)
-      .map((version) => {
-        const { definition, validation, ...row } = version;
-        void definition;
-        void validation;
-        return row;
-      });
-    return ok('PolicyManagementController_listVersions_v1', v0Page(versions, request.query));
-  }),
-  PolicyManagementController_getVersion_v1: withPolicy((seed, _policy, request) => {
-    const versionNo = Number(request.params.versionNo);
-    if (!Number.isInteger(versionNo) || versionNo < 1 || versionNo > seed.versions) {
-      return apiError(404, 'policy_version_not_found', 'Policy version not found');
-    }
-    return ok('PolicyManagementController_getVersion_v1', versionOf(seed, versionNo));
-  }),
-  PolicyToolsController_history_v1: guarded(executions),
-  PolicyToolsController_catalog_v1: guarded(() => ok('PolicyToolsController_catalog_v1', CATALOG)),
-  PolicySettingsController_get_v1: guarded(() =>
-    ok('PolicySettingsController_get_v1', POLICY_SETTINGS),
-  ),
-  RiskProfilesController_profile_v1: guarded(() =>
-    ok('RiskProfilesController_profile_v1', RISK_PROFILE),
-  ),
-  RiskProfilesController_listVersions_v1: guarded((request) =>
-    ok(
-      'RiskProfilesController_listVersions_v1',
-      filtered(RISK_VERSIONS, request, (v, q) => !q.get('status') || q.get('status') === v.status),
-    ),
-  ),
+  ...managementFixtures,
+  ...toolFixtures,
+  ...riskFixtures,
+  AuditLogsController_search_v1: auditSearch,
   DlpPoliciesController_list_v1: guarded((request) =>
     ok(
       'DlpPoliciesController_list_v1',

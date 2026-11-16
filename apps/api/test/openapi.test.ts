@@ -5,6 +5,10 @@
  * snapshot docs/api/openapi.json. Regenerate the snapshot after an intended API change with
  *
  *   UPDATE_OPENAPI=1 pnpm --filter @email-gateway/api test:e2e -- openapi
+ *
+ * The same flag writes docs/api/policy-catalog.json (step 7.3 §2 B1): the policy catalogue with
+ * the shipped default bounds and the time-zone list replaced by a marker (it depends on the Node
+ * ICU build); without the flag the test fails when the file differs.
  */
 import { randomBytes } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -32,11 +36,15 @@ import {
   OPENAPI_TAGS,
 } from '../src/http/openapi';
 import { KeyValueStore } from '../src/kv/key-value-store';
+import { catalogView } from '../src/modules/policies/domain/policy-definition';
 import { InMemoryKeyValueStore } from './support/in-memory-key-value-store';
 import { RecordingEmailSender } from './support/recording-email-sender';
 import { TEST_DOMAIN_ENV } from './support/test-env';
 
 const SNAPSHOT = resolve(__dirname, '../../../docs/api/openapi.json');
+const POLICY_CATALOG = resolve(__dirname, '../../../docs/api/policy-catalog.json');
+/** `timeZones` of docs/api/policy-catalog.json (the runtime list depends on the ICU build). */
+const POLICY_CATALOG_TIME_ZONES_MARKER = "<runtime: Intl.supportedValuesOf('timeZone')>";
 const UPDATE = process.env.UPDATE_OPENAPI === '1';
 
 const config = loadApiConfig({
@@ -94,9 +102,9 @@ function operations(doc: OpenAPIObject): Operation[] {
 }
 
 /** Serialized like Prettier formats JSON (the repository's format check covers the file). */
-async function serialize(doc: OpenAPIObject): Promise<string> {
+async function serialize(doc: unknown, file: string = SNAPSHOT): Promise<string> {
   const prettier = await import('prettier');
-  const options = (await prettier.resolveConfig(SNAPSHOT)) ?? {};
+  const options = (await prettier.resolveConfig(file)) ?? {};
   return prettier.format(JSON.stringify(doc), { ...options, parser: 'json' });
 }
 
@@ -200,8 +208,9 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     // (docs/plan/steps/19-webhooks-notifications.md §6.1): 266; plus the 3 reports of step 7.1
     // (docs/plan/steps/20-admin-portal.md §3.3): 269; plus the 5 saved views routes of step 7.2
     // WP1 (docs/plan/steps/21-email-explorer-details.md §3.3): 274; plus the headers route and the
-    // two reveal operations of step 7.2 WP2: 277, all under /api/v1.
-    expect(count).toBe(277);
+    // two reveal operations of step 7.2 WP2: 277; plus the validate and sample dry-run routes of
+    // step 7.3 (docs/plan/steps/22-policy-builder.md §4.4): 279, all under /api/v1.
+    expect(count).toBe(279);
   });
 
   it('gives every /api/v1 operation a tag', () => {
@@ -685,6 +694,9 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
       'GET /api/v1/policies/executions',
       'POST /api/v1/messages/{messageId}/scans/{scanId}/policy/dry-run',
       'GET /api/v1/messages/{messageId}/policy-evaluations',
+      // Step 7.3 §4.2, §4.3.
+      'POST /api/v1/policies/validate',
+      'POST /api/v1/policies/dry-run',
     ];
     const departments = [
       'GET /api/v1/departments',
@@ -1044,6 +1056,147 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
       expect(text, path).toContain('recipientMasked');
       expect(text, path).toContain('message:reveal');
     }
+  });
+
+  it('documents the step 7.3 policy builder routes and the catalogue presentation keys (§4.1–§4.4, ADR-0063)', () => {
+    type RawOp = Record<string, unknown> & {
+      operationId?: string;
+      tags?: string[];
+      description?: string;
+      security?: Array<Record<string, unknown>>;
+      requestBody?: { content?: Record<string, { schema?: unknown; examples?: unknown }> };
+      responses: Record<
+        string,
+        { headers?: Record<string, unknown>; content?: Record<string, { schema?: unknown }> }
+      >;
+    };
+    const raw = (method: string, path: string) =>
+      (doc.paths[path] as Record<string, RawOp>)[method]!;
+    const schemaOf = (op: RawOp, status: string) =>
+      op.responses[status]!.content!['application/json']!.schema as {
+        required?: string[];
+        properties: Record<string, { items?: { required?: string[] }; required?: string[] }>;
+      };
+    // The catalogue: every §4.1 key, required, strict.
+    const catalog = schemaOf(raw('get', '/api/v1/policies/catalog'), '200');
+    for (const key of [
+      'fieldGroups',
+      'operatorDefinitions',
+      'actionDefinitions',
+      'quantifiers',
+      'scopeNouns',
+      'contextRules',
+      'weekdays',
+      'timeZones',
+      'policyDirections',
+      'messageDirections',
+    ]) {
+      expect(catalog.required, key).toContain(key);
+      expect(catalog.properties, key).toHaveProperty(key);
+    }
+    expect(catalog.properties.fields!.items!.required).toEqual(
+      expect.arrayContaining(['label', 'group', 'unit', 'suggestions', 'contexts']),
+    );
+    expect(catalog.properties.operatorDefinitions!.items!.required).toEqual(
+      expect.arrayContaining(['op', 'valueShape', 'itemKind', 'maxItems', 'allowedInException']),
+    );
+    expect(JSON.stringify(catalog.properties.limits)).toContain('dryRunSampleMax');
+    expect(raw('get', '/api/v1/policies/catalog').description).toContain('operatorDefinitions');
+
+    const validate = raw('post', '/api/v1/policies/validate');
+    const sample = raw('post', '/api/v1/policies/dry-run');
+    expect(validate.operationId).toBe('PolicyToolsController_validate_v1');
+    expect(sample.operationId).toBe('PolicyToolsController_sampleDryRun_v1');
+    for (const [op, permissions] of [
+      [validate, ['policy:manage']],
+      [sample, ['policy:manage', 'message:read']],
+    ] as const) {
+      expect(op.tags).toEqual(['policies']);
+      expect(op['x-eg-permissions']).toEqual({ mode: 'all', permissions });
+      const schemes = (op.security ?? []).flatMap((x) => Object.keys(x)).sort();
+      expect(schemes).toEqual([ACCESS_TOKEN_SCHEME, API_KEY_SCHEME].sort());
+      expect(op['x-eg-idempotency']).toBeUndefined();
+      expect(op.description).toContain('Writes nothing');
+      expect(op.description).toContain('327680 bytes');
+      expect(op.requestBody?.content?.['application/json']?.examples).toBeDefined();
+      expect(Object.keys(op.responses)).toEqual(
+        expect.arrayContaining(['200', '400', '401', '403', '413', '429', '500', '503']),
+      );
+      expect(JSON.stringify(op.responses['413'])).toContain('payload_too_large');
+      expect(op.responses['201']).toBeUndefined();
+    }
+    expect(validate['x-eg-rate-class']).toBeUndefined();
+    expect(sample['x-eg-rate-class']).toBe('expensive');
+    expect(JSON.stringify(validate.responses['400'])).toContain('validation_failed');
+    expect(schemaOf(validate, '200').required).toEqual(
+      expect.arrayContaining(['valid', 'violations', 'referenceViolations', 'definitionSha256']),
+    );
+    const sampleText = JSON.stringify(sample);
+    for (const word of [
+      'POLICY_DRY_RUN_SAMPLE_MAX',
+      'POLICY_DRY_RUN_DEADLINE_MS',
+      'POLICY_SAMPLE_DRY_RUNS_PER_MINUTE',
+      'POLICY_HISTORY_MAX_RANGE_DAYS',
+      'truncated',
+    ]) {
+      expect(sampleText, word).toContain(word);
+    }
+    const errors = JSON.stringify(sample.responses);
+    for (const code of [
+      'validation_failed',
+      'policy_definition_invalid',
+      'policy_version_not_found',
+      'rate_limited',
+      'service_unavailable',
+    ]) {
+      expect(errors, code).toContain(code);
+    }
+    expect(JSON.stringify(sample.responses['429'])).toContain('route');
+    expect(sample.responses['429']!.headers).toHaveProperty('Retry-After');
+    expect(schemaOf(sample, '200').required).toEqual(
+      expect.arrayContaining(['target', 'window', 'truncated', 'exhausted', 'summary', 'items']),
+    );
+  });
+
+  it('matches the committed policy catalogue snapshot docs/api/policy-catalog.json (step 7.3 B1)', async () => {
+    const bounds = {
+      POLICY_PLATFORM_DEFAULT: config.POLICY_PLATFORM_DEFAULT,
+      POLICY_MAX_POLICIES: config.POLICY_MAX_POLICIES,
+      POLICY_MAX_VERSIONS_PER_POLICY: config.POLICY_MAX_VERSIONS_PER_POLICY,
+      POLICY_MAX_ACTIVE_RULES: config.POLICY_MAX_ACTIVE_RULES,
+      POLICY_HISTORY_MAX_RANGE_DAYS: config.POLICY_HISTORY_MAX_RANGE_DAYS,
+      POLICY_DRY_RUN_SAMPLE_MAX: config.POLICY_DRY_RUN_SAMPLE_MAX,
+      POLICY_SAMPLE_DRY_RUNS_PER_MINUTE: config.POLICY_SAMPLE_DRY_RUNS_PER_MINUTE,
+    };
+    // The suite's config sets none of these keys: the shipped defaults.
+    expect(bounds).toMatchObject({
+      POLICY_MAX_POLICIES: 100,
+      POLICY_DRY_RUN_SAMPLE_MAX: 50,
+      POLICY_SAMPLE_DRY_RUNS_PER_MINUTE: 6,
+    });
+    const catalog = catalogView(bounds);
+    expect(catalog.timeZones).toContain('UTC');
+    const serialized = await serialize(
+      { ...catalog, timeZones: [POLICY_CATALOG_TIME_ZONES_MARKER] },
+      POLICY_CATALOG,
+    );
+    if (UPDATE) {
+      writeFileSync(POLICY_CATALOG, serialized);
+      return;
+    }
+    let committed: unknown;
+    try {
+      committed = JSON.parse(readFileSync(POLICY_CATALOG, 'utf8'));
+    } catch {
+      throw new Error(
+        'docs/api/policy-catalog.json is missing or invalid: run UPDATE_OPENAPI=1 pnpm --filter ' +
+          '@email-gateway/api test:e2e -- openapi',
+      );
+    }
+    expect(
+      JSON.parse(serialized),
+      'The policy catalogue changed: regenerate docs/api/policy-catalog.json with UPDATE_OPENAPI=1',
+    ).toEqual(committed);
   });
 
   it('matches the committed snapshot docs/api/openapi.json', async () => {

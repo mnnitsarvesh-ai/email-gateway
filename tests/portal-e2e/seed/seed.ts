@@ -18,10 +18,11 @@ import {
   type RecipientStatus,
 } from '@email-gateway/database';
 import * as argon2 from 'argon2';
-import { apiOrigin, optionalEnv, requireEnv } from '../support/env';
+import { optionalEnv, requireEnv } from '../support/env';
 import { base32Encode } from '../support/totp';
 import type { E2eState, E2eUser, UserKey } from '../support/state';
 import { writeState } from '../support/state';
+import { type ApiSession, apiSession } from './api';
 import { cleanup } from './cleanup';
 import { mailBucket, reader, writer } from './db';
 import { historyOf, requiredEnginesOf, scanVerdictOf, writeMessageDetails } from './details';
@@ -36,6 +37,12 @@ import {
   planSpecialAlpha,
   recipientsOf,
 } from './plan';
+import {
+  ALPHA_DLP_POLICY_NAME,
+  BETA_POLICY_NAME,
+  SEEDED_POLICY_NAME,
+  seedPolicies,
+} from './policies';
 
 const sha = (text: string) => createHash('sha256').update(text).digest('hex');
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -464,41 +471,16 @@ function syntheticEml(plan: MessagePlan, body: string): string {
   ].join('\r\n');
 }
 
-/** Logs in through the api (as a client would) and creates a webhook of the user's tenant. */
-async function createWebhook(
-  email: string,
-  password: string,
-  name: string,
-  url: string,
-): Promise<string> {
-  const base = apiOrigin();
-  const login = await fetch(`${base}/api/v1/auth/login`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ email, password }),
-  });
-  if (!login.ok) throw new Error(`webhook owner login failed: ${login.status}`);
-  const { accessToken } = (await login.json()) as { accessToken: string };
-  const res = await fetch(`${base}/api/v1/webhooks`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      authorization: `Bearer ${accessToken}`,
-      'idempotency-key': randomUUID(),
-    },
-    body: JSON.stringify({ name, url, eventTypes: ['email.quarantined'] }),
-  });
-  if (res.status !== 201) {
-    throw new Error(`webhook create failed: ${res.status} ${await res.text()}`);
-  }
-  const body = (await res.json()) as { id?: string; webhook?: { id: string } };
-  const id = body.webhook?.id ?? body.id;
+/** Creates a webhook of the session user's tenant through the api. */
+async function createWebhook(api: ApiSession, name: string, url: string): Promise<string> {
+  const res = await api.call<{ id?: string; webhook?: { id: string } }>(
+    'POST',
+    '/webhooks',
+    { name, url, eventTypes: ['email.quarantined'] },
+    { idempotent: true, expect: 201 },
+  );
+  const id = res.body.webhook?.id ?? res.body.id;
   if (!id) throw new Error('webhook create returned no id');
-  await fetch(`${base}/api/v1/auth/logout`, {
-    method: 'POST',
-    headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' },
-    body: '{}',
-  }).catch(() => undefined);
   return id;
 }
 
@@ -906,18 +888,34 @@ export async function seed(): Promise<SeedSummary> {
       select: { publicId: true },
     });
 
-    const webhookId = await createWebhook(
-      users.betaAdmin.email,
-      users.betaAdmin.password,
-      'Beta SIEM (e2e)',
-      'https://siem.beta.e2e-portal.test/hooks/in',
-    );
-    const alphaWebhookId = await createWebhook(
-      users.alphaAdmin.email,
-      users.alphaAdmin.password,
-      'Alpha SIEM (e2e)',
-      'https://siem.alpha.e2e-portal.test/hooks/in',
-    );
+    // Writes through the api, as the seeded administrators (one session each).
+    const betaApi = await apiSession(users.betaAdmin.email, users.betaAdmin.password);
+    const alphaApi = await apiSession(users.alphaAdmin.email, users.alphaAdmin.password);
+    let webhookId: string;
+    let alphaWebhookId: string;
+    let policies: Awaited<ReturnType<typeof seedPolicies>>;
+    try {
+      webhookId = await createWebhook(
+        betaApi,
+        'Beta SIEM (e2e)',
+        'https://siem.beta.e2e-portal.test/hooks/in',
+      );
+      alphaWebhookId = await createWebhook(
+        alphaApi,
+        'Alpha SIEM (e2e)',
+        'https://siem.alpha.e2e-portal.test/hooks/in',
+      );
+      // Step 7.3: departments, policies with versions, DLP/BEC rows (seed/policies.ts).
+      policies = await seedPolicies(p, alphaApi, betaApi, {
+        alphaOrg: alpha.id,
+        betaOrg: beta.id,
+        alphaMemberUserId: memberIds[0]!,
+        domainName: ALPHA_DOMAIN,
+      });
+    } finally {
+      await alphaApi.logout();
+      await betaApi.logout();
+    }
 
     // Expected figures for the dashboard's default range (7 days ending at the next full hour).
     const to = Math.ceil(Date.now() / 3_600_000) * 3_600_000;
@@ -931,19 +929,23 @@ export async function seed(): Promise<SeedSummary> {
     // The api reads lists and reports from the replica: wait until it has every row.
     const lastAlpha = alphaMessages.at(-1)!;
     await waitForReplica(async (r) => {
-      const [messages, audits, approvalRow, members] = await Promise.all([
+      const [messages, audits, approvalRow, members, versions, suppressions] = await Promise.all([
         r.emailMessage.count({ where: { organizationId: alpha.id } }),
         r.auditLog.count({
           where: { organizationId: alpha.id, correlationId: `e2e-portal-${runId}` },
         }),
         r.quarantineApprovalRequest.count({ where: { id: betaApproval.id } }),
         r.user.count({ where: { organizationId: alpha.id } }),
+        r.policyVersion.count({ where: { organizationId: { in: [alpha.id, beta.id] } } }),
+        r.becSuppressionRule.count({ where: { organizationId: { in: [alpha.id, beta.id] } } }),
       ]);
       return (
         messages === alphaMessages.length &&
         audits === ALPHA_AUDIT_ROWS + 2 &&
         approvalRow === 1 &&
-        members === MEMBER_COUNT + ALPHA_ROLE_USERS
+        members === MEMBER_COUNT + ALPHA_ROLE_USERS &&
+        versions === 4 &&
+        suppressions === 2
       );
     }, `alpha rows (last message ${lastAlpha.publicId})`);
 
@@ -995,6 +997,19 @@ export async function seed(): Promise<SeedSummary> {
         marker: 'BETA-ONLY',
         twinMessageId: byKey('beta-search-twin').publicId,
         savedViewId: betaView.publicId,
+      },
+      policies: {
+        departments: policies.departments,
+        policyId: policies.policyId,
+        policyName: SEEDED_POLICY_NAME,
+        dlpPolicyId: policies.dlpPolicyId,
+        dlpPolicyName: ALPHA_DLP_POLICY_NAME,
+        suppressionId: policies.suppressionId,
+        beta: {
+          policyId: policies.betaPolicyId,
+          policyName: BETA_POLICY_NAME,
+          ...policies.beta,
+        },
       },
       expected: { dashboard7d },
     };

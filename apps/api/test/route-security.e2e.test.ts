@@ -106,6 +106,8 @@ const EXPENSIVE_LEGACY = [
   'post /api/v1/policies/test',
   'post /api/v1/messages/:messageId/scans/:scanId/policy/dry-run',
   'post /api/v1/messages/:messageId/scans/:scanId/risk/dry-run',
+  // Step 7.3 §4.3: the sample dry-run.
+  'post /api/v1/policies/dry-run',
 ];
 
 /** Step 6.1 D3: the pre-6.1 cursor lists (unsigned v0 cursors, unchanged). */
@@ -501,7 +503,7 @@ describe('route security (e2e, dependencies stubbed)', () => {
     }
   });
 
-  it('the step 5.2 policy and department routes require exactly their permissions (P22)', () => {
+  it('the step 5.2 and 7.3 policy and department routes require exactly their permissions (P22)', () => {
     const expected: Record<string, string[]> = {
       'get /api/v1/policies/catalog': ['policy:read'],
       'get /api/v1/policies': ['policy:read'],
@@ -522,6 +524,9 @@ describe('route security (e2e, dependencies stubbed)', () => {
       'put /api/v1/policy-settings': ['policy:publish'],
       'post /api/v1/policies/test': ['policy:manage'],
       'get /api/v1/policies/executions': ['policy:read'],
+      // Step 7.3 §4.2, §4.3 (no new permission).
+      'post /api/v1/policies/validate': ['policy:manage'],
+      'post /api/v1/policies/dry-run': ['policy:manage', 'message:read'],
       'post /api/v1/messages/:messageId/scans/:scanId/policy/dry-run': [
         'policy:manage',
         'message:read',
@@ -555,11 +560,45 @@ describe('route security (e2e, dependencies stubbed)', () => {
       expect(route?.userOnly, key).toBe(false);
       expect(route?.rateLimits, key).toEqual([]);
     }
-    // The static /policies routes are registered before /policies/:policyId.
+    // The static /policies routes are registered before every /policies/:policyId route.
     const order = routes.map((r) => `${r.method} ${r.path}`);
-    expect(order.indexOf('get /api/v1/policies/catalog')).toBeLessThan(
-      order.indexOf('get /api/v1/policies/:policyId'),
+    const firstParam = order.findIndex((k) => k.includes(' /api/v1/policies/:policyId'));
+    expect(firstParam).toBeGreaterThan(0);
+    for (const key of [
+      'get /api/v1/policies/catalog',
+      'post /api/v1/policies/test',
+      'get /api/v1/policies/executions',
+      'post /api/v1/policies/validate',
+      'post /api/v1/policies/dry-run',
+    ]) {
+      expect(order.indexOf(key), key).toBeGreaterThanOrEqual(0);
+      expect(order.indexOf(key), key).toBeLessThan(firstParam);
+    }
+  });
+
+  it('the step 7.3 policy builder routes: classes, the sample limit, no key, users and API keys (§4.2, §4.3)', () => {
+    const validate = routes.find(
+      (r) => `${r.method} ${r.path}` === 'post /api/v1/policies/validate',
     );
+    expect(validate?.rateClass).toBeNull();
+    expect(validate?.policySampleRate).toBeNull();
+    expect(validate?.idempotency).toBeNull();
+    const sample = routes.find((r) => `${r.method} ${r.path}` === 'post /api/v1/policies/dry-run');
+    expect(sample?.rateClass).toBe('expensive');
+    expect(sample?.policySampleRate).toBe('policy-sample-dry-run');
+    expect(sample?.idempotency).toBeNull();
+    for (const route of [validate, sample]) {
+      expect(route?.returnsSecret).toBe(false);
+      expect(route?.userOnly).toBe(false);
+      expect(route?.requireMfa).toBe(false);
+      expect(route?.quarantineRate).toBeNull();
+      expect(route?.revealRate).toBeNull();
+      expect(route?.cursor).toBeNull();
+    }
+    // Only the sample dry-run carries the sample limit.
+    expect(
+      routes.filter((r) => r.policySampleRate !== null).map((r) => `${r.method} ${r.path}`),
+    ).toEqual(['post /api/v1/policies/dry-run']);
   });
 
   it('the step 5.3 quarantine routes require exactly their permissions, users, MFA and rate limits (Q26)', () => {

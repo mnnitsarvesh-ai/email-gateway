@@ -19,3 +19,11 @@ export const ENABLED_TONE: Readonly<Record<string, Tone>> = {
   disabled: 'neutral',
   expired: 'neutral',
 };
+
+/** Policy dispositions (the result view's scale, step 7.3 WP2). */
+export const DISPOSITION_TONE: Readonly<Record<string, Tone>> = {
+  allow: 'success',
+  require_approval: 'warning',
+  quarantine: 'orange',
+  reject: 'danger',
+};

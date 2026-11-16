@@ -7,7 +7,24 @@ import AxeBuilder from '@axe-core/playwright';
 import { expect, type Page } from '@playwright/test';
 
 export async function expectNoSeriousA11yViolations(page: Page, label: string): Promise<void> {
+  // A toast that is fading in or out (sonner's 400 ms transition) is measured at partial opacity
+  // and reported as low contrast (step 7.3 WP4): wait until every toast is fully shown, and leave
+  // out a toast that starts leaving during the scan (a settled toast is still checked).
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() =>
+          [...document.querySelectorAll('[data-sonner-toast]')].every(
+            (toast) =>
+              toast.getAttribute('data-removed') !== 'true' &&
+              getComputedStyle(toast).opacity === '1',
+          ),
+        ),
+      { timeout: 10_000 },
+    )
+    .toBe(true);
   const results = await new AxeBuilder({ page })
+    .exclude('[data-sonner-toast][data-removed="true"]')
     .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'])
     .analyze();
   const serious = results.violations

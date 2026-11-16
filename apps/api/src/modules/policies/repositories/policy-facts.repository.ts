@@ -266,6 +266,35 @@ export class PolicyFactsRepository {
   // -------------------------------------------------------------------------- directory
 
   /**
+   * The public ids among `refs` that exist in the organization (step 7.3 §4.2, the reference check
+   * of `POST /policies/validate`): departments of the organization, users of the organization
+   * that are not deleted (the writer check of publish and activation, read on the replica).
+   */
+  async existingDirectoryIds(
+    scope: TenantScope,
+    refs: { departmentIds: readonly string[]; userIds: readonly string[] },
+  ): Promise<{ departmentIds: Set<string>; userIds: Set<string> }> {
+    const [departments, users] = await Promise.all([
+      refs.departmentIds.length === 0
+        ? Promise.resolve([])
+        : this.db.tenantDepartment.findMany({
+            where: tenantWhere(scope, { publicId: { in: [...refs.departmentIds] } }),
+            select: { publicId: true },
+          }),
+      refs.userIds.length === 0
+        ? Promise.resolve([])
+        : this.db.user.findMany({
+            where: tenantWhere(scope, { publicId: { in: [...refs.userIds] }, deletedAt: null }),
+            select: { publicId: true },
+          }),
+    ]);
+    return {
+      departmentIds: new Set(departments.map((d) => d.publicId)),
+      userIds: new Set(users.map((u) => u.publicId)),
+    };
+  }
+
+  /**
    * Memberships (P5) of `addresses` (normalized) in the referenced departments and users of the
    * organization: address members match their stored normalized address; user members and
    * referenced users match the user's `email` while `status = active` and not deleted.

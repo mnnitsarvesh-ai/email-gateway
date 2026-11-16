@@ -50,7 +50,11 @@ import {
   SCAN_ROUND_NOT_COMPLETE,
   scanRoundNotComplete,
 } from '../policies.errors';
-import { PolicyFactsRepository } from '../repositories/policy-facts.repository';
+import {
+  type FactsMessageRow,
+  type FactsScanRow,
+  PolicyFactsRepository,
+} from '../repositories/policy-facts.repository';
 import { type PolicyDryRunKind, type PolicyDryRunResult, PolicyMetrics } from './policy-writer';
 
 type Settings = { POLICY_PLATFORM_DEFAULT: string };
@@ -65,12 +69,40 @@ const RESULT_OF_CODE: Readonly<Record<string, PolicyDryRunResult>> = {
   [POLICY_INPUT_INVALID]: 'invalid',
 };
 
-const invalidVersions = (compiled: CompiledSnapshot): PolicyTestResponse['invalidVersions'] =>
+/** The versions of a snapshot the current DSL no longer accepts (as every response lists them). */
+export const invalidVersions = (
+  compiled: CompiledSnapshot,
+): PolicyTestResponse['invalidVersions'] =>
   compiled.invalid.map((i) => ({
     policyId: i.publicId,
     versionNo: i.versionNo,
     violations: i.violations.map((v) => ({ path: v.path, code: v.code, message: v.message })),
   }));
+
+/** A round the dry-runs refuse: pending or running on the replica, or not replicated yet. */
+export const isOpenRound = (scan: Pick<FactsScanRow, 'status' | 'completedAt'>): boolean =>
+  OPEN_SCAN_STATUSES.has(scan.status) || scan.completedAt === null;
+
+/**
+ * Runs a test or dry-run and counts it in `policy_dry_runs_total{kind, result}`: `ok`, or the
+ * result of a coded refusal (404s `not_found`, `scan_round_not_complete` `not_complete`,
+ * definition/facts/input errors `invalid`); other errors are not counted.
+ */
+export async function countDryRun<T>(
+  metrics: PolicyMetrics,
+  kind: PolicyDryRunKind,
+  fn: () => Promise<T>,
+): Promise<T> {
+  try {
+    const out = await fn();
+    metrics.dryRuns.inc({ kind, result: 'ok' });
+    return out;
+  } catch (error) {
+    const result = error instanceof CodedHttpException ? RESULT_OF_CODE[error.code] : undefined;
+    if (result !== undefined) metrics.dryRuns.inc({ kind, result });
+    throw error;
+  }
+}
 
 /**
  * The per-recipient evaluation (step 5.3 Q4) as the test and dry-run responses show it: the
@@ -98,7 +130,9 @@ export function perRecipientView(e: PerRecipientEvaluation): {
  * library functions the policy-engine uses (`compileSnapshot`, `buildSyntheticInput` /
  * `buildPolicyInput`, `evaluatePolicyPerRecipient`, step 5.3 Q4). It reads the replica only and **writes nothing**: no
  * evaluation row, no audit row, no outbox row (this service has no writer or audit dependency).
- * Counted `policy_dry_runs_total{kind, result}`.
+ * Counted `policy_dry_runs_total{kind, result}`. Since step 7.3 the target compiler
+ * (`inlineOf`, `compile`) and the round evaluation (`evaluateRound`) are shared with the sample
+ * dry-run (`PolicySampleDryRunService`).
  */
 @Injectable()
 export class PolicyEvaluationService {
@@ -121,16 +155,8 @@ export class PolicyEvaluationService {
     return this.counted('message', () => this.runDryRun(scope, messageId, scanId, body));
   }
 
-  private async counted<T>(kind: PolicyDryRunKind, fn: () => Promise<T>): Promise<T> {
-    try {
-      const out = await fn();
-      this.metrics.dryRuns.inc({ kind, result: 'ok' });
-      return out;
-    } catch (error) {
-      const result = error instanceof CodedHttpException ? RESULT_OF_CODE[error.code] : undefined;
-      if (result !== undefined) this.metrics.dryRuns.inc({ kind, result });
-      throw error;
-    }
+  private counted<T>(kind: PolicyDryRunKind, fn: () => Promise<T>): Promise<T> {
+    return countDryRun(this.metrics, kind, fn);
   }
 
   private async runTest(
@@ -171,26 +197,9 @@ export class PolicyEvaluationService {
     if (!message) throw messageNotFound();
     const scan = await this.facts.scan(scope, message, scanId);
     if (!scan) throw policyScanNotFound();
-    if (OPEN_SCAN_STATUSES.has(scan.status) || scan.completedAt === null) {
-      throw scanRoundNotComplete(scan.status);
-    }
+    if (isOpenRound(scan)) throw scanRoundNotComplete(scan.status);
     const compiled = await this.compile(scope, body.target, inline);
-    const rows = await this.facts.roundRows(scope, message, scanId);
-    const refs = referencedDirectoryIds(compiled);
-    const directory =
-      refs.departmentIds.length === 0 && refs.userIds.length === 0
-        ? { departmentsByAddress: {}, usersByAddress: {} }
-        : directoryMaps(await this.facts.directory(scope, roundAddresses(message, rows), refs));
-    let evaluation: PerRecipientEvaluation;
-    try {
-      evaluation = evaluatePolicyPerRecipient(
-        buildPolicyInput(policyRoundRowsOf(message, scan, rows, directory)),
-        compiled,
-      );
-    } catch (error) {
-      if (error instanceof PolicyInputError) throw policyInputInvalid();
-      throw error;
-    }
+    const evaluation = await this.evaluateRound(scope, message, scan, compiled);
     const storedRow = await this.facts.storedEvaluation(scope, message, scanId);
     const stored = storedRow === null ? null : evaluationViewOf(storedRow);
     const view = perRecipientView(evaluation);
@@ -207,16 +216,54 @@ export class PolicyEvaluationService {
     };
   }
 
-  /** `{ definition }` → the inline snapshot policy (400 when the DSL refuses it). */
-  private inlineOf(target: PolicyTarget): SnapshotPolicy | null {
+  /**
+   * Evaluates one finished round of a message against a compiled snapshot, reading exactly what
+   * the policy-engine assembles (P8): the round's rows and, when the snapshot references directory
+   * ids, the memberships of the round's addresses, all from the replica. `409
+   * policy_input_invalid` when the stored rows do not form an input. Shared by the per-round
+   * dry-run and the sample dry-run (step 7.3, one compiled snapshot per request).
+   */
+  async evaluateRound(
+    scope: TenantScope,
+    message: FactsMessageRow,
+    scan: FactsScanRow,
+    compiled: CompiledSnapshot,
+    refs: { departmentIds: readonly string[]; userIds: readonly string[] } = referencedDirectoryIds(
+      compiled,
+    ),
+  ): Promise<PerRecipientEvaluation> {
+    const rows = await this.facts.roundRows(scope, message, scan.id);
+    const directory =
+      refs.departmentIds.length === 0 && refs.userIds.length === 0
+        ? { departmentsByAddress: {}, usersByAddress: {} }
+        : directoryMaps(await this.facts.directory(scope, roundAddresses(message, rows), refs));
+    try {
+      return evaluatePolicyPerRecipient(
+        buildPolicyInput(policyRoundRowsOf(message, scan, rows, directory)),
+        compiled,
+      );
+    } catch (error) {
+      if (error instanceof PolicyInputError) throw policyInputInvalid();
+      throw error;
+    }
+  }
+
+  /**
+   * `{ definition }` → the inline snapshot policy (400 when the DSL refuses it); null for the
+   * other targets. Callers check it before any database access.
+   */
+  inlineOf(target: PolicyTarget): SnapshotPolicy | null {
     if (typeof target !== 'object' || !('definition' in target)) return null;
     const check = checkDefinition(target.definition);
     if (!check.ok) throw policyDefinitionInvalid(check.violations);
     return inlinePolicy(check.content.definition, check.content.definitionSha256);
   }
 
-  /** The target's compiled snapshot from the replica's active snapshot source (P12). */
-  private async compile(
+  /**
+   * The target's compiled snapshot from the replica's active snapshot source (P12): one snapshot
+   * read and one compile per call (`404 policy_version_not_found` for an unknown version).
+   */
+  async compile(
     scope: TenantScope,
     target: PolicyTarget,
     inline: SnapshotPolicy | null = this.inlineOf(target),

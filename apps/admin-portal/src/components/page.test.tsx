@@ -20,6 +20,24 @@ describe('PageHeader and Breadcrumbs', () => {
     await waitFor(() => expect(document.title).toBe('Domains · Email Security Gateway'));
     await expectNoAxeViolations(container);
   });
+
+  it('keeps its own <title> in the head while another title element comes and goes', async () => {
+    // Next's metadata <title> is removed during a URL-state navigation until the new payload
+    // resolves; the page header's hoisted <title> keeps the document titled meanwhile.
+    const metadataTitle = document.createElement('title');
+    metadataTitle.textContent = 'Email Security Gateway';
+    document.head.append(metadataTitle);
+    const { unmount } = renderWithProviders(<PageHeader title="Policy management" />);
+    await waitFor(() =>
+      expect(Array.from(document.head.querySelectorAll('title'), (t) => t.textContent)).toContain(
+        'Policy management · Email Security Gateway',
+      ),
+    );
+    metadataTitle.remove();
+    expect(document.title).toBe('Policy management · Email Security Gateway');
+    unmount();
+    expect(document.head.querySelectorAll('title')).toHaveLength(0);
+  });
 });
 
 describe('KpiTile', () => {

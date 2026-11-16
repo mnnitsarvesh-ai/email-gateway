@@ -2,21 +2,29 @@ import {
   ACTION_STATUSES,
   DECISION_SOURCES,
   effectivePolicySettingsSchema,
+  POLICY_ACTION_KINDS,
+  POLICY_ACTION_PARAM_TYPES,
   POLICY_ACTION_TYPES,
   POLICY_DIRECTIONS,
   POLICY_DISPOSITIONS,
+  POLICY_DSL_VERSION,
+  POLICY_FIELD_GROUP_IDS,
   POLICY_FIELD_SCOPES,
   POLICY_FIELD_TYPES,
+  POLICY_FIELD_UNITS,
   POLICY_FINAL_ACTIONS,
+  POLICY_ITEM_KINDS,
   POLICY_MESSAGE_DIRECTIONS,
   POLICY_NON_TERMINAL_ACTIONS,
   POLICY_OPERATORS,
   POLICY_TRIGGERS,
+  POLICY_VALUE_SHAPES,
   policyEvaluationResultSchema,
   recipientDecisionsSchema,
   policyEvaluationViewSchema,
   policyTenantSettingsSchema,
   syntheticFactsSchema,
+  WEEKDAYS,
 } from '@email-gateway/policy-dsl';
 import { z } from 'zod';
 import { PageQuerySchema } from '../../../http/pagination';
@@ -338,6 +346,9 @@ export const PolicySettingsUpdateDocSchema = PolicySettingsUpdateSchema.extend({
 // Catalog
 // --------------------------------------------------------------------------------------------
 
+const QUANTIFIERS = ['any', 'all'] as const;
+const Count = z.number().int().min(0);
+
 export const PolicyCatalogFieldSchema = z.strictObject({
   name: z.string(),
   type: z.enum(POLICY_FIELD_TYPES),
@@ -353,6 +364,87 @@ export const PolicyCatalogFieldSchema = z.strictObject({
   min: z.number().int().nullable(),
   max: z.number().int().nullable(),
   description: z.string(),
+  // Step 7.3 §4.1 (presentation metadata of the DSL package).
+  label: z.string().min(1).max(64).describe('Plain-English label (unique; never the code name)'),
+  group: z.enum(POLICY_FIELD_GROUP_IDS).describe('Id of the field group (`fieldGroups`)'),
+  unit: z
+    .enum(POLICY_FIELD_UNITS)
+    .nullable()
+    .describe('Unit of an `int` field (`bytes`, `count`, `score`); null for other types'),
+  suggestions: z
+    .array(z.string())
+    .nullable()
+    .describe(
+      'Known codes for autocomplete of an open `codes` field (one without `values`); never a ' +
+        'closed list (any reason code is accepted); null otherwise',
+    ),
+  contexts: z
+    .strictObject({
+      when: z.literal(true),
+      exception: z.boolean(),
+      relaxingWhen: z.boolean(),
+      holdRule: z.boolean(),
+    })
+    .describe(
+      'Where the field may be used: every `when`; `exception` = rule `unless` and policy ' +
+        '`exceptions` (not raw sender identity, not AI-derived); `relaxingWhen` = the `when` of ' +
+        'ALLOW and override rules (not raw sender identity); `holdRule` = rules with ' +
+        'REQUIRE_APPROVAL, QUARANTINE or REJECT (not AI-derived)',
+    ),
+});
+
+const PolicyOperatorDefinitionSchema = z.strictObject({
+  op: z.enum(POLICY_OPERATORS),
+  label: z.string(),
+  phrase: z.string().describe('Lower-case verb phrase of a readable summary'),
+  valueShape: z
+    .enum(POLICY_VALUE_SHAPES)
+    .describe(
+      '`scalar` one value; `list` 1..`maxItems` items of `itemKind`; `range` `[low, high]`; ' +
+        '`none` no value; `boolean`; `time` (the field decides `time.window` or ' +
+        '`time.date_range`)',
+    ),
+  itemKind: z
+    .enum(POLICY_ITEM_KINDS)
+    .nullable()
+    .describe(
+      '`field` a value of the field type and vocabulary; `domain`; `glob`; `regex` (a pattern ' +
+        "string or `{ pattern, flags: '' | 'i' }`, RE2, validated by the server); `cidr`; `code`",
+    ),
+  maxItems: z.number().int().min(1).nullable(),
+  maxItemLength: z.number().int().min(1).nullable(),
+  negated: z.boolean(),
+  allowedInException: z.boolean(),
+  description: z.string(),
+});
+
+const PolicyActionParamSchema = z.strictObject({
+  name: z.string(),
+  label: z.string(),
+  type: z.enum(POLICY_ACTION_PARAM_TYPES),
+  required: z.boolean(),
+  values: z.array(z.string()).nullable().describe('Allowed values of an `enum` parameter'),
+  default: z
+    .union([z.string(), z.boolean()])
+    .nullable()
+    .describe('The value used when the parameter is absent (null = none or a tenant setting)'),
+  minLength: z.number().int().min(0).nullable(),
+  maxLength: z.number().int().min(1).nullable(),
+  pattern: z
+    .string()
+    .nullable()
+    .describe('A pattern a valid string matches (documentation; the server validates)'),
+  description: z.string(),
+});
+
+const PolicyActionDefinitionSchema = z.strictObject({
+  type: z.enum(POLICY_ACTION_TYPES),
+  label: z.string(),
+  phrase: z.string().describe('Lower-case verb phrase of a readable summary'),
+  kind: z.enum(POLICY_ACTION_KINDS).describe('At most one `disposition` action per rule'),
+  disposition: z.enum(POLICY_DISPOSITIONS).nullable(),
+  params: z.array(PolicyActionParamSchema),
+  description: z.string().describe('What the platform enforces, requests or records'),
 });
 
 export const PolicyCatalogSchema = z.strictObject({
@@ -365,9 +457,47 @@ export const PolicyCatalogSchema = z.strictObject({
   dispositions: z.array(z.enum(POLICY_DISPOSITIONS)).describe('Weakest first'),
   limits: z
     .record(z.string(), z.number().int())
-    .describe('The DSL limits (P4) with the organization bounds of this deployment applied'),
+    .describe(
+      'The DSL limits (P4) with the organization bounds of this deployment applied, plus ' +
+        '(step 7.3) `dryRunSampleMax` (POLICY_DRY_RUN_SAMPLE_MAX) and `dryRunSamplesPerMinute` ' +
+        '(POLICY_SAMPLE_DRY_RUNS_PER_MINUTE)',
+    ),
   settingsDefaults: effectivePolicySettingsSchema,
   enforcement: z.string(),
+  // Step 7.3 §4.1: presentation metadata for visual builders (ADR-0063).
+  fieldGroups: z
+    .array(z.strictObject({ id: z.enum(POLICY_FIELD_GROUP_IDS), label: z.string() }))
+    .describe('Field groups in display order'),
+  operatorDefinitions: z.array(PolicyOperatorDefinitionSchema).describe('One per operator'),
+  actionDefinitions: z.array(PolicyActionDefinitionSchema).describe('One per action'),
+  quantifiers: z
+    .array(z.strictObject({ id: z.enum(QUANTIFIERS), label: z.string(), phrase: z.string() }))
+    .describe('`any` (at least one list element) and `all` (every element)'),
+  scopeNouns: z
+    .strictObject({ recipients: z.string(), attachments: z.string(), urls: z.string() })
+    .describe('Noun of one element of a list-scoped field'),
+  contextRules: z
+    .strictObject({
+      defaultQuantifier: z.enum(QUANTIFIERS),
+      exceptionQuantifier: z.enum(QUANTIFIERS),
+      exceptionNegation: z.boolean(),
+      relaxingDispositions: z.array(z.enum(POLICY_DISPOSITIONS)),
+      holdDispositions: z.array(z.enum(POLICY_DISPOSITIONS)),
+    })
+    .describe(
+      'Placement rules (P6, P9.8): the quantifier of a list condition without one; the only ' +
+        'quantifier exceptions accept; whether exceptions may negate; dispositions whose `when` ' +
+        'is relaxing (plus any `override: true` rule); dispositions that hold mail',
+    ),
+  weekdays: z.array(z.enum(WEEKDAYS)).describe('Days of `time.window`, Monday first'),
+  timeZones: z
+    .array(z.string())
+    .describe(
+      "IANA time zones of the api runtime (`Intl.supportedValuesOf('timeZone')` plus `UTC`, " +
+        'sorted); the validator also accepts aliases the runtime resolves',
+    ),
+  policyDirections: z.array(z.enum(POLICY_DIRECTIONS)),
+  messageDirections: z.array(z.enum(POLICY_MESSAGE_DIRECTIONS)),
 });
 export type PolicyCatalog = z.output<typeof PolicyCatalogSchema>;
 
@@ -451,6 +581,191 @@ export const PolicyDryRunResponseSchema = PolicyTestResponseSchema.extend({
     ),
 });
 export type PolicyDryRunResponse = z.output<typeof PolicyDryRunResponseSchema>;
+
+// --------------------------------------------------------------------------------------------
+// Policy builder (step 7.3 §4.2, §4.3): validation without persisting, sample dry-run
+// --------------------------------------------------------------------------------------------
+
+export const PolicyValidateSchema = z.strictObject({
+  definition: DefinitionInput,
+});
+export type PolicyValidate = z.output<typeof PolicyValidateSchema>;
+
+export const PolicyValidateResponseSchema = z.strictObject({
+  dslVersion: z.literal(POLICY_DSL_VERSION),
+  valid: z
+    .boolean()
+    .describe(
+      'No DSL violation (the check a draft save runs); `referenceViolations` do not make a ' +
+        'definition invalid (publish, activation and enable refuse them)',
+    ),
+  violations: z
+    .array(ViolationSchema)
+    .max(100)
+    .describe('Every DSL violation by JSON path (sorted by path, at most 100)'),
+  referenceViolations: z
+    .array(ViolationSchema)
+    .max(100)
+    .describe(
+      'Departments and users the definition references that are not the organization’s ' +
+        '(`department_unknown`, `user_unknown`; read replica; at most 100); empty when the ' +
+        'definition is invalid',
+    ),
+  ruleCount: z.number().int().min(1).nullable().describe('Null when invalid'),
+  hasOverrideRules: z.boolean().nullable().describe('Null when invalid'),
+  references: DirectoryReferencesSchema.nullable().describe(
+    'Department and user public ids the definition references; null when invalid',
+  ),
+  definitionSha256: Sha256.nullable().describe(
+    'SHA-256 of the canonical JSON (what a save stores); null when invalid',
+  ),
+});
+export type PolicyValidateResponse = z.output<typeof PolicyValidateResponseSchema>;
+
+/** Most rounds a sample dry-run may request (`POLICY_DRY_RUN_SAMPLE_MAX` lowers it). */
+export const POLICY_SAMPLE_LIMIT_MAX = 200;
+export const POLICY_SAMPLE_LIMIT_DEFAULT = 25;
+/** The default sample window (`from` = `to` − 7 days, at most POLICY_HISTORY_MAX_RANGE_DAYS). */
+export const POLICY_SAMPLE_DEFAULT_DAYS = 7;
+
+export const PolicySampleDryRunSchema = z.strictObject({
+  target: TargetSchema.default('active').describe(TARGET_DOC),
+  sample: z
+    .strictObject({
+      from: IsoDate.optional().describe(
+        'Inclusive lower bound of `receivedAt` (default: `to` − 7 days, at most ' +
+          'POLICY_HISTORY_MAX_RANGE_DAYS)',
+      ),
+      to: IsoDate.optional().describe('Exclusive upper bound of `receivedAt` (default: now)'),
+      direction: z.enum(POLICY_MESSAGE_DIRECTIONS).optional(),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(POLICY_SAMPLE_LIMIT_MAX)
+        .optional()
+        .describe(
+          'Rounds to re-evaluate, newest first (1..POLICY_DRY_RUN_SAMPLE_MAX, a larger value is ' +
+            '`400`; default 25, or POLICY_DRY_RUN_SAMPLE_MAX when that is lower)',
+        ),
+    })
+    .default({})
+    .describe('The window of stored evaluations to sample (default: the last 7 days, 25 rounds)'),
+});
+export type PolicySampleDryRun = z.output<typeof PolicySampleDryRunSchema>;
+
+const DispositionCountsSchema = z.strictObject({
+  allow: Count,
+  require_approval: Count,
+  quarantine: Count,
+  reject: Count,
+});
+
+export const POLICY_SAMPLE_OUTCOMES = [
+  'evaluated',
+  'not_complete',
+  'input_invalid',
+  'not_found',
+] as const;
+export type PolicySampleOutcome = (typeof POLICY_SAMPLE_OUTCOMES)[number];
+
+export const PolicySampleItemSchema = z.strictObject({
+  messageId: z.uuid().nullable().describe('Message public id (null if the registry row is gone)'),
+  receivedAt: IsoDate,
+  direction: z.enum(POLICY_MESSAGE_DIRECTIONS),
+  lifecycleRound: z.number().int().min(0),
+  scanId: Decimal,
+  trigger: z.enum(['scanned', 'scan_failed']),
+  outcome: z
+    .enum(POLICY_SAMPLE_OUTCOMES)
+    .describe(
+      '`evaluated`; `not_complete` (the round is pending or running on the replica); ' +
+        '`input_invalid` (the stored rows do not form a policy input); `not_found` (the ' +
+        'message or scan is gone)',
+    ),
+  stored: z
+    .strictObject({
+      disposition: z.enum(POLICY_DISPOSITIONS),
+      source: z.enum(DECISION_SOURCES),
+      policyId: z.uuid().nullable(),
+      versionNo: VersionNo.nullable(),
+      ruleId: z.string().nullable(),
+      evaluatedAt: IsoDate,
+    })
+    .describe('The stored evaluation of the round (message-level decision)'),
+  dryRun: z
+    .strictObject({
+      disposition: z.enum(POLICY_DISPOSITIONS),
+      lifecycleDisposition: z.enum(POLICY_DISPOSITIONS),
+      source: z.enum(DECISION_SOURCES),
+      policyId: z.uuid().nullable(),
+      versionNo: VersionNo.nullable(),
+      ruleId: z.string().nullable(),
+      matchedRuleCount: Count,
+      actionTypes: z.array(z.enum(POLICY_ACTION_TYPES)),
+      recipientSplit: z.boolean(),
+      overrideApplied: z.boolean(),
+    })
+    .nullable()
+    .describe('The recomputed decision against the target; null unless `evaluated`'),
+  dispositionChanged: z
+    .boolean()
+    .describe('The stored and recomputed message-level dispositions differ'),
+  decisiveChanged: z
+    .boolean()
+    .describe('The decisive source, policy or rule differs (false unless `evaluated`)'),
+});
+export type PolicySampleItem = z.output<typeof PolicySampleItemSchema>;
+
+export const PolicySampleDryRunResponseSchema = z.strictObject({
+  target: z
+    .strictObject({
+      kind: z.enum(['active', 'platform', 'version', 'inline']),
+      policyId: z.uuid().nullable(),
+      versionNo: VersionNo.nullable(),
+    })
+    .describe(
+      '`inline` reports the synthetic id `00000000-0000-7000-8000-000000000000` version 1 the ' +
+        'definition is evaluated as',
+    ),
+  window: z.strictObject({ from: IsoDate, to: IsoDate }),
+  limit: z.number().int().min(1).max(POLICY_SAMPLE_LIMIT_MAX),
+  evaluated: Count.describe('Items with outcome `evaluated`'),
+  skipped: Count.describe('Items with another outcome'),
+  truncated: z
+    .boolean()
+    .describe(
+      'POLICY_DRY_RUN_DEADLINE_MS stopped the run before every selected round was evaluated ' +
+        '(`items` holds the evaluated prefix)',
+    ),
+  exhausted: z
+    .boolean()
+    .describe(
+      'The window held fewer stored rounds than `limit` (the bounded selection read all of it)',
+    ),
+  summary: z.strictObject({
+    changed: Count.describe('Evaluated items whose disposition changed'),
+    unchanged: Count,
+    stored: DispositionCountsSchema.describe('Stored dispositions of the evaluated items'),
+    dryRun: DispositionCountsSchema.describe('Recomputed dispositions of the evaluated items'),
+    transitions: z
+      .array(
+        z.strictObject({
+          from: z.enum(POLICY_DISPOSITIONS),
+          to: z.enum(POLICY_DISPOSITIONS),
+          count: z.number().int().min(1),
+        }),
+      )
+      .describe('Stored → recomputed disposition changes, most frequent first'),
+  }),
+  items: z
+    .array(PolicySampleItemSchema)
+    .describe('The processed rounds, newest first (one per message, at most `limit`)'),
+  invalidVersions: z
+    .array(InvalidVersionSchema)
+    .describe('Versions of the snapshot the current DSL no longer accepts (excluded)'),
+});
+export type PolicySampleDryRunResponse = z.output<typeof PolicySampleDryRunResponseSchema>;
 
 // --------------------------------------------------------------------------------------------
 // Execution history and evaluations of a message

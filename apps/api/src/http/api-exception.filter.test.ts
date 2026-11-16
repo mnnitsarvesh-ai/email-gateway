@@ -166,6 +166,52 @@ describe('ApiExceptionFilter (step 6.1 D1, D2, §3.2)', () => {
     expect(error).toHaveBeenCalledWith(expect.objectContaining({ err: expect.any(Error) }));
   });
 
+  it('renders the body parser’s client errors with their status, not as 500 (step 7.3 §14.8)', () => {
+    // body-parser 2 (http-errors): an Error with status, expose and type, not an HttpException.
+    const parserError = (status: number, type: string, message: string, extra = {}) =>
+      Object.assign(new Error(message), {
+        status,
+        statusCode: status,
+        expose: true,
+        type,
+        ...extra,
+      });
+    const tooLarge = render(
+      parserError(413, 'entity.too.large', 'request entity too large', {
+        limit: 102_400,
+        length: 153_600,
+      }),
+      { route: false },
+    );
+    expect(tooLarge.statusCode).toBe(413);
+    expect(tooLarge.body).toEqual({
+      statusCode: 413,
+      error: 'PAYLOAD_TOO_LARGE',
+      code: 'payload_too_large',
+      message: 'Request body is larger than the 102400-byte limit of this route',
+      correlationId: 'corr-0000001',
+      requestId: 'req-0000001',
+    });
+    expect(
+      render(parserError(415, 'charset.unsupported', 'unsupported charset "X"')).body,
+    ).toMatchObject({ statusCode: 415, code: 'unsupported_media_type' });
+    expect(render(parserError(400, 'request.aborted', 'request aborted')).body).toMatchObject({
+      statusCode: 400,
+      code: 'validation_failed',
+      message: 'request aborted',
+    });
+    expect(error).not.toHaveBeenCalled();
+    // Not exposed, not a client status or without a type: still a generic 500.
+    for (const other of [
+      Object.assign(new Error('x'), { status: 413, expose: false, type: 'entity.too.large' }),
+      Object.assign(new Error('x'), { status: 500, expose: true, type: 'stream.encoding.set' }),
+      Object.assign(new Error('x'), { status: 413, expose: true }),
+      { status: 413, expose: true, type: 'entity.too.large', message: 'plain object' },
+    ]) {
+      expect(render(other).body).toMatchObject({ statusCode: 500, code: 'internal_error' });
+    }
+  });
+
   it('logs 5xx HttpExceptions and leaves an already sent response alone', () => {
     render(new ServiceUnavailableException());
     expect(error).toHaveBeenCalled();

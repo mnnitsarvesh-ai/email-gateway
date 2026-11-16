@@ -319,6 +319,9 @@ importers:
       dns-packet:
         specifier: ^5.6.1
         version: 5.6.1
+      express:
+        specifier: ^5.2.1
+        version: 5.2.1
       helmet:
         specifier: ^8.1.0
         version: 8.3.0

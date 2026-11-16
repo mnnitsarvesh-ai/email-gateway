@@ -4,7 +4,9 @@
  * by the policy-engine and the api, the pure deterministic evaluator `policy-eval/2` with the
  * mandatory strictness floor, per-recipient evaluation and the delivery edits of a release copy
  * (step 5.3 Q4, Q13.6, Q22, Q23; ADR-0046, ADR-0049), and the one row ↔ result mapping. No I/O, no clock, no logger;
- * regular expressions from policy documents run only through RE2 (`re2js`).
+ * regular expressions from policy documents run only through RE2 (`re2js`). Step 7.3 (ADR-0063)
+ * adds the presentation metadata of the catalogue (`presentation.ts`: labels, groups, units, code
+ * suggestions, operator value shapes, action parameters, placement contexts) for visual builders.
  */
 export {
   POLICY_DSL_VERSION,
@@ -209,6 +211,37 @@ export {
   type SplitCounts,
 } from './per-recipient';
 export { renderExplanation, renderLine } from './explanation';
+export {
+  POLICY_FIELD_GROUP_IDS,
+  POLICY_FIELD_GROUPS,
+  POLICY_FIELD_UNITS,
+  POLICY_FIELD_PRESENTATION,
+  POLICY_VALUE_SHAPES,
+  POLICY_ITEM_KINDS,
+  POLICY_OPERATOR_PRESENTATION,
+  POLICY_ACTION_KINDS,
+  POLICY_ACTION_PARAM_TYPES,
+  POLICY_ACTION_PRESENTATION,
+  POLICY_QUANTIFIER_PRESENTATION,
+  POLICY_SCOPE_NOUNS,
+  POLICY_CONTEXT_RULES,
+  fieldContexts,
+  policyTimeZones,
+  type PolicyFieldGroupId,
+  type PolicyFieldGroup,
+  type PolicyFieldUnit,
+  type PolicyFieldPresentation,
+  type PolicyFieldContexts,
+  type PolicyValueShape,
+  type PolicyItemKind,
+  type PolicyOperatorPresentation,
+  type PolicyActionKind,
+  type PolicyActionParamType,
+  type PolicyActionParam,
+  type PolicyActionPresentation,
+  type PolicyQuantifierPresentation,
+  type PolicyContextRules,
+} from './presentation';
 export { isValidTimeZone, tzdataVersion } from './time';
 export { normalizeAddress, type NormalizedAddress } from './matchers';
 export { canonicalJson, sha256Hex } from '@email-gateway/risk-scoring';

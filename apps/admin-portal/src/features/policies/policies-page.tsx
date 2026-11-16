@@ -5,7 +5,6 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { z } from 'zod';
 import { PageHeader } from '@/components/page-header';
-import { UnavailableState } from '@/components/states/unavailable-state';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useUrlState } from '@/hooks/use-url-state';
@@ -13,11 +12,13 @@ import type { OperationId } from '@/lib/api/types';
 import { useCan, usePermissions } from '@/lib/auth/me';
 import { canPerform } from '@/lib/auth/permissions';
 import { RouteGate } from '@/lib/auth/route-gate';
-import { PolicySettingsTab, RiskTab, ScanningTab } from './config-tabs';
+import { ScanningTab } from './config-tabs';
 import { BecTab, DlpTab } from './dlp-bec';
 import { EmailPoliciesTab } from './email-policies';
 import { ExecutionsTab } from './executions';
 import { POLICY_BUILDER_HREF, policiesTabHref } from './links';
+import { RiskTab } from './risk/risk-tab';
+import { PolicySettingsTab } from './settings-tab';
 
 export const POLICY_TABS = [
   'email',
@@ -51,18 +52,11 @@ const TAB_LABEL: Record<PolicyTab, string> = {
 
 const URL_SHAPE = { tab: z.enum(POLICY_TABS).default('email').catch('email') };
 
-/** The 7.3 banner of every policy page (no mutation buttons in 7.1). */
-export function PolicyEditingBanner() {
-  return (
-    <UnavailableState
-      step="7.3"
-      title="Policy editing"
-      description="Creating, editing, publishing and activating policies arrives in step 7.3. These pages are read-only."
-    />
-  );
-}
-
-/** Policy management (`/policies?tab=…`, §1.3 row 13): read-only lists and details. */
+/**
+ * Policy management (`/policies?tab=…`, page 13; step 7.3 design B13, B17): email policies with
+ * "New policy", the execution history, the editable policy settings, risk-profile drafts,
+ * scanning, and the DLP and BEC tabs.
+ */
 export function PoliciesPage() {
   return (
     <RouteGate gate={['PolicyManagementController_list_v1']}>
@@ -88,13 +82,12 @@ function PoliciesContent() {
             <Button asChild variant="outline" size="sm">
               <Link href={POLICY_BUILDER_HREF}>
                 <WorkflowIcon aria-hidden />
-                DSL reference
+                Policy builder
               </Link>
             </Button>
           ) : null
         }
       />
-      <PolicyEditingBanner />
       <Tabs
         value={tab}
         onValueChange={(next) => router.push(policiesTabHref(next), { scroll: false })}

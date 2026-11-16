@@ -147,7 +147,20 @@ describe('webhooks: cross-tenant isolation', () => {
     }
     const after = await subscriptionRow(ctx, hookB);
     expect(after).toEqual(before);
-    expect(await ctx.prisma.webhookDelivery.count({ where: { subscriptionId: after.id } })).toBe(1);
+    // B's own range replay (setup) may already have been run by a webhook-worker on the stack,
+    // adding its replayed copy (trigger replay, replayId = that replay). Any other row (a test
+    // delivery, a single-delivery replay, another range replay) could only come from A's requests.
+    const ownReplay = await ctx.prisma.webhookReplay.findUniqueOrThrow({
+      where: { publicId: replayB },
+      select: { id: true },
+    });
+    const deliveries = await ctx.prisma.webhookDelivery.findMany({
+      where: { subscriptionId: after.id },
+      select: { publicId: true, trigger: true, replayId: true },
+    });
+    expect(
+      deliveries.filter((d) => !(d.trigger === 'replay' && d.replayId === ownReplay.id)),
+    ).toEqual([{ publicId: deliveryB.publicId, trigger: 'event', replayId: null }]);
     expect(await ctx.prisma.webhookReplay.count({ where: { subscriptionId: after.id } })).toBe(1);
   });
 

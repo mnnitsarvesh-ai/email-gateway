@@ -69,6 +69,8 @@ export interface PolicyApp {
     history: ReturnType<typeof vi.fn>;
     messagePublicIds: ReturnType<typeof vi.fn>;
     forMessage: ReturnType<typeof vi.fn>;
+    /** Step 7.3: the stored rounds the sample dry-run selects (set per test). */
+    sampleRounds: ReturnType<typeof vi.fn>;
   };
   reset: () => void;
   close: () => Promise<void>;
@@ -111,6 +113,7 @@ export async function createPolicyApp(extraEnv: Record<string, string> = {}): Pr
     snapshot: (s: TenantScope) => store.facts.snapshot(s),
     policyVersion: (s: TenantScope, id: string, n: number) => store.facts.policyVersion(s, id, n),
     directory: (s: TenantScope, a: readonly string[], r: never) => store.facts.directory(s, a, r),
+    existingDirectoryIds: (s: TenantScope, r: never) => store.facts.existingDirectoryIds(s, r),
     message: (scope: TenantScope, id: string) =>
       Promise.resolve(
         scope.organizationId === 1n && id === MESSAGE_ID
@@ -126,6 +129,7 @@ export async function createPolicyApp(extraEnv: Record<string, string> = {}): Pr
     history: vi.fn(() => Promise.resolve([] as unknown[])),
     messagePublicIds: vi.fn(() => Promise.resolve(new Map<bigint, string>())),
     forMessage: vi.fn(() => Promise.resolve([] as unknown[])),
+    sampleRounds: vi.fn(() => Promise.resolve([] as unknown[])),
   };
   const proxy = (pick: () => object) =>
     new Proxy({}, { get: (_t, key: string) => (pick() as Record<string, unknown>)[key] });

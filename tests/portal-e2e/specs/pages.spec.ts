@@ -1,9 +1,11 @@
 /**
  * Every page of design §1.3 (22 pages, their tabs and sub-routes) and the routes linked from
  * emails (§1.2) render with the seeded data, show no error state, and pass axe (no serious or
- * critical violation). The unavailable states of steps 7.3, 8.1, 8.2 and 8.3 and the two "Not
+ * critical violation). The unavailable states of steps 8.1, 8.2 and 8.3 and the two "Not
  * offered" states are present where the design puts them; since step 7.2 the explorer, the
- * details and the scan rounds page carry no "arrives in 7.2" state any more.
+ * details and the scan rounds page carry no "arrives in 7.2" state any more, and since step 7.3
+ * the policy pages carry no "arrives in 7.3" state (the builder, the management flows and the
+ * DLP/BEC editors replaced them).
  */
 import { signIn } from '../support/auth';
 import { expect, test } from '../support/fixtures';
@@ -67,14 +69,36 @@ test('organization admin: overview, mail and security pages', async ({ page }) =
     { path: '/mail-servers?tab=connectors', heading: 'Mail servers' },
     { path: '/mail-servers?tab=suppressions', heading: 'Mail servers' },
     { path: '/mail-servers?tab=deliveries', heading: 'Mail servers' },
-    { path: '/policies', heading: 'Policy management', unavailable: ['7.3'] },
+    {
+      path: '/policies',
+      heading: 'Policy management',
+      markers: [s.policies.policyName],
+      absent: ['Arrives in step 7.3'],
+    },
     { path: '/policies?tab=executions', heading: 'Policy management' },
     { path: '/policies?tab=settings', heading: 'Policy management' },
     { path: '/policies?tab=risk', heading: 'Policy management' },
     { path: '/policies?tab=scanning', heading: 'Policy management' },
     { path: '/policies?tab=dlp', heading: 'Policy management' },
     { path: '/policies?tab=bec', heading: 'Policy management' },
-    { path: '/policies/builder', heading: 'Policy builder', unavailable: ['7.3'] },
+    {
+      path: '/policies/builder',
+      heading: 'Policy builder',
+      absent: ['Arrives in step 7.3'],
+    },
+    {
+      path: `/policies/${s.policies.policyId}`,
+      heading: s.policies.policyName,
+      markers: ['Sender department is one of E2E Finance'],
+    },
+    { path: `/policies/${s.policies.policyId}?tab=versions`, heading: s.policies.policyName },
+    { path: `/policies/${s.policies.policyId}?tab=audit`, heading: s.policies.policyName },
+    {
+      path: `/policies/${s.policies.policyId}/versions/3`,
+      heading: `${s.policies.policyName} · v3`,
+    },
+    { path: `/policies/${s.policies.policyId}/compare?from=1&to=2`, heading: /compare/i },
+    { path: '/policies/new', heading: 'New policy' },
     { path: '/threat-intelligence', heading: 'Threat intelligence', notOffered: 1 },
     {
       path: '/url-protection?range=7d',

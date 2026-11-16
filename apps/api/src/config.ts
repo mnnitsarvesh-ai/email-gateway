@@ -809,6 +809,15 @@ const policyConfigShape = {
   DEPARTMENT_MAX_PER_ORG: int(10, 5000).default(500),
   /** Most members per department (`409 department_member_limit_reached`). */
   DEPARTMENT_MAX_MEMBERS: int(100, 50_000).default(5000),
+  /**
+   * Policy builder (step 7.3 §3, docs/plan/steps/22-policy-builder.md): most stored rounds one
+   * `POST /policies/dry-run` re-evaluates (a larger `sample.limit` is `400`), the wall-clock
+   * budget of one sample dry-run (on expiry the evaluated prefix is returned, `truncated: true`)
+   * and the per-principal sample dry-runs per minute (on top of the `expensive` class).
+   */
+  POLICY_DRY_RUN_SAMPLE_MAX: int(1, 200).default(50),
+  POLICY_DRY_RUN_DEADLINE_MS: int(1000, 30_000).default(10_000),
+  POLICY_SAMPLE_DRY_RUNS_PER_MINUTE: int(1, 60).default(6),
 };
 
 /**

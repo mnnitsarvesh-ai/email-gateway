@@ -8,7 +8,8 @@
  * - `insights.ts` (WP3): audit logs, reports, usage, billing, threat-intelligence lookup;
  * - `webhooks.ts` (step 6.2 WP3): webhooks, delivery history, replays, notification settings
  *   and preferences;
- * - `explorer.ts` (step 7.2): saved views (WP1), headers and reveal (WP2).
+ * - `explorer.ts` (step 7.2): saved views (WP1), headers and reveal (WP2);
+ * - `policy-builder.ts` (step 7.3): policy validation and the sample dry-run.
  *
  * Consumed by `test/route-inventory.e2e.test.ts`, which fails when a served route has no entry,
  * when an entry names a route that does not exist, or when a named test file is missing or does
@@ -18,6 +19,7 @@ import { COVERAGE as EXPLORER } from './explorer';
 import { COVERAGE as INSIGHTS } from './insights';
 import { COVERAGE as LEGACY } from './legacy';
 import { COVERAGE as MESSAGES } from './messages';
+import { COVERAGE as POLICY_BUILDER } from './policy-builder';
 import { COVERAGE as WEBHOOKS } from './webhooks';
 
 /** The §3.8 manifest entry (each manifest declares the same structure). */
@@ -34,7 +36,8 @@ export interface RouteCoverage {
 }
 
 /** Which manifest an entry comes from (reported by the inventory on a failure). */
-export type CoverageArea = 'legacy' | 'messages' | 'insights' | 'webhooks' | 'explorer';
+export type CoverageArea =
+  'legacy' | 'messages' | 'insights' | 'webhooks' | 'explorer' | 'policy-builder';
 
 export const COVERAGE_BY_AREA: Readonly<Record<CoverageArea, readonly RouteCoverage[]>> =
   Object.freeze({
@@ -43,6 +46,7 @@ export const COVERAGE_BY_AREA: Readonly<Record<CoverageArea, readonly RouteCover
     insights: INSIGHTS,
     webhooks: WEBHOOKS,
     explorer: EXPLORER,
+    'policy-builder': POLICY_BUILDER,
   });
 
 export const COVERAGE: readonly RouteCoverage[] = Object.freeze([
@@ -51,4 +55,5 @@ export const COVERAGE: readonly RouteCoverage[] = Object.freeze([
   ...INSIGHTS,
   ...WEBHOOKS,
   ...EXPLORER,
+  ...POLICY_BUILDER,
 ]);

@@ -117,7 +117,9 @@ describe('one door for the message lifecycle (L5.9)', () => {
         violations(readFileSync(join(ROOT, file), 'utf8')).map((v) => `${file}: ${v}`),
       );
     expect(offenders).toEqual([]);
-  });
+    // A whole-repository scan (about 200 ms alone); 30 s under the uncached parallel `pnpm test`,
+    // where it was seen past the 5 s default (step 7.3 §14.7, §14.8).
+  }, 30_000);
 
   it('keeps the allow-list empty (and honest: every entry would still have to write)', () => {
     expect(ALLOW_LIST).toEqual([]);

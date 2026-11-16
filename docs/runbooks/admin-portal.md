@@ -1,8 +1,8 @@
 # Runbook: admin portal
 
-Operating `apps/admin-portal` (steps 7.1 and 7.2): a Next.js 15 application whose same-origin BFF (`/bff/*`) holds the api tokens in a sealed httpOnly cookie and forwards to the api over the internal network ([ADR-0058](../architecture/adr/0058-admin-portal-architecture.md), [ADR-0060](../architecture/adr/0060-portal-ingress-and-trusted-client-ip-forwarding.md), [design note](../plan/steps/20-admin-portal.md)). Local commands: [running and testing](../frontend/running-and-testing.md). Pages: [page inventory](../frontend/page-inventory.md).
+Operating `apps/admin-portal` (steps 7.1, 7.2 and 7.3): a Next.js 15 application whose same-origin BFF (`/bff/*`) holds the api tokens in a sealed httpOnly cookie and forwards to the api over the internal network ([ADR-0058](../architecture/adr/0058-admin-portal-architecture.md), [ADR-0060](../architecture/adr/0060-portal-ingress-and-trusted-client-ip-forwarding.md), [design note](../plan/steps/20-admin-portal.md)). Local commands: [running and testing](../frontend/running-and-testing.md). Pages: [page inventory](../frontend/page-inventory.md).
 
-Contents: [deploy](#deploy) · [configuration and secrets](#configuration-and-secrets) · [session key rotation](#session-key-rotation) · [forwarder token rotation](#forwarder-token-rotation) · [health checks](#health-checks) · [logs](#logs) · [CSP problems](#csp-problems) · [login problems](#login-problems) · [refresh and session expiry](#refresh-and-session-expiry) · [email explorer and details](#email-explorer-and-details-step-72) · [rollback](#rollback)
+Contents: [deploy](#deploy) · [configuration and secrets](#configuration-and-secrets) · [session key rotation](#session-key-rotation) · [forwarder token rotation](#forwarder-token-rotation) · [health checks](#health-checks) · [logs](#logs) · [CSP problems](#csp-problems) · [login problems](#login-problems) · [refresh and session expiry](#refresh-and-session-expiry) · [email explorer and details](#email-explorer-and-details-step-72) · [policy builder and DLP/BEC](#policy-builder-and-dlpbec-configuration-step-73) · [rollback](#rollback)
 
 ## Deploy
 
@@ -90,6 +90,10 @@ Pages 9 (`/messages`) and 10 (`/messages/[messageId]`) are operated through the 
 - The explorer keeps its filters in the URL (shareable); a shared link with filters the recipient may not use is applied without them and says so. Column visibility is per viewer (browser storage); saved views are server-side (`/saved-views`) and not available inside a platform override (`403 saved_views_member_only`, stated in the Views menu).
 - Each details section loads only when opened; a section the user may not open renders "You do not have access to this section" without loading data. The sanitized preview of a quarantined copy is requested only after the explicit click (each preview read is audited, step 5.3).
 - The tenant's api budget (`organization_limits.api_requests_per_minute`, standard plan 300/min, shared by every user of the tenant) applies to the portal like any client: a details page costs one request per opened section plus the shared detail and scan reads.
+
+## Policy builder and DLP/BEC configuration (step 7.3)
+
+Pages 13 (`/policies…`) and 14 (`/policies/builder`) are operated through the api: validation and its auto-validate throttle, the sample dry-run bounds and `429`s, test targets, save conflicts and their dialog choices, publish/activate/rollback and the next-evaluation rule, the policy generation, the `413`/`500` large-policy limitation, risk-profile drafts, settings, DLP and BEC editing (including the Aadhaar basis that needs an MFA session) and where the audit rows are, are in the [policy builder runbook](policy-builder.md). Portal-side facts: the build fails when policy evaluator code reaches `.next` (`assert-no-policy-evaluator`, ADR-0063); the catalogue is cached for 5 minutes per tab; deploy the api before the portal (the catalogue keys and the two step 7.3 operations must exist).
 
 ## Rollback
 

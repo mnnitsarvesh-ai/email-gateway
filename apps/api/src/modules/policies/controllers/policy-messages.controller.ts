@@ -9,6 +9,7 @@ import { ApiErrors } from '../../auth/api-docs';
 import { ApiMessageId, messageIdPipe } from '../../deliveries/api-docs';
 import { ApiMessageNotFound } from '../../messages/api-docs';
 import {
+  ApiPolicyBodyTooLarge,
   ApiDryRunErrors,
   ApiPolicyScanId,
   MESSAGE_READ,
@@ -65,6 +66,7 @@ export class PolicyMessagesController {
   }
 
   @Post(':messageId/scans/:scanId/policy/dry-run')
+  @ApiPolicyBodyTooLarge()
   @RateClass('expensive')
   @RequirePermissions(POLICY_MANAGE, MESSAGE_READ)
   @HttpCode(HttpStatus.OK)

@@ -1,4 +1,12 @@
-import { canonicalJson, POLICY_LIMITS, sha256Hex } from '@email-gateway/policy-dsl';
+import {
+  canonicalJson,
+  POLICY_ACTION_TYPES,
+  POLICY_FIELD_NAMES,
+  POLICY_LIMITS,
+  POLICY_OPERATORS,
+  sha256Hex,
+  validatePolicyDefinition,
+} from '@email-gateway/policy-dsl';
 import { describe, expect, it } from 'vitest';
 import {
   departmentExceptionDefinition,
@@ -6,6 +14,7 @@ import {
   quarantineDomainDefinition,
   tagAllDefinition,
 } from '../../../../test/support/policy-fixtures';
+import { PolicyCatalogSchema } from '../dto/policies.schemas';
 import {
   catalogView,
   changedSettingsPaths,
@@ -25,6 +34,9 @@ const bounds = {
   POLICY_MAX_VERSIONS_PER_POLICY: 50,
   POLICY_MAX_ACTIVE_RULES: 300,
   POLICY_HISTORY_MAX_RANGE_DAYS: 31,
+  // Step 7.3 §3: the sample dry-run bounds the catalog reports.
+  POLICY_DRY_RUN_SAMPLE_MAX: 50,
+  POLICY_SAMPLE_DRY_RUNS_PER_MINUTE: 6,
 };
 
 describe('checkDefinition (P2–P6, P17)', () => {
@@ -181,5 +193,132 @@ describe('catalogView', () => {
     expect(catalog.dispositions).toEqual(['allow', 'require_approval', 'quarantine', 'reject']);
     expect(catalog.platformDefault.id).toBe('pol-default/1');
     expect(catalog.enforcement).toContain('step 5.3');
+  });
+
+  it('carries the step 7.3 presentation metadata and matches the strict response schema', () => {
+    const catalog = catalogView({
+      ...bounds,
+      POLICY_DRY_RUN_SAMPLE_MAX: 40,
+      POLICY_SAMPLE_DRY_RUNS_PER_MINUTE: 3,
+    });
+    expect(PolicyCatalogSchema.parse(catalog)).toEqual(catalog);
+    expect(catalog.limits).toMatchObject({ dryRunSampleMax: 40, dryRunSamplesPerMinute: 3 });
+    expect(catalog.fields.map((f) => f.name)).toEqual([...POLICY_FIELD_NAMES]);
+    expect(catalog.fields.find((f) => f.name === 'direction')).toMatchObject({
+      label: 'Email direction',
+      group: 'message',
+      unit: null,
+      suggestions: null,
+      contexts: { when: true, exception: true, relaxingWhen: true, holdRule: true },
+    });
+    expect(catalog.fields.find((f) => f.name === 'sender.envelope.domain')!.contexts).toEqual({
+      when: true,
+      exception: false,
+      relaxingWhen: false,
+      holdRule: true,
+    });
+    expect(catalog.fields.find((f) => f.name === 'bec.verdict')!.contexts).toEqual({
+      when: true,
+      exception: false,
+      relaxingWhen: true,
+      holdRule: false,
+    });
+    expect(catalog.fields.find((f) => f.name === 'message.size_bytes')!.unit).toBe('bytes');
+    expect(catalog.fields.find((f) => f.name === 'bec.rule_codes')!.suggestions).toContain(
+      'bec.content.wire_transfer',
+    );
+    expect(catalog.fieldGroups.map((g) => g.id)).toEqual([
+      'message',
+      'sender',
+      'recipient',
+      'connection',
+      'authentication',
+      'attachments',
+      'urls',
+      'risk',
+      'dlp',
+      'bec',
+      'scan',
+      'time',
+    ]);
+    expect(catalog.operatorDefinitions.map((o) => o.op)).toEqual([...POLICY_OPERATORS]);
+    expect(catalog.operatorDefinitions.find((o) => o.op === 'regex')).toMatchObject({
+      valueShape: 'list',
+      itemKind: 'regex',
+      maxItems: POLICY_LIMITS.regexes,
+      maxItemLength: POLICY_LIMITS.regexLength,
+      negated: false,
+      allowedInException: true,
+    });
+    expect(catalog.operatorDefinitions.find((o) => o.op === 'not_in')).toMatchObject({
+      negated: true,
+      allowedInException: false,
+    });
+    expect(catalog.actionDefinitions.map((a) => a.type)).toEqual([...POLICY_ACTION_TYPES]);
+    expect(catalog.actionDefinitions.find((a) => a.type === 'ALERT')).toMatchObject({
+      label: 'Alert administrators',
+      kind: 'non_terminal',
+      disposition: null,
+      params: [{ name: 'severity', label: 'Severity', type: 'enum', required: true }],
+    });
+    expect(catalog.actionDefinitions.find((a) => a.type === 'QUARANTINE')).toMatchObject({
+      kind: 'disposition',
+      disposition: 'quarantine',
+      params: [],
+    });
+    expect(catalog.quantifiers).toEqual([
+      { id: 'any', label: 'any', phrase: 'Any' },
+      { id: 'all', label: 'every', phrase: 'Every' },
+    ]);
+    expect(catalog.scopeNouns).toEqual({
+      recipients: 'recipient',
+      attachments: 'attachment',
+      urls: 'link',
+    });
+    expect(catalog.contextRules).toEqual({
+      defaultQuantifier: 'any',
+      exceptionQuantifier: 'all',
+      exceptionNegation: false,
+      relaxingDispositions: ['allow'],
+      holdDispositions: ['require_approval', 'quarantine', 'reject'],
+    });
+    expect(catalog.weekdays).toEqual(['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']);
+    expect(catalog.policyDirections).toEqual(['inbound', 'outbound', 'internal', 'any']);
+    expect(catalog.messageDirections).toEqual(['inbound', 'outbound', 'internal']);
+    expect(catalog.timeZones).toContain('UTC');
+    expect(catalog.timeZones).toContain('Europe/London');
+    expect([...catalog.timeZones].sort()).toEqual(catalog.timeZones);
+    expect(new Set(catalog.timeZones).size).toBe(catalog.timeZones.length);
+  });
+
+  it('describes every action parameter the validator accepts (a document using all validates)', () => {
+    const catalog = catalogView(bounds);
+    for (const action of catalog.actionDefinitions) {
+      const full: Record<string, unknown> = { type: action.type };
+      for (const p of action.params) {
+        full[p.name] =
+          p.type === 'enum'
+            ? p.values![0]
+            : p.type === 'boolean'
+              ? true
+              : p.name === 'label'
+                ? 'review'
+                : 'Checked';
+      }
+      const doc = {
+        dslVersion: 'policy-dsl/1',
+        direction: 'any',
+        priority: 1,
+        rules: [
+          {
+            id: 'r1',
+            priority: 1,
+            when: { field: 'direction', op: 'equals', value: 'inbound' },
+            actions: [full],
+          },
+        ],
+      };
+      expect(validatePolicyDefinition(doc).ok, action.type).toBe(true);
+    }
   });
 });

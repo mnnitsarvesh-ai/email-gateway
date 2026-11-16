@@ -35,6 +35,7 @@ import type { ClientContext } from '../../auth/services/session.service';
 import { ApiQueryFrom } from '../../organizations/api-docs';
 import {
   ApiDefinitionInvalid,
+  ApiPolicyBodyTooLarge,
   ApiInconsistentRead,
   ApiPolicyConflict,
   ApiPolicyId,
@@ -126,6 +127,7 @@ export class PolicyManagementController {
   }
 
   @Post()
+  @ApiPolicyBodyTooLarge()
   @RequirePermissions(POLICY_MANAGE)
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
@@ -302,6 +304,7 @@ export class PolicyManagementController {
   }
 
   @Post(':policyId/versions')
+  @ApiPolicyBodyTooLarge()
   @RequirePermissions(POLICY_MANAGE)
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
@@ -352,6 +355,7 @@ export class PolicyManagementController {
   }
 
   @Put(':policyId/versions/:versionNo')
+  @ApiPolicyBodyTooLarge()
   @RequirePermissions(POLICY_MANAGE)
   @ApiOperation({
     summary: 'Replace a draft version',

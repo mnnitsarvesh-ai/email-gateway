@@ -326,6 +326,20 @@ describe('REST API conventions (e2e, dependencies stubbed)', () => {
       expectEnvelope(res, 400, 'validation_failed');
       expect(res.headers['x-request-id']).toMatch(UUID);
     });
+
+    it('answers a body above the default 100 KiB JSON limit 413 payload_too_large, not 500', async () => {
+      const res = await api
+        .http()
+        .post('/api/v1/conventions-test/validate')
+        .set(await api.principals.bearer())
+        .set('Content-Type', 'application/json')
+        .send(JSON.stringify({ name: 'x'.repeat(110 * 1024) }));
+      expectEnvelope(res, 413, 'payload_too_large');
+      expect(res.body.message).toBe(
+        'Request body is larger than the 102400-byte limit of this route',
+      );
+      expect(res.headers['x-request-id']).toMatch(UUID);
+    });
   });
 
   describe('global rate limiter headers (D8)', () => {

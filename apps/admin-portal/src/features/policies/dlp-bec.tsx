@@ -6,21 +6,31 @@ import { z } from 'zod';
 import { DataTable, type DataTableColumn } from '@/components/data-table';
 import { DateTime, DirectionBadge, UntrustedText } from '@/components/domain';
 import { EmptyState } from '@/components/states/empty-state';
-import { ErrorState } from '@/components/states/error-state';
-import { LoadingState } from '@/components/states/loading-state';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useUrlState } from '@/hooks/use-url-state';
-import { useApiQuery, useCursorList } from '@/lib/api/hooks';
-import type { ListItem, OperationId } from '@/lib/api/types';
+import { useCursorList } from '@/lib/api/hooks';
+import type { OperationId } from '@/lib/api/types';
 import { useCan } from '@/lib/auth/me';
 import { formatNumber, humanize } from '@/lib/format';
-import { CodeList, DetailList, EnumBadge, Section, YesNo } from '@/features/messages/controls';
+import { CodeList } from '@/features/messages/controls';
 import { messageHref } from '@/features/messages/links';
-import { ENABLED_TONE } from './semantic';
+import { BEC_CACHE_NOTE, ExecutivesSection, VendorsSection } from './dlp-bec/bec-profiles';
+import { SuppressionsSection, TrustedSendersSection } from './dlp-bec/bec-senders';
+import { DlpComplianceSection } from './dlp-bec/dlp-compliance';
+import { DlpDictionariesSection } from './dlp-bec/dlp-dictionaries';
+import { DlpExceptionsSection } from './dlp-bec/dlp-exceptions';
+import { DlpPatternsSection } from './dlp-bec/dlp-patterns';
+import { DlpPoliciesSection } from './dlp-bec/dlp-policies';
+import type { BecFeedback, DlpIncident } from './dlp-bec/model';
 
-const enabledBadge = (enabled: boolean) => (
-  <EnumBadge value={enabled ? 'enabled' : 'disabled'} tones={ENABLED_TONE} />
-);
+/**
+ * The DLP and BEC tabs of page 13 (`/policies?tab=dlp|bec`, step 7.3 WP5, design §2 B13): editors
+ * over the existing API in sheets and dialogs inside the tabs (no routes of their own). Views need
+ * `dlp:read` / `bec:read`; editing controls appear only with `dlp:manage` / `bec:manage` (the
+ * Aadhaar basis with `dlp:compliance_manage` and an MFA session); the API stays authoritative.
+ * Every section loads only its own list on first render; details load when an editor opens.
+ * DLP incidents and BEC feedback stay read-only; DLP evidence is never requested here.
+ */
 
 function Sections<T extends string>({
   label,
@@ -85,155 +95,15 @@ function ListTable<Id extends OperationId, Row>({
   );
 }
 
-type DlpPolicy = ListItem<'DlpPoliciesController_list_v1'>;
-type DlpPattern = ListItem<'DlpPatternsController_list_v1'>;
-type DlpDictionary = ListItem<'DlpDictionariesController_list_v1'>;
-type DlpException = ListItem<'DlpExceptionsController_list_v1'>;
-type DlpIncident = ListItem<'DlpIncidentsController_list_v1'>;
-
-const DLP_POLICY_COLUMNS: DataTableColumn<DlpPolicy>[] = [
-  { id: 'name', header: 'Policy', meta: { label: 'Policy' }, cell: ({ row }) => row.original.name },
-  {
-    id: 'enabled',
-    header: 'Status',
-    meta: { label: 'Status' },
-    cell: ({ row }) => enabledBadge(row.original.enabled),
-  },
-  {
-    id: 'mode',
-    header: 'Mode',
-    meta: { label: 'Mode' },
-    cell: ({ row }) => humanize(row.original.mode),
-  },
-  {
-    id: 'directions',
-    header: 'Directions',
-    meta: { label: 'Directions' },
-    cell: ({ row }) => row.original.directions.map(humanize).join(', '),
-  },
-  {
-    id: 'rules',
-    header: 'Rules',
-    meta: { label: 'Rules', className: 'tabular-nums' },
-    cell: ({ row }) => formatNumber(row.original.ruleCount),
-  },
-  {
-    id: 'priority',
-    header: 'Priority',
-    meta: { label: 'Priority', className: 'tabular-nums' },
-    cell: ({ row }) => formatNumber(row.original.priority),
-  },
-  {
-    id: 'updated',
-    header: 'Updated',
-    meta: { label: 'Updated' },
-    cell: ({ row }) => <DateTime value={row.original.updatedAt} />,
-  },
-];
-
-const DLP_PATTERN_COLUMNS: DataTableColumn<DlpPattern>[] = [
-  {
-    id: 'name',
-    header: 'Pattern',
-    meta: { label: 'Pattern' },
-    cell: ({ row }) => row.original.name,
-  },
-  {
-    id: 'pattern',
-    header: 'Expression',
-    meta: { label: 'Expression', className: 'max-w-72' },
-    cell: ({ row }) => <UntrustedText value={row.original.pattern} mono maxLength={60} />,
-  },
-  {
-    id: 'validator',
-    header: 'Validator',
-    meta: { label: 'Validator' },
-    cell: ({ row }) => humanize(row.original.validator),
-  },
-  {
-    id: 'severity',
-    header: 'Severity',
-    meta: { label: 'Severity' },
-    cell: ({ row }) => humanize(row.original.severity),
-  },
-  {
-    id: 'enabled',
-    header: 'Status',
-    meta: { label: 'Status' },
-    cell: ({ row }) => enabledBadge(row.original.enabled),
-  },
-];
-
-const DLP_DICTIONARY_COLUMNS: DataTableColumn<DlpDictionary>[] = [
-  {
-    id: 'name',
-    header: 'Dictionary',
-    meta: { label: 'Dictionary' },
-    cell: ({ row }) => row.original.name,
-  },
-  {
-    id: 'category',
-    header: 'Category',
-    meta: { label: 'Category' },
-    cell: ({ row }) => humanize(row.original.category),
-  },
-  {
-    id: 'terms',
-    header: 'Terms',
-    meta: { label: 'Terms', className: 'tabular-nums' },
-    cell: ({ row }) => formatNumber(row.original.termCount),
-  },
-  {
-    id: 'severity',
-    header: 'Severity',
-    meta: { label: 'Severity' },
-    cell: ({ row }) => humanize(row.original.severity),
-  },
-  {
-    id: 'enabled',
-    header: 'Status',
-    meta: { label: 'Status' },
-    cell: ({ row }) => enabledBadge(row.original.enabled),
-  },
-];
-
-const DLP_EXCEPTION_COLUMNS: DataTableColumn<DlpException>[] = [
-  {
-    id: 'scope',
-    header: 'Scope',
-    meta: { label: 'Scope' },
-    cell: ({ row }) => humanize(row.original.scope),
-  },
-  {
-    id: 'value',
-    header: 'Value',
-    meta: { label: 'Value' },
-    cell: ({ row }) => <UntrustedText value={row.original.value} maxLength={60} />,
-  },
-  {
-    id: 'reason',
-    header: 'Reason',
-    meta: { label: 'Reason', className: 'max-w-72' },
-    cell: ({ row }) => <UntrustedText value={row.original.reason} maxLength={80} />,
-  },
-  {
-    id: 'expires',
-    header: 'Expires',
-    meta: { label: 'Expires' },
-    cell: ({ row }) => <DateTime value={row.original.expiresAt} />,
-  },
-  {
-    id: 'status',
-    header: 'Status',
-    meta: { label: 'Status' },
-    cell: ({ row }) =>
-      row.original.expired ? (
-        <EnumBadge value="expired" tones={ENABLED_TONE} />
-      ) : (
-        enabledBadge(row.original.enabled)
-      ),
-  },
-];
+/** The cache and permission note above a tab's sections. */
+function TabNote({ cache, viewOnly }: { cache: string; viewOnly: string | null }) {
+  return (
+    <p className="mb-3 text-sm text-muted-foreground">
+      {cache}
+      {viewOnly ? <> {viewOnly}</> : null}
+    </p>
+  );
+}
 
 function incidentColumns(canMessages: boolean): DataTableColumn<DlpIncident>[] {
   return [
@@ -305,219 +175,55 @@ const DLP_LABELS: Record<(typeof DLP_SECTIONS)[number], string> = {
   compliance: 'Compliance',
 };
 
-/** DLP configuration and incidents (dlp:read), read-only lists. */
+const DLP_CACHE_NOTE =
+  'Changes apply to messages scanned after the DLP engine’s cache refresh (30 seconds by default); finished scans keep their result.';
+
+/** DLP configuration (`dlp:read` views, `dlp:manage` edits) and incidents (read-only). */
 export function DlpTab() {
   const canMessages = useCan('MessagesController_detail_v1');
+  const canManage = useCan('DlpPoliciesController_create_v1');
   return (
-    <Sections
-      label="DLP sections"
-      sections={DLP_SECTIONS}
-      labels={DLP_LABELS}
-      render={(section) => {
-        switch (section) {
-          case 'policies':
-            return (
-              <ListTable
-                operationId="DlpPoliciesController_list_v1"
-                tableId="dlp-policies"
-                caption="DLP policies"
-                columns={DLP_POLICY_COLUMNS}
-                getRowId={(r: DlpPolicy) => r.id}
-                emptyTitle="No DLP policies"
-                mobile={(r: DlpPolicy) => r.name}
-              />
-            );
-          case 'patterns':
-            return (
-              <ListTable
-                operationId="DlpPatternsController_list_v1"
-                tableId="dlp-patterns"
-                caption="DLP patterns"
-                columns={DLP_PATTERN_COLUMNS}
-                getRowId={(r: DlpPattern) => r.id}
-                emptyTitle="No custom patterns"
-                mobile={(r: DlpPattern) => r.name}
-              />
-            );
-          case 'dictionaries':
-            return (
-              <ListTable
-                operationId="DlpDictionariesController_list_v1"
-                tableId="dlp-dictionaries"
-                caption="DLP dictionaries"
-                columns={DLP_DICTIONARY_COLUMNS}
-                getRowId={(r: DlpDictionary) => r.id}
-                emptyTitle="No dictionaries"
-                mobile={(r: DlpDictionary) => r.name}
-              />
-            );
-          case 'exceptions':
-            return (
-              <ListTable
-                operationId="DlpExceptionsController_list_v1"
-                tableId="dlp-exceptions"
-                caption="DLP exceptions"
-                columns={DLP_EXCEPTION_COLUMNS}
-                getRowId={(r: DlpException) => r.id}
-                emptyTitle="No exceptions"
-                mobile={(r: DlpException) => <UntrustedText value={r.value} />}
-              />
-            );
-          case 'incidents':
-            return (
-              <ListTable
-                operationId="DlpIncidentsController_list_v1"
-                tableId="dlp-incidents"
-                caption="DLP incidents"
-                columns={incidentColumns(canMessages)}
-                getRowId={(r: DlpIncident) => `${r.messageId}:${r.scanId}`}
-                emptyTitle="No DLP incidents"
-                mobile={(r: DlpIncident) => humanize(r.action)}
-              />
-            );
-          default:
-            return <DlpCompliance />;
-        }
-      }}
-    />
-  );
-}
-
-function DlpCompliance() {
-  const compliance = useApiQuery('DlpComplianceController_get_v1');
-  if (compliance.isLoading) return <LoadingState label="Loading compliance status" rows={4} />;
-  if (compliance.error || !compliance.data) {
-    return <ErrorState error={compliance.error} onRetry={() => void compliance.refetch()} />;
-  }
-  const a = compliance.data.aadhaar;
-  return (
-    <Section
-      title="Aadhaar detection"
-      description="Aadhaar numbers are detected only with a recorded legal basis."
-    >
-      <DetailList
-        items={[
-          { label: 'Enabled', value: <YesNo value={a.enabled} /> },
-          { label: 'Active', value: <YesNo value={a.active} /> },
-          {
-            label: 'Legal basis',
-            value: a.basis ? (
-              humanize(a.basis)
-            ) : (
-              <span className="text-muted-foreground">None recorded</span>
-            ),
-          },
-          { label: 'Reference', value: <UntrustedText value={a.reference} emptyLabel="None" /> },
-          { label: 'Attested', value: <YesNo value={a.attested} /> },
-          {
-            label: 'Recorded',
-            value: <DateTime value={a.recordedAt} mode="absolute" emptyLabel="Never" />,
-          },
-          {
-            label: 'Review due',
-            value: <DateTime value={a.reviewDueAt} mode="absolute" emptyLabel="Not set" />,
-          },
-        ]}
+    <div>
+      <TabNote
+        cache={DLP_CACHE_NOTE}
+        viewOnly={canManage ? null : 'View only: changing DLP configuration needs dlp:manage.'}
       />
-    </Section>
+      <Sections
+        label="DLP sections"
+        sections={DLP_SECTIONS}
+        labels={DLP_LABELS}
+        render={(section) => {
+          switch (section) {
+            case 'policies':
+              return <DlpPoliciesSection />;
+            case 'patterns':
+              return <DlpPatternsSection />;
+            case 'dictionaries':
+              return <DlpDictionariesSection />;
+            case 'exceptions':
+              return <DlpExceptionsSection />;
+            case 'incidents':
+              return (
+                <ListTable
+                  operationId="DlpIncidentsController_list_v1"
+                  tableId="dlp-incidents"
+                  caption="DLP incidents"
+                  columns={incidentColumns(canMessages)}
+                  getRowId={(r: DlpIncident) => `${r.messageId}:${r.scanId}`}
+                  emptyTitle="No DLP incidents"
+                  mobile={(r: DlpIncident) => humanize(r.action)}
+                />
+              );
+            default:
+              return <DlpComplianceSection />;
+          }
+        }}
+      />
+    </div>
   );
 }
 
-type Executive = ListItem<'BecExecutivesController_list_v1'>;
-type Vendor = ListItem<'BecVendorsController_list_v1'>;
-type TrustedSender = ListItem<'BecTrustedSendersController_list_v1'>;
-type Feedback = ListItem<'BecFeedbackController_list_v1'>;
-type Suppression = ListItem<'BecFeedbackController_listSuppressions_v1'>;
-
-const EXECUTIVE_COLUMNS: DataTableColumn<Executive>[] = [
-  {
-    id: 'name',
-    header: 'Executive',
-    meta: { label: 'Executive' },
-    cell: ({ row }) => row.original.displayName,
-  },
-  {
-    id: 'title',
-    header: 'Title',
-    meta: { label: 'Title' },
-    cell: ({ row }) => row.original.title ?? <span className="text-muted-foreground">None</span>,
-  },
-  {
-    id: 'addresses',
-    header: 'Known addresses',
-    meta: { label: 'Known addresses', className: 'max-w-72' },
-    cell: ({ row }) => <CodeList codes={row.original.knownAddresses} />,
-  },
-  {
-    id: 'aliases',
-    header: 'Aliases',
-    meta: { label: 'Aliases' },
-    cell: ({ row }) => <CodeList codes={row.original.aliases} />,
-  },
-  {
-    id: 'enabled',
-    header: 'Status',
-    meta: { label: 'Status' },
-    cell: ({ row }) => enabledBadge(row.original.enabled),
-  },
-];
-
-const VENDOR_COLUMNS: DataTableColumn<Vendor>[] = [
-  { id: 'name', header: 'Vendor', meta: { label: 'Vendor' }, cell: ({ row }) => row.original.name },
-  {
-    id: 'domains',
-    header: 'Domains',
-    meta: { label: 'Domains' },
-    cell: ({ row }) => <CodeList codes={row.original.domains} />,
-  },
-  {
-    id: 'senders',
-    header: 'Known senders',
-    meta: { label: 'Known senders' },
-    cell: ({ row }) => <CodeList codes={row.original.knownSenders} />,
-  },
-  {
-    id: 'payment',
-    header: 'Payment-change sensitive',
-    meta: { label: 'Payment-change sensitive' },
-    cell: ({ row }) => <YesNo value={row.original.paymentChangeSensitive} />,
-  },
-  {
-    id: 'enabled',
-    header: 'Status',
-    meta: { label: 'Status' },
-    cell: ({ row }) => enabledBadge(row.original.enabled),
-  },
-];
-
-const TRUSTED_COLUMNS: DataTableColumn<TrustedSender>[] = [
-  {
-    id: 'kind',
-    header: 'Kind',
-    meta: { label: 'Kind' },
-    cell: ({ row }) => humanize(row.original.kind),
-  },
-  {
-    id: 'value',
-    header: 'Value',
-    meta: { label: 'Value' },
-    cell: ({ row }) => <UntrustedText value={row.original.value} mono />,
-  },
-  {
-    id: 'reason',
-    header: 'Reason',
-    meta: { label: 'Reason' },
-    cell: ({ row }) => <UntrustedText value={row.original.reason} maxLength={80} />,
-  },
-  {
-    id: 'expires',
-    header: 'Expires',
-    meta: { label: 'Expires' },
-    cell: ({ row }) => <DateTime value={row.original.expiresAt} emptyLabel="Never" />,
-  },
-];
-
-function feedbackColumns(canMessages: boolean): DataTableColumn<Feedback>[] {
+function feedbackColumns(canMessages: boolean): DataTableColumn<BecFeedback>[] {
   return [
     {
       id: 'created',
@@ -564,39 +270,6 @@ function feedbackColumns(canMessages: boolean): DataTableColumn<Feedback>[] {
   ];
 }
 
-const SUPPRESSION_COLUMNS: DataTableColumn<Suppression>[] = [
-  {
-    id: 'code',
-    header: 'Reason code',
-    meta: { label: 'Reason code' },
-    cell: ({ row }) => <span className="font-mono text-xs">{row.original.reasonCode}</span>,
-  },
-  {
-    id: 'scope',
-    header: 'Sender scope',
-    meta: { label: 'Sender scope' },
-    cell: ({ row }) => humanize(row.original.senderScope),
-  },
-  {
-    id: 'value',
-    header: 'Sender',
-    meta: { label: 'Sender' },
-    cell: ({ row }) => <UntrustedText value={row.original.senderValue} mono />,
-  },
-  {
-    id: 'expires',
-    header: 'Expires',
-    meta: { label: 'Expires' },
-    cell: ({ row }) => <DateTime value={row.original.expiresAt} />,
-  },
-  {
-    id: 'status',
-    header: 'Status',
-    meta: { label: 'Status' },
-    cell: ({ row }) => (row.original.expired ? 'Expired' : 'Active'),
-  },
-];
-
 const BEC_SECTIONS = ['executives', 'vendors', 'trusted', 'feedback', 'suppressions'] as const;
 const BEC_LABELS: Record<(typeof BEC_SECTIONS)[number], string> = {
   executives: 'Executives',
@@ -606,78 +279,45 @@ const BEC_LABELS: Record<(typeof BEC_SECTIONS)[number], string> = {
   suppressions: 'Suppressions',
 };
 
-/** Phishing and BEC tenant data (bec:read), read-only lists. */
+/** Phishing and BEC tenant data (`bec:read` views, `bec:manage` edits; feedback read-only). */
 export function BecTab() {
   const canMessages = useCan('MessagesController_detail_v1');
+  const canManage = useCan('BecExecutivesController_create_v1');
   return (
-    <Sections
-      label="BEC sections"
-      sections={BEC_SECTIONS}
-      labels={BEC_LABELS}
-      render={(section) => {
-        switch (section) {
-          case 'executives':
-            return (
-              <ListTable
-                operationId="BecExecutivesController_list_v1"
-                tableId="bec-executives"
-                caption="Protected executives"
-                columns={EXECUTIVE_COLUMNS}
-                getRowId={(r: Executive) => r.id}
-                emptyTitle="No protected executives"
-                mobile={(r: Executive) => r.displayName}
-              />
-            );
-          case 'vendors':
-            return (
-              <ListTable
-                operationId="BecVendorsController_list_v1"
-                tableId="bec-vendors"
-                caption="Vendors"
-                columns={VENDOR_COLUMNS}
-                getRowId={(r: Vendor) => r.id}
-                emptyTitle="No vendors"
-                mobile={(r: Vendor) => r.name}
-              />
-            );
-          case 'trusted':
-            return (
-              <ListTable
-                operationId="BecTrustedSendersController_list_v1"
-                tableId="bec-trusted"
-                caption="Trusted senders"
-                columns={TRUSTED_COLUMNS}
-                getRowId={(r: TrustedSender) => r.id}
-                emptyTitle="No trusted senders"
-                mobile={(r: TrustedSender) => <UntrustedText value={r.value} />}
-              />
-            );
-          case 'feedback':
-            return (
-              <ListTable
-                operationId="BecFeedbackController_list_v1"
-                tableId="bec-feedback"
-                caption="BEC feedback"
-                columns={feedbackColumns(canMessages)}
-                getRowId={(r: Feedback) => r.id}
-                emptyTitle="No feedback recorded"
-                mobile={(r: Feedback) => humanize(r.kind)}
-              />
-            );
-          default:
-            return (
-              <ListTable
-                operationId="BecFeedbackController_listSuppressions_v1"
-                tableId="bec-suppressions"
-                caption="Suppressions"
-                columns={SUPPRESSION_COLUMNS}
-                getRowId={(r: Suppression) => r.id}
-                emptyTitle="No suppressions"
-                mobile={(r: Suppression) => r.reasonCode}
-              />
-            );
-        }
-      }}
-    />
+    <div>
+      <TabNote
+        cache={BEC_CACHE_NOTE}
+        viewOnly={canManage ? null : 'View only: changing BEC configuration needs bec:manage.'}
+      />
+      <Sections
+        label="BEC sections"
+        sections={BEC_SECTIONS}
+        labels={BEC_LABELS}
+        render={(section) => {
+          switch (section) {
+            case 'executives':
+              return <ExecutivesSection />;
+            case 'vendors':
+              return <VendorsSection />;
+            case 'trusted':
+              return <TrustedSendersSection />;
+            case 'feedback':
+              return (
+                <ListTable
+                  operationId="BecFeedbackController_list_v1"
+                  tableId="bec-feedback"
+                  caption="BEC feedback"
+                  columns={feedbackColumns(canMessages)}
+                  getRowId={(r: BecFeedback) => r.id}
+                  emptyTitle="No feedback recorded"
+                  mobile={(r: BecFeedback) => humanize(r.kind)}
+                />
+              );
+            default:
+              return <SuppressionsSection />;
+          }
+        }}
+      />
+    </div>
   );
 }

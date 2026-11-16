@@ -2,6 +2,7 @@ import { applyDecorators, UseFilters } from '@nestjs/common';
 import { ApiBearerAuth, ApiParam, ApiSecurity, ApiTags } from '@nestjs/swagger';
 import { ApiCodedError, CodedExceptionFilter } from '../../http/coded-exception';
 import { ACCESS_TOKEN_SCHEME, API_KEY_SCHEME } from '../../http/openapi';
+import { POLICY_JSON_BODY_LIMIT_BYTES } from '../../http/policy-body-limit';
 import { ZodValidationPipe } from '../../validation/zod-validation.pipe';
 import { MESSAGE_NOT_FOUND } from '../messages/messages.errors';
 import { PolicyIdSchema, PolicyScanIdSchema, PolicyVersionNoSchema } from './dto/policies.schemas';
@@ -168,5 +169,72 @@ export const ApiDryRunErrors = (): MethodDecorator =>
         'form a policy input (a defect; the policy-engine dead-letters such a round)',
       [SCAN_ROUND_NOT_COMPLETE, POLICY_INPUT_INVALID],
       { status: { type: 'string' } },
+    ),
+  );
+
+// --------------------------------------------------------------------------------------------
+// Policy builder (step 7.3 §4.2, §4.3)
+// --------------------------------------------------------------------------------------------
+
+/**
+ * The JSON body limit of the routes that carry a definition (step 7.3 B16, §14.8):
+ * `POLICY_JSON_BODY_LIMIT_BYTES` (the DSL's 262 144-byte document limit plus 64 KiB for the
+ * request wrapper, `src/http/policy-body-limit.ts`); a larger body is refused by the parser before
+ * the route with `413 payload_too_large`.
+ */
+export const BODY_LIMIT_NOTE =
+  `The JSON body limit of this route is ${POLICY_JSON_BODY_LIMIT_BYTES} bytes (the DSL’s ` +
+  '262 144-byte document limit plus 64 KiB for the rest of the request): every definition the ' +
+  'DSL accepts fits; a larger body is answered `413 payload_too_large` before it reaches the route.';
+
+/** 413 of the routes that carry a definition (`BODY_LIMIT_NOTE`). */
+export const ApiPolicyBodyTooLarge = (): MethodDecorator =>
+  ApiCodedError(
+    413,
+    `\`payload_too_large\`: the JSON body is larger than ${POLICY_JSON_BODY_LIMIT_BYTES} bytes ` +
+      '(the DSL’s document limit plus the request wrapper); split the policy into several policies',
+    ['payload_too_large'],
+  );
+
+/** 400 of the validate route: only a body that is not `{ definition: <object> }`. */
+export const ApiValidateBadRequest = (): MethodDecorator =>
+  ApiCodedError(
+    400,
+    '`validation_failed`: the body is not strict JSON `{ definition: <JSON object> }` ' +
+      '(`message` lists `"<path>: <issue>"`). An invalid definition is not an error: it is ' +
+      'answered `200` with `valid: false` and its violations',
+    ['validation_failed'],
+  );
+
+/** Every error of the sample dry-run besides 401/403. */
+export const ApiSampleDryRunErrors = (): MethodDecorator =>
+  applyDecorators(
+    ApiCodedError(
+      400,
+      '`validation_failed` (the body is not strict JSON of the documented shape; ' +
+        '`sample.limit` above POLICY_DRY_RUN_SAMPLE_MAX; `sample.from` not before ' +
+        '`sample.to`; a range longer than POLICY_HISTORY_MAX_RANGE_DAYS), or ' +
+        '`policy_definition_invalid` for an inline target (`violations` by path)',
+      ['validation_failed', POLICY_DEFINITION_INVALID],
+      VIOLATIONS,
+    ),
+    ApiCodedError(
+      404,
+      '`policy_version_not_found`: the `{ policyId, versionNo }` target is not a version of a ' +
+        'policy of your organization (unknown, archived or another organization’s)',
+      [POLICY_VERSION_NOT_FOUND],
+    ),
+    ApiCodedError(
+      429,
+      'More than POLICY_SAMPLE_DRY_RUNS_PER_MINUTE sample dry-runs by this user or API key in ' +
+        'the current minute (`scope: route`), or the `expensive` class or a global limit ' +
+        '(`scope: principal | tenant`); `Retry-After` gives the seconds to wait',
+      ['rate_limited'],
+      { scope: { type: 'string', enum: ['principal', 'tenant', 'route'] } },
+    ),
+    ApiCodedError(
+      503,
+      '`service_unavailable`: the rate-limit store is unavailable (fail closed); retry',
+      ['service_unavailable'],
     ),
   );

@@ -1,18 +1,20 @@
 'use client';
 
-import { ScrollTextIcon } from 'lucide-react';
+import { PlusIcon, ScrollTextIcon } from 'lucide-react';
 import Link from 'next/link';
 import { useMemo } from 'react';
 import { z } from 'zod';
 import { DataTable, type DataTableColumn } from '@/components/data-table';
 import { DateTime, DirectionBadge } from '@/components/domain';
 import { EmptyState } from '@/components/states/empty-state';
+import { Button } from '@/components/ui/button';
 import { useUrlState } from '@/hooks/use-url-state';
 import { useCursorList } from '@/lib/api/hooks';
 import type { ListItem, QueryParams } from '@/lib/api/types';
+import { useCan } from '@/lib/auth/me';
 import { formatNumber } from '@/lib/format';
 import { EnumBadge, FilterSelect, optionsOf } from '@/features/messages/controls';
-import { policyHref } from './links';
+import { NEW_POLICY_HREF, policyHref } from './links';
 import { POLICY_STATUS_TONE } from './semantic';
 
 type PolicyRow = ListItem<'PolicyManagementController_list_v1'>;
@@ -90,9 +92,24 @@ const COLUMNS: DataTableColumn<PolicyRow>[] = [
   },
 ];
 
-/** Email policies (`GET /policies`, v0 list, status and direction filters), read-only in 7.1. */
+function NewPolicyButton({ size = 'sm' }: { size?: 'sm' | 'default' }) {
+  return (
+    <Button asChild size={size}>
+      <Link href={NEW_POLICY_HREF}>
+        <PlusIcon aria-hidden />
+        New policy
+      </Link>
+    </Button>
+  );
+}
+
+/**
+ * Email policies (`GET /policies`, v0 list, status and direction filters) with "New policy"
+ * for users who may create policies (step 7.3 design B17).
+ */
 export function EmailPoliciesTab() {
   const [state, setState] = useUrlState(EMAIL_POLICIES_URL_SHAPE);
+  const canCreate = useCan('PolicyManagementController_create_v1');
   const query = useMemo(() => {
     const q: QueryParams<'PolicyManagementController_list_v1'> = {};
     if (state.status) q.status = state.status;
@@ -103,12 +120,19 @@ export function EmailPoliciesTab() {
   const generation = (list.query.data as { generation?: string } | undefined)?.generation;
   return (
     <div className="grid gap-2">
-      {generation ? (
-        <p className="text-xs text-muted-foreground">
-          Policy generation <span className="font-mono">{generation}</span>: every change that
-          affects evaluation increments it and applies to the next evaluation only.
-        </p>
-      ) : null}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        {generation ? (
+          <p className="text-xs text-muted-foreground">
+            Policy generation <span className="font-mono">{generation}</span>: every change that
+            affects evaluation increments it and applies to the next evaluation only.
+          </p>
+        ) : (
+          <span />
+        )}
+        {canCreate && (list.rows.length > 0 || state.status || state.direction) ? (
+          <NewPolicyButton />
+        ) : null}
+      </div>
       <DataTable
         tableId="policies"
         caption="Email policies"
@@ -138,7 +162,12 @@ export function EmailPoliciesTab() {
           <EmptyState
             icon={ScrollTextIcon}
             title="No email policies yet"
-            description="Without tenant policies the platform default decides. Creating policies arrives in step 7.3."
+            description={
+              canCreate
+                ? 'Without tenant policies the platform default decides. Build your first policy with New policy.'
+                : 'Without tenant policies the platform default decides.'
+            }
+            action={canCreate ? <NewPolicyButton size="default" /> : undefined}
           />
         }
         mobileCard={(row) => (

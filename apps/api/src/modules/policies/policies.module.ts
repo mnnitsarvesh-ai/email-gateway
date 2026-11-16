@@ -5,10 +5,13 @@ import { PolicySettingsController } from './controllers/policy-settings.controll
 import { PolicyToolsController } from './controllers/policy-tools.controller';
 import { PoliciesManagementRepository } from './repositories/policies-management.repository';
 import { PolicyExecutionsRepository } from './repositories/policy-executions.repository';
+import { PolicySampleDryRunRateLimitGuard } from './policy-sample-dry-run-rate-limit';
 import { PolicyFactsRepository } from './repositories/policy-facts.repository';
 import { PoliciesService } from './services/policies.service';
 import { PolicyEvaluationService } from './services/policy-evaluation.service';
 import { PolicyHistoryService } from './services/policy-history.service';
+import { PolicySampleDryRunService } from './services/policy-sample-dry-run.service';
+import { PolicyValidationService } from './services/policy-validation.service';
 import { PolicyAuditor, PolicyMetrics, PolicyWriter } from './services/policy-writer';
 
 /**
@@ -18,9 +21,11 @@ import { PolicyAuditor, PolicyMetrics, PolicyWriter } from './services/policy-wr
  * catalog, tests with synthetic facts, the no-write dry-run of a stored round, the execution
  * history and the evaluations of a message. Evaluation itself runs in the policy-engine; every
  * change that affects it increments the organization's generation and applies to the next
- * evaluation. PolicyToolsController is listed first so its static `/policies/*` routes are
- * matched before `/policies/{policyId}`. The writer, auditor and metrics are exported for the
- * directory module.
+ * evaluation. Step 7.3 (docs/plan/steps/22-policy-builder.md §4.2, §4.3) adds validation without
+ * saving and the sample dry-run over recent stored evaluations (both write nothing; the sample
+ * has its own per-principal limit). PolicyToolsController is listed first so its static
+ * `/policies/*` routes are matched before `/policies/{policyId}`. The writer, auditor and metrics
+ * are exported for the directory module.
  */
 @Module({
   controllers: [
@@ -39,6 +44,9 @@ import { PolicyAuditor, PolicyMetrics, PolicyWriter } from './services/policy-wr
     PoliciesService,
     PolicyEvaluationService,
     PolicyHistoryService,
+    PolicyValidationService,
+    PolicySampleDryRunService,
+    PolicySampleDryRunRateLimitGuard,
   ],
   exports: [
     PolicyWriter,

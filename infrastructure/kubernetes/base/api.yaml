@@ -102,6 +102,11 @@ spec:
             - { name: API_MESSAGES_SEARCH_TIMEOUT_MS, value: '5000' }
             - { name: SAVED_VIEWS_MAX_PER_USER, value: '50' }
             - { name: API_MESSAGES_REVEAL_PER_MINUTE, value: '30' }
+            # Policy builder (step 7.3 §3): the sample dry-run's most rounds (400 above), its
+            # deadline (truncated result) and the per-principal requests per minute (429 above).
+            - { name: POLICY_DRY_RUN_SAMPLE_MAX, value: '50' }
+            - { name: POLICY_DRY_RUN_DEADLINE_MS, value: '10000' }
+            - { name: POLICY_SAMPLE_DRY_RUNS_PER_MINUTE, value: '6' }
             # HMAC key of the signed v1 list cursors (step 6.1 D3; 64 hex characters): the api is
             # its only holder; its own Secret, mounted here only. The previous key (rotation,
             # verification only) is optional; see docs/runbooks/api-rate-limits-and-reports.md.

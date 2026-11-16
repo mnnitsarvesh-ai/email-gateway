@@ -4019,6 +4019,8 @@ model PolicyExecutionLog {
   @@index([organizationId, receivedAt])
   @@index([organizationId, disposition, receivedAt])
   @@index([organizationId, decisivePolicyPublicId, receivedAt])
+  /// Step 7.3: direction-filtered history and sample dry-run read a bounded index range.
+  @@index([organizationId, direction, receivedAt])
   @@map("policy_execution_logs")
 }
 

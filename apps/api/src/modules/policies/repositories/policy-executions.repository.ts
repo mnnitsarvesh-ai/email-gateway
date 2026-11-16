@@ -46,11 +46,38 @@ export interface HistoryFilter {
 /** Most evaluations one message lists (one per lifecycle round). */
 const MAX_MESSAGE_EVALUATIONS = 100;
 
+/** The stored evaluation columns the sample dry-run compares against (step 7.3 §4.3). */
+const sampleSelect = {
+  id: true,
+  receivedAt: true,
+  messageId: true,
+  evaluationSeq: true,
+  scanId: true,
+  trigger: true,
+  direction: true,
+  disposition: true,
+  decisionSource: true,
+  decisivePolicyPublicId: true,
+  decisiveRuleId: true,
+  policyVersions: true,
+  evaluatedAt: true,
+} satisfies Prisma.PolicyExecutionLogSelect;
+export type SampleRoundRow = Prisma.PolicyExecutionLogGetPayload<{ select: typeof sampleSelect }>;
+
+export interface SampleFilter {
+  from: Date;
+  to: Date;
+  direction?: 'inbound' | 'outbound' | 'internal';
+  /** Most rows read (the caller passes `limit × 4`). */
+  take: number;
+}
+
 /**
  * Read-only, tenant-scoped reads of `policy_execution_logs` (step 5.2 P16, P22) on the replica:
  * the execution history (a required, bounded `received_at` range prunes the monthly partitions;
- * newest first by `(received_at, id)`) and every evaluation of one message, plus the message
- * public ids of a page. Every query matches the scope's organization; no write method.
+ * newest first by `(received_at, id)`), the rounds of a sample dry-run (step 7.3) and every
+ * evaluation of one message, plus the message public ids of a page. Every query matches the
+ * scope's organization; no write method.
  */
 @Injectable()
 export class PolicyExecutionsRepository {
@@ -80,6 +107,27 @@ export class PolicyExecutionsRepository {
     return this.db.policyExecutionLog.findMany({
       where,
       select: historySelect,
+      orderBy: [{ receivedAt: 'desc' }, { id: 'desc' }],
+      take: f.take,
+    });
+  }
+
+  /**
+   * The newest stored evaluations of scanned rounds in `[from, to)` (step 7.3 §4.3): newest first
+   * by `(received_at, id)` through `(organization_id, received_at)`, or through
+   * `(organization_id, direction, received_at)` when a direction is given (step 7.3 §14.8: the
+   * entries read stay about `take` even when the tenant has little traffic in that direction;
+   * the bounded range prunes the monthly partitions), at most `take` rows; parse-failure
+   * evaluations (no scan) are excluded.
+   */
+  sampleRounds(scope: TenantScope, f: SampleFilter): Promise<SampleRoundRow[]> {
+    return this.db.policyExecutionLog.findMany({
+      where: tenantWhere(scope, {
+        receivedAt: { gte: f.from, lt: f.to },
+        scanId: { not: null },
+        ...(f.direction !== undefined && { direction: f.direction }),
+      }),
+      select: sampleSelect,
       orderBy: [{ receivedAt: 'desc' }, { id: 'desc' }],
       take: f.take,
     });

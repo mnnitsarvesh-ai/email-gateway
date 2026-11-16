@@ -5,6 +5,7 @@ import { fixtures as attachments } from './fixtures/attachments';
 import { fixtures as audit } from './fixtures/audit';
 import { fixtures as billing } from './fixtures/billing';
 import { fixtures as dashboard } from './fixtures/dashboard';
+import { fixtures as dlpBec } from './fixtures/dlp-bec';
 import { fixtures as domains } from './fixtures/domains';
 import { fixtures as integrations } from './fixtures/integrations';
 import { fixtures as mailServers } from './fixtures/mail-servers';
@@ -36,7 +37,8 @@ export type { FixtureHandler, FixtureHandlers };
  * import in `src/server/bff/deps.ts`; never part of a production build (asserted after build).
  *
  * Order matters: the session fixtures come first, so a feature package may replace one of them
- * (e.g. `OrganizationsController_list_v1`) in its own file.
+ * (e.g. `OrganizationsController_list_v1`) in its own file. `dlp-bec` (step 7.3 WP5) comes last:
+ * its DLP and BEC handlers (with writes) replace the read-only lists of `policies`.
  */
 export const FEATURE_FIXTURES: Readonly<Record<string, FixtureHandlers>> = {
   session,
@@ -57,6 +59,7 @@ export const FEATURE_FIXTURES: Readonly<Record<string, FixtureHandlers>> = {
   messages,
   quarantine,
   policies,
+  'dlp-bec': dlpBec,
 };
 
 export function mergedFixtures(): FixtureHandlers {

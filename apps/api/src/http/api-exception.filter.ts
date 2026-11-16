@@ -55,6 +55,32 @@ function messageOf(exception: HttpException): string | string[] {
   return exception.message;
 }
 
+/**
+ * The client error of Express's body parser (body-parser 2, `http-errors`) as an HttpException:
+ * a `4xx` with `expose: true` and a `type` such as `entity.too.large` (413), `charset.unsupported`
+ * (415) or `request.aborted` (400). Nest maps only the parser's `SyntaxError` (malformed JSON,
+ * `400`); without this the others reached the filter as unexpected errors and were answered
+ * `500 internal_error` (step 7.3 §14.8, B16). Anything else is `undefined`.
+ */
+export function bodyParserHttpException(exception: unknown): HttpException | undefined {
+  if (!(exception instanceof Error)) return undefined;
+  const e = exception as Error & { type?: unknown; status?: unknown; expose?: unknown };
+  const status = e.status;
+  if (typeof e.type !== 'string' || e.expose !== true || typeof status !== 'number') {
+    return undefined;
+  }
+  if (!Number.isInteger(status) || status < 400 || status > 499) return undefined;
+  if (e.type === 'entity.too.large') {
+    const limit = (e as { limit?: unknown }).limit;
+    const message =
+      typeof limit === 'number'
+        ? `Request body is larger than the ${limit}-byte limit of this route`
+        : 'Request body is larger than the limit of this route';
+    return new HttpException(message, status);
+  }
+  return new HttpException(e.message, status);
+}
+
 function ownCode(exception: HttpException): string | undefined {
   const response = exception.getResponse();
   if (typeof response !== 'object' || response === null) return undefined;
@@ -71,6 +97,8 @@ function ownCode(exception: HttpException): string | undefined {
  * - `CodedHttpException` → its code and details (the same body as `CodedExceptionFilter`);
  * - another `HttpException` → its status and message (`string`, or `string[]` for validation)
  *   with the default code of its status (`route_not_found` for a path no route serves);
+ * - a client error of the body parser (`bodyParserHttpException`) → as that HttpException
+ *   (`413 payload_too_large` for a body above the route's JSON limit);
  * - anything else → `500 internal_error` with a generic message; logged with its stack, never
  *   rendered (no internals leak).
  */
@@ -78,7 +106,8 @@ function ownCode(exception: HttpException): string | undefined {
 export class ApiExceptionFilter implements ExceptionFilter {
   private readonly logger = new Logger('ApiExceptionFilter');
 
-  catch(exception: unknown, host: ArgumentsHost): void {
+  catch(thrown: unknown, host: ArgumentsHost): void {
+    const exception = bodyParserHttpException(thrown) ?? thrown;
     const http = host.switchToHttp();
     const res = http.getResponse<Response>();
     const req = http.getRequest<Request | undefined>();

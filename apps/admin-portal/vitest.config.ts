@@ -16,7 +16,10 @@ export default defineConfig({
     include: ['src/**/*.test.{ts,tsx}', 'scripts/**/*.test.{ts,mjs}'],
     setupFiles: ['src/test/setup.ts'],
     css: false,
-    testTimeout: 20_000,
+    // The interactive page and editor tests (full forms, several submits, axe) take 2–4 s alone,
+    // but the repository's uncached parallel `pnpm test` (about ten turbo tasks, each with its own
+    // workers) slows them 6–10×: step 7.3 verification saw different ones pass 20 s on each run.
+    testTimeout: 60_000,
     // Server modules run under node; they declare `// @vitest-environment node` themselves.
     restoreMocks: true,
   },

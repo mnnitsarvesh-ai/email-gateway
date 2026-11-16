@@ -3,8 +3,8 @@
 
 import type { OperationMeta, RouteMatcher } from './operation-types';
 
-/** Snapshot facts: 277 operations, OpenAPI 3.0.0, API v1. */
-export const OPERATION_COUNT = 277;
+/** Snapshot facts: 279 operations, OpenAPI 3.0.0, API v1. */
+export const OPERATION_COUNT = 279;
 
 export const operations = {
   ApiKeysController_create_v1: {
@@ -2711,6 +2711,22 @@ export const operations = {
     sort: null,
     bffOnly: false,
   },
+  PolicyToolsController_sampleDryRun_v1: {
+    operationId: 'PolicyToolsController_sampleDryRun_v1',
+    method: 'POST',
+    path: '/api/v1/policies/dry-run',
+    tag: 'policies',
+    permissions: [{ mode: 'all', permissions: ['policy:manage', 'message:read'] }],
+    public: false,
+    idempotency: null,
+    cursor: null,
+    rateClass: 'expensive',
+    returnsSecret: false,
+    secretReplay: null,
+    listKey: 'items',
+    sort: null,
+    bffOnly: false,
+  },
   PolicyToolsController_test_v1: {
     operationId: 'PolicyToolsController_test_v1',
     method: 'POST',
@@ -2721,6 +2737,22 @@ export const operations = {
     idempotency: null,
     cursor: null,
     rateClass: 'expensive',
+    returnsSecret: false,
+    secretReplay: null,
+    listKey: null,
+    sort: null,
+    bffOnly: false,
+  },
+  PolicyToolsController_validate_v1: {
+    operationId: 'PolicyToolsController_validate_v1',
+    method: 'POST',
+    path: '/api/v1/policies/validate',
+    tag: 'policies',
+    permissions: [{ mode: 'all', permissions: ['policy:manage'] }],
+    public: false,
+    idempotency: null,
+    cursor: null,
+    rateClass: null,
     returnsSecret: false,
     secretReplay: null,
     listKey: null,
@@ -5173,11 +5205,21 @@ export const routeMatchers: readonly RouteMatcher<OperationId>[] = [
     operationId: 'PolicyToolsController_catalog_v1',
   },
   {
+    method: 'POST',
+    segments: ['policies', 'dry-run'],
+    operationId: 'PolicyToolsController_sampleDryRun_v1',
+  },
+  {
     method: 'GET',
     segments: ['policies', 'executions'],
     operationId: 'PolicyToolsController_history_v1',
   },
   { method: 'POST', segments: ['policies', 'test'], operationId: 'PolicyToolsController_test_v1' },
+  {
+    method: 'POST',
+    segments: ['policies', 'validate'],
+    operationId: 'PolicyToolsController_validate_v1',
+  },
   {
     method: 'POST',
     segments: ['policies', { param: 'policyId' }, 'disable'],

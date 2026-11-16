@@ -1293,6 +1293,11 @@ services:
       API_MESSAGES_SEARCH_TIMEOUT_MS: ${API_MESSAGES_SEARCH_TIMEOUT_MS:-5000}
       SAVED_VIEWS_MAX_PER_USER: ${SAVED_VIEWS_MAX_PER_USER:-50}
       API_MESSAGES_REVEAL_PER_MINUTE: ${API_MESSAGES_REVEAL_PER_MINUTE:-30}
+      # Policy builder (step 7.3 §3): the sample dry-run's most rounds, deadline and per-principal
+      # requests per minute.
+      POLICY_DRY_RUN_SAMPLE_MAX: ${POLICY_DRY_RUN_SAMPLE_MAX:-50}
+      POLICY_DRY_RUN_DEADLINE_MS: ${POLICY_DRY_RUN_DEADLINE_MS:-10000}
+      POLICY_SAMPLE_DRY_RUNS_PER_MINUTE: ${POLICY_SAMPLE_DRY_RUNS_PER_MINUTE:-6}
     ports: ['127.0.0.1:${API_HOST_PORT:-3000}:3000']
     healthcheck:
       <<: *node-healthcheck

@@ -1,6 +1,6 @@
 import { PolicyDetail } from '@/features/policies';
 
-/** Policy detail (design §3.1). */
+/** Policy detail (`?tab=overview|versions|audit`, step 7.3 design B17). */
 export default async function PolicyDetailRoute({
   params,
 }: {

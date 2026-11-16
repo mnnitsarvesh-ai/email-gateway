@@ -102,6 +102,25 @@ export interface E2eState {
     /** A saved explorer view of the beta administrator. */
     savedViewId: string;
   };
+  /** Step 7.3: seeded policy builder, DLP and BEC data (seed/policies.ts). */
+  policies: {
+    departments: Array<{ id: string; name: string }>;
+    /** Alpha's "E2E outbound data guard": v1 superseded, v2 active, v3 draft. */
+    policyId: string;
+    policyName: string;
+    /** An alpha DLP policy without rules. */
+    dlpPolicyId: string;
+    dlpPolicyName: string;
+    /** An alpha BEC suppression rule (lifted by dlp-bec-config.spec). */
+    suppressionId: string;
+    beta: {
+      policyId: string;
+      policyName: string;
+      patternId: string;
+      executiveId: string;
+      suppressionId: string;
+    };
+  };
   expected: { dashboard7d: DashboardExpectation };
 }
 

@@ -1,25 +1,37 @@
 import {
   canonicalJson,
   DIRECTORY_FIELDS,
+  fieldContexts,
   formatPath,
+  POLICY_ACTION_PRESENTATION,
   POLICY_ACTION_TYPES,
+  POLICY_CONTEXT_RULES,
+  POLICY_DIRECTIONS,
   POLICY_DISPOSITIONS,
   POLICY_DSL_VERSION,
   POLICY_EVALUATOR_VERSION,
+  POLICY_FIELD_GROUPS,
   POLICY_FIELD_NAMES,
+  POLICY_FIELD_PRESENTATION,
   POLICY_FIELDS,
   POLICY_INPUT_VERSION,
   POLICY_LIMITS,
+  POLICY_MESSAGE_DIRECTIONS,
   POLICY_NON_TERMINAL_ACTIONS,
+  POLICY_OPERATOR_PRESENTATION,
   POLICY_OPERATORS,
   POLICY_PLATFORM_DEFAULTS,
+  POLICY_QUANTIFIER_PRESENTATION,
+  POLICY_SCOPE_NOUNS,
   POLICY_SETTINGS_DEFAULTS,
   type PolicyDefinition,
   policyTenantSettingsSchema,
+  policyTimeZones,
   resolvePolicySettings,
   sha256Hex,
   validatePolicyDefinition,
   type Violation,
+  WEEKDAYS,
 } from '@email-gateway/policy-dsl';
 import type { Prisma } from '@email-gateway/database';
 import type {
@@ -305,15 +317,26 @@ export function settingsView(row: SettingsRow | null): PolicySettingsView {
   };
 }
 
-/** The organization bounds of this deployment (env, §5) applied to the DSL limits (P4). */
+/**
+ * The organization bounds of this deployment (env, §5) applied to the DSL limits (P4), and the
+ * sample dry-run bounds (step 7.3 §3).
+ */
 export interface PolicyBounds {
   POLICY_PLATFORM_DEFAULT: string;
   POLICY_MAX_POLICIES: number;
   POLICY_MAX_VERSIONS_PER_POLICY: number;
   POLICY_MAX_ACTIVE_RULES: number;
   POLICY_HISTORY_MAX_RANGE_DAYS: number;
+  POLICY_DRY_RUN_SAMPLE_MAX: number;
+  POLICY_SAMPLE_DRY_RUNS_PER_MINUTE: number;
 }
 
+/**
+ * The catalog (P22) with the step 7.3 presentation metadata (§4.1, ADR-0063 decision 1): every
+ * field with its label, group, unit, suggestions and placement contexts; the field groups, the
+ * operator and action definitions, quantifiers, scope nouns, placement rules, weekdays, the time
+ * zones of this runtime and the directions. Library data only.
+ */
 export function catalogView(bounds: PolicyBounds): PolicyCatalog {
   const platform = POLICY_PLATFORM_DEFAULTS[bounds.POLICY_PLATFORM_DEFAULT]!;
   const limits: Record<string, number> = {};
@@ -329,6 +352,8 @@ export function catalogView(bounds: PolicyBounds): PolicyCatalog {
   limits.policiesPerOrganization = bounds.POLICY_MAX_POLICIES;
   limits.versionsPerPolicy = bounds.POLICY_MAX_VERSIONS_PER_POLICY;
   limits.historyRangeDays = bounds.POLICY_HISTORY_MAX_RANGE_DAYS;
+  limits.dryRunSampleMax = bounds.POLICY_DRY_RUN_SAMPLE_MAX;
+  limits.dryRunSamplesPerMinute = bounds.POLICY_SAMPLE_DRY_RUNS_PER_MINUTE;
   return {
     versions: {
       dsl: POLICY_DSL_VERSION,
@@ -338,6 +363,7 @@ export function catalogView(bounds: PolicyBounds): PolicyCatalog {
     platformDefault: { id: platform.id, description: platform.description },
     fields: POLICY_FIELD_NAMES.map((name) => {
       const f = POLICY_FIELDS[name];
+      const p = POLICY_FIELD_PRESENTATION[name];
       return {
         name,
         type: f.type,
@@ -353,6 +379,11 @@ export function catalogView(bounds: PolicyBounds): PolicyCatalog {
         min: f.min,
         max: f.max,
         description: f.description,
+        label: p.label,
+        group: p.group,
+        unit: p.unit,
+        suggestions: p.suggestions === null ? null : [...p.suggestions],
+        contexts: { ...fieldContexts(f) },
       };
     }),
     operators: [...POLICY_OPERATORS],
@@ -368,5 +399,61 @@ export function catalogView(bounds: PolicyBounds): PolicyCatalog {
       tagging: { ...POLICY_SETTINGS_DEFAULTS.tagging },
     },
     enforcement: POLICY_ENFORCEMENT_NOTE,
+    fieldGroups: POLICY_FIELD_GROUPS.map((g) => ({ id: g.id, label: g.label })),
+    operatorDefinitions: POLICY_OPERATORS.map((op) => {
+      const o = POLICY_OPERATOR_PRESENTATION[op];
+      return {
+        op,
+        label: o.label,
+        phrase: o.phrase,
+        valueShape: o.valueShape,
+        itemKind: o.itemKind,
+        maxItems: o.maxItems,
+        maxItemLength: o.maxItemLength,
+        negated: o.negated,
+        allowedInException: o.allowedInException,
+        description: o.description,
+      };
+    }),
+    actionDefinitions: POLICY_ACTION_TYPES.map((type) => {
+      const a = POLICY_ACTION_PRESENTATION[type];
+      return {
+        type,
+        label: a.label,
+        phrase: a.phrase,
+        kind: a.kind,
+        disposition: a.disposition,
+        params: a.params.map((param) => ({
+          name: param.name,
+          label: param.label,
+          type: param.type,
+          required: param.required,
+          values: param.values === null ? null : [...param.values],
+          default: param.default,
+          minLength: param.minLength,
+          maxLength: param.maxLength,
+          pattern: param.pattern,
+          description: param.description,
+        })),
+        description: a.description,
+      };
+    }),
+    quantifiers: POLICY_QUANTIFIER_PRESENTATION.map((q) => ({
+      id: q.id,
+      label: q.label,
+      phrase: q.phrase,
+    })),
+    scopeNouns: { ...POLICY_SCOPE_NOUNS },
+    contextRules: {
+      defaultQuantifier: POLICY_CONTEXT_RULES.defaultQuantifier,
+      exceptionQuantifier: POLICY_CONTEXT_RULES.exceptionQuantifier,
+      exceptionNegation: POLICY_CONTEXT_RULES.exceptionNegation,
+      relaxingDispositions: [...POLICY_CONTEXT_RULES.relaxingDispositions],
+      holdDispositions: [...POLICY_CONTEXT_RULES.holdDispositions],
+    },
+    weekdays: [...WEEKDAYS],
+    timeZones: policyTimeZones(),
+    policyDirections: [...POLICY_DIRECTIONS],
+    messageDirections: [...POLICY_MESSAGE_DIRECTIONS],
   };
 }

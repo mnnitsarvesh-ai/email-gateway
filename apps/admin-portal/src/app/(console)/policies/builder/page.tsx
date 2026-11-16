@@ -1,6 +1,6 @@
 import { PolicyBuilder } from '@/features/policies';
 
-/** Policy builder: DSL catalogue reference (design §1.3 row 14; the builder arrives in 7.3). */
+/** Policy builder (page 14): new policy, test and dry-run of the active set, DSL reference. */
 export default function PolicyBuilderRoute() {
   return <PolicyBuilder />;
 }

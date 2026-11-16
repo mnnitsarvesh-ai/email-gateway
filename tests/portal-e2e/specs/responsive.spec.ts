@@ -4,7 +4,10 @@
  * the top bar, focus-trapped, closes on navigation). No top-level page scrolls horizontally;
  * data tables stay usable (stacked cards on mobile, a scrolling table otherwise). Step 7.2: the
  * Email Explorer and every Email Details section fit each viewport; the section navigation is
- * vertical tabs (desktop), a horizontal tab list (tablet) or a labelled select (mobile).
+ * vertical tabs (desktop), a horizontal tab list (tablet) or a labelled select (mobile). Step 7.3:
+ * the policy builder (summary beside the editor from 1280 px, above it below; stacked condition
+ * rows and full-screen panel sheets below 640 px), the policy pages and the DLP/BEC editor sheets
+ * fit every viewport.
  */
 import type { Page, TestInfo } from '@playwright/test';
 import { signIn } from '../support/auth';
@@ -12,6 +15,9 @@ import { NAV_GATES } from '../support/contract';
 import { expect, test } from '../support/fixtures';
 import { messageOf } from '../support/messages';
 import { expectNoSeriousA11yViolations } from '../support/pages';
+import { readState } from '../support/state';
+
+test.use({ actionTimeout: 20_000 });
 
 type Layout = 'desktop' | 'tablet' | 'mobile';
 
@@ -187,4 +193,104 @@ test('email explorer and details fit the viewport; section navigation per layout
     await expect(page).toHaveURL(/[?&]section=headers/);
   }
   await expectNoSeriousA11yViolations(page, `/messages/[id] (${layout})`);
+});
+
+test('policy builder: summary placement, stacked conditions, panels as sheets', async ({
+  page,
+}, testInfo) => {
+  test.setTimeout(300_000);
+  const layout = layoutOf(testInfo);
+  const { policies } = readState();
+  await signIn(page, 'alphaAdmin', { next: `/policies/${policies.policyId}/versions/3` });
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText(`${policies.policyName} · v3`);
+  await expect(page.locator('main [aria-busy="true"]')).toHaveCount(0, { timeout: 20_000 });
+  const viewport = page.viewportSize()!;
+  const summary = page.getByRole('complementary', { name: 'Readable summary of the policy' });
+  const rules = page.getByRole('region', { name: /^Rules \(/ });
+  const summaryBox = (await summary.boundingBox())!;
+  const rulesBox = (await rules.boundingBox())!;
+  if (layout === 'desktop') {
+    // ≥ 1280 px: editor and summary side by side.
+    expect(summaryBox.x).toBeGreaterThan(rulesBox.x + rulesBox.width - 1);
+  } else {
+    // Below 1280 px: the summary comes first, above the editor.
+    expect(summaryBox.y + summaryBox.height).toBeLessThanOrEqual(rulesBox.y + 1);
+  }
+  const condition = page
+    .getByRole('group', { name: /^Condition 1 of \d+ in all of the following \(AND\), level 1$/ })
+    .first();
+  const field = (await condition.getByRole('combobox', { name: /^Field / }).boundingBox())!;
+  const operator = (await condition.getByRole('combobox', { name: 'Operator' }).boundingBox())!;
+  if (layout === 'mobile') {
+    // < 640 px: field, operator and value each on their own line.
+    expect(operator.y).toBeGreaterThanOrEqual(field.y + field.height - 1);
+  } else {
+    expect(Math.abs(operator.y - field.y)).toBeLessThan(4);
+  }
+  expect(
+    await horizontalOverflow(page),
+    `builder wider than the ${layout} viewport`,
+  ).toBeLessThanOrEqual(1);
+  await expectNoSeriousA11yViolations(page, `/policies/[id]/versions/3 (${layout})`);
+
+  // The test panel: a side panel on desktop, a full-screen sheet on a phone.
+  await page
+    .getByRole('group', { name: 'Version actions' })
+    .getByRole('button', { name: 'Test' })
+    .click();
+  const panel = page.getByRole('dialog', { name: 'Test with synthetic facts' });
+  await expect(panel).toBeVisible();
+  const panelBox = (await panel.boundingBox())!;
+  if (layout === 'mobile') {
+    expect(panelBox.width).toBeGreaterThanOrEqual(viewport.width - 1);
+  } else {
+    expect(panelBox.width).toBeLessThan(viewport.width);
+  }
+  await expectNoSeriousA11yViolations(page, `test panel (${layout})`);
+  await panel.getByRole('button', { name: 'Close' }).last().click();
+
+  const offenders: string[] = [];
+  for (const path of [
+    '/policies/new',
+    `/policies/${policies.policyId}`,
+    `/policies/${policies.policyId}?tab=versions`,
+    `/policies/${policies.policyId}/compare?from=1&to=2`,
+    '/policies?tab=settings',
+    '/policies?tab=risk',
+    '/policies?tab=dlp',
+    '/policies?tab=bec',
+  ]) {
+    await page.goto(path);
+    await expect(page.locator('main h1').first()).toBeVisible({ timeout: 20_000 });
+    await expect(page.locator('main [aria-busy="true"]')).toHaveCount(0, { timeout: 20_000 });
+    const overflow = await horizontalOverflow(page);
+    if (overflow > 1) offenders.push(`${path}: ${overflow}px`);
+    await expectNoSeriousA11yViolations(page, `${path} (${layout})`);
+  }
+  expect(offenders, `policy pages wider than the ${layout} viewport`).toEqual([]);
+});
+
+test('DLP and BEC editor sheets fit the viewport', async ({ page }, testInfo) => {
+  const layout = layoutOf(testInfo);
+  await signIn(page, 'alphaAnalyst', { next: '/policies?tab=dlp' });
+  for (const [tab, section, button, title] of [
+    ['dlp', 'Patterns', 'New pattern', 'New custom pattern'],
+    ['dlp', 'Exceptions', 'New exception', 'New DLP exception'],
+    ['bec', 'Executives', 'New executive', 'New executive'],
+  ] as const) {
+    await page.goto(`/policies?tab=${tab}`);
+    await page.getByRole('tab', { name: section, exact: true }).click();
+    await page.getByRole('button', { name: button }).click();
+    const sheet = page.getByRole('dialog', { name: title });
+    await expect(sheet).toBeVisible();
+    const box = (await sheet.boundingBox())!;
+    const viewport = page.viewportSize()!;
+    if (layout === 'mobile') expect(box.width).toBeGreaterThanOrEqual(viewport.width - 1);
+    expect(box.x).toBeGreaterThanOrEqual(-1);
+    expect(box.x + box.width).toBeLessThanOrEqual(viewport.width + 1);
+    expect(await horizontalOverflow(page), `${title} (${layout})`).toBeLessThanOrEqual(1);
+    await expectNoSeriousA11yViolations(page, `${title} sheet (${layout})`);
+    await sheet.getByRole('button', { name: 'Cancel' }).click();
+    await expect(sheet).toHaveCount(0);
+  }
 });

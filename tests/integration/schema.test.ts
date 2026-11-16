@@ -3936,6 +3936,9 @@ describe('policy engine schema (step 5.2, docs/plan/steps/16-policy-engine.md §
         'organization_id,received_at',
         'organization_id,disposition,received_at',
         'organization_id,decisive_policy_public_id,received_at',
+        // Step 7.3 §14.8 (migration 20261116205511_policy_execution_direction_index): the
+        // direction-filtered history and sample dry-run.
+        'organization_id,direction,received_at',
       ].sort(),
     );
     expect(await foreignKeys('policy_execution_logs')).toEqual([]);

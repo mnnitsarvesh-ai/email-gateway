@@ -667,7 +667,10 @@ export class InMemoryPolicies {
 
   // ---------------------------------------------------------- facts (snapshot, directory)
 
-  readonly facts: Pick<PolicyFactsRepository, 'snapshot' | 'policyVersion' | 'directory'> = {
+  readonly facts: Pick<
+    PolicyFactsRepository,
+    'snapshot' | 'policyVersion' | 'directory' | 'existingDirectoryIds'
+  > = {
     snapshot: (scope: TenantScope): Promise<SnapshotRows> => {
       this.log('snapshot');
       const s = this.state.settings.find((x) => x.organizationId === scope.organizationId);
@@ -717,6 +720,32 @@ export class InMemoryPolicies {
           : null,
       );
     },
+    // Step 7.3 (validate): the replica's existence check, same semantics as the writer's.
+    existingDirectoryIds: (
+      scope: TenantScope,
+      refs: { departmentIds: readonly string[]; userIds: readonly string[] },
+    ) =>
+      Promise.resolve({
+        departmentIds: new Set(
+          this.state.departments
+            .filter(
+              (d) =>
+                d.organizationId === scope.organizationId &&
+                refs.departmentIds.includes(d.publicId),
+            )
+            .map((d) => d.publicId),
+        ),
+        userIds: new Set(
+          [...this.users.values()]
+            .filter(
+              (u) =>
+                u.organizationId === scope.organizationId &&
+                !u.deleted &&
+                refs.userIds.includes(u.publicId),
+            )
+            .map((u) => u.publicId),
+        ),
+      }),
     directory: (
       scope: TenantScope,
       addresses: readonly string[],

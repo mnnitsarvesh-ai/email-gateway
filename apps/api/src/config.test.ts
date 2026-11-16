@@ -974,6 +974,42 @@ describe('loadApiConfig: policy engine (step 5.2 §5)', () => {
   });
 });
 
+describe('loadApiConfig: policy builder (step 7.3 §3)', () => {
+  it('defaults the sample size, the deadline and the per-principal sample dry-runs', () => {
+    expect(loadApiConfig(valid)).toMatchObject({
+      POLICY_DRY_RUN_SAMPLE_MAX: 50,
+      POLICY_DRY_RUN_DEADLINE_MS: 10_000,
+      POLICY_SAMPLE_DRY_RUNS_PER_MINUTE: 6,
+    });
+  });
+
+  it('accepts the bounds', () => {
+    for (const [key, value] of [
+      ['POLICY_DRY_RUN_SAMPLE_MAX', '1'],
+      ['POLICY_DRY_RUN_SAMPLE_MAX', '200'],
+      ['POLICY_DRY_RUN_DEADLINE_MS', '1000'],
+      ['POLICY_DRY_RUN_DEADLINE_MS', '30000'],
+      ['POLICY_SAMPLE_DRY_RUNS_PER_MINUTE', '1'],
+      ['POLICY_SAMPLE_DRY_RUNS_PER_MINUTE', '60'],
+    ] as const) {
+      expect(loadApiConfig({ ...valid, [key]: value })[key], `${key}=${value}`).toBe(Number(value));
+    }
+  });
+
+  it.each([
+    ['POLICY_DRY_RUN_SAMPLE_MAX', '0'],
+    ['POLICY_DRY_RUN_SAMPLE_MAX', '201'],
+    ['POLICY_DRY_RUN_SAMPLE_MAX', 'many'],
+    ['POLICY_DRY_RUN_DEADLINE_MS', '999'],
+    ['POLICY_DRY_RUN_DEADLINE_MS', '30001'],
+    ['POLICY_DRY_RUN_DEADLINE_MS', '1.5'],
+    ['POLICY_SAMPLE_DRY_RUNS_PER_MINUTE', '0'],
+    ['POLICY_SAMPLE_DRY_RUNS_PER_MINUTE', '61'],
+  ])('refuses %s=%s naming the key', (key, value) => {
+    expect(rejection({ ...valid, [key]: value })).toContain(key);
+  });
+});
+
 describe('loadApiConfig: quarantine (step 5.3 §5)', () => {
   it('defaults every bound and requires the download-token key', () => {
     const cfg = loadApiConfig(valid);

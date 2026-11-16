@@ -70754,7 +70754,7 @@
     },
     "/api/v1/policies/catalog": {
       "get": {
-        "description": "The DSL, input and evaluator versions, every field with its type, scope, operators, identity and AI flags and vocabulary, the operators, the nine actions, the dispositions (weakest first), the limits (P4 with this deployment’s organization bounds applied), the settings defaults and the platform default. Library data; no database access. The policy engine **enforces** the final disposition per recipient when rules are recipient-scoped (`recipientSplit`, step 5.3: ALLOW delivers; QUARANTINE and REQUIRE_APPROVAL create quarantine entries; REJECT discards the recipient) and the strictness floor (hard blocks, failures, the DLP binding and missing data are never weakened), plus TAG/WARN headers in a delivered copy; from step 5.3 the WARN body banner and URL_REWRITE are applied to the delivered copy after the scan when the message allows it (signed, encrypted or oversized messages record a `skipped_*` outcome instead). It **requests** ARCHIVE (consumed by step 8.1), ALERT and sender non-delivery notices (notification-worker). Quarantine release re-validates against the current policy (GET /quarantine/catalog); archiving and journaling are step 8.1.",
+        "description": "The DSL, input and evaluator versions, every field with its type, scope, operators, identity and AI flags and vocabulary, the operators, the nine actions, the dispositions (weakest first), the limits (P4 with this deployment’s organization bounds applied, plus `dryRunSampleMax` and `dryRunSamplesPerMinute`), the settings defaults and the platform default. Step 7.3 (ADR-0063) adds the presentation metadata a visual builder renders from: per field a `label`, `group`, `unit`, code `suggestions` and the `contexts` it may be used in; `fieldGroups`, `operatorDefinitions` (label, summary phrase, value shape, item kind and limits, negation), `actionDefinitions` (label, kind, disposition and parameter definitions), `quantifiers`, `scopeNouns`, `contextRules`, `weekdays`, `timeZones` (of the api runtime), `policyDirections` and `messageDirections`. Library data; no database access. The policy engine **enforces** the final disposition per recipient when rules are recipient-scoped (`recipientSplit`, step 5.3: ALLOW delivers; QUARANTINE and REQUIRE_APPROVAL create quarantine entries; REJECT discards the recipient) and the strictness floor (hard blocks, failures, the DLP binding and missing data are never weakened), plus TAG/WARN headers in a delivered copy; from step 5.3 the WARN body banner and URL_REWRITE are applied to the delivered copy after the scan when the message allows it (signed, encrypted or oversized messages record a `skipped_*` outcome instead). It **requests** ARCHIVE (consumed by step 8.1), ALERT and sender non-delivery notices (notification-worker). Quarantine release re-validates against the current policy (GET /quarantine/catalog); archiving and journaling are step 8.1.",
         "operationId": "PolicyToolsController_catalog_v1",
         "parameters": [],
         "responses": {
@@ -70868,7 +70868,55 @@
                             "minimum": -9007199254740991,
                             "maximum": 9007199254740991
                           },
-                          "description": { "type": "string" }
+                          "description": { "type": "string" },
+                          "label": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 64,
+                            "description": "Plain-English label (unique; never the code name)"
+                          },
+                          "group": {
+                            "type": "string",
+                            "enum": [
+                              "message",
+                              "sender",
+                              "recipient",
+                              "connection",
+                              "authentication",
+                              "attachments",
+                              "urls",
+                              "risk",
+                              "dlp",
+                              "bec",
+                              "scan",
+                              "time"
+                            ],
+                            "description": "Id of the field group (`fieldGroups`)"
+                          },
+                          "unit": {
+                            "nullable": true,
+                            "description": "Unit of an `int` field (`bytes`, `count`, `score`); null for other types",
+                            "type": "string",
+                            "enum": ["bytes", "count", "score"]
+                          },
+                          "suggestions": {
+                            "nullable": true,
+                            "description": "Known codes for autocomplete of an open `codes` field (one without `values`); never a closed list (any reason code is accepted); null otherwise",
+                            "type": "array",
+                            "items": { "type": "string" }
+                          },
+                          "contexts": {
+                            "type": "object",
+                            "properties": {
+                              "when": { "type": "boolean", "enum": [true] },
+                              "exception": { "type": "boolean" },
+                              "relaxingWhen": { "type": "boolean" },
+                              "holdRule": { "type": "boolean" }
+                            },
+                            "required": ["when", "exception", "relaxingWhen", "holdRule"],
+                            "additionalProperties": false,
+                            "description": "Where the field may be used: every `when`; `exception` = rule `unless` and policy `exceptions` (not raw sender identity, not AI-derived); `relaxingWhen` = the `when` of ALLOW and override rules (not raw sender identity); `holdRule` = rules with REQUIRE_APPROVAL, QUARANTINE or REJECT (not AI-derived)"
+                          }
                         },
                         "required": [
                           "name",
@@ -70884,7 +70932,12 @@
                           "ordered",
                           "min",
                           "max",
-                          "description"
+                          "description",
+                          "label",
+                          "group",
+                          "unit",
+                          "suggestions",
+                          "contexts"
                         ],
                         "additionalProperties": false
                       }
@@ -70954,7 +71007,7 @@
                         "minimum": -9007199254740991,
                         "maximum": 9007199254740991
                       },
-                      "description": "The DSL limits (P4) with the organization bounds of this deployment applied"
+                      "description": "The DSL limits (P4) with the organization bounds of this deployment applied, plus (step 7.3) `dryRunSampleMax` (POLICY_DRY_RUN_SAMPLE_MAX) and `dryRunSamplesPerMinute` (POLICY_SAMPLE_DRY_RUNS_PER_MINUTE)"
                     },
                     "settingsDefaults": {
                       "type": "object",
@@ -70986,7 +71039,298 @@
                       "required": ["allowRecommendationOverrides", "notices", "alerts", "tagging"],
                       "additionalProperties": false
                     },
-                    "enforcement": { "type": "string" }
+                    "enforcement": { "type": "string" },
+                    "fieldGroups": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "enum": [
+                              "message",
+                              "sender",
+                              "recipient",
+                              "connection",
+                              "authentication",
+                              "attachments",
+                              "urls",
+                              "risk",
+                              "dlp",
+                              "bec",
+                              "scan",
+                              "time"
+                            ]
+                          },
+                          "label": { "type": "string" }
+                        },
+                        "required": ["id", "label"],
+                        "additionalProperties": false
+                      },
+                      "description": "Field groups in display order"
+                    },
+                    "operatorDefinitions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "op": {
+                            "type": "string",
+                            "enum": [
+                              "equals",
+                              "in",
+                              "not_in",
+                              "domain_in",
+                              "glob",
+                              "regex",
+                              "in_cidr",
+                              "eq",
+                              "gt",
+                              "gte",
+                              "lt",
+                              "lte",
+                              "between",
+                              "contains_any",
+                              "contains_all",
+                              "exists",
+                              "is",
+                              "within"
+                            ]
+                          },
+                          "label": { "type": "string" },
+                          "phrase": {
+                            "type": "string",
+                            "description": "Lower-case verb phrase of a readable summary"
+                          },
+                          "valueShape": {
+                            "type": "string",
+                            "enum": ["scalar", "list", "range", "none", "boolean", "time"],
+                            "description": "`scalar` one value; `list` 1..`maxItems` items of `itemKind`; `range` `[low, high]`; `none` no value; `boolean`; `time` (the field decides `time.window` or `time.date_range`)"
+                          },
+                          "itemKind": {
+                            "nullable": true,
+                            "description": "`field` a value of the field type and vocabulary; `domain`; `glob`; `regex` (a pattern string or `{ pattern, flags: '' | 'i' }`, RE2, validated by the server); `cidr`; `code`",
+                            "type": "string",
+                            "enum": ["field", "domain", "glob", "regex", "cidr", "code"]
+                          },
+                          "maxItems": {
+                            "nullable": true,
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 9007199254740991
+                          },
+                          "maxItemLength": {
+                            "nullable": true,
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 9007199254740991
+                          },
+                          "negated": { "type": "boolean" },
+                          "allowedInException": { "type": "boolean" },
+                          "description": { "type": "string" }
+                        },
+                        "required": [
+                          "op",
+                          "label",
+                          "phrase",
+                          "valueShape",
+                          "itemKind",
+                          "maxItems",
+                          "maxItemLength",
+                          "negated",
+                          "allowedInException",
+                          "description"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "description": "One per operator"
+                    },
+                    "actionDefinitions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "type": "string",
+                            "enum": [
+                              "ALLOW",
+                              "REJECT",
+                              "QUARANTINE",
+                              "TAG",
+                              "WARN",
+                              "REQUIRE_APPROVAL",
+                              "URL_REWRITE",
+                              "ARCHIVE",
+                              "ALERT"
+                            ]
+                          },
+                          "label": { "type": "string" },
+                          "phrase": {
+                            "type": "string",
+                            "description": "Lower-case verb phrase of a readable summary"
+                          },
+                          "kind": {
+                            "type": "string",
+                            "enum": ["disposition", "non_terminal"],
+                            "description": "At most one `disposition` action per rule"
+                          },
+                          "disposition": {
+                            "nullable": true,
+                            "type": "string",
+                            "enum": ["allow", "require_approval", "quarantine", "reject"]
+                          },
+                          "params": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": { "type": "string" },
+                                "label": { "type": "string" },
+                                "type": { "type": "string", "enum": ["enum", "string", "boolean"] },
+                                "required": { "type": "boolean" },
+                                "values": {
+                                  "nullable": true,
+                                  "description": "Allowed values of an `enum` parameter",
+                                  "type": "array",
+                                  "items": { "type": "string" }
+                                },
+                                "default": {
+                                  "nullable": true,
+                                  "description": "The value used when the parameter is absent (null = none or a tenant setting)",
+                                  "anyOf": [{ "type": "string" }, { "type": "boolean" }]
+                                },
+                                "minLength": {
+                                  "nullable": true,
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 9007199254740991
+                                },
+                                "maxLength": {
+                                  "nullable": true,
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 9007199254740991
+                                },
+                                "pattern": {
+                                  "nullable": true,
+                                  "description": "A pattern a valid string matches (documentation; the server validates)",
+                                  "type": "string"
+                                },
+                                "description": { "type": "string" }
+                              },
+                              "required": [
+                                "name",
+                                "label",
+                                "type",
+                                "required",
+                                "values",
+                                "default",
+                                "minLength",
+                                "maxLength",
+                                "pattern",
+                                "description"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "description": {
+                            "type": "string",
+                            "description": "What the platform enforces, requests or records"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "label",
+                          "phrase",
+                          "kind",
+                          "disposition",
+                          "params",
+                          "description"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "description": "One per action"
+                    },
+                    "quantifiers": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": { "type": "string", "enum": ["any", "all"] },
+                          "label": { "type": "string" },
+                          "phrase": { "type": "string" }
+                        },
+                        "required": ["id", "label", "phrase"],
+                        "additionalProperties": false
+                      },
+                      "description": "`any` (at least one list element) and `all` (every element)"
+                    },
+                    "scopeNouns": {
+                      "type": "object",
+                      "properties": {
+                        "recipients": { "type": "string" },
+                        "attachments": { "type": "string" },
+                        "urls": { "type": "string" }
+                      },
+                      "required": ["recipients", "attachments", "urls"],
+                      "additionalProperties": false,
+                      "description": "Noun of one element of a list-scoped field"
+                    },
+                    "contextRules": {
+                      "type": "object",
+                      "properties": {
+                        "defaultQuantifier": { "type": "string", "enum": ["any", "all"] },
+                        "exceptionQuantifier": { "type": "string", "enum": ["any", "all"] },
+                        "exceptionNegation": { "type": "boolean" },
+                        "relaxingDispositions": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "enum": ["allow", "require_approval", "quarantine", "reject"]
+                          }
+                        },
+                        "holdDispositions": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "enum": ["allow", "require_approval", "quarantine", "reject"]
+                          }
+                        }
+                      },
+                      "required": [
+                        "defaultQuantifier",
+                        "exceptionQuantifier",
+                        "exceptionNegation",
+                        "relaxingDispositions",
+                        "holdDispositions"
+                      ],
+                      "additionalProperties": false,
+                      "description": "Placement rules (P6, P9.8): the quantifier of a list condition without one; the only quantifier exceptions accept; whether exceptions may negate; dispositions whose `when` is relaxing (plus any `override: true` rule); dispositions that hold mail"
+                    },
+                    "weekdays": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "enum": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+                      },
+                      "description": "Days of `time.window`, Monday first"
+                    },
+                    "timeZones": {
+                      "type": "array",
+                      "items": { "type": "string" },
+                      "description": "IANA time zones of the api runtime (`Intl.supportedValuesOf('timeZone')` plus `UTC`, sorted); the validator also accepts aliases the runtime resolves"
+                    },
+                    "policyDirections": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "enum": ["inbound", "outbound", "internal", "any"]
+                      }
+                    },
+                    "messageDirections": {
+                      "type": "array",
+                      "items": { "type": "string", "enum": ["inbound", "outbound", "internal"] }
+                    }
                   },
                   "required": [
                     "versions",
@@ -70998,7 +71342,17 @@
                     "dispositions",
                     "limits",
                     "settingsDefaults",
-                    "enforcement"
+                    "enforcement",
+                    "fieldGroups",
+                    "operatorDefinitions",
+                    "actionDefinitions",
+                    "quantifiers",
+                    "scopeNouns",
+                    "contextRules",
+                    "weekdays",
+                    "timeZones",
+                    "policyDirections",
+                    "messageDirections"
                   ],
                   "additionalProperties": false
                 }
@@ -72779,6 +73133,32 @@
               "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
             }
           },
+          "413": {
+            "description": "`payload_too_large`: the JSON body is larger than 327680 bytes (the DSL’s document limit plus the request wrapper); split the policy into several policies",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [413] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["payload_too_large"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
           "429": {
             "description": "Too many requests (rate_limited, with scope and Retry-After)",
             "content": {
@@ -72826,6 +73206,1218 @@
         "summary": "Test policies against synthetic facts",
         "tags": ["policies"],
         "x-eg-permissions": { "mode": "all", "permissions": ["policy:manage"] },
+        "x-eg-rate-class": "expensive"
+      }
+    },
+    "/api/v1/policies/validate": {
+      "post": {
+        "description": "Checks a `policy-dsl/1` document exactly as a draft save does (every violation with a stable code and a JSON path such as `rules[2].when.all[0].value`, at most 100, sorted by path; regular expressions, globs, CIDRs and time zones are validated here, never in a client) and, for a valid document, the departments and users it references against the read replica (`referenceViolations`: `department_unknown`, `user_unknown`; they do not make it invalid because drafts may name a department created later, but publish, activation and enable refuse them). An invalid document is a result (`200`, `valid: false`), not an error. **Writes nothing**: no row, no audit row, no event, no idempotency record (no Idempotency-Key). Requires `policy:manage`; the organization comes from the credentials. The JSON body limit of this route is 327680 bytes (the DSL’s 262 144-byte document limit plus 64 KiB for the rest of the request): every definition the DSL accepts fits; a larger body is answered `413 payload_too_large` before it reaches the route.",
+        "operationId": "PolicyToolsController_validate_v1",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "definition": {
+                    "type": "object",
+                    "additionalProperties": {},
+                    "description": "A `policy-dsl/1` document: `{ dslVersion, direction, priority, rules[], exceptions? }` (see `GET /policies/catalog` and docs/architecture/policy-dsl.md)"
+                  }
+                },
+                "required": ["definition"],
+                "additionalProperties": false
+              },
+              "examples": {
+                "confidentialOutbound": {
+                  "value": {
+                    "definition": {
+                      "dslVersion": "policy-dsl/1",
+                      "direction": "outbound",
+                      "priority": 100,
+                      "rules": [
+                        {
+                          "id": "quarantine-confidential",
+                          "priority": 10,
+                          "description": "Hold confidential data leaving the organization",
+                          "when": {
+                            "all": [
+                              {
+                                "field": "dlp.categories",
+                                "op": "contains_any",
+                                "value": ["confidential"]
+                              },
+                              {
+                                "field": "recipient.domain",
+                                "op": "domain_in",
+                                "value": ["partner.example"],
+                                "quantifier": "any"
+                              }
+                            ]
+                          },
+                          "unless": [
+                            {
+                              "field": "sender.department",
+                              "op": "in",
+                              "value": ["0193a1b2-7c3d-7e4f-8a5b-00000000d001"]
+                            }
+                          ],
+                          "actions": [
+                            { "type": "QUARANTINE" },
+                            { "type": "ALERT", "severity": "warning" }
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                },
+                "invalidRegex": {
+                  "value": {
+                    "definition": {
+                      "dslVersion": "policy-dsl/1",
+                      "direction": "outbound",
+                      "priority": 100,
+                      "rules": [
+                        {
+                          "id": "quarantine-confidential",
+                          "priority": 10,
+                          "description": "Hold confidential data leaving the organization",
+                          "when": {
+                            "field": "attachment.filename",
+                            "op": "regex",
+                            "value": ["(a+)+\\1"],
+                            "quantifier": "any"
+                          },
+                          "unless": [
+                            {
+                              "field": "sender.department",
+                              "op": "in",
+                              "value": ["0193a1b2-7c3d-7e4f-8a5b-00000000d001"]
+                            }
+                          ],
+                          "actions": [
+                            { "type": "QUARANTINE" },
+                            { "type": "ALERT", "severity": "warning" }
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The validation result (also for an invalid definition)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "dslVersion": { "type": "string", "enum": ["policy-dsl/1"] },
+                    "valid": {
+                      "type": "boolean",
+                      "description": "No DSL violation (the check a draft save runs); `referenceViolations` do not make a definition invalid (publish, activation and enable refuse them)"
+                    },
+                    "violations": {
+                      "maxItems": 100,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": { "type": "string" },
+                          "code": { "type": "string" },
+                          "message": { "type": "string" }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      },
+                      "description": "Every DSL violation by JSON path (sorted by path, at most 100)"
+                    },
+                    "referenceViolations": {
+                      "maxItems": 100,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": { "type": "string" },
+                          "code": { "type": "string" },
+                          "message": { "type": "string" }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      },
+                      "description": "Departments and users the definition references that are not the organization’s (`department_unknown`, `user_unknown`; read replica; at most 100); empty when the definition is invalid"
+                    },
+                    "ruleCount": {
+                      "nullable": true,
+                      "description": "Null when invalid",
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    },
+                    "hasOverrideRules": {
+                      "nullable": true,
+                      "description": "Null when invalid",
+                      "type": "boolean"
+                    },
+                    "references": {
+                      "nullable": true,
+                      "description": "Department and user public ids the definition references; null when invalid",
+                      "type": "object",
+                      "properties": {
+                        "departmentIds": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                          }
+                        },
+                        "userIds": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                          }
+                        }
+                      },
+                      "required": ["departmentIds", "userIds"],
+                      "additionalProperties": false
+                    },
+                    "definitionSha256": {
+                      "nullable": true,
+                      "description": "SHA-256 of the canonical JSON (what a save stores); null when invalid",
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    }
+                  },
+                  "required": [
+                    "dslVersion",
+                    "valid",
+                    "violations",
+                    "referenceViolations",
+                    "ruleCount",
+                    "hasOverrideRules",
+                    "references",
+                    "definitionSha256"
+                  ],
+                  "additionalProperties": false,
+                  "example": {
+                    "dslVersion": "policy-dsl/1",
+                    "valid": true,
+                    "violations": [],
+                    "referenceViolations": [
+                      {
+                        "path": "rules[0].unless[0].value[0]",
+                        "code": "department_unknown",
+                        "message": "Unknown department of the organization"
+                      }
+                    ],
+                    "ruleCount": 1,
+                    "hasOverrideRules": false,
+                    "references": {
+                      "departmentIds": ["0193a1b2-7c3d-7e4f-8a5b-00000000d001"],
+                      "userIds": []
+                    },
+                    "definitionSha256": "940c537e8e79805c4ad30478bb286366b79f622f38ad7ee2ec24f20770882e25"
+                  }
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "400": {
+            "description": "`validation_failed`: the body is not strict JSON `{ definition: <JSON object> }` (`message` lists `\"<path>: <issue>\"`). An invalid definition is not an error: it is answered `200` with `valid: false` and its violations",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [400] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["validation_failed"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "413": {
+            "description": "`payload_too_large`: the JSON body is larger than 327680 bytes (the DSL’s document limit plus the request wrapper); split the policy into several policies",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [413] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["payload_too_large"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "429": {
+            "description": "Too many requests (rate_limited, with scope and Retry-After)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RateLimitedErrorBody" }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" },
+              "Retry-After": { "$ref": "#/components/headers/Retry-After" }
+            }
+          },
+          "500": {
+            "description": "Unexpected error (internal_error; no details are disclosed)",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "503": {
+            "description": "A dependency is unavailable (service_unavailable or a specific code)",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          }
+        },
+        "security": [{ "access-token": [] }, { "api-key": [] }],
+        "summary": "Validate a policy definition without saving it",
+        "tags": ["policies"],
+        "x-eg-permissions": { "mode": "all", "permissions": ["policy:manage"] }
+      }
+    },
+    "/api/v1/policies/dry-run": {
+      "post": {
+        "description": "Re-evaluates the newest stored evaluation of each message of your organization (rounds with a scan) whose `receivedAt` is in [`sample.from`, `sample.to`) (default: the last 7 days; at most POLICY_HISTORY_MAX_RANGE_DAYS), optionally of one `direction`, newest first, against `target` (`active`, `platform`, `{ policyId, versionNo }` or an inline `{ definition }`, as `POST /policies/test`). The target snapshot is compiled once; each round’s facts are read from the read replica exactly as `POST /messages/{messageId}/scans/{scanId}/policy/dry-run` reads them, one round after the other. Bounds: `sample.limit` 1..POLICY_DRY_RUN_SAMPLE_MAX (default 25; above → `400`), at most `limit × 4` stored rows read, and POLICY_DRY_RUN_DEADLINE_MS (on expiry the evaluated prefix is returned with `truncated: true`). Each item compares the stored and the recomputed message-level disposition and decisive rule (`dispositionChanged`, `decisiveChanged`); the summary counts them and the transitions. Items carry message public ids, times, enums, rule ids and counts only, never subjects, addresses or content. **Writes nothing**: no evaluation row, no audit row, no event, no idempotency record. Requires `policy:manage` and `message:read`; class `expensive` plus POLICY_SAMPLE_DRY_RUNS_PER_MINUTE per user or API key (`429 rate_limited`, `scope: route`). The JSON body limit of this route is 327680 bytes (the DSL’s 262 144-byte document limit plus 64 KiB for the rest of the request): every definition the DSL accepts fits; a larger body is answered `413 payload_too_large` before it reaches the route. The policy engine **enforces** the final disposition per recipient when rules are recipient-scoped (`recipientSplit`, step 5.3: ALLOW delivers; QUARANTINE and REQUIRE_APPROVAL create quarantine entries; REJECT discards the recipient) and the strictness floor (hard blocks, failures, the DLP binding and missing data are never weakened), plus TAG/WARN headers in a delivered copy; from step 5.3 the WARN body banner and URL_REWRITE are applied to the delivered copy after the scan when the message allows it (signed, encrypted or oversized messages record a `skipped_*` outcome instead). It **requests** ARCHIVE (consumed by step 8.1), ALERT and sender non-delivery notices (notification-worker). Quarantine release re-validates against the current policy (GET /quarantine/catalog); archiving and journaling are step 8.1.",
+        "operationId": "PolicyToolsController_sampleDryRun_v1",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "target": {
+                    "default": "active",
+                    "description": "`active`: the organization’s active policies now (replica); `platform`: the platform default alone (the tenant settings apply); `{ policyId, versionNo }`: the active policies with that version (draft or published) in place of the policy’s active version (added when the policy is not active); `{ definition }`: an unsaved definition, validated like a draft (`400 policy_definition_invalid`), added to the active policies as policy `00000000-0000-7000-8000-000000000000` version 1",
+                    "anyOf": [
+                      { "type": "string", "enum": ["active"] },
+                      { "type": "string", "enum": ["platform"] },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "policyId": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                          },
+                          "versionNo": { "type": "integer", "minimum": 1, "maximum": 4294967295 }
+                        },
+                        "required": ["policyId", "versionNo"],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "definition": {
+                            "type": "object",
+                            "additionalProperties": {},
+                            "description": "A `policy-dsl/1` document: `{ dslVersion, direction, priority, rules[], exceptions? }` (see `GET /policies/catalog` and docs/architecture/policy-dsl.md)"
+                          }
+                        },
+                        "required": ["definition"],
+                        "additionalProperties": false
+                      }
+                    ]
+                  },
+                  "sample": {
+                    "default": {},
+                    "description": "The window of stored evaluations to sample (default: the last 7 days, 25 rounds)",
+                    "type": "object",
+                    "properties": {
+                      "from": {
+                        "description": "Inclusive lower bound of `receivedAt` (default: `to` − 7 days, at most POLICY_HISTORY_MAX_RANGE_DAYS)",
+                        "type": "string",
+                        "format": "date-time",
+                        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                      },
+                      "to": {
+                        "description": "Exclusive upper bound of `receivedAt` (default: now)",
+                        "type": "string",
+                        "format": "date-time",
+                        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                      },
+                      "direction": {
+                        "type": "string",
+                        "enum": ["inbound", "outbound", "internal"]
+                      },
+                      "limit": {
+                        "description": "Rounds to re-evaluate, newest first (1..POLICY_DRY_RUN_SAMPLE_MAX, a larger value is `400`; default 25, or POLICY_DRY_RUN_SAMPLE_MAX when that is lower)",
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 200
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "additionalProperties": false
+              },
+              "examples": {
+                "activeLastWeek": { "value": { "target": "active", "sample": { "limit": 25 } } },
+                "draftVersionOutbound": {
+                  "value": {
+                    "target": {
+                      "policyId": "0193a1b2-7c3d-7e4f-8a5b-00000000a001",
+                      "versionNo": 3
+                    },
+                    "sample": {
+                      "from": "2026-11-09T00:00:00.000Z",
+                      "to": "2026-11-16T00:00:00.000Z",
+                      "direction": "outbound",
+                      "limit": 50
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Stored versus recomputed decisions of the sampled rounds",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "target": {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "enum": ["active", "platform", "version", "inline"]
+                        },
+                        "policyId": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "versionNo": {
+                          "nullable": true,
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 4294967295
+                        }
+                      },
+                      "required": ["kind", "policyId", "versionNo"],
+                      "additionalProperties": false,
+                      "description": "`inline` reports the synthetic id `00000000-0000-7000-8000-000000000000` version 1 the definition is evaluated as"
+                    },
+                    "window": {
+                      "type": "object",
+                      "properties": {
+                        "from": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                        },
+                        "to": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                        }
+                      },
+                      "required": ["from", "to"],
+                      "additionalProperties": false
+                    },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
+                    "evaluated": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991,
+                      "description": "Items with outcome `evaluated`"
+                    },
+                    "skipped": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991,
+                      "description": "Items with another outcome"
+                    },
+                    "truncated": {
+                      "type": "boolean",
+                      "description": "POLICY_DRY_RUN_DEADLINE_MS stopped the run before every selected round was evaluated (`items` holds the evaluated prefix)"
+                    },
+                    "exhausted": {
+                      "type": "boolean",
+                      "description": "The window held fewer stored rounds than `limit` (the bounded selection read all of it)"
+                    },
+                    "summary": {
+                      "type": "object",
+                      "properties": {
+                        "changed": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991,
+                          "description": "Evaluated items whose disposition changed"
+                        },
+                        "unchanged": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "stored": {
+                          "type": "object",
+                          "properties": {
+                            "allow": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "require_approval": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "quarantine": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "reject": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            }
+                          },
+                          "required": ["allow", "require_approval", "quarantine", "reject"],
+                          "additionalProperties": false,
+                          "description": "Stored dispositions of the evaluated items"
+                        },
+                        "dryRun": {
+                          "type": "object",
+                          "properties": {
+                            "allow": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "require_approval": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "quarantine": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "reject": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            }
+                          },
+                          "required": ["allow", "require_approval", "quarantine", "reject"],
+                          "additionalProperties": false,
+                          "description": "Recomputed dispositions of the evaluated items"
+                        },
+                        "transitions": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "from": {
+                                "type": "string",
+                                "enum": ["allow", "require_approval", "quarantine", "reject"]
+                              },
+                              "to": {
+                                "type": "string",
+                                "enum": ["allow", "require_approval", "quarantine", "reject"]
+                              },
+                              "count": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 9007199254740991
+                              }
+                            },
+                            "required": ["from", "to", "count"],
+                            "additionalProperties": false
+                          },
+                          "description": "Stored → recomputed disposition changes, most frequent first"
+                        }
+                      },
+                      "required": ["changed", "unchanged", "stored", "dryRun", "transitions"],
+                      "additionalProperties": false
+                    },
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "messageId": {
+                            "nullable": true,
+                            "description": "Message public id (null if the registry row is gone)",
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                          },
+                          "receivedAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "direction": {
+                            "type": "string",
+                            "enum": ["inbound", "outbound", "internal"]
+                          },
+                          "lifecycleRound": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "scanId": { "type": "string", "pattern": "^(0|[1-9][0-9]{0,19})$" },
+                          "trigger": { "type": "string", "enum": ["scanned", "scan_failed"] },
+                          "outcome": {
+                            "type": "string",
+                            "enum": ["evaluated", "not_complete", "input_invalid", "not_found"],
+                            "description": "`evaluated`; `not_complete` (the round is pending or running on the replica); `input_invalid` (the stored rows do not form a policy input); `not_found` (the message or scan is gone)"
+                          },
+                          "stored": {
+                            "type": "object",
+                            "properties": {
+                              "disposition": {
+                                "type": "string",
+                                "enum": ["allow", "require_approval", "quarantine", "reject"]
+                              },
+                              "source": {
+                                "type": "string",
+                                "enum": ["tenant_rule", "platform_default", "floor"]
+                              },
+                              "policyId": {
+                                "nullable": true,
+                                "type": "string",
+                                "format": "uuid",
+                                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                              },
+                              "versionNo": {
+                                "nullable": true,
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 4294967295
+                              },
+                              "ruleId": { "nullable": true, "type": "string" },
+                              "evaluatedAt": {
+                                "type": "string",
+                                "format": "date-time",
+                                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                              }
+                            },
+                            "required": [
+                              "disposition",
+                              "source",
+                              "policyId",
+                              "versionNo",
+                              "ruleId",
+                              "evaluatedAt"
+                            ],
+                            "additionalProperties": false,
+                            "description": "The stored evaluation of the round (message-level decision)"
+                          },
+                          "dryRun": {
+                            "nullable": true,
+                            "description": "The recomputed decision against the target; null unless `evaluated`",
+                            "type": "object",
+                            "properties": {
+                              "disposition": {
+                                "type": "string",
+                                "enum": ["allow", "require_approval", "quarantine", "reject"]
+                              },
+                              "lifecycleDisposition": {
+                                "type": "string",
+                                "enum": ["allow", "require_approval", "quarantine", "reject"]
+                              },
+                              "source": {
+                                "type": "string",
+                                "enum": ["tenant_rule", "platform_default", "floor"]
+                              },
+                              "policyId": {
+                                "nullable": true,
+                                "type": "string",
+                                "format": "uuid",
+                                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                              },
+                              "versionNo": {
+                                "nullable": true,
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 4294967295
+                              },
+                              "ruleId": { "nullable": true, "type": "string" },
+                              "matchedRuleCount": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              "actionTypes": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "enum": [
+                                    "ALLOW",
+                                    "REJECT",
+                                    "QUARANTINE",
+                                    "TAG",
+                                    "WARN",
+                                    "REQUIRE_APPROVAL",
+                                    "URL_REWRITE",
+                                    "ARCHIVE",
+                                    "ALERT"
+                                  ]
+                                }
+                              },
+                              "recipientSplit": { "type": "boolean" },
+                              "overrideApplied": { "type": "boolean" }
+                            },
+                            "required": [
+                              "disposition",
+                              "lifecycleDisposition",
+                              "source",
+                              "policyId",
+                              "versionNo",
+                              "ruleId",
+                              "matchedRuleCount",
+                              "actionTypes",
+                              "recipientSplit",
+                              "overrideApplied"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "dispositionChanged": {
+                            "type": "boolean",
+                            "description": "The stored and recomputed message-level dispositions differ"
+                          },
+                          "decisiveChanged": {
+                            "type": "boolean",
+                            "description": "The decisive source, policy or rule differs (false unless `evaluated`)"
+                          }
+                        },
+                        "required": [
+                          "messageId",
+                          "receivedAt",
+                          "direction",
+                          "lifecycleRound",
+                          "scanId",
+                          "trigger",
+                          "outcome",
+                          "stored",
+                          "dryRun",
+                          "dispositionChanged",
+                          "decisiveChanged"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "description": "The processed rounds, newest first (one per message, at most `limit`)"
+                    },
+                    "invalidVersions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "policyId": { "type": "string" },
+                          "versionNo": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "violations": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "path": { "type": "string" },
+                                "code": { "type": "string" },
+                                "message": { "type": "string" }
+                              },
+                              "required": ["path", "code", "message"],
+                              "additionalProperties": false
+                            }
+                          }
+                        },
+                        "required": ["policyId", "versionNo", "violations"],
+                        "additionalProperties": false
+                      },
+                      "description": "Versions of the snapshot the current DSL no longer accepts (excluded)"
+                    }
+                  },
+                  "required": [
+                    "target",
+                    "window",
+                    "limit",
+                    "evaluated",
+                    "skipped",
+                    "truncated",
+                    "exhausted",
+                    "summary",
+                    "items",
+                    "invalidVersions"
+                  ],
+                  "additionalProperties": false,
+                  "example": {
+                    "target": {
+                      "kind": "version",
+                      "policyId": "0193a1b2-7c3d-7e4f-8a5b-00000000a001",
+                      "versionNo": 3
+                    },
+                    "window": {
+                      "from": "2026-11-09T00:00:00.000Z",
+                      "to": "2026-11-16T00:00:00.000Z"
+                    },
+                    "limit": 50,
+                    "evaluated": 2,
+                    "skipped": 1,
+                    "truncated": false,
+                    "exhausted": true,
+                    "summary": {
+                      "changed": 1,
+                      "unchanged": 1,
+                      "stored": { "allow": 2, "require_approval": 0, "quarantine": 0, "reject": 0 },
+                      "dryRun": { "allow": 1, "require_approval": 0, "quarantine": 1, "reject": 0 },
+                      "transitions": [{ "from": "allow", "to": "quarantine", "count": 1 }]
+                    },
+                    "items": [
+                      {
+                        "messageId": "0193a1b2-7c3d-7e4f-8a5b-00000000e003",
+                        "receivedAt": "2026-11-15T16:42:10.512Z",
+                        "direction": "outbound",
+                        "lifecycleRound": 0,
+                        "scanId": "901233",
+                        "trigger": "scanned",
+                        "outcome": "evaluated",
+                        "stored": {
+                          "disposition": "allow",
+                          "source": "platform_default",
+                          "policyId": null,
+                          "versionNo": null,
+                          "ruleId": null,
+                          "evaluatedAt": "2026-11-15T16:42:14.020Z"
+                        },
+                        "dryRun": {
+                          "disposition": "quarantine",
+                          "lifecycleDisposition": "quarantine",
+                          "source": "tenant_rule",
+                          "policyId": "0193a1b2-7c3d-7e4f-8a5b-00000000a001",
+                          "versionNo": 3,
+                          "ruleId": "quarantine-confidential",
+                          "matchedRuleCount": 1,
+                          "actionTypes": ["QUARANTINE", "ALERT"],
+                          "recipientSplit": false,
+                          "overrideApplied": false
+                        },
+                        "dispositionChanged": true,
+                        "decisiveChanged": true
+                      },
+                      {
+                        "messageId": "0193a1b2-7c3d-7e4f-8a5b-00000000e002",
+                        "receivedAt": "2026-11-15T09:03:51.007Z",
+                        "direction": "outbound",
+                        "lifecycleRound": 1,
+                        "scanId": "901107",
+                        "trigger": "scanned",
+                        "outcome": "evaluated",
+                        "stored": {
+                          "disposition": "allow",
+                          "source": "tenant_rule",
+                          "policyId": "0193a1b2-7c3d-7e4f-8a5b-00000000a002",
+                          "versionNo": 1,
+                          "ruleId": "tag-external",
+                          "evaluatedAt": "2026-11-15T09:03:55.311Z"
+                        },
+                        "dryRun": {
+                          "disposition": "allow",
+                          "lifecycleDisposition": "allow",
+                          "source": "tenant_rule",
+                          "policyId": "0193a1b2-7c3d-7e4f-8a5b-00000000a002",
+                          "versionNo": 1,
+                          "ruleId": "tag-external",
+                          "matchedRuleCount": 1,
+                          "actionTypes": ["ALLOW", "TAG"],
+                          "recipientSplit": false,
+                          "overrideApplied": false
+                        },
+                        "dispositionChanged": false,
+                        "decisiveChanged": false
+                      },
+                      {
+                        "messageId": "0193a1b2-7c3d-7e4f-8a5b-00000000e001",
+                        "receivedAt": "2026-11-14T22:17:05.900Z",
+                        "direction": "outbound",
+                        "lifecycleRound": 0,
+                        "scanId": "900861",
+                        "trigger": "scan_failed",
+                        "outcome": "not_complete",
+                        "stored": {
+                          "disposition": "quarantine",
+                          "source": "floor",
+                          "policyId": null,
+                          "versionNo": null,
+                          "ruleId": null,
+                          "evaluatedAt": "2026-11-14T22:47:06.112Z"
+                        },
+                        "dryRun": null,
+                        "dispositionChanged": false,
+                        "decisiveChanged": false
+                      }
+                    ],
+                    "invalidVersions": []
+                  }
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "400": {
+            "description": "`validation_failed` (the body is not strict JSON of the documented shape; `sample.limit` above POLICY_DRY_RUN_SAMPLE_MAX; `sample.from` not before `sample.to`; a range longer than POLICY_HISTORY_MAX_RANGE_DAYS), or `policy_definition_invalid` for an inline target (`violations` by path)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [400] },
+                    "error": { "type": "string" },
+                    "code": {
+                      "type": "string",
+                      "enum": ["validation_failed", "policy_definition_invalid"]
+                    },
+                    "message": { "type": "string" },
+                    "violations": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": { "type": "string" },
+                          "code": { "type": "string" },
+                          "message": { "type": "string" }
+                        },
+                        "required": ["path", "code", "message"]
+                      }
+                    },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "404": {
+            "description": "`policy_version_not_found`: the `{ policyId, versionNo }` target is not a version of a policy of your organization (unknown, archived or another organization’s)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [404] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["policy_version_not_found"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "413": {
+            "description": "`payload_too_large`: the JSON body is larger than 327680 bytes (the DSL’s document limit plus the request wrapper); split the policy into several policies",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [413] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["payload_too_large"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "429": {
+            "description": "More than POLICY_SAMPLE_DRY_RUNS_PER_MINUTE sample dry-runs by this user or API key in the current minute (`scope: route`), or the `expensive` class or a global limit (`scope: principal | tenant`); `Retry-After` gives the seconds to wait",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [429] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["rate_limited"] },
+                    "message": { "type": "string" },
+                    "scope": { "type": "string", "enum": ["principal", "tenant", "route"] },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" },
+              "Retry-After": { "$ref": "#/components/headers/Retry-After" }
+            }
+          },
+          "500": {
+            "description": "Unexpected error (internal_error; no details are disclosed)",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "503": {
+            "description": "`service_unavailable`: the rate-limit store is unavailable (fail closed); retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [503] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["service_unavailable"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          }
+        },
+        "security": [{ "access-token": [] }, { "api-key": [] }],
+        "summary": "Dry-run policies against recent stored evaluations",
+        "tags": ["policies"],
+        "x-eg-permissions": { "mode": "all", "permissions": ["policy:manage", "message:read"] },
         "x-eg-rate-class": "expensive"
       }
     },
@@ -73961,6 +75553,32 @@
                     "limit": { "type": "integer", "minimum": 1 },
                     "requested": { "type": "integer", "minimum": 1 },
                     "currentRowVersion": { "type": "integer", "minimum": 0 },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "413": {
+            "description": "`payload_too_large`: the JSON body is larger than 327680 bytes (the DSL’s document limit plus the request wrapper); split the policy into several policies",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [413] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["payload_too_large"] },
+                    "message": { "type": "string" },
                     "correlationId": { "type": "string" },
                     "requestId": { "type": "string", "format": "uuid" }
                   },
@@ -76466,6 +78084,32 @@
               "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
             }
           },
+          "413": {
+            "description": "`payload_too_large`: the JSON body is larger than 327680 bytes (the DSL’s document limit plus the request wrapper); split the policy into several policies",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [413] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["payload_too_large"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
           "429": {
             "description": "Too many requests (rate_limited, with scope and Retry-After)",
             "content": {
@@ -77227,6 +78871,32 @@
                     "limit": { "type": "integer", "minimum": 1 },
                     "requested": { "type": "integer", "minimum": 1 },
                     "currentRowVersion": { "type": "integer", "minimum": 0 },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "413": {
+            "description": "`payload_too_large`: the JSON body is larger than 327680 bytes (the DSL’s document limit plus the request wrapper); split the policy into several policies",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [413] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["payload_too_large"] },
+                    "message": { "type": "string" },
                     "correlationId": { "type": "string" },
                     "requestId": { "type": "string", "format": "uuid" }
                   },
@@ -82225,6 +83895,32 @@
                     },
                     "message": { "type": "string" },
                     "status": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "413": {
+            "description": "`payload_too_large`: the JSON body is larger than 327680 bytes (the DSL’s document limit plus the request wrapper); split the policy into several policies",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [413] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["payload_too_large"] },
+                    "message": { "type": "string" },
                     "correlationId": { "type": "string" },
                     "requestId": { "type": "string", "format": "uuid" }
                   },

@@ -4,6 +4,7 @@ import js from '@eslint/js';
 import prettier from 'eslint-config-prettier';
 import globals from 'globals';
 import tseslint from 'typescript-eslint';
+import { EVALUATOR_PACKAGES } from './apps/admin-portal/scripts/assert-no-policy-evaluator.mjs';
 
 // The admin portal's React/Next/a11y plugins are dev dependencies of apps/admin-portal (pnpm
 // strict layout), so they are resolved from there.
@@ -32,6 +33,28 @@ const appBoundaryPatterns = [
 ];
 
 const PORTAL = 'apps/admin-portal/src';
+
+/**
+ * The admin portal never evaluates policies (step 7.3 design B2, ADR-0063 decision 2): the policy
+ * evaluator and its engines (and their RE2 dependency) must not reach the browser bundle. The
+ * same package list drives the source scan and the build-output scan of
+ * apps/admin-portal/scripts/assert-no-policy-evaluator.mjs.
+ */
+const noPolicyEvaluatorPatterns = [
+  {
+    group: [
+      ...EVALUATOR_PACKAGES,
+      ...EVALUATOR_PACKAGES.map((pkg) => `${pkg}/**`),
+      ...['policy-dsl', 'risk-scoring', 'dlp', 'bec'].flatMap((dir) => [
+        `**/packages/${dir}`,
+        `**/packages/${dir}/**`,
+      ]),
+    ],
+    message:
+      'The admin portal never evaluates policies (ADR-0063, step 7.3 B2): validation, test and dry-run are api calls. Do not import the policy evaluator, its engines or re2js.',
+  },
+];
+
 const noInnerHtml = {
   selector: "JSXAttribute[name.name='dangerouslySetInnerHTML']",
   message: 'Never render HTML (design P12): render text, or use the sanitized preview components.',
@@ -235,6 +258,17 @@ export default tseslint.config(
     rules: { 'no-restricted-syntax': ['error', noInnerHtml] },
   },
   {
+    // Every admin-portal module: no policy evaluator (ADR-0063). Flat config replaces rule
+    // options, so the boundary patterns are repeated here and in the client-facing block below.
+    files: ['apps/admin-portal/**/*.ts', 'apps/admin-portal/**/*.tsx'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        { patterns: [...appBoundaryPatterns, ...noPolicyEvaluatorPatterns] },
+      ],
+    },
+  },
+  {
     // Client-facing modules never import server code (tokens, config, the BFF).
     files: [
       `${PORTAL}/components/**/*.{ts,tsx}`,
@@ -257,6 +291,7 @@ export default tseslint.config(
               message:
                 'Client-facing code must not import src/server/** (server-only, design P10).',
             },
+            ...noPolicyEvaluatorPatterns,
           ],
         },
       ],

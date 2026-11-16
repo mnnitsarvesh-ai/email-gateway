@@ -1,44 +1,78 @@
 'use client';
 
+import { CopyPlusIcon, PencilIcon, ScrollTextIcon, Trash2Icon, WorkflowIcon } from 'lucide-react';
+import Link from 'next/link';
+import { useRouter } from 'next/navigation';
+import { useMemo, useState } from 'react';
+import { toast } from 'sonner';
 import { z } from 'zod';
-import { DataTable, type DataTableColumn } from '@/components/data-table';
-import { CopyableId, DateTime } from '@/components/domain';
+import { CopyableId, DateTime, DirectionBadge } from '@/components/domain';
+import { NotFoundView } from '@/components/not-found-view';
 import { PageHeader } from '@/components/page-header';
 import { EmptyState } from '@/components/states/empty-state';
 import { ErrorState } from '@/components/states/error-state';
 import { LoadingState } from '@/components/states/loading-state';
 import { Button } from '@/components/ui/button';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useUrlState } from '@/hooks/use-url-state';
-import { useApiQuery, useCursorList } from '@/lib/api/hooks';
-import type { ListItem } from '@/lib/api/types';
+import { ApiError } from '@/lib/api/errors';
+import { useApiMutation, useApiQuery } from '@/lib/api/hooks';
+import type { SuccessBody } from '@/lib/api/types';
+import { useCan } from '@/lib/auth/me';
 import { RouteGate } from '@/lib/auth/route-gate';
-import { formatNumber, humanize } from '@/lib/format';
-import { DetailList, EnumBadge, Section, YesNo } from '@/features/messages/controls';
-import { PolicyEditingBanner } from './policies-page';
-import { POLICY_STATUS_TONE, VERSION_STATUS_TONE } from './semantic';
+import { formatNumber } from '@/lib/format';
+import { DetailList, EnumBadge, Section } from '@/features/messages/controls';
+import { isUuid } from '@/features/domains/kit';
+import { PolicySummaryView, summarizeDefinition, type DirectoryNames } from './builder';
+import { CatalogGate } from './catalog-state';
+import { PolicyAuditTrail } from './detail/audit-trail';
+import { VersionsTable } from './detail/versions-table';
+import { NextEvaluationNote } from './lifecycle/dialog-shell';
+import { DeletePolicyDialog, PolicyStatusSwitch, RenameDialog } from './lifecycle/policy-controls';
+import {
+  policiesTabHref,
+  policyExecutionsHref,
+  policyVersionHref,
+  type PolicyDetailTab,
+} from './links';
+import { detailNumber, POLICY_QUERIES } from './queries';
+import { POLICY_STATUS_TONE } from './semantic';
+import { useBuilderCatalog } from './use-builder-catalog';
+import { useDirectoryOptions } from './use-directory-options';
 
-type Version = ListItem<'PolicyManagementController_listVersions_v1'>;
+type Policy = SuccessBody<'PolicyManagementController_get_v1'>;
 
-const URL_SHAPE = { version: z.coerce.number().int().min(1).optional().catch(undefined) };
+const DETAIL_TABS = ['overview', 'versions', 'audit'] as const;
+const URL_SHAPE = { tab: z.enum(DETAIL_TABS).default('overview').catch('overview') };
 
-/** Policy detail (`/policies/[policyId]`): policy, versions, and a version's definition (read-only). */
+/** Policy detail (`/policies/[policyId]?tab=overview|versions|audit`, design B9–B11, B17). */
 export function PolicyDetail({ policyId }: { policyId: string }) {
   return (
     <RouteGate gate={['PolicyManagementController_get_v1']}>
-      <PolicyDetailContent policyId={policyId} />
+      {isUuid(policyId) ? <PolicyDetailContent policyId={policyId} /> : <NotFoundView />}
     </RouteGate>
   );
 }
 
 function PolicyDetailContent({ policyId }: { policyId: string }) {
+  const router = useRouter();
   const policy = useApiQuery('PolicyManagementController_get_v1', { path: { policyId } });
-  const [state, setState] = useUrlState(URL_SHAPE);
-  const versions = useCursorList('PolicyManagementController_listVersions_v1', undefined, {
-    path: { policyId },
-    limit: 25,
-    enabled: policy.isSuccess,
+  const settings = useApiQuery('PolicySettingsController_get_v1');
+  const [url, setUrl] = useUrlState(URL_SHAPE);
+  const { names } = useDirectoryOptions();
+  const canAudit = useCan('AuditLogsController_search_v1');
+  const canRename = useCan('PolicyManagementController_update_v1');
+  const canDelete = useCan('PolicyManagementController_remove_v1');
+  const canCreateDraft = useCan('PolicyManagementController_createDraft_v1');
+  const [dialog, setDialog] = useState<'rename' | 'delete' | null>(null);
+  const [generation, setGeneration] = useState<string | null>(null);
+  const createDraft = useApiMutation('PolicyManagementController_createDraft_v1', {
+    invalidates: POLICY_QUERIES,
+    successMessage: null,
   });
   const breadcrumbs = [{ label: 'Policy management', href: '/policies' }, { label: 'Policy' }];
+
+  if (policy.error instanceof ApiError && policy.error.status === 404) return <NotFoundView />;
   if (policy.isLoading) {
     return (
       <div className="grid gap-4">
@@ -56,70 +90,93 @@ function PolicyDetailContent({ policyId }: { policyId: string }) {
     );
   }
   const p = policy.data;
-  const selected = state.version ?? p.activeVersionNo ?? p.latestVersionNo ?? undefined;
-  const columns: DataTableColumn<Version>[] = [
-    {
-      id: 'versionNo',
-      header: 'Version',
-      meta: { label: 'Version' },
-      cell: ({ row }) => (
-        <Button
-          variant="link"
-          size="sm"
-          className="h-auto p-0"
-          aria-pressed={row.original.versionNo === selected}
-          onClick={() => setState({ version: row.original.versionNo })}
-        >
-          v{row.original.versionNo}
-          {row.original.active ? ' (active)' : ''}
-        </Button>
-      ),
-    },
-    {
-      id: 'status',
-      header: 'Status',
-      meta: { label: 'Status' },
-      cell: ({ row }) => <EnumBadge value={row.original.status} tones={VERSION_STATUS_TONE} />,
-    },
-    {
-      id: 'rules',
-      header: 'Rules',
-      meta: { label: 'Rules', className: 'tabular-nums' },
-      cell: ({ row }) => formatNumber(row.original.ruleCount),
-    },
-    {
-      id: 'note',
-      header: 'Change note',
-      meta: { label: 'Change note', className: 'max-w-72' },
-      cell: ({ row }) =>
-        row.original.changeNote ?? <span className="text-muted-foreground">None</span>,
-    },
-    {
-      id: 'published',
-      header: 'Published',
-      meta: { label: 'Published', className: 'whitespace-nowrap' },
-      cell: ({ row }) => <DateTime value={row.original.publishedAt} emptyLabel="Not published" />,
-    },
-  ];
+  const tabs = DETAIL_TABS.filter((tab) => tab !== 'audit' || canAudit);
+  const tab: PolicyDetailTab = tabs.includes(url.tab) ? url.tab : 'overview';
+  const builderVersion = p.activeVersionNo ?? p.latestVersionNo;
+  const draftSource = p.activeVersionNo ?? p.latestVersionNo;
+
+  const newDraft = async () => {
+    if (!draftSource) return;
+    const outcome = await createDraft.submit({
+      path: { policyId: p.id },
+      body: { basedOnVersionNo: draftSource },
+    });
+    if (outcome.ok) {
+      toast.success(`Draft v${outcome.data.versionNo} created from v${draftSource}`);
+      router.push(policyVersionHref(p.id, outcome.data.versionNo));
+    } else if (outcome.error.code === 'policy_version_limit_reached') {
+      toast.error(
+        `This policy reached its limit of ${detailNumber(outcome.error, 'limit') ?? '?'} versions; delete unused drafts first.`,
+      );
+    } else if (outcome.error.status !== 429) {
+      toast.error(`The draft could not be created (${outcome.error.code}).`);
+    }
+  };
+
   return (
-    <div className="grid gap-4">
+    <div className="grid min-w-0 gap-4">
       <PageHeader
         title={p.name}
-        breadcrumbs={breadcrumbs}
+        breadcrumbs={[{ label: 'Policy management', href: '/policies' }, { label: p.name }]}
         description={p.description ?? undefined}
+        actions={
+          <>
+            {builderVersion ? (
+              <Button asChild size="sm">
+                <Link href={policyVersionHref(p.id, builderVersion)}>
+                  <WorkflowIcon aria-hidden />
+                  {p.activeVersionNo
+                    ? `Open v${builderVersion} in the builder`
+                    : `Open v${builderVersion}`}
+                </Link>
+              </Button>
+            ) : null}
+            {canCreateDraft && draftSource ? (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void newDraft()}
+                disabled={createDraft.isPending}
+              >
+                <CopyPlusIcon aria-hidden />
+                New draft
+              </Button>
+            ) : null}
+            {canRename ? (
+              <Button variant="outline" size="sm" onClick={() => setDialog('rename')}>
+                <PencilIcon aria-hidden />
+                Rename
+              </Button>
+            ) : null}
+            {canDelete ? (
+              <Button variant="ghost" size="sm" onClick={() => setDialog('delete')}>
+                <Trash2Icon aria-hidden />
+                Delete policy
+              </Button>
+            ) : null}
+          </>
+        }
       />
-      <PolicyEditingBanner />
       <Section title="Policy">
+        <PolicyStatusSwitch policy={p} />
         <DetailList
           items={[
             { label: 'Status', value: <EnumBadge value={p.status} tones={POLICY_STATUS_TONE} /> },
-            { label: 'Direction', value: humanize(p.direction) },
-            { label: 'Priority', value: formatNumber(p.priority) },
+            {
+              label: 'Direction',
+              value:
+                p.direction === 'any' ? (
+                  <span>Any direction</span>
+                ) : (
+                  <DirectionBadge direction={p.direction} />
+                ),
+            },
+            { label: 'Priority', value: `${formatNumber(p.priority)} (lower runs first)` },
             {
               label: 'Active version',
               value: p.activeVersion ? (
                 <span>
-                  v{p.activeVersion.versionNo} · {formatNumber(p.activeVersion.ruleCount)} rules
+                  {`v${p.activeVersion.versionNo} · ${formatNumber(p.activeVersion.ruleCount)} rules`}
                   {p.activeVersion.hasOverrideRules ? ' · has override rules' : ''}
                 </span>
               ) : (
@@ -130,86 +187,146 @@ function PolicyDetailContent({ policyId }: { policyId: string }) {
               label: 'Versions',
               value: `${formatNumber(p.counts.published)} published, ${formatNumber(p.counts.drafts)} drafts, ${formatNumber(p.counts.superseded)} superseded (limit ${formatNumber(p.counts.limit)})`,
             },
+            {
+              label: 'Policy generation',
+              value: settings.data ? (
+                <span>
+                  <span className="font-mono">{settings.data.generation}</span>
+                  <span className="text-xs text-muted-foreground">
+                    {' '}
+                    (every change that affects evaluation increments it)
+                  </span>
+                </span>
+              ) : (
+                <span className="text-muted-foreground">Unknown</span>
+              ),
+            },
             { label: 'Updated', value: <DateTime value={p.updatedAt} mode="absolute" /> },
             { label: 'Policy ID', value: <CopyableId value={p.id} label="policy ID" max={40} /> },
           ]}
         />
+        {generation ? <NextEvaluationNote generation={generation} /> : null}
       </Section>
-      <DataTable
-        tableId="policy-versions"
-        caption="Policy versions"
-        columns={columns}
-        list={versions}
-        getRowId={(row) => String(row.versionNo)}
-        getRowLabel={(row) => `version ${row.versionNo}`}
-        emptyState={<EmptyState title="No versions" />}
-        mobileCard={(row) => (
-          <Button
-            variant="link"
-            size="sm"
-            className="h-auto p-0"
-            onClick={() => setState({ version: row.versionNo })}
-          >
-            v{row.versionNo} · {humanize(row.status)}
-          </Button>
-        )}
-      />
-      {selected ? <VersionDefinition policyId={p.id} versionNo={selected} /> : null}
+      <Tabs
+        value={tab}
+        onValueChange={(next) => setUrl({ tab: next as PolicyDetailTab }, { push: true })}
+      >
+        <TabsList aria-label="Policy views">
+          <TabsTrigger value="overview">Overview</TabsTrigger>
+          <TabsTrigger value="versions">Versions</TabsTrigger>
+          {canAudit ? <TabsTrigger value="audit">Audit</TabsTrigger> : null}
+        </TabsList>
+        <TabsContent value="overview">
+          {tab === 'overview' ? <Overview policy={p} names={names} /> : null}
+        </TabsContent>
+        <TabsContent value="versions">
+          {tab === 'versions' ? (
+            <VersionsTable policy={p} names={names} onGeneration={setGeneration} />
+          ) : null}
+        </TabsContent>
+        {canAudit ? (
+          <TabsContent value="audit">
+            {tab === 'audit' ? <PolicyAuditTrail policyId={p.id} names={names} /> : null}
+          </TabsContent>
+        ) : null}
+      </Tabs>
+      {canRename ? (
+        <RenameDialog
+          open={dialog === 'rename'}
+          onOpenChange={(open) => setDialog(open ? 'rename' : null)}
+          policy={p}
+        />
+      ) : null}
+      {canDelete ? (
+        <DeletePolicyDialog
+          open={dialog === 'delete'}
+          onOpenChange={(open) => setDialog(open ? 'delete' : null)}
+          policy={p}
+          onDeleted={() => router.push(policiesTabHref('email'))}
+        />
+      ) : null}
     </div>
   );
 }
 
-function VersionDefinition({ policyId, versionNo }: { policyId: string; versionNo: number }) {
-  const version = useApiQuery('PolicyManagementController_getVersion_v1', {
-    path: { policyId, versionNo },
-  });
-  return (
-    <Section
-      title={`Definition of version ${versionNo}`}
-      description="The policy DSL document as stored (read-only). Validation runs against today's DSL."
-    >
-      {version.isLoading ? (
-        <LoadingState label="Loading the definition" rows={8} />
-      ) : version.error || !version.data ? (
-        <ErrorState error={version.error} onRetry={() => void version.refetch()} compact />
-      ) : (
-        <div className="grid gap-3">
-          <DetailList
-            items={[
-              {
-                label: 'Status',
-                value: <EnumBadge value={version.data.status} tones={VERSION_STATUS_TONE} />,
-              },
-              { label: 'DSL version', value: version.data.dslVersion ?? 'Unknown' },
-              { label: 'Valid today', value: <YesNo value={version.data.validation.valid} /> },
-              {
-                label: 'Definition hash',
-                value: (
-                  <span className="font-mono text-xs break-all">
-                    {version.data.definitionSha256}
-                  </span>
-                ),
-              },
-            ]}
-          />
-          {version.data.validation.violations.length > 0 ? (
-            <ul className="grid gap-1 text-sm" aria-label="Validation violations">
-              {version.data.validation.violations.map((v, i) => (
-                <li key={i}>
-                  <span className="font-mono text-xs">{v.path}</span> {v.code}: {v.message}
-                </li>
-              ))}
-            </ul>
-          ) : null}
-          <pre
-            className="rounded-md border bg-muted/40 p-3 font-mono text-xs leading-relaxed break-words whitespace-pre-wrap"
-            aria-label={`Definition of version ${versionNo}`}
-            data-testid="policy-definition"
-          >
-            {JSON.stringify(version.data.definition, null, 2)}
-          </pre>
-        </div>
-      )}
-    </Section>
+/** The active version's readable summary and the link to the policy's executions. */
+function Overview({ policy, names }: { policy: Policy; names: DirectoryNames }) {
+  const catalog = useBuilderCatalog();
+  const activeNo = policy.activeVersionNo;
+  const active = useApiQuery(
+    'PolicyManagementController_getVersion_v1',
+    { path: { policyId: policy.id, versionNo: activeNo ?? 0 } },
+    { enabled: activeNo !== null },
   );
+  return (
+    <div className="grid min-w-0 gap-4">
+      <Section
+        title={activeNo ? `Active version (v${activeNo})` : 'Active version'}
+        description="What the policy evaluates now, as a readable summary of its definition."
+        actions={
+          activeNo ? (
+            <Button asChild size="sm" variant="outline">
+              <Link href={policyVersionHref(policy.id, activeNo)}>Open in the builder</Link>
+            </Button>
+          ) : null
+        }
+      >
+        {activeNo === null ? (
+          <EmptyState
+            icon={ScrollTextIcon}
+            title="No active version"
+            description="Publish and activate a version to make this policy effective."
+            action={
+              policy.latestVersionNo ? (
+                <Button asChild size="sm" variant="outline">
+                  <Link href={policyVersionHref(policy.id, policy.latestVersionNo)}>
+                    {`Open v${policy.latestVersionNo}`}
+                  </Link>
+                </Button>
+              ) : undefined
+            }
+          />
+        ) : (
+          <CatalogGate state={catalog}>
+            {(builderCatalog) =>
+              active.isLoading ? (
+                <LoadingState label="Loading the active version" rows={4} />
+              ) : active.error || !active.data ? (
+                <ErrorState error={active.error} onRetry={() => void active.refetch()} compact />
+              ) : (
+                <ActiveSummary
+                  definition={active.data.definition}
+                  catalog={builderCatalog}
+                  names={names}
+                />
+              )
+            }
+          </CatalogGate>
+        )}
+      </Section>
+      <Section title="Executions" description="The stored evaluations this policy decided.">
+        <Button asChild size="sm" variant="outline" className="justify-self-start">
+          <Link href={policyExecutionsHref(policy.id)}>
+            Open the execution history of this policy
+          </Link>
+        </Button>
+      </Section>
+    </div>
+  );
+}
+
+function ActiveSummary({
+  definition,
+  catalog,
+  names,
+}: {
+  definition: unknown;
+  catalog: Parameters<typeof summarizeDefinition>[1];
+  names: DirectoryNames;
+}) {
+  const summary = useMemo(
+    () => summarizeDefinition(definition, catalog, names),
+    [definition, catalog, names],
+  );
+  return <PolicySummaryView summary={summary} />;
 }

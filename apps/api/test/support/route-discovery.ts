@@ -1,8 +1,9 @@
 /**
  * Route discovery for the route-level suites (route security, the step 6.1 conventions and the
  * WP5 inventory): every controller route of the running app (Nest discovery) with its
- * authorization, rate-limit (including the config-driven quarantine and reveal limits),
- * rate-class, idempotency, secret and cursor metadata, and the routes Express actually serves.
+ * authorization, rate-limit (including the config-driven quarantine, reveal and sample dry-run
+ * limits), rate-class, idempotency, secret and cursor metadata, and the routes Express actually
+ * serves.
  */
 import { type INestApplication, RequestMethod, VERSION_NEUTRAL } from '@nestjs/common';
 import { METHOD_METADATA, PATH_METADATA, VERSION_METADATA } from '@nestjs/common/constants';
@@ -18,6 +19,7 @@ import {
 import { API_GLOBAL_PREFIX } from '../../src/http/configure-api-app';
 import type { IdempotentOptions } from '../../src/http/idempotency/idempotency.interceptor';
 import { MESSAGE_REVEAL_RATE_LIMIT_KEY } from '../../src/modules/messages/message-reveal-rate-limit';
+import { POLICY_SAMPLE_DRY_RUN_RATE_LIMIT_KEY } from '../../src/modules/policies/policy-sample-dry-run-rate-limit';
 import { QUARANTINE_RATE_LIMIT_KEY } from '../../src/modules/quarantine/quarantine-rate-limit';
 import {
   IDEMPOTENT_KEY,
@@ -46,6 +48,8 @@ export interface DiscoveredRoute {
   quarantineRate: string | null;
   /** Config-driven reveal limit bucket (step 7.2 §2 E6), if any. */
   revealRate: string | null;
+  /** Config-driven sample dry-run limit bucket (step 7.3 §4.3), if any. */
+  policySampleRate: string | null;
   /** `@RateClass()` of the route (step 6.1 D8), if any. */
   rateClass: RateClass | null;
   /** `@Idempotent()` options (step 6.1 D9), if any. */
@@ -107,6 +111,9 @@ export function discoverRoutes(app: INestApplication): DiscoveredRoute[] {
             revealRate:
               (Reflect.getMetadata(MESSAGE_REVEAL_RATE_LIMIT_KEY, handler) as string | undefined) ??
               null,
+            policySampleRate:
+              (Reflect.getMetadata(POLICY_SAMPLE_DRY_RUN_RATE_LIMIT_KEY, handler) as
+                string | undefined) ?? null,
             rateClass:
               reflector.getAllAndOverride<RateClass | undefined>(RATE_CLASS_KEY, targets) ?? null,
             idempotency:

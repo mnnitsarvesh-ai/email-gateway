@@ -1,6 +1,5 @@
 import { screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
-import { expectNoInjectedMarkup } from '@/features/messages/test-data';
 import {
   apiErrorJson,
   currentTestUrl,
@@ -11,17 +10,13 @@ import {
 } from '@/test';
 import { PoliciesPage } from './policies-page';
 import { PolicyBuilder, filterFields } from './policy-builder';
-import { PolicyDetail } from './policy-detail';
 import {
-  CATALOG,
+  PLATFORM_RISK_PROFILE,
   POLICY_ID,
   POLICY_SETTINGS,
-  RISK_PROFILE,
+  REAL_CATALOG,
   execution,
-  policyDetail,
   policyRow,
-  versionDetail,
-  versionRow,
 } from './test-data';
 
 const MUTATION_LABELS = [
@@ -41,7 +36,7 @@ function expectNoMutationButtons() {
 }
 
 describe('Policy management (/policies)', () => {
-  it('lists email policies with filters in the URL; shows the 7.3 banner and no mutations; axe', async () => {
+  it('lists email policies with filters in the URL; New policy only with create permission; axe', async () => {
     const seen: URLSearchParams[] = [];
     mockApi({
       PolicyManagementController_list_v1: ({ url }) => {
@@ -49,7 +44,7 @@ describe('Policy management (/policies)', () => {
         return okJson({ data: [policyRow()], nextCursor: null, generation: '42' });
       },
     });
-    const { user, container } = renderWithProviders(<PoliciesPage />, {
+    const { user, container, unmount } = renderWithProviders(<PoliciesPage />, {
       role: 'security_analyst',
       route: '/policies',
     });
@@ -57,16 +52,42 @@ describe('Policy management (/policies)', () => {
       'href',
       `/policies/${POLICY_ID}`,
     );
-    expect(
-      screen.getByText(/Creating, editing, publishing and activating policies arrives in step 7.3/),
-    ).toBeInTheDocument();
+    // Step 7.3 replaced the "arrives in step 7.3" banner with the builder.
+    expect(screen.queryByText(/arrives in step 7\.3/)).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'New policy' })).toHaveAttribute(
+      'href',
+      '/policies/new',
+    );
+    expect(screen.getByRole('link', { name: 'Policy builder' })).toHaveAttribute(
+      'href',
+      '/policies/builder',
+    );
     expect(screen.getByText(/Policy generation/)).toBeInTheDocument();
-    expectNoMutationButtons();
     await expectNoAxeViolations(container);
     await user.click(screen.getByLabelText('Status'));
     await user.click(await screen.findByRole('option', { name: 'Disabled' }));
     await waitFor(() => expect(currentTestUrl()).toContain('status=disabled'));
     await waitFor(() => expect(seen[seen.length - 1]?.get('status')).toBe('disabled'));
+    unmount();
+    renderWithProviders(<PoliciesPage />, { role: 'read_only_user', route: '/policies' });
+    expect(await screen.findByRole('link', { name: 'Inbound threats' })).toBeInTheDocument();
+    expectNoMutationButtons();
+    expect(screen.queryByRole('link', { name: 'New policy' })).not.toBeInTheDocument();
+  });
+
+  it('the empty list points to New policy for users who may create policies', async () => {
+    mockApi({
+      PolicyManagementController_list_v1: () =>
+        okJson({ data: [], nextCursor: null, generation: '1' }),
+    });
+    const { container } = renderWithProviders(<PoliciesPage />, {
+      role: 'organization_admin',
+      route: '/policies',
+    });
+    expect(await screen.findByText('No email policies yet')).toBeInTheDocument();
+    expect(screen.getAllByRole('link', { name: 'New policy' })).toHaveLength(1);
+    expect(screen.getByText(/Build your first policy with New policy/)).toBeInTheDocument();
+    await expectNoAxeViolations(container);
   });
 
   it('shows DLP and BEC tabs only with their permissions; mailbox users are forbidden', async () => {
@@ -126,10 +147,10 @@ describe('Policy management (/policies)', () => {
     expect(within(alert).getByText('req-exec')).toBeInTheDocument();
   });
 
-  it('settings, risk and scanning tabs render the read-only configuration', async () => {
+  it('settings, risk and scanning tabs render the configuration read-only without the write permissions', async () => {
     mockApi({
       PolicySettingsController_get_v1: () => okJson(POLICY_SETTINGS),
-      RiskProfilesController_profile_v1: () => okJson(RISK_PROFILE),
+      RiskProfilesController_profile_v1: () => okJson(PLATFORM_RISK_PROFILE),
       RiskProfilesController_listVersions_v1: () => okJson({ data: [], nextCursor: null }),
       ScanSettingsController_list_v1: () =>
         okJson({
@@ -176,14 +197,17 @@ describe('Policy management (/policies)', () => {
       route: '/policies?tab=settings',
     });
     expect(await screen.findByText('Recommendation overrides')).toBeInTheDocument();
+    // security_analyst lacks policy:publish: the effective settings, no form.
+    expect(screen.queryByRole('button', { name: 'Save settings' })).not.toBeInTheDocument();
     await expectNoAxeViolations(container);
     unmount();
     const risk = renderWithProviders(<PoliciesPage />, {
-      role: 'security_analyst',
+      role: 'read_only_user',
       route: '/policies?tab=risk',
     });
     expect(await screen.findByText(/Platform default \(rsk-default\/1\)/)).toBeInTheDocument();
     expect(screen.getByText('The platform default profile applies.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'New draft' })).not.toBeInTheDocument();
     await expectNoAxeViolations(risk.container);
     risk.unmount();
     renderWithProviders(<PoliciesPage />, {
@@ -270,93 +294,63 @@ describe('Policy management (/policies)', () => {
     unmount();
     renderWithProviders(<PoliciesPage />, { role: 'security_analyst', route: '/policies?tab=bec' });
     expect(await screen.findByText('Dana Whitfield')).toBeInTheDocument();
-    expectNoMutationButtons();
-  });
-});
-
-describe('Policy detail (/policies/[policyId])', () => {
-  it('shows the policy, versions and the active definition as text; selecting a version updates the URL', async () => {
-    const versionsRequested: string[] = [];
-    mockApi({
-      PolicyManagementController_get_v1: () => okJson(policyDetail()),
-      PolicyManagementController_listVersions_v1: () =>
-        okJson({ data: [versionRow(3), versionRow(2), versionRow(1)], nextCursor: null }),
-      PolicyManagementController_getVersion_v1: ({ params }) => {
-        versionsRequested.push(params.versionNo ?? '');
-        return okJson(
-          versionDetail({
-            versionNo: Number(params.versionNo),
-            validation:
-              params.versionNo === '1'
-                ? {
-                    valid: false,
-                    violations: [
-                      { path: 'rules[0]', code: 'field_unknown', message: 'Renamed field' },
-                    ],
-                  }
-                : { valid: true, violations: [] },
-          }),
-        );
-      },
-    });
-    const { user, container } = renderWithProviders(<PolicyDetail policyId={POLICY_ID} />, {
-      role: 'read_only_user',
-      route: `/policies/${POLICY_ID}`,
-    });
-    expect(
-      await screen.findByRole('heading', { name: 'Inbound threats', level: 1 }),
-    ).toBeInTheDocument();
-    const definition = await screen.findByTestId('policy-definition');
-    expect(definition.tagName).toBe('PRE');
-    expect(definition.textContent).toContain('<script>window.__pwned=3</script>');
-    expectNoInjectedMarkup(container);
-    expect(versionsRequested).toEqual(['2']);
-    expectNoMutationButtons();
-    await expectNoAxeViolations(container);
-    await user.click(screen.getByRole('button', { name: 'v1' }));
-    await waitFor(() => expect(currentTestUrl()).toContain('version=1'));
-    expect(await screen.findByText('Renamed field', { exact: false })).toBeInTheDocument();
-  });
-
-  it('renders not-found for unknown and foreign ids', async () => {
-    mockApi({
-      PolicyManagementController_get_v1: () =>
-        apiErrorJson(404, 'policy_not_found', 'Not found', { requestId: 'req-pol' }),
-    });
-    renderWithProviders(<PolicyDetail policyId={POLICY_ID} />, { role: 'security_analyst' });
-    expect(screen.getByText(/Loading the policy/)).toBeInTheDocument();
-    const alert = await screen.findByRole('alert');
-    expect(within(alert).getByText('policy_not_found')).toBeInTheDocument();
-    expect(within(alert).getByText('req-pol')).toBeInTheDocument();
   });
 });
 
 describe('Policy builder (/policies/builder)', () => {
-  it('shows the DSL catalogue as a searchable reference and the 7.3 state; axe', async () => {
-    mockApi({ PolicyToolsController_catalog_v1: () => okJson(CATALOG) });
+  it('offers New policy, test and dry run of the active set, and the searchable catalogue reference; axe', async () => {
+    mockApi({ PolicyToolsController_catalog_v1: () => okJson(REAL_CATALOG) });
     const { user, container } = renderWithProviders(<PolicyBuilder />, {
-      role: 'security_analyst',
+      role: 'organization_admin',
       route: '/policies/builder',
     });
     expect(await screen.findByText('risk.score')).toBeInTheDocument();
-    expect(
-      screen.getByText(/The visual policy builder, test and dry-run arrive in step 7.3/),
-    ).toBeInTheDocument();
-    expect(screen.getAllByText('Terminal (decides the disposition)')).toHaveLength(2);
-    expect(screen.getByText('not used by any field')).toBeInTheDocument();
+    expect(screen.queryByText(/arrive in step 7\.3/)).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'New policy' })).toHaveAttribute(
+      'href',
+      '/policies/new',
+    );
+    expect(screen.getByRole('button', { name: 'Test with synthetic facts' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Dry run on stored messages' })).toBeInTheDocument();
+    // Fields are grouped by the catalogue's groups and show their labels.
+    expect(screen.getByRole('list', { name: 'Risk fields' })).toBeInTheDocument();
+    expect(screen.getByText('Risk score')).toBeInTheDocument();
     await expectNoAxeViolations(container);
     await user.type(screen.getByLabelText('Search fields'), 'attachment');
     await waitFor(() => expect(screen.queryByText('risk.score')).not.toBeInTheDocument());
-    expect(screen.getByText('attachments.type_family')).toBeInTheDocument();
+    expect(screen.getByText('attachment.type_family')).toBeInTheDocument();
     expect(currentTestUrl()).toContain('q=attachment');
+    await user.click(screen.getByRole('button', { name: 'Hide the reference' }));
+    expect(screen.queryByText('attachment.type_family')).not.toBeInTheDocument();
+  });
+
+  it('read-only users see the reference only (no New policy, no test or dry run)', async () => {
+    mockApi({ PolicyToolsController_catalog_v1: () => okJson(REAL_CATALOG) });
+    renderWithProviders(<PolicyBuilder />, { role: 'read_only_user', route: '/policies/builder' });
+    expect(await screen.findByText('risk.score')).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'New policy' })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: /synthetic facts|dry run/i }),
+    ).not.toBeInTheDocument();
     expectNoMutationButtons();
   });
 
-  it('filters fields by scope and text', () => {
-    expect(filterFields(CATALOG.fields, undefined, 'attachments').map((f) => f.name)).toEqual([
-      'attachments.type_family',
-    ]);
-    expect(filterFields(CATALOG.fields, 'between', undefined).map((f) => f.name)).toEqual([
+  it('filters fields by scope and text (labels included)', () => {
+    expect(
+      filterFields(REAL_CATALOG.fields, undefined, 'attachments').every(
+        (f) => f.scope === 'attachments',
+      ),
+    ).toBe(true);
+    const byLabel = filterFields(REAL_CATALOG.fields, 'DLP data categories', undefined);
+    expect(byLabel.map((f) => f.name)).toContain('dlp.categories');
+    expect(
+      byLabel.every(
+        (f) =>
+          f.label.toLowerCase().includes('dlp data categories') ||
+          f.description.toLowerCase().includes('dlp data categories'),
+      ),
+    ).toBe(true);
+    expect(filterFields(REAL_CATALOG.fields, 'risk.score', undefined).map((f) => f.name)).toEqual([
       'risk.score',
     ]);
   });
@@ -372,5 +366,19 @@ describe('Policy builder (/policies/builder)', () => {
     unmount();
     renderWithProviders(<PolicyBuilder />, { role: 'quarantine_reviewer' });
     expect(await screen.findByText(/policy:read/)).toBeInTheDocument();
+  });
+
+  it('a catalogue the builder cannot read is an error state, never a guess', async () => {
+    mockApi({
+      PolicyToolsController_catalog_v1: () =>
+        okJson({ ...REAL_CATALOG, operatorDefinitions: 'missing' } as never),
+    });
+    renderWithProviders(<PolicyBuilder />, { role: 'organization_admin' });
+    expect(
+      await screen.findByText('The policy catalogue cannot drive the builder'),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('list', { name: 'Catalogue problems' })).toHaveTextContent(
+      'operatorDefinitions',
+    );
   });
 });

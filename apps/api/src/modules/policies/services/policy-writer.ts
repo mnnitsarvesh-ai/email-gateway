@@ -122,18 +122,34 @@ export const POLICY_OPERATIONS = [
 ] as const;
 export type PolicyOperation = (typeof POLICY_OPERATIONS)[number];
 
-/** `kind` and `result` of `policy_dry_runs_total` (P24). */
-export type PolicyDryRunKind = 'test' | 'message';
+/** `kind` and `result` of `policy_dry_runs_total` (P24; `sample` since step 7.3). */
+export type PolicyDryRunKind = 'test' | 'message' | 'sample';
 export type PolicyDryRunResult = 'ok' | 'invalid' | 'not_found' | 'not_complete';
 
+/** `result` of `policy_validations_total` (step 7.3 §4.5). */
+export type PolicyValidationResult = 'valid' | 'invalid';
+
+/** `outcome` of `policy_sample_dry_run_rounds_total` (step 7.3 §4.5). */
+export const POLICY_SAMPLE_ROUND_OUTCOMES = [
+  'evaluated',
+  'not_complete',
+  'input_invalid',
+  'not_found',
+  'deadline',
+] as const;
+export type PolicySampleRoundOutcome = (typeof POLICY_SAMPLE_ROUND_OUTCOMES)[number];
+
 /**
- * The api's policy series (P24): `policy_changes_total{operation}` and
- * `policy_dry_runs_total{kind, result}`. Bounded labels; never a tenant, an id or a value.
+ * The api's policy series (P24, step 7.3 §4.5): `policy_changes_total{operation}`,
+ * `policy_dry_runs_total{kind, result}`, `policy_validations_total{result}` and
+ * `policy_sample_dry_run_rounds_total{outcome}`. Bounded labels; never a tenant, an id or a value.
  */
 @Injectable()
 export class PolicyMetrics {
   readonly changes: Counter<'operation'>;
   readonly dryRuns: Counter<'kind' | 'result'>;
+  readonly validations: Counter<'result'>;
+  readonly sampleRounds: Counter<'outcome'>;
 
   constructor(metrics: MetricsService) {
     this.changes = metrics.counter(
@@ -143,8 +159,18 @@ export class PolicyMetrics {
     );
     this.dryRuns = metrics.counter(
       'policy_dry_runs_total',
-      'Policy tests (synthetic facts) and message dry-runs (no write), by kind (test, message) and result (ok, invalid, not_found, not_complete)',
+      'Policy tests (synthetic facts), message dry-runs and sample dry-runs (no write), by kind (test, message, sample) and result (ok, invalid, not_found, not_complete)',
       ['kind', 'result'],
+    );
+    this.validations = metrics.counter(
+      'policy_validations_total',
+      'Policy definitions validated without saving (POST /policies/validate), by result (valid, invalid)',
+      ['result'],
+    );
+    this.sampleRounds = metrics.counter(
+      'policy_sample_dry_run_rounds_total',
+      'Stored rounds of sample dry-runs, by outcome (evaluated, not_complete, input_invalid, not_found, deadline = selected but not evaluated before the deadline)',
+      ['outcome'],
     );
   }
 }

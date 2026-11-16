@@ -2649,11 +2649,31 @@ export interface paths {
     };
     /**
      * Get the policy DSL catalog
-     * @description The DSL, input and evaluator versions, every field with its type, scope, operators, identity and AI flags and vocabulary, the operators, the nine actions, the dispositions (weakest first), the limits (P4 with this deployment’s organization bounds applied), the settings defaults and the platform default. Library data; no database access. The policy engine **enforces** the final disposition per recipient when rules are recipient-scoped (`recipientSplit`, step 5.3: ALLOW delivers; QUARANTINE and REQUIRE_APPROVAL create quarantine entries; REJECT discards the recipient) and the strictness floor (hard blocks, failures, the DLP binding and missing data are never weakened), plus TAG/WARN headers in a delivered copy; from step 5.3 the WARN body banner and URL_REWRITE are applied to the delivered copy after the scan when the message allows it (signed, encrypted or oversized messages record a `skipped_*` outcome instead). It **requests** ARCHIVE (consumed by step 8.1), ALERT and sender non-delivery notices (notification-worker). Quarantine release re-validates against the current policy (GET /quarantine/catalog); archiving and journaling are step 8.1.
+     * @description The DSL, input and evaluator versions, every field with its type, scope, operators, identity and AI flags and vocabulary, the operators, the nine actions, the dispositions (weakest first), the limits (P4 with this deployment’s organization bounds applied, plus `dryRunSampleMax` and `dryRunSamplesPerMinute`), the settings defaults and the platform default. Step 7.3 (ADR-0063) adds the presentation metadata a visual builder renders from: per field a `label`, `group`, `unit`, code `suggestions` and the `contexts` it may be used in; `fieldGroups`, `operatorDefinitions` (label, summary phrase, value shape, item kind and limits, negation), `actionDefinitions` (label, kind, disposition and parameter definitions), `quantifiers`, `scopeNouns`, `contextRules`, `weekdays`, `timeZones` (of the api runtime), `policyDirections` and `messageDirections`. Library data; no database access. The policy engine **enforces** the final disposition per recipient when rules are recipient-scoped (`recipientSplit`, step 5.3: ALLOW delivers; QUARANTINE and REQUIRE_APPROVAL create quarantine entries; REJECT discards the recipient) and the strictness floor (hard blocks, failures, the DLP binding and missing data are never weakened), plus TAG/WARN headers in a delivered copy; from step 5.3 the WARN body banner and URL_REWRITE are applied to the delivered copy after the scan when the message allows it (signed, encrypted or oversized messages record a `skipped_*` outcome instead). It **requests** ARCHIVE (consumed by step 8.1), ALERT and sender non-delivery notices (notification-worker). Quarantine release re-validates against the current policy (GET /quarantine/catalog); archiving and journaling are step 8.1.
      */
     get: operations['PolicyToolsController_catalog_v1'];
     put?: never;
     post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/policies/dry-run': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Dry-run policies against recent stored evaluations
+     * @description Re-evaluates the newest stored evaluation of each message of your organization (rounds with a scan) whose `receivedAt` is in [`sample.from`, `sample.to`) (default: the last 7 days; at most POLICY_HISTORY_MAX_RANGE_DAYS), optionally of one `direction`, newest first, against `target` (`active`, `platform`, `{ policyId, versionNo }` or an inline `{ definition }`, as `POST /policies/test`). The target snapshot is compiled once; each round’s facts are read from the read replica exactly as `POST /messages/{messageId}/scans/{scanId}/policy/dry-run` reads them, one round after the other. Bounds: `sample.limit` 1..POLICY_DRY_RUN_SAMPLE_MAX (default 25; above → `400`), at most `limit × 4` stored rows read, and POLICY_DRY_RUN_DEADLINE_MS (on expiry the evaluated prefix is returned with `truncated: true`). Each item compares the stored and the recomputed message-level disposition and decisive rule (`dispositionChanged`, `decisiveChanged`); the summary counts them and the transitions. Items carry message public ids, times, enums, rule ids and counts only, never subjects, addresses or content. **Writes nothing**: no evaluation row, no audit row, no event, no idempotency record. Requires `policy:manage` and `message:read`; class `expensive` plus POLICY_SAMPLE_DRY_RUNS_PER_MINUTE per user or API key (`429 rate_limited`, `scope: route`). The JSON body limit of this route is 327680 bytes (the DSL’s 262 144-byte document limit plus 64 KiB for the rest of the request): every definition the DSL accepts fits; a larger body is answered `413 payload_too_large` before it reaches the route. The policy engine **enforces** the final disposition per recipient when rules are recipient-scoped (`recipientSplit`, step 5.3: ALLOW delivers; QUARANTINE and REQUIRE_APPROVAL create quarantine entries; REJECT discards the recipient) and the strictness floor (hard blocks, failures, the DLP binding and missing data are never weakened), plus TAG/WARN headers in a delivered copy; from step 5.3 the WARN body banner and URL_REWRITE are applied to the delivered copy after the scan when the message allows it (signed, encrypted or oversized messages record a `skipped_*` outcome instead). It **requests** ARCHIVE (consumed by step 8.1), ALERT and sender non-delivery notices (notification-worker). Quarantine release re-validates against the current policy (GET /quarantine/catalog); archiving and journaling are step 8.1.
+     */
+    post: operations['PolicyToolsController_sampleDryRun_v1'];
     delete?: never;
     options?: never;
     head?: never;
@@ -2694,6 +2714,26 @@ export interface paths {
      * @description Evaluates synthetic facts (every field optional with documented defaults; `evaluationTime` defaults to the request time) against `target` with the same evaluator the policy-engine runs (floor and platform default included) and returns the full result: disposition, decisive rule, actions with applicability, delivery header edits, trace, floor, recommendation, override and clamps, explanation and hashes. The synthetic risk facts are trusted for the test only. Active policies and versions are read from the read replica. **Writes nothing**: no evaluation row, no audit row, no event. The policy engine **enforces** the final disposition per recipient when rules are recipient-scoped (`recipientSplit`, step 5.3: ALLOW delivers; QUARANTINE and REQUIRE_APPROVAL create quarantine entries; REJECT discards the recipient) and the strictness floor (hard blocks, failures, the DLP binding and missing data are never weakened), plus TAG/WARN headers in a delivered copy; from step 5.3 the WARN body banner and URL_REWRITE are applied to the delivered copy after the scan when the message allows it (signed, encrypted or oversized messages record a `skipped_*` outcome instead). It **requests** ARCHIVE (consumed by step 8.1), ALERT and sender non-delivery notices (notification-worker). Quarantine release re-validates against the current policy (GET /quarantine/catalog); archiving and journaling are step 8.1.
      */
     post: operations['PolicyToolsController_test_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/policies/validate': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Validate a policy definition without saving it
+     * @description Checks a `policy-dsl/1` document exactly as a draft save does (every violation with a stable code and a JSON path such as `rules[2].when.all[0].value`, at most 100, sorted by path; regular expressions, globs, CIDRs and time zones are validated here, never in a client) and, for a valid document, the departments and users it references against the read replica (`referenceViolations`: `department_unknown`, `user_unknown`; they do not make it invalid because drafts may name a department created later, but publish, activation and enable refuse them). An invalid document is a result (`200`, `valid: false`), not an error. **Writes nothing**: no row, no audit row, no event, no idempotency record (no Idempotency-Key). Requires `policy:manage`; the organization comes from the credentials. The JSON body limit of this route is 327680 bytes (the DSL’s 262 144-byte document limit plus 64 KiB for the rest of the request): every definition the DSL accepts fits; a larger body is answered `413 payload_too_large` before it reaches the route.
+     */
+    post: operations['PolicyToolsController_validate_v1'];
     delete?: never;
     options?: never;
     head?: never;
@@ -31007,6 +31047,30 @@ export interface operations {
           };
         };
       };
+      /** @description `payload_too_large`: the JSON body is larger than 327680 bytes (the DSL’s document limit plus the request wrapper); split the policy into several policies */
+      413: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'payload_too_large';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 413;
+          };
+        };
+      };
       /** @description Too many requests (rate_limited, with scope and Retry-After) */
       429: {
         headers: {
@@ -40045,6 +40109,30 @@ export interface operations {
           };
         };
       };
+      /** @description `payload_too_large`: the JSON body is larger than 327680 bytes (the DSL’s document limit plus the request wrapper); split the policy into several policies */
+      413: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'payload_too_large';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 413;
+          };
+        };
+      };
       /** @description Too many requests (rate_limited, with scope and Retry-After) */
       429: {
         headers: {
@@ -41609,6 +41697,30 @@ export interface operations {
           };
         };
       };
+      /** @description `payload_too_large`: the JSON body is larger than 327680 bytes (the DSL’s document limit plus the request wrapper); split the policy into several policies */
+      413: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'payload_too_large';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 413;
+          };
+        };
+      };
       /** @description Too many requests (rate_limited, with scope and Retry-After) */
       429: {
         headers: {
@@ -42070,6 +42182,30 @@ export interface operations {
             requestId?: string;
             /** @enum {integer} */
             statusCode: 409;
+          };
+        };
+      };
+      /** @description `payload_too_large`: the JSON body is larger than 327680 bytes (the DSL’s document limit plus the request wrapper); split the policy into several policies */
+      413: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'payload_too_large';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 413;
           };
         };
       };
@@ -42961,6 +43097,48 @@ export interface operations {
         };
         content: {
           'application/json': {
+            /** @description One per action */
+            actionDefinitions: {
+              /** @description What the platform enforces, requests or records */
+              description: string;
+              /** @enum {string|null} */
+              disposition: 'allow' | 'require_approval' | 'quarantine' | 'reject' | null;
+              /**
+               * @description At most one `disposition` action per rule
+               * @enum {string}
+               */
+              kind: 'disposition' | 'non_terminal';
+              label: string;
+              params: {
+                /** @description The value used when the parameter is absent (null = none or a tenant setting) */
+                default: (string | boolean) | null;
+                description: string;
+                label: string;
+                maxLength: number | null;
+                minLength: number | null;
+                name: string;
+                /** @description A pattern a valid string matches (documentation; the server validates) */
+                pattern: string | null;
+                required: boolean;
+                /** @enum {string} */
+                type: 'enum' | 'string' | 'boolean';
+                /** @description Allowed values of an `enum` parameter */
+                values: string[] | null;
+              }[];
+              /** @description Lower-case verb phrase of a readable summary */
+              phrase: string;
+              /** @enum {string} */
+              type:
+                | 'ALLOW'
+                | 'REJECT'
+                | 'QUARANTINE'
+                | 'TAG'
+                | 'WARN'
+                | 'REQUIRE_APPROVAL'
+                | 'URL_REWRITE'
+                | 'ARCHIVE'
+                | 'ALERT';
+            }[];
             actions: (
               | 'ALLOW'
               | 'REJECT'
@@ -42972,14 +43150,69 @@ export interface operations {
               | 'ARCHIVE'
               | 'ALERT'
             )[];
+            /** @description Placement rules (P6, P9.8): the quantifier of a list condition without one; the only quantifier exceptions accept; whether exceptions may negate; dispositions whose `when` is relaxing (plus any `override: true` rule); dispositions that hold mail */
+            contextRules: {
+              /** @enum {string} */
+              defaultQuantifier: 'any' | 'all';
+              exceptionNegation: boolean;
+              /** @enum {string} */
+              exceptionQuantifier: 'any' | 'all';
+              holdDispositions: ('allow' | 'require_approval' | 'quarantine' | 'reject')[];
+              relaxingDispositions: ('allow' | 'require_approval' | 'quarantine' | 'reject')[];
+            };
             /** @description Weakest first */
             dispositions: ('allow' | 'require_approval' | 'quarantine' | 'reject')[];
             enforcement: string;
+            /** @description Field groups in display order */
+            fieldGroups: {
+              /** @enum {string} */
+              id:
+                | 'message'
+                | 'sender'
+                | 'recipient'
+                | 'connection'
+                | 'authentication'
+                | 'attachments'
+                | 'urls'
+                | 'risk'
+                | 'dlp'
+                | 'bec'
+                | 'scan'
+                | 'time';
+              label: string;
+            }[];
             fields: {
               aiDerived: boolean;
               authenticatedIdentity: boolean;
+              /** @description Where the field may be used: every `when`; `exception` = rule `unless` and policy `exceptions` (not raw sender identity, not AI-derived); `relaxingWhen` = the `when` of ALLOW and override rules (not raw sender identity); `holdRule` = rules with REQUIRE_APPROVAL, QUARANTINE or REJECT (not AI-derived) */
+              contexts: {
+                exception: boolean;
+                holdRule: boolean;
+                relaxingWhen: boolean;
+                /** @enum {boolean} */
+                when: true;
+              };
               description: string;
               directions: ('inbound' | 'outbound' | 'internal')[];
+              /**
+               * @description Id of the field group (`fieldGroups`)
+               * @enum {string}
+               */
+              group:
+                | 'message'
+                | 'sender'
+                | 'recipient'
+                | 'connection'
+                | 'authentication'
+                | 'attachments'
+                | 'urls'
+                | 'risk'
+                | 'dlp'
+                | 'bec'
+                | 'scan'
+                | 'time';
+              /** @description Plain-English label (unique; never the code name) */
+              label: string;
               max: number | null;
               min: number | null;
               name: string;
@@ -43009,6 +43242,8 @@ export interface operations {
               scope: 'message' | 'recipients' | 'attachments' | 'urls';
               /** @enum {string|null} */
               senderIdentity: 'raw' | 'authenticated' | null;
+              /** @description Known codes for autocomplete of an open `codes` field (one without `values`); never a closed list (any reason code is accepted); null otherwise */
+              suggestions: string[] | null;
               /** @enum {string} */
               type:
                 | 'string'
@@ -43021,13 +43256,60 @@ export interface operations {
                 | 'codes'
                 | 'id'
                 | 'time';
+              /**
+               * @description Unit of an `int` field (`bytes`, `count`, `score`); null for other types
+               * @enum {string|null}
+               */
+              unit: 'bytes' | 'count' | 'score' | null;
               values: string[] | null;
             }[];
-            /** @description The DSL limits (P4) with the organization bounds of this deployment applied */
+            /** @description The DSL limits (P4) with the organization bounds of this deployment applied, plus (step 7.3) `dryRunSampleMax` (POLICY_DRY_RUN_SAMPLE_MAX) and `dryRunSamplesPerMinute` (POLICY_SAMPLE_DRY_RUNS_PER_MINUTE) */
             limits: {
               [key: string]: number;
             };
+            messageDirections: ('inbound' | 'outbound' | 'internal')[];
             nonTerminalActions: ('TAG' | 'WARN' | 'URL_REWRITE' | 'ARCHIVE' | 'ALERT')[];
+            /** @description One per operator */
+            operatorDefinitions: {
+              allowedInException: boolean;
+              description: string;
+              /**
+               * @description `field` a value of the field type and vocabulary; `domain`; `glob`; `regex` (a pattern string or `{ pattern, flags: '' | 'i' }`, RE2, validated by the server); `cidr`; `code`
+               * @enum {string|null}
+               */
+              itemKind: 'field' | 'domain' | 'glob' | 'regex' | 'cidr' | 'code' | null;
+              label: string;
+              maxItemLength: number | null;
+              maxItems: number | null;
+              negated: boolean;
+              /** @enum {string} */
+              op:
+                | 'equals'
+                | 'in'
+                | 'not_in'
+                | 'domain_in'
+                | 'glob'
+                | 'regex'
+                | 'in_cidr'
+                | 'eq'
+                | 'gt'
+                | 'gte'
+                | 'lt'
+                | 'lte'
+                | 'between'
+                | 'contains_any'
+                | 'contains_all'
+                | 'exists'
+                | 'is'
+                | 'within';
+              /** @description Lower-case verb phrase of a readable summary */
+              phrase: string;
+              /**
+               * @description `scalar` one value; `list` 1..`maxItems` items of `itemKind`; `range` `[low, high]`; `none` no value; `boolean`; `time` (the field decides `time.window` or `time.date_range`)
+               * @enum {string}
+               */
+              valueShape: 'scalar' | 'list' | 'range' | 'none' | 'boolean' | 'time';
+            }[];
             operators: (
               | 'equals'
               | 'in'
@@ -43052,6 +43334,20 @@ export interface operations {
               description: string;
               id: string;
             };
+            policyDirections: ('inbound' | 'outbound' | 'internal' | 'any')[];
+            /** @description `any` (at least one list element) and `all` (every element) */
+            quantifiers: {
+              /** @enum {string} */
+              id: 'any' | 'all';
+              label: string;
+              phrase: string;
+            }[];
+            /** @description Noun of one element of a list-scoped field */
+            scopeNouns: {
+              attachments: string;
+              recipients: string;
+              urls: string;
+            };
             settingsDefaults: {
               alerts: {
                 enabled: boolean;
@@ -43066,11 +43362,15 @@ export interface operations {
                 platformTagOutbound: boolean;
               };
             };
+            /** @description IANA time zones of the api runtime (`Intl.supportedValuesOf('timeZone')` plus `UTC`, sorted); the validator also accepts aliases the runtime resolves */
+            timeZones: string[];
             versions: {
               dsl: string;
               evaluator: string;
               input: string;
             };
+            /** @description Days of `time.window`, Monday first */
+            weekdays: ('mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat' | 'sun')[];
           };
         };
       };
@@ -43153,6 +43453,380 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+    };
+  };
+  PolicyToolsController_sampleDryRun_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /**
+           * @description The window of stored evaluations to sample (default: the last 7 days, 25 rounds)
+           * @default {}
+           */
+          sample?: {
+            /** @enum {string} */
+            direction?: 'inbound' | 'outbound' | 'internal';
+            /**
+             * Format: date-time
+             * @description Inclusive lower bound of `receivedAt` (default: `to` − 7 days, at most POLICY_HISTORY_MAX_RANGE_DAYS)
+             */
+            from?: string;
+            /** @description Rounds to re-evaluate, newest first (1..POLICY_DRY_RUN_SAMPLE_MAX, a larger value is `400`; default 25, or POLICY_DRY_RUN_SAMPLE_MAX when that is lower) */
+            limit?: number;
+            /**
+             * Format: date-time
+             * @description Exclusive upper bound of `receivedAt` (default: now)
+             */
+            to?: string;
+          };
+          /**
+           * @description `active`: the organization’s active policies now (replica); `platform`: the platform default alone (the tenant settings apply); `{ policyId, versionNo }`: the active policies with that version (draft or published) in place of the policy’s active version (added when the policy is not active); `{ definition }`: an unsaved definition, validated like a draft (`400 policy_definition_invalid`), added to the active policies as policy `00000000-0000-7000-8000-000000000000` version 1
+           * @default active
+           */
+          target?:
+            | 'active'
+            | 'platform'
+            | {
+                /** Format: uuid */
+                policyId: string;
+                versionNo: number;
+              }
+            | {
+                /** @description A `policy-dsl/1` document: `{ dslVersion, direction, priority, rules[], exceptions? }` (see `GET /policies/catalog` and docs/architecture/policy-dsl.md) */
+                definition: {
+                  [key: string]: unknown;
+                };
+              };
+        };
+      };
+    };
+    responses: {
+      /** @description Stored versus recomputed decisions of the sampled rounds */
+      200: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @description Items with outcome `evaluated` */
+            evaluated: number;
+            /** @description The window held fewer stored rounds than `limit` (the bounded selection read all of it) */
+            exhausted: boolean;
+            /** @description Versions of the snapshot the current DSL no longer accepts (excluded) */
+            invalidVersions: {
+              policyId: string;
+              versionNo: number;
+              violations: {
+                code: string;
+                message: string;
+                path: string;
+              }[];
+            }[];
+            /** @description The processed rounds, newest first (one per message, at most `limit`) */
+            items: {
+              /** @description The decisive source, policy or rule differs (false unless `evaluated`) */
+              decisiveChanged: boolean;
+              /** @enum {string} */
+              direction: 'inbound' | 'outbound' | 'internal';
+              /** @description The stored and recomputed message-level dispositions differ */
+              dispositionChanged: boolean;
+              /** @description The recomputed decision against the target; null unless `evaluated` */
+              dryRun: {
+                actionTypes: (
+                  | 'ALLOW'
+                  | 'REJECT'
+                  | 'QUARANTINE'
+                  | 'TAG'
+                  | 'WARN'
+                  | 'REQUIRE_APPROVAL'
+                  | 'URL_REWRITE'
+                  | 'ARCHIVE'
+                  | 'ALERT'
+                )[];
+                /** @enum {string} */
+                disposition: 'allow' | 'require_approval' | 'quarantine' | 'reject';
+                /** @enum {string} */
+                lifecycleDisposition: 'allow' | 'require_approval' | 'quarantine' | 'reject';
+                matchedRuleCount: number;
+                overrideApplied: boolean;
+                /** Format: uuid */
+                policyId: string | null;
+                recipientSplit: boolean;
+                ruleId: string | null;
+                /** @enum {string} */
+                source: 'tenant_rule' | 'platform_default' | 'floor';
+                versionNo: number | null;
+              } | null;
+              lifecycleRound: number;
+              /**
+               * Format: uuid
+               * @description Message public id (null if the registry row is gone)
+               */
+              messageId: string | null;
+              /**
+               * @description `evaluated`; `not_complete` (the round is pending or running on the replica); `input_invalid` (the stored rows do not form a policy input); `not_found` (the message or scan is gone)
+               * @enum {string}
+               */
+              outcome: 'evaluated' | 'not_complete' | 'input_invalid' | 'not_found';
+              /** Format: date-time */
+              receivedAt: string;
+              scanId: string;
+              /** @description The stored evaluation of the round (message-level decision) */
+              stored: {
+                /** @enum {string} */
+                disposition: 'allow' | 'require_approval' | 'quarantine' | 'reject';
+                /** Format: date-time */
+                evaluatedAt: string;
+                /** Format: uuid */
+                policyId: string | null;
+                ruleId: string | null;
+                /** @enum {string} */
+                source: 'tenant_rule' | 'platform_default' | 'floor';
+                versionNo: number | null;
+              };
+              /** @enum {string} */
+              trigger: 'scanned' | 'scan_failed';
+            }[];
+            limit: number;
+            /** @description Items with another outcome */
+            skipped: number;
+            summary: {
+              /** @description Evaluated items whose disposition changed */
+              changed: number;
+              /** @description Recomputed dispositions of the evaluated items */
+              dryRun: {
+                allow: number;
+                quarantine: number;
+                reject: number;
+                require_approval: number;
+              };
+              /** @description Stored dispositions of the evaluated items */
+              stored: {
+                allow: number;
+                quarantine: number;
+                reject: number;
+                require_approval: number;
+              };
+              /** @description Stored → recomputed disposition changes, most frequent first */
+              transitions: {
+                count: number;
+                /** @enum {string} */
+                from: 'allow' | 'require_approval' | 'quarantine' | 'reject';
+                /** @enum {string} */
+                to: 'allow' | 'require_approval' | 'quarantine' | 'reject';
+              }[];
+              unchanged: number;
+            };
+            /** @description `inline` reports the synthetic id `00000000-0000-7000-8000-000000000000` version 1 the definition is evaluated as */
+            target: {
+              /** @enum {string} */
+              kind: 'active' | 'platform' | 'version' | 'inline';
+              /** Format: uuid */
+              policyId: string | null;
+              versionNo: number | null;
+            };
+            /** @description POLICY_DRY_RUN_DEADLINE_MS stopped the run before every selected round was evaluated (`items` holds the evaluated prefix) */
+            truncated: boolean;
+            window: {
+              /** Format: date-time */
+              from: string;
+              /** Format: date-time */
+              to: string;
+            };
+          };
+        };
+      };
+      /** @description `validation_failed` (the body is not strict JSON of the documented shape; `sample.limit` above POLICY_DRY_RUN_SAMPLE_MAX; `sample.from` not before `sample.to`; a range longer than POLICY_HISTORY_MAX_RANGE_DAYS), or `policy_definition_invalid` for an inline target (`violations` by path) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'policy_definition_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+            violations?: {
+              code: string;
+              message: string;
+              path: string;
+            }[];
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Authenticated but not allowed (permission, MFA, enrollment restriction) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description `policy_version_not_found`: the `{ policyId, versionNo }` target is not a version of a policy of your organization (unknown, archived or another organization’s) */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'policy_version_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description `payload_too_large`: the JSON body is larger than 327680 bytes (the DSL’s document limit plus the request wrapper); split the policy into several policies */
+      413: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'payload_too_large';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 413;
+          };
+        };
+      };
+      /** @description More than POLICY_SAMPLE_DRY_RUNS_PER_MINUTE sample dry-runs by this user or API key in the current minute (`scope: route`), or the `expensive` class or a global limit (`scope: principal | tenant`); `Retry-After` gives the seconds to wait */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'rate_limited';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {string} */
+            scope?: 'principal' | 'tenant' | 'route';
+            /** @enum {integer} */
+            statusCode: 429;
+          };
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description `service_unavailable`: the rate-limit store is unavailable (fail closed); retry */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
         };
       };
     };
@@ -44125,6 +44799,221 @@ export interface operations {
             requestId?: string;
             /** @enum {integer} */
             statusCode: 404;
+          };
+        };
+      };
+      /** @description `payload_too_large`: the JSON body is larger than 327680 bytes (the DSL’s document limit plus the request wrapper); split the policy into several policies */
+      413: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'payload_too_large';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 413;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description A dependency is unavailable (service_unavailable or a specific code) */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+    };
+  };
+  PolicyToolsController_validate_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @description A `policy-dsl/1` document: `{ dslVersion, direction, priority, rules[], exceptions? }` (see `GET /policies/catalog` and docs/architecture/policy-dsl.md) */
+          definition: {
+            [key: string]: unknown;
+          };
+        };
+      };
+    };
+    responses: {
+      /** @description The validation result (also for an invalid definition) */
+      200: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @description SHA-256 of the canonical JSON (what a save stores); null when invalid */
+            definitionSha256: string | null;
+            /** @enum {string} */
+            dslVersion: 'policy-dsl/1';
+            /** @description Null when invalid */
+            hasOverrideRules: boolean | null;
+            /** @description Department and user public ids the definition references; null when invalid */
+            references: {
+              departmentIds: string[];
+              userIds: string[];
+            } | null;
+            /** @description Departments and users the definition references that are not the organization’s (`department_unknown`, `user_unknown`; read replica; at most 100); empty when the definition is invalid */
+            referenceViolations: {
+              code: string;
+              message: string;
+              path: string;
+            }[];
+            /** @description Null when invalid */
+            ruleCount: number | null;
+            /** @description No DSL violation (the check a draft save runs); `referenceViolations` do not make a definition invalid (publish, activation and enable refuse them) */
+            valid: boolean;
+            /** @description Every DSL violation by JSON path (sorted by path, at most 100) */
+            violations: {
+              code: string;
+              message: string;
+              path: string;
+            }[];
+          };
+        };
+      };
+      /** @description `validation_failed`: the body is not strict JSON `{ definition: <JSON object> }` (`message` lists `"<path>: <issue>"`). An invalid definition is not an error: it is answered `200` with `valid: false` and its violations */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Authenticated but not allowed (permission, MFA, enrollment restriction) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description `payload_too_large`: the JSON body is larger than 327680 bytes (the DSL’s document limit plus the request wrapper); split the policy into several policies */
+      413: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'payload_too_large';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 413;
           };
         };
       };

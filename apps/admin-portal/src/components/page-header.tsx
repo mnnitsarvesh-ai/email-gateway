@@ -18,11 +18,17 @@ export function PageHeader({
   breadcrumbs?: readonly Crumb[];
   className?: string;
 }) {
+  const documentTitle = `${title} · Email Security Gateway`;
   useEffect(() => {
-    document.title = `${title} · Email Security Gateway`;
-  }, [title]);
+    document.title = documentTitle;
+  }, [documentTitle]);
   return (
     <header className={cn('flex flex-col gap-2 pb-4', className)}>
+      {/* React hoists this into <head> and keeps it while the page is mounted. A URL-state change
+          (router.replace of a tab, section or filter) re-renders Next's metadata, which removes
+          its own <title> until the new payload resolves; without this element the document had
+          no title in between (axe document-title, step 7.3 verification). */}
+      <title>{documentTitle}</title>
       {breadcrumbs ? <Breadcrumbs items={breadcrumbs} /> : null}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="grid min-w-0 gap-1">

@@ -28,7 +28,10 @@
  * (docs/plan/steps/20-admin-portal.md §3.3) adds three expensive report routes (`NEW_IN_7_1`).
  * Step 7.2 (docs/plan/steps/21-email-explorer-details.md §3.3) adds the five saved views routes
  * (WP1) and the headers route and the two audited reveal operations (WP2) (`NEW_IN_7_2`,
- * examples required, the list v1, in the explorer manifest).
+ * examples required, the list v1, in the explorer manifest). Step 7.3
+ * (docs/plan/steps/22-policy-builder.md §4.4) adds policy validation and the sample dry-run
+ * (`NEW_IN_7_3`, examples required, the policy-builder manifest; the sample dry-run is
+ * `expensive`).
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -230,6 +233,12 @@ const NEW_IN_7_2 = [
   'post /api/v1/messages/:messageId/reveal',
 ];
 
+/**
+ * Step 7.3 §4.4 (docs/plan/steps/22-policy-builder.md): validation without saving and the sample
+ * dry-run (examples required, exactly the policy-builder manifest).
+ */
+const NEW_IN_7_3 = ['post /api/v1/policies/validate', 'post /api/v1/policies/dry-run'];
+
 /** D9: secret-bearing responses (sensitive class, never idempotency-stored). */
 const SECRET_BEARING = [
   'post /api/v1/api-keys',
@@ -252,6 +261,8 @@ const EXPENSIVE = [
   'post /api/v1/policies/test',
   'post /api/v1/messages/:messageId/scans/:scanId/policy/dry-run',
   'post /api/v1/messages/:messageId/scans/:scanId/risk/dry-run',
+  // Step 7.3 §4.3: the sample dry-run (plus its own per-principal limit).
+  'post /api/v1/policies/dry-run',
 ];
 
 /**
@@ -409,11 +420,12 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     await api?.close();
   });
 
-  it('discovers every route once (277 operations under /api/v1 plus the 3 internal endpoints)', () => {
+  it('discovers every route once (279 operations under /api/v1 plus the 3 internal endpoints)', () => {
     expect(facts.length).toBe(byKey.size);
     // 249 after step 6.1, plus the 17 routes of step 6.2, plus the 3 reports of step 7.1, plus
-    // the 5 saved views routes (WP1) and the headers and two reveal routes (WP2) of step 7.2.
-    expect(facts.filter((f) => f.key.includes(' /api/v1/')).length).toBe(277);
+    // the 5 saved views routes (WP1) and the headers and two reveal routes (WP2) of step 7.2,
+    // plus the validate and sample dry-run routes of step 7.3.
+    expect(facts.filter((f) => f.key.includes(' /api/v1/')).length).toBe(279);
     expect(
       facts
         .filter((f) => isInternal(f.key))
@@ -508,9 +520,9 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     }
   });
 
-  it('gives every route new in 6.1, 6.2, 7.1 and 7.2 explicit response examples (D14)', () => {
+  it('gives every route new in 6.1, 6.2, 7.1, 7.2 and 7.3 explicit response examples (D14)', () => {
     const failures: string[] = [];
-    for (const key of [...NEW_IN_6_1, ...NEW_IN_6_2, ...NEW_IN_7_1, ...NEW_IN_7_2]) {
+    for (const key of [...NEW_IN_6_1, ...NEW_IN_6_2, ...NEW_IN_7_1, ...NEW_IN_7_2, ...NEW_IN_7_3]) {
       const op = operation(key);
       if (!op) {
         failures.push(`${key}: missing`);
@@ -555,6 +567,10 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     expect(NEW_IN_6_2).toHaveLength(17);
     // NEW_IN_7_2 is exactly the step 7.2 explorer manifest (WP1, WP2).
     expect(COVERAGE_BY_AREA.explorer.map((c) => c.route).sort()).toEqual([...NEW_IN_7_2].sort());
+    // NEW_IN_7_3 is exactly the step 7.3 policy-builder manifest.
+    expect(COVERAGE_BY_AREA['policy-builder'].map((c) => c.route).sort()).toEqual(
+      [...NEW_IN_7_3].sort(),
+    );
   });
 
   it('has one coverage entry per served route and none for a route that does not exist (§3.8)', () => {
@@ -570,6 +586,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
       expect(NEW_IN_6_2.includes(route), route).toBe(false);
       expect(NEW_IN_7_1.includes(route), route).toBe(false);
       expect(NEW_IN_7_2.includes(route), route).toBe(false);
+      expect(NEW_IN_7_3.includes(route), route).toBe(false);
     }
   });
 
@@ -616,10 +633,11 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
         (NEW_IN_6_1.includes(key) ||
           NEW_IN_6_2.includes(key) ||
           NEW_IN_7_1.includes(key) ||
-          NEW_IN_7_2.includes(key)) &&
+          NEW_IN_7_2.includes(key) ||
+          NEW_IN_7_3.includes(key)) &&
         route.cursor === 'v0'
       )
-        failures.push(`${key}: 6.1/6.2/7.1/7.2 list on v0`);
+        failures.push(`${key}: 6.1/6.2/7.1/7.2/7.3 list on v0`);
       if (route.cursor !== null && operation(key)!['x-eg-cursor'] !== route.cursor) {
         failures.push(`${key}: x-eg-cursor not documented`);
       }
