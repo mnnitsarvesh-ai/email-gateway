@@ -9,12 +9,14 @@
  * - `webhooks.ts` (step 6.2 WP3): webhooks, delivery history, replays, notification settings
  *   and preferences;
  * - `explorer.ts` (step 7.2): saved views (WP1), headers and reveal (WP2);
- * - `policy-builder.ts` (step 7.3): policy validation and the sample dry-run.
+ * - `policy-builder.ts` (step 7.3): policy validation and the sample dry-run;
+ * - `archive.ts` (step 8.1): archive, legal hold and eDiscovery operations.
  *
  * Consumed by `test/route-inventory.e2e.test.ts`, which fails when a served route has no entry,
  * when an entry names a route that does not exist, or when a named test file is missing or does
  * not carry the marker comment `@covers <method> <path>`.
  */
+import { COVERAGE as ARCHIVE } from './archive';
 import { COVERAGE as EXPLORER } from './explorer';
 import { COVERAGE as INSIGHTS } from './insights';
 import { COVERAGE as LEGACY } from './legacy';
@@ -37,7 +39,7 @@ export interface RouteCoverage {
 
 /** Which manifest an entry comes from (reported by the inventory on a failure). */
 export type CoverageArea =
-  'legacy' | 'messages' | 'insights' | 'webhooks' | 'explorer' | 'policy-builder';
+  'legacy' | 'messages' | 'insights' | 'webhooks' | 'explorer' | 'policy-builder' | 'archive';
 
 export const COVERAGE_BY_AREA: Readonly<Record<CoverageArea, readonly RouteCoverage[]>> =
   Object.freeze({
@@ -47,6 +49,7 @@ export const COVERAGE_BY_AREA: Readonly<Record<CoverageArea, readonly RouteCover
     webhooks: WEBHOOKS,
     explorer: EXPLORER,
     'policy-builder': POLICY_BUILDER,
+    archive: ARCHIVE,
   });
 
 export const COVERAGE: readonly RouteCoverage[] = Object.freeze([
@@ -56,4 +59,5 @@ export const COVERAGE: readonly RouteCoverage[] = Object.freeze([
   ...WEBHOOKS,
   ...EXPLORER,
   ...POLICY_BUILDER,
+  ...ARCHIVE,
 ]);

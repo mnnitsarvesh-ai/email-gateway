@@ -109,6 +109,10 @@ The `policy-engine` (EKS Deployment, ≥ 2 replicas) consumes `email.policy.eval
 
 The `webhook-worker` image runs as two Deployments: `webhook-fanout` (consumes `email.webhooks` as `eg-webhook` and projects internal events into public webhook events, deliveries and security alert requests) and `webhook-delivery` (signs and POSTs through the SSRF-guarded client; the **only** workload with Internet egress for webhooks, TCP 443 to public addresses). Rollout order (migration → topology v11 + `eg-webhook` → api → webhook-worker → notification-worker), the new Secret `email-gateway-webhook-secret-key` (api encrypts, webhook-delivery decrypts) and the Secret key `rabbitmq-webhook-url`, egress, DNS and sizing: [webhooks.md](webhooks.md). Runbook: [webhooks](../runbooks/webhooks.md).
 
+### Journaling and compliance archiving (step 8.1)
+
+The `archive-worker` image runs as two Deployments: `archive-worker` (roles `capture,index`: consumes `email.archive` as `eg-archive`, runs the journal completeness sweep and the policy reconciler, captures encrypted copies into the Object-Lock archive bucket and keeps the OpenSearch metadata index in sync; HPA) and `archive-jobs` (roles `lifecycle,ediscovery`: expiry, review, holds, the disposal pipeline across S3 versions, replica buckets, OpenSearch and MySQL, the root key re-wrap, case searches and signed encrypted exports; the **only** holder of the export signing key and of the S3 version-delete permissions). Rollout order (migration → topology v12 + `eg-archive` → archive bucket with Object Lock → OpenSearch domain and FGAC users → api → archive-worker → archive-jobs), the archive bucket and its CRR target, IAM per role, Amazon OpenSearch roles, the Secrets `email-gateway-archive-root-key`, `email-gateway-archive-search-worker`, `email-gateway-archive-export-signing` and the Secret key `rabbitmq-archive-url`, KMS and the MinIO/AWS differences: [archive.md](archive.md). Runbook: [archive](../runbooks/archive.md).
+
 ## Terraform
 
 See `infrastructure/terraform/README.md`. Remote state is per AWS account, and `backend.hcl` is not committed.

@@ -21,7 +21,11 @@ export interface ApiSession {
   logout(): Promise<void>;
 }
 
-export async function apiSession(email: string, password: string): Promise<ApiSession> {
+export async function apiSession(
+  email: string,
+  password: string,
+  mfa?: { code: string },
+): Promise<ApiSession> {
   const base = apiOrigin();
   const login = await fetch(`${base}/api/v1/auth/login`, {
     method: 'POST',
@@ -29,7 +33,22 @@ export async function apiSession(email: string, password: string): Promise<ApiSe
     body: JSON.stringify({ email, password }),
   });
   if (!login.ok) throw new Error(`seed login failed: ${login.status}`);
-  const { accessToken } = (await login.json()) as { accessToken: string };
+  let { accessToken, mfaToken } = (await login.json()) as {
+    accessToken?: string;
+    mfaToken?: string;
+  };
+  // Step 8.1: MFA routes (archive settings) need a session signed in with MFA.
+  if (!accessToken && mfaToken && mfa) {
+    const verified = await fetch(`${base}/api/v1/auth/mfa/verify`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mfaToken, code: mfa.code }),
+    });
+    if (!verified.ok) throw new Error(`seed MFA verification failed: ${verified.status}`);
+    ({ accessToken } = (await verified.json()) as { accessToken: string });
+    mfaToken = undefined;
+  }
+  if (!accessToken) throw new Error('seed login returned no access token');
   const headers = (extra: Record<string, string> = {}) => ({
     accept: 'application/json',
     authorization: `Bearer ${accessToken}`,

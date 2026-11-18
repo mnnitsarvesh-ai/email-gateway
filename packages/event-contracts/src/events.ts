@@ -339,8 +339,9 @@ export type PolicyDecidedV1 = z.infer<typeof policyDecidedV1>;
  * An ARCHIVE request of a policy decision (step 5.2 P15, P19, ADR-0045): the round's message is
  * to be archived. Written by the policy-engine through `message_outbox` (`aggregate_type =
  * 'message'`) in the evaluation transaction when an ARCHIVE action applies (once per round).
- * Published to `email.archive`; bound to the **dormant** `email.archive` queue (consumer: step
- * 8.1, which also reconciles from `policy_execution_logs`, because the dormant queue is lossy).
+ * Published to `email.archive`; bound to the `email.archive` queue, since topology v12 (step 8.1)
+ * the lossy work queue of the archive-worker's `capture` role (ledger `archive-worker.archive`),
+ * which also reconciles from `policy_execution_logs`, because the queue is lossy by design.
  * Ids, the S3 key and hashes only (strict). `emlS3Key` is the ORIGINAL
  * `email_messages.eml_object_key` (organization-prefixed), never a policy or rewritten copy;
  * `ruleRef` names the first rule that requested ARCHIVE (null never happens for `source =

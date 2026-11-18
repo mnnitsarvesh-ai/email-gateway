@@ -75,8 +75,12 @@ flowchart LR
     quarantine_approval_requests
     quarantine_object_purges
   end
-  subgraph archive[Archiving]
+  subgraph archive[Archiving and eDiscovery]
     email_archives[(email_archives P)]
+    archive_capture_intents[(archive_capture_intents P)]
+    archive_disposals[(archive_disposals P)]
+    archive_encryption_keys
+    ediscovery_cases[ediscovery_cases, custodians, searches, hits, exports]
   end
   subgraph ops[Platform operations]
     message_outbox[(message_outbox P)]
@@ -131,6 +135,10 @@ flowchart LR
   email_deliveries -.-> delivery_status_events
   email_messages -.-> quarantine_messages
   email_messages -.-> email_archives
+  email_messages -.-> archive_capture_intents
+  email_archives -.-> archive_disposals
+  organizations --> archive_encryption_keys
+  organizations --> ediscovery_cases
   email_messages -.-> message_outbox
   email_policies -.-> email_messages
   organizations --> policy_settings
@@ -1132,34 +1140,139 @@ erDiagram
 
 ## Archiving
 
+Step 8.1 ([design §3](../plan/steps/23-journaling-archiving.md#3-data-model-one-forward-migration-journaling_archiving-wp1)). Solid lines are foreign keys; dotted lines are logical references (partitioned tables have no foreign keys). Metadata only: message content lives in the encrypted objects of the archive bucket.
+
 ```mermaid
 erDiagram
-  organizations ||--o| archive_settings : "1:1"
-  organizations ||--o{ archive_retention_policies : ""
+  organizations ||--o| archive_settings : "1:1, RESTRICT"
+  organizations ||--o{ archive_retention_policies : "RESTRICT"
   archive_retention_policies |o--o{ archive_settings : "default policy, SET NULL"
-  email_messages ||..o| email_archives : "message_id + received_at"
+  users |o--o{ archive_settings : "updated_by SET NULL"
+  email_messages ||..o| archive_capture_intents : "message_id + received_at (UQ)"
+  email_messages ||..o| email_archives : "message_id + received_at (UQ)"
+  archive_capture_intents |o..o| email_archives : "archive_id"
   archive_retention_policies |o..o{ email_archives : "retention_policy_id"
-  organizations ||--o{ archive_legal_holds : ""
+  archive_encryption_keys ||..o{ email_archives : "organization_id + key_version"
+  organizations ||--o{ archive_encryption_keys : "RESTRICT"
+  email_archives ||..o{ archive_index_queue : "message_id + received_at"
+  organizations ||--o{ archive_index_checks : "RESTRICT"
+  email_archives ||..o| archive_disposals : "archive_record_id, message_id"
+  organizations ||--o{ archive_legal_holds : "RESTRICT"
+  ediscovery_cases |o--o{ archive_legal_holds : "case_id RESTRICT"
+  organizations ||--o{ ediscovery_cases : "RESTRICT"
+  ediscovery_cases ||--o{ ediscovery_custodians : "RESTRICT"
+  users |o--o{ ediscovery_custodians : "user_id SET NULL"
+  ediscovery_cases ||--o{ ediscovery_searches : "RESTRICT"
+  ediscovery_searches ||--o{ ediscovery_search_hits : "RESTRICT"
+  email_archives ||..o{ ediscovery_search_hits : "message_id + received_at"
+  ediscovery_cases ||--o{ ediscovery_exports : "RESTRICT"
+  ediscovery_searches ||--o{ ediscovery_exports : "RESTRICT"
+  ediscovery_exports |o--o{ archive_download_grants : "export_id CASCADE"
+  email_archives |o..o{ archive_download_grants : "message_id + received_at"
+  users ||--o{ archive_download_grants : "user_id CASCADE"
+  organizations ||--o{ archive_download_grants : "RESTRICT"
   archive_settings {
     bigint id PK
     bigint organization_id FK,UK
+    json settings "archive-settings/1, NULL = defaults"
+    bigint generation
+    int row_version
+    enum scope "RETIRED"
+    varchar encryption_key_ref "RETIRED"
   }
   archive_retention_policies {
     bigint id PK
+    char public_id UK
     bigint organization_id FK
     varchar name "UQ with organization_id"
+    json criteria "archive-retention/1"
+    datetime deleted_at "soft delete"
+    bool is_default "RETIRED"
+  }
+  archive_capture_intents {
+    bigint id PK
+    datetime received_at PK "PARTITIONED month, 2 months"
+    bigint message_id "UQ with received_at"
+    enum status
+    datetime next_check_at
   }
   email_archives {
     bigint id PK
     datetime received_at PK "PARTITIONED month, never dropped"
-    bigint message_id
+    bigint message_id "UQ with received_at"
+    char message_public_id
+    enum status "active, expiry_review, disposing"
+    json parties "archive-parties/1"
+    json objects "keys and version ids"
+    varchar wrapped_dek "NULL = crypto-shredded"
     datetime retain_until
-    bool legal_hold
+    bool legal_hold "informational"
+  }
+  archive_encryption_keys {
+    bigint id PK
+    char public_id UK
+    bigint organization_id FK "UQ with version"
+    int version
+    varchar wrapped_key "under the root key"
+  }
+  archive_index_queue {
+    bigint id PK
+    bigint organization_id "no FK"
+    enum op "upsert, delete, purge_org"
+  }
+  archive_index_checks {
+    bigint id PK
+    bigint organization_id FK "UQ with day"
+    date day
+  }
+  archive_disposals {
+    bigint id PK
+    datetime requested_at PK "PARTITIONED month, never dropped"
+    bigint archive_record_id
+    enum state
   }
   archive_legal_holds {
     bigint id PK
+    char public_id UK
     bigint organization_id FK
+    bigint case_id FK
     enum status
+  }
+  ediscovery_cases {
+    bigint id PK
+    char public_id UK
+    bigint organization_id FK "UQ with name"
+    enum status "open, closed"
+  }
+  ediscovery_custodians {
+    bigint id PK
+    bigint case_id FK "UQ with address"
+    varchar address
+  }
+  ediscovery_searches {
+    bigint id PK
+    char public_id UK
+    bigint case_id FK
+    json criteria "archive-search/1"
+    bool index_complete
+  }
+  ediscovery_search_hits {
+    bigint id PK
+    bigint search_id FK "UQ with message_id, received_at"
+    enum review_tag
+  }
+  ediscovery_exports {
+    bigint id PK
+    char public_id UK
+    bigint search_id FK
+    char package_sha256
+    varchar wrapped_dek
+  }
+  archive_download_grants {
+    bigint id PK
+    char jti UK
+    bigint user_id FK
+    enum kind "message, export"
   }
 ```
 

@@ -40,7 +40,10 @@ export function toJsonSchema(schema: unknown, depth = 0): unknown {
   }
   if (node.nullable === true) {
     if (typeof out.type === 'string') out.type = [out.type, 'null'];
-    if (Array.isArray(out.enum)) out.enum = [...(out.enum as unknown[]), null];
+    // `{ nullable: true, enum: [null] }` (a value that is always null, step 8.1) keeps one null.
+    if (Array.isArray(out.enum) && !(out.enum as unknown[]).includes(null)) {
+      out.enum = [...(out.enum as unknown[]), null];
+    }
   }
   if (
     out.type === 'object' &&

@@ -36,9 +36,9 @@ const daily = (...names: string[]): ExistingPartition[] => [
 const utc = (iso: string) => new Date(iso);
 
 describe('registry', () => {
-  it('lists the 33 partitioned tables (D3, steps 2.3, 3.1, 4.1, 4.2, 4.3, 4.4, 4.5, 5.1 and 6.2) with their retention', () => {
-    expect(PARTITION_REGISTRY).toHaveLength(33);
-    expect(new Set(PARTITION_REGISTRY.map((s) => s.table)).size).toBe(33);
+  it('lists the 35 partitioned tables (D3, steps 2.3, 3.1, 4.1, 4.2, 4.3, 4.4, 4.5, 5.1, 6.2 and 8.1) with their retention', () => {
+    expect(PARTITION_REGISTRY).toHaveLength(35);
+    expect(new Set(PARTITION_REGISTRY.map((s) => s.table)).size).toBe(35);
     const byTable = Object.fromEntries(PARTITION_REGISTRY.map((s) => [s.table, s]));
     expect(byTable.email_messages).toMatchObject({
       column: 'received_at',
@@ -49,6 +49,26 @@ describe('registry', () => {
     expect(byTable.bounce_events).toMatchObject({ column: 'occurred_at', retention: 6 });
     expect(byTable.webhook_deliveries).toMatchObject({ column: 'event_occurred_at', retention: 2 });
     expect(byTable.email_archives).toMatchObject({ retention: null, drop: false });
+    // Step 8.1: capture intents are operational (4 months, longer than the 30-day maximum intent
+    // age and the 100-day bound of a wait in quarantine); the disposal log is compliance data
+    // and never dropped.
+    expect(byTable.archive_capture_intents).toMatchObject({
+      column: 'received_at',
+      granularity: 'month',
+      retention: 4,
+      drop: true,
+      tier: 'operational',
+    });
+    expect(byTable.archive_capture_intents!.retention! * 28).toBeGreaterThan(100);
+    expect(byTable.archive_capture_intents!.guard).toBeUndefined();
+    expect(byTable.archive_disposals).toMatchObject({
+      column: 'requested_at',
+      granularity: 'month',
+      retention: null,
+      drop: false,
+      tier: 'compliance',
+    });
+    expect(byTable.email_archives).toMatchObject({ tier: 'compliance' });
     // Step 2.3 delivery tables.
     expect(byTable.delivery_reinjections).toMatchObject({
       column: 'received_at',

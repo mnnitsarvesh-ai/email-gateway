@@ -10,6 +10,9 @@ export * from './partitioning';
 export * from './migrations';
 // Seed catalog and runners (D7).
 export * from './seed';
+// Step 8.1 (A5): the scan read-model selects and row types shared by the api's scans view and
+// the archive-worker's frozen `archive-scan/1` snapshots.
+export * from './read-models/scan-read-model';
 // Domain-name normalization (step 2.1 D2), mail-path tenant resolution (D13) and post-queue
 // owner resolution (step 2.2 D7).
 export * from './domains';

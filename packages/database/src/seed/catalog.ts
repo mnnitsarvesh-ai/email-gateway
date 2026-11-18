@@ -50,7 +50,8 @@ export const PERMISSIONS = Object.freeze([
   { key: 'archive:export', description: 'Export archived messages' },
   { key: 'archive:legal_hold', description: 'Create and release legal holds' },
   { key: 'webhook:manage', description: 'Create and edit webhook subscriptions' },
-  { key: 'settings:manage', description: 'Change notification, quarantine and archive settings' },
+  // Step 8.1 (A20): archive settings need archive:manage, so "archive" is no longer listed here.
+  { key: 'settings:manage', description: 'Change notification and quarantine settings' },
   {
     key: 'platform:organizations',
     description: 'Platform: create, suspend and manage customer organizations',
@@ -217,6 +218,30 @@ export const PERMISSIONS = Object.freeze([
     description:
       'Reveal masked message metadata (subjects, recipient addresses, To/Cc/Subject header ' +
       'values) through the audited reveal action (step 7.2)',
+  },
+  // Step 8.1 (docs/plan/steps/23-journaling-archiving.md A20, ADR-0068, ADR-0069): archive
+  // search, content retrieval, archive management and eDiscovery. organization_admin and
+  // super_admin hold them through TENANT_PERMISSIONS / ALL_PERMISSIONS; security_analyst gets
+  // archive:search, compliance_auditor archive:search, archive:retrieve and ediscovery:manage,
+  // explicitly. None is in TENANT_READ_PERMISSIONS (read_only_user, platform_admin): searches
+  // reveal who corresponded with whom, and archived content is customer-only.
+  {
+    key: 'archive:search',
+    description: 'Search archived and journaled messages (metadata, masked)',
+  },
+  {
+    key: 'archive:retrieve',
+    description: 'View the sanitized preview and download original archived messages (audited)',
+  },
+  {
+    key: 'archive:manage',
+    description:
+      'Manage archive settings, retention policies, encryption keys, capture issues and ' +
+      'disposal of reviewed records',
+  },
+  {
+    key: 'ediscovery:manage',
+    description: 'Manage eDiscovery cases, custodians, searches, review and exports',
   },
 ] as const satisfies readonly PermissionDef[]);
 
@@ -386,6 +411,7 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'threat_intel:read',
       'webhook:read',
       'message:reveal',
+      'archive:search',
     ],
   },
   {
@@ -420,6 +446,9 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'billing:read',
       'webhook:read',
       'message:reveal',
+      'archive:search',
+      'archive:retrieve',
+      'ediscovery:manage',
     ],
   },
   {

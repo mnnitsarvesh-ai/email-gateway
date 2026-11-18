@@ -25,7 +25,7 @@
 // @covers put /api/v1/organizations/:id/limits/:limitKey
 // @covers put /api/v1/organizations/:id/settings
 // ---- end of route coverage ----
-import { randomBytes, randomInt } from 'node:crypto';
+import { randomBytes, randomInt, randomUUID } from 'node:crypto';
 import { LIMIT_KEYS, PLANS } from '@email-gateway/database';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { generateApiKey, TokenHasher } from '../src/crypto/tokens';
@@ -794,6 +794,20 @@ describe('deletion workflow', () => {
         sizeBytes: 2048,
         retainUntil,
         archivedAt: new Date(),
+        // Step 8.1 (§3 item 4): the archive record's required metadata (synthetic, no content).
+        messagePublicId: randomUUID(),
+        direction: 'inbound',
+        category: 'delivered',
+        messageState: 'delivered',
+        envelopeFrom: 'sender@example.test',
+        parties: { v: 1, from: 'sender@example.test', headerFrom: null, recipients: [] },
+        recipientCount: 1,
+        objects: {},
+        storedBytes: 2048n,
+        encryptionFormat: 'archive-object/1',
+        keyVersion: 1,
+        scanRounds: [],
+        settingsGeneration: 1n,
       },
     });
 

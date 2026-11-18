@@ -548,6 +548,9 @@ export class SmtpFixtures {
         await this.deleteWebhookTenantRows(ids);
         // Step 7.2: saved explorer views (foreign key to organizations, Restrict).
         await this.prisma.savedView.deleteMany({ where });
+        // Step 8.1: archive rows of the run (the live archive-worker's consumer and policy
+        // reconciler create capture intents for any message with a policy ARCHIVE request).
+        await this.deleteArchiveTenantRows(ids);
         await this.prisma.organizationLimit.deleteMany({ where });
         // Plan features a suite switched on (step 4.6: attachment_sandbox; Restrict).
         await this.prisma.organizationFeature.deleteMany({ where });
@@ -850,6 +853,31 @@ export class SmtpFixtures {
    * Consumer ledger rows (`message_idempotency`) and consumer progress rows
    * (`message_consumer_progress`, step 3.2) of this run's outbox events, any consumer.
    */
+  /**
+   * Step 8.1 rows (docs/plan/steps/23-journaling-archiving.md §3) of fixture organizations, in the
+   * order of the api's organization purge phase 2 (A24; RESTRICT keys last). Objects and index
+   * documents exist only for organizations a suite entitled and enabled; that suite removes them
+   * itself (tests/integration/support/archive.ts `purgeArchiveTenants`) with the worker stopped.
+   */
+  private async deleteArchiveTenantRows(ids: readonly bigint[]): Promise<void> {
+    const where = { organizationId: { in: [...ids] } };
+    await this.prisma.ediscoverySearchHit.deleteMany({ where });
+    await this.prisma.archiveDownloadGrant.deleteMany({ where });
+    await this.prisma.ediscoveryExport.deleteMany({ where });
+    await this.prisma.ediscoverySearch.deleteMany({ where });
+    await this.prisma.archiveLegalHold.deleteMany({ where });
+    await this.prisma.ediscoveryCustodian.deleteMany({ where });
+    await this.prisma.ediscoveryCase.deleteMany({ where });
+    await this.prisma.archiveIndexQueue.deleteMany({ where });
+    await this.prisma.archiveIndexCheck.deleteMany({ where });
+    await this.prisma.archiveDisposal.deleteMany({ where });
+    await this.prisma.emailArchive.deleteMany({ where });
+    await this.prisma.archiveCaptureIntent.deleteMany({ where });
+    await this.prisma.archiveSetting.deleteMany({ where });
+    await this.prisma.archiveRetentionPolicy.deleteMany({ where });
+    await this.prisma.archiveEncryptionKey.deleteMany({ where });
+  }
+
   private async deleteLedgerRows(ids: readonly bigint[]): Promise<void> {
     const events = await this.prisma.messageOutbox.findMany({
       where: { organizationId: { in: [...ids] } },

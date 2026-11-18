@@ -1,6 +1,6 @@
 'use client';
 
-import { CableIcon, KeyRoundIcon } from 'lucide-react';
+import { ArchiveIcon, CableIcon, KeyRoundIcon } from 'lucide-react';
 import Link from 'next/link';
 import { PageHeader } from '@/components/page-header';
 import { UnavailableState } from '@/components/states/unavailable-state';
@@ -12,7 +12,7 @@ import { WebhooksSection } from './webhooks-section';
 
 /**
  * `/integrations`: webhooks (full list), API keys and SMTP connectors (link cards), and the
- * honest unavailable states of the connectors later steps deliver.
+ * archive link card (step 8.1) and the honest unavailable state of the connectors of step 8.2.
  */
 export function IntegrationsPage() {
   return (
@@ -32,6 +32,8 @@ function Integrations() {
   const canWebhooks = useCan('WebhooksController_list_v1');
   const canKeys = useCan('ApiKeysController_list_v1');
   const canConnectors = useCan('SmtpConnectorsController_list_v1');
+  const canArchiveSettings = useCan('ArchiveAdminController_get_v1');
+  const canArchiveSearch = useCan('ArchiveMessagesController_list_v1');
   return (
     <div className="grid min-w-0 gap-6 [&>*]:min-w-0">
       <PageHeader
@@ -71,11 +73,28 @@ function Integrations() {
           title="Microsoft 365 and Google Workspace"
           description="API-based connectors for Microsoft 365 and Google Workspace mailboxes are not available yet."
         />
-        <UnavailableState
-          step="8.1"
-          title="Archive and journaling"
-          description="Journaling and compliance archive integrations are not available yet."
-        />
+        {canArchiveSettings || canArchiveSearch ? (
+          <Section
+            title="Archive and journaling"
+            description="Journal inbound, outbound and internal mail into the encrypted compliance archive (step 8.1)."
+          >
+            <div className="flex flex-wrap gap-2">
+              {canArchiveSettings ? (
+                <Button asChild variant="outline" className="justify-self-start">
+                  <Link href="/settings?tab=archive">
+                    <ArchiveIcon aria-hidden />
+                    Archive settings
+                  </Link>
+                </Button>
+              ) : null}
+              {canArchiveSearch ? (
+                <Button asChild variant="outline" className="justify-self-start">
+                  <Link href="/archive">Search the archive</Link>
+                </Button>
+              ) : null}
+            </div>
+          </Section>
+        ) : null}
       </div>
     </div>
   );

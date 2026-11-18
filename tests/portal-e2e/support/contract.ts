@@ -85,6 +85,15 @@ export const NAV_GATES: ReadonlyArray<{ label: string; href: string; gate: strin
     href: '/attachments',
     gate: ['AttachmentsController_search_v1', 'AttachmentRescansController_list_v1'],
   },
+  // Step 8.1: Compliance.
+  { label: 'Archive', href: '/archive', gate: ['ArchiveMessagesController_list_v1'] },
+  {
+    label: 'Retention and review',
+    href: '/archive/retention',
+    gate: ['ArchiveRetentionController_list_v1'],
+  },
+  { label: 'Legal holds', href: '/legal-holds', gate: ['LegalHoldsController_list_v1'] },
+  { label: 'eDiscovery', href: '/ediscovery', gate: ['EdiscoveryCasesController_list_v1'] },
   { label: 'Domains', href: '/domains', gate: ['DomainsController_list_v1'] },
   { label: 'Users', href: '/users', gate: ['UsersController_list_v1'] },
   { label: 'Roles and permissions', href: '/roles', gate: ['RolesController_list_v1'] },

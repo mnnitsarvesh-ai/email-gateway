@@ -18,6 +18,7 @@ export const QUARANTINE_ERROR_CODES = Object.freeze({
   quarantine_preview_unavailable: 409,
   quarantine_content_purged: 410,
   quarantine_legal_hold: 409,
+  /** Deprecated since step 8.1 (A23): no longer produced; kept so clients still recognize it. */
   quarantine_retention_active: 409,
   quarantine_download_disabled: 403,
   quarantine_download_blocked: 409,

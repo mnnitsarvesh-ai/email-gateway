@@ -318,14 +318,19 @@ describe('mail.message.archive_requested.v1 (step 5.2 P15)', () => {
     );
   });
 
-  it('reaches the dormant email.archive queue (step 8.1) and the firehose only', () => {
+  it('reaches the email.archive work queue of the archive-worker (topology v12, step 8.1) and the firehose only', () => {
     expect(routeMessage('email.archive', eventRoutingKey('42', type))).toEqual([
       'email.analytics',
       'email.archive',
     ]);
     const archiveQueue = TOPOLOGY.queues.find((q) => q.name === 'email.archive');
-    expect(archiveQueue?.role).toBe('dormant');
-    expect(archiveQueue?.consumer).toMatchObject({ kind: 'planned', plannedStep: '8.1' });
+    expect(archiveQueue?.role).toBe('work');
+    expect(archiveQueue?.lossy).toBe(true);
+    expect(archiveQueue?.consumer).toEqual({
+      kind: 'ledger',
+      ledgerName: 'archive-worker.archive',
+      service: 'archive-worker',
+    });
   });
 
   it('is strict and carries an organization-prefixed original object key', () => {

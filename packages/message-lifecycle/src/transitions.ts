@@ -3,7 +3,8 @@ import { EXPIRABLE_STATES, type ActorRole, type MessageState } from './states';
 /**
  * Reason codes of the transition table (L3) plus the history-only codes no edge lists, so
  * `decideTransition` never accepts them: `lifecycle_backfill` (only the step 3.3 migration writes
- * it) and `dev_passthrough` (the retired E4/E27, step 5.2; rows written before stay readable).
+ * it), `dev_passthrough` (the retired E4/E27, step 5.2; rows written before stay readable) and
+ * `archived` (the retired E25, step 8.1; no producer ever wrote it).
  * Codes match `/^[a-z0-9_]{1,64}$/`.
  */
 export const LIFECYCLE_REASON_CODES = [
@@ -81,7 +82,7 @@ export interface TransitionEdge {
  * gives E5, E8–E13 their producer, the policy-engine, ADR-0044; step 5.3 (ADR-0046 decision 4)
  * adds the reason `policy_partial` to E10, produces E16–E18 (role `quarantine`), lets the
  * quarantine sweeper expire held messages through E26 (`quarantine_expired`) and adds E28 and
- * E29), as data. Every allowed change of `email_messages.status` is one of these edges;
+ * E29; step 8.1 retires E25, ADR-0064), as data. Every allowed change of `email_messages.status` is one of these edges;
  * everything else is stale or invalid (L4). Retired ids are never reused.
  * At most one edge exists per `(from, to)` pair (`transitions.test.ts`).
  */
@@ -288,14 +289,13 @@ export const TRANSITIONS: readonly TransitionEdge[] = [
     reasons: ['delivery_failed'],
     producedBy: '3.3',
   },
-  {
-    id: 'E25',
-    from: ['delivered', 'rejected'],
-    to: 'archived',
-    roles: ['archive'],
-    reasons: ['archived'],
-    producedBy: '8.1',
-  },
+  // E25 (`delivered | rejected → archived`, role `archive`, planned for step 8.1) is retired by
+  // step 8.1 (docs/plan/steps/23-journaling-archiving.md A25, ADR-0064, superseding ADR-0025
+  // decision 6 for `archived`): archive membership is a separate fact (`email_archives`), so a
+  // message keeps its delivery outcome and the archive-worker never changes
+  // `email_messages.status`. The id is never reused; `archived` stays a reserved MessageStatus
+  // value without a producer, and `archive` / `archived` stay a valid actor role / reason code,
+  // but no edge accepts them.
   {
     id: 'E26',
     from: EXPIRABLE_STATES,

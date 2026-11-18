@@ -1,0 +1,168 @@
+# Journaling and archiving alerts (step 8.1 A27, docs/plan/steps/23-journaling-archiving.md;
+# ADR-0064..0069). Series: the archive-worker's archive_* series (job `archive-worker`; Kubernetes:
+# the archive-worker and archive-jobs Deployments). Labels are bounded enums only (never a tenant,
+# principal, address or id). Leader-written gauges (sweep lag, index queue, disposals, root
+# re-wrap) are 0 on non-leader replicas, so they are aggregated with max().
+# Every alert links its section of docs/runbooks/archive.md.
+# Validate with `promtool check rules` and `promtool test rules tests/archive.rules.test.yml`.
+groups:
+  - name: archive
+    rules:
+      - alert: ArchiveWorkerDown
+        expr: up{job="archive-worker"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: An archive-worker replica is down
+          description: >-
+            Prometheus cannot scrape an archive-worker replica for 5 minutes. Journal capture,
+            indexing, disposals or eDiscovery of that Deployment are not progressing; the mail path
+            is unaffected and capture resumes from its cursors.
+          runbook_url: docs/runbooks/archive.md#archiveworkerdown
+      - alert: ArchiveCaptureBacklog
+        expr: max(archive_intent_oldest_pending_seconds) > 21600
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: A capture intent has been stalled for more than 6 hours
+          description: >-
+            The oldest overdue or erroring capture intent is older than 6 hours (intents waiting
+            for a non-final or quarantined message do not count). Mail must be captured before
+            the 30-day mail-bucket lifecycle removes the original; check the capture scheduler,
+            S3 and the intents' last error codes.
+          runbook_url: docs/runbooks/archive.md#archivecapturebacklog
+      - alert: ArchiveCaptureBacklog
+        expr: max(archive_intent_oldest_pending_seconds) > 86400
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: A capture intent has been stalled for more than 24 hours
+          description: >-
+            The oldest overdue or erroring capture intent is older than 24 hours. Restore capture
+            now; past the intent max age (25 days) mail can no longer be archived.
+          runbook_url: docs/runbooks/archive.md#archivecapturebacklog
+      - alert: ArchiveCaptureLost
+        expr: sum(increase(archive_capture_total{result="lost"}[1h])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Archive captures ended lost
+          description: >-
+            At least one capture intent ended lost in the last hour (message row gone or original
+            object missing). The message cannot be archived; it is listed under capture issues.
+          runbook_url: docs/runbooks/archive.md#archivecapturelost
+      - alert: ArchiveCaptureAgedOut
+        expr: sum(increase(archive_capture_skipped_total{reason="max_age"}[1h])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Mail aged out of capture without being archived
+          description: >-
+            At least one capture intent was skipped in the last hour because it aged out
+            (max_age): the message did not reach a capturable state within the intent max age (a
+            message waiting in quarantine: 100 days) and was not archived. It is listed under
+            capture issues (status skipped).
+          runbook_url: docs/runbooks/archive.md#archivecaptureagedout
+      - alert: ArchiveCaptureFailures
+        expr: sum(increase(archive_capture_total{result="failed"}[1h])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Archive captures failed
+          description: >-
+            At least one capture intent failed in the last hour (Object Lock unavailable for a
+            locked tenant, invalid facts, or retries past the intent max age). Check capture issues
+            and retry after fixing the cause.
+          runbook_url: docs/runbooks/archive.md#archivecapturefailures
+      - alert: ArchiveIntegrityFailure
+        expr: sum(increase(archive_integrity_failures_total[15m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: Archive integrity check failed
+          description: >-
+            A plaintext SHA-256 did not match (an original against email_messages.eml_sha256 at
+            capture, or an archived original during an export). Nothing was committed or exported
+            from that object; investigate storage corruption or tampering.
+          runbook_url: docs/runbooks/archive.md#archiveintegrityfailure
+      - alert: ArchiveSweepStalled
+        expr: max by (sweep) (archive_sweep_lag_seconds) > 1800
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: An archive capture sweep is more than 30 minutes behind
+          description: >-
+            The journal completeness sweep or the policy reconciler has not passed rows newer than
+            30 minutes. New journal intents are delayed; check the sweep leader's logs and the
+            writer.
+          runbook_url: docs/runbooks/archive.md#archivesweepstalled
+      - alert: ArchiveIndexLag
+        expr: max(archive_index_oldest_seconds) > 900
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Archive search index is more than 15 minutes behind
+          description: >-
+            The oldest archive index operation is older than 15 minutes. Search and eDiscovery
+            results are incomplete (searches report index_lag); check OpenSearch and the index
+            sync leader.
+          runbook_url: docs/runbooks/archive.md#archiveindexlag
+      - alert: ArchiveReconcileMismatch
+        expr: sum(increase(archive_reconcile_days_total{result="mismatch"}[1h])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Archive index reconciliation found mismatched days
+          description: >-
+            The per-day reconciliation found MySQL and OpenSearch counts that differ and re-enqueued
+            those days. A repeated mismatch means documents are lost or written elsewhere.
+          runbook_url: docs/runbooks/archive.md#archivereconcilemismatch
+      - alert: ArchiveDisposalStuck
+        expr: max(archive_disposal_oldest_pending_seconds) > 86400
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: An archive disposal has been open for more than 24 hours
+          description: >-
+            A disposal (already crypto-shredded) has not completed within 24 hours: objects still
+            locked, S3 or OpenSearch failures, or a stuck index delete. Check archive_disposals.
+          runbook_url: docs/runbooks/archive.md#archivedisposalstuck
+      - alert: ArchiveDisposalStuck
+        expr: sum(increase(archive_disposals_total{result="failed"}[1h])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: An archive disposal failed permanently
+          description: >-
+            A disposal reached ARCHIVE_DISPOSAL_MAX_ATTEMPTS. Its content is already unreadable
+            (crypto-shredded), but objects, replica copies, the index document or the row may
+            remain; finish it by hand.
+          runbook_url: docs/runbooks/archive.md#archivedisposalstuck
+      - alert: ArchiveRootKeyRewrapPending
+        expr: max(archive_root_rewrap_pending) > 0
+        for: 2h
+        labels:
+          severity: warning
+        annotations:
+          summary: Tenant keys are still wrapped under the previous archive root key
+          description: >-
+            A root key rotation has not finished re-wrapping every tenant key after 2 hours. Do not
+            remove ARCHIVE_ROOT_KEY_PREVIOUS until the count is 0.
+          runbook_url: docs/runbooks/archive.md#archiverootkeyrewrappending
+      - alert: ArchiveExportFailures
+        expr: sum(increase(archive_exports_total{result="failed"}[1h])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: eDiscovery exports failed
+          description: >-
+            At least one eDiscovery export failed in the last hour (bounds, malicious
+            acknowledgement, content no longer available, integrity or storage errors). The error
+            code is on the export row.
+          runbook_url: docs/runbooks/archive.md#archiveexportfailures

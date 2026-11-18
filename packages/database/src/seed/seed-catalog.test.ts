@@ -73,7 +73,7 @@ describe('seed catalog', () => {
   const sorted = (list: readonly string[]) => [...list].sort();
   const role = (key: string) => SYSTEM_ROLES.find((r) => r.key === key)!.permissions;
 
-  it('contains the 60 permissions of D7, D8, steps 2.1 D14, 2.2, 2.3, 3.2, 3.3, 4.1, 4.2, 4.4, 4.5, 5.3, 6.1, 6.2 and 7.2, without duplicates', () => {
+  it('contains the 64 permissions of D7, D8, steps 2.1 D14, 2.2, 2.3, 3.2, 3.3, 4.1, 4.2, 4.4, 4.5, 5.3, 6.1, 6.2, 7.2 and 8.1, without duplicates', () => {
     expect(new Set(keys).size).toBe(keys.length);
     expect(sorted(keys)).toEqual(
       sorted([
@@ -137,14 +137,18 @@ describe('seed catalog', () => {
         'delivery:suppression_manage',
         'webhook:read',
         'message:reveal',
+        'archive:search',
+        'archive:retrieve',
+        'archive:manage',
+        'ediscovery:manage',
       ]),
     );
-    expect(keys).toHaveLength(60);
+    expect(keys).toHaveLength(64);
     // Step 3.3 placed message:rescan next to the other message permissions (design §3.3); the
     // seed upserts by key, so on an existing database it simply gets the next id.
     expect(keys.indexOf('message:rescan')).toBe(keys.indexOf('message:read_content') + 1);
     // Otherwise appended in catalog order (permission ids follow it on a fresh database).
-    expect(keys.slice(-28)).toEqual([
+    expect(keys.slice(-32)).toEqual([
       'connector:read',
       'connector:manage',
       'domain:routing_manage',
@@ -173,6 +177,10 @@ describe('seed catalog', () => {
       'delivery:suppression_manage',
       'webhook:read',
       'message:reveal',
+      'archive:search',
+      'archive:retrieve',
+      'archive:manage',
+      'ediscovery:manage',
     ]);
     // `resource:action`; the resource may contain underscores since step 6.1 (`threat_intel`).
     for (const key of keys) expect(key).toMatch(/^[a-z]+(?:_[a-z]+)*:[a-z_]+$/);
@@ -257,8 +265,9 @@ describe('seed catalog', () => {
         'values) through the audited reveal action (step 7.2)',
     );
     expect(permission!.description.length).toBeLessThanOrEqual(255);
-    // Appended last (append-only catalog order: permission ids follow it on a fresh database).
-    expect(keys.at(-1)).toBe('message:reveal');
+    // Appended after webhook:read (append-only catalog order: permission ids follow it on a
+    // fresh database; step 8.1 appended its four keys after it).
+    expect(keys.indexOf('message:reveal')).toBe(keys.indexOf('webhook:read') + 1);
     const matrix: Record<SystemRoleKey, boolean> = {
       super_admin: true,
       platform_admin: false,
@@ -286,6 +295,65 @@ describe('seed catalog', () => {
         .map((r) => r.key)
         .sort(),
     ).toEqual(['organization_admin', 'security_analyst', 'super_admin']);
+  });
+
+  it('grants the step 8.1 archive and eDiscovery permissions exactly as A20 says', () => {
+    const holders = (permission: string) =>
+      SYSTEM_ROLES.filter((r) => (r.permissions as readonly string[]).includes(permission))
+        .map((r) => r.key)
+        .sort();
+    const description = (key: string) => PERMISSIONS.find((p) => p.key === key)?.description;
+    expect(description('archive:search')).toBe(
+      'Search archived and journaled messages (metadata, masked)',
+    );
+    expect(description('archive:retrieve')).toBe(
+      'View the sanitized preview and download original archived messages (audited)',
+    );
+    expect(description('archive:manage')).toBe(
+      'Manage archive settings, retention policies, encryption keys, capture issues and ' +
+        'disposal of reviewed records',
+    );
+    expect(description('ediscovery:manage')).toBe(
+      'Manage eDiscovery cases, custodians, searches, review and exports',
+    );
+    // Archive settings need archive:manage from step 8.1 on.
+    expect(description('settings:manage')).toBe('Change notification and quarantine settings');
+    expect(holders('archive:search')).toEqual(
+      ['compliance_auditor', 'organization_admin', 'security_analyst', 'super_admin'].sort(),
+    );
+    expect(holders('archive:retrieve')).toEqual(
+      ['compliance_auditor', 'organization_admin', 'super_admin'].sort(),
+    );
+    expect(holders('archive:manage')).toEqual(['organization_admin', 'super_admin']);
+    expect(holders('ediscovery:manage')).toEqual(
+      ['compliance_auditor', 'organization_admin', 'super_admin'].sort(),
+    );
+    for (const key of [
+      'archive:search',
+      'archive:retrieve',
+      'archive:manage',
+      'ediscovery:manage',
+    ]) {
+      expect(TENANT_PERMISSIONS, key).toContain(key);
+      expect(PLATFORM_PERMISSIONS, key).not.toContain(key);
+      expect(TENANT_READ_PERMISSIONS, key).not.toContain(key);
+      expect(PERMISSIONS.find((p) => p.key === key)!.description.length).toBeLessThanOrEqual(255);
+    }
+    // The existing archive permissions keep their holders.
+    expect(holders('archive:read')).toEqual(
+      [
+        'compliance_auditor',
+        'organization_admin',
+        'platform_admin',
+        'read_only_user',
+        'security_analyst',
+        'super_admin',
+      ].sort(),
+    );
+    expect(holders('archive:export')).toEqual(
+      ['compliance_auditor', 'organization_admin', 'super_admin'].sort(),
+    );
+    expect(holders('archive:legal_hold')).toEqual(['organization_admin', 'super_admin']);
   });
 
   it('has exactly the 8 system roles of D8 plus mailbox_user (5.3), each referencing existing permissions only', () => {
@@ -389,6 +457,7 @@ describe('seed catalog', () => {
         'threat_intel:read',
         'webhook:read',
         'message:reveal',
+        'archive:search',
       ],
       quarantine_reviewer: [
         'organization:read',
@@ -412,6 +481,9 @@ describe('seed catalog', () => {
         'billing:read',
         'webhook:read',
         'message:reveal',
+        'archive:search',
+        'archive:retrieve',
+        'ediscovery:manage',
       ],
       read_only_user: read,
       mailbox_user: ['quarantine:self'],

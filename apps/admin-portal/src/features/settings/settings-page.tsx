@@ -4,12 +4,12 @@ import Link from 'next/link';
 import { PageHeader } from '@/components/page-header';
 import { LoadingState } from '@/components/states/loading-state';
 import { ErrorState } from '@/components/states/error-state';
-import { UnavailableState } from '@/components/states/unavailable-state';
 import { useApiQuery } from '@/lib/api/hooks';
 import { Can } from '@/lib/auth/can';
 import { useMe } from '@/lib/auth/me';
 import { RouteGate } from '@/lib/auth/route-gate';
 import { ChangePasswordForm, MfaPanel, SessionsPanel } from '@/features/account';
+import { ArchiveSettingsPanel } from '@/features/archive/settings-panel';
 import { ProfileForm } from '@/features/organizations/profile-form';
 import { GatedTabs, type TabDefinition } from '@/features/reports/gated-tabs';
 import { navGate } from '@/features/reports/nav-gate';
@@ -28,7 +28,7 @@ export const SETTINGS_TABS: readonly TabDefinition[] = [
   { id: 'preferences', label: 'My notifications' },
   { id: 'security', label: 'Security' },
   { id: 'scanning', label: 'Scanning', ops: ['ScanSettingsController_list_v1'] },
-  { id: 'archive', label: 'Archive and retention' },
+  { id: 'archive', label: 'Archive and retention', ops: ['ArchiveAdminController_get_v1'] },
 ];
 
 /** `/settings` (design §1.3 row 21): each tab gated by its operation; security is self-service. */
@@ -40,8 +40,8 @@ export function SettingsPage() {
           title="Settings"
           description={
             <>
-              Organization, notification, account security and scanning settings. Quarantine
-              settings are under{' '}
+              Organization, notification, account security, scanning and archive settings.
+              Quarantine settings are under{' '}
               <Link
                 href="/quarantine/settings"
                 className="text-primary underline underline-offset-2"
@@ -75,14 +75,10 @@ export function SettingsPage() {
                 return <SecurityTab />;
               case 'scanning':
                 return <ScanSettingsPanel />;
+              case 'archive':
+                return <ArchiveSettingsPanel />;
               default:
-                return (
-                  <UnavailableState
-                    step="8.1"
-                    title="Archive and retention settings"
-                    description="Archive and retention settings arrive in 8.1 together with journaling and compliance archiving; no API exists for them yet."
-                  />
-                );
+                return null;
             }
           }}
         />

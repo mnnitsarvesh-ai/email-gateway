@@ -31,7 +31,8 @@ export interface ApiSession {
   get(path: string): Promise<ApiResponse>;
   /** A GET whose body is returned as bytes (downloads, step 5.3 Q12); never parsed or printed. */
   getRaw(path: string): Promise<{ status: number; bytes: Buffer; headers: Headers }>;
-  put(path: string, body: unknown): Promise<ApiResponse>;
+  /** PUT; `headers` e.g. an `Idempotency-Key` (step 8.1 `PUT /archive/settings`). */
+  put(path: string, body: unknown, headers?: Record<string, string>): Promise<ApiResponse>;
   post(path: string, body: unknown, headers?: Record<string, string>): Promise<ApiResponse>;
   patch(path: string, body: unknown): Promise<ApiResponse>;
   /** DELETE; `headers` e.g. an `Idempotency-Key` (step 6.2 `DELETE /webhooks/{id}`). */
@@ -186,7 +187,7 @@ export async function apiSession(
         headers: res.headers,
       };
     },
-    put: (path, body) => call('PUT', path, body),
+    put: (path, body, headers) => call('PUT', path, body, headers),
     post: (path, body, headers) => call('POST', path, body, headers),
     patch: (path, body) => call('PATCH', path, body),
     delete: (path, headers) => call('DELETE', path, undefined, headers),

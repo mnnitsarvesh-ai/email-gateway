@@ -31,6 +31,8 @@ export const PASSED_RESPONSE_HEADERS = [
   'idempotency-replayed',
   'deprecation',
   'link',
+  // Step 8.1: freshness of the archive search (GET /archive/messages, A17).
+  'x-eg-index-lag-seconds',
 ] as const;
 
 function rawApiPath(url: URL): string | null {

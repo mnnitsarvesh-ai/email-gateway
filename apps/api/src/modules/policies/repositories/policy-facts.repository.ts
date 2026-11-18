@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaReadService } from '@email-gateway/common';
-import type { Prisma } from '@email-gateway/database';
+import { type EvaluationRow, evaluationSelect, type Prisma } from '@email-gateway/database';
 import { tenantWhere, type TenantScope } from '../../../auth-contracts/tenant-scope';
 
 /** Safety bound of the per-message lists (the builder caps and flags truncation itself). */
@@ -39,53 +39,11 @@ const scanSelect = {
 } satisfies Prisma.EmailScanSelect;
 export type FactsScanRow = Prisma.EmailScanGetPayload<{ select: typeof scanSelect }>;
 
-/** The stored evaluation columns `rowToEvaluationView` reads (P10; no internal ids). */
-export const evaluationSelect = {
-  id: true,
-  receivedAt: true,
-  messageId: true,
-  evaluationSeq: true,
-  scanId: true,
-  trigger: true,
-  direction: true,
-  disposition: true,
-  decisionSource: true,
-  decisivePolicyPublicId: true,
-  decisiveRuleId: true,
-  action: true,
-  finalVerdict: true,
-  riskScore: true,
-  overrideApplied: true,
-  actions: true,
-  matchedRules: true,
-  trace: true,
-  floor: true,
-  recommendation: true,
-  overrideDetail: true,
-  clamps: true,
-  reasonCodes: true,
-  delivery: true,
-  deliveredObject: true,
-  explanation: true,
-  explanationText: true,
-  policyGeneration: true,
-  snapshotSha256: true,
-  policyVersions: true,
-  platformDefaultId: true,
-  dslVersion: true,
-  evaluatorVersion: true,
-  inputVersion: true,
-  inputSha256: true,
-  tzdataVersion: true,
-  durationUs: true,
-  evaluatedAt: true,
-  // Step 5.3 (Q4): per-recipient decisions of the round (null/false for 5.2 rows).
-  recipientSplit: true,
-  recipientDecisions: true,
-} satisfies Prisma.PolicyExecutionLogSelect;
-export type EvaluationRow = Prisma.PolicyExecutionLogGetPayload<{
-  select: typeof evaluationSelect;
-}>;
+/**
+ * The stored evaluation columns `rowToEvaluationView` reads (P10; no internal ids): the shared
+ * read-model select of `@email-gateway/database` (step 8.1 A5), re-exported for the importers.
+ */
+export { evaluationSelect, type EvaluationRow };
 
 /** The stored rows of one finished round (P8 before mapping). */
 export interface RoundFactRows {

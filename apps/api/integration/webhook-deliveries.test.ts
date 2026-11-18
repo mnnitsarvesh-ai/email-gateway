@@ -25,6 +25,7 @@ import { createIntegrationApp, type IntegrationApp } from './support/app';
 import { createFixtures, type FixtureOrganization, type Fixtures } from './support/fixtures';
 import { bearer, loginWithMfa } from './support/http';
 import { explain, partitionsOf } from './support/insights';
+import { pauseLiveService } from './support/live-archive-worker';
 import { POLL } from './support/messages-data';
 import {
   createBody,
@@ -264,43 +265,50 @@ describe('webhook deliveries against the writer and replica', () => {
       to: new Date().toISOString(),
       eventTypes: ['email.received'],
     };
-    const res = await admin.post(url, body, `it-${randomUUID()}`);
-    expect(res.status).toBe(202);
-    expect(res.body.status).toBe('queued');
-    const row = await ctx.prisma.webhookReplay.findUniqueOrThrow({
-      where: { publicId: res.body.replayId },
-    });
-    expect(row).toMatchObject({
-      organizationId: org.id,
-      subscriptionId: sub.id,
-      requestedByType: 'user',
-      status: 'queued',
-      statuses: ['failed', 'dead'],
-      eventTypes: ['email.received'],
-    });
-    await expect
-      .poll(
-        async () => (await admin.get(`${WEBHOOKS}/${hook}/replays/${res.body.replayId}`)).status,
-        POLL,
-      )
-      .toBe(200);
-    const view = await admin.get(`${WEBHOOKS}/${hook}/replays/${res.body.replayId}`);
-    expect(view.body).toMatchObject({ id: res.body.replayId, status: 'queued', matchedCount: 0 });
-    const busy = await admin.post(url, body, `it-${randomUUID()}`);
-    expect(busy.body).toMatchObject({
-      code: 'webhook_replay_in_progress',
-      replayId: res.body.replayId,
-    });
-    await ctx.prisma.webhookReplay.update({
-      where: { id: row.id },
-      data: { status: 'completed', completedAt: new Date() },
-    });
-    expect((await admin.post(url, body, `it-${randomUUID()}`)).status).toBe(202);
-    const limited = await admin.post(url, body, `it-${randomUUID()}`);
-    expect(limited.status).toBe(429);
-    expect(limited.body).toMatchObject({ code: 'rate_limited', scope: 'route' });
-    expect(
-      (await webhookAudit(ctx, hook)).filter((a) => a.action === 'webhook.replay_requested'),
-    ).toHaveLength(2);
+    // The live webhook-worker (apps profile) claims queued replays every second; it is paused so
+    // the replay can be read while still queued (live-archive-worker.ts, pauseLiveService).
+    const resume = await pauseLiveService('webhook-worker');
+    try {
+      const res = await admin.post(url, body, `it-${randomUUID()}`);
+      expect(res.status).toBe(202);
+      expect(res.body.status).toBe('queued');
+      const row = await ctx.prisma.webhookReplay.findUniqueOrThrow({
+        where: { publicId: res.body.replayId },
+      });
+      expect(row).toMatchObject({
+        organizationId: org.id,
+        subscriptionId: sub.id,
+        requestedByType: 'user',
+        status: 'queued',
+        statuses: ['failed', 'dead'],
+        eventTypes: ['email.received'],
+      });
+      await expect
+        .poll(
+          async () => (await admin.get(`${WEBHOOKS}/${hook}/replays/${res.body.replayId}`)).status,
+          POLL,
+        )
+        .toBe(200);
+      const view = await admin.get(`${WEBHOOKS}/${hook}/replays/${res.body.replayId}`);
+      expect(view.body).toMatchObject({ id: res.body.replayId, status: 'queued', matchedCount: 0 });
+      const busy = await admin.post(url, body, `it-${randomUUID()}`);
+      expect(busy.body).toMatchObject({
+        code: 'webhook_replay_in_progress',
+        replayId: res.body.replayId,
+      });
+      await ctx.prisma.webhookReplay.update({
+        where: { id: row.id },
+        data: { status: 'completed', completedAt: new Date() },
+      });
+      expect((await admin.post(url, body, `it-${randomUUID()}`)).status).toBe(202);
+      const limited = await admin.post(url, body, `it-${randomUUID()}`);
+      expect(limited.status).toBe(429);
+      expect(limited.body).toMatchObject({ code: 'rate_limited', scope: 'route' });
+      expect(
+        (await webhookAudit(ctx, hook)).filter((a) => a.action === 'webhook.replay_requested'),
+      ).toHaveLength(2);
+    } finally {
+      await resume();
+    }
   });
 });

@@ -1,6 +1,13 @@
 import { Injectable } from '@nestjs/common';
+import {
+  type ArchiveIntentStatus,
+  EMPTY_JOURNAL_SCOPE,
+  type ResolvedJournalScope,
+  resolveArchiveSettings,
+} from '@email-gateway/archive';
 import type {
   ActorType,
+  MessageDirection,
   Prisma,
   QuarantineActionType,
   QuarantineApprovalKind,
@@ -12,6 +19,8 @@ import type {
 import type { MessageRef } from '@email-gateway/message-lifecycle';
 import { tenantWhere, type TenantScope } from '../../../auth-contracts/tenant-scope';
 import type { ApprovalRow, EntryRow } from '../domain/entry';
+import { resolveJournalScope } from '../../archive/domain/journal-scope';
+import { ARCHIVING_FEATURE } from '../../archive/archive.constants';
 import { InconsistentQuarantineReadError } from '../quarantine.errors';
 import { approvalSelect, entrySelect, toApprovalRow, toEntryRow } from './entry-select';
 
@@ -103,13 +112,24 @@ export interface EntryStateRow {
   rcptSeq: number;
 }
 
-/** Facts of Q17 (`decideObjectDisposal`) read on the writer. */
+/**
+ * Facts of Q17 (`decideObjectDisposal`) read on the writer, under step 8.1 (A23): the active
+ * legal holds with their criteria version, whether a live archive record exists, the message's
+ * capture intent, the stored evaluation actions and the journaling inputs of the organization
+ * (entitlement, settings, enablement time and the resolved scope).
+ */
 export interface DisposalFactRows {
-  legalHolds: Array<{ id: bigint; criteria: unknown }>;
-  archive: { enabled: boolean; scope: 'all' | 'inbound' | 'outbound' | 'internal' } | null;
-  retentionPolicyDays: number[];
-  emailArchives: Array<{ retainUntil: Date | null; legalHold: boolean }>;
+  legalHolds: Array<{ id: bigint; criteria: unknown; criteriaVersion: string | null }>;
+  archived: boolean;
+  intentStatus: ArchiveIntentStatus | null;
   evaluationActions: unknown[];
+  journal: {
+    entitled: boolean;
+    enabled: boolean;
+    settings: unknown;
+    journalEnabledAt: Date | null;
+    scope: ResolvedJournalScope;
+  } | null;
 }
 
 /** The message row the writer paths read (manual quarantine, sender notices). */
@@ -453,10 +473,18 @@ export class QuarantineWriteRepository {
     tx: Tx,
     scope: TenantScope,
     message: MessageRef,
-  ): Promise<Array<{ id: bigint; rcptSeq: number; address: string; status: RecipientStatus }>> {
+  ): Promise<
+    Array<{
+      id: bigint;
+      rcptSeq: number;
+      address: string;
+      status: RecipientStatus;
+      direction: MessageDirection | null;
+    }>
+  > {
     return tx.emailRecipient.findMany({
       where: tenantWhere(scope, { messageId: message.id, receivedAt: message.receivedAt }),
-      select: { id: true, rcptSeq: true, address: true, status: true },
+      select: { id: true, rcptSeq: true, address: true, status: true, direction: true },
       orderBy: { rcptSeq: 'asc' },
       take: 5000,
     });
@@ -465,43 +493,85 @@ export class QuarantineWriteRepository {
   // ------------------------------------------------------------------ disposal (Q17)
 
   async disposalFacts(tx: Tx, scope: TenantScope, message: MessageRef): Promise<DisposalFactRows> {
-    const [legalHolds, archive, policies, archives, evaluations] = await Promise.all([
+    const [legalHolds, archive, archives, intents, evaluations, feature] = await Promise.all([
       tx.archiveLegalHold.findMany({
         where: tenantWhere(scope, { status: 'active' as const }),
-        select: { id: true, criteria: true, organizationId: true },
+        select: { id: true, criteria: true, criteriaVersion: true, organizationId: true },
         take: 1000,
       }),
       tx.archiveSetting.findFirst({
         where: tenantWhere(scope),
-        select: { enabled: true, scope: true, organizationId: true },
-      }),
-      tx.archiveRetentionPolicy.findMany({
-        where: tenantWhere(scope),
-        select: { retentionDays: true, organizationId: true },
-        take: 1000,
+        select: { enabled: true, settings: true, journalEnabledAt: true, organizationId: true },
       }),
       tx.emailArchive.findMany({
+        where: tenantWhere(scope, {
+          messageId: message.id,
+          receivedAt: message.receivedAt,
+          deletedAt: null,
+        }),
+        select: { id: true, organizationId: true },
+        take: 1,
+      }),
+      tx.archiveCaptureIntent.findMany({
         where: tenantWhere(scope, { messageId: message.id, receivedAt: message.receivedAt }),
-        select: { retainUntil: true, legalHold: true, organizationId: true },
+        select: { status: true, organizationId: true },
+        take: 1,
       }),
       tx.policyExecutionLog.findMany({
         where: tenantWhere(scope, { messageId: message.id, receivedAt: message.receivedAt }),
         select: { actions: true, organizationId: true },
         take: 100,
       }),
+      tx.organizationFeature.findUnique({
+        where: {
+          organizationId_featureKey: {
+            organizationId: scope.organizationId,
+            featureKey: ARCHIVING_FEATURE,
+          },
+        },
+        select: { enabled: true, organizationId: true },
+      }),
     ]);
-    const foreign = [...legalHolds, ...policies, ...archives, ...evaluations].some(
+    const foreign = [...legalHolds, ...archives, ...intents, ...evaluations].some(
       (r) => r.organizationId !== scope.organizationId,
     );
-    if (foreign || (archive !== null && archive.organizationId !== scope.organizationId)) {
+    if (
+      foreign ||
+      (archive !== null && archive.organizationId !== scope.organizationId) ||
+      (feature !== null && feature.organizationId !== scope.organizationId)
+    ) {
       throw new InconsistentQuarantineReadError('disposal');
     }
+    let journal: DisposalFactRows['journal'] = null;
+    if (archive !== null) {
+      let scopeIds: ReturnType<typeof resolveArchiveSettings>['scope'] | null = null;
+      try {
+        scopeIds = resolveArchiveSettings(archive.settings).scope;
+      } catch {
+        scopeIds = null; // unparsable settings: archivePendingOf treats them as eligible
+      }
+      const resolved =
+        scopeIds === null || scopeIds.mode === 'all'
+          ? EMPTY_JOURNAL_SCOPE
+          : (await resolveJournalScope(tx, scope.organizationId, scopeIds)).scope;
+      journal = {
+        entitled: feature?.enabled ?? false,
+        enabled: archive.enabled,
+        settings: archive.settings,
+        journalEnabledAt: archive.journalEnabledAt,
+        scope: resolved,
+      };
+    }
     return {
-      legalHolds: legalHolds.map((h) => ({ id: h.id, criteria: h.criteria })),
-      archive: archive === null ? null : { enabled: archive.enabled, scope: archive.scope },
-      retentionPolicyDays: policies.map((p) => p.retentionDays),
-      emailArchives: archives.map((a) => ({ retainUntil: a.retainUntil, legalHold: a.legalHold })),
+      legalHolds: legalHolds.map((h) => ({
+        id: h.id,
+        criteria: h.criteria,
+        criteriaVersion: h.criteriaVersion,
+      })),
+      archived: archives.length > 0,
+      intentStatus: intents[0]?.status ?? null,
       evaluationActions: evaluations.flatMap((e) => (Array.isArray(e.actions) ? e.actions : [])),
+      journal,
     };
   }
 

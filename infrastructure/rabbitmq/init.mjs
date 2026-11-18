@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// RabbitMQ provisioning for topology v11 (step 3.2 Q5, Q10, ADR-0024; v2: step 3.3 L7; v3: step
+// RabbitMQ provisioning for topology v12 (step 3.2 Q5, Q10, ADR-0024; v2: step 3.3 L7; v3: step
 // 4.1 S2, ADR-0026; v4: step 4.2 A2, ADR-0028; v5: step 4.3 U2, ADR-0029; v6: step 4.4 B3,
 // ADR-0033; v7: step 4.5 D2, ADR-0036; v8: step 4.6 X11, ADR-0040; v9: step 5.2 P15, ADR-0044;
-// v10: step 5.3 Q27, ADR-0046; v11: step 6.2 §4.3, ADR-0055).
+// v10: step 5.3 Q27, ADR-0046; v11: step 6.2 §4.3, ADR-0055; v12: step 8.1 A26, ADR-0064).
 // The only code that declares broker objects: services verify passively and their users cannot
 // configure.
 //
@@ -122,6 +122,16 @@ const topic = (exchange, write) => ({ exchange, write, read: '^$' });
  * email.policy). ops may replay email.webhooks: it gains write on email.events, limited by its
  * topic permission to the `retry.email.webhooks.` hops (never `org.` keys or dead letters).
  * `email.webhooks` is no dot-prefix of another queue name.
+ *
+ * Topology v12 (step 8.1 A26, §4.7, ADR-0064) adds the archive-worker user (`eg-archive`,
+ * RABBITMQ_ARCHIVE_USER / RABBITMQ_ARCHIVE_PASSWORD): it reads only email.archive (the `capture`
+ * role's lossy work queue, home exchange email.archive) and publishes only that queue's retry hops
+ * on email.archive and its dead-letter hops on email.events; never an event key (it produces no
+ * event). It configures nothing. The queue's bindings are unchanged since v9, so the relay needs
+ * nothing new. ops may replay email.archive: it gains write on email.archive, limited by its topic
+ * permission to the `retry.email.archive.` hops. `email.archive` is no dot-prefix of another queue
+ * name. email.archive is not in RECONCILE_QUEUES (the archive-worker reconciles from
+ * policy_execution_logs itself).
  */
 const SCANNER_QUEUES =
   '(spam|attachment|url|url\\.results|bec|dlp|sandbox\\.submissions|sandbox\\.results)';
@@ -253,6 +263,20 @@ const ROLE_USERS = [
     ],
   },
   {
+    // Step 8.1 A2, A26 (v12): the archive-worker's capture role. Reads its one queue; publishes
+    // only the retry hops of email.archive (home exchange email.archive) and its dead-letter hops.
+    role: 'archive-worker',
+    userKey: 'RABBITMQ_ARCHIVE_USER',
+    passwordKey: 'RABBITMQ_ARCHIVE_PASSWORD',
+    configure: '^$',
+    write: '^email\\.(archive|events)$',
+    read: '^email\\.archive$',
+    topics: [
+      topic('email.archive', '^retry\\.email\\.archive\\.'),
+      topic('email.events', '^dead-letter\\.email\\.archive(\\.|$)'),
+    ],
+  },
+  {
     role: 'ops',
     userKey: 'RABBITMQ_OPS_USER',
     passwordKey: 'RABBITMQ_OPS_PASSWORD',
@@ -262,8 +286,9 @@ const ROLE_USERS = [
     // scan.bec, v7 scan.dlp, v8 scan.sandbox, scan.sandbox.submissions and scan.sandbox.results
     // (home exchange email.security), v9 email.policy.evaluate and email.notifications, v10
     // email.quarantine (home exchange email.policy), v11 email.webhooks (home exchange
-    // email.events; its topic grant there is the retry prefix only).
-    write: '^email\\.(ingestion|delivery|security|policy|events)$',
+    // email.events; its topic grant there is the retry prefix only), v12 email.archive (home
+    // exchange email.archive; retry prefix only).
+    write: '^email\\.(ingestion|delivery|security|policy|archive|events)$',
     read: '^email\\.dead-letter$',
     topics: [
       topic('email.ingestion', '^retry\\.email\\.received\\.'),
@@ -273,6 +298,7 @@ const ROLE_USERS = [
         '^retry\\.scan\\.(spam|attachment|url|url\\.inspect|url\\.results|bec|dlp|sandbox|sandbox\\.submissions|sandbox\\.results)\\.',
       ),
       topic('email.policy', '^retry\\.email\\.(policy\\.evaluate|notifications|quarantine)\\.'),
+      topic('email.archive', '^retry\\.email\\.archive\\.'),
       topic('email.events', '^retry\\.email\\.webhooks\\.'),
     ],
   },

@@ -298,8 +298,9 @@ export const DORMANT_QUEUES = [
   // delivery gate); until its consumer exists (WP3) its messages wait there and are evaluated
   // (or skipped as stale by the lifecycle) once it runs — never purged. `email.quarantine` is a
   // work queue since v10 (step 5.3 Q27: the policy-engine's release executor) — never purged.
+  // `email.archive` is a lossy work queue since v12 (step 8.1 A26: the archive-worker's capture
+  // role; drop-head at 10 000, the worker reconciles from policy_execution_logs) — never purged.
   'scan.auth',
-  'email.archive',
   'email.analytics',
 ] as const;
 

@@ -1,6 +1,7 @@
 import 'server-only';
 import { matchOperation, splitRawPath } from '@/lib/api/operations';
 import type { UpstreamFetch } from '@/server/upstream';
+import { fixtures as archive } from './fixtures/archive';
 import { fixtures as attachments } from './fixtures/attachments';
 import { fixtures as audit } from './fixtures/audit';
 import { fixtures as billing } from './fixtures/billing';
@@ -38,7 +39,8 @@ export type { FixtureHandler, FixtureHandlers };
  *
  * Order matters: the session fixtures come first, so a feature package may replace one of them
  * (e.g. `OrganizationsController_list_v1`) in its own file. `dlp-bec` (step 7.3 WP5) comes last:
- * its DLP and BEC handlers (with writes) replace the read-only lists of `policies`.
+ * its DLP and BEC handlers (with writes) replace the read-only lists of `policies`; `archive`
+ * (step 8.1 WP5) adds the 41 archive and eDiscovery operations.
  */
 export const FEATURE_FIXTURES: Readonly<Record<string, FixtureHandlers>> = {
   session,
@@ -59,6 +61,7 @@ export const FEATURE_FIXTURES: Readonly<Record<string, FixtureHandlers>> = {
   messages,
   quarantine,
   policies,
+  archive,
   'dlp-bec': dlpBec,
 };
 

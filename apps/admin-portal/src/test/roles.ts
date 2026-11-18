@@ -82,6 +82,10 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'delivery:suppression_manage',
     'webhook:read',
     'message:reveal',
+    'archive:search',
+    'archive:retrieve',
+    'archive:manage',
+    'ediscovery:manage',
   ],
   platform_admin: [
     'organization:read',
@@ -160,6 +164,10 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'delivery:suppression_manage',
     'webhook:read',
     'message:reveal',
+    'archive:search',
+    'archive:retrieve',
+    'archive:manage',
+    'ediscovery:manage',
   ],
   domain_admin: [
     'organization:read',
@@ -206,6 +214,7 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'threat_intel:read',
     'webhook:read',
     'message:reveal',
+    'archive:search',
   ],
   quarantine_reviewer: [
     'organization:read',
@@ -240,6 +249,9 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'billing:read',
     'webhook:read',
     'message:reveal',
+    'archive:search',
+    'archive:retrieve',
+    'ediscovery:manage',
   ],
   read_only_user: [
     'organization:read',

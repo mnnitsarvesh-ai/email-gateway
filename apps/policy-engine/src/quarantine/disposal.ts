@@ -4,8 +4,18 @@ import {
   ListObjectVersionsCommand,
   type S3Client,
 } from '@aws-sdk/client-s3';
+import {
+  EMPTY_JOURNAL_SCOPE,
+  type ResolvedArchiveSettings,
+  type ResolvedJournalScope,
+  resolveArchiveSettings,
+} from '@email-gateway/archive';
 import type { Prisma } from '@email-gateway/database';
-import type { ObjectDisposalInput, QuarantineState } from '@email-gateway/quarantine';
+import {
+  archivePendingOf,
+  type ObjectDisposalInput,
+  type QuarantineState,
+} from '@email-gateway/quarantine';
 import { type QuarantineInconsistencySink, quarantineWrongRead } from './errors';
 import type { MessageKey } from './store-writer';
 
@@ -108,19 +118,79 @@ export class S3QuarantineObjects implements QuarantineObjects {
   }
 }
 
-/** The writer facts of `decideObjectDisposal` for one message (Q17 rules 1–4). */
+/** Plan feature of archiving (step 8.1 A20): journaling only applies to entitled tenants. */
+const ARCHIVING_FEATURE = 'archiving';
+/** Most department member rows read per scope resolution. */
+const MAX_DEPARTMENT_MEMBERS = 50_000;
+
+/** The writer facts of `decideObjectDisposal` for one message (Q17 under 8.1, A23). */
 export interface DisposalFacts extends Omit<ObjectDisposalInput, 'now' | 'entries'> {
   /** Every entry of the message (state as stored). */
   entries: Array<{ id: bigint; state: QuarantineState; emlObjectKey: string }>;
 }
 
 /**
- * Reads the Q17 facts of a message on the writer (echo-checked on the organization): active
- * legal holds of the organization, `archive_settings`, the retention days of its
- * `archive_retention_policies`, the message's `email_archives` rows (not deleted), whether an
- * evaluation of the message requested ARCHIVE, every entry and every recipient status.
- * Returns null when the message row is gone (its partition was dropped): the entries then
- * carry the facts (received time, direction, addresses).
+ * The journal scope of `archive-settings/1` resolved inside the organization (A4): verified
+ * domains by name, users by e-mail, department member addresses and member users' e-mails.
+ * Every query filters by the organization, so another organization's id never resolves.
+ */
+async function resolveScope(
+  tx: Prisma.TransactionClient,
+  org: bigint,
+  scope: ResolvedArchiveSettings['scope'],
+): Promise<ResolvedJournalScope> {
+  if (scope.mode === 'all') return EMPTY_JOURNAL_SCOPE;
+  const [domains, users, departments] = await Promise.all([
+    scope.domainIds.length === 0
+      ? []
+      : tx.domain.findMany({
+          where: {
+            organizationId: org,
+            publicId: { in: scope.domainIds },
+            deletedAt: null,
+            verifiedAt: { not: null },
+          },
+          select: { name: true, organizationId: true },
+        }),
+    scope.userIds.length === 0
+      ? []
+      : tx.user.findMany({
+          where: { organizationId: org, publicId: { in: scope.userIds }, deletedAt: null },
+          select: { email: true, organizationId: true },
+        }),
+    scope.departmentIds.length === 0
+      ? []
+      : tx.tenantDepartmentMember.findMany({
+          where: { organizationId: org, department: { publicId: { in: scope.departmentIds } } },
+          select: {
+            address: true,
+            organizationId: true,
+            user: { select: { email: true, deletedAt: true } },
+          },
+          take: MAX_DEPARTMENT_MEMBERS,
+        }),
+  ]);
+  const own = <R extends { organizationId: bigint }>(rows: readonly R[]) =>
+    rows.filter((r) => r.organizationId === org);
+  return {
+    addresses: [...scope.addresses],
+    userEmails: own(users).map((u) => u.email),
+    departmentAddresses: own(departments).flatMap((m) => [
+      ...(m.address !== null ? [m.address] : []),
+      ...(m.user !== null && m.user.deletedAt === null ? [m.user.email] : []),
+    ]),
+    domains: own(domains).map((d) => d.name),
+  };
+}
+
+/**
+ * Reads the Q17 facts of a message on the writer (echo-checked on the organization), as bound
+ * to step 8.1 (A23): the active legal holds of the organization with their criteria version,
+ * whether a live `email_archives` row exists, and whether a capture is still expected
+ * (`archivePendingOf`: the message's capture intent, an ARCHIVE request of an evaluation, or
+ * journal eligibility under the current settings with the resolved scope), every entry and every
+ * recipient status. When the message row is gone (its partition was dropped), the entries carry
+ * the facts (received time, direction, addresses).
  */
 export class DisposalFactsReader {
   constructor(private readonly sink: QuarantineInconsistencySink) {}
@@ -129,7 +199,13 @@ export class DisposalFactsReader {
     const org = message.organizationId;
     const holds = await tx.archiveLegalHold.findMany({
       where: { organizationId: org, status: 'active' },
-      select: { id: true, organizationId: true, status: true, criteria: true },
+      select: {
+        id: true,
+        organizationId: true,
+        status: true,
+        criteria: true,
+        criteriaVersion: true,
+      },
       orderBy: { id: 'asc' },
     });
     for (const h of holds) {
@@ -139,17 +215,17 @@ export class DisposalFactsReader {
     }
     const settings = await tx.archiveSetting.findFirst({
       where: { organizationId: org },
-      select: { organizationId: true, enabled: true, scope: true },
+      select: { organizationId: true, enabled: true, settings: true, journalEnabledAt: true },
     });
     if (settings !== null && settings.organizationId !== org) {
       quarantineWrongRead(this.sink, 'archive', 'archive settings echo');
     }
-    const policies = await tx.archiveRetentionPolicy.findMany({
-      where: { organizationId: org },
-      select: { organizationId: true, retentionDays: true },
+    const feature = await tx.organizationFeature.findUnique({
+      where: { organizationId_featureKey: { organizationId: org, featureKey: ARCHIVING_FEATURE } },
+      select: { organizationId: true, enabled: true },
     });
-    if (policies.some((p) => p.organizationId !== org)) {
-      quarantineWrongRead(this.sink, 'archive', 'retention policy echo');
+    if (feature !== null && feature.organizationId !== org) {
+      quarantineWrongRead(this.sink, 'archive', 'archiving feature echo');
     }
     const archives = await tx.emailArchive.findMany({
       where: {
@@ -158,10 +234,19 @@ export class DisposalFactsReader {
         organizationId: org,
         deletedAt: null,
       },
-      select: { messageId: true, organizationId: true, retainUntil: true, legalHold: true },
+      select: { messageId: true, organizationId: true },
+      take: 1,
     });
     if (archives.some((a) => a.messageId !== message.messageId || a.organizationId !== org)) {
       quarantineWrongRead(this.sink, 'archive', 'email archive echo');
+    }
+    const intents = await tx.archiveCaptureIntent.findMany({
+      where: { messageId: message.messageId, receivedAt: message.receivedAt, organizationId: org },
+      select: { messageId: true, organizationId: true, status: true },
+      take: 1,
+    });
+    if (intents.some((i) => i.messageId !== message.messageId || i.organizationId !== org)) {
+      quarantineWrongRead(this.sink, 'archive', 'capture intent echo');
     }
     const evaluations = await tx.policyExecutionLog.findMany({
       where: { messageId: message.messageId, receivedAt: message.receivedAt, organizationId: org },
@@ -197,34 +282,75 @@ export class DisposalFactsReader {
     }
     const recipients = await tx.emailRecipient.findMany({
       where: { messageId: message.messageId, receivedAt: message.receivedAt, organizationId: org },
-      select: { messageId: true, organizationId: true, address: true, status: true },
+      select: {
+        messageId: true,
+        organizationId: true,
+        address: true,
+        status: true,
+        direction: true,
+      },
     });
     if (recipients.some((r) => r.messageId !== message.messageId || r.organizationId !== org)) {
       quarantineWrongRead(this.sink, 'recipients', 'disposal recipient echo');
     }
     const first = entries[0];
+    const direction = first?.direction ?? 'inbound';
     const senders = new Set<string>();
     for (const e of entries) {
       senders.add(e.envelopeFrom.toLowerCase());
       if (e.headerFrom !== null) senders.add(e.headerFrom.toLowerCase());
     }
+    const recipientFacts = [
+      ...recipients.map((r) => ({ address: r.address, direction: r.direction ?? direction })),
+      ...entries
+        .filter(
+          (e) =>
+            !recipients.some((r) => r.address.toLowerCase() === e.recipientAddress.toLowerCase()),
+        )
+        .map((e) => ({ address: e.recipientAddress, direction: e.direction })),
+    ];
+    let journal: Parameters<typeof archivePendingOf>[0]['journal'] = null;
+    if (settings !== null) {
+      let scope: ResolvedJournalScope = EMPTY_JOURNAL_SCOPE;
+      try {
+        scope = await resolveScope(tx, org, resolveArchiveSettings(settings.settings).scope);
+      } catch {
+        // Unparsable settings: archivePendingOf treats them as eligible (fail-safe).
+      }
+      journal = {
+        entitled: feature?.enabled ?? false,
+        enabled: settings.enabled,
+        settings: settings.settings,
+        journalEnabledAt: settings.journalEnabledAt,
+        scope,
+        message: {
+          receivedAt: message.receivedAt,
+          direction,
+          envelopeFrom: first?.envelopeFrom ?? null,
+          headerFrom: first?.headerFrom ?? null,
+          recipients: recipientFacts,
+        },
+      };
+    }
     return {
       message: {
         receivedAt: message.receivedAt,
-        direction: first?.direction ?? 'inbound',
+        direction,
+        recipientDirections: [...new Set(recipientFacts.map((r) => r.direction))],
         senderAddresses: [...senders],
-        recipientAddresses: [
-          ...new Set([
-            ...recipients.map((r) => r.address.toLowerCase()),
-            ...entries.map((e) => e.recipientAddress.toLowerCase()),
-          ]),
-        ],
+        recipientAddresses: [...new Set(recipientFacts.map((r) => r.address.toLowerCase()))],
       },
-      legalHolds: holds.map((h) => ({ id: h.id.toString(), criteria: h.criteria })),
-      archive: settings === null ? null : { enabled: settings.enabled, scope: settings.scope },
-      retentionPolicyDays: policies.map((p) => p.retentionDays),
-      emailArchives: archives.map((a) => ({ retainUntil: a.retainUntil, legalHold: a.legalHold })),
-      archiveRequested,
+      legalHolds: holds.map((h) => ({
+        id: h.id.toString(),
+        criteria: h.criteria,
+        criteriaVersion: h.criteriaVersion,
+      })),
+      archived: archives.length > 0,
+      archivePending: archivePendingOf({
+        intentStatus: intents[0]?.status ?? null,
+        archiveRequested,
+        journal,
+      }),
       entries: entries.map((e) => ({
         id: e.id,
         state: e.status,

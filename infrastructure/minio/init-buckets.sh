@@ -22,9 +22,25 @@
 # <bucket>/samples/* and s3:PutObject on <bucket>/artifacts/*, nothing else (no list, no other
 # bucket). Re-running updates the user's secret, the policy and the lifecycle in place. Logs names
 # and counts only, never a secret. Production S3: docs/deployment/sandbox.md (IAM).
+#
+# Step 8.1 (docs/plan/steps/23-journaling-archiving.md A10, A29, ADR-0066): S3_BUCKET_ARCHIVE is
+# created WITH Object Lock (`mc mb --with-lock`, no default retention: the archive-worker sets the
+# mode and retain-until per object for tenants that require it). MinIO cannot enable Object Lock
+# on an existing bucket, so an archive bucket that exists without it is removed and recreated with
+# it only when it holds ZERO object versions (a one-time migration, logged); when it holds
+# versions the script FAILS and points at docs/runbooks/archive.md (it never deletes data).
+# Versioning on (Object Lock implies it), anonymous none; lifecycle: abort incomplete multipart
+# uploads after 1 day and expire eDiscovery export packages (objects tagged
+# eg-object=archive-export) after ceil(ARCHIVE_EXPORT_TTL_HOURS / 24) + 1 days (their noncurrent
+# versions one day later); no other expiry rule: archive records are deleted only by the
+# archive-worker's disposal pipeline. The TEST-ONLY bucket ARCHIVE_TEST_REPLICA_BUCKET (default
+# gateway-archive-replica) is created the same way (lock-enabled, versioned, anonymous none) and
+# simulates a replication target (ARCHIVE_REPLICA_TARGETS) in the stack tests. Production S3:
+# Terraform module mail-storage and docs/deployment/archive.md.
 set -eu
 mc alias set local "http://minio:9000" "${MINIO_ROOT_USER}" "${MINIO_ROOT_PASSWORD}" >/dev/null
-for bucket in "${S3_BUCKET_MAIL}" "${S3_BUCKET_ARCHIVE}"; do
+# The archive bucket is created with Object Lock further below (step 8.1).
+for bucket in "${S3_BUCKET_MAIL}"; do
   mc mb --ignore-existing "local/${bucket}"
   mc version enable "local/${bucket}"
   mc anonymous set none "local/${bucket}"
@@ -125,4 +141,63 @@ attached=$(mc admin user info local "$sandbox_user" --json | sed -n 's/.*"policy
 [ "$attached" = "eg-sandbox-controller" ] ||
   fail "user ${sandbox_user} must have exactly the policy eg-sandbox-controller (has: ${attached:-none})"
 echo "sandbox: bucket ${sandbox_bucket} (versioning off, anonymous none), user ${sandbox_user} with policy eg-sandbox-controller"
+
+# ---------------------------------------------------------------- archive buckets (step 8.1)
+archive_bucket="${S3_BUCKET_ARCHIVE}"
+replica_bucket="${ARCHIVE_TEST_REPLICA_BUCKET:-gateway-archive-replica}"
+export_ttl_hours="${ARCHIVE_EXPORT_TTL_HOURS:-168}"
+for name in "$archive_bucket" "$replica_bucket"; do
+  printf '%s' "$name" | grep -Eq '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$' ||
+    fail "S3_BUCKET_ARCHIVE and ARCHIVE_TEST_REPLICA_BUCKET must be valid bucket names (3..63 of a-z 0-9 . -)"
+done
+if [ "$replica_bucket" = "$archive_bucket" ] || [ "$replica_bucket" = "${S3_BUCKET_MAIL}" ] ||
+  [ "$replica_bucket" = "$sandbox_bucket" ]; then
+  fail "ARCHIVE_TEST_REPLICA_BUCKET must differ from the mail, archive and sandbox buckets"
+fi
+is_uint "$export_ttl_hours" || fail "ARCHIVE_EXPORT_TTL_HOURS must be a positive integer"
+if [ "$export_ttl_hours" -lt 1 ] || [ "$export_ttl_hours" -gt 8760 ]; then
+  fail "ARCHIVE_EXPORT_TTL_HOURS must be 1..8760"
+fi
+
+# True when the bucket exists with Object Lock enabled (`mc retention info --default` reports
+# "enabled":"Enabled"; it errors for a bucket without Object Lock).
+lock_enabled() {
+  mc retention info --default --json "local/$1" 2>/dev/null | grep -q '"enabled":"Enabled"'
+}
+
+# Creates bucket $1 with Object Lock, or migrates an existing bucket without it when it is empty
+# (zero object versions, delete markers included). Never deletes data.
+ensure_lock_bucket() {
+  bucket="$1"
+  if mc stat "local/${bucket}" >/dev/null 2>&1; then
+    if lock_enabled "$bucket"; then
+      echo "archive: bucket ${bucket} has Object Lock enabled"
+    else
+      versions=$(mc ls --versions --recursive "local/${bucket}" | wc -l | tr -d ' ')
+      if [ "$versions" -ne 0 ]; then
+        fail "bucket ${bucket} exists WITHOUT Object Lock and holds ${versions} object version(s); it cannot be converted in place. Follow docs/runbooks/archive.md (Object Lock migration); nothing was deleted."
+      fi
+      echo "archive: bucket ${bucket} exists without Object Lock and holds 0 object versions: recreating it with Object Lock (one-time migration, step 8.1 A29)"
+      mc rb "local/${bucket}" >/dev/null
+      mc mb --with-lock "local/${bucket}"
+    fi
+  else
+    mc mb --with-lock "local/${bucket}"
+  fi
+  lock_enabled "$bucket" || fail "bucket ${bucket}: Object Lock is not enabled after creation"
+  mc version enable "local/${bucket}"
+  mc anonymous set none "local/${bucket}"
+}
+
+ensure_lock_bucket "$archive_bucket"
+export_days=$(((export_ttl_hours + 23) / 24 + 1))
+# MinIO refuses a rule whose only action is AbortIncompleteMultipartUpload ("not well-formed"), so
+# that rule also removes expired object delete markers (markers left with no version: never data;
+# the archive-worker always deletes by version id).
+printf '{"Rules":[{"ID":"eg-archive-abort-multipart","Status":"Enabled","Filter":{"Prefix":""},"Expiration":{"ExpiredObjectDeleteMarker":true},"AbortIncompleteMultipartUpload":{"DaysAfterInitiation":1}},{"ID":"eg-archive-export-expiry","Status":"Enabled","Filter":{"Tag":{"Key":"eg-object","Value":"archive-export"}},"Expiration":{"Days":%s},"NoncurrentVersionExpiration":{"NoncurrentDays":1}}]}' \
+  "$export_days" | mc ilm import "local/${archive_bucket}" >/dev/null
+echo "lifecycle: ${archive_bucket} incomplete multipart uploads aborted after 1 day; objects tagged eg-object=archive-export expire after ${export_days} days; no other expiry"
+
+ensure_lock_bucket "$replica_bucket"
+echo "archive: test-only replica bucket ${replica_bucket} (Object Lock, versioned, anonymous none)"
 echo "buckets ready"

@@ -17,12 +17,18 @@ import { findEdge, LIFECYCLE_REASON_CODES, TRANSITIONS } from './transitions';
  * (`scanned → approved`) added (docs/plan/steps/09-rspamd.md S15); step 5.2 retires E27 as well
  * (docs/plan/steps/16-policy-engine.md P14, ADR-0044); step 5.3 (docs/plan/steps/17-quarantine.md
  * Q5, ADR-0046 decision 4) adds `policy_partial` to E10, the role `quarantine` with
- * `quarantine_expired` to E26, and the edges E28 and E29.
+ * `quarantine_expired` to E26, and the edges E28 and E29; step 8.1
+ * (docs/plan/steps/23-journaling-archiving.md A25, ADR-0064) retires E25 (`→ archived`).
  */
-const RETIRED_EDGE_IDS = ['E4', 'E27'];
-/** Kept for history rows written before the retirements (no edge accepts them). */
-const HISTORY_ONLY_ROLES = ['dev_passthrough'];
-const HISTORY_ONLY_REASONS = ['dev_passthrough', 'lifecycle_backfill'];
+const RETIRED_EDGE_IDS = ['E4', 'E25', 'E27'];
+/**
+ * Kept for history rows written before the retirements (no edge accepts them); `archive` /
+ * `archived` are reserved values of the retired E25, which never had a producer.
+ */
+const HISTORY_ONLY_ROLES = ['dev_passthrough', 'archive'];
+const HISTORY_ONLY_REASONS = ['dev_passthrough', 'lifecycle_backfill', 'archived'];
+/** States no edge produces (step 8.1 A25): `archived` stays in MessageStatus, reserved. */
+const RESERVED_STATES: readonly MessageState[] = ['archived'];
 const L3 = `
 E1  - received ingestion smtp_accepted - 3.3
 E2  received persisted ingestion committed - 3.3
@@ -47,7 +53,6 @@ E21 delivery_pending delivery_retry delivery,recovery delivery_deferred - 3.3
 E22 delivery_retry delivery_pending delivery,recovery delivery_requeued - 3.3
 E23 delivery_pending,delivery_retry delivered delivery,recovery delivery_complete,delivery_partial - 3.3
 E24 delivery_pending,delivery_retry rejected delivery,recovery delivery_failed - 3.3
-E25 delivered,rejected archived archive archived - 8.1
 E26 persisted,scanning,scanned,scan_failed,policy_evaluated,approved,quarantined,held_for_review,delivery_pending,delivery_retry expired sweeper,quarantine deadline_exceeded,quarantine_expired - 3.3
 E28 delivered,rejected,expired approved quarantine quarantine_partial_release yes 5.3
 E29 rejected quarantined quarantine manual_quarantine - 5.3
@@ -61,7 +66,7 @@ const REASON_ROLES: Record<string, Record<string, string[]>> = {
 };
 
 describe('TRANSITIONS', () => {
-  it('is the L3 table verbatim (E1–E26, E28, E29) without the retired E4 and E27', () => {
+  it('is the L3 table verbatim (E1–E29) without the retired E4, E25 and E27', () => {
     const expected = L3.trim()
       .split('\n')
       .map((line) => {
@@ -80,7 +85,7 @@ describe('TRANSITIONS', () => {
     expect(TRANSITIONS.map((e) => ({ ...e, from: [...e.from] }))).toEqual(expected);
   });
 
-  it('uses exactly the fifteen states and only known roles; every role but the history-only ones is used', () => {
+  it('uses exactly the fifteen states but the reserved archived, and only known roles; every role but the history-only ones is used', () => {
     const states = new Set<MessageState>();
     const roles = new Set<string>();
     for (const edge of TRANSITIONS) {
@@ -88,7 +93,9 @@ describe('TRANSITIONS', () => {
       for (const f of edge.from) if (f !== null) states.add(f);
       for (const r of edge.roles) roles.add(r);
     }
-    expect([...states].sort()).toEqual([...MESSAGE_STATES].sort());
+    expect([...states].sort()).toEqual(
+      MESSAGE_STATES.filter((s) => !RESERVED_STATES.includes(s)).sort(),
+    );
     expect([...roles].sort()).toEqual(
       ACTOR_ROLES.filter((r) => !HISTORY_ONLY_ROLES.includes(r)).sort(),
     );
@@ -105,26 +112,38 @@ describe('TRANSITIONS', () => {
         expect(findEdge(from, edge.to)).toBe(edge);
       }
     }
-    // Ids are E1, E2, … in order; a retired id (E4, E27) is never reused.
+    // Ids are E1, E2, … in order; a retired id (E4, E25, E27) is never reused.
     const ids = Array.from({ length: 29 }, (_, i) => `E${i + 1}`).filter(
       (id) => !RETIRED_EDGE_IDS.includes(id),
     );
     expect(TRANSITIONS.map((e) => e.id)).toEqual(ids);
   });
 
-  it('has no edge out of archived; final states leave only by rescan, archive or a quarantine role (5.3)', () => {
+  it('has no edge into or out of archived; final states leave only by rescan or a quarantine role (5.3)', () => {
     const out = (state: MessageState) =>
       TRANSITIONS.filter((e) => e.from.includes(state)).map((e) => e.to);
     expect(out('archived')).toEqual([]);
+    // Step 8.1 A25: E25 is retired; nothing produces `archived` (archive membership is
+    // `email_archives`, the message keeps its outcome).
+    expect(TRANSITIONS.filter((e) => e.to === 'archived')).toEqual([]);
+    expect(TRANSITIONS.some((e) => e.id === 'E25')).toBe(false);
+    expect(TRANSITIONS.some((e) => e.roles.includes('archive'))).toBe(false);
+    expect(TRANSITIONS.some((e) => e.reasons.includes('archived'))).toBe(false);
+    for (const from of [...MESSAGE_STATES, null])
+      expect(findEdge(from, 'archived')).toBeUndefined();
+    // Reserved, not removed: the enum value, the role and the reason stay known values.
+    expect(MESSAGE_STATES).toContain('archived');
+    expect(ACTOR_ROLES).toContain('archive');
+    expect(LIFECYCLE_REASON_CODES).toContain('archived');
     expect(out('expired')).toEqual(['scanning', 'approved']);
-    expect(out('delivered')).toEqual(['archived', 'approved']);
-    expect(out('rejected')).toEqual(['archived', 'approved', 'quarantined']);
+    expect(out('delivered')).toEqual(['approved']);
+    expect(out('rejected')).toEqual(['approved', 'quarantined']);
     // Automatic processing never leaves a final state: the only edges out of one besides the
-    // archive (8.1) and the operator/scanner rescan (E19) belong to the quarantine role (E28,
-    // E29: explicit operator-caused re-entries, ADR-0046).
+    // operator/scanner rescan (E19) belong to the quarantine role (E28, E29: explicit
+    // operator-caused re-entries, ADR-0046).
     for (const edge of TRANSITIONS) {
       if (!edge.from.some((f) => f !== null && FINAL_STATES.includes(f))) continue;
-      if (['E19', 'E25'].includes(edge.id)) continue;
+      if (edge.id === 'E19') continue;
       expect([...edge.roles], edge.id).toEqual(['quarantine']);
     }
     expect(findEdge('rejected', 'quarantined')?.id).toBe('E29');
@@ -204,7 +223,7 @@ describe('TRANSITIONS', () => {
     );
   });
 
-  it('reaches every state from creation and every non-final state reaches a final state', () => {
+  it('reaches every state but the reserved archived from creation and every non-final state reaches a final state', () => {
     const next = (from: MessageState | null) =>
       TRANSITIONS.filter((e) => e.from.includes(from)).map((e) => e.to);
     const reachable = new Set<MessageState>();
@@ -217,7 +236,11 @@ describe('TRANSITIONS', () => {
         }
       }
     }
-    expect([...reachable].sort()).toEqual([...MESSAGE_STATES].sort());
+    // Step 8.1 A25: `archived` is excluded explicitly (reserved, no producer).
+    expect([...reachable].sort()).toEqual(
+      MESSAGE_STATES.filter((s) => !RESERVED_STATES.includes(s)).sort(),
+    );
+    expect(reachable.has('archived')).toBe(false);
 
     for (const state of MESSAGE_STATES) {
       if (FINAL_STATES.includes(state)) continue;

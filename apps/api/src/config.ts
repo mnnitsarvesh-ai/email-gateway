@@ -1,5 +1,14 @@
 import {
+  parseExportSigningPublicKey,
+  parsePreviousSigningPublicKeys,
+  parseSigningKeyId,
+} from '@email-gateway/archive';
+import {
   amqpUrlListSchema,
+  archiveKeysFieldsSchema,
+  archiveSearchFieldsSchema,
+  archiveStorageConfigSchema,
+  archiveTestSeamFieldsSchema,
   baseConfigSchema,
   databaseConfigSchema,
   databaseReadConfigSchema,
@@ -8,6 +17,9 @@ import {
   notifySmtpFieldsSchema,
   redisConfigSchema,
   s3ConfigSchema,
+  validateArchiveKeysConfig,
+  validateArchiveSearchConfig,
+  validateArchiveTestSeam,
   validateNotifySmtpConfig,
 } from '@email-gateway/config';
 import { parseAllowedDestinationPorts } from '@email-gateway/mail-routing';
@@ -1010,6 +1022,84 @@ export function validateWebhookConfig(
   }
 }
 
+/**
+ * Journaling and compliance archiving, api side (step 8.1 §4.8,
+ * docs/plan/steps/23-journaling-archiving.md A17–A19, A22): the download-token HMAC key (64 hex,
+ * required, `_FILE` accepted) and its TTL and per-user grant limit, the preview and reveal route
+ * limits, the search ranges, the per-organization bounds, the export bounds the api checks
+ * before queueing an export (the worker enforces them again), and the export signing public
+ * keys published by `GET /archive/export-signing-keys` (Ed25519 SPKI DER base64url, validated at
+ * start). The root key, search, storage and test-seam keys come from `@email-gateway/config`.
+ * Start-up errors name the key, never the value.
+ */
+export const archiveApiConfigShape = {
+  ARCHIVE_DOWNLOAD_TOKEN_KEY: aesKey,
+  ARCHIVE_DOWNLOAD_TOKEN_TTL_SECONDS: int(10, 300).default(60),
+  ARCHIVE_DOWNLOAD_GRANTS_PER_HOUR: int(1, 1000).default(20),
+  ARCHIVE_PREVIEW_PER_MINUTE: int(1, 600).default(30),
+  ARCHIVE_REVEAL_PER_MINUTE: int(1, 600).default(30),
+  ARCHIVE_SEARCH_MAX_RANGE_DAYS: int(1, 3660).default(366),
+  ARCHIVE_CASE_SEARCH_MAX_RANGE_DAYS: int(1, 36_500).default(3650),
+  ARCHIVE_RETENTION_POLICIES_MAX_PER_ORG: int(1, 500).default(50),
+  ARCHIVE_HOLDS_MAX_ACTIVE_PER_ORG: int(1, 1000).default(100),
+  ARCHIVE_CASES_MAX_OPEN_PER_ORG: int(1, 10_000).default(200),
+  ARCHIVE_CASE_MAX_CUSTODIANS: int(1, 10_000).default(1000),
+  ARCHIVE_CASE_MAX_ACTIVE_SEARCHES: int(1, 50).default(3),
+  ARCHIVE_REVIEW_MAX_ITEMS: int(1, 5000).default(500),
+  ARCHIVE_EXPORT_MAX_ITEMS: int(1, 1_000_000).default(10_000),
+  ARCHIVE_EXPORT_MAX_BYTES: int(1_048_576).default(2_147_483_648),
+  ARCHIVE_EXPORT_SIGNING_PUBLIC_KEY: z.string().min(1).max(256),
+  ARCHIVE_EXPORT_SIGNING_PUBLIC_KEY_ID: z.string().default('es1'),
+  ARCHIVE_EXPORT_SIGNING_PREVIOUS_PUBLIC_KEYS: z.string().max(8192).optional(),
+};
+
+export type ArchiveApiConfigKeys = {
+  [K in keyof typeof archiveApiConfigShape]: z.output<(typeof archiveApiConfigShape)[K]>;
+};
+
+/**
+ * The export signing public keys must parse as Ed25519 SPKI (base64url DER) with lower-case ids;
+ * the previous keys may not reuse the current id. Issues name the key, never the value.
+ */
+export function validateArchiveApiConfig(
+  cfg: Pick<
+    ArchiveApiConfigKeys,
+    'ARCHIVE_EXPORT_SIGNING_PUBLIC_KEY' | 'ARCHIVE_EXPORT_SIGNING_PUBLIC_KEY_ID'
+  > & { ARCHIVE_EXPORT_SIGNING_PREVIOUS_PUBLIC_KEYS?: string | undefined },
+  ctx: z.RefinementCtx,
+): void {
+  const check = (path: string, fn: () => void) => {
+    try {
+      fn();
+    } catch (error) {
+      ctx.addIssue({
+        code: 'custom',
+        path: [path],
+        message: error instanceof Error ? error.message : 'is invalid',
+      });
+    }
+  };
+  check('ARCHIVE_EXPORT_SIGNING_PUBLIC_KEY', () => {
+    parseExportSigningPublicKey(cfg.ARCHIVE_EXPORT_SIGNING_PUBLIC_KEY);
+  });
+  check('ARCHIVE_EXPORT_SIGNING_PUBLIC_KEY_ID', () => {
+    parseSigningKeyId(
+      cfg.ARCHIVE_EXPORT_SIGNING_PUBLIC_KEY_ID,
+      'ARCHIVE_EXPORT_SIGNING_PUBLIC_KEY_ID',
+    );
+  });
+  check('ARCHIVE_EXPORT_SIGNING_PREVIOUS_PUBLIC_KEYS', () => {
+    const previous = parsePreviousSigningPublicKeys(
+      cfg.ARCHIVE_EXPORT_SIGNING_PREVIOUS_PUBLIC_KEYS,
+    );
+    if (previous.some((k) => k.id === cfg.ARCHIVE_EXPORT_SIGNING_PUBLIC_KEY_ID)) {
+      throw new Error(
+        'ARCHIVE_EXPORT_SIGNING_PREVIOUS_PUBLIC_KEYS must not reuse ARCHIVE_EXPORT_SIGNING_PUBLIC_KEY_ID',
+      );
+    }
+  });
+}
+
 /** `API_RATE_TENANT_MIN_PER_MINUTE <= API_RATE_TENANT_DEFAULT_PER_MINUTE <= …_MAX_PER_MINUTE`. */
 export function validateRestApiConfig(
   cfg: Pick<
@@ -1138,6 +1228,12 @@ export const apiConfigSchema = baseConfigSchema
   .extend(webhookConfigShape)
   .extend(portalConfigShape)
   .extend(explorerConfigShape)
+  // Step 8.1 §4.8: archive root keys, search, storage, test seam and the api-only keys.
+  .extend(archiveKeysFieldsSchema.shape)
+  .extend(archiveSearchFieldsSchema.shape)
+  .extend(archiveStorageConfigSchema.shape)
+  .extend({ ARCHIVE_TEST_DAY_SECONDS: archiveTestSeamFieldsSchema.shape.ARCHIVE_TEST_DAY_SECONDS })
+  .extend(archiveApiConfigShape)
   .extend({
     /** Comma-separated allow-list of admin portal origins. */
     CORS_ORIGINS: z
@@ -1162,6 +1258,10 @@ export const apiConfigSchema = baseConfigSchema
     validateQuarantineConfig(cfg, ctx);
     validateRestApiConfig(cfg, ctx);
     validateWebhookConfig(cfg, ctx);
+    validateArchiveKeysConfig(cfg, ctx);
+    validateArchiveSearchConfig(cfg, ctx);
+    validateArchiveTestSeam(cfg, ctx);
+    validateArchiveApiConfig(cfg, ctx);
     if (cfg.AUTH_SESSION_MAX_AGE_SECONDS < cfg.AUTH_REFRESH_TOKEN_TTL_SECONDS) {
       ctx.addIssue({
         code: 'custom',

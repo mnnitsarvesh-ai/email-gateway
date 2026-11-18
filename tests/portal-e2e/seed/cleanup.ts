@@ -10,6 +10,7 @@
  */
 import { DeleteObjectsCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { PLATFORM_ORGANIZATION_SLUG, Prisma, type PrismaClient } from '@email-gateway/database';
+import { ARCHIVE_TABLES, cleanupArchiveStores } from './archive';
 import { mailBucket } from './db';
 import { LATE_MESSAGE_AGE_DAYS } from './plan';
 
@@ -18,6 +19,8 @@ export const PLATFORM_EMAIL_SUFFIX = '@e2e-portal.test';
 
 /** Partitioned tables and their partition column (docs/database/partitioning.md). */
 const PARTITION_COLUMN: Record<string, string> = {
+  archive_capture_intents: 'received_at',
+  archive_disposals: 'requested_at',
   attachment_scan_results: 'received_at',
   bec_scan_results: 'received_at',
   bounce_events: 'occurred_at',
@@ -67,10 +70,8 @@ const ORDER = [
   'quarantine_settings',
   // Message graph (quarantine.ts deleteQuarantineFixtures, messages-data.ts, lifecycle.ts).
   'message_outbox',
-  'archive_legal_holds',
-  'archive_retention_policies',
-  'archive_settings',
-  'email_archives',
+  // Step 8.1: archive and eDiscovery rows (seed/archive.ts ARCHIVE_TABLES order).
+  ...ARCHIVE_TABLES,
   'message_risk_scores',
   'email_auth_results',
   'scan_engine_results',
@@ -257,6 +258,8 @@ export async function cleanup(prisma: PrismaClient): Promise<CleanupResult> {
   let objects = 0;
   if (orgIds.length > 0) {
     objects = await deleteObjects(orgIds);
+    // Step 8.1: archive bucket versions, index documents and alias, worker cursors.
+    objects += await cleanupArchiveStores(prisma, orgIds);
     const cutoff = new Date(Date.now() - PARTITION_CUTOFF_DAYS * 86_400_000);
     let pending: string[] = [...ORDER];
     for (let pass = 0; pending.length > 0; pass++) {

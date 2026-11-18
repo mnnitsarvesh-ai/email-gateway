@@ -9,7 +9,7 @@
  * Creates the throwaway schema `<db>_perf` (e.g. `email_gateway_perf`) with the migrator
  * account, which holds ALL on exactly that schema (infrastructure/mysql/init), applies every
  * migration to it, bootstraps partitions 4 months back, loads synthetic data, runs ANALYZE
- * TABLE and Q1–Q18 and Q24 (EXPLAIN, EXPLAIN FORMAT=TREE, EXPLAIN ANALYZE, timings), samples replica
+ * TABLE and Q1–Q18, Q24 and Q25–Q30 (EXPLAIN, EXPLAIN FORMAT=TREE, EXPLAIN ANALYZE, timings), samples replica
  * lag through DATABASE_READ_URL, writes the report and drops the schema unless --keep.
  * `--quarantine-entries N` additionally loads N quarantine entries for the sample organization
  * with realistic state/reason/recipient/sender/policy/date distributions (step 5.3 §9.2,

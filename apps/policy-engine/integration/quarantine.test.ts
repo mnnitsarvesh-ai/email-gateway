@@ -863,6 +863,74 @@ describe('sweeper (Q19, Q17, Q8, Q20)', () => {
     expect(await q.objects.exists(m.emlObjectKey)).toBe(false);
   });
 
+  it('step 8.1 A23: no archive-retention hold; a pending capture defers one hour; archive-hold/1 directions', async () => {
+    const t = await tenant('a23', [rule('q', [{ type: 'QUARANTINE' }])]);
+    const p = buildPipeline(fx.prisma, fx.s3, { consumer: fx.consumer('a23') });
+    const q = buildQuarantine(fx.prisma, fx.s3, {
+      consumer: fx.consumer('a23-x'),
+      organizationIds: [t],
+    });
+    const m = await fx.message(t);
+    expect(await p.consumer.handler(fx.scanned(m))).toBe('handled');
+    // A case-scoped hold for outbound mail only does not cover this inbound message.
+    const hold = await fx.prisma.archiveLegalHold.create({
+      data: {
+        organizationId: t,
+        name: 'outbound only',
+        reason: 'it',
+        criteria: { directions: ['outbound'] },
+        criteriaVersion: 'archive-hold/1',
+        status: 'active',
+      },
+    });
+    // 5.3 retained objects for archive retention; 8.1 no longer does (the archive has a copy).
+    await fx.prisma.archiveSetting.create({
+      data: { organizationId: t, enabled: true, scope: 'all' },
+    });
+    const policy = await fx.prisma.archiveRetentionPolicy.create({
+      data: { organizationId: t, name: 'long', retentionDays: 3650, priority: 1 },
+    });
+    const intent = await fx.prisma.archiveCaptureIntent.create({
+      data: {
+        receivedAt: m.receivedAt,
+        organizationId: t,
+        messageId: m.messageId,
+        direction: 'inbound',
+        sourceJournal: true,
+        status: 'pending',
+        nextCheckAt: new Date(),
+        settingsGeneration: 0n,
+      },
+    });
+    await fx.prisma.quarantineMessage.updateMany({
+      where: { messageId: m.messageId },
+      data: { expiresAt: new Date(Date.now() - 60_000) },
+    });
+    const before = Date.now();
+    expect(await q.sweeper.sweepOnce()).toMatchObject({ expired: 1, purged: 0 });
+    const retained = await fx.prisma.quarantineObjectPurge.findFirstOrThrow({
+      where: { messageId: m.messageId },
+    });
+    expect(retained).toMatchObject({ status: 'retained', reason: 'archive_pending' });
+    expect(retained.purgeAfter.getTime()).toBeGreaterThanOrEqual(before + 3_590_000);
+    expect(retained.purgeAfter.getTime()).toBeLessThanOrEqual(Date.now() + 3_600_000);
+    // The capture resolved (closed): the next pass purges; the retention policy changes nothing.
+    await fx.prisma.archiveCaptureIntent.updateMany({
+      where: { id: intent.id },
+      data: { status: 'closed' },
+    });
+    await fx.prisma.quarantineObjectPurge.updateMany({
+      where: { messageId: m.messageId },
+      data: { purgeAfter: new Date(Date.now() - 1_000) },
+    });
+    expect(await q.sweeper.sweepOnce()).toMatchObject({ purged: 1 });
+    expect(await q.objects.exists(m.emlObjectKey)).toBe(false);
+    await fx.prisma.archiveCaptureIntent.deleteMany({ where: { id: intent.id } });
+    await fx.prisma.archiveSetting.deleteMany({ where: { organizationId: t } });
+    await fx.prisma.archiveRetentionPolicy.deleteMany({ where: { id: policy.id } });
+    await fx.prisma.archiveLegalHold.deleteMany({ where: { id: hold.id } });
+  });
+
   it('adopts a held message without entries (held by 5.2) with origin adopted', async () => {
     const t = await tenant('adopt', [rule('h', [{ type: 'REQUIRE_APPROVAL' }])]);
     const p = buildPipeline(fx.prisma, fx.s3, { consumer: fx.consumer('adopt') });

@@ -21,7 +21,7 @@ import { stack } from './support/env';
 /**
  * The provisioned vhost `email-gateway` matches the topology exactly (step 3.2 Q1, Q4, §3; v2:
  * step 3.3 L7; v3: step 4.1 S2; v4: step 4.2 A2; v5: step 4.3 U2; v6: step 4.4 B3; v7: step 4.5
- * D2; v8: step 4.6 X11; v9: step 5.2 P15; v10: step 5.3 Q27; v11: step 6.2 §4.3): checks through the management API. The prune case adds one stray binding to the dormant
+ * D2; v8: step 4.6 X11; v9: step 5.2 P15; v10: step 5.3 Q27; v11: step 6.2 §4.3; v12: step 8.1 A26): checks through the management API. The prune case adds one stray binding to the dormant
  * `scan.auth` and lets `init.mjs` remove it again.
  */
 /**
@@ -36,7 +36,8 @@ import { stack } from './support/env';
  * init.mjs) and email.notifications adds two: 47 (42 queue + 5 exchange bindings). v10 (step 5.3
  * Q27): email.notifications adds one: 48. v11 (step 6.2 §4.3): email.webhooks adds nine (eight
  * event bindings + its retry binding) and email.notifications one (alert_requested.v1): 58 (53
- * queue + 5 exchange bindings).
+ * queue + 5 exchange bindings). v12 (step 8.1 A26): email.archive turns from dormant into a lossy
+ * work queue with the same two bindings: still 58.
  */
 const TOPOLOGY_BINDINGS = 58;
 const api = new ManagementApi();
@@ -139,10 +140,10 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
     expect(bindings.filter((b) => b.destination_type === 'exchange')).toHaveLength(5);
   });
 
-  it('is topology v11: the vhost description and the rescan bindings (steps 4.1 S2, 4.2 A2, 4.3 U2, 4.4 B3, 4.5 D2, 4.6 X11, 5.2 P15, 5.3 Q27, 6.2)', async () => {
-    expect(TOPOLOGY_VERSION).toBe(11);
+  it('is topology v12: the vhost description and the rescan bindings (steps 4.1 S2, 4.2 A2, 4.3 U2, 4.4 B3, 4.5 D2, 4.6 X11, 5.2 P15, 5.3 Q27, 6.2, 8.1)', async () => {
+    expect(TOPOLOGY_VERSION).toBe(12);
     const info = await api.get<{ description?: string }>(`/vhosts/${encodeURIComponent(vhost)}`);
-    expect(info.description).toBe('email-gateway topology v11');
+    expect(info.description).toBe('email-gateway topology v12');
     const rescan = bindings
       .filter(
         (b) =>
@@ -599,7 +600,7 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
     for (const user of await consumerUsers('email.quarantine')) expect(user).toBe(engine);
   });
 
-  it('routes the policy and quarantine events on the live bindings (v10/v11): decision → firehose and webhook fanout, release request → email.quarantine, archive request → archive (8.1), notifications → email.notifications', () => {
+  it('routes the policy and quarantine events on the live bindings (v10/v11/v12): decision → firehose and webhook fanout, release request → email.quarantine, archive request → email.archive, notifications → email.notifications', () => {
     const route = (exchange: string, type: string) =>
       bindings
         .filter((b) => b.source === exchange && topicMatches(b.routing_key, `org.42.${type}`))
@@ -634,10 +635,8 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
         'email.archive [retry.email.archive.#]',
       ].sort(),
     );
-    expect(queueDefinition('email.archive')).toMatchObject({
-      role: 'dormant',
-      consumer: { kind: 'planned', plannedStep: '8.1' },
-    });
+    // v12 (step 8.1 A26): no longer dormant (see the email.archive case below).
+    expect(queueDefinition('email.archive').role).toBe('work');
     // Retry hops on email.policy reach exactly their own queue.
     for (const queue of ['email.policy.evaluate', 'email.notifications', 'email.quarantine']) {
       const reached = bindings
@@ -649,6 +648,50 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
         .map((b) => b.destination);
       expect(reached, queue).toEqual([queue]);
     }
+  });
+
+  it('email.archive is a lossy work queue (v12, step 8.1 A26) for the archive-worker (eg-archive) only', async () => {
+    expect(queueDefinition('email.archive')).toMatchObject({
+      role: 'work',
+      homeExchange: 'email.archive',
+      lossy: true,
+      consumer: { kind: 'ledger', ledgerName: 'archive-worker.archive', service: 'archive-worker' },
+      retry: {
+        strategy: 'hold',
+        maxAttempts: 10,
+        baseDelayMs: 2_000,
+        maxDelayMs: 60_000,
+        maxRetryAgeMs: 24 * 3_600_000,
+      },
+    });
+    // The applied policy is work-lossy: drop-head at 10 000 and at-most-once dead-lettering (the
+    // relay never stalls on the archive; the worker reconciles from policy_execution_logs).
+    expect(queues.find((q) => q.name === 'email.archive')?.effective_policy_definition).toEqual({
+      'delivery-limit': 20,
+      'dead-letter-exchange': 'email.events',
+      'dead-letter-routing-key': 'dead-letter.email.archive',
+      'dead-letter-strategy': 'at-most-once',
+      overflow: 'drop-head',
+      'max-length': 10_000,
+    });
+    expect(policyFor('work-lossy', 'email.archive')).toEqual(
+      queues.find((q) => q.name === 'email.archive')?.effective_policy_definition,
+    );
+    // Retry hops on email.archive reach exactly email.archive; its dead letters email.dead-letter.
+    const reached = (exchange: string, key: string) =>
+      bindings
+        .filter((b) => b.source === exchange && topicMatches(b.routing_key, key))
+        .map((b) => `${b.destination_type}:${b.destination}`)
+        .sort();
+    expect(
+      reached('email.archive', 'retry.email.archive.org.42.mail.message.archive_requested.v1'),
+    ).toEqual(['queue:email.archive']);
+    expect(
+      reached('email.events', 'dead-letter.email.archive.org.42.mail.message.archive_requested.v1'),
+    ).toEqual(['queue:email.dead-letter']);
+    // Consumers (from WP3 on): the archive-worker role user only.
+    const worker = process.env.RABBITMQ_ARCHIVE_USER || 'eg-archive';
+    for (const user of await consumerUsers('email.archive')) expect(user).toBe(worker);
   });
 
   it('email.webhooks is a work queue (v11) for the webhook-worker fanout (eg-webhook) only', async () => {

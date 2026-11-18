@@ -1,5 +1,7 @@
 import { Module } from '@nestjs/common';
+import { ArchiveRecordsRepository } from '../archive/repositories/archive-records.repository';
 import { DlpEvidenceStore } from '../dlp/services/dlp-evidence-store';
+import { ArchiveTenantDataRepository } from './archive-tenant-data.repository';
 import { BecTenantDataRepository } from './bec-tenant-data.repository';
 import { DlpTenantDataRepository } from './dlp-tenant-data.repository';
 import { DomainsRepository } from './domains.repository';
@@ -18,7 +20,9 @@ import { RiskTenantDataRepository } from './risk-tenant-data.repository';
  * 4.5: DlpTenantDataRepository its DLP rows and evidence objects; step 5.1:
  * RiskTenantDataRepository its risk scores and risk scoring profiles; step 5.2:
  * PolicyTenantDataRepository its policy evaluations, policies, settings and departments; step
- * 5.3: QuarantineTenantDataRepository its quarantine tables (refused under an active legal hold).
+ * 5.3: QuarantineTenantDataRepository its quarantine tables (refused under an active legal hold);
+ * step 8.1: ArchiveTenantDataRepository its archive (disposal decisions, then the archive and
+ * eDiscovery rows and the tenant keys; refused under an active hold or running retention).
  */
 @Module({
   providers: [
@@ -32,6 +36,8 @@ import { RiskTenantDataRepository } from './risk-tenant-data.repository';
     RiskTenantDataRepository,
     PolicyTenantDataRepository,
     QuarantineTenantDataRepository,
+    ArchiveRecordsRepository,
+    ArchiveTenantDataRepository,
   ],
   exports: [
     DomainsRepository,
@@ -43,6 +49,7 @@ import { RiskTenantDataRepository } from './risk-tenant-data.repository';
     RiskTenantDataRepository,
     PolicyTenantDataRepository,
     QuarantineTenantDataRepository,
+    ArchiveTenantDataRepository,
   ],
 })
 export class TenantDataModule {}

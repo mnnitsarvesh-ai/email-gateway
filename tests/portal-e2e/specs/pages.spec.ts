@@ -1,8 +1,9 @@
 /**
  * Every page of design §1.3 (22 pages, their tabs and sub-routes) and the routes linked from
  * emails (§1.2) render with the seeded data, show no error state, and pass axe (no serious or
- * critical violation). The unavailable states of steps 8.1, 8.2 and 8.3 and the two "Not
- * offered" states are present where the design puts them; since step 7.2 the explorer, the
+ * critical violation). The unavailable states of steps 8.2 and 8.3 and the two "Not offered"
+ * states are present where the design puts them (step 8.1 replaced its states with the
+ * Compliance pages and the Settings archive tab); since step 7.2 the explorer, the
  * details and the scan rounds page carry no "arrives in 7.2" state any more, and since step 7.3
  * the policy pages carry no "arrives in 7.3" state (the builder, the management flows and the
  * DLP/BEC editors replaced them).
@@ -125,8 +126,9 @@ test('organization admin: directory and administration pages', async ({ page }) 
     {
       path: '/integrations',
       heading: 'Integrations',
-      markers: ['Alpha SIEM (e2e)'],
+      markers: ['Alpha SIEM (e2e)', 'Archive and journaling'],
       unavailable: ['8.2'],
+      absent: ['Arrives in step 8.1'],
     },
     { path: '/integrations/api-keys', heading: /api keys|integrations/i },
     { path: `/webhooks/${s.alpha.webhookId}`, heading: 'Alpha SIEM (e2e)' },
@@ -146,7 +148,25 @@ test('organization admin: directory and administration pages', async ({ page }) 
       markers: ['Multi-factor authentication'],
     },
     { path: '/settings?tab=scanning', heading: 'Settings' },
-    { path: '/settings?tab=archive', heading: 'Settings', unavailable: ['8.1'] },
+    // Step 8.1: the archive tab is real (no "arrives in 8.1" state left).
+    {
+      path: '/settings?tab=archive',
+      heading: 'Settings',
+      markers: ['Encryption key versions', /Immutable storage/],
+      absent: ['Arrives in step 8.1'],
+    },
+    // Step 8.1: Compliance pages.
+    { path: '/archive?range=7d', heading: 'Archive', absent: ['Arrives in step 8.1'] },
+    {
+      path: '/archive/retention',
+      heading: 'Retention and review',
+      markers: [s.archive.policyName],
+    },
+    { path: '/archive/retention?tab=review', heading: 'Retention and review' },
+    { path: '/archive/retention?tab=disposals', heading: 'Retention and review' },
+    { path: '/archive/retention?tab=capture', heading: 'Retention and review' },
+    { path: '/legal-holds', heading: 'Legal holds' },
+    { path: '/ediscovery', heading: 'eDiscovery' },
   ];
   for (const check of checks) await checkPage(page, check);
 });

@@ -163,6 +163,55 @@ spec:
                 name: API_TRUSTED_FORWARDER_TOKEN_FILE,
                 value: /var/run/secrets/api-trusted-forwarder/token,
               }
+            # Journaling and archiving (step 8.1 §4.8, A9, A17-A19, ADR-0065..0069). Shared keys
+            # (search URL, index prefix, Object Lock mode, retention cap, key ids, export bounds)
+            # come from the ConfigMap. The archive root key (decrypts archived content; held by the
+            # api and the archive-worker only), the download-token HMAC key (api only), the api's
+            # OpenSearch password (FGAC user eg-archive-api: read <prefix>-t* only) and the export
+            # signing PUBLIC key are mounted from their own Secrets. The previous root key and its
+            # id (root rotation, unwrap only) are optional.
+            - { name: ARCHIVE_ROOT_KEY_FILE, value: /var/run/secrets/archive-root-key/key }
+            - name: ARCHIVE_ROOT_KEY_PREVIOUS
+              valueFrom:
+                secretKeyRef:
+                  { name: email-gateway-archive-root-key, key: previous-key, optional: true }
+            - name: ARCHIVE_ROOT_KEY_PREVIOUS_ID
+              valueFrom:
+                secretKeyRef:
+                  { name: email-gateway-archive-root-key, key: previous-key-id, optional: true }
+            - {
+                name: ARCHIVE_DOWNLOAD_TOKEN_KEY_FILE,
+                value: /var/run/secrets/archive-download-token/key,
+              }
+            - { name: ARCHIVE_SEARCH_USERNAME, value: eg-archive-api }
+            - {
+                name: ARCHIVE_SEARCH_PASSWORD_FILE,
+                value: /var/run/secrets/archive-search/password,
+              }
+            - {
+                name: ARCHIVE_EXPORT_SIGNING_PUBLIC_KEY_FILE,
+                value: /var/run/secrets/archive-export-signing/public-key,
+              }
+            - name: ARCHIVE_EXPORT_SIGNING_PREVIOUS_PUBLIC_KEYS
+              valueFrom:
+                secretKeyRef:
+                  {
+                    name: email-gateway-archive-export-signing,
+                    key: previous-public-keys,
+                    optional: true,
+                  }
+            - { name: ARCHIVE_DOWNLOAD_TOKEN_TTL_SECONDS, value: '60' }
+            - { name: ARCHIVE_DOWNLOAD_GRANTS_PER_HOUR, value: '20' }
+            - { name: ARCHIVE_PREVIEW_PER_MINUTE, value: '30' }
+            - { name: ARCHIVE_REVEAL_PER_MINUTE, value: '30' }
+            - { name: ARCHIVE_SEARCH_MAX_RANGE_DAYS, value: '366' }
+            - { name: ARCHIVE_CASE_SEARCH_MAX_RANGE_DAYS, value: '3650' }
+            - { name: ARCHIVE_RETENTION_POLICIES_MAX_PER_ORG, value: '50' }
+            - { name: ARCHIVE_HOLDS_MAX_ACTIVE_PER_ORG, value: '100' }
+            - { name: ARCHIVE_CASES_MAX_OPEN_PER_ORG, value: '200' }
+            - { name: ARCHIVE_CASE_MAX_CUSTODIANS, value: '1000' }
+            - { name: ARCHIVE_CASE_MAX_ACTIVE_SEARCHES, value: '3' }
+            - { name: ARCHIVE_REVIEW_MAX_ITEMS, value: '500' }
           volumeMounts:
             - { name: secrets, mountPath: /var/run/secrets/gateway, readOnly: true }
             - { name: dlp-evidence-key, mountPath: /var/run/secrets/dlp-evidence, readOnly: true }
@@ -180,6 +229,22 @@ spec:
             - {
                 name: api-trusted-forwarder,
                 mountPath: /var/run/secrets/api-trusted-forwarder,
+                readOnly: true,
+              }
+            - {
+                name: archive-root-key,
+                mountPath: /var/run/secrets/archive-root-key,
+                readOnly: true,
+              }
+            - {
+                name: archive-download-token,
+                mountPath: /var/run/secrets/archive-download-token,
+                readOnly: true,
+              }
+            - { name: archive-search, mountPath: /var/run/secrets/archive-search, readOnly: true }
+            - {
+                name: archive-export-signing,
+                mountPath: /var/run/secrets/archive-export-signing,
                 readOnly: true,
               }
             - { name: tmp, mountPath: /tmp }
@@ -225,6 +290,24 @@ spec:
           secret:
             secretName: email-gateway-api-trusted-forwarder
             items: [{ key: token, path: token }]
+        # Step 8.1: only the items the api needs (never the export signing PRIVATE key, which only
+        # the archive-jobs Deployment mounts).
+        - name: archive-root-key
+          secret:
+            secretName: email-gateway-archive-root-key
+            items: [{ key: key, path: key }]
+        - name: archive-download-token
+          secret:
+            secretName: email-gateway-archive-download-token-key
+            items: [{ key: key, path: key }]
+        - name: archive-search
+          secret:
+            secretName: email-gateway-archive-search-api
+            items: [{ key: password, path: password }]
+        - name: archive-export-signing
+          secret:
+            secretName: email-gateway-archive-export-signing
+            items: [{ key: public-key, path: public-key }]
         - name: tmp
           emptyDir: {}
 ---

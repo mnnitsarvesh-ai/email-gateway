@@ -3,7 +3,8 @@
  * organizations `e2e-portal-alpha` / `e2e-portal-beta`, domains, users of every role, messages
  * over the last 7 days with deliveries, scan rounds and clicks, quarantine entries (one needs an
  * approver), sanitized preview and EML objects in MinIO, audit rows and one beta webhook (created
- * through the api). Idempotent: the previous run's data is removed first (cleanup.ts).
+ * through the api); step 8.1: both tenants on the enterprise plan, archive settings and a
+ * retention policy, a beta archive message (seed/archive.ts). Idempotent: the previous run's data is removed first (cleanup.ts).
  *
  * Rows are written on the writer as the api integration helpers do (preconditions, metadata
  * only; message content lives only in MinIO). Reserved `.test` domains only. Passwords are
@@ -19,10 +20,16 @@ import {
 } from '@email-gateway/database';
 import * as argon2 from 'argon2';
 import { optionalEnv, requireEnv } from '../support/env';
-import { base32Encode } from '../support/totp';
+import { base32Encode, freshTotp } from '../support/totp';
 import type { E2eState, E2eUser, UserKey } from '../support/state';
 import { writeState } from '../support/state';
 import { type ApiSession, apiSession } from './api';
+import {
+  ARCHIVE_CUSTODIAN,
+  ARCHIVE_POLICY_NAME,
+  alphaArchiveDashboardPlans,
+  prepareArchive,
+} from './archive';
 import { cleanup } from './cleanup';
 import { mailBucket, reader, writer } from './db';
 import { historyOf, requiredEnginesOf, scanVerdictOf, writeMessageDetails } from './details';
@@ -57,7 +64,7 @@ export const ALPHA_AUDIT_ROWS = 70;
 /** Alpha's tenant request budget (the enterprise plan value; standard is 300). */
 export const ALPHA_API_REQUESTS_PER_MINUTE = 1_200;
 /** Users of the role table below that belong to alpha (every role key starting with `alpha`). */
-export const ALPHA_ROLE_USERS = 9;
+export const ALPHA_ROLE_USERS = 10;
 
 function generatePassword(): string {
   return `E2e-${randomBytes(12).toString('base64url')}-7a`;
@@ -100,11 +107,17 @@ interface Org {
   name: string;
 }
 
+/**
+ * The e2e tenants are on the `enterprise` plan since step 8.1 (design §9.5): it carries the
+ * `archiving` feature and the `archive_retention_days` limit the archive pages need.
+ */
+export const E2E_PLAN = 'enterprise';
+
 async function createOrganization(p: PrismaClient, slug: string, name: string): Promise<Org> {
-  const planDef = PLANS.find((plan) => plan.code === 'standard');
-  if (!planDef) throw new Error('standard plan missing');
+  const planDef = PLANS.find((plan) => plan.code === E2E_PLAN);
+  if (!planDef) throw new Error(`${E2E_PLAN} plan missing`);
   const plan = await p.organizationPlan.findUniqueOrThrow({
-    where: { code: 'standard' },
+    where: { code: E2E_PLAN },
     select: { id: true },
   });
   const org = await p.organization.create({
@@ -597,6 +610,13 @@ export async function seed(): Promise<SeedSummary> {
         org: 'alpha',
         name: 'Alpha Approver',
       },
+      // Step 8.1: a compliance auditor with MFA (case searches, exports and their downloads).
+      alphaAuditorMfa: {
+        email: `auditor-mfa@${ALPHA_DOMAIN}`,
+        roles: ['compliance_auditor'],
+        org: 'alpha',
+        name: 'Alpha MFA Auditor',
+      },
       betaAdmin: {
         email: `admin@${BETA_DOMAIN}`,
         roles: ['organization_admin'],
@@ -632,6 +652,13 @@ export async function seed(): Promise<SeedSummary> {
       data: { mfaEnabled: true, mfaSecretCiphertext: sealMfaSecret(approverSecret, approverId) },
     });
     users.alphaApprover.totpSecret = approverSecret;
+    const auditorSecret = base32Encode(randomBytes(20));
+    const auditorId = userIds.get(spec.alphaAuditorMfa.email)!;
+    await p.user.update({
+      where: { id: auditorId },
+      data: { mfaEnabled: true, mfaSecretCiphertext: sealMfaSecret(auditorSecret, auditorId) },
+    });
+    users.alphaAuditorMfa.totpSecret = auditorSecret;
 
     const memberHash = await hashPassword(generatePassword());
     const memberIds: string[] = [];
@@ -894,6 +921,7 @@ export async function seed(): Promise<SeedSummary> {
     let webhookId: string;
     let alphaWebhookId: string;
     let policies: Awaited<ReturnType<typeof seedPolicies>>;
+    let archive: Awaited<ReturnType<typeof prepareArchive>>;
     try {
       webhookId = await createWebhook(
         betaApi,
@@ -912,6 +940,23 @@ export async function seed(): Promise<SeedSummary> {
         alphaMemberUserId: memberIds[0]!,
         domainName: ALPHA_DOMAIN,
       });
+      // Step 8.1: archive tenants (seed/archive.ts). PUT /archive/settings is an MFA route.
+      const { code, step } = await freshTotp(approverSecret, undefined);
+      users.alphaApprover.lastTotpStep = step;
+      const approverApi = await apiSession(
+        users.alphaApprover.email,
+        users.alphaApprover.password,
+        { code },
+      );
+      try {
+        archive = await prepareArchive(p, {
+          alphaAdmin: alphaApi,
+          alphaApprover: approverApi,
+          betaOrg: beta.id,
+        });
+      } finally {
+        await approverApi.logout();
+      }
     } finally {
       await alphaApi.logout();
       await betaApi.logout();
@@ -919,8 +964,10 @@ export async function seed(): Promise<SeedSummary> {
 
     // Expected figures for the dashboard's default range (7 days ending at the next full hour).
     const to = Math.ceil(Date.now() / 3_600_000) * 3_600_000;
+    // Step 8.1: the alpha archive messages the archive spec inserts during the run count too
+    // (the dashboard spec makes sure they exist before it compares).
     const dashboard7d = expectDashboard(
-      alphaPlans,
+      [...alphaPlans, ...alphaArchiveDashboardPlans(Date.now())],
       { primary: ALPHA_DOMAIN, deleted: ALPHA_DELETED_DOMAIN },
       to - 7 * DAY,
       to,
@@ -1012,6 +1059,12 @@ export async function seed(): Promise<SeedSummary> {
         },
       },
       expected: { dashboard7d },
+      archive: {
+        custodian: ARCHIVE_CUSTODIAN,
+        policyId: archive.alphaPolicyId,
+        policyName: ARCHIVE_POLICY_NAME,
+        betaMessageId: archive.betaMessages[0]!.publicId,
+      },
     };
     writeState(state);
     return {

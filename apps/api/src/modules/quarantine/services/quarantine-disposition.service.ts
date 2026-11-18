@@ -2,6 +2,7 @@ import { HttpStatus, Inject, Injectable } from '@nestjs/common';
 import type { Prisma } from '@email-gateway/database';
 import type { MessageRef, TransitionActor } from '@email-gateway/message-lifecycle';
 import {
+  archivePendingOf,
   computeExpiry,
   decideObjectDisposal,
   HARD_BLOCK_ENGINE,
@@ -38,7 +39,6 @@ import {
   AuditedRefusal,
   legalHold,
   manualNotAllowed,
-  retentionActive,
   stateConflict,
   entryNotFound,
 } from '../quarantine.errors';
@@ -312,10 +312,7 @@ export class QuarantineDispositionService {
     // The recipient as it will be after the delete (Q17: facts "after the action").
     const disposal = await this.disposal(tx, scope, locked, now, { discardsRecipient: wasLive });
     if (!disposal.deleteAllowed && disposal.refusal !== null) {
-      const error =
-        disposal.refusal.code === 'quarantine_legal_hold'
-          ? legalHold(disposal.refusal.legalHoldId)
-          : retentionActive(disposal.refusal.retainUntil);
+      const error = legalHold(disposal.refusal.legalHoldId);
       throw new AuditedRefusal(error, {
         action: QUARANTINE_AUDIT.deleteRefused,
         resourceId: entry.publicId,
@@ -395,20 +392,49 @@ export class QuarantineDispositionService {
       this.writes.entriesOfMessage(tx, scope, locked.ref),
       this.writes.recipients(tx, scope, locked.ref),
     ]);
+    const senderAddresses = [message.envelopeFrom, message.headerFrom ?? ''].filter(
+      (a) => a !== '',
+    );
+    const recipientDirections = recipients.flatMap((r) =>
+      r.direction === null ? [] : [r.direction],
+    );
     return decideObjectDisposal({
       now,
       message: {
         receivedAt: locked.ref.receivedAt,
         direction: message.direction,
-        senderAddresses: [message.envelopeFrom, message.headerFrom ?? ''].filter((a) => a !== ''),
+        recipientDirections,
+        senderAddresses,
         recipientAddresses: recipients.map((r) => r.address),
         state: locked.snapshot.state,
       },
-      legalHolds: facts.legalHolds.map((h) => ({ id: h.id.toString(), criteria: h.criteria })),
-      archive: facts.archive,
-      retentionPolicyDays: facts.retentionPolicyDays,
-      emailArchives: facts.emailArchives,
-      archiveRequested: archiveRequested(facts.evaluationActions),
+      legalHolds: facts.legalHolds.map((h) => ({
+        id: h.id.toString(),
+        criteria: h.criteria,
+        criteriaVersion: h.criteriaVersion,
+      })),
+      // Step 8.1 A23: no retention rule; the archive keeps its own copy.
+      archived: facts.archived,
+      archivePending: archivePendingOf({
+        intentStatus: facts.intentStatus,
+        archiveRequested: archiveRequested(facts.evaluationActions),
+        journal:
+          facts.journal === null
+            ? null
+            : {
+                ...facts.journal,
+                message: {
+                  receivedAt: locked.ref.receivedAt,
+                  direction: message.direction,
+                  envelopeFrom: message.envelopeFrom,
+                  headerFrom: message.headerFrom,
+                  recipients: recipients.map((r) => ({
+                    address: r.address,
+                    direction: r.direction ?? message.direction,
+                  })),
+                },
+              },
+      }),
       entries: entries.map((e) => ({
         state: pending !== null && e.id === locked.entry.id ? 'deleted' : e.state,
       })),

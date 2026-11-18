@@ -411,3 +411,91 @@ SELECT id, public_id, recipient_address, envelope_from, reason, status, risk_lev
 ```
 
 The default view (no filter) is a backward range scan of `(organization_id, quarantined_at, id)`. Each filter index ends with `quarantined_at` (InnoDB appends the primary key `id`), so a selective value is a backward range scan with no sort; a very frequent value (or a dominant state) is cheaper on the default index with the filter applied on the row, which the optimizer chooses. `pnpm db:perf -- --quarantine-entries 1000000` runs the five shapes (`quarantineSearchSteps` of `@email-gateway/database`) on 1 M entries of one organization; the api integration test asserts the plans with EXPLAIN. The sweeper's scans: `status IN ('held','pending_approval') AND expires_at <= ?` uses `(status, expires_at)`, row retention `status = ? AND state_changed_at < ?` uses `(status, state_changed_at)`.
+
+## Q25: Journal completeness sweep (step 8.1)
+
+The archive-worker's journal sweep ([A2](../plan/steps/23-journaling-archiving.md#a2-capture-model-intents-sources-sweeps-consumer-reconciler-adr-0064)) walks `email_messages` forward by id from its cursor (`stream_cursors` row `archive:journal-sweep`), with one day of `received_at` slack below the cursor's message and a safety lag on `created_at` (`ARCHIVE_SWEEP_SAFETY_LAG_SECONDS`) so no in-flight id is skipped:
+
+```sql
+SELECT id, received_at, organization_id, direction, status
+  FROM email_messages
+ WHERE id > :cursor_id AND received_at >= :cursor_received_at - INTERVAL 1 DAY
+   AND created_at <= NOW(3) - INTERVAL 120 SECOND
+ ORDER BY id
+ LIMIT 1000;
+```
+
+Plan (perf harness, 100,000 messages over 120 days, 10 organizations, 2026-11-16): `range` on `PRIMARY` (`id > ?`) in **5 of 9 partitions** (the months older than the slack are pruned), no filesort (the per-partition primary-key scans are merged in id order), 848 index entries read for 846 rows returned, 3.9 ms median. Registry ids are allocated in time order, so the slack bounds the pruned range.
+
+## Q26: Policy ARCHIVE reconciler (step 8.1)
+
+The same forward cursor over `policy_execution_logs` (`stream_cursors` row `archive:policy-reconcile`, safety lag `ARCHIVE_POLICY_RECONCILE_SAFETY_LAG_SECONDS` ≥ `POLICY_DB_TX_TIMEOUT_MS`); the worker keeps the rows whose `actions` contain `{ type: 'ARCHIVE', status: 'requested' }`:
+
+```sql
+SELECT id, received_at, organization_id, message_id, actions
+  FROM policy_execution_logs
+ WHERE id > :cursor_id AND received_at >= :cursor_received_at - INTERVAL 1 DAY
+   AND created_at <= NOW(3) - INTERVAL 300 SECOND
+ ORDER BY id
+ LIMIT 1000;
+```
+
+Plan: `range` on `PRIMARY`, **5 of 9 partitions**, no filesort, 845 rows, 3.5 ms median.
+
+## Q27: Capture scheduler claim (step 8.1)
+
+```sql
+SELECT id, received_at, organization_id, message_id, status
+  FROM archive_capture_intents
+ WHERE status IN ('pending', 'captured_open') AND next_check_at <= NOW(3)
+ ORDER BY next_check_at
+ LIMIT 20
+ FOR UPDATE SKIP LOCKED;
+```
+
+Plan: `range` on `(status, next_check_at)` (two ranges, one per status) in every live partition (no partition-column predicate; the table keeps 2 months), then a sort of the matching rows only (`Using filesort` over 67 rows in the perf data: only due open intents qualify), 0.6 ms median. The claim stays proportional to the due intents, not to the table.
+
+## Q28: Lifecycle expiry and review queue (step 8.1)
+
+```sql
+-- due records of one organization
+SELECT id, received_at, retain_until, expiry_action, lock_mode
+  FROM email_archives
+ WHERE organization_id = ? AND status = 'active' AND retain_until <= NOW(3)
+ ORDER BY retain_until
+ LIMIT 200;
+-- the review queue
+SELECT id, received_at, message_public_id, retain_until
+  FROM email_archives
+ WHERE organization_id = ? AND status = 'expiry_review'
+ ORDER BY retain_until
+ LIMIT 50;
+```
+
+Plan: `range` (due) / `ref` (review) on `(organization_id, status, retain_until)` in every partition (the table is never dropped, so each monthly partition is probed with one short range), no filesort; 2.3 ms median for both statements together (250 rows). Then each record is locked by its primary key `(id, received_at)` in the expiry transaction.
+
+## Q29: Disposal pipeline claim (step 8.1)
+
+```sql
+SELECT id, requested_at, organization_id, archive_record_id, state
+  FROM archive_disposals
+ WHERE state IN ('shredded', 'objects_deleted', 'index_deleted') AND next_attempt_at <= NOW(3)
+ ORDER BY next_attempt_at
+ LIMIT 50
+ FOR UPDATE SKIP LOCKED;
+```
+
+Plan: `range` on `(state, next_attempt_at)` (three ranges) in every partition, sort of the due rows only (23 rows), 0.6 ms median. `completed` rows (the large majority) are never read.
+
+## Q30: Search index queue claim (step 8.1)
+
+```sql
+SELECT id, organization_id, message_id, received_at, op
+  FROM archive_index_queue
+ WHERE available_at <= NOW(3)
+ ORDER BY available_at, id
+ LIMIT 500
+ FOR UPDATE SKIP LOCKED;
+```
+
+Plan: `range` on `(available_at, id)`, no filesort (the index order is the claim order), 0.6 ms median. The table is unpartitioned and transient (applied rows are deleted).

@@ -71,6 +71,14 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: ['webhook-worker:3075']
+  # archive-worker (step 8.1 A27): archive_* capture, sweep, index, lifecycle, disposal and
+  # eDiscovery series, the shared amqp_* consumer series (capture role). Compose runs every role in
+  # one container; Kubernetes scrapes the archive-worker (capture,index) and archive-jobs
+  # (lifecycle,ediscovery) Services under the same job name.
+  - job_name: archive-worker
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['archive-worker:3060']
   # event-relay (step 3.2 §5.3): outbox relay (outbox_relay_*), outbox health (outbox_*),
   # reconciliation (reconcile_*), AMQP client (amqp_*).
   - job_name: event-relay

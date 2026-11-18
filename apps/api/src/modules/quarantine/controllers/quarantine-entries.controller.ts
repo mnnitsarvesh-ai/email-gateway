@@ -447,22 +447,25 @@ export class QuarantineEntriesController {
   @RequirePermissions(Q.delete)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Delete a quarantine entry (retention and legal hold apply)',
+    summary: 'Delete a quarantine entry (legal holds apply)',
     description:
       'A `held`, `pending_approval`, `rejected` or `expired` entry → `deleted`. Refused with ' +
-      '`409 quarantine_legal_hold` while an active legal hold matches the message (criteria ' +
-      'this release cannot read match everything) and `409 quarantine_retention_active` while ' +
-      'archive retention applies. Otherwise the object purge is scheduled: purged by the ' +
-      'quarantine sweeper when every entry of the message is final and not released and no ' +
-      'recipient still needs it, else retained (`archive_pending`, `shared`). Audited as ' +
-      '`quarantine.deleted` / `quarantine.delete_refused`. Requires the Idempotency-Key header.',
+      '`409 quarantine_legal_hold` while an active legal hold matches the message (`archive-' +
+      'hold/1` holds and the 5.3 subset; criteria that cannot be read match everything). Since ' +
+      'step 8.1 archive retention no longer refuses the delete (`quarantine_retention_active` ' +
+      'is no longer returned: the archive keeps its own encrypted copy). Otherwise the object ' +
+      'purge is scheduled: purged by the quarantine sweeper when every entry of the message is ' +
+      'final and not released and no recipient still needs it, else retained (`shared`, or ' +
+      '`archive_pending` while a journal or policy archive capture of the message is still ' +
+      'expected: re-checked hourly). Audited as `quarantine.deleted` / ' +
+      '`quarantine.delete_refused`. Requires the Idempotency-Key header.',
   })
   @ApiEntryId()
   @ApiBody({ schema: zodToOpenApi(DeleteBodySchema, { io: 'input' }) })
   @ApiOkResponse({ schema: zodToOpenApi(EntryStateResponseSchema) })
   @ApiErrors(400, 401, 403, 422)
   @ApiEntryNotFound()
-  @ApiConflicts([...ENTRY_WRITE_CONFLICTS, 'quarantine_legal_hold', 'quarantine_retention_active'])
+  @ApiConflicts([...ENTRY_WRITE_CONFLICTS, 'quarantine_legal_hold'])
   @ApiInconsistent()
   async delete(
     @CurrentPrincipal() principal: Principal,

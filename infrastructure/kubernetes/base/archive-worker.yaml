@@ -1,3 +1,12 @@
+# Archive worker (step 8.1 A1, docs/plan/steps/23-journaling-archiving.md; ADR-0064..0069;
+# docs/deployment/archive.md): the archive-worker image with ARCHIVE_WORKER_ROLES=capture,index.
+# capture: the email.archive consumer as the role user eg-archive (topology v12, ledger
+# archive-worker.archive), the journal completeness sweep and the policy reconciler (leader-elected
+# with GET_LOCK), the capture scheduler (FOR UPDATE SKIP LOCKED claims with leases: every replica
+# captures) and the outcome refresh. index: the OpenSearch sync and the per-day reconciliation
+# (leader-elected). Writer-only MySQL; S3 reads the mail bucket and writes the archive bucket (IAM
+# per role, docs/deployment/archive.md); no Redis. The lifecycle and eDiscovery roles run in the
+# archive-jobs Deployment.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -16,7 +25,9 @@ spec:
     spec:
       serviceAccountName: archive-worker
       automountServiceAccountToken: false
-      terminationGracePeriodSeconds: 60
+      # Longer than one capture (S3 timeout 120 s) plus the stop grace: captures in flight either
+      # commit or leave attempt-scoped objects that the orphan reconciliation removes (A6).
+      terminationGracePeriodSeconds: 150
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -36,12 +47,73 @@ spec:
             - configMapRef: { name: email-gateway-config }
           env:
             - { name: HTTP_PORT, value: '3060' }
+            - { name: ARCHIVE_WORKER_ROLES, value: 'capture,index' }
+            # Capture and index tunables (step 8.1 §4.8); shared keys (search URL, index prefix,
+            # Object Lock mode, retention cap, root key id) come from the ConfigMap.
+            - { name: ARCHIVE_PREFETCH, value: '20' }
+            - { name: ARCHIVE_DB_TX_TIMEOUT_MS, value: '60000' }
+            - { name: ARCHIVE_CAPTURE_CONCURRENCY, value: '4' }
+            - { name: ARCHIVE_CAPTURE_LEASE_SECONDS, value: '600' }
+            - { name: ARCHIVE_CAPTURE_RETRY_BASE_MS, value: '5000' }
+            - { name: ARCHIVE_CAPTURE_RETRY_MAX_MS, value: '3600000' }
+            - { name: ARCHIVE_INTENT_MAX_AGE_DAYS, value: '25' }
+            - { name: ARCHIVE_OUTCOME_WINDOW_DAYS, value: '7' }
+            - { name: ARCHIVE_SWEEP_INTERVAL_MS, value: '15000' }
+            - { name: ARCHIVE_SWEEP_BATCH_SIZE, value: '1000' }
+            - { name: ARCHIVE_SWEEP_SAFETY_LAG_SECONDS, value: '120' }
+            - { name: ARCHIVE_POLICY_RECONCILE_SAFETY_LAG_SECONDS, value: '300' }
+            - { name: ARCHIVE_JOURNAL_SWEEP_START, value: now }
+            - { name: ARCHIVE_POLICY_RECONCILE_START, value: oldest }
+            - { name: ARCHIVE_S3_TIMEOUT_MS, value: '120000' }
+            - { name: ARCHIVE_S3_PART_SIZE_BYTES, value: '8388608' }
+            - { name: ARCHIVE_CHUNK_BYTES, value: '65536' }
+            - { name: ARCHIVE_PREVIEW_PART_MAX_BYTES, value: '1048576' }
+            - { name: ARCHIVE_SETTINGS_CACHE_TTL_MS, value: '30000' }
+            - { name: ARCHIVE_KEY_CACHE_TTL_MS, value: '60000' }
+            - { name: ARCHIVE_INDEX_BATCH_SIZE, value: '500' }
+            - { name: ARCHIVE_INDEX_INTERVAL_MS, value: '2000' }
+            # Sized in step 10.1 with the OpenSearch domain.
+            - { name: ARCHIVE_INDEX_SHARDS, value: '1' }
+            - { name: ARCHIVE_INDEX_REPLICAS, value: '1' }
+            - { name: ARCHIVE_RECONCILE_INTERVAL_MS, value: '600000' }
+            - { name: ARCHIVE_RECONCILE_RECENT_DAYS, value: '3' }
             # Secrets are mounted as files by External Secrets and read via the <KEY>_FILE convention.
             - { name: DATABASE_URL_FILE, value: /var/run/secrets/gateway/database-url }
-            - { name: REDIS_URL_FILE, value: /var/run/secrets/gateway/redis-url }
+            # Role user eg-archive (topology v12): reads email.archive, publishes its own retry and
+            # dead-letter hops on email.archive / email.events only.
+            - {
+                name: RABBITMQ_ARCHIVE_URL_FILE,
+                value: /var/run/secrets/gateway/rabbitmq-archive-url,
+              }
+            # Archive root key (unwraps tenant keys; held by the api and the archive Deployments
+            # only). The previous key and its id (root rotation, unwrap only) are optional.
+            - { name: ARCHIVE_ROOT_KEY_FILE, value: /var/run/secrets/archive-root-key/key }
+            - name: ARCHIVE_ROOT_KEY_PREVIOUS
+              valueFrom:
+                secretKeyRef:
+                  { name: email-gateway-archive-root-key, key: previous-key, optional: true }
+            - name: ARCHIVE_ROOT_KEY_PREVIOUS_ID
+              valueFrom:
+                secretKeyRef:
+                  { name: email-gateway-archive-root-key, key: previous-key-id, optional: true }
+            # The worker's OpenSearch FGAC user: writes <prefix>-v*, manages templates and aliases.
+            - { name: ARCHIVE_SEARCH_USERNAME, value: eg-archive-worker }
+            - {
+                name: ARCHIVE_SEARCH_PASSWORD_FILE,
+                value: /var/run/secrets/archive-search/password,
+              }
           volumeMounts:
             - { name: secrets, mountPath: /var/run/secrets/gateway, readOnly: true }
+            - {
+                name: archive-root-key,
+                mountPath: /var/run/secrets/archive-root-key,
+                readOnly: true,
+              }
+            - { name: archive-search, mountPath: /var/run/secrets/archive-search, readOnly: true }
             - { name: tmp, mountPath: /tmp }
+          # Readiness: mysql, s3 and rabbitmq (email.archive and email.events verified passively).
+          # OpenSearch is deliberately not a readiness check: capture continues while the index
+          # is down (the queue grows; ArchiveIndexLag alerts).
           readinessProbe:
             httpGet: { path: /health/ready, port: http }
             periodSeconds: 10
@@ -54,9 +126,11 @@ spec:
             httpGet: { path: /health/live, port: http }
             periodSeconds: 5
             failureThreshold: 24
+          # Measured locally (WP3): 1 000 captures at concurrency 4 peaked at 230 MiB RSS in the
+          # test process; lib-storage buffers ≤ 2 parts of 8 MiB per capture.
           resources:
             requests: { cpu: 250m, memory: 512Mi }
-            limits: { memory: 512Mi }
+            limits: { memory: 768Mi }
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -64,6 +138,14 @@ spec:
       volumes:
         - name: secrets
           secret: { secretName: email-gateway-secrets }
+        - name: archive-root-key
+          secret:
+            secretName: email-gateway-archive-root-key
+            items: [{ key: key, path: key }]
+        - name: archive-search
+          secret:
+            secretName: email-gateway-archive-search-worker
+            items: [{ key: password, path: password }]
         - name: tmp
           emptyDir: {}
 ---
@@ -71,7 +153,10 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: archive-worker
+  # Production: IRSA role with the capture IAM policy of docs/deployment/archive.md (mail bucket
+  # GetObject on org/*/eml/* and org/*/part/*, archive bucket PutObject + PutObjectRetention).
 ---
+# Metrics (/metrics) and health on the http port.
 apiVersion: v1
 kind: Service
 metadata:
@@ -104,3 +189,61 @@ spec:
   minAvailable: 1
   selector:
     matchLabels: { app.kubernetes.io/name: archive-worker }
+---
+# Egress: MySQL, RabbitMQ, S3 (HTTPS to public addresses), OpenSearch, DNS and OTLP only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: archive-worker
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: archive-worker }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # Metrics and probes only (Prometheus; the kubelet's probes are not subject to policies).
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: observability }
+          podSelector:
+            matchLabels: { app.kubernetes.io/name: prometheus }
+      ports: [{ protocol: TCP, port: 3060 }]
+  egress:
+    # MySQL writer (RDS/Aurora subnet).
+    - to: [{ ipBlock: { cidr: 10.0.32.0/20 } }]
+      ports: [{ protocol: TCP, port: 3306 }]
+    # RabbitMQ (Amazon MQ subnet).
+    - to: [{ ipBlock: { cidr: 10.0.64.0/20 } }]
+      ports: [{ protocol: TCP, port: 5671 }, { protocol: TCP, port: 5672 }]
+    # Amazon OpenSearch VPC domain (HTTPS; data subnet of step 10.1, docs/deployment/archive.md).
+    - to: [{ ipBlock: { cidr: 10.0.80.0/20 } }]
+      ports: [{ protocol: TCP, port: 443 }]
+    # Cluster DNS.
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }]
+    # OTLP traces / logs to the collector.
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: observability }
+      ports: [{ protocol: TCP, port: 4318 }]
+    # S3 (public endpoint or the VPC gateway endpoint's public prefixes): HTTPS to public
+    # addresses only.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 0.0.0.0/8
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.0.0.0/24
+              - 192.168.0.0/16
+              - 198.18.0.0/15
+              - 224.0.0.0/4
+              - 240.0.0.0/4
+      ports: [{ protocol: TCP, port: 443 }]

@@ -45,7 +45,7 @@ The `permissions` table is seeded from `PERMISSIONS` in `packages/database/src/s
 | `archive:export`               | Export archived messages                                                                                                                 |
 | `archive:legal_hold`           | Create and release legal holds                                                                                                           |
 | `webhook:manage`               | Create and edit webhook subscriptions                                                                                                    |
-| `settings:manage`              | Change notification, quarantine and archive settings                                                                                     |
+| `settings:manage`              | Change notification and quarantine settings (archive settings need `archive:manage` from step 8.1)                                       |
 | `platform:organizations`       | Platform: create, suspend and manage customer organizations                                                                              |
 | `platform:operations`          | Platform: view operational health, queues and maintenance status                                                                         |
 | `platform:tenant_override`     | Platform: start an audited override into a customer organization                                                                         |
@@ -77,8 +77,12 @@ The `permissions` table is seeded from `PERMISSIONS` in `packages/database/src/s
 | `delivery:suppression_manage`  | Add and remove recipient suppressions (step 6.1)                                                                                         |
 | `webhook:read`                 | View webhook subscriptions, event catalogue and delivery history (step 6.2)                                                              |
 | `message:reveal`               | Reveal masked message metadata (subjects, recipient addresses, To/Cc/Subject header values) through the audited reveal action (step 7.2) |
+| `archive:search`               | Search archived and journaled messages (metadata, masked) (step 8.1)                                                                     |
+| `archive:retrieve`             | View the sanitized preview and download original archived messages (audited) (step 8.1)                                                  |
+| `archive:manage`               | Manage archive settings, retention policies, encryption keys, capture issues and disposal of reviewed records (step 8.1)                 |
+| `ediscovery:manage`            | Manage eDiscovery cases, custodians, searches, review and exports (step 8.1)                                                             |
 
-The catalog has **60** permissions (59 before step 7.2, 58 before step 6.2, 55 before step 6.1, 49 before step 5.3).
+The catalog has **64** permissions (60 before step 8.1, 59 before step 7.2, 58 before step 6.2, 55 before step 6.1, 49 before step 5.3).
 
 `GET /permissions` lists `platform:*` keys only to users of the platform organization who are not under an override; customer users and API keys see the tenant permissions only.
 
@@ -163,6 +167,10 @@ Generated from the seed catalog (`SYSTEM_ROLES`); if the catalog changes, regene
 | `delivery:suppression_manage`  |  ✓  |     |  ✓  |  ✓  |     |     |     |     |     |
 | `webhook:read`                 |  ✓  |     |  ✓  |     |  ✓  |     |  ✓  |     |     |
 | `message:reveal`               |  ✓  |     |  ✓  |     |  ✓  |     |  ✓  |     |     |
+| `archive:search`               |  ✓  |     |  ✓  |     |  ✓  |     |  ✓  |     |     |
+| `archive:retrieve`             |  ✓  |     |  ✓  |     |     |     |  ✓  |     |     |
+| `archive:manage`               |  ✓  |     |  ✓  |     |     |     |     |     |     |
+| `ediscovery:manage`            |  ✓  |     |  ✓  |     |     |     |  ✓  |     |     |
 
 **Platform roles** are the roles that hold any `platform:*` permission: `super_admin` and `platform_admin` (`PLATFORM_ROLE_KEYS`). They can be assigned only to users of the platform organization (`kind = platform`); assigning one in a customer organization is `400`. Customer organizations never see platform roles in `GET /roles` or `GET /roles/{key}` (`404`). Domain Admin is organization-wide; per-domain scoping of roles is out of scope for now.
 
@@ -428,6 +436,45 @@ Who sees what, by system role (the tenant roles directly, the platform roles und
 - **Not masked (open product-owner question):** attachment file names (`GET /messages/{id}/attachments`, `GET /attachments`, scan rounds) stay in clear for every `message:read` holder, as before step 7.2 (ADR-0062 "Open product-owner questions").
 - **API keys** see exactly the same masks; a key reveals only when its scope holds `message:reveal` (granted only by a creator holding it).
 - **Not reused:** `message:read_content` keeps its meaning (body and attachment content from object storage) and gates no reveal.
+
+## Archive and eDiscovery (step 8.1)
+
+Design [23-journaling-archiving.md](../plan/steps/23-journaling-archiving.md) A20, §4.4. Permissions: `archive:read` (settings, status, keys, retention, disposal log, detail, journal, frozen security results), `archive:search` (metadata search; case searches with `ediscovery:manage`), `archive:retrieve` (sanitized preview, original download grants), `archive:export` (export requests and their grants, with `ediscovery:manage`), `archive:manage` (settings, retention policies, key rotation, capture issues, disposal of reviewed records), `archive:legal_hold` (holds: list, detail, release; creation with `ediscovery:manage`), `ediscovery:manage` (cases, custodians, searches, hits, review, exports). None is part of `TENANT_READ_PERMISSIONS`.
+
+| Route                                                                                                           | Requirement                                                                                                                               | Users / MFA             | API keys |
+| --------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- | -------- |
+| `GET /archive/settings`, `/status`, `/keys`, `/disposals`, `/export-signing-keys`, `/retention-policies[/{id}]` | `archive:read`                                                                                                                            | —                       | yes      |
+| `PUT /archive/settings`, `POST /archive/keys/rotate`                                                            | `archive:manage`                                                                                                                          | users, MFA              | no       |
+| `POST/PUT/DELETE /archive/retention-policies…`                                                                  | `archive:manage`                                                                                                                          | —                       | yes      |
+| `GET /archive/capture-issues`, `POST …/{messageId}/retry`                                                       | `archive:manage`                                                                                                                          | —                       | yes      |
+| `GET /archive/messages`                                                                                         | `archive:search` (+ `message:reveal` for `recipient`, `subject`, `custodian`; + `archive:legal_hold` or `ediscovery:manage` for `holdId`) | —                       | yes      |
+| `GET /archive/messages/{id}`, `…/journal`, `…/security`                                                         | `archive:read`                                                                                                                            | —                       | yes      |
+| `POST /archive/messages/{id}/reveal`                                                                            | `archive:read` + `message:reveal`                                                                                                         | —                       | yes      |
+| `GET /archive/messages/{id}/preview`                                                                            | `archive:retrieve`                                                                                                                        | users, MFA, no override | no       |
+| `POST /archive/messages/{id}/download-grants`                                                                   | `archive:retrieve` (+ password/TOTP re-entry)                                                                                             | users, MFA, no override | no       |
+| `GET /archive/downloads/{token}`                                                                                | `archive:retrieve` (message) or `archive:export` + `ediscovery:manage` (export); the grant's user                                         | users, no override      | no       |
+| `POST /archive/messages/{id}/dispose`                                                                           | `archive:manage`                                                                                                                          | users, MFA              | no       |
+| `GET /legal-holds[/{id}]`                                                                                       | `archive:legal_hold` or `ediscovery:manage`                                                                                               | —                       | yes      |
+| `POST /legal-holds/{id}/release`                                                                                | `archive:legal_hold`                                                                                                                      | users, MFA              | no       |
+| `POST /ediscovery/cases/{id}/holds`                                                                             | `archive:legal_hold` + `ediscovery:manage`                                                                                                | users, MFA              | no       |
+| `GET/POST /ediscovery/cases`, `GET/PATCH /ediscovery/cases/{id}`                                                | `ediscovery:manage`                                                                                                                       | —                       | yes      |
+| `POST /ediscovery/cases/{id}/close`                                                                             | `ediscovery:manage`                                                                                                                       | users, MFA              | no       |
+| `POST /ediscovery/cases/{id}/searches`                                                                          | `ediscovery:manage` + `archive:search`                                                                                                    | —                       | yes      |
+| `GET …/searches[/{id}]`, `…/hits`                                                                               | `ediscovery:manage`                                                                                                                       | —                       | yes      |
+| `POST …/searches/{id}/review`                                                                                   | `ediscovery:manage`                                                                                                                       | users                   | no       |
+| `POST /ediscovery/cases/{id}/exports`                                                                           | `ediscovery:manage` + `archive:export`                                                                                                    | —                       | yes      |
+| `GET …/exports[/{id}]`                                                                                          | `ediscovery:manage`                                                                                                                       | —                       | yes      |
+| `POST …/exports/{id}/download-grants`                                                                           | `ediscovery:manage` + `archive:export` (+ re-entry)                                                                                       | users, MFA, no override | no       |
+
+**Role matrix excerpt** (seed catalog): super_admin all; organization_admin all seven archive keys plus `ediscovery:manage` and `message:reveal`; compliance_auditor `archive:read`, `archive:search`, `archive:retrieve`, `archive:export`, `ediscovery:manage` and `message:reveal` (runs a case to export and downloads it, cannot place or release holds, cannot change settings); security_analyst `archive:read`, `archive:search` (and `message:reveal`, so the reveal-gated filters); read_only_user and platform_admin `archive:read` only (metadata); quarantine_reviewer, domain_admin and mailbox_user none.
+
+**Platform overrides.** Archived content is customer-only (product-owner decision 5): the preview, download grants and downloads refuse an override session with `403 archive_override_forbidden`, whatever its permissions. Metadata routes under an override work with the override's intersected permissions (platform_admin: the read set only) and every audit row carries `metadata.override`.
+
+**API keys** may use the read, search, retention, capture-issue, case, case-search and export-request routes (by scope), never an MFA or user-only route: settings `PUT`, key rotation, holds (release, creation), disposal, preview, grants, downloads, case close and review (`403 user_required`).
+
+**Hold confidentiality.** Who is under hold reveals litigation: hold lists and details need `archive:legal_hold` or `ediscovery:manage`; the archive detail lists the holds matching a record only for those holders (`holds: null` otherwise); the `holdId` search filter needs them too. Hold audit rows name criteria and counts, never custodian addresses.
+
+**Entitlement.** Mutations other than settings, keys, holds and disposal need the plan feature `archiving` (`403 archiving_not_enabled`); enabling archiving needs it too.
 
 ## Custom roles
 

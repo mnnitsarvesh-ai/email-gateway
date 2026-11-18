@@ -41,7 +41,12 @@ resources:
   # through the SSRF-guarded client; the only workload with Internet egress on 443 for webhooks).
   - webhook-fanout.yaml
   - webhook-delivery.yaml
+  # Journaling and archiving (step 8.1 A1, docs/deployment/archive.md): the archive-worker image as
+  # two Deployments: archive-worker (capture,index; consumes email.archive as eg-archive, HPA) and
+  # archive-jobs (lifecycle,ediscovery; the only holder of the export signing key and of the S3
+  # version-delete permissions).
   - archive-worker.yaml
+  - archive-jobs.yaml
   # Outbox relay and reconciliation (step 3.2, ADR-0023).
   - event-relay.yaml
   - admin-portal.yaml

@@ -1,0 +1,218 @@
+# Archive jobs (step 8.1 A1, A9–A15, A18; docs/plan/steps/23-journaling-archiving.md;
+# ADR-0066/0067/0069; docs/deployment/archive.md): the archive-worker image with
+# ARCHIVE_WORKER_ROLES=lifecycle,ediscovery. lifecycle: expiry and review (leader eg:archive-
+# lifecycle, with the apply-lock pass, the orphan reconciliation and the disposal verification),
+# the disposal pipeline (SKIP LOCKED claims: every replica works), the root key re-wrap (leader
+# eg:archive-root-rewrap). ediscovery: case searches and export builds (SKIP LOCKED claims) and
+# export expiry. No broker connection; no Redis. The ONLY workload holding the export signing
+# PRIVATE key and the S3 permissions to delete archive object versions (incl. governance bypass for
+# orphans and replica targets).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: archive-jobs
+  labels: { app.kubernetes.io/name: archive-jobs, app.kubernetes.io/part-of: email-gateway }
+spec:
+  # Leader locks make the single-run jobs safe with two replicas; the second takes over at once.
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels: { app.kubernetes.io/name: archive-jobs }
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: archive-jobs, app.kubernetes.io/part-of: email-gateway }
+    spec:
+      serviceAccountName: archive-jobs
+      automountServiceAccountToken: false
+      # An export build streams up to 2 GiB; a stopped build is taken over after a day.
+      terminationGracePeriodSeconds: 150
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile: { type: RuntimeDefault }
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app.kubernetes.io/name: archive-jobs }
+      containers:
+        - name: archive-jobs
+          image: email-gateway/archive-worker:latest
+          ports:
+            - { name: http, containerPort: 3060 }
+          envFrom:
+            - configMapRef: { name: email-gateway-config }
+          env:
+            - { name: HTTP_PORT, value: '3060' }
+            - { name: ARCHIVE_WORKER_ROLES, value: 'lifecycle,ediscovery' }
+            # Lifecycle and eDiscovery tunables (step 8.1 §4.8); export bounds, search URL, index
+            # prefix, Object Lock mode and the signing key id come from the ConfigMap.
+            - { name: ARCHIVE_DB_TX_TIMEOUT_MS, value: '60000' }
+            - { name: ARCHIVE_S3_TIMEOUT_MS, value: '120000' }
+            - { name: ARCHIVE_S3_PART_SIZE_BYTES, value: '8388608' }
+            - { name: ARCHIVE_CHUNK_BYTES, value: '65536' }
+            - { name: ARCHIVE_KEY_CACHE_TTL_MS, value: '60000' }
+            - { name: ARCHIVE_LIFECYCLE_INTERVAL_MS, value: '60000' }
+            - { name: ARCHIVE_LIFECYCLE_BATCH_SIZE, value: '200' }
+            - { name: ARCHIVE_HOLD_EXTENSION_DAYS, value: '30' }
+            - { name: ARCHIVE_REVIEW_EXTENSION_DAYS, value: '30' }
+            - { name: ARCHIVE_DISPOSAL_MAX_ATTEMPTS, value: '20' }
+            - { name: ARCHIVE_GOVERNANCE_BYPASS_ORPHANS, value: 'true' }
+            # Replica buckets (CRR targets, step 10.2): `bucket` or `bucket@region`, comma list.
+            - { name: ARCHIVE_REPLICA_TARGETS, value: '' }
+            - { name: ARCHIVE_EXPORT_CONCURRENCY, value: '1' }
+            - { name: ARCHIVE_CASE_SEARCH_MAX_HITS, value: '100000' }
+            - { name: ARCHIVE_CASE_SEARCH_DEADLINE_MS, value: '600000' }
+            # Secrets are mounted as files by External Secrets and read via the <KEY>_FILE convention.
+            - { name: DATABASE_URL_FILE, value: /var/run/secrets/gateway/database-url }
+            - { name: ARCHIVE_ROOT_KEY_FILE, value: /var/run/secrets/archive-root-key/key }
+            - name: ARCHIVE_ROOT_KEY_PREVIOUS
+              valueFrom:
+                secretKeyRef:
+                  { name: email-gateway-archive-root-key, key: previous-key, optional: true }
+            - name: ARCHIVE_ROOT_KEY_PREVIOUS_ID
+              valueFrom:
+                secretKeyRef:
+                  { name: email-gateway-archive-root-key, key: previous-key-id, optional: true }
+            - { name: ARCHIVE_SEARCH_USERNAME, value: eg-archive-worker }
+            - {
+                name: ARCHIVE_SEARCH_PASSWORD_FILE,
+                value: /var/run/secrets/archive-search/password,
+              }
+            # Export manifest signing key (Ed25519 PKCS#8 DER base64url): this Deployment only.
+            - {
+                name: ARCHIVE_EXPORT_SIGNING_KEY_FILE,
+                value: /var/run/secrets/archive-export-signing/private-key,
+              }
+          volumeMounts:
+            - { name: secrets, mountPath: /var/run/secrets/gateway, readOnly: true }
+            - {
+                name: archive-root-key,
+                mountPath: /var/run/secrets/archive-root-key,
+                readOnly: true,
+              }
+            - { name: archive-search, mountPath: /var/run/secrets/archive-search, readOnly: true }
+            - {
+                name: archive-export-signing,
+                mountPath: /var/run/secrets/archive-export-signing,
+                readOnly: true,
+              }
+            - { name: tmp, mountPath: /tmp }
+          # Readiness: mysql and s3 (no broker; OpenSearch is not a readiness check).
+          readinessProbe:
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /health/live, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          startupProbe:
+            httpGet: { path: /health/live, port: http }
+            periodSeconds: 5
+            failureThreshold: 24
+          # Exports stream (yazl → encryption → multipart upload); memory stays bounded by the part
+          # buffers, independent of the package size.
+          resources:
+            requests: { cpu: 250m, memory: 384Mi }
+            limits: { memory: 768Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+      volumes:
+        - name: secrets
+          secret: { secretName: email-gateway-secrets }
+        - name: archive-root-key
+          secret:
+            secretName: email-gateway-archive-root-key
+            items: [{ key: key, path: key }]
+        - name: archive-search
+          secret:
+            secretName: email-gateway-archive-search-worker
+            items: [{ key: password, path: password }]
+        - name: archive-export-signing
+          secret:
+            secretName: email-gateway-archive-export-signing
+            items: [{ key: private-key, path: private-key }]
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: archive-jobs
+  # Production: IRSA role with the lifecycle IAM policy of docs/deployment/archive.md
+  # (DeleteObjectVersion, ListBucketVersions, PutObjectRetention, BypassGovernanceRetention on the
+  # archive bucket and every replica target; PutObject/GetObject for exports).
+---
+# Metrics (/metrics) and health on the http port.
+apiVersion: v1
+kind: Service
+metadata:
+  name: archive-jobs
+  labels: { app.kubernetes.io/name: archive-jobs }
+spec:
+  selector: { app.kubernetes.io/name: archive-jobs }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: archive-jobs
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: archive-jobs }
+---
+# Egress: MySQL, S3 (HTTPS to public addresses), OpenSearch, DNS and OTLP only (no broker).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: archive-jobs
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: archive-jobs }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: observability }
+          podSelector:
+            matchLabels: { app.kubernetes.io/name: prometheus }
+      ports: [{ protocol: TCP, port: 3060 }]
+  egress:
+    - to: [{ ipBlock: { cidr: 10.0.32.0/20 } }]
+      ports: [{ protocol: TCP, port: 3306 }]
+    - to: [{ ipBlock: { cidr: 10.0.80.0/20 } }]
+      ports: [{ protocol: TCP, port: 443 }]
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }]
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: observability }
+      ports: [{ protocol: TCP, port: 4318 }]
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 0.0.0.0/8
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.0.0.0/24
+              - 192.168.0.0/16
+              - 198.18.0.0/15
+              - 224.0.0.0/4
+              - 240.0.0.0/4
+      ports: [{ protocol: TCP, port: 443 }]

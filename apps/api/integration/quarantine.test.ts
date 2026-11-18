@@ -593,6 +593,9 @@ describe('preview (Q11)', () => {
         `<iframe src="http://evil.example/frame"></iframe></body></html>`,
     );
     await insertParse(ctx, m, { htmlKey, htmlSize: 600 });
+    // The preview reads the entry and the parse rows from the replica (the next test waits the
+    // same way; without it a lagging replica answers 404 right after the fixture insert).
+    await waitForReplica();
     const res = await analystApi.get(`/entries/${entry.publicId}/preview`).expect(200);
     expect(res.headers['cache-control']).toBe('no-store');
     const body = JSON.stringify(res.body);
@@ -1083,6 +1086,8 @@ describe('reject (Q16) and delete under legal hold and retention (Q17)', () => {
       data: { status: 'released' },
     });
 
+    // Step 8.1 A23: archive retention no longer refuses the delete (the archive keeps its own
+    // copy); a capture still pending defers the purge by one hour instead.
     await ctx.prisma.archiveSetting.create({
       data: { organizationId: orgA.id, enabled: true, scope: 'all' },
     });
@@ -1094,25 +1099,36 @@ describe('reject (Q16) and delete under legal hold and retention (Q17)', () => {
         priority: 1,
       },
     });
-    const retained = await analystApi
-      .post(`/entries/${held.entry.publicId}/delete`, { reason })
-      .expect(409);
-    expect(retained.body.code).toBe('quarantine_retention_active');
-    await ctx.prisma.archiveRetentionPolicy.delete({ where: { id: policy.id } });
-    await ctx.prisma.archiveSetting.deleteMany({ where: { organizationId: orgA.id } });
-
+    const intent = await ctx.prisma.archiveCaptureIntent.create({
+      data: {
+        receivedAt: held.message.receivedAt,
+        organizationId: orgA.id,
+        messageId: held.message.id,
+        direction: 'inbound',
+        sourceJournal: true,
+        status: 'pending',
+        nextCheckAt: new Date(),
+        settingsGeneration: 0n,
+      },
+    });
+    const before = Date.now();
     const done = await analystApi
       .post(`/entries/${held.entry.publicId}/delete`, { reason })
       .expect(200);
     expect(done.body).toMatchObject({
       state: 'deleted',
       messageTransition: 'E17',
-      purge: 'pending',
+      purge: 'retained',
     });
     const purge = await ctx.prisma.quarantineObjectPurge.findFirstOrThrow({
       where: { messageId: held.message.id },
     });
-    expect(purge.status).toBe('pending');
+    expect(purge).toMatchObject({ status: 'retained', reason: 'archive_pending' });
+    expect(purge.purgeAfter.getTime()).toBeGreaterThanOrEqual(before + 3_590_000);
+    expect(purge.purgeAfter.getTime()).toBeLessThanOrEqual(Date.now() + 3_600_000);
+    await ctx.prisma.archiveCaptureIntent.deleteMany({ where: { id: intent.id } });
+    await ctx.prisma.archiveRetentionPolicy.delete({ where: { id: policy.id } });
+    await ctx.prisma.archiveSetting.deleteMany({ where: { organizationId: orgA.id } });
   });
 });
 

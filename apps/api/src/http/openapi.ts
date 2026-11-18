@@ -297,10 +297,9 @@ export const OPENAPI_DESCRIPTION = [
     'data the engines use (`GET /threat-intelligence/lookup`) and keep their own allow-lists ' +
     'as BEC trusted senders, DLP exceptions and policy conditions. Prices, invoices and ' +
     'payments: no such data exists (`GET /billing/plan` says `pricing: null`).',
-  '**Deferred to later steps.** Archive, journal search, retention policies, legal holds and ' +
-    'export: step 8.1. Microsoft 365 and Google Workspace connectors: step 8.2. Deployment ' +
-    'manager: step 8.3. Admin-portal screens (webhooks, delivery history, preferences): ' +
-    'steps 7.x.',
+  '**Deferred to later steps.** Microsoft 365 and Google Workspace connectors: step 8.2. ' +
+    'Deployment manager: step 8.3. Admin-portal screens (webhooks, delivery history, ' +
+    'preferences): steps 7.x.',
 ].join('\n\n');
 
 /**
@@ -448,7 +447,7 @@ export const OPENAPI_TAGS: ReadonlyArray<{ name: string; description: string }> 
       'rotation with overlap), the event catalogue, delivery history with attempts, single and ' +
       'time-range replay, test pings. `webhook:read` / `webhook:manage`; needs the plan ' +
       'feature `webhooks`. Not offered: events for SMTP-time refusals, per-recipient ' +
-      'deliveries, URL clicks, DLP incidents and archive (8.1), connector events (8.2), ' +
+      'deliveries, URL clicks, DLP incidents and archive actions, connector events (8.2), ' +
       'payload version 2, custom headers or mTLS, back-fill of past events; portal screens: 7.x.',
   },
   {
@@ -465,6 +464,32 @@ export const OPENAPI_TAGS: ReadonlyArray<{ name: string; description: string }> 
       'Step 7.2: the caller’s saved Email Explorer views (filters, sort, range, columns), per ' +
       'user and organization, `message:read`, members only (no API keys or platform ' +
       'overrides). Shared or organization-wide views are not offered.',
+  },
+  {
+    name: 'archive',
+    description:
+      'Step 8.1: journaling and compliance archiving. Archive settings (journal directions, ' +
+      'categories, scope, immutability, access switches), retention policies, per-tenant ' +
+      'encryption key versions and audited rotation, capture issues, the disposal log, the ' +
+      "export signing keys, metadata search over the tenant's OpenSearch alias (masked like the " +
+      'Email Explorer; reveal through the audited `message:reveal`), detail, journal report, ' +
+      'frozen scan results, the sanitized preview and single-use re-authorized downloads ' +
+      '(customer-only: never under a platform override), and disposal of records under review. ' +
+      'Every read of archived content is audited before it is returned. Not offered: content ' +
+      '(body) search, per-attachment downloads, backfill of mail received before journaling ' +
+      'was enabled, shortening retention of existing records, re-wrapping record keys after a ' +
+      'rotation (8.x / 10.x).',
+  },
+  {
+    name: 'ediscovery',
+    description:
+      'Step 8.1: eDiscovery cases with custodians, case-scoped legal holds, worker-run case ' +
+      'searches verified against MySQL with explicit completeness flags, review tags, and ' +
+      'bounded encrypted EML exports with a signed chain-of-custody manifest (Ed25519, public ' +
+      'keys at `GET /archive/export-signing-keys`) downloaded through single-use re-authorized ' +
+      'grants. Organization-wide legal hold views under `/legal-holds`. Not offered: per-case ' +
+      'access lists, API-key retrieval of exports, PST/MBOX exports, split exports above the ' +
+      'bounds.',
   },
   {
     name: 'platform',

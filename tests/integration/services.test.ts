@@ -10,8 +10,11 @@ const running = (await runningServices()).has('api');
  * Readiness checks per service (contracts §9). Step 3.2: event-relay is a new deployable
  * (`mysql` writer + `rabbitmq`); email-worker and delivery-worker check RabbitMQ through the
  * client library (connected, not blocked, their exchanges/queues verified passively);
- * policy-engine, archive-worker and notification-worker consume nothing yet and no longer
- * connect to RabbitMQ; the api opens its ops connection per dead-letter request only.
+ * policy-engine and notification-worker consume nothing yet and no longer connect to RabbitMQ
+ * (both consume since step 5.2, see below); the api opens its ops connection per dead-letter
+ * request only. Step 8.1: the archive-worker's capture role consumes `email.archive` (`rabbitmq`,
+ * user eg-archive); OpenSearch is never a readiness check (docs/plan/steps/
+ * 23-journaling-archiving.md WP3 §2: the index lags, capture never waits for it).
  */
 const EXPECTED_CHECKS: Record<string, string[]> = {
   api: ['mysql', 'mysql-reader', 'redis', 's3'],
@@ -42,7 +45,7 @@ const EXPECTED_CHECKS: Record<string, string[]> = {
   'policy-engine': ['mysql', 'rabbitmq', 'redis', 's3'],
   'delivery-worker': ['mysql', 'rabbitmq', 'redis', 's3'],
   'notification-worker': ['mysql', 'rabbitmq'],
-  'archive-worker': ['mysql', 's3'],
+  'archive-worker': ['mysql', 'rabbitmq', 's3'],
   'event-relay': ['mysql', 'rabbitmq'],
 };
 

@@ -209,8 +209,9 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     // (docs/plan/steps/20-admin-portal.md §3.3): 269; plus the 5 saved views routes of step 7.2
     // WP1 (docs/plan/steps/21-email-explorer-details.md §3.3): 274; plus the headers route and the
     // two reveal operations of step 7.2 WP2: 277; plus the validate and sample dry-run routes of
-    // step 7.3 (docs/plan/steps/22-policy-builder.md §4.4): 279, all under /api/v1.
-    expect(count).toBe(279);
+    // step 7.3 (docs/plan/steps/22-policy-builder.md §4.4): 279; step 8.1
+    // (docs/plan/steps/23-journaling-archiving.md §4.4): 320, all under /api/v1.
+    expect(count).toBe(320);
   });
 
   it('gives every /api/v1 operation a tag', () => {
@@ -806,7 +807,8 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     expect(path('/entries/{entryId}/release')).toContain('quarantine_rescan_required');
     expect(path('/entries/{entryId}/release')).toContain('Idempotency-Key');
     expect(path('/entries/{entryId}/delete')).toContain('quarantine_legal_hold');
-    expect(path('/entries/{entryId}/delete')).toContain('quarantine_retention_active');
+    // Step 8.1 A23: archive retention no longer refuses the delete (code deprecated).
+    expect(path('/entries/{entryId}/delete')).not.toContain('"quarantine_retention_active"');
     expect(path('/entries/{entryId}/download-grants')).toContain('quarantine_reauth_failed');
     expect(path('/downloads/{token}')).toContain('application/octet-stream');
     expect(path('/downloads/{token}')).toContain('quarantine_download_token_used');
@@ -833,7 +835,6 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
       'cursor_invalid',
       'RateLimit-Limit',
       'Idempotency-Key',
-      'step 8.1',
       'step 6.2',
       'step 8.2',
       'step 8.3',
@@ -914,8 +915,9 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
       }
     }
     // §3.5: 13 transactional since 3.3/5.3, 2 new transactional, 22 legacy (interceptor);
-    // step 6.2: 5 transactional webhook routes (create, delete, rotate, replay, range replay).
-    expect(keyed).toHaveLength(42);
+    // step 6.2: 5 transactional webhook routes (create, delete, rotate, replay, range replay);
+    // step 8.1: 15 transactional archive, legal hold and eDiscovery mutations.
+    expect(keyed).toHaveLength(57);
   });
 
   it('documents the 17 step 6.2 routes with their tags, permissions and the redacted replay (§6.1, ADR-0057)', () => {
@@ -1156,6 +1158,36 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     expect(schemaOf(sample, '200').required).toEqual(
       expect.arrayContaining(['target', 'window', 'truncated', 'exhausted', 'summary', 'items']),
     );
+  });
+
+  it('documents the step 8.1 archive and eDiscovery operations (§4.4) without secret-shaped examples', () => {
+    const ops = operations(doc).filter(
+      (op) =>
+        op.key.includes(' /api/v1/archive') ||
+        op.key.includes(' /api/v1/legal-holds') ||
+        op.key.includes(' /api/v1/ediscovery'),
+    );
+    expect(ops).toHaveLength(41);
+    for (const op of ops) {
+      expect(op.tags.length, op.key).toBe(1);
+      expect(['archive', 'ediscovery'], op.key).toContain(op.tags[0]);
+    }
+    const description = doc.info.description ?? '';
+    expect(description).not.toMatch(/Archive, journal search, retention policies/);
+    const archiveDocs = JSON.stringify(
+      Object.entries(doc.paths).filter(
+        ([path]) =>
+          path.startsWith('/api/v1/archive') ||
+          path.startsWith('/api/v1/legal-holds') ||
+          path.startsWith('/api/v1/ediscovery'),
+      ),
+    );
+    expect(archiveDocs).toContain('EXAMPLE');
+    expect(archiveDocs).not.toMatch(
+      /whsec_|AKIA|ghp_|BEGIN [A-Z ]*PRIVATE KEY|egk_|sk-[A-Za-z0-9]{8}/,
+    );
+    expect(archiveDocs).toContain('archive_override_forbidden');
+    expect(archiveDocs).toContain('X-EG-Index-Lag-Seconds');
   });
 
   it('matches the committed policy catalogue snapshot docs/api/policy-catalog.json (step 7.3 B1)', async () => {

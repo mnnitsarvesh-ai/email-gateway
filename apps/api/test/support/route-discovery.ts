@@ -18,6 +18,7 @@ import {
 } from '../../src/auth-contracts/decorators';
 import { API_GLOBAL_PREFIX } from '../../src/http/configure-api-app';
 import type { IdempotentOptions } from '../../src/http/idempotency/idempotency.interceptor';
+import { ARCHIVE_RATE_LIMIT_KEY } from '../../src/modules/archive/archive-rate-limit';
 import { MESSAGE_REVEAL_RATE_LIMIT_KEY } from '../../src/modules/messages/message-reveal-rate-limit';
 import { POLICY_SAMPLE_DRY_RUN_RATE_LIMIT_KEY } from '../../src/modules/policies/policy-sample-dry-run-rate-limit';
 import { QUARANTINE_RATE_LIMIT_KEY } from '../../src/modules/quarantine/quarantine-rate-limit';
@@ -50,6 +51,8 @@ export interface DiscoveredRoute {
   revealRate: string | null;
   /** Config-driven sample dry-run limit bucket (step 7.3 §4.3), if any. */
   policySampleRate: string | null;
+  /** Config-driven archive route limit kind (step 8.1 §4.4), if any. */
+  archiveRate: string | null;
   /** `@RateClass()` of the route (step 6.1 D8), if any. */
   rateClass: RateClass | null;
   /** `@Idempotent()` options (step 6.1 D9), if any. */
@@ -111,6 +114,8 @@ export function discoverRoutes(app: INestApplication): DiscoveredRoute[] {
             revealRate:
               (Reflect.getMetadata(MESSAGE_REVEAL_RATE_LIMIT_KEY, handler) as string | undefined) ??
               null,
+            archiveRate:
+              (Reflect.getMetadata(ARCHIVE_RATE_LIMIT_KEY, handler) as string | undefined) ?? null,
             policySampleRate:
               (Reflect.getMetadata(POLICY_SAMPLE_DRY_RUN_RATE_LIMIT_KEY, handler) as
                 string | undefined) ?? null,

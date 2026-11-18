@@ -2,6 +2,8 @@ import { uuidv7, sqlTime, type LoadSample } from './load';
 import { type SqlClient } from '../partitioning/executor';
 
 /**
+ * Q25–Q30: the step 8.1 archive-worker queries (journal sweep, policy reconciler, capture
+ * scheduler, expiry, disposal and index-queue claims; `archiveQueries`).
  * Q1–Q14 from D8 plus Q15–Q18 for the remaining high-volume tables (headers, archives,
  * bounces, webhook deliveries) and Q24 (query-examples.md) for the step 5.3 quarantine search filters (Q9; on the
  * entries of `--quarantine-entries` when given),
@@ -75,6 +77,19 @@ export async function buildQueries(
     `SELECT sha256 FROM email_attachments WHERE organization_id = ? AND received_at >= ? LIMIT 1`,
     org,
     sqlTime(nowMs - 7 * 24 * HOUR_MS),
+  );
+  // Step 8.1 sweep cursors: the first message / evaluation of the last 24 h, so each forward
+  // read starts in the middle of the data like a running sweep.
+  const [sweepCursor] = await client.$queryRawUnsafe<{ id: bigint; received_at: Date }[]>(
+    `SELECT id, received_at FROM email_messages WHERE received_at >= ? ORDER BY received_at, id LIMIT 1`,
+    since24h,
+  );
+  const [reconcileCursor] = await client.$queryRawUnsafe<{ id: bigint; received_at: Date }[]>(
+    `SELECT id, received_at FROM policy_execution_logs WHERE received_at >= ? ORDER BY received_at, id LIMIT 1`,
+    since24h,
+  );
+  const [archiveOrg] = await client.$queryRawUnsafe<{ organization_id: bigint }[]>(
+    `SELECT organization_id FROM email_archives GROUP BY organization_id ORDER BY COUNT(*) DESC LIMIT 1`,
   );
   const duplicateEventId = uuidv7(nowMs);
   await client.$executeRawUnsafe(
@@ -405,6 +420,156 @@ export async function buildQueries(
       title: 'Quarantine search filters (step 5.3 Q9, keyset, bounded range)',
       note: 'Each filter starts from an (organization_id, <filter>, quarantined_at[, id]) index prefix: default view (organization_id, quarantined_at, id); recipient (organization_id, recipient_address(100), quarantined_at, id); sender (organization_id, envelope_from(100), quarantined_at); state (organization_id, status, quarantined_at, id); decisive policy (organization_id, decisive_policy_public_id, quarantined_at).',
       steps: quarantineSearchSteps(org, sample.quarantine ?? fallback),
+    },
+    ...archiveQueries({
+      nowMs,
+      organizationId: archiveOrg?.organization_id ?? org,
+      sweepCursor: sweepCursor
+        ? { id: sweepCursor.id, receivedAt: new Date(sweepCursor.received_at).getTime() }
+        : { id: 0n, receivedAt: nowMs - 24 * HOUR_MS },
+      reconcileCursor: reconcileCursor
+        ? { id: reconcileCursor.id, receivedAt: new Date(reconcileCursor.received_at).getTime() }
+        : { id: 0n, receivedAt: nowMs - 24 * HOUR_MS },
+    }),
+  ];
+}
+
+/** Inputs of the step 8.1 archive queries (Q25–Q30). */
+export interface ArchiveQueryInputs {
+  nowMs: number;
+  /** An organization with archive records. */
+  organizationId: bigint;
+  /** Journal completeness sweep cursor: last processed email_messages (id, received_at). */
+  sweepCursor: { id: bigint; receivedAt: number };
+  /** Policy reconciler cursor: last processed policy_execution_logs (id, received_at). */
+  reconcileCursor: { id: bigint; receivedAt: number };
+}
+
+const DAY_MS = 24 * HOUR_MS;
+
+/**
+ * Step 8.1 (docs/plan/steps/23-journaling-archiving.md A2, A13, A14, A16): the archive-worker's
+ * hot queries, as WP3 issues them. Defaults of §4.8: sweep batch 1000, safety lag 120 s (journal)
+ * / 300 s (policy), lifecycle batch 200, index batch 500.
+ */
+export function archiveQueries(q: ArchiveQueryInputs): PerfQuery[] {
+  const now = sqlTime(q.nowMs);
+  return [
+    {
+      id: 'Q25',
+      title: 'Journal completeness sweep, forward cursor over email_messages (step 8.1 A2)',
+      note: 'PRIMARY (id, received_at) range per partition; received_at >= cursor − 1 day prunes to the recent partitions; ordered merge of the per-partition PK scans, LIMIT 1000.',
+      steps: [
+        {
+          label: 'next batch',
+          sql: `SELECT id, received_at, organization_id, direction, status
+  FROM email_messages
+ WHERE id > ? AND received_at >= ? AND created_at <= ?
+ ORDER BY id
+ LIMIT 1000`,
+          params: [
+            q.sweepCursor.id,
+            sqlTime(q.sweepCursor.receivedAt - DAY_MS),
+            sqlTime(q.nowMs - 120_000),
+          ],
+        },
+      ],
+    },
+    {
+      id: 'Q26',
+      title: 'Policy ARCHIVE reconciler, forward cursor over policy_execution_logs (step 8.1 A2)',
+      note: 'Same shape as Q25 on policy_execution_logs: PRIMARY (id, received_at) range, pruned by received_at; the ARCHIVE action filter is applied to the 1000 rows in the worker.',
+      steps: [
+        {
+          label: 'next batch',
+          sql: `SELECT id, received_at, organization_id, message_id, actions
+  FROM policy_execution_logs
+ WHERE id > ? AND received_at >= ? AND created_at <= ?
+ ORDER BY id
+ LIMIT 1000`,
+          params: [
+            q.reconcileCursor.id,
+            sqlTime(q.reconcileCursor.receivedAt - DAY_MS),
+            sqlTime(q.nowMs - 300_000),
+          ],
+        },
+      ],
+    },
+    {
+      id: 'Q27',
+      title: 'Capture scheduler: due intents (step 8.1 A2)',
+      note: 'Index (status, next_check_at): two short ranges (pending, captured_open) in every live partition (2 months retention: 3 partitions plus pmax); FOR UPDATE SKIP LOCKED.',
+      steps: [
+        {
+          label: 'claim',
+          sql: `SELECT id, received_at, organization_id, message_id, status
+  FROM archive_capture_intents
+ WHERE status IN ('pending', 'captured_open') AND next_check_at <= ?
+ ORDER BY next_check_at
+ LIMIT 20
+ FOR UPDATE SKIP LOCKED`,
+          params: [now],
+        },
+      ],
+    },
+    {
+      id: 'Q28',
+      title: 'Lifecycle: expired records of one organization (step 8.1 A13)',
+      note: 'Index (organization_id, status, retain_until): one range per partition (email_archives is never dropped, so every monthly partition is probed; each probe is a short range read).',
+      steps: [
+        {
+          label: 'expiry batch',
+          sql: `SELECT id, received_at, retain_until, expiry_action, lock_mode
+  FROM email_archives
+ WHERE organization_id = ? AND status = 'active' AND retain_until <= ?
+ ORDER BY retain_until
+ LIMIT 200`,
+          params: [q.organizationId, now],
+        },
+        {
+          label: 'review queue',
+          sql: `SELECT id, received_at, message_public_id, retain_until
+  FROM email_archives
+ WHERE organization_id = ? AND status = 'expiry_review'
+ ORDER BY retain_until
+ LIMIT 50`,
+          params: [q.organizationId],
+        },
+      ],
+    },
+    {
+      id: 'Q29',
+      title: 'Disposal pipeline claim (step 8.1 A14)',
+      note: 'Index (state, next_attempt_at): one short range per open state in every partition (never dropped); FOR UPDATE SKIP LOCKED.',
+      steps: [
+        {
+          label: 'claim',
+          sql: `SELECT id, requested_at, organization_id, archive_record_id, state
+  FROM archive_disposals
+ WHERE state IN ('shredded', 'objects_deleted', 'index_deleted') AND next_attempt_at <= ?
+ ORDER BY next_attempt_at
+ LIMIT 50
+ FOR UPDATE SKIP LOCKED`,
+          params: [now],
+        },
+      ],
+    },
+    {
+      id: 'Q30',
+      title: 'Search index queue claim (step 8.1 A16)',
+      note: 'Unpartitioned transient queue; index (available_at, id) gives the claim order without a sort; FOR UPDATE SKIP LOCKED.',
+      steps: [
+        {
+          label: 'claim',
+          sql: `SELECT id, organization_id, message_id, received_at, op
+  FROM archive_index_queue
+ WHERE available_at <= ?
+ ORDER BY available_at, id
+ LIMIT 500
+ FOR UPDATE SKIP LOCKED`,
+          params: [now],
+        },
+      ],
     },
   ];
 }

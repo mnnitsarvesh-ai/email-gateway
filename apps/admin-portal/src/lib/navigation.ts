@@ -1,9 +1,13 @@
 import {
+  Archive,
   BarChart3,
+  Briefcase,
   Building2,
   CreditCard,
   FileClock,
+  Gavel,
   Globe,
+  History,
   LayoutDashboard,
   Link2,
   Mail,
@@ -35,6 +39,11 @@ export interface NavItem {
   readonly href: string;
   readonly icon: LucideIcon;
   readonly gate: Gate;
+  /**
+   * Gate of the routes below `href` when it differs from the item's own (step 8.1: an archived
+   * message's details need `archive:read`, the search page `archive:search`).
+   */
+  readonly childGate?: Gate;
 }
 
 export interface NavSection {
@@ -137,6 +146,41 @@ export const NAVIGATION: readonly NavSection[] = [
     ],
   },
   {
+    id: 'compliance',
+    label: 'Compliance',
+    items: [
+      {
+        id: 'archive',
+        label: 'Archive',
+        href: '/archive',
+        icon: Archive,
+        gate: ['ArchiveMessagesController_list_v1'],
+        childGate: ['ArchiveMessagesController_detail_v1'],
+      },
+      {
+        id: 'retention',
+        label: 'Retention and review',
+        href: '/archive/retention',
+        icon: History,
+        gate: ['ArchiveRetentionController_list_v1'],
+      },
+      {
+        id: 'legal-holds',
+        label: 'Legal holds',
+        href: '/legal-holds',
+        icon: Gavel,
+        gate: ['LegalHoldsController_list_v1'],
+      },
+      {
+        id: 'ediscovery',
+        label: 'eDiscovery',
+        href: '/ediscovery',
+        icon: Briefcase,
+        gate: ['EdiscoveryCasesController_list_v1'],
+      },
+    ],
+  },
+  {
     id: 'directory',
     label: 'Directory',
     items: [
@@ -235,6 +279,13 @@ export function navItemForPath(pathname: string): NavItem | null {
     if (matches && (!best || item.href.length > best.href.length)) best = item;
   }
   return best;
+}
+
+/** The gate that guards a pathname: the owning item's, or its `childGate` below its href. */
+export function gateForPath(pathname: string): Gate | null {
+  const item = navItemForPath(pathname);
+  if (!item) return null;
+  return pathname !== item.href && item.childGate ? item.childGate : item.gate;
 }
 
 /** Plan references for the "arrives in step N" states (UnavailableState). */

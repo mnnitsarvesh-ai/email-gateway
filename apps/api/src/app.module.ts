@@ -17,6 +17,7 @@ import { API_CONFIG } from './api-config.token';
 import type { ApiConfig } from './config';
 import { MetaModule } from './meta/meta.module';
 import { ApiKeysModule } from './modules/api-keys/api-keys.module';
+import { ArchiveModule } from './modules/archive/archive.module';
 import { AttachmentsModule } from './modules/attachments/attachments.module';
 import { AuditLogsModule } from './modules/audit-logs/audit-logs.module';
 import { AuthModule } from './modules/auth/auth.module';
@@ -27,6 +28,7 @@ import { DlpModule } from './modules/dlp/dlp.module';
 import { DeliveriesModule } from './modules/deliveries/deliveries.module';
 import { DomainDestinationsModule } from './modules/domain-destinations/domain-destinations.module';
 import { DomainsModule } from './modules/domains/domains.module';
+import { EdiscoveryModule } from './modules/ediscovery/ediscovery.module';
 import { LoginAuditModule } from './modules/login-audit/login-audit.module';
 import { MessagesModule } from './modules/messages/messages.module';
 import { OrganizationsModule } from './modules/organizations/organizations.module';
@@ -124,6 +126,10 @@ export class AppModule {
         NotificationsModule,
         // Step 7.2: saved Email Explorer views (per user, tenant-scoped).
         SavedViewsModule,
+        // Step 8.1: journaling and compliance archiving (settings, retention, keys, search,
+        // content access, downloads) and legal holds / eDiscovery (cases, searches, exports).
+        ArchiveModule,
+        EdiscoveryModule,
       ],
       providers: [{ provide: API_CONFIG, useValue: config }],
       exports: [API_CONFIG],

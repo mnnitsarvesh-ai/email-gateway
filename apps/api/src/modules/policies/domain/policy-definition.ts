@@ -65,7 +65,7 @@ export const POLICY_ENFORCEMENT_NOTE =
   'weakened), plus TAG/WARN headers in a delivered copy; from step 5.3 the WARN body banner ' +
   'and URL_REWRITE are applied to the delivered copy after the scan when the message allows ' +
   'it (signed, encrypted or oversized messages record a `skipped_*` outcome instead). It ' +
-  '**requests** ARCHIVE (consumed by step 8.1), ALERT and sender non-delivery notices ' +
+  '**requests** ARCHIVE (performed by the archive-worker, step 8.1), ALERT and sender non-delivery notices ' +
   '(notification-worker). Quarantine release re-validates against the current policy ' +
   '(GET /quarantine/catalog); archiving and journaling are step 8.1.';
 

@@ -53,8 +53,26 @@ const CATALOG: { key: string; description: string }[] = [
   { key: 'archive:read', description: 'Search and view archived messages' },
   { key: 'archive:export', description: 'Export archived messages' },
   { key: 'archive:legal_hold', description: 'Create and release legal holds' },
+  {
+    key: 'archive:search',
+    description: 'Search archived and journaled messages (metadata, masked) (step 8.1)',
+  },
+  {
+    key: 'archive:retrieve',
+    description:
+      'View the sanitized preview and download original archived messages (audited) (step 8.1)',
+  },
+  {
+    key: 'archive:manage',
+    description:
+      'Manage archive settings, retention policies, encryption keys, capture issues and disposal of reviewed records (step 8.1)',
+  },
+  {
+    key: 'ediscovery:manage',
+    description: 'Manage eDiscovery cases, custodians, searches, review and exports (step 8.1)',
+  },
   { key: 'webhook:manage', description: 'Create and edit webhook subscriptions' },
-  { key: 'settings:manage', description: 'Change notification, quarantine and archive settings' },
+  { key: 'settings:manage', description: 'Change notification and quarantine settings' },
   {
     key: 'platform:organizations',
     description: 'Platform: create, suspend and manage customer organizations',

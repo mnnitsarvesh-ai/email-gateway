@@ -241,18 +241,23 @@ describe('Settings: notifications and preferences', () => {
     await screen.findByRole('form', { name: 'Your notifications' });
   });
 
-  it('archive tab says it arrives in 8.1; switching tabs writes the URL', async () => {
-    mockApi({ NotificationsController_preferences_v1: () => okJson(preferences) });
+  it('archive tab (step 8.1) is hidden without archive:read; switching tabs writes the URL', async () => {
+    mockApi({
+      NotificationsController_preferences_v1: () => okJson(preferences),
+      SessionsController_list_v1: () => okJson({ data: [], nextCursor: null }),
+    });
     const { user, container } = renderWithProviders(<SettingsPage />, {
       route: '/settings?tab=archive',
       role: 'mailbox_user',
     });
-    expect(screen.getByText('Arrives in step 8.1')).toBeInTheDocument();
-    expect(screen.getByText(/Archive and retention settings arrive in 8.1/)).toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: 'Archive and retention' })).not.toBeInTheDocument();
+    expect(screen.queryByText('Arrives in step 8.1')).not.toBeInTheDocument();
+    await screen.findByRole('form', { name: 'Your notifications' });
     await expectNoAxeViolations(container);
+    await user.click(screen.getByRole('tab', { name: 'Security' }));
+    await waitFor(() => expect(currentTestUrl()).toBe('/settings?tab=security'));
     await user.click(screen.getByRole('tab', { name: 'My notifications' }));
     await waitFor(() => expect(currentTestUrl()).toBe('/settings?tab=preferences'));
-    await screen.findByRole('form', { name: 'Your notifications' });
   });
 
   it('security tab hosts password, MFA and sessions', async () => {

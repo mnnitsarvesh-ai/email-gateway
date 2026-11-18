@@ -14,7 +14,7 @@
 // - Timestamps are DATETIME(3) UTC. Append-only tables have no `updated_at`.
 // - snake_case table and column names via @@map / @map. Enum values are only ever appended.
 // - No email bodies or attachment content: only S3 object keys, sizes and hashes.
-// - Partitioned tables (33, marked PARTITIONED below) use a composite primary key
+// - Partitioned tables (35, marked PARTITIONED below) use a composite primary key
 //   (id, <partition column>), have no foreign keys in either direction, and every unique key
 //   ends with the partition column. The PARTITION BY clause is hand-written in the migration
 //   SQL; Prisma does not model partitions. Child rows of a message copy the message's
@@ -1002,6 +1002,8 @@ enum QuarantineDigestKind {
   admin_alert
 }
 
+/// Retired by step 8.1 (A22): `archive_settings.scope` is kept for the rolling upgrade and never
+/// read; the direction and scope selection lives in `archive_settings.settings`.
 enum ArchiveScope {
   all
   inbound
@@ -1023,6 +1025,103 @@ enum RetentionExpiryAction {
 enum LegalHoldStatus {
   active
   released
+}
+
+// Step 8.1 journaling and compliance archiving (docs/plan/steps/23-journaling-archiving.md §3).
+
+/// Capture category of an archive record (A3).
+enum ArchiveCategory {
+  delivered
+  rejected
+  quarantined
+  failed
+}
+
+/// `email_archives.status` (A13, A14): `disposing` = crypto-shredded, deletion in progress.
+enum ArchiveRecordStatus {
+  active
+  expiry_review
+  disposing
+}
+
+/// `archive_capture_intents.status` (A2, A3).
+enum ArchiveIntentStatus {
+  pending
+  captured_open
+  closed
+  skipped
+  lost
+  failed
+}
+
+/// `archive_encryption_keys.status` (A9): `retired` = decrypt-only.
+enum ArchiveKeyStatus {
+  active
+  retired
+  destroyed
+}
+
+/// `archive_index_queue.op` (A16).
+enum ArchiveIndexOp {
+  upsert
+  delete
+  purge_org
+}
+
+/// `archive_disposals.reason` (A13, A14, A24).
+enum ArchiveDisposalReason {
+  retention_expired
+  review_disposed
+  organization_deleted
+}
+
+/// `archive_disposals.state` (A14): the pipeline stage reached.
+enum ArchiveDisposalState {
+  shredded
+  objects_deleted
+  index_deleted
+  completed
+  failed
+}
+
+/// `archive_index_checks.state` (A15).
+enum ArchiveIndexCheckState {
+  ok
+  mismatch
+  repairing
+}
+
+enum EdiscoveryCaseStatus {
+  open
+  closed
+}
+
+enum EdiscoverySearchStatus {
+  queued
+  running
+  completed
+  failed
+}
+
+enum EdiscoveryReviewTag {
+  untagged
+  relevant
+  not_relevant
+  privileged
+}
+
+enum EdiscoveryExportStatus {
+  queued
+  building
+  completed
+  failed
+  expired
+}
+
+/// `archive_download_grants.kind` (A19): an archived original or an eDiscovery export package.
+enum ArchiveDownloadKind {
+  message
+  export
 }
 
 enum AuditActorType {
@@ -1192,6 +1291,13 @@ model Organization {
   archiveSettings          ArchiveSetting?
   archiveRetentionPolicies ArchiveRetentionPolicy[]
   archiveLegalHolds        ArchiveLegalHold[]
+  archiveEncryptionKeys    ArchiveEncryptionKey[]
+  archiveIndexChecks       ArchiveIndexCheck[]
+  archiveDownloadGrants    ArchiveDownloadGrant[]
+  ediscoveryCases          EdiscoveryCase[]
+  ediscoveryCustodians     EdiscoveryCustodian[]
+  ediscoverySearches       EdiscoverySearch[]
+  ediscoveryExports        EdiscoveryExport[]
   webhookSubscriptions     WebhookSubscription[]
   webhookReplays           WebhookReplay[]
   notificationSettings     NotificationSettings?
@@ -1360,6 +1466,19 @@ model User {
   quarantineDigests            QuarantineDigest[]          @relation("QuarantineDigestUser")
   createdLegalHolds            ArchiveLegalHold[]          @relation("LegalHoldCreatedBy")
   releasedLegalHolds           ArchiveLegalHold[]          @relation("LegalHoldReleasedBy")
+  updatedArchiveSettings       ArchiveSetting[]            @relation("ArchiveSettingsUpdatedBy")
+  createdRetentionPolicies     ArchiveRetentionPolicy[]    @relation("ArchiveRetentionPolicyCreatedBy")
+  updatedRetentionPolicies     ArchiveRetentionPolicy[]    @relation("ArchiveRetentionPolicyUpdatedBy")
+  createdArchiveKeys           ArchiveEncryptionKey[]      @relation("ArchiveEncryptionKeyCreatedBy")
+  archiveDownloadGrants        ArchiveDownloadGrant[]      @relation("ArchiveDownloadGrantUser")
+  createdEdiscoveryCases       EdiscoveryCase[]            @relation("EdiscoveryCaseCreatedBy")
+  updatedEdiscoveryCases       EdiscoveryCase[]            @relation("EdiscoveryCaseUpdatedBy")
+  closedEdiscoveryCases        EdiscoveryCase[]            @relation("EdiscoveryCaseClosedBy")
+  ediscoveryCustodianships     EdiscoveryCustodian[]       @relation("EdiscoveryCustodianUser")
+  createdEdiscoveryCustodians  EdiscoveryCustodian[]       @relation("EdiscoveryCustodianCreatedBy")
+  requestedEdiscoverySearches  EdiscoverySearch[]          @relation("EdiscoverySearchRequestedBy")
+  reviewedEdiscoveryHits       EdiscoverySearchHit[]       @relation("EdiscoverySearchHitReviewedBy")
+  requestedEdiscoveryExports   EdiscoveryExport[]          @relation("EdiscoveryExportRequestedBy")
   createdWebhooks              WebhookSubscription[]
   updatedNotificationSettings  NotificationSettings[]      @relation("NotificationSettingsUpdatedBy")
   notificationPreference       NotificationUserPreference? @relation("NotificationUserPreferenceUser")
@@ -4635,91 +4754,531 @@ model QuarantineDigest {
 }
 
 // ---------------------------------------------------------------------------------------------
-// 3.9 Archiving
+// 3.9 Archiving (step 1.1 tables, extended by step 8.1: docs/plan/steps/23-journaling-archiving.md
+// §3, ADR-0064 .. ADR-0069). No message content: bodies and attachments exist only inside the
+// encrypted objects of the archive bucket; MySQL holds metadata, hashes, keys (wrapped) and codes.
 // ---------------------------------------------------------------------------------------------
 
+/// One row per organization; no row = archiving disabled (step 8.1 A22). `settings` is the strict
+/// `archive-settings/1` document of @email-gateway/archive, every key optional, `NULL` = every
+/// default (rows created before 8.1 keep working). The typed columns `enabled`, `object_lock_mode`
+/// (API `immutability`) and `default_retention_policy_id` are authoritative. `generation` + 1 on
+/// every change (capture intents record it); `journal_enabled_at` = last false → true of
+/// `enabled` (no backfill before it). Written by the api only (`PUT /archive/settings`, CAS on
+/// `row_version`).
 model ArchiveSetting {
   id                       BigInt         @id @default(autoincrement()) @db.UnsignedBigInt
   organizationId           BigInt         @unique @map("organization_id") @db.UnsignedBigInt
   enabled                  Boolean        @default(false)
+  /// RETIRED by step 8.1 (A22): kept for the rolling upgrade, never read or written; replaced by
+  /// `settings.directions` / `settings.scope`. Dropped by a later contract migration.
   scope                    ArchiveScope   @default(all)
   defaultRetentionPolicyId BigInt?        @map("default_retention_policy_id") @db.UnsignedBigInt
   objectLockMode           ObjectLockMode @default(none) @map("object_lock_mode")
+  /// RETIRED by step 8.1 (A8, A22): tenant keys live in `archive_encryption_keys`. Kept, never
+  /// read or written; dropped by a later contract migration.
   encryptionKeyRef         String?        @map("encryption_key_ref") @db.VarChar(512)
+  /// `archive-settings/1`; NULL = every default.
+  settings                 Json?
+  /// Hex SHA-256 of the canonical settings JSON (NULL while `settings` is NULL).
+  settingsSha256           String?        @map("settings_sha256") @db.Char(64)
+  generation               BigInt         @default(0) @db.UnsignedBigInt
+  rowVersion               Int            @default(1) @map("row_version") @db.UnsignedInt
+  journalEnabledAt         DateTime?      @map("journal_enabled_at") @db.DateTime(3)
+  updatedByUserId          BigInt?        @map("updated_by_user_id") @db.UnsignedBigInt
   createdAt                DateTime       @default(now()) @map("created_at") @db.DateTime(3)
   updatedAt                DateTime       @updatedAt @map("updated_at") @db.DateTime(3)
 
   organization           Organization            @relation(fields: [organizationId], references: [id], onDelete: Restrict)
   defaultRetentionPolicy ArchiveRetentionPolicy? @relation(fields: [defaultRetentionPolicyId], references: [id], onDelete: SetNull)
+  updatedByUser          User?                   @relation("ArchiveSettingsUpdatedBy", fields: [updatedByUserId], references: [id], onDelete: SetNull)
 
   @@map("archive_settings")
 }
 
+/// Tenant retention policy (step 8.1 A11). `criteria` = `archive-retention/1` (NULL = matches
+/// every record); live policies (`deleted_at IS NULL`) are evaluated by `priority` ascending then
+/// id, the first match wins, else the settings' default policy. `retention_days` ≤ min(plan limit
+/// `archive_retention_days`, ARCHIVE_MAX_RETENTION_DAYS). Soft-deleted (records keep their
+/// `retention_policy_id`); the default policy cannot be deleted. Written by the api only.
 model ArchiveRetentionPolicy {
-  id             BigInt                @id @default(autoincrement()) @db.UnsignedBigInt
-  organizationId BigInt                @map("organization_id") @db.UnsignedBigInt
-  name           String                @db.VarChar(128)
-  retentionDays  Int                   @map("retention_days") @db.UnsignedInt
-  criteria       Json?
-  priority       Int
-  isDefault      Boolean               @default(false) @map("is_default")
-  onExpiry       RetentionExpiryAction @default(delete) @map("on_expiry")
-  createdAt      DateTime              @default(now()) @map("created_at") @db.DateTime(3)
-  updatedAt      DateTime              @updatedAt @map("updated_at") @db.DateTime(3)
+  id              BigInt                @id @default(autoincrement()) @db.UnsignedBigInt
+  /// UUIDv7 (rows created before step 8.1 were backfilled with MySQL `UUID()`).
+  publicId        String                @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId  BigInt                @map("organization_id") @db.UnsignedBigInt
+  name            String                @db.VarChar(128)
+  retentionDays   Int                   @map("retention_days") @db.UnsignedInt
+  criteria        Json?
+  priority        Int
+  /// RETIRED by step 8.1 (A11): the default is `archive_settings.default_retention_policy_id`.
+  /// Kept, never read or written; dropped by a later contract migration.
+  isDefault       Boolean               @default(false) @map("is_default")
+  onExpiry        RetentionExpiryAction @default(delete) @map("on_expiry")
+  rowVersion      Int                   @default(1) @map("row_version") @db.UnsignedInt
+  deletedAt       DateTime?             @map("deleted_at") @db.DateTime(3)
+  createdByUserId BigInt?               @map("created_by_user_id") @db.UnsignedBigInt
+  updatedByUserId BigInt?               @map("updated_by_user_id") @db.UnsignedBigInt
+  createdAt       DateTime              @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt       DateTime              @updatedAt @map("updated_at") @db.DateTime(3)
 
   organization    Organization     @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  createdByUser   User?            @relation("ArchiveRetentionPolicyCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  updatedByUser   User?            @relation("ArchiveRetentionPolicyUpdatedBy", fields: [updatedByUserId], references: [id], onDelete: SetNull)
   defaultSettings ArchiveSetting[]
 
   @@unique([organizationId, name])
+  @@index([organizationId, deletedAt, priority])
   @@map("archive_retention_policies")
 }
 
-/// PARTITIONED by RANGE COLUMNS(received_at), monthly, and never auto-dropped (legal holds and
-/// per-tenant archive retention are row-level). No foreign keys.
+/// PARTITIONED by RANGE COLUMNS(received_at), monthly, and never auto-dropped (compliance): legal
+/// holds and per-tenant archive retention are row-level, the archive-worker's lifecycle role
+/// disposes of records one by one (step 8.1 A13, A14). One archive record per message (unique
+/// `(message_id, received_at)`, capture idempotency), written only by the archive-worker. Metadata
+/// only: the original EML, the journal report and the scan snapshots are `archive-object/1`
+/// encrypted objects in the archive bucket named by `objects`; `wrapped_dek` is the record data
+/// key wrapped under tenant key `key_version` and is set to NULL by the disposal decision
+/// (crypto-shredding). `deleted_at` is set when disposal starts (NULL = live: the registry purge
+/// and the step 1.2 organization deletion contracts). No foreign keys.
 model EmailArchive {
-  id                BigInt    @default(autoincrement()) @db.UnsignedBigInt
-  receivedAt        DateTime  @map("received_at") @db.DateTime(3)
-  messageId         BigInt    @map("message_id") @db.UnsignedBigInt
-  organizationId    BigInt    @map("organization_id") @db.UnsignedBigInt
-  archiveObjectKey  String    @map("archive_object_key") @db.VarChar(512)
-  sha256            String    @db.Char(64)
-  sizeBytes         Int       @map("size_bytes") @db.UnsignedInt
-  retentionPolicyId BigInt?   @map("retention_policy_id") @db.UnsignedBigInt
-  retainUntil       DateTime  @map("retain_until") @db.DateTime(3)
-  /// Denormalized from active legal holds.
-  legalHold         Boolean   @default(false) @map("legal_hold")
-  archivedAt        DateTime  @map("archived_at") @db.DateTime(3)
-  deletedAt         DateTime? @map("deleted_at") @db.DateTime(3)
-  createdAt         DateTime  @default(now()) @map("created_at") @db.DateTime(3)
-  updatedAt         DateTime  @updatedAt @map("updated_at") @db.DateTime(3)
+  id                 BigInt                @default(autoincrement()) @db.UnsignedBigInt
+  receivedAt         DateTime              @map("received_at") @db.DateTime(3)
+  messageId          BigInt                @map("message_id") @db.UnsignedBigInt
+  organizationId     BigInt                @map("organization_id") @db.UnsignedBigInt
+  /// message_identities.public_id of the message (the REST `messageId`).
+  messagePublicId    String                @map("message_public_id") @db.Char(36)
+  direction          MessageDirection
+  capturedByJournal  Boolean               @default(false) @map("captured_by_journal")
+  capturedByPolicy   Boolean               @default(false) @map("captured_by_policy")
+  /// `ruleRef` of the policy ARCHIVE action that requested the capture.
+  policyRuleRef      String?               @map("policy_rule_ref") @db.VarChar(128)
+  category           ArchiveCategory
+  status             ArchiveRecordStatus   @default(active)
+  /// email_messages.status / status_reason at the last outcome refresh (A7).
+  messageState       MessageStatus         @map("message_state")
+  messageStateReason String?               @map("message_state_reason") @db.VarChar(64)
+  envelopeFrom       String                @map("envelope_from") @db.VarChar(320)
+  headerFrom         String?               @map("header_from") @db.VarChar(320)
+  /// Metadata (masked in every API response, ADR-0062); never a body.
+  subject            String?               @db.VarChar(998)
+  internetMessageId  String?               @map("internet_message_id") @db.VarChar(998)
+  /// `archive-parties/1`: envelope sender, header From and every envelope recipient with
+  /// direction, status and final action.
+  parties            Json
+  recipientCount     Int                   @map("recipient_count") @db.UnsignedSmallInt
+  attachmentCount    Int                   @default(0) @map("attachment_count") @db.UnsignedSmallInt
+  /// EML object key in the archive bucket (`org/<org>/archive/.../<captureId>/eml.bin`).
+  archiveObjectKey   String                @map("archive_object_key") @db.VarChar(512)
+  /// Hex SHA-256 of the original EML (= email_messages.eml_sha256, re-verified at capture).
+  sha256             String                @db.Char(64)
+  /// Size of the original EML in bytes.
+  sizeBytes          Int                   @map("size_bytes") @db.UnsignedInt
+  /// Capture id, object keys, version ids, ciphertext SHA-256s and sizes of every object.
+  objects            Json
+  storedBytes        BigInt                @map("stored_bytes") @db.UnsignedBigInt
+  /// `archive-object/1`.
+  encryptionFormat   String                @map("encryption_format") @db.VarChar(32)
+  keyVersion         Int                   @map("key_version") @db.UnsignedInt
+  /// `v1.k<version>.<iv>.<tag>.<ct>`; NULL once disposal started (crypto-shredded).
+  wrappedDek         String?               @map("wrapped_dek") @db.VarChar(255)
+  lockMode           ObjectLockMode        @default(none) @map("lock_mode")
+  lockUntil          DateTime?             @map("lock_until") @db.DateTime(3)
+  retentionPolicyId  BigInt?               @map("retention_policy_id") @db.UnsignedBigInt
+  retainUntil        DateTime              @map("retain_until") @db.DateTime(3)
+  expiryAction       RetentionExpiryAction @default(delete) @map("expiry_action")
+  /// Informational: set when an active legal hold blocked an expiry (A12). Holds are evaluated
+  /// authoritatively at disposal time.
+  legalHold          Boolean               @default(false) @map("legal_hold")
+  finalVerdict       MessageVerdict?       @map("final_verdict")
+  finalAction        MessageAction?        @map("final_action")
+  riskScore          Int?                  @map("risk_score") @db.UnsignedSmallInt
+  malicious          Boolean               @default(false)
+  /// ≤ 16 links (round, revision, snapshot object) to frozen `archive-scan/1` snapshots.
+  scanRounds         Json                  @map("scan_rounds")
+  settingsGeneration BigInt                @map("settings_generation") @db.UnsignedBigInt
+  indexedAt          DateTime?             @map("indexed_at") @db.DateTime(3)
+  outcomeRefreshedAt DateTime?             @map("outcome_refreshed_at") @db.DateTime(3)
+  /// Captured at.
+  archivedAt         DateTime              @map("archived_at") @db.DateTime(3)
+  deletedAt          DateTime?             @map("deleted_at") @db.DateTime(3)
+  createdAt          DateTime              @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt          DateTime              @updatedAt @map("updated_at") @db.DateTime(3)
 
   @@id([id, receivedAt])
   @@unique([messageId, receivedAt])
   @@index([organizationId, receivedAt])
-  @@index([organizationId, retainUntil])
+  @@index([organizationId, status, retainUntil])
   @@map("email_archives")
 }
 
-/// `criteria` holds custodians, date range and query.
+/// Legal hold (step 8.1 A12): created inside an eDiscovery case and immutable afterwards (change
+/// = create a new hold and release the old one). `criteria` = `archive-hold/1` when
+/// `criteria_version` is set; legacy rows (no case, `criteria_version` NULL) use the step 5.3
+/// subset `{custodians, from, to}`; unparsable criteria match every record (fail-safe).
+/// Evaluated authoritatively at disposal, organization deletion and quarantine purge.
 model ArchiveLegalHold {
   id               BigInt          @id @default(autoincrement()) @db.UnsignedBigInt
+  /// UUIDv7 (rows created before step 8.1 were backfilled with MySQL `UUID()`).
+  publicId         String          @unique @default(uuid(7)) @map("public_id") @db.Char(36)
   organizationId   BigInt          @map("organization_id") @db.UnsignedBigInt
+  caseId           BigInt?         @map("case_id") @db.UnsignedBigInt
   name             String          @db.VarChar(128)
   reason           String          @db.VarChar(1024)
   criteria         Json
+  /// `archive-hold/1`; NULL = legacy subset.
+  criteriaVersion  String?         @map("criteria_version") @db.VarChar(32)
   status           LegalHoldStatus @default(active)
   createdByUserId  BigInt?         @map("created_by_user_id") @db.UnsignedBigInt
   releasedAt       DateTime?       @map("released_at") @db.DateTime(3)
   releasedByUserId BigInt?         @map("released_by_user_id") @db.UnsignedBigInt
+  releaseReason    String?         @map("release_reason") @db.VarChar(1024)
+  rowVersion       Int             @default(1) @map("row_version") @db.UnsignedInt
   createdAt        DateTime        @default(now()) @map("created_at") @db.DateTime(3)
   updatedAt        DateTime        @updatedAt @map("updated_at") @db.DateTime(3)
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  createdBy    User?        @relation("LegalHoldCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
-  releasedBy   User?        @relation("LegalHoldReleasedBy", fields: [releasedByUserId], references: [id], onDelete: SetNull)
+  organization Organization    @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  case         EdiscoveryCase? @relation(fields: [caseId], references: [id], onDelete: Restrict)
+  createdBy    User?           @relation("LegalHoldCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  releasedBy   User?           @relation("LegalHoldReleasedBy", fields: [releasedByUserId], references: [id], onDelete: SetNull)
 
   @@index([organizationId, status])
+  @@index([caseId])
   @@map("archive_legal_holds")
+}
+
+/// PARTITIONED by RANGE COLUMNS(received_at), monthly (2 months, operational; step 8.1 §3, A2).
+/// Capture intent: one row per message in archive scope, created by the journal completeness
+/// sweep, the `email.archive` consumer or the policy reconciler (`INSERT … ON DUPLICATE KEY
+/// UPDATE` on `(message_id, received_at)`, sources OR-ed in); the capture scheduler's work queue
+/// (`status`, `next_check_at`, lease) and the anchor of the capture-issues view. Written by the
+/// archive-worker (the api only re-queues `failed` intents). No foreign keys.
+model ArchiveCaptureIntent {
+  id                 BigInt              @default(autoincrement()) @db.UnsignedBigInt
+  receivedAt         DateTime            @map("received_at") @db.DateTime(3)
+  organizationId     BigInt              @map("organization_id") @db.UnsignedBigInt
+  messageId          BigInt              @map("message_id") @db.UnsignedBigInt
+  direction          MessageDirection
+  sourceJournal      Boolean             @default(false) @map("source_journal")
+  sourcePolicy       Boolean             @default(false) @map("source_policy")
+  policyRuleRef      String?             @map("policy_rule_ref") @db.VarChar(128)
+  status             ArchiveIntentStatus @default(pending)
+  category           ArchiveCategory?
+  /// `category_excluded`, `not_entitled`, `archiving_disabled`, `policy_archive_disabled`,
+  /// `max_age`, … (codes only).
+  skipReason         String?             @map("skip_reason") @db.VarChar(64)
+  attempts           Int                 @default(0) @db.UnsignedSmallInt
+  nextCheckAt        DateTime            @map("next_check_at") @db.DateTime(3)
+  leaseUntil         DateTime?           @map("lease_until") @db.DateTime(3)
+  lastErrorCode      String?             @map("last_error_code") @db.VarChar(64)
+  settingsGeneration BigInt              @map("settings_generation") @db.UnsignedBigInt
+  /// email_archives.id of the captured record (no FK: partitioned).
+  archiveId          BigInt?             @map("archive_id") @db.UnsignedBigInt
+  capturedAt         DateTime?           @map("captured_at") @db.DateTime(3)
+  closedAt           DateTime?           @map("closed_at") @db.DateTime(3)
+  createdAt          DateTime            @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt          DateTime            @updatedAt @map("updated_at") @db.DateTime(3)
+
+  @@id([id, receivedAt])
+  @@unique([messageId, receivedAt])
+  @@index([status, nextCheckAt])
+  @@index([organizationId, status, receivedAt])
+  @@map("archive_capture_intents")
+}
+
+/// Tenant archive key version (step 8.1 A8, A9): 32 random bytes stored only wrapped under the
+/// root key (`wrapped_key`, SecretBox format `v1.<rootKid>.<iv>.<tag>.<ct>`, AAD bound to the
+/// organization and version). One `active` version per organization; `retired` versions are
+/// decrypt-only; `destroyed` (`wrapped_key` NULL) only by the organization purge. Version 1 is
+/// created by the archive-worker on first capture; rotations by the api. Never key material in
+/// any response.
+model ArchiveEncryptionKey {
+  id              BigInt           @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId        String           @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId  BigInt           @map("organization_id") @db.UnsignedBigInt
+  version         Int              @db.UnsignedInt
+  status          ArchiveKeyStatus
+  wrappedKey      String?          @map("wrapped_key") @db.VarChar(512)
+  /// ARCHIVE_ROOT_KEY_ID that wraps `wrapped_key` (root re-wrap finds the previous id).
+  rootKeyId       String           @map("root_key_id") @db.VarChar(32)
+  algorithm       String           @db.VarChar(32)
+  rotationReason  String?          @map("rotation_reason") @db.VarChar(256)
+  createdByUserId BigInt?          @map("created_by_user_id") @db.UnsignedBigInt
+  createdAt       DateTime         @default(now()) @map("created_at") @db.DateTime(3)
+  activatedAt     DateTime?        @map("activated_at") @db.DateTime(3)
+  retiredAt       DateTime?        @map("retired_at") @db.DateTime(3)
+  destroyedAt     DateTime?        @map("destroyed_at") @db.DateTime(3)
+
+  organization  Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  createdByUser User?        @relation("ArchiveEncryptionKeyCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([organizationId, version])
+  @@index([organizationId, status])
+  @@index([rootKeyId])
+  @@map("archive_encryption_keys")
+}
+
+/// Transient search-index work queue (step 8.1 A16): one row per record change, written in the
+/// same transaction as the change (capture, refresh, status, extension, disposal, organization
+/// purge); the archive-worker's index role claims rows in id order, builds each document from the
+/// current MySQL row and deletes applied rows. No foreign keys (rows outlive nothing; a
+/// `purge_org` op may be the last trace of an organization's records).
+model ArchiveIndexQueue {
+  id              BigInt         @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId  BigInt         @map("organization_id") @db.UnsignedBigInt
+  messageId       BigInt         @map("message_id") @db.UnsignedBigInt
+  receivedAt      DateTime       @map("received_at") @db.DateTime(3)
+  messagePublicId String         @map("message_public_id") @db.Char(36)
+  op              ArchiveIndexOp
+  attempts        Int            @default(0) @db.UnsignedSmallInt
+  availableAt     DateTime       @default(now()) @map("available_at") @db.DateTime(3)
+  lastErrorCode   String?        @map("last_error_code") @db.VarChar(64)
+  createdAt       DateTime       @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@index([availableAt, id])
+  @@index([organizationId, createdAt])
+  @@map("archive_index_queue")
+}
+
+/// Per organization and UTC day: MySQL count of live records vs the tenant alias `_count`
+/// (step 8.1 A15); eDiscovery completeness reads it (A18). Written by the archive-worker.
+model ArchiveIndexCheck {
+  id             BigInt                 @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId BigInt                 @map("organization_id") @db.UnsignedBigInt
+  day            DateTime               @db.Date
+  mysqlCount     Int                    @map("mysql_count") @db.UnsignedInt
+  indexCount     Int                    @map("index_count") @db.UnsignedInt
+  state          ArchiveIndexCheckState
+  checkedAt      DateTime               @map("checked_at") @db.DateTime(3)
+  repairedAt     DateTime?              @map("repaired_at") @db.DateTime(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  @@unique([organizationId, day])
+  @@map("archive_index_checks")
+}
+
+/// PARTITIONED by RANGE COLUMNS(requested_at), monthly, never dropped (compliance; step 8.1 A14,
+/// A21). Append-only disposal log and pipeline state of one archive record: inserted by the
+/// disposal decision transaction (state `shredded`, the record's data key already destroyed),
+/// advanced by the lifecycle role through `objects_deleted`, `index_deleted` to `completed`.
+/// `objects` = object keys and version ids (no content); `replica_status` = per replica target
+/// progress. `requested_by_user_id` has no FK (the trail survives the user). No foreign keys.
+model ArchiveDisposal {
+  id                BigInt                @default(autoincrement()) @db.UnsignedBigInt
+  requestedAt       DateTime              @map("requested_at") @db.DateTime(3)
+  organizationId    BigInt                @map("organization_id") @db.UnsignedBigInt
+  messageId         BigInt                @map("message_id") @db.UnsignedBigInt
+  messagePublicId   String                @map("message_public_id") @db.Char(36)
+  messageReceivedAt DateTime              @map("message_received_at") @db.DateTime(3)
+  archiveRecordId   BigInt                @map("archive_record_id") @db.UnsignedBigInt
+  reason            ArchiveDisposalReason
+  /// Hex SHA-256 of the original EML.
+  sha256            String                @db.Char(64)
+  sizeBytes         Int                   @map("size_bytes") @db.UnsignedInt
+  objects           Json
+  replicaStatus     Json?                 @map("replica_status")
+  state             ArchiveDisposalState  @default(shredded)
+  attempts          Int                   @default(0) @db.UnsignedSmallInt
+  nextAttemptAt     DateTime              @map("next_attempt_at") @db.DateTime(3)
+  lastErrorCode     String?               @map("last_error_code") @db.VarChar(64)
+  requestedByUserId BigInt?               @map("requested_by_user_id") @db.UnsignedBigInt
+  completedAt       DateTime?             @map("completed_at") @db.DateTime(3)
+  createdAt         DateTime              @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt         DateTime              @updatedAt @map("updated_at") @db.DateTime(3)
+
+  @@id([id, requestedAt])
+  @@index([state, nextAttemptAt])
+  @@index([organizationId, requestedAt])
+  @@map("archive_disposals")
+}
+
+/// Single-use download grant (step 8.1 A18, A19): an archived original (`kind = message`,
+/// `message_id` + `message_received_at`, no FK: partitioned target) or an eDiscovery export
+/// package (`kind = export`). The HMAC token carries `jti`; consumption is atomic
+/// (`consumed_at`). Written by the api only.
+model ArchiveDownloadGrant {
+  id                BigInt              @id @default(autoincrement()) @db.UnsignedBigInt
+  /// UUIDv7 token id.
+  jti               String              @unique @db.Char(36)
+  organizationId    BigInt              @map("organization_id") @db.UnsignedBigInt
+  userId            BigInt              @map("user_id") @db.UnsignedBigInt
+  kind              ArchiveDownloadKind
+  messageId         BigInt?             @map("message_id") @db.UnsignedBigInt
+  messageReceivedAt DateTime?           @map("message_received_at") @db.DateTime(3)
+  exportId          BigInt?             @map("export_id") @db.UnsignedBigInt
+  expiresAt         DateTime            @map("expires_at") @db.DateTime(3)
+  consumedAt        DateTime?           @map("consumed_at") @db.DateTime(3)
+  sourceIp          String?             @map("source_ip") @db.VarChar(45)
+  createdAt         DateTime            @default(now()) @map("created_at") @db.DateTime(3)
+
+  organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  user         User              @relation("ArchiveDownloadGrantUser", fields: [userId], references: [id], onDelete: Cascade)
+  export       EdiscoveryExport? @relation(fields: [exportId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@index([userId, createdAt])
+  @@map("archive_download_grants")
+}
+
+/// eDiscovery case (step 8.1 A18): name unique per organization, `open | closed` (close requires
+/// no active hold of the case), CAS on `row_version`. Written by the api only.
+model EdiscoveryCase {
+  id              BigInt               @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId        String               @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId  BigInt               @map("organization_id") @db.UnsignedBigInt
+  name            String               @db.VarChar(128)
+  description     String?              @db.VarChar(1024)
+  matterReference String?              @map("matter_reference") @db.VarChar(128)
+  status          EdiscoveryCaseStatus @default(open)
+  rowVersion      Int                  @default(1) @map("row_version") @db.UnsignedInt
+  createdByUserId BigInt?              @map("created_by_user_id") @db.UnsignedBigInt
+  updatedByUserId BigInt?              @map("updated_by_user_id") @db.UnsignedBigInt
+  closedByUserId  BigInt?              @map("closed_by_user_id") @db.UnsignedBigInt
+  closedAt        DateTime?            @map("closed_at") @db.DateTime(3)
+  createdAt       DateTime             @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt       DateTime             @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization  Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  createdByUser User?        @relation("EdiscoveryCaseCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  updatedByUser User?        @relation("EdiscoveryCaseUpdatedBy", fields: [updatedByUserId], references: [id], onDelete: SetNull)
+  closedByUser  User?        @relation("EdiscoveryCaseClosedBy", fields: [closedByUserId], references: [id], onDelete: SetNull)
+
+  custodians EdiscoveryCustodian[]
+  holds      ArchiveLegalHold[]
+  searches   EdiscoverySearch[]
+  exports    EdiscoveryExport[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId, status, id])
+  @@map("ediscovery_cases")
+}
+
+/// Custodian of a case (step 8.1 A18): a lower-cased address, optionally linked to a user.
+/// Replaced as a list by `PATCH /ediscovery/cases/{caseId}`. Written by the api only.
+model EdiscoveryCustodian {
+  id              BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId        String   @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  caseId          BigInt   @map("case_id") @db.UnsignedBigInt
+  organizationId  BigInt   @map("organization_id") @db.UnsignedBigInt
+  /// Lower-cased.
+  address         String   @db.VarChar(320)
+  userId          BigInt?  @map("user_id") @db.UnsignedBigInt
+  createdByUserId BigInt?  @map("created_by_user_id") @db.UnsignedBigInt
+  createdAt       DateTime @default(now()) @map("created_at") @db.DateTime(3)
+
+  case          EdiscoveryCase @relation(fields: [caseId], references: [id], onDelete: Restrict)
+  organization  Organization   @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  user          User?          @relation("EdiscoveryCustodianUser", fields: [userId], references: [id], onDelete: SetNull)
+  createdByUser User?          @relation("EdiscoveryCustodianCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([caseId, address])
+  @@map("ediscovery_custodians")
+}
+
+/// Case search (step 8.1 A18): criteria `archive-search/1`, requested by the api (`queued`) and
+/// executed by the archive-worker's ediscovery role through the tenant alias, every hit verified
+/// against MySQL. `index_complete` / `incomplete_reason` report completeness (never assumed).
+model EdiscoverySearch {
+  id                BigInt                 @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId          String                 @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  caseId            BigInt                 @map("case_id") @db.UnsignedBigInt
+  organizationId    BigInt                 @map("organization_id") @db.UnsignedBigInt
+  criteria          Json
+  /// Hex SHA-256 of the canonical criteria JSON.
+  criteriaSha256    String                 @map("criteria_sha256") @db.Char(64)
+  status            EdiscoverySearchStatus @default(queued)
+  hitCount          Int                    @default(0) @map("hit_count") @db.UnsignedInt
+  truncated         Boolean                @default(false)
+  indexComplete     Boolean?               @map("index_complete")
+  /// `index_lag`, `unverified_days`, `mismatched_days`.
+  incompleteReason  String?                @map("incomplete_reason") @db.VarChar(32)
+  errorCode         String?                @map("error_code") @db.VarChar(64)
+  requestedByUserId BigInt?                @map("requested_by_user_id") @db.UnsignedBigInt
+  startedAt         DateTime?              @map("started_at") @db.DateTime(3)
+  completedAt       DateTime?              @map("completed_at") @db.DateTime(3)
+  createdAt         DateTime               @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt         DateTime               @updatedAt @map("updated_at") @db.DateTime(3)
+
+  case            EdiscoveryCase @relation(fields: [caseId], references: [id], onDelete: Restrict)
+  organization    Organization   @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  requestedByUser User?          @relation("EdiscoverySearchRequestedBy", fields: [requestedByUserId], references: [id], onDelete: SetNull)
+
+  hits    EdiscoverySearchHit[]
+  exports EdiscoveryExport[]
+
+  @@index([caseId, id])
+  @@index([status, createdAt])
+  @@map("ediscovery_searches")
+}
+
+/// One verified hit of a case search (step 8.1 A18) with its review tag. `message_id` +
+/// `message_received_at` reference the archive record (no FK: partitioned target). Written by the
+/// archive-worker (hits) and the api (review tags).
+model EdiscoverySearchHit {
+  id                BigInt              @id @default(autoincrement()) @db.UnsignedBigInt
+  searchId          BigInt              @map("search_id") @db.UnsignedBigInt
+  organizationId    BigInt              @map("organization_id") @db.UnsignedBigInt
+  messageId         BigInt              @map("message_id") @db.UnsignedBigInt
+  messageReceivedAt DateTime            @map("message_received_at") @db.DateTime(3)
+  messagePublicId   String              @map("message_public_id") @db.Char(36)
+  reviewTag         EdiscoveryReviewTag @default(untagged) @map("review_tag")
+  reviewedByUserId  BigInt?             @map("reviewed_by_user_id") @db.UnsignedBigInt
+  reviewedAt        DateTime?           @map("reviewed_at") @db.DateTime(3)
+  createdAt         DateTime            @default(now()) @map("created_at") @db.DateTime(3)
+
+  search         EdiscoverySearch @relation(fields: [searchId], references: [id], onDelete: Restrict)
+  reviewedByUser User?            @relation("EdiscoverySearchHitReviewedBy", fields: [reviewedByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([searchId, messageId, messageReceivedAt])
+  @@index([searchId, id])
+  @@index([searchId, reviewTag, id])
+  @@map("ediscovery_search_hits")
+}
+
+/// eDiscovery export (step 8.1 A18): built from one completed search by the archive-worker into
+/// one encrypted ZIP object (`org/<org>/exports/<yyyy>/<mm>/<exportId>.bin`, tag
+/// `eg-object=archive-export`, never locked), with a signed `archive-export-manifest/1`.
+/// `wrapped_dek` = the export data key under tenant key `key_version`. Expires after
+/// ARCHIVE_EXPORT_TTL_HOURS (object deleted, status `expired`).
+model EdiscoveryExport {
+  id                   BigInt                 @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId             String                 @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  caseId               BigInt                 @map("case_id") @db.UnsignedBigInt
+  searchId             BigInt                 @map("search_id") @db.UnsignedBigInt
+  organizationId       BigInt                 @map("organization_id") @db.UnsignedBigInt
+  status               EdiscoveryExportStatus @default(queued)
+  /// Review tags selected (JSON array of EdiscoveryReviewTag values).
+  reviewTags           Json                   @map("review_tags")
+  acknowledgeMalicious Boolean                @default(false) @map("acknowledge_malicious")
+  itemCount            Int                    @default(0) @map("item_count") @db.UnsignedInt
+  maliciousCount       Int                    @default(0) @map("malicious_count") @db.UnsignedInt
+  packageBytes         BigInt?                @map("package_bytes") @db.UnsignedBigInt
+  /// Hex SHA-256 of the plaintext ZIP.
+  packageSha256        String?                @map("package_sha256") @db.Char(64)
+  manifestSha256       String?                @map("manifest_sha256") @db.Char(64)
+  signingKeyId         String?                @map("signing_key_id") @db.VarChar(32)
+  objectKey            String?                @map("object_key") @db.VarChar(512)
+  objectVersionId      String?                @map("object_version_id") @db.VarChar(255)
+  keyVersion           Int?                   @map("key_version") @db.UnsignedInt
+  wrappedDek           String?                @map("wrapped_dek") @db.VarChar(255)
+  expiresAt            DateTime?              @map("expires_at") @db.DateTime(3)
+  errorCode            String?                @map("error_code") @db.VarChar(64)
+  requestedByUserId    BigInt?                @map("requested_by_user_id") @db.UnsignedBigInt
+  completedAt          DateTime?              @map("completed_at") @db.DateTime(3)
+  createdAt            DateTime               @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt            DateTime               @updatedAt @map("updated_at") @db.DateTime(3)
+
+  case            EdiscoveryCase   @relation(fields: [caseId], references: [id], onDelete: Restrict)
+  search          EdiscoverySearch @relation(fields: [searchId], references: [id], onDelete: Restrict)
+  organization    Organization     @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  requestedByUser User?            @relation("EdiscoveryExportRequestedBy", fields: [requestedByUserId], references: [id], onDelete: SetNull)
+
+  downloadGrants ArchiveDownloadGrant[]
+
+  @@index([caseId, id])
+  @@index([status, createdAt])
+  @@index([status, expiresAt])
+  @@map("ediscovery_exports")
 }
 
 // ---------------------------------------------------------------------------------------------

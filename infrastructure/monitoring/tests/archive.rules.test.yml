@@ -1,0 +1,308 @@
+# promtool unit tests of rules/archive.rules.yml (step 8.1 A27):
+#   docker run --rm -v "$PWD/infrastructure/monitoring:/m:ro" --entrypoint promtool \
+#     prom/prometheus:v3.6.0 test rules /m/tests/archive.rules.test.yml
+rule_files:
+  - ../rules/archive.rules.yml
+evaluation_interval: 1m
+tests:
+  - name: worker down for 5 minutes
+    interval: 1m
+    input_series:
+      - series: up{job="archive-worker",instance="archive-worker-a"}
+        values: 1x3 0x10
+      - series: up{job="archive-worker",instance="archive-jobs-b"}
+        values: 1x13
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ArchiveWorkerDown
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: ArchiveWorkerDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: archive-worker
+              instance: archive-worker-a
+            exp_annotations:
+              summary: An archive-worker replica is down
+              description:
+                Prometheus cannot scrape an archive-worker replica for 5 minutes. Journal capture,
+                indexing, disposals or eDiscovery of that Deployment are not progressing; the mail
+                path is unaffected and capture resumes from its cursors.
+              runbook_url: docs/runbooks/archive.md#archiveworkerdown
+  - name: 'capture backlog: 6 h warning, 24 h critical (max over replicas)'
+    interval: 1m
+    input_series:
+      - series: archive_intent_oldest_pending_seconds{job="archive-worker",instance="a"}
+        values: 3600x15 30000x15 90000x15
+      - series: archive_intent_oldest_pending_seconds{job="archive-worker",instance="b"}
+        values: '0x45'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: ArchiveCaptureBacklog
+        exp_alerts: []
+      - eval_time: 28m
+        alertname: ArchiveCaptureBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations: &a1
+              summary: A capture intent has been stalled for more than 6 hours
+              description:
+                The oldest overdue or erroring capture intent is older than 6 hours (intents waiting
+                for a non-final or quarantined message do not count). Mail must be captured before
+                the 30-day mail-bucket lifecycle removes the original; check the capture scheduler,
+                S3 and the intents' last error codes.
+              runbook_url: docs/runbooks/archive.md#archivecapturebacklog
+      - eval_time: 43m
+        alertname: ArchiveCaptureBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations: *a1
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: A capture intent has been stalled for more than 24 hours
+              description:
+                The oldest overdue or erroring capture intent is older than 24 hours. Restore capture
+                now; past the intent max age (25 days) mail can no longer be archived.
+              runbook_url: docs/runbooks/archive.md#archivecapturebacklog
+  - name: 'aged-out captures (max_age) alert; other skip reasons do not'
+    interval: 1m
+    input_series:
+      - series: archive_capture_skipped_total{job="archive-worker",reason="category_excluded"}
+        values: 0+5x30
+      - series: archive_capture_skipped_total{job="archive-worker",reason="max_age"}
+        values: 0x15 1x15
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: ArchiveCaptureAgedOut
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ArchiveCaptureAgedOut
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Mail aged out of capture without being archived
+              description: >-
+                At least one capture intent was skipped in the last hour because it aged out
+                (max_age): the message did not reach a capturable state within the intent max age (a
+                message waiting in quarantine: 100 days) and was not archived. It is listed under
+                capture issues (status skipped).
+              runbook_url: docs/runbooks/archive.md#archivecaptureagedout
+  - name: lost and failed captures
+    interval: 1m
+    input_series:
+      - series: archive_capture_total{job="archive-worker",result="captured",source="journal",category="delivered"}
+        values: 0+10x30
+      - series: archive_capture_total{job="archive-worker",result="lost",source="journal",category="none"}
+        values: 0x10 1x20
+      - series: archive_capture_total{job="archive-worker",result="failed",source="policy",category="delivered"}
+        values: 0x15 2x15
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ArchiveCaptureLost
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: ArchiveCaptureLost
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Archive captures ended lost
+              description:
+                At least one capture intent ended lost in the last hour (message row gone or original
+                object missing). The message cannot be archived; it is listed under capture issues.
+              runbook_url: docs/runbooks/archive.md#archivecapturelost
+      - eval_time: 10m
+        alertname: ArchiveCaptureFailures
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ArchiveCaptureFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Archive captures failed
+              description:
+                At least one capture intent failed in the last hour (Object Lock unavailable for a
+                locked tenant, invalid facts, or retries past the intent max age). Check capture
+                issues and retry after fixing the cause.
+              runbook_url: docs/runbooks/archive.md#archivecapturefailures
+  - name: integrity failure pages at once and clears after 15 minutes
+    interval: 1m
+    input_series:
+      - series: archive_integrity_failures_total{job="archive-worker"}
+        values: 0x5 1x30
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: ArchiveIntegrityFailure
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: ArchiveIntegrityFailure
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: Archive integrity check failed
+              description:
+                A plaintext SHA-256 did not match (an original against email_messages.eml_sha256 at
+                capture, or an archived original during an export). Nothing was committed or
+                exported from that object; investigate storage corruption or tampering.
+              runbook_url: docs/runbooks/archive.md#archiveintegrityfailure
+      - eval_time: 30m
+        alertname: ArchiveIntegrityFailure
+        exp_alerts: []
+  - name: sweep stalled per sweep (non-leader replicas export 0)
+    interval: 1m
+    input_series:
+      - series: archive_sweep_lag_seconds{job="archive-worker",instance="a",sweep="journal"}
+        values: 120x5 4000x30
+      - series: archive_sweep_lag_seconds{job="archive-worker",instance="b",sweep="journal"}
+        values: '0x35'
+      - series: archive_sweep_lag_seconds{job="archive-worker",instance="a",sweep="policy"}
+        values: 300x35
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ArchiveSweepStalled
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: ArchiveSweepStalled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              sweep: journal
+            exp_annotations:
+              summary: An archive capture sweep is more than 30 minutes behind
+              description:
+                The journal completeness sweep or the policy reconciler has not passed rows newer than
+                30 minutes. New journal intents are delayed; check the sweep leader's logs and the
+                writer.
+              runbook_url: docs/runbooks/archive.md#archivesweepstalled
+  - name: index lag and reconciliation mismatch
+    interval: 1m
+    input_series:
+      - series: archive_index_oldest_seconds{job="archive-worker",instance="a"}
+        values: 10x5 1200x20
+      - series: archive_reconcile_days_total{job="archive-worker",result="ok"}
+        values: 0+3x25
+      - series: archive_reconcile_days_total{job="archive-worker",result="mismatch"}
+        values: 0x10 1x15
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: ArchiveIndexLag
+        exp_alerts: []
+      - eval_time: 18m
+        alertname: ArchiveIndexLag
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Archive search index is more than 15 minutes behind
+              description:
+                The oldest archive index operation is older than 15 minutes. Search and eDiscovery
+                results are incomplete (searches report index_lag); check OpenSearch and the index
+                sync leader.
+              runbook_url: docs/runbooks/archive.md#archiveindexlag
+      - eval_time: 9m
+        alertname: ArchiveReconcileMismatch
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: ArchiveReconcileMismatch
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Archive index reconciliation found mismatched days
+              description:
+                The per-day reconciliation found MySQL and OpenSearch counts that differ and
+                re-enqueued those days. A repeated mismatch means documents are lost or written
+                elsewhere.
+              runbook_url: docs/runbooks/archive.md#archivereconcilemismatch
+  - name: disposal stuck (open > 24 h) and failed
+    interval: 1m
+    input_series:
+      - series: archive_disposal_oldest_pending_seconds{job="archive-worker",instance="jobs-a"}
+        values: 3600x10 90000x40
+      - series: archive_disposals_total{job="archive-worker",stage="objects",result="ok"}
+        values: 0+1x50
+      - series: archive_disposals_total{job="archive-worker",stage="row",result="failed"}
+        values: 0x20 1x30
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: ArchiveDisposalStuck
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations: &a2
+              summary: An archive disposal failed permanently
+              description:
+                A disposal reached ARCHIVE_DISPOSAL_MAX_ATTEMPTS. Its content is already unreadable
+                (crypto-shredded), but objects, replica copies, the index document or the row may
+                remain; finish it by hand.
+              runbook_url: docs/runbooks/archive.md#archivedisposalstuck
+      - eval_time: 45m
+        alertname: ArchiveDisposalStuck
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: An archive disposal has been open for more than 24 hours
+              description:
+                'A disposal (already crypto-shredded) has not completed within 24 hours: objects still
+                locked, S3 or OpenSearch failures, or a stuck index delete. Check
+                archive_disposals.'
+              runbook_url: docs/runbooks/archive.md#archivedisposalstuck
+          - exp_labels:
+              severity: critical
+            exp_annotations: *a2
+      - eval_time: 15m
+        alertname: ArchiveDisposalStuck
+        exp_alerts: []
+  - name: root re-wrap pending for 2 hours
+    interval: 1m
+    input_series:
+      - series: archive_root_rewrap_pending{job="archive-worker",instance="jobs-a"}
+        values: 5x200 0x60
+    alert_rule_test:
+      - eval_time: 1h
+        alertname: ArchiveRootKeyRewrapPending
+        exp_alerts: []
+      - eval_time: 3h
+        alertname: ArchiveRootKeyRewrapPending
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Tenant keys are still wrapped under the previous archive root key
+              description:
+                A root key rotation has not finished re-wrapping every tenant key after 2 hours. Do not
+                remove ARCHIVE_ROOT_KEY_PREVIOUS until the count is 0.
+              runbook_url: docs/runbooks/archive.md#archiverootkeyrewrappending
+      - eval_time: 4h
+        alertname: ArchiveRootKeyRewrapPending
+        exp_alerts: []
+  - name: export failures
+    interval: 1m
+    input_series:
+      - series: archive_exports_total{job="archive-worker",result="completed"}
+        values: 0+1x20
+      - series: archive_exports_total{job="archive-worker",result="failed"}
+        values: 0x10 1x10
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: ArchiveExportFailures
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: ArchiveExportFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: eDiscovery exports failed
+              description: At least one eDiscovery export failed in the last hour (bounds, malicious
+                acknowledgement, content no longer available, integrity or storage errors). The
+                error code is on the export row.
+              runbook_url: docs/runbooks/archive.md#archiveexportfailures

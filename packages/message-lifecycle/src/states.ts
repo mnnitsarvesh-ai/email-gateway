@@ -8,7 +8,10 @@ import {
 /**
  * The fifteen lifecycle states (step 3.3 L2, ADR-0025) and the actor roles (L3). The lists are
  * defined once in `@email-gateway/event-contracts` (events carry them) and re-exported here;
- * `states.test.ts` asserts that they equal the Prisma `MessageStatus` enum.
+ * `states.test.ts` asserts that they equal the Prisma `MessageStatus` enum. `archived` and the
+ * role `archive` are reserved since step 8.1 retired edge E25 (docs/plan/steps/
+ * 23-journaling-archiving.md A25, ADR-0064): the append-only enum keeps the value, but no edge
+ * produces it and the archive-worker never changes `email_messages.status`.
  */
 export { ACTOR_ROLES, MESSAGE_STATES };
 
@@ -37,7 +40,7 @@ export const STATE_RANK: Readonly<Record<MessageState, number>> = {
   expired: 8,
 };
 
-/** No automatic processing leaves these states (L2). */
+/** No automatic processing leaves these states (L2). `archived` is reserved (E25 retired, 8.1). */
 export const FINAL_STATES: readonly MessageState[] = [
   'delivered',
   'rejected',

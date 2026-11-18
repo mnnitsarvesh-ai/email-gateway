@@ -25,8 +25,9 @@ import { stack } from './support/env';
  * step 5.1 (15-risk-scoring.md §3), the policy engine tables and columns of step 5.2
  * (16-policy-engine.md §3), the quarantine tables and columns of step 5.3
  * (17-quarantine.md §3), the webhook and notification tables and columns of step 6.2
- * (19-webhooks-notifications.md §3) and the explorer search keys, driver indexes and saved views
- * of step 7.2 (21-email-explorer-details.md §3.1).
+ * (19-webhooks-notifications.md §3), the explorer search keys, driver indexes and saved views
+ * of step 7.2 (21-email-explorer-details.md §3.1) and the journaling and archiving tables and
+ * columns of step 8.1 (23-journaling-archiving.md §3).
  */
 const prisma = new PrismaClient({ datasourceUrl: stack.databaseUrl() });
 
@@ -76,7 +77,31 @@ const PARTITIONED: Record<string, string> = {
   // Step 6.2 §3: stored public webhook events and delivery attempts.
   webhook_events: 'occurred_at',
   webhook_delivery_attempts: 'attempted_at',
+  // Step 8.1 §3: capture intents (operational) and the disposal log (compliance).
+  archive_capture_intents: 'received_at',
+  archive_disposals: 'requested_at',
 };
+
+/**
+ * The step 8.1 NOT NULL columns of an `email_archives` row without a default (§3 item 4), for
+ * fixtures that only need a live record (registry purge, organization deletion). Synthetic
+ * metadata; no content.
+ */
+const ARCHIVE_RECORD_FIXTURE = {
+  messagePublicId: '00000000-0000-7000-8000-000000000000',
+  direction: 'inbound',
+  category: 'delivered',
+  messageState: 'delivered',
+  envelopeFrom: 'sender@example.test',
+  parties: { v: 1, from: 'sender@example.test', headerFrom: null, recipients: [] },
+  recipientCount: 1,
+  objects: {},
+  storedBytes: 1n,
+  encryptionFormat: 'archive-object/1',
+  keyVersion: 1,
+  scanRounds: [],
+  settingsGeneration: 1n,
+} satisfies Partial<Prisma.EmailArchiveUncheckedCreateInput>;
 
 /** Tables with no `organization_id`: platform catalogs, the root, a join table, the ledger and
  * the maintenance job's watermarks. */
@@ -216,6 +241,18 @@ const TENANT_OWNED = [
   'archive_retention_policies',
   'email_archives',
   'archive_legal_holds',
+  // Step 8.1 §3.
+  'archive_capture_intents',
+  'archive_encryption_keys',
+  'archive_index_queue',
+  'archive_index_checks',
+  'archive_disposals',
+  'archive_download_grants',
+  'ediscovery_cases',
+  'ediscovery_custodians',
+  'ediscovery_searches',
+  'ediscovery_search_hits',
+  'ediscovery_exports',
   'message_outbox',
   'audit_logs',
   'webhook_subscriptions',
@@ -235,17 +272,17 @@ const TENANT_OWNED = [
 const ALL_TABLES = [...NOT_TENANT_OWNED, ...TENANT_OWNED];
 
 describe('MySQL schema', () => {
-  it('has exactly the 121 data-model tables plus _prisma_migrations', async () => {
+  it('has exactly the 132 data-model tables plus _prisma_migrations', async () => {
     const rows = await prisma.$queryRaw<{ name: string }[]>`
       SELECT TABLE_NAME AS name FROM information_schema.TABLES
       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'`;
-    expect(ALL_TABLES).toHaveLength(121);
-    expect(new Set(ALL_TABLES).size).toBe(121);
+    expect(ALL_TABLES).toHaveLength(132);
+    expect(new Set(ALL_TABLES).size).toBe(132);
     expect(rows.map((r) => r.name).sort()).toEqual([...ALL_TABLES, '_prisma_migrations'].sort());
   });
 
-  it('partitions the 33 high-volume tables by RANGE COLUMNS with a pmax partition', async () => {
-    expect(Object.keys(PARTITIONED)).toHaveLength(33);
+  it('partitions the 35 high-volume tables by RANGE COLUMNS with a pmax partition', async () => {
+    expect(Object.keys(PARTITIONED)).toHaveLength(35);
     const rows = await prisma.$queryRaw<
       { tableName: string; method: string; expression: string; partitionName: string }[]
     >`
@@ -1818,6 +1855,7 @@ describe('message_identities retention purge', () => {
           retainUntil: new Date('2033-01-01T00:00:00Z'),
           archivedAt: receivedAt,
           deletedAt,
+          ...ARCHIVE_RECORD_FIXTURE,
         },
       });
     try {
@@ -5323,6 +5361,589 @@ describe('email explorer schema (step 7.2, docs/plan/steps/21-email-explorer-det
       await prisma.savedView.deleteMany({ where: { organizationId } });
       await prisma.emailRecipient.deleteMany({ where: { organizationId, receivedAt } });
       await prisma.emailMessage.deleteMany({ where: { organizationId, receivedAt } });
+      await prisma.user.deleteMany({ where: { organizationId } });
+      await cleanup();
+    }
+  });
+});
+
+describe('step 8.1 journaling and archiving schema (23-journaling-archiving.md §3)', () => {
+  const foreignKeys = async (table: string) =>
+    prisma.$queryRaw<{ columnName: string; referenced: string; onDelete: string }[]>`
+      SELECT k.COLUMN_NAME AS columnName, k.REFERENCED_TABLE_NAME AS referenced,
+             r.DELETE_RULE AS onDelete
+      FROM information_schema.KEY_COLUMN_USAGE k
+      JOIN information_schema.REFERENTIAL_CONSTRAINTS r
+        ON r.CONSTRAINT_SCHEMA = k.TABLE_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+      WHERE k.TABLE_SCHEMA = DATABASE() AND k.TABLE_NAME = ${table}
+        AND k.REFERENCED_TABLE_NAME IS NOT NULL
+      ORDER BY k.COLUMN_NAME`;
+  const expectColumns = async (table: string, expected: Record<string, [string, string]>) => {
+    const cols = await columns([table]);
+    for (const [column, [columnType, nullable]] of Object.entries(expected)) {
+      expect(cols.get(`${table}.${column}`), `${table}.${column}`).toMatchObject({
+        columnType,
+        nullable,
+      });
+    }
+    return cols;
+  };
+  const exactColumns = async (table: string, expected: Record<string, [string, string]>) => {
+    const cols = await expectColumns(table, expected);
+    expect([...cols.keys()].map((k) => k.split('.')[1]!).sort(), table).toEqual(
+      Object.keys(expected).sort(),
+    );
+    return cols;
+  };
+  const CATEGORY = "enum('delivered','rejected','quarantined','failed')";
+  const DIRECTION = "enum('inbound','outbound','internal')";
+  /** Unique keys of a partitioned table must end with its partition column (ADR-0014). */
+  const expectUniqueKeysEndWith = async (table: string, column: string) => {
+    for (const [name, index] of await indexes(table)) {
+      if (index.unique) expect(index.columns.at(-1), `${table}.${name}`).toBe(column);
+    }
+  };
+
+  it('extends archive_settings with the settings document, CAS and generation; scope and encryption_key_ref stay (retired)', async () => {
+    const cols = await expectColumns('archive_settings', {
+      settings: ['json', 'YES'],
+      settings_sha256: ['char(64)', 'YES'],
+      generation: ['bigint unsigned', 'NO'],
+      row_version: ['int unsigned', 'NO'],
+      journal_enabled_at: ['datetime(3)', 'YES'],
+      updated_by_user_id: ['bigint unsigned', 'YES'],
+      // Retired by step 8.1 (A22), kept for the rolling upgrade.
+      scope: ["enum('all','inbound','outbound','internal')", 'NO'],
+      encryption_key_ref: ['varchar(512)', 'YES'],
+      object_lock_mode: ["enum('none','governance','compliance')", 'NO'],
+    });
+    expect(cols.get('archive_settings.generation')?.columnDefault).toBe('0');
+    expect(cols.get('archive_settings.row_version')?.columnDefault).toBe('1');
+    expect(await foreignKeys('archive_settings')).toEqual([
+      {
+        columnName: 'default_retention_policy_id',
+        referenced: 'archive_retention_policies',
+        onDelete: 'SET NULL',
+      },
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+      { columnName: 'updated_by_user_id', referenced: 'users', onDelete: 'SET NULL' },
+    ]);
+  });
+
+  it('extends archive_retention_policies (public id, CAS, soft delete, actors; is_default retired) and archive_legal_holds (case link)', async () => {
+    await expectColumns('archive_retention_policies', {
+      public_id: ['char(36)', 'NO'],
+      row_version: ['int unsigned', 'NO'],
+      deleted_at: ['datetime(3)', 'YES'],
+      created_by_user_id: ['bigint unsigned', 'YES'],
+      updated_by_user_id: ['bigint unsigned', 'YES'],
+      is_default: ['tinyint(1)', 'NO'],
+    });
+    const policyIdx = await indexes('archive_retention_policies');
+    expect(policyIdx.get('archive_retention_policies_public_id_key')).toEqual({
+      columns: ['public_id'],
+      unique: true,
+    });
+    expect(
+      policyIdx.get('archive_retention_policies_organization_id_deleted_at_priori_idx'),
+    ).toEqual({
+      columns: ['organization_id', 'deleted_at', 'priority'],
+      unique: false,
+    });
+    expect(await foreignKeys('archive_retention_policies')).toEqual([
+      { columnName: 'created_by_user_id', referenced: 'users', onDelete: 'SET NULL' },
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+      { columnName: 'updated_by_user_id', referenced: 'users', onDelete: 'SET NULL' },
+    ]);
+
+    await expectColumns('archive_legal_holds', {
+      public_id: ['char(36)', 'NO'],
+      case_id: ['bigint unsigned', 'YES'],
+      criteria_version: ['varchar(32)', 'YES'],
+      release_reason: ['varchar(1024)', 'YES'],
+      row_version: ['int unsigned', 'NO'],
+    });
+    const holdIdx = await indexes('archive_legal_holds');
+    expect(holdIdx.get('archive_legal_holds_public_id_key')).toEqual({
+      columns: ['public_id'],
+      unique: true,
+    });
+    expect(holdIdx.get('archive_legal_holds_case_id_idx')).toEqual({
+      columns: ['case_id'],
+      unique: false,
+    });
+    expect(await foreignKeys('archive_legal_holds')).toEqual([
+      { columnName: 'case_id', referenced: 'ediscovery_cases', onDelete: 'RESTRICT' },
+      { columnName: 'created_by_user_id', referenced: 'users', onDelete: 'SET NULL' },
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+      { columnName: 'released_by_user_id', referenced: 'users', onDelete: 'SET NULL' },
+    ]);
+  });
+
+  it('alters the partitioned email_archives into the archive record (not re-created; expiry index replaced)', async () => {
+    const cols = await expectColumns('email_archives', {
+      message_public_id: ['char(36)', 'NO'],
+      direction: [DIRECTION, 'NO'],
+      captured_by_journal: ['tinyint(1)', 'NO'],
+      captured_by_policy: ['tinyint(1)', 'NO'],
+      policy_rule_ref: ['varchar(128)', 'YES'],
+      category: [CATEGORY, 'NO'],
+      status: ["enum('active','expiry_review','disposing')", 'NO'],
+      message_state: [
+        "enum('received','persisted','scanning','scanned','scan_failed','policy_evaluated','approved','quarantined','held_for_review','rejected','delivery_pending','delivery_retry','delivered','archived','expired')",
+        'NO',
+      ],
+      message_state_reason: ['varchar(64)', 'YES'],
+      envelope_from: ['varchar(320)', 'NO'],
+      header_from: ['varchar(320)', 'YES'],
+      subject: ['varchar(998)', 'YES'],
+      internet_message_id: ['varchar(998)', 'YES'],
+      parties: ['json', 'NO'],
+      recipient_count: ['smallint unsigned', 'NO'],
+      attachment_count: ['smallint unsigned', 'NO'],
+      objects: ['json', 'NO'],
+      stored_bytes: ['bigint unsigned', 'NO'],
+      encryption_format: ['varchar(32)', 'NO'],
+      key_version: ['int unsigned', 'NO'],
+      wrapped_dek: ['varchar(255)', 'YES'],
+      lock_mode: ["enum('none','governance','compliance')", 'NO'],
+      lock_until: ['datetime(3)', 'YES'],
+      expiry_action: ["enum('delete','review')", 'NO'],
+      final_verdict: [
+        "enum('clean','spam','bulk','phishing','malware','bec','dlp_violation','suspicious','unknown')",
+        'YES',
+      ],
+      final_action: [
+        "enum('deliver','tag','quarantine','discard','reject','require_approval','partial')",
+        'YES',
+      ],
+      risk_score: ['smallint unsigned', 'YES'],
+      malicious: ['tinyint(1)', 'NO'],
+      scan_rounds: ['json', 'NO'],
+      settings_generation: ['bigint unsigned', 'NO'],
+      indexed_at: ['datetime(3)', 'YES'],
+      outcome_refreshed_at: ['datetime(3)', 'YES'],
+      // Step 1.1 columns kept with a defined meaning.
+      archive_object_key: ['varchar(512)', 'NO'],
+      sha256: ['char(64)', 'NO'],
+      size_bytes: ['int unsigned', 'NO'],
+      retain_until: ['datetime(3)', 'NO'],
+      legal_hold: ['tinyint(1)', 'NO'],
+      deleted_at: ['datetime(3)', 'YES'],
+    });
+    expect(cols.get('email_archives.status')?.columnDefault).toBe('active');
+    expect(cols.get('email_archives.lock_mode')?.columnDefault).toBe('none');
+    // No content-like column: metadata only (§2.0 invariant 1).
+    const types = [...cols.values()].map((c) => c.columnType);
+    expect(types.some((t) => /text|blob/i.test(t))).toBe(false);
+    const idx = await indexes('email_archives');
+    expect(idx.get('email_archives_organization_id_status_retain_until_idx')).toEqual({
+      columns: ['organization_id', 'status', 'retain_until'],
+      unique: false,
+    });
+    expect(idx.has('email_archives_organization_id_retain_until_idx')).toBe(false);
+    expect(idx.get('email_archives_message_id_received_at_key')).toEqual({
+      columns: ['message_id', 'received_at'],
+      unique: true,
+    });
+    expect(idx.get('email_archives_organization_id_received_at_idx')).toEqual({
+      columns: ['organization_id', 'received_at'],
+      unique: false,
+    });
+    expect(idx.get('PRIMARY')).toEqual({ columns: ['id', 'received_at'], unique: true });
+    await expectUniqueKeysEndWith('email_archives', 'received_at');
+  });
+
+  it('has archive_capture_intents (partitioned by received_at) with exactly the §3 columns and keys', async () => {
+    await exactColumns('archive_capture_intents', {
+      id: ['bigint unsigned', 'NO'],
+      received_at: ['datetime(3)', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      message_id: ['bigint unsigned', 'NO'],
+      direction: [DIRECTION, 'NO'],
+      source_journal: ['tinyint(1)', 'NO'],
+      source_policy: ['tinyint(1)', 'NO'],
+      policy_rule_ref: ['varchar(128)', 'YES'],
+      status: ["enum('pending','captured_open','closed','skipped','lost','failed')", 'NO'],
+      category: [CATEGORY, 'YES'],
+      skip_reason: ['varchar(64)', 'YES'],
+      attempts: ['smallint unsigned', 'NO'],
+      next_check_at: ['datetime(3)', 'NO'],
+      lease_until: ['datetime(3)', 'YES'],
+      last_error_code: ['varchar(64)', 'YES'],
+      settings_generation: ['bigint unsigned', 'NO'],
+      archive_id: ['bigint unsigned', 'YES'],
+      captured_at: ['datetime(3)', 'YES'],
+      closed_at: ['datetime(3)', 'YES'],
+      created_at: ['datetime(3)', 'NO'],
+      updated_at: ['datetime(3)', 'NO'],
+    });
+    const idx = await indexes('archive_capture_intents');
+    expect(idx.get('PRIMARY')).toEqual({ columns: ['id', 'received_at'], unique: true });
+    expect(idx.get('archive_capture_intents_message_id_received_at_key')).toEqual({
+      columns: ['message_id', 'received_at'],
+      unique: true,
+    });
+    expect(idx.get('archive_capture_intents_status_next_check_at_idx')).toEqual({
+      columns: ['status', 'next_check_at'],
+      unique: false,
+    });
+    expect(idx.get('archive_capture_intents_organization_id_status_received_at_idx')).toEqual({
+      columns: ['organization_id', 'status', 'received_at'],
+      unique: false,
+    });
+    await expectUniqueKeysEndWith('archive_capture_intents', 'received_at');
+    expect(await foreignKeys('archive_capture_intents')).toEqual([]);
+  });
+
+  it('has archive_disposals (partitioned by requested_at, never dropped) with exactly the §3 columns and keys', async () => {
+    await exactColumns('archive_disposals', {
+      id: ['bigint unsigned', 'NO'],
+      requested_at: ['datetime(3)', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      message_id: ['bigint unsigned', 'NO'],
+      message_public_id: ['char(36)', 'NO'],
+      message_received_at: ['datetime(3)', 'NO'],
+      archive_record_id: ['bigint unsigned', 'NO'],
+      reason: ["enum('retention_expired','review_disposed','organization_deleted')", 'NO'],
+      sha256: ['char(64)', 'NO'],
+      size_bytes: ['int unsigned', 'NO'],
+      objects: ['json', 'NO'],
+      replica_status: ['json', 'YES'],
+      state: ["enum('shredded','objects_deleted','index_deleted','completed','failed')", 'NO'],
+      attempts: ['smallint unsigned', 'NO'],
+      next_attempt_at: ['datetime(3)', 'NO'],
+      last_error_code: ['varchar(64)', 'YES'],
+      requested_by_user_id: ['bigint unsigned', 'YES'],
+      completed_at: ['datetime(3)', 'YES'],
+      created_at: ['datetime(3)', 'NO'],
+      updated_at: ['datetime(3)', 'NO'],
+    });
+    const idx = await indexes('archive_disposals');
+    expect(idx.get('PRIMARY')).toEqual({ columns: ['id', 'requested_at'], unique: true });
+    expect(idx.get('archive_disposals_state_next_attempt_at_idx')).toEqual({
+      columns: ['state', 'next_attempt_at'],
+      unique: false,
+    });
+    expect(idx.get('archive_disposals_organization_id_requested_at_idx')).toEqual({
+      columns: ['organization_id', 'requested_at'],
+      unique: false,
+    });
+    await expectUniqueKeysEndWith('archive_disposals', 'requested_at');
+    expect(await foreignKeys('archive_disposals')).toEqual([]);
+  });
+
+  it('has the nine unpartitioned step 8.1 tables with their keys and foreign keys', async () => {
+    for (const table of [
+      'archive_encryption_keys',
+      'archive_index_queue',
+      'archive_index_checks',
+      'archive_download_grants',
+      'ediscovery_cases',
+      'ediscovery_custodians',
+      'ediscovery_searches',
+      'ediscovery_search_hits',
+      'ediscovery_exports',
+    ]) {
+      expect(PARTITIONED, table).not.toHaveProperty(table);
+    }
+    const unique = (columnsList: string[]) => ({ columns: columnsList, unique: true });
+    const plain = (columnsList: string[]) => ({ columns: columnsList, unique: false });
+    const expectIndexes = async (
+      table: string,
+      expected: Record<string, { columns: string[]; unique: boolean }>,
+    ) => {
+      const idx = await indexes(table);
+      for (const [name, value] of Object.entries(expected))
+        expect(idx.get(name), name).toEqual(value);
+    };
+
+    await expectColumns('archive_encryption_keys', {
+      public_id: ['char(36)', 'NO'],
+      version: ['int unsigned', 'NO'],
+      status: ["enum('active','retired','destroyed')", 'NO'],
+      wrapped_key: ['varchar(512)', 'YES'],
+      root_key_id: ['varchar(32)', 'NO'],
+      algorithm: ['varchar(32)', 'NO'],
+    });
+    await expectIndexes('archive_encryption_keys', {
+      archive_encryption_keys_public_id_key: unique(['public_id']),
+      archive_encryption_keys_organization_id_version_key: unique(['organization_id', 'version']),
+      archive_encryption_keys_organization_id_status_idx: plain(['organization_id', 'status']),
+      archive_encryption_keys_root_key_id_idx: plain(['root_key_id']),
+    });
+    expect(await foreignKeys('archive_encryption_keys')).toEqual([
+      { columnName: 'created_by_user_id', referenced: 'users', onDelete: 'SET NULL' },
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+    ]);
+
+    await expectColumns('archive_index_queue', {
+      message_public_id: ['char(36)', 'NO'],
+      op: ["enum('upsert','delete','purge_org')", 'NO'],
+      available_at: ['datetime(3)', 'NO'],
+    });
+    await expectIndexes('archive_index_queue', {
+      archive_index_queue_available_at_id_idx: plain(['available_at', 'id']),
+      archive_index_queue_organization_id_created_at_idx: plain(['organization_id', 'created_at']),
+    });
+    expect(await foreignKeys('archive_index_queue')).toEqual([]);
+
+    await expectColumns('archive_index_checks', {
+      day: ['date', 'NO'],
+      state: ["enum('ok','mismatch','repairing')", 'NO'],
+    });
+    await expectIndexes('archive_index_checks', {
+      archive_index_checks_organization_id_day_key: unique(['organization_id', 'day']),
+    });
+    expect(await foreignKeys('archive_index_checks')).toEqual([
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+    ]);
+
+    await expectColumns('archive_download_grants', {
+      jti: ['char(36)', 'NO'],
+      kind: ["enum('message','export')", 'NO'],
+      message_id: ['bigint unsigned', 'YES'],
+      message_received_at: ['datetime(3)', 'YES'],
+      export_id: ['bigint unsigned', 'YES'],
+    });
+    await expectIndexes('archive_download_grants', {
+      archive_download_grants_jti_key: unique(['jti']),
+      archive_download_grants_expires_at_idx: plain(['expires_at']),
+      archive_download_grants_user_id_created_at_idx: plain(['user_id', 'created_at']),
+    });
+    expect(await foreignKeys('archive_download_grants')).toEqual([
+      { columnName: 'export_id', referenced: 'ediscovery_exports', onDelete: 'CASCADE' },
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+      { columnName: 'user_id', referenced: 'users', onDelete: 'CASCADE' },
+    ]);
+
+    await expectColumns('ediscovery_cases', {
+      name: ['varchar(128)', 'NO'],
+      status: ["enum('open','closed')", 'NO'],
+      row_version: ['int unsigned', 'NO'],
+    });
+    await expectIndexes('ediscovery_cases', {
+      ediscovery_cases_public_id_key: unique(['public_id']),
+      ediscovery_cases_organization_id_name_key: unique(['organization_id', 'name']),
+      ediscovery_cases_organization_id_status_id_idx: plain(['organization_id', 'status', 'id']),
+    });
+    expect(await foreignKeys('ediscovery_cases')).toEqual([
+      { columnName: 'closed_by_user_id', referenced: 'users', onDelete: 'SET NULL' },
+      { columnName: 'created_by_user_id', referenced: 'users', onDelete: 'SET NULL' },
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+      { columnName: 'updated_by_user_id', referenced: 'users', onDelete: 'SET NULL' },
+    ]);
+
+    await expectIndexes('ediscovery_custodians', {
+      ediscovery_custodians_public_id_key: unique(['public_id']),
+      ediscovery_custodians_case_id_address_key: unique(['case_id', 'address']),
+    });
+    expect(await foreignKeys('ediscovery_custodians')).toEqual([
+      { columnName: 'case_id', referenced: 'ediscovery_cases', onDelete: 'RESTRICT' },
+      { columnName: 'created_by_user_id', referenced: 'users', onDelete: 'SET NULL' },
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+      { columnName: 'user_id', referenced: 'users', onDelete: 'SET NULL' },
+    ]);
+
+    await expectColumns('ediscovery_searches', {
+      criteria: ['json', 'NO'],
+      criteria_sha256: ['char(64)', 'NO'],
+      status: ["enum('queued','running','completed','failed')", 'NO'],
+      index_complete: ['tinyint(1)', 'YES'],
+      incomplete_reason: ['varchar(32)', 'YES'],
+    });
+    await expectIndexes('ediscovery_searches', {
+      ediscovery_searches_public_id_key: unique(['public_id']),
+      ediscovery_searches_case_id_id_idx: plain(['case_id', 'id']),
+      ediscovery_searches_status_created_at_idx: plain(['status', 'created_at']),
+    });
+    expect(await foreignKeys('ediscovery_searches')).toEqual([
+      { columnName: 'case_id', referenced: 'ediscovery_cases', onDelete: 'RESTRICT' },
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+      { columnName: 'requested_by_user_id', referenced: 'users', onDelete: 'SET NULL' },
+    ]);
+
+    await expectColumns('ediscovery_search_hits', {
+      review_tag: ["enum('untagged','relevant','not_relevant','privileged')", 'NO'],
+      message_public_id: ['char(36)', 'NO'],
+    });
+    await expectIndexes('ediscovery_search_hits', {
+      ediscovery_search_hits_search_id_message_id_message_received_key: unique([
+        'search_id',
+        'message_id',
+        'message_received_at',
+      ]),
+      ediscovery_search_hits_search_id_id_idx: plain(['search_id', 'id']),
+      ediscovery_search_hits_search_id_review_tag_id_idx: plain(['search_id', 'review_tag', 'id']),
+    });
+    expect(await foreignKeys('ediscovery_search_hits')).toEqual([
+      { columnName: 'reviewed_by_user_id', referenced: 'users', onDelete: 'SET NULL' },
+      { columnName: 'search_id', referenced: 'ediscovery_searches', onDelete: 'RESTRICT' },
+    ]);
+
+    await expectColumns('ediscovery_exports', {
+      status: ["enum('queued','building','completed','failed','expired')", 'NO'],
+      review_tags: ['json', 'NO'],
+      package_sha256: ['char(64)', 'YES'],
+      wrapped_dek: ['varchar(255)', 'YES'],
+    });
+    await expectIndexes('ediscovery_exports', {
+      ediscovery_exports_public_id_key: unique(['public_id']),
+      ediscovery_exports_case_id_id_idx: plain(['case_id', 'id']),
+      ediscovery_exports_status_created_at_idx: plain(['status', 'created_at']),
+      ediscovery_exports_status_expires_at_idx: plain(['status', 'expires_at']),
+    });
+    expect(await foreignKeys('ediscovery_exports')).toEqual([
+      { columnName: 'case_id', referenced: 'ediscovery_cases', onDelete: 'RESTRICT' },
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+      { columnName: 'requested_by_user_id', referenced: 'users', onDelete: 'SET NULL' },
+      { columnName: 'search_id', referenced: 'ediscovery_searches', onDelete: 'RESTRICT' },
+    ]);
+  });
+
+  it('enforces capture idempotency, OR-ed intent sources, case-scoped holds and grant cascades', async () => {
+    const { suffix, ids, cleanup } = await scratchOrganizations(1);
+    const organizationId = ids[0]!;
+    const receivedAt = new Date();
+    const messageId = BigInt(Date.now()) * 1000n + 81n;
+    const user = await prisma.user.create({
+      data: { organizationId, email: `arch-${suffix}@example.test`, displayName: 'IT' },
+    });
+    try {
+      // email_archives: one record per (message_id, received_at).
+      const record = {
+        receivedAt,
+        messageId,
+        organizationId,
+        archiveObjectKey: `org/${organizationId}/archive/it/${suffix}/eml.bin`,
+        sha256: 'a'.repeat(64),
+        sizeBytes: 10,
+        retainUntil: new Date(receivedAt.getTime() + 86_400_000),
+        archivedAt: receivedAt,
+        ...ARCHIVE_RECORD_FIXTURE,
+      };
+      const created = await prisma.emailArchive.create({ data: record });
+      expect(created).toMatchObject({ status: 'active', lockMode: 'none', expiryAction: 'delete' });
+      await expect(prisma.emailArchive.create({ data: record })).rejects.toMatchObject({
+        code: 'P2002',
+      });
+
+      // archive_capture_intents: the three sources upsert one row; sources are OR-ed in.
+      const upsert = (journal: boolean, policy: boolean) =>
+        prisma.$executeRaw`
+          INSERT INTO archive_capture_intents
+            (received_at, organization_id, message_id, direction, source_journal, source_policy,
+             next_check_at, settings_generation, updated_at)
+          VALUES (${receivedAt}, ${organizationId}, ${messageId}, 'inbound', ${journal}, ${policy},
+                  ${receivedAt}, 1, CURRENT_TIMESTAMP(3))
+          ON DUPLICATE KEY UPDATE source_journal = source_journal OR VALUES(source_journal),
+                                  source_policy = source_policy OR VALUES(source_policy)`;
+      await upsert(true, false);
+      await upsert(false, true);
+      const intents = await prisma.archiveCaptureIntent.findMany({ where: { messageId } });
+      expect(intents).toHaveLength(1);
+      expect(intents[0]).toMatchObject({
+        sourceJournal: true,
+        sourcePolicy: true,
+        status: 'pending',
+      });
+
+      // A hold of a case keeps the case (RESTRICT); a grant goes with its export (CASCADE).
+      const ediscoveryCase = await prisma.ediscoveryCase.create({
+        data: { organizationId, name: `case-${suffix}`, createdByUserId: user.id },
+      });
+      expect(ediscoveryCase.publicId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-/);
+      const hold = await prisma.archiveLegalHold.create({
+        data: {
+          organizationId,
+          caseId: ediscoveryCase.id,
+          name: 'hold',
+          reason: 'it',
+          criteria: { custodians: ['custodian@example.test'] },
+          criteriaVersion: 'archive-hold/1',
+        },
+      });
+      expect(hold.publicId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-/);
+      await expect(
+        prisma.ediscoveryCase.delete({ where: { id: ediscoveryCase.id } }),
+      ).rejects.toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+      // A legacy hold (no case, step 5.3 fixture shape) still works and gets a public id.
+      const legacy = await prisma.archiveLegalHold.create({
+        data: { organizationId, name: 'legacy', reason: 'it', criteria: {} },
+      });
+      expect(legacy).toMatchObject({ caseId: null, criteriaVersion: null, rowVersion: 1 });
+      // `completed`, not the default `queued`: a running archive-worker (ediscovery role) claims
+      // queued searches and clears their hits, which would race with the uniqueness check below.
+      const search = await prisma.ediscoverySearch.create({
+        data: {
+          caseId: ediscoveryCase.id,
+          organizationId,
+          criteria: { from: '2026-01-01', to: '2026-02-01' },
+          criteriaSha256: 'b'.repeat(64),
+          status: 'completed',
+        },
+      });
+      await prisma.ediscoverySearchHit.create({
+        data: {
+          searchId: search.id,
+          organizationId,
+          messageId,
+          messageReceivedAt: receivedAt,
+          messagePublicId: ARCHIVE_RECORD_FIXTURE.messagePublicId,
+        },
+      });
+      await expect(
+        prisma.ediscoverySearchHit.create({
+          data: {
+            searchId: search.id,
+            organizationId,
+            messageId,
+            messageReceivedAt: receivedAt,
+            messagePublicId: ARCHIVE_RECORD_FIXTURE.messagePublicId,
+          },
+        }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+      const exportRow = await prisma.ediscoveryExport.create({
+        data: {
+          caseId: ediscoveryCase.id,
+          searchId: search.id,
+          organizationId,
+          reviewTags: ['relevant'],
+          // Not `queued`: a running archive-worker would claim the export (creating the tenant key
+          // and an `ediscovery.export_failed` audit row) and the organization could not be deleted.
+          status: 'failed',
+        },
+      });
+      await prisma.archiveDownloadGrant.create({
+        data: {
+          jti: randomUUID(),
+          organizationId,
+          userId: user.id,
+          kind: 'export',
+          exportId: exportRow.id,
+          expiresAt: new Date(Date.now() + 60_000),
+        },
+      });
+      await prisma.ediscoveryExport.delete({ where: { id: exportRow.id } });
+      expect(await prisma.archiveDownloadGrant.count({ where: { organizationId } })).toBe(0);
+      // Settings: a bare row (older fixtures) means every default.
+      const settings = await prisma.archiveSetting.create({ data: { organizationId } });
+      expect(settings).toMatchObject({
+        settings: null,
+        generation: 0n,
+        rowVersion: 1,
+        enabled: false,
+      });
+    } finally {
+      await prisma.archiveDownloadGrant.deleteMany({ where: { organizationId } });
+      await prisma.ediscoveryExport.deleteMany({ where: { organizationId } });
+      await prisma.ediscoverySearchHit.deleteMany({ where: { organizationId } });
+      await prisma.ediscoverySearch.deleteMany({ where: { organizationId } });
+      await prisma.archiveLegalHold.deleteMany({ where: { organizationId } });
+      await prisma.ediscoveryCase.deleteMany({ where: { organizationId } });
+      await prisma.archiveSetting.deleteMany({ where: { organizationId } });
+      await prisma.archiveCaptureIntent.deleteMany({ where: { organizationId } });
+      await prisma.emailArchive.deleteMany({ where: { organizationId } });
       await prisma.user.deleteMany({ where: { organizationId } });
       await cleanup();
     }

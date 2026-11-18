@@ -7,10 +7,10 @@ import {
 } from './registry';
 
 /**
- * RabbitMQ topology v11 as data (step 3.2 §3, ADR-0024; v2: step 3.3 L7, ADR-0025; v3: step 4.1
+ * RabbitMQ topology v12 as data (step 3.2 §3, ADR-0024; v2: step 3.3 L7, ADR-0025; v3: step 4.1
  * S2, ADR-0026; v4: step 4.2 A2, ADR-0028; v5: step 4.3 U2, ADR-0029; v6: step 4.4 B3,
  * ADR-0033; v7: step 4.5 D2, ADR-0036; v8: step 4.6 X11, ADR-0040; v9: step 5.2 P15, ADR-0044;
- * v10: step 5.3 Q27, ADR-0046; v11: step 6.2 §4.3, ADR-0055):
+ * v10: step 5.3 Q27, ADR-0046; v11: step 6.2 §4.3, ADR-0055; v12: step 8.1 A26, ADR-0064):
  * exactly six topic exchanges and twenty-one quorum queues in the vhost `email-gateway`. v2 added the bindings of `mail.message.rescan_requested.v1`
  * (`email.security`) to the five scan queues, and `mail.message.state_changed.v1`
  * (`email.events`) reaches only the `email.analytics` firehose. v3 makes `scan.spam` a work queue
@@ -104,6 +104,20 @@ import {
  * also binds the new `notification.alert_requested.v1` on `email.policy` (security alerts of the
  * webhook-worker). Twenty-one queues; the exchanges and the other queues are unchanged.
  *
+ * v12 (step 8.1 A2, A26, §4.7, ADR-0064) builds the archive consumer. `email.archive` becomes a
+ * **work** queue of the archive-worker's `capture` role (ledger consumer `archive-worker.archive`;
+ * broker user `eg-archive`), `lossy: true` (policy `work-lossy`: drop-head at 10 000, heads
+ * dead-lettered at most once to `email.dead-letter`), retry `hold` 10 attempts 2 s–60 s within
+ * 24 h. Lossy by design: the outbox relay must never stall on the archive (a `reject-publish`
+ * work queue would block the whole pipeline's relay while the archive-worker is down), and the
+ * worker's policy reconciler re-reads every ARCHIVE request from `policy_execution_logs`, so a
+ * dropped request is still captured. Its bindings are unchanged since v9
+ * (`org.*.mail.message.archive_requested.v1` and the plain `retry.email.archive.#`), so the
+ * counts stay six exchanges, twenty-one queues, fifty-eight bindings and twenty-one policies
+ * (policy `eg.email.archive` replaced). It is **not** in `RECONCILE_QUEUES`: the archive's own
+ * policy reconciler (A2) replaces the outbox re-drive. The exchanges and the other queues are
+ * unchanged.
+ *
  * `infrastructure/rabbitmq/definitions.json` is
  * generated from `TOPOLOGY` (`pnpm --filter @email-gateway/event-contracts topology:export`) and
  * imported by `infrastructure/rabbitmq/init.mjs`; services never declare, they verify passively.
@@ -112,7 +126,7 @@ import {
  * target, overflow, length limits) is a per-queue policy `eg.<queue>` (Q4), so it changes without
  * re-declaring a queue.
  */
-export const TOPOLOGY_VERSION = 11;
+export const TOPOLOGY_VERSION = 12;
 export const DEFAULT_VHOST = 'email-gateway';
 
 /** The six exchanges of the topology (ADR-0024): all topic, durable, not internal. */
@@ -771,16 +785,37 @@ export const TOPOLOGY: Topology = {
       description:
         'Quarantine releases queued by the api, re-validated and executed by the policy-engine (step 5.3)',
     },
-    // v9 (step 5.2 P15): binds the archive request of a policy ARCHIVE action instead of
-    // mail.policy.decided.v1 (still dormant: the consumer is step 8.1).
-    dormant(
-      'email.archive',
-      'email.archive',
-      [eventBinding('email.archive', 'mail.message.archive_requested.v1')],
-      '8.1',
-      'archive-worker',
-      'Archive requests of policy ARCHIVE actions (consumer: step 8.1)',
-    ),
+    {
+      // v12 (step 8.1 A2, A26, ADR-0064): the archive-worker's `capture` role consumes the
+      // archive requests of policy ARCHIVE actions (bindings unchanged since v9). A bounded lossy
+      // buffer by design (work-lossy: drop-head at 10 000, heads dead-lettered at most once): the
+      // outbox relay must never stall on the archive, and the worker reconciles every request from
+      // policy_execution_logs, so a dropped request is captured anyway. Not in RECONCILE_QUEUES
+      // (the archive's own policy reconciler replaces the outbox re-drive).
+      name: 'email.archive',
+      role: 'work',
+      homeExchange: 'email.archive',
+      bindings: [
+        eventBinding('email.archive', 'mail.message.archive_requested.v1'),
+        retryBinding('email.archive', 'email.archive'),
+      ],
+      consumer: {
+        kind: 'ledger',
+        ledgerName: 'archive-worker.archive',
+        service: 'archive-worker',
+      },
+      retry: {
+        strategy: 'hold',
+        maxAttempts: 10,
+        baseDelayMs: 2 * SECOND,
+        maxDelayMs: MINUTE,
+        maxRetryAgeMs: 24 * HOUR,
+      },
+      lossy: true,
+      policy: policyFor('work-lossy', 'email.archive'),
+      description:
+        'Archive requests of policy ARCHIVE actions, consumed by the archive-worker (step 8.1); lossy by design: the worker reconciles from policy_execution_logs',
+    },
     {
       // v9 (step 5.2 P15, P25): policy ALERT notifications and sender non-delivery notices, sent
       // by the notification-worker (at least once).

@@ -1489,4 +1489,54 @@ describe('loadApiConfig: email explorer and details (step 7.2 §2 E16)', () => {
   ])('refuses %s=%s naming the key', (key, value) => {
     expect(rejection({ ...valid, [key]: value })).toContain(key);
   });
+
+  describe('archive keys (step 8.1 §4.8)', () => {
+    it('parses the archive defaults and leaves search optional', () => {
+      const cfg = loadApiConfig(valid);
+      expect(cfg.ARCHIVE_SEARCH_URL).toBeUndefined();
+      expect(cfg).toMatchObject({
+        ARCHIVE_ROOT_KEY_ID: 'r1',
+        ARCHIVE_DOWNLOAD_TOKEN_TTL_SECONDS: 60,
+        ARCHIVE_DOWNLOAD_GRANTS_PER_HOUR: 20,
+        ARCHIVE_SEARCH_MAX_RANGE_DAYS: 366,
+        ARCHIVE_CASE_SEARCH_MAX_RANGE_DAYS: 3650,
+        ARCHIVE_REVIEW_MAX_ITEMS: 500,
+        ARCHIVE_EXPORT_SIGNING_PUBLIC_KEY_ID: 'es1',
+        ARCHIVE_OBJECT_LOCK: 'auto',
+      });
+    });
+
+    it('refuses a missing download token key, a bad signing public key and bad bounds', () => {
+      expect(rejection({ ...valid, ARCHIVE_DOWNLOAD_TOKEN_KEY: undefined })).toContain(
+        'ARCHIVE_DOWNLOAD_TOKEN_KEY',
+      );
+      const bad = rejection({ ...valid, ARCHIVE_EXPORT_SIGNING_PUBLIC_KEY: 'EXAMPLE-NOT-A-KEY' });
+      expect(bad).toContain('ARCHIVE_EXPORT_SIGNING_PUBLIC_KEY');
+      expect(bad).not.toContain('EXAMPLE-NOT-A-KEY');
+      expect(rejection({ ...valid, ARCHIVE_DOWNLOAD_TOKEN_TTL_SECONDS: '5' })).toContain(
+        'ARCHIVE_DOWNLOAD_TOKEN_TTL_SECONDS',
+      );
+      expect(rejection({ ...valid, ARCHIVE_EXPORT_SIGNING_PUBLIC_KEY_ID: 'Bad' })).toContain(
+        'ARCHIVE_EXPORT_SIGNING_PUBLIC_KEY_ID',
+      );
+      expect(
+        rejection({
+          ...valid,
+          ARCHIVE_EXPORT_SIGNING_PREVIOUS_PUBLIC_KEYS: `es1:${TEST_DOMAIN_ENV.ARCHIVE_EXPORT_SIGNING_PUBLIC_KEY}`,
+        }),
+      ).toContain('ARCHIVE_EXPORT_SIGNING_PREVIOUS_PUBLIC_KEYS');
+    });
+
+    it('refuses the day-length test seam outside local/ci and credentials in the search URL', () => {
+      expect(
+        rejection({ ...valid, APP_ENV: 'production', ARCHIVE_TEST_DAY_SECONDS: '5' }),
+      ).toContain('ARCHIVE_TEST_DAY_SECONDS');
+      expect(
+        rejection({ ...valid, ARCHIVE_SEARCH_URL: 'http://u:p@search.example:9200' }),
+      ).toContain('ARCHIVE_SEARCH_URL');
+      expect(
+        rejection({ ...valid, ARCHIVE_ROOT_KEY_PREVIOUS: TEST_DOMAIN_ENV.ARCHIVE_ROOT_KEY }),
+      ).toContain('ARCHIVE_ROOT_KEY_PREVIOUS');
+    });
+  });
 });

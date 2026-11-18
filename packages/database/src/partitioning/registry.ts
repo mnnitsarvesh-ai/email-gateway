@@ -52,12 +52,12 @@ const monthly = (
 });
 
 /**
- * The 33 partitioned tables: the 16 of D3, the two delivery tables of step 2.3 (§3), the parse
+ * The 35 partitioned tables: the 16 of D3, the two delivery tables of step 2.3 (§3), the parse
  * stage table of step 3.1 (§3), the authentication results table of step 4.1 (§3), the
  * per-attachment results and sandbox submissions of step 4.2 (§3), the five URL tables of
  * step 4.3 (§3), the BEC results table of step 4.4 (§3), the two DLP tables of step 4.5 (§3),
- * the risk scores table of step 5.1 (§3) and the webhook events and delivery attempts of
- * step 6.2 (§3).
+ * the risk scores table of step 5.1 (§3), the webhook events and delivery attempts of
+ * step 6.2 (§3) and the archive capture intents and disposal log of step 8.1 (§3).
  */
 export const PARTITION_REGISTRY: readonly PartitionSpec[] = Object.freeze([
   monthly('email_messages', 'received_at', 6, 'core'),
@@ -110,8 +110,19 @@ export const PARTITION_REGISTRY: readonly PartitionSpec[] = Object.freeze([
   // Step 5.1 (docs/plan/steps/15-risk-scoring.md §3, R14): the risk scores of a scan round
   // (revision 0 and the sandbox revision 1) live as long as the scan rounds (email_scans).
   monthly('message_risk_scores', 'received_at', 6, 'core'),
-  // Legal hold and per-tenant archive retention are row-level (step 8.1).
+  // Legal hold and per-tenant archive retention are row-level (step 8.1): the archive-worker's
+  // lifecycle role disposes of records one by one (docs/plan/steps/23-journaling-archiving.md
+  // A13, A14); partitions are never dropped.
   monthly('email_archives', 'received_at', null, 'compliance'),
+  // Step 8.1 (docs/plan/steps/23-journaling-archiving.md §3, A2): capture intents are the
+  // capture scheduler's work queue. An intent is resolved within ARCHIVE_INTENT_MAX_AGE_DAYS
+  // (≤ 30) of its message's receipt, or — a message waiting in quarantine — within
+  // QUARANTINE_WAIT_MAX_DAYS (100, @email-gateway/archive), so 4 months (operational) only ever
+  // drops resolved rows.
+  monthly('archive_capture_intents', 'received_at', 4, 'operational'),
+  // Step 8.1 (A14, A21): the per-record disposal log is the compliance trail of every deletion
+  // of archived mail (append-only); partitioned by the disposal request instant, never dropped.
+  monthly('archive_disposals', 'requested_at', null, 'compliance'),
   monthly('bounce_events', 'occurred_at', 6, 'core'),
   // Compliance: export and drop are a later manual or ops decision.
   monthly('audit_logs', 'created_at', null, 'compliance'),

@@ -87,6 +87,9 @@ export {
   type EntryAction,
 } from './access';
 export {
+  ARCHIVE_PENDING_RECHECK_MS,
+  archivePendingOf,
+  type ArchivePendingFacts,
   decideObjectDisposal,
   legalHoldMatches,
   legalHoldCriteriaSchema,

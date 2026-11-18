@@ -10,7 +10,7 @@ import {
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { apiSession, type ApiSession } from './support/api-client';
 import { attachmentMessage, type MessageAttachment } from './support/attachment-stack';
-import { copiesOfEvent, ManagementApi, purgeDormantQueues } from './support/broker';
+import { ManagementApi, purgeDormantQueues } from './support/broker';
 import { composeExec, waitFor } from './support/compose';
 import { waitForMessage } from './support/deliveries';
 import { stack } from './support/env';
@@ -93,8 +93,10 @@ import { reply, swaks } from './support/smtp-tools';
  * 5. REJECT stops delivery; REQUIRE_APPROVAL → `held_for_review` with a `review` entry; the step
  *    3.3 route answers `409 quarantine_workflow_required` and a second MFA user approves the
  *    `policy_review` request (17-quarantine.md Q14, Q30) → executor E15 → delivered.
- * 6. ARCHIVE → `mail.message.archive_requested.v1` in the dormant `email.archive` (peeked
- *    without losing other messages).
+ * 6. ARCHIVE → `mail.message.archive_requested.v1` on `email.archive`, consumed since step 8.1
+ *    (topology v12) by the archive-worker (ledger `archive-worker.archive`): the organization is
+ *    not entitled to archiving, so its capture intent is skipped (`not_entitled`) and nothing is
+ *    archived (23-journaling-archiving.md A2, A3; archive-smtp.test.ts covers capture).
  * 7. ALERT → `mail.policy.notification_requested.v1` → notification-worker → mail-sink.
  * 8. A published change applies to the next evaluation only.
  * 9. Rescan of a quarantined message → a new evaluation row; round 0's row unchanged.
@@ -963,7 +965,7 @@ describe.skipIf(gate.skip)(
       ]);
     });
 
-    it('(6) ARCHIVE → archive_requested in the dormant email.archive (peeked, nothing lost)', async () => {
+    it('(6) ARCHIVE → archive_requested consumed by the archive-worker (not entitled: intent skipped, nothing archived)', async () => {
       const rcpt = `${LP.archive}@${inC.name}`;
       const message = await inbound(orgC, [rcpt], cleanEml());
       const row = await evaluated(message);
@@ -989,14 +991,39 @@ describe.skipIf(gate.skip)(
         emlS3Key: stored.emlObjectKey,
         ruleRef: expect.stringMatching(/\/archive-recipient$/),
       });
+      // Step 8.1 (topology v12): email.archive is a work queue of the archive-worker; the
+      // request is consumed once (ledger row) and becomes a policy-sourced capture intent that
+      // the scheduler skips because organization C has no `archiving` entitlement.
       await waitFor(
-        'the archive request in email.archive',
-        async () => (await copiesOfEvent(mgmt, vhost, 'email.archive', request!.eventId)) === 1,
-        { timeoutMs: 60_000, intervalMs: 1_000 },
+        'the archive request consumed by the archive-worker',
+        async () =>
+          (await fx.prisma.messageIdempotency.count({
+            where: { consumer: 'archive-worker.archive', eventId: request!.eventId },
+          })) === 1,
+        { timeoutMs: 120_000, intervalMs: 1_000 },
       );
-      expect((await mgmt.queue(vhost, 'email.archive')).consumers).toBe(0);
+      const intent = await waitFor(
+        'the skipped capture intent',
+        async () => {
+          const row = await fx.prisma.archiveCaptureIntent.findFirst({
+            where: { messageId: message.id, receivedAt: message.receivedAt },
+          });
+          return row?.status === 'skipped' ? row : undefined;
+        },
+        { timeoutMs: 120_000, intervalMs: 1_000 },
+      );
+      expect(intent).toMatchObject({ sourcePolicy: true, skipReason: 'not_entitled' });
+      expect(
+        await fx.prisma.emailArchive.count({
+          where: { messageId: message.id, receivedAt: message.receivedAt },
+        }),
+      ).toBe(0);
+      expect((await mgmt.queue(vhost, 'email.archive')).consumers).toBeGreaterThanOrEqual(1);
       await expectDelivered(message, [rcpt]);
-      record('policy-smtp', { archive: actionOf(row, 'ARCHIVE')!.status });
+      record('policy-smtp', {
+        archive: actionOf(row, 'ARCHIVE')!.status,
+        archive_intent: `${intent.status}/${intent.skipReason}`,
+      });
     });
 
     it('(7) ALERT → notification-worker → the alert mail in mail-sink', async () => {

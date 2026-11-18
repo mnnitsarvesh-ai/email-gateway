@@ -43,11 +43,11 @@ async function partitionNames(table: string): Promise<string[]> {
 }
 
 describe('partition maintenance', () => {
-  it('manages the 33 partitioned tables, including the step 2.3, 3.1, 4.1, 4.2, 4.3, 4.4, 4.5, 5.1, 5.2 and 6.2 tables (none added by 5.3)', () => {
+  it('manages the 35 partitioned tables, including the step 2.3, 3.1, 4.1, 4.2, 4.3, 4.4, 4.5, 5.1, 5.2, 6.2 and 8.1 tables (none added by 5.3)', () => {
     // Step 4.6 §3 adds sandbox_analyses and sandbox_artifacts unpartitioned; step 5.1 §3 adds
     // message_risk_scores (partitioned) and the unpartitioned risk_scoring_profiles and
     // risk_scoring_profile_versions.
-    expect(PARTITION_REGISTRY).toHaveLength(33);
+    expect(PARTITION_REGISTRY).toHaveLength(35);
     expect(PARTITION_REGISTRY.map((s) => s.table)).not.toEqual(
       expect.arrayContaining(['risk_scoring_profiles']),
     );
@@ -129,6 +129,42 @@ describe('partition maintenance', () => {
       'notification_settings',
       'notification_user_preferences',
       'notification_alert_windows',
+    ]) {
+      expect(PARTITION_REGISTRY.map((s) => s.table)).not.toContain(table);
+    }
+    // Step 8.1 §3: capture intents are operational (4 months: a wait in quarantine is bounded by
+    // 100 days, review fix of the closing round), the disposal log is compliance
+    // data partitioned by the request instant and never dropped (like email_archives); the nine
+    // other archive and eDiscovery tables are unpartitioned.
+    expect(PARTITION_REGISTRY.find((s) => s.table === 'archive_capture_intents')).toEqual({
+      table: 'archive_capture_intents',
+      column: 'received_at',
+      granularity: 'month',
+      retention: 4,
+      drop: true,
+      tier: 'operational',
+    });
+    for (const table of ['archive_disposals', 'email_archives']) {
+      expect(PARTITION_REGISTRY.find((s) => s.table === table)).toMatchObject({
+        granularity: 'month',
+        retention: null,
+        drop: false,
+        tier: 'compliance',
+      });
+    }
+    expect(PARTITION_REGISTRY.find((s) => s.table === 'archive_disposals')?.column).toBe(
+      'requested_at',
+    );
+    for (const table of [
+      'archive_encryption_keys',
+      'archive_index_queue',
+      'archive_index_checks',
+      'archive_download_grants',
+      'ediscovery_cases',
+      'ediscovery_custodians',
+      'ediscovery_searches',
+      'ediscovery_search_hits',
+      'ediscovery_exports',
     ]) {
       expect(PARTITION_REGISTRY.map((s) => s.table)).not.toContain(table);
     }

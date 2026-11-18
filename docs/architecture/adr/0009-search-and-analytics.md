@@ -1,6 +1,6 @@
 # ADR-0009: OpenSearch for search, ClickHouse for analytics
 
-**Status:** Accepted
+**Status:** Accepted. Step 8.1 amendment: the first OpenSearch use is the archive metadata index defined by [ADR-0068](0068-archive-search-opensearch-and-authorization.md) (fed from MySQL, not from RabbitMQ events; local `search` profile).
 
 **Decision.**
 

@@ -138,6 +138,19 @@ The future job (a scheduled worker, one instance at a time under a lock) must ap
    UNION ALL SELECT 'tenant_departments', COUNT(*) FROM tenant_departments WHERE organization_id = ?;
    ```
 
+   **Archive and eDiscovery (step 8.1, [A24](../plan/steps/23-journaling-archiving.md)).** `ArchiveTenantDataRepository.purgeOrganization(systemScope(org))` (api `tenant-data`) is resumable: call it until it returns `complete: true`.
+
+   - **Refusals** (`ArchivePurgeRefusedError`, nothing changed): `reason: legal_hold` while any `archive_legal_holds` row of the organization is `active` (release them through `POST /legal-holds/{id}/release` after legal approval); `reason: retention` while a live record's effective retention is in the future (stored `retain_until`, a running Object Lock `lock_until`, or the live policy's current days). Deletion of a customer within its contractual retention is a legal decision, not an operator one: escalate.
+   - **Phase 1:** every remaining `active`/`expiry_review` record goes through the disposal decision exactly like an expiry (reason `organization_deleted`): the record's data key is destroyed in the same transaction (crypto-shredding: no copy can be decrypted any more), an `archive_disposals` row is written and an index `delete` op queued, in batches of 200; one `purge_org` op asks the index role to delete the organization's documents and its tenant alias. The archive-worker's lifecycle role then deletes every object version (also in the replica targets), waits for the index and hard-deletes the rows. The call returns `complete: false` while records or unfinished disposals remain.
+   - **Phase 2** (no record and no unfinished disposal left): deletes, in RESTRICT-safe batches, `archive_capture_intents`, `archive_index_checks`, `archive_download_grants`, `ediscovery_search_hits`, `ediscovery_exports`, `ediscovery_searches`, `ediscovery_custodians`, released `archive_legal_holds`, `ediscovery_cases`, `archive_settings`, `archive_retention_policies`, then sets every `archive_encryption_keys` row `destroyed` with `wrapped_key = NULL`. `archive_disposals` (the per-record disposal log, compliance tier) and `audit_logs` stay. Export packages under `org/<org>/exports/` in the archive bucket carry the `eg-object=archive-export` tag and expire with the bucket lifecycle rule (≤ `ARCHIVE_EXPORT_TTL_HOURS` + 1 day); delete them earlier by prefix if required.
+
+   ```sql
+   SELECT status, COUNT(*) FROM email_archives WHERE organization_id = ? GROUP BY status;
+   SELECT state, COUNT(*) FROM archive_disposals WHERE organization_id = ? GROUP BY state;
+   SELECT COUNT(*) FROM archive_legal_holds WHERE organization_id = ? AND status = 'active';
+   SELECT version, status, wrapped_key IS NULL AS destroyed FROM archive_encryption_keys WHERE organization_id = ?;
+   ```
+
 5. **Free verified domain names:** deleting the organization's `domains` rows releases `domains.verified_name` (the generated unique column), so the domain can be verified by another organization. This must happen only in the purge, never at confirmation, so a cancelled deletion keeps its domains.
 6. Keep `audit_logs` (append-only, retained by policy) and `login_audit_logs` until their own retention ends; write `organization.purged` with counts, then hard-delete or tombstone the `organizations` row (keep the slug reserved for a period to avoid confusion).
 7. Make every step resumable: a crash mid-purge must leave the organization `deleted` and be safe to re-run.

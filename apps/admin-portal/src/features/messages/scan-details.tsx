@@ -175,7 +175,19 @@ function durationOf(start: string | null, end: string | null): string {
   return Number.isFinite(ms) && ms >= 0 ? formatDuration(ms) : '';
 }
 
-function RoundCard({ round, messageId }: { round: ScanRound; messageId: string }) {
+/**
+ * One scan round (also the security section of an archived message, step 8.1 A19: the frozen
+ * snapshot mapped by the same api mapper; `showLinks` off because the live message may be gone).
+ */
+export function RoundCard({
+  round,
+  messageId,
+  showLinks = true,
+}: {
+  round: ScanRound;
+  messageId: string;
+  showLinks?: boolean;
+}) {
   const risk = round.risk.length > 0 ? round.risk[round.risk.length - 1] : undefined;
   return (
     <Section
@@ -216,7 +228,7 @@ function RoundCard({ round, messageId }: { round: ScanRound; messageId: string }
           { label: 'Reason codes', value: <CodeList codes={round.reasonCodes} /> },
         ]}
       />
-      <RoundDetailLinks messageId={messageId} round={round.round} />
+      {showLinks ? <RoundDetailLinks messageId={messageId} round={round.round} /> : null}
       {round.auth ? <AuthResults auth={round.auth} /> : null}
       <EnginesTable engines={round.engines} round={round.round} />
       {risk ? <RiskSummary risk={risk} /> : null}

@@ -1,8 +1,10 @@
 /**
  * Dashboard (design §1.4): the 12 widgets show the figures computed independently from the
- * seeded rows (seed/plan.ts `expectDashboard`) for the default range (last 7 days).
+ * seeded rows (seed/plan.ts `expectDashboard`) for the default range (last 7 days), including
+ * the step 8.1 archive messages inserted during the run.
  */
 import type { Page } from '@playwright/test';
+import { ensureAlphaArchive, CAPTURE_TIMEOUT_MS } from '../support/archive';
 import { signIn } from '../support/auth';
 import { expect, test } from '../support/fixtures';
 import { readState } from '../support/state';
@@ -16,6 +18,10 @@ function tile(page: Page, label: string) {
 }
 
 test('the 12 widgets show the seeded figures for the last 7 days', async ({ page }) => {
+  // Step 8.1: the expectation includes the three alpha archive messages (seed/archive.ts);
+  // they exist once the archive spec ran, or are inserted and captured here.
+  test.setTimeout(CAPTURE_TIMEOUT_MS + 120_000);
+  await ensureAlphaArchive();
   const state = readState();
   const want = state.expected.dashboard7d;
   await signIn(page, 'alphaAdmin', { next: '/dashboard?range=7d' });

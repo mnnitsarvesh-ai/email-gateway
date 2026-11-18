@@ -131,8 +131,8 @@ export const EVENT_REGISTRY = {
     policyDecidedV1,
     'message',
   ),
-  // Step 5.2 P15: producer policy-engine through the outbox; bound to the dormant email.archive
-  // (consumer: step 8.1).
+  // Step 5.2 P15: producer policy-engine through the outbox; bound to email.archive (consumer:
+  // the archive-worker since topology v12, step 8.1).
   [EventTypes.MessageArchiveRequested]: define(
     EventTypes.MessageArchiveRequested,
     'email.archive',

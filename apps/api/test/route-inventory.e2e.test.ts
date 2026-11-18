@@ -31,7 +31,10 @@
  * examples required, the list v1, in the explorer manifest). Step 7.3
  * (docs/plan/steps/22-policy-builder.md §4.4) adds policy validation and the sample dry-run
  * (`NEW_IN_7_3`, examples required, the policy-builder manifest; the sample dry-run is
- * `expensive`).
+ * `expensive`). Step 8.1 (docs/plan/steps/23-journaling-archiving.md §4.4) adds the 41 archive,
+ * legal hold and eDiscovery operations (`NEW_IN_8_1`, examples required, every list v1, the
+ * archive manifest): 15 transactional keyed mutations (13 `sensitive`, the case search and
+ * export requests `expensive`), the expensive archive search.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -179,6 +182,20 @@ const SENSITIVE_TRANSACTIONAL = [
   'post /api/v1/webhooks/:webhookId/rotate-secret',
   'post /api/v1/webhooks/:webhookId/deliveries/:deliveryId/replay',
   'post /api/v1/webhooks/:webhookId/replays',
+  // Step 8.1 §4.4 (the keyed archive, legal hold and eDiscovery mutations).
+  'put /api/v1/archive/settings',
+  'post /api/v1/archive/retention-policies',
+  'put /api/v1/archive/retention-policies/:policyId',
+  'delete /api/v1/archive/retention-policies/:policyId',
+  'post /api/v1/archive/keys/rotate',
+  'post /api/v1/archive/capture-issues/:messageId/retry',
+  'post /api/v1/archive/messages/:messageId/dispose',
+  'post /api/v1/legal-holds/:holdId/release',
+  'post /api/v1/ediscovery/cases/:caseId/holds',
+  'post /api/v1/ediscovery/cases',
+  'patch /api/v1/ediscovery/cases/:caseId',
+  'post /api/v1/ediscovery/cases/:caseId/close',
+  'post /api/v1/ediscovery/cases/:caseId/searches/:searchId/review',
 ];
 
 /** §3.5: the legacy sensitive mutations keyed by the reservation interceptor (`@Idempotent`). */
@@ -239,6 +256,63 @@ const NEW_IN_7_2 = [
  */
 const NEW_IN_7_3 = ['post /api/v1/policies/validate', 'post /api/v1/policies/dry-run'];
 
+/**
+ * Step 8.1 §4.4 (docs/plan/steps/23-journaling-archiving.md): the 41 archive, legal hold and
+ * eDiscovery operations (examples required, lists v1, exactly the archive manifest).
+ */
+const NEW_IN_8_1 = [
+  'get /api/v1/archive/settings',
+  'put /api/v1/archive/settings',
+  'get /api/v1/archive/retention-policies',
+  'post /api/v1/archive/retention-policies',
+  'get /api/v1/archive/retention-policies/:policyId',
+  'put /api/v1/archive/retention-policies/:policyId',
+  'delete /api/v1/archive/retention-policies/:policyId',
+  'get /api/v1/archive/keys',
+  'post /api/v1/archive/keys/rotate',
+  'get /api/v1/archive/status',
+  'get /api/v1/archive/capture-issues',
+  'post /api/v1/archive/capture-issues/:messageId/retry',
+  'get /api/v1/archive/disposals',
+  'get /api/v1/archive/export-signing-keys',
+  'get /api/v1/archive/messages',
+  'get /api/v1/archive/messages/:messageId',
+  'get /api/v1/archive/messages/:messageId/journal',
+  'get /api/v1/archive/messages/:messageId/security',
+  'post /api/v1/archive/messages/:messageId/reveal',
+  'get /api/v1/archive/messages/:messageId/preview',
+  'post /api/v1/archive/messages/:messageId/download-grants',
+  'get /api/v1/archive/downloads/:token',
+  'post /api/v1/archive/messages/:messageId/dispose',
+  'get /api/v1/legal-holds',
+  'get /api/v1/legal-holds/:holdId',
+  'post /api/v1/legal-holds/:holdId/release',
+  'post /api/v1/ediscovery/cases/:caseId/holds',
+  'get /api/v1/ediscovery/cases',
+  'post /api/v1/ediscovery/cases',
+  'get /api/v1/ediscovery/cases/:caseId',
+  'patch /api/v1/ediscovery/cases/:caseId',
+  'post /api/v1/ediscovery/cases/:caseId/close',
+  'post /api/v1/ediscovery/cases/:caseId/searches',
+  'get /api/v1/ediscovery/cases/:caseId/searches',
+  'get /api/v1/ediscovery/cases/:caseId/searches/:searchId',
+  'get /api/v1/ediscovery/cases/:caseId/searches/:searchId/hits',
+  'post /api/v1/ediscovery/cases/:caseId/searches/:searchId/review',
+  'post /api/v1/ediscovery/cases/:caseId/exports',
+  'get /api/v1/ediscovery/cases/:caseId/exports',
+  'get /api/v1/ediscovery/cases/:caseId/exports/:exportId',
+  'post /api/v1/ediscovery/cases/:caseId/exports/:exportId/download-grants',
+];
+
+/** Step 8.1: binary downloads (`application/octet-stream`; no JSON example applies). */
+const BINARY_DOWNLOADS = ['get /api/v1/archive/downloads/:token'];
+
+/** Step 8.1: the two worker-queued keyed requests in the `expensive` class (§4.4 #33, #38). */
+const EXPENSIVE_TRANSACTIONAL = [
+  'post /api/v1/ediscovery/cases/:caseId/searches',
+  'post /api/v1/ediscovery/cases/:caseId/exports',
+];
+
 /** D9: secret-bearing responses (sensitive class, never idempotency-stored). */
 const SECRET_BEARING = [
   'post /api/v1/api-keys',
@@ -263,6 +337,9 @@ const EXPENSIVE = [
   'post /api/v1/messages/:messageId/scans/:scanId/risk/dry-run',
   // Step 7.3 §4.3: the sample dry-run (plus its own per-principal limit).
   'post /api/v1/policies/dry-run',
+  // Step 8.1 §4.4: the archive search and the two worker-queued keyed requests.
+  'get /api/v1/archive/messages',
+  ...EXPENSIVE_TRANSACTIONAL,
 ];
 
 /**
@@ -420,12 +497,13 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     await api?.close();
   });
 
-  it('discovers every route once (279 operations under /api/v1 plus the 3 internal endpoints)', () => {
+  it('discovers every route once (320 operations under /api/v1 plus the 3 internal endpoints)', () => {
     expect(facts.length).toBe(byKey.size);
     // 249 after step 6.1, plus the 17 routes of step 6.2, plus the 3 reports of step 7.1, plus
     // the 5 saved views routes (WP1) and the headers and two reveal routes (WP2) of step 7.2,
-    // plus the validate and sample dry-run routes of step 7.3.
-    expect(facts.filter((f) => f.key.includes(' /api/v1/')).length).toBe(279);
+    // plus the validate and sample dry-run routes of step 7.3, plus the 41 archive, legal hold
+    // and eDiscovery operations of step 8.1.
+    expect(facts.filter((f) => f.key.includes(' /api/v1/')).length).toBe(320);
     expect(
       facts
         .filter((f) => isInternal(f.key))
@@ -520,16 +598,23 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     }
   });
 
-  it('gives every route new in 6.1, 6.2, 7.1, 7.2 and 7.3 explicit response examples (D14)', () => {
+  it('gives every route new in 6.1, 6.2, 7.1, 7.2, 7.3 and 8.1 explicit response examples (D14)', () => {
     const failures: string[] = [];
-    for (const key of [...NEW_IN_6_1, ...NEW_IN_6_2, ...NEW_IN_7_1, ...NEW_IN_7_2, ...NEW_IN_7_3]) {
+    for (const key of [
+      ...NEW_IN_6_1,
+      ...NEW_IN_6_2,
+      ...NEW_IN_7_1,
+      ...NEW_IN_7_2,
+      ...NEW_IN_7_3,
+      ...NEW_IN_8_1,
+    ]) {
       const op = operation(key);
       if (!op) {
         failures.push(`${key}: missing`);
         continue;
       }
       for (const [status, response] of Object.entries(op.responses)) {
-        if (!/^2\d\d$/.test(status) || status === '204') continue;
+        if (!/^2\d\d$/.test(status) || status === '204' || BINARY_DOWNLOADS.includes(key)) continue;
         if (!hasExample(response?.content?.['application/json'])) {
           failures.push(`${key}: ${status} without an example`);
         }
@@ -571,6 +656,9 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     expect(COVERAGE_BY_AREA['policy-builder'].map((c) => c.route).sort()).toEqual(
       [...NEW_IN_7_3].sort(),
     );
+    // NEW_IN_8_1 is exactly the step 8.1 archive manifest (41 operations).
+    expect(COVERAGE_BY_AREA.archive.map((c) => c.route).sort()).toEqual([...NEW_IN_8_1].sort());
+    expect(NEW_IN_8_1).toHaveLength(41);
   });
 
   it('has one coverage entry per served route and none for a route that does not exist (§3.8)', () => {
@@ -587,6 +675,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
       expect(NEW_IN_7_1.includes(route), route).toBe(false);
       expect(NEW_IN_7_2.includes(route), route).toBe(false);
       expect(NEW_IN_7_3.includes(route), route).toBe(false);
+      expect(NEW_IN_8_1.includes(route), route).toBe(false);
     }
   });
 
@@ -634,10 +723,11 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
           NEW_IN_6_2.includes(key) ||
           NEW_IN_7_1.includes(key) ||
           NEW_IN_7_2.includes(key) ||
-          NEW_IN_7_3.includes(key)) &&
+          NEW_IN_7_3.includes(key) ||
+          NEW_IN_8_1.includes(key)) &&
         route.cursor === 'v0'
       )
-        failures.push(`${key}: 6.1/6.2/7.1/7.2/7.3 list on v0`);
+        failures.push(`${key}: 6.1/6.2/7.1/7.2/7.3/8.1 list on v0`);
       if (route.cursor !== null && operation(key)!['x-eg-cursor'] !== route.cursor) {
         failures.push(`${key}: x-eg-cursor not documented`);
       }
@@ -646,8 +736,8 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     const counts = { v0: 0, v1: 0 };
     for (const { route } of facts) if (route.cursor) counts[route.cursor] += 1;
     // 33 pre-6.1 lists keep the unsigned v0 cursors; the 9 lists of 6.1, the 2 of 6.2
-    // (webhooks, deliveries) and the saved views list of 7.2 are signed v1.
-    expect(counts).toEqual({ v0: 33, v1: 12 });
+    // (webhooks, deliveries), the saved views list of 7.2 and the 10 lists of 8.1 are signed v1.
+    expect(counts).toEqual({ v0: 33, v1: 22 });
   });
 
   it('every body and query schema of every route is strict at every object node (D1)', () => {
@@ -668,7 +758,11 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
 
   it('every §3.5 sensitive mutation has idempotency metadata and the sensitive class (D9, D10)', () => {
     const failures: string[] = [];
-    for (const key of [...SENSITIVE_TRANSACTIONAL, ...SENSITIVE_LEGACY]) {
+    for (const key of [
+      ...SENSITIVE_TRANSACTIONAL,
+      ...SENSITIVE_LEGACY,
+      ...EXPENSIVE_TRANSACTIONAL,
+    ]) {
       const fact = byKey.get(key);
       const op = operation(key);
       if (!fact || !op) {
@@ -680,7 +774,8 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
         failures.push(`${key}: no @Idempotent({ legacy: true })`);
       }
       if (!legacy && fact.transactional === null) failures.push(`${key}: no transactional marker`);
-      if (fact.route.rateClass !== 'sensitive') failures.push(`${key}: not in the sensitive class`);
+      const expected = EXPENSIVE_TRANSACTIONAL.includes(key) ? 'expensive' : 'sensitive';
+      if (fact.route.rateClass !== expected) failures.push(`${key}: not in the ${expected} class`);
       if (op['x-eg-idempotency'] !== (legacy ? 'legacy' : 'required')) {
         failures.push(`${key}: x-eg-idempotency ${String(op['x-eg-idempotency'])}`);
       }
@@ -695,12 +790,15 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
       .filter((f) => f.route.idempotency !== null || f.transactional !== null)
       .map((f) => f.key)
       .sort();
-    expect(keyed).toEqual([...SENSITIVE_TRANSACTIONAL, ...SENSITIVE_LEGACY].sort());
+    expect(keyed).toEqual(
+      [...SENSITIVE_TRANSACTIONAL, ...SENSITIVE_LEGACY, ...EXPENSIVE_TRANSACTIONAL].sort(),
+    );
     const operations = facts.flatMap((f) =>
       [f.route.idempotency?.operation, f.transactional?.operation].filter(Boolean),
     );
     expect(new Set(operations).size).toBe(operations.length);
-    expect(operations).toHaveLength(42);
+    // 42 before step 8.1, plus its 15 keyed archive, legal hold and eDiscovery mutations.
+    expect(operations).toHaveLength(57);
   });
 
   it('no route is both @Idempotent() and @ReturnsSecret(); secret-bearing and expensive routes carry their class (D8, D9, ADR-0057)', () => {

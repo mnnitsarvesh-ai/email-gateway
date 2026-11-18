@@ -6,11 +6,16 @@
     "build": "nest build",
     "dev": "nest start --watch --exec \"node --env-file-if-exists=../../.env\"",
     "start": "node dist/main.js",
+    "reindex": "node --env-file-if-exists=../../.env dist/cli/reindex.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "eslint src",
-    "test": "vitest run --dir src"
+    "lint": "eslint --no-error-on-unmatched-pattern src integration",
+    "test": "vitest run --dir src",
+    "test:integration": "vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.890.0",
+    "@aws-sdk/lib-storage": "^3.1152.0",
+    "@email-gateway/archive": "workspace:*",
     "@email-gateway/common": "workspace:*",
     "@email-gateway/config": "workspace:*",
     "@email-gateway/database": "workspace:*",
@@ -22,6 +27,7 @@
     "@nestjs/platform-express": "^11.1.6",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
+    "yazl": "3.3.1",
     "zod": "^4.1.5"
   },
   "devDependencies": {
@@ -29,6 +35,7 @@
     "@nestjs/testing": "^11.1.6",
     "@swc/core": "^1.13.5",
     "@types/express": "^5.0.3",
+    "@types/yazl": "3.3.1",
     "unplugin-swc": "^1.5.7"
   }
 }

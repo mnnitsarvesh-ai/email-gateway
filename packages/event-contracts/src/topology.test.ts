@@ -42,13 +42,13 @@ const mutableQueue = (topology: { queues: QueueDefinition[] }, name: QueueName) 
   return queue;
 };
 
-describe('TOPOLOGY v11', () => {
+describe('TOPOLOGY v12', () => {
   it('satisfies every invariant of design §3', () => {
     expect(validateTopology(TOPOLOGY)).toEqual([]);
   });
 
-  it('declares exactly the six exchanges and twenty-one queues (v11)', () => {
-    expect(TOPOLOGY_VERSION).toBe(11);
+  it('declares exactly the six exchanges and twenty-one queues (v12)', () => {
+    expect(TOPOLOGY_VERSION).toBe(12);
     expect(DEFAULT_VHOST).toBe('email-gateway');
     expect([...TOPOLOGY.exchanges]).toEqual([
       'email.ingestion',
@@ -77,7 +77,7 @@ describe('TOPOLOGY v11', () => {
     );
   });
 
-  it('assigns roles: sixteen work queues, one delay, one dead-letter, three dormant (v11)', () => {
+  it('assigns roles: seventeen work queues, one delay, one dead-letter, two dormant (v12)', () => {
     const byRole = (role: string) =>
       TOPOLOGY.queues.filter((q) => q.role === role).map((q) => q.name);
     expect(byRole('work')).toEqual([
@@ -96,13 +96,19 @@ describe('TOPOLOGY v11', () => {
       'email.delivery.pending',
       // v10 (step 5.3 Q27): the release executor.
       'email.quarantine',
+      // v12 (step 8.1 A26): the archive-worker's capture role.
+      'email.archive',
       'email.notifications',
       // v11 (step 6.2 W1): the webhook-worker fanout.
       'email.webhooks',
     ]);
     expect(byRole('delay')).toEqual(['email.delivery.retry']);
     expect(byRole('dead-letter')).toEqual(['email.dead-letter']);
-    expect(byRole('dormant')).toEqual(['scan.auth', 'email.archive', 'email.analytics']);
+    expect(byRole('dormant')).toEqual(['scan.auth', 'email.analytics']);
+    // v12 (step 8.1 A26): email.archive is no longer dormant; lossy by design (the worker
+    // reconciles from policy_execution_logs, the relay never stalls on the archive).
+    expect(byRole('dormant')).not.toContain('email.archive');
+    expect(queueDefinition('email.archive').lossy).toBe(true);
     expect(byRole('dormant')).not.toContain('scan.url');
     // v7 (step 4.5 D2): scan.dlp is no longer dormant; v8 (step 4.6 X11): nor scan.sandbox.
     expect(byRole('dormant')).not.toContain('scan.dlp');
@@ -211,7 +217,8 @@ describe('TOPOLOGY v11', () => {
         'email.policy org.*.mail.quarantine.release_requested.v1',
         'email.policy retry.email.quarantine.#',
       ],
-      // v9 (step 5.2 P15): the archive request replaces mail.policy.decided.v1 (still dormant).
+      // v9 (step 5.2 P15): the archive request replaces mail.policy.decided.v1; v12 (step 8.1
+      // A26): bindings unchanged, now a work queue.
       'email.archive': [
         'email.archive',
         'email.archive org.*.mail.message.archive_requested.v1',
@@ -427,8 +434,23 @@ describe('TOPOLOGY v11', () => {
       maxDelayMs: 60_000,
       maxRetryAgeMs: 24 * 3_600_000,
     });
+    // v12 (step 8.1 A2, A26, ADR-0064): the archive-worker's capture role, lossy work queue.
+    expect(queueDefinition('email.archive').consumer).toEqual({
+      kind: 'ledger',
+      ledgerName: 'archive-worker.archive',
+      service: 'archive-worker',
+    });
+    expect(queueDefinition('email.archive').retry).toEqual({
+      strategy: 'hold',
+      maxAttempts: 10,
+      baseDelayMs: 2_000,
+      maxDelayMs: 60_000,
+      maxRetryAgeMs: 24 * 3_600_000,
+    });
+    expect(queueDefinition('email.archive').description).toBe(
+      'Archive requests of policy ARCHIVE actions, consumed by the archive-worker (step 8.1); lossy by design: the worker reconciles from policy_execution_logs',
+    );
     expect(planned).toEqual({
-      'email.archive': '8.1',
       'email.analytics': 'not scheduled (ADR-0009)',
     });
     expect(queueDefinition('email.delivery.retry').consumer.kind).toBe('none');
@@ -448,7 +470,19 @@ describe('policies (Q4)', () => {
     expect(TOPOLOGY.queues.filter((q) => q.lossy).map((q) => q.name)).toEqual([
       'scan.url.inspect',
       'scan.sandbox',
+      // v12 (step 8.1 A26).
+      'email.archive',
     ]);
+    // v12: drop-head at 10 000, heads dead-lettered at most once (policy eg.email.archive
+    // replaced; dormant had no dead-letter target and no delivery limit).
+    expect(queueDefinition('email.archive').policy).toEqual({
+      'delivery-limit': 20,
+      'dead-letter-exchange': 'email.events',
+      'dead-letter-routing-key': 'dead-letter.email.archive',
+      'dead-letter-strategy': 'at-most-once',
+      overflow: 'drop-head',
+      'max-length': 10_000,
+    });
     expect(queueDefinition('scan.url.inspect').policy).toEqual({
       'delivery-limit': 20,
       'dead-letter-exchange': 'email.events',
@@ -1166,19 +1200,23 @@ describe('validateTopology (negative cases)', () => {
 
   it('allows the stateless consumer kind and the lossy policy on work queues only (v5)', () => {
     const t = clone();
-    // v10: email.quarantine is a work queue; email.archive is the dormant example.
-    mutableQueue(t, 'email.archive').consumer = {
+    // v12: email.archive is a work queue; email.analytics is the dormant example.
+    mutableQueue(t, 'email.analytics').consumer = {
       kind: 'stateless',
       service: 'x',
       reason: 'y',
     };
     expect(validateTopology(t)).toContain(
-      'email.archive: a dormant queue must have consumer kind planned or none',
+      'email.analytics: a dormant queue must have consumer kind planned or none',
     );
     const u = clone();
-    const archive = mutableQueue(u, 'email.archive');
-    archive.lossy = true;
-    expect(validateTopology(u)).toContain('email.archive: only a work queue can be lossy');
+    const analytics = mutableQueue(u, 'email.analytics');
+    analytics.lossy = true;
+    expect(validateTopology(u)).toContain('email.analytics: only a work queue can be lossy');
+    // v12 (step 8.1 A26): email.archive is work-lossy; without lossy its policy is wrong.
+    const z = clone();
+    delete mutableQueue(z, 'email.archive').lossy;
+    expect(validateTopology(z)).toContain('email.archive: policy differs from the work policy');
     // v8 (step 4.6 X11): scan.sandbox is work-lossy; without lossy its policy is wrong.
     const v = clone();
     delete mutableQueue(v, 'scan.sandbox').lossy;
@@ -1256,7 +1294,7 @@ describe('toRabbitDefinitions (Q5)', () => {
   const definitions = toRabbitDefinitions(TOPOLOGY, { vhost: DEFAULT_VHOST });
 
   it('declares topic exchanges and quorum queues with no other argument', () => {
-    expect(definitions.topology_version).toBe(11);
+    expect(definitions.topology_version).toBe(12);
     expect(definitions.exchanges).toHaveLength(6);
     for (const exchange of definitions.exchanges) {
       expect(exchange).toEqual({
@@ -1297,7 +1335,8 @@ describe('toRabbitDefinitions (Q5)', () => {
     // + 5 exchange = 47. v10 (step 5.3 Q27): email.quarantine keeps two (release_requested.v1
     // replaces policy.decided.v1), email.notifications adds one: 43 queue + 5 exchange = 48.
     // v11 (step 6.2 §4.3): email.webhooks adds nine (eight events + retry), email.notifications
-    // one (alert_requested.v1): 53 queue + 5 exchange = 58.
+    // one (alert_requested.v1): 53 queue + 5 exchange = 58. v12 (step 8.1 A26): email.archive
+    // keeps its two bindings (dormant → work): still 58.
     expect(definitions.bindings).toHaveLength(58);
     const keys = definitions.bindings.map(
       (b) => `${b.source}|${b.destination_type}|${b.destination}|${b.routing_key}`,

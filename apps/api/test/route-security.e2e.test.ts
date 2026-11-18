@@ -750,6 +750,142 @@ describe('route security (e2e, dependencies stubbed)', () => {
     ).toEqual(['post /api/v1/messages/:messageId/reveal', 'post /api/v1/messages/reveal']);
   });
 
+  it('the step 8.1 archive, legal hold and eDiscovery routes: exact permissions, MFA, users, limits, classes and keys (§4.4, A20)', () => {
+    type Flags = {
+      any?: boolean;
+      mfa?: boolean;
+      user?: boolean;
+      rate?: string;
+      cls?: string;
+      key?: string;
+      cursor?: boolean;
+    };
+    const R = 'archive:read';
+    const M = 'archive:manage';
+    const E = 'ediscovery:manage';
+    const expected: Record<string, [string[], Flags?]> = {
+      'get /api/v1/archive/settings': [[R]],
+      'put /api/v1/archive/settings': [
+        [M],
+        { mfa: true, user: true, cls: 'sensitive', key: 'archive.settings_update' },
+      ],
+      'get /api/v1/archive/retention-policies': [[R], { cursor: true }],
+      'post /api/v1/archive/retention-policies': [
+        [M],
+        { cls: 'sensitive', key: 'archive.retention_policy_create' },
+      ],
+      'get /api/v1/archive/retention-policies/:policyId': [[R]],
+      'put /api/v1/archive/retention-policies/:policyId': [
+        [M],
+        { cls: 'sensitive', key: 'archive.retention_policy_update' },
+      ],
+      'delete /api/v1/archive/retention-policies/:policyId': [
+        [M],
+        { cls: 'sensitive', key: 'archive.retention_policy_delete' },
+      ],
+      'get /api/v1/archive/keys': [[R], { cursor: true }],
+      'post /api/v1/archive/keys/rotate': [
+        [M],
+        { mfa: true, user: true, cls: 'sensitive', key: 'archive.key_rotate' },
+      ],
+      'get /api/v1/archive/status': [[R]],
+      'get /api/v1/archive/capture-issues': [[M], { cursor: true }],
+      'post /api/v1/archive/capture-issues/:messageId/retry': [
+        [M],
+        { cls: 'sensitive', key: 'archive.capture_retry' },
+      ],
+      'get /api/v1/archive/disposals': [[R], { cursor: true }],
+      'get /api/v1/archive/export-signing-keys': [[R]],
+      'get /api/v1/archive/messages': [['archive:search'], { cls: 'expensive', cursor: true }],
+      'get /api/v1/archive/messages/:messageId': [[R]],
+      'get /api/v1/archive/messages/:messageId/journal': [[R]],
+      'get /api/v1/archive/messages/:messageId/security': [[R]],
+      'post /api/v1/archive/messages/:messageId/reveal': [
+        [R, 'message:reveal'],
+        { rate: 'reveal' },
+      ],
+      'get /api/v1/archive/messages/:messageId/preview': [
+        ['archive:retrieve'],
+        { mfa: true, user: true, rate: 'preview' },
+      ],
+      'post /api/v1/archive/messages/:messageId/download-grants': [
+        ['archive:retrieve'],
+        { mfa: true, user: true, rate: 'download_grant' },
+      ],
+      'get /api/v1/archive/downloads/:token': [
+        ['archive:retrieve', 'archive:export'],
+        { any: true, user: true, rate: 'download' },
+      ],
+      'post /api/v1/archive/messages/:messageId/dispose': [
+        [M],
+        { mfa: true, user: true, cls: 'sensitive', key: 'archive.dispose' },
+      ],
+      'get /api/v1/legal-holds': [['archive:legal_hold', E], { any: true, cursor: true }],
+      'get /api/v1/legal-holds/:holdId': [['archive:legal_hold', E], { any: true }],
+      'post /api/v1/legal-holds/:holdId/release': [
+        ['archive:legal_hold'],
+        { mfa: true, user: true, cls: 'sensitive', key: 'legal_hold.release' },
+      ],
+      'post /api/v1/ediscovery/cases/:caseId/holds': [
+        ['archive:legal_hold', E],
+        { mfa: true, user: true, cls: 'sensitive', key: 'legal_hold.create' },
+      ],
+      'get /api/v1/ediscovery/cases': [[E], { cursor: true }],
+      'post /api/v1/ediscovery/cases': [[E], { cls: 'sensitive', key: 'ediscovery.case_create' }],
+      'get /api/v1/ediscovery/cases/:caseId': [[E]],
+      'patch /api/v1/ediscovery/cases/:caseId': [
+        [E],
+        { cls: 'sensitive', key: 'ediscovery.case_update' },
+      ],
+      'post /api/v1/ediscovery/cases/:caseId/close': [
+        [E],
+        { mfa: true, user: true, cls: 'sensitive', key: 'ediscovery.case_close' },
+      ],
+      'post /api/v1/ediscovery/cases/:caseId/searches': [
+        [E, 'archive:search'],
+        { cls: 'expensive', key: 'ediscovery.search_create' },
+      ],
+      'get /api/v1/ediscovery/cases/:caseId/searches': [[E], { cursor: true }],
+      'get /api/v1/ediscovery/cases/:caseId/searches/:searchId': [[E]],
+      'get /api/v1/ediscovery/cases/:caseId/searches/:searchId/hits': [[E], { cursor: true }],
+      'post /api/v1/ediscovery/cases/:caseId/searches/:searchId/review': [
+        [E],
+        { user: true, cls: 'sensitive', key: 'ediscovery.review' },
+      ],
+      'post /api/v1/ediscovery/cases/:caseId/exports': [
+        [E, 'archive:export'],
+        { cls: 'expensive', key: 'ediscovery.export_create' },
+      ],
+      'get /api/v1/ediscovery/cases/:caseId/exports': [[E], { cursor: true }],
+      'get /api/v1/ediscovery/cases/:caseId/exports/:exportId': [[E]],
+      'post /api/v1/ediscovery/cases/:caseId/exports/:exportId/download-grants': [
+        [E, 'archive:export'],
+        { mfa: true, user: true, rate: 'download_grant' },
+      ],
+    };
+    const archiveRoutes = routes.filter((r) =>
+      /^\/api\/v1\/(archive|legal-holds|ediscovery)(\/|$)/.test(r.path),
+    );
+    expect(archiveRoutes.map((r) => `${r.method} ${r.path}`).sort()).toEqual(
+      Object.keys(expected).sort(),
+    );
+    expect(archiveRoutes).toHaveLength(41);
+    for (const [key, [permissions, flags]] of Object.entries(expected)) {
+      const route = routes.find((r) => `${r.method} ${r.path}` === key)!;
+      expect(route.isPublic, key).toBe(false);
+      expect(route.requirement, key).toEqual({ mode: flags?.any ? 'any' : 'all', permissions });
+      expect(route.requireMfa, key).toBe(flags?.mfa ?? false);
+      expect(route.userOnly, key).toBe(flags?.user ?? false);
+      expect(route.archiveRate, key).toBe(flags?.rate ?? null);
+      expect(route.rateClass, key).toBe(flags?.cls ?? null);
+      // Transactional keys are not the reservation interceptor (`@Idempotent`).
+      expect(route.idempotency, key).toBeNull();
+      // Grants and the reveal carry no key (secret-bearing / values never stored).
+      expect(route.returnsSecret, key).toBe(false);
+      expect(route.cursor, key).toBe(flags?.cursor ? 'v1' : null);
+    }
+  });
+
   it('every §3.5 legacy sensitive mutation is @Idempotent (legacy) in the sensitive class (step 6.1 D9, D10)', () => {
     for (const [key, operation] of Object.entries(LEGACY_SENSITIVE)) {
       const route = routes.find((r) => `${r.method} ${r.path}` === key);

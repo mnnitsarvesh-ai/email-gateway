@@ -196,10 +196,15 @@ const HEADER_NAMES = [
 const BOUNCE_P = 0.01;
 /** Archive retention used for synthetic archive rows (7 years). */
 const ARCHIVE_RETENTION_MS = 7 * 365 * 24 * 60 * 60 * 1000;
+/** Capture intents are kept two months (registry: operational); older messages have none. */
+const ARCHIVE_INTENT_WINDOW_MS = 60 * 24 * 60 * 60 * 1000;
 const HOUR_WEIGHT = Array.from({ length: 24 }, (_, h) => (h >= 3 && h <= 12 ? 1 : 0.35));
 
 export async function loadSyntheticData(client: SqlClient, opts: LoadOptions): Promise<LoadResult> {
   const rand = createRandom(opts.seed);
+  // Step 8.1 archive rows draw from their own stream so the shape of every other table stays
+  // identical to earlier runs with the same seed.
+  const archiveRand = createRandom(opts.seed ^ 0x8a1);
   const loader = new Loader(client);
   const started = performance.now();
   const nowMs = opts.now.getTime();
@@ -413,6 +418,9 @@ export async function loadSyntheticData(client: SqlClient, opts: LoadOptions): P
     /** Message index of each policy_execution_logs row (scan_id is known after the scans). */
     const policyLogOwners: number[] = [];
     const archiveRows: Row[] = [];
+    const intentRows: Row[] = [];
+    const disposalRows: Row[] = [];
+    const indexQueueRows: Row[] = [];
     const webhookRows: Row[] = [];
 
     msgs.forEach((m, k) => {
@@ -675,21 +683,120 @@ export async function loadSyntheticData(client: SqlClient, opts: LoadOptions): P
         null,
       ]);
       if (featured(m.org)) {
+        // Step 8.1 (§3 item 4): the archive record as the archive-worker writes it (metadata,
+        // object references and a wrapped key only). ~1 % of records carry a short retention that
+        // has already expired, so the expiry query (Q28) finds due rows.
+        const direction = k % 8 === 0 ? 'outbound' : 'inbound';
+        const captureId = uuidv7(m.receivedMs + 60_000);
+        const prefix = `org/${m.orgId}/archive/${day}/${m.publicId}/${captureId}`;
+        const shortRetention = archiveRand() < 0.01;
+        const retainUntilMs = shortRetention
+          ? m.receivedMs + 30 * DAY_MS
+          : m.receivedMs + ARCHIVE_RETENTION_MS;
+        const review = shortRetention && archiveRand() < 0.2;
+        const category =
+          status === 'quarantined'
+            ? 'quarantined'
+            : status === 'rejected'
+              ? 'rejected'
+              : 'delivered';
         archiveRows.push([
           m.received,
           id,
           m.orgId,
-          `org/${m.orgId}/archive/${day}/${id}.eml`,
+          `${prefix}/eml.bin`,
           hex64(),
           size,
           null,
-          sqlTime(m.receivedMs + ARCHIVE_RETENTION_MS),
+          sqlTime(retainUntilMs),
           false,
           sqlTime(m.receivedMs + 60_000),
           null,
           m.received,
           m.received,
+          m.publicId,
+          direction,
+          true,
+          false,
+          category,
+          review ? 'expiry_review' : 'active',
+          status,
+          `sender${k % 97}@sender${k % 13}.example`,
+          `sender${k % 97}@sender${k % 13}.example`,
+          `Synthetic message ${base + k}`,
+          `<${m.publicId}@sender.example>`,
+          JSON.stringify({ v: 1, from: `sender${k % 97}@sender${k % 13}.example`, recipients: [] }),
+          m.recipients,
+          m.attachments,
+          JSON.stringify({ captureId, eml: { key: `${prefix}/eml.bin` } }),
+          size + 4096,
+          'archive-object/1',
+          1,
+          `v1.k1.perf.perf.${hex64().slice(0, 32)}`,
+          review ? 'review' : 'delete',
+          m.verdict === 'unknown' ? null : m.verdict,
+          action,
+          risk,
+          m.verdict === 'malware' || m.verdict === 'phishing',
+          JSON.stringify([]),
+          1,
         ]);
+        if (age < ARCHIVE_INTENT_WINDOW_MS) {
+          // Step 8.1 A2: capture intents of the last two months. Recent ones are still open
+          // (outcome window), a few are due now; the rest are closed.
+          const open = age < 7 * DAY_MS;
+          const due = open && archiveRand() < 0.02;
+          intentRows.push([
+            m.received,
+            m.orgId,
+            id,
+            direction,
+            true,
+            false,
+            open ? (due && archiveRand() < 0.5 ? 'pending' : 'captured_open') : 'closed',
+            category,
+            sqlTime(due ? nowMs - 60_000 : open ? nowMs + HOUR_MS : m.receivedMs + DAY_MS),
+            1,
+            sqlTime(m.receivedMs + 60_000),
+            open ? null : sqlTime(m.receivedMs + DAY_MS),
+            m.received,
+            m.received,
+          ]);
+        }
+        if (shortRetention && !review && age > 30 * DAY_MS) {
+          // Step 8.1 A14: disposal log rows of expired records (the record itself stays in this
+          // synthetic data so both queries have rows); 5 % are still in the pipeline.
+          const requestedMs = retainUntilMs + HOUR_MS;
+          const done = archiveRand() >= 0.05;
+          disposalRows.push([
+            sqlTime(requestedMs),
+            m.orgId,
+            id,
+            m.publicId,
+            m.received,
+            0,
+            'retention_expired',
+            hex64(),
+            size,
+            JSON.stringify({ captureId, keys: 3 }),
+            done ? 'completed' : 'shredded',
+            sqlTime(done ? requestedMs : nowMs - 60_000),
+            done ? sqlTime(requestedMs + 60_000) : null,
+            sqlTime(requestedMs),
+            sqlTime(requestedMs),
+          ]);
+        }
+        if (age < HOUR_MS) {
+          indexQueueRows.push([
+            m.orgId,
+            id,
+            m.received,
+            m.publicId,
+            'upsert',
+            m.received,
+            m.received,
+          ]);
+        }
         const fresh = age < HOUR_MS;
         const failed = !fresh && rand() < 0.01;
         webhookRows.push([
@@ -1133,8 +1240,89 @@ export async function loadSyntheticData(client: SqlClient, opts: LoadOptions): P
         'deleted_at',
         'created_at',
         'updated_at',
+        // Step 8.1 columns.
+        'message_public_id',
+        'direction',
+        'captured_by_journal',
+        'captured_by_policy',
+        'category',
+        'status',
+        'message_state',
+        'envelope_from',
+        'header_from',
+        'subject',
+        'internet_message_id',
+        'parties',
+        'recipient_count',
+        'attachment_count',
+        'objects',
+        'stored_bytes',
+        'encryption_format',
+        'key_version',
+        'wrapped_dek',
+        'expiry_action',
+        'final_verdict',
+        'final_action',
+        'risk_score',
+        'malicious',
+        'scan_rounds',
+        'settings_generation',
       ],
       archiveRows,
+    );
+    await loader.insert(
+      'archive_capture_intents',
+      [
+        'received_at',
+        'organization_id',
+        'message_id',
+        'direction',
+        'source_journal',
+        'source_policy',
+        'status',
+        'category',
+        'next_check_at',
+        'settings_generation',
+        'captured_at',
+        'closed_at',
+        'created_at',
+        'updated_at',
+      ],
+      intentRows,
+    );
+    await loader.insert(
+      'archive_disposals',
+      [
+        'requested_at',
+        'organization_id',
+        'message_id',
+        'message_public_id',
+        'message_received_at',
+        'archive_record_id',
+        'reason',
+        'sha256',
+        'size_bytes',
+        'objects',
+        'state',
+        'next_attempt_at',
+        'completed_at',
+        'created_at',
+        'updated_at',
+      ],
+      disposalRows,
+    );
+    await loader.insert(
+      'archive_index_queue',
+      [
+        'organization_id',
+        'message_id',
+        'received_at',
+        'message_public_id',
+        'op',
+        'available_at',
+        'created_at',
+      ],
+      indexQueueRows,
     );
     await loader.insert(
       'webhook_deliveries',

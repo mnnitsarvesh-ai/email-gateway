@@ -264,3 +264,23 @@ data:
   CLICK_CONTINUE_TTL_SECONDS: '600'
   CLICK_TRUST_PROXY: '1'
   CLICK_STORE_CLIENT_NETWORK: 'true'
+  # Journaling and compliance archiving (step 8.1 §4.8, docs/plan/steps/23-journaling-archiving.md;
+  # docs/deployment/archive.md). Shared by the api and the archive-worker / archive-jobs
+  # Deployments (worker-only tunables and roles live in their manifests). Secrets are NOT here:
+  # ARCHIVE_ROOT_KEY (+ _PREVIOUS), ARCHIVE_DOWNLOAD_TOKEN_KEY, ARCHIVE_SEARCH_PASSWORD and the
+  # export signing keys are mounted from their own Secrets (<KEY>_FILE). ARCHIVE_TEST_* are
+  # local/ci-only and never set here.
+  ARCHIVE_ROOT_KEY_ID: r1
+  # Amazon OpenSearch domain endpoint (HTTPS; fine-grained access control: the api's user may only
+  # read <prefix>-t*, the worker's writes <prefix>-v* and manages aliases). Set per overlay.
+  ARCHIVE_SEARCH_URL: https://search.replace-per-environment.invalid
+  ARCHIVE_SEARCH_TIMEOUT_MS: '10000'
+  ARCHIVE_SEARCH_INDEX_PREFIX: eg-archive
+  # `auto`: probe the archive bucket's Object Lock at start (Terraform creates it lock-enabled).
+  ARCHIVE_OBJECT_LOCK: auto
+  ARCHIVE_MAX_RETENTION_DAYS: '3650'
+  ARCHIVE_EXPORT_SIGNING_KEY_ID: es1
+  ARCHIVE_EXPORT_SIGNING_PUBLIC_KEY_ID: es1
+  ARCHIVE_EXPORT_MAX_ITEMS: '10000'
+  ARCHIVE_EXPORT_MAX_BYTES: '2147483648'
+  ARCHIVE_EXPORT_TTL_HOURS: '168'

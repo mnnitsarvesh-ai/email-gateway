@@ -1,4 +1,9 @@
-import { QUEUE_NAMES } from '@email-gateway/event-contracts';
+import {
+  policyFor,
+  QUEUE_NAMES,
+  queueDefinition,
+  TOPOLOGY_VERSION,
+} from '@email-gateway/event-contracts';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createTestVhost, ManagementApi, runInit, type TestVhost } from './support/broker';
 import { stack } from './support/env';
@@ -88,6 +93,19 @@ afterAll(async () => {
 }, 60_000);
 
 describe('init.mjs --cleanup-legacy (quorum legacy queues)', () => {
+  it('provisions the v12 topology in the test vhost: email.archive is a lossy work queue, not dormant (step 8.1 A26)', async () => {
+    const info = await mgmt.get<{ description?: string }>(
+      `/vhosts/${encodeURIComponent(vhost.vhost)}`,
+    );
+    expect(info.description).toBe(`email-gateway topology v${TOPOLOGY_VERSION}`);
+    expect(TOPOLOGY_VERSION).toBe(12);
+    expect(queueDefinition('email.archive')).toMatchObject({ role: 'work', lossy: true });
+    const archive = (await mgmt.queues(vhost.vhost)).find((q) => q.name === 'email.archive');
+    expect(archive?.effective_policy_definition).toEqual(policyFor('work-lossy', 'email.archive'));
+    // The ADR-0005 queue name of the archive-worker is a legacy object, never a topology queue.
+    expect(QUEUE_NAMES).not.toContain('archive-worker.policy-decided');
+  });
+
   it('deletes the empty quorum queues, keeps a non-empty one and its bound exchange', async () => {
     const before = await mgmt.queues(legacy);
     expect(before.filter((q) => q.type === 'quorum').map((q) => q.name)).toEqual(
@@ -122,8 +140,9 @@ describe('init.mjs --cleanup-legacy (quorum legacy queues)', () => {
     const exchanges = new Set((await mgmt.exchanges(legacy)).map((e) => e.name));
     expect(exchanges.has('mail.dlx')).toBe(false); // only the deleted .dlq queues were bound
     expect(exchanges.has('mail.events')).toBe(true); // still bound to the kept queue
-    // The topology vhost is untouched (every queue of the current topology, 21 in v11: step 5.2
-    // P15 added `email.notifications`, step 6.2 `email.webhooks`).
+    // The topology vhost is untouched (every queue of the current topology, 21 since v11: step 5.2
+    // P15 added `email.notifications`, step 6.2 `email.webhooks`; v12 (step 8.1) turned the
+    // dormant `email.archive` into a work queue, the count is unchanged).
     expect(QUEUE_NAMES).toHaveLength(21);
     expect((await mgmt.queues(vhost.vhost)).length).toBe(QUEUE_NAMES.length);
 

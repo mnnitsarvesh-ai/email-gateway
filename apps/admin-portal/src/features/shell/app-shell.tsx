@@ -12,7 +12,7 @@ import { DESKTOP_QUERY, MOBILE_QUERY, useMediaQuery } from '@/hooks/use-media-qu
 import { SESSION_QUERY_KEY, useMe, useSession } from '@/lib/auth/me';
 import { RouteGate } from '@/lib/auth/route-gate';
 import { isBoolean, readPreference, writePreference } from '@/lib/local-preference';
-import { navItemForPath } from '@/lib/navigation';
+import { gateForPath, navItemForPath } from '@/lib/navigation';
 import { scheduleProactiveRefresh } from '@/lib/session/refresh';
 import { cn } from '@/lib/utils';
 import { DevFixturesBadge } from './dev-fixtures-badge';
@@ -96,6 +96,7 @@ function ShellFrame({ children }: { children: ReactNode }) {
 
   const permissions = meData?.permissions ?? [];
   const navItem = navItemForPath(pathname);
+  const routeGate = gateForPath(pathname);
   const override = session.data?.override ?? null;
   const canOverride = permissions.includes('platform:tenant_override') && !override;
 
@@ -103,7 +104,7 @@ function ShellFrame({ children }: { children: ReactNode }) {
     if (me.isLoading || session.isLoading || mustEnroll)
       return <LoadingState label="Loading your workspace" rows={5} />;
     if (me.error) return <ErrorState error={me.error} onRetry={() => void me.refetch()} />;
-    return navItem ? <RouteGate gate={navItem.gate}>{children}</RouteGate> : children;
+    return routeGate ? <RouteGate gate={routeGate}>{children}</RouteGate> : children;
   })();
 
   return (

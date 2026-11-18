@@ -434,8 +434,9 @@ export class QuarantineSweeper {
 
   /**
    * Q17 at expiry / re-evaluation: the message's `quarantine_object_purges` row — `pending`
-   * (`purge_after = now`) when rules 1–4 allow the purge, else `retained` with the reason and
-   * `purge_after` = the retention end (or one day later when unknown, re-evaluated then).
+   * (`purge_after = now`) when the rules allow the purge, else `retained` with the reason and
+   * `purge_after` = the decision's re-check time (`archive_pending`: now + 1 h, step 8.1 A23, so
+   * the purge follows the capture closely) or one day later when unknown (re-evaluated then).
    */
   private async schedulePurge(
     tx: Prisma.TransactionClient,

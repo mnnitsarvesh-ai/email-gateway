@@ -20,6 +20,7 @@ export const USER_KEYS = [
   'alphaMailbox',
   'alphaMfaAdmin',
   'alphaApprover',
+  'alphaAuditorMfa',
   'betaAdmin',
   'platformAdmin',
 ] as const;
@@ -122,6 +123,14 @@ export interface E2eState {
     };
   };
   expected: { dashboard7d: DashboardExpectation };
+  /** Step 8.1: archive tenants (seed/archive.ts); alpha's records are captured during the run. */
+  archive: {
+    custodian: string;
+    policyId: string;
+    policyName: string;
+    /** Beta's captured-to-be message (isolation target). */
+    betaMessageId: string;
+  };
 }
 
 let cached: E2eState | undefined;

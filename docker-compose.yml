@@ -5,6 +5,7 @@
 #                                                   # MySQL replica, seeded by mysql-replica-setup
 #   docker compose --profile apps up -d --build --wait     # + migrations and all services
 #   docker compose --profile analytics up -d --wait        # + OpenSearch, ClickHouse
+#   docker compose --profile search up -d --wait opensearch  # OpenSearch only (archive search, 8.1)
 #   docker compose --profile observability up -d --wait    # + OTel Collector, Prometheus, Grafana
 #   docker compose --profile smtp-test up -d --wait # + test-only SMTP sinks, test PKI, DNS,
 #                                                   #   client tools and the reinject-forwarder
@@ -32,14 +33,22 @@
 #
 # Messaging (step 3.2, docs/architecture/messaging-topology.md): `rabbitmq-init` (one-shot,
 # default profile) provisions vhost ${RABBITMQ_VHOST} from infrastructure/rabbitmq/definitions.json
-# (topology v11: 6 exchanges, 21 quorum queues, bindings, policies) and the least-privilege role
+# (topology v12: 6 exchanges, 21 quorum queues, bindings, policies) and the least-privilege role
 # users, and removes the empty ADR-0005 objects on vhost "/". Every app waits for it. Services
 # never declare topology and each one gets only its own role URL (no RABBITMQ_URL): email-worker
 # RABBITMQ_EMAIL_WORKER_URL, delivery-worker RABBITMQ_DELIVERY_WORKER_URL, api RABBITMQ_OPS_URL,
 # event-relay (outbox relay and reconciler, ADR-0023) RABBITMQ_RELAY_URL, policy-engine
 # RABBITMQ_POLICY_ENGINE_URL, notification-worker RABBITMQ_NOTIFICATION_URL, webhook-worker
-# RABBITMQ_WEBHOOK_URL. archive-worker
-# consumes nothing yet and does not connect to RabbitMQ.
+# RABBITMQ_WEBHOOK_URL, archive-worker RABBITMQ_ARCHIVE_URL (topology v12, step 8.1: it consumes
+# email.archive as eg-archive).
+#
+# Journaling and archiving (step 8.1, docs/plan/steps/23-journaling-archiving.md, ADR-0064..0069):
+# the `archive-worker` (roles ARCHIVE_WORKER_ROLES=capture,index,lifecycle,ediscovery in one
+# container locally) captures journaled and policy-archived mail into the Object Lock archive
+# bucket (S3_BUCKET_ARCHIVE, created lock-enabled by minio-init) and indexes metadata into
+# OpenSearch (profile `search`: docker compose --profile search up -d --wait opensearch). The api
+# reads archive metadata, decrypts archived content and searches through the tenant alias; both
+# hold ARCHIVE_ROOT_KEY. ARCHIVE_TEST_REPLICA_BUCKET is a test-only lock-enabled replica target.
 #
 # Policy (step 5.2, docs/plan/steps/16-policy-engine.md, ADR-0043/0044/0045, topology v9): the
 # `policy-engine` consumes email.policy.evaluate as eg-policy-engine (RABBITMQ_POLICY_ENGINE_URL)
@@ -302,6 +311,22 @@ x-rabbitmq-cluster-node: &rabbitmq-cluster-node
     start_period: 60s
     retries: 12
 
+# Step 8.1 §4.8: the archive keys both the api and the archive-worker read (root key, search,
+# Object Lock mode, platform retention cap, test-only day length).
+x-archive-shared-env: &archive-shared-env
+  ARCHIVE_ROOT_KEY: ${ARCHIVE_ROOT_KEY:?append the archiving keys from .env.example}
+  ARCHIVE_ROOT_KEY_ID: ${ARCHIVE_ROOT_KEY_ID:-r1}
+  ARCHIVE_ROOT_KEY_PREVIOUS: ${ARCHIVE_ROOT_KEY_PREVIOUS:-}
+  ARCHIVE_ROOT_KEY_PREVIOUS_ID: ${ARCHIVE_ROOT_KEY_PREVIOUS_ID:-}
+  ARCHIVE_SEARCH_URL: http://opensearch:9200
+  ARCHIVE_SEARCH_USERNAME: ${ARCHIVE_SEARCH_USERNAME:-}
+  ARCHIVE_SEARCH_PASSWORD: ${ARCHIVE_SEARCH_PASSWORD:-}
+  ARCHIVE_SEARCH_TIMEOUT_MS: ${ARCHIVE_SEARCH_TIMEOUT_MS:-10000}
+  ARCHIVE_SEARCH_INDEX_PREFIX: ${ARCHIVE_SEARCH_INDEX_PREFIX:-eg-archive}
+  ARCHIVE_OBJECT_LOCK: ${ARCHIVE_OBJECT_LOCK:-auto}
+  ARCHIVE_MAX_RETENTION_DAYS: ${ARCHIVE_MAX_RETENTION_DAYS:-3650}
+  ARCHIVE_TEST_DAY_SECONDS: ${ARCHIVE_TEST_DAY_SECONDS:-}
+
 x-node-healthcheck: &node-healthcheck
   interval: 10s
   timeout: 5s
@@ -466,6 +491,9 @@ services:
       # Webhook worker (step 6.2 §4.3): reads email.webhooks, publishes its own hops only.
       RABBITMQ_WEBHOOK_USER: ${RABBITMQ_WEBHOOK_USER:-eg-webhook}
       RABBITMQ_WEBHOOK_PASSWORD: ${RABBITMQ_WEBHOOK_PASSWORD:?append the webhook keys from .env.example}
+      # Archive worker (step 8.1 A26, topology v12): reads email.archive, publishes its own hops only.
+      RABBITMQ_ARCHIVE_USER: ${RABBITMQ_ARCHIVE_USER:-eg-archive}
+      RABBITMQ_ARCHIVE_PASSWORD: ${RABBITMQ_ARCHIVE_PASSWORD:?append the archiving keys from .env.example}
     volumes: ['./infrastructure/rabbitmq:/rabbitmq:ro']
     depends_on:
       rabbitmq: { condition: service_healthy }
@@ -536,6 +564,10 @@ services:
       SANDBOX_S3_SECRET_ACCESS_KEY: ${SANDBOX_S3_SECRET_ACCESS_KEY:?append the sandbox keys from .env.example}
       SANDBOX_SAMPLE_RETENTION_HOURS: ${SANDBOX_SAMPLE_RETENTION_HOURS:-24}
       SANDBOX_ARTIFACT_RETENTION_DAYS: ${SANDBOX_ARTIFACT_RETENTION_DAYS:-30}
+      # Step 8.1 A29: the archive bucket with Object Lock, its export-expiry lifecycle rule and the
+      # test-only lock-enabled replica bucket.
+      ARCHIVE_EXPORT_TTL_HOURS: ${ARCHIVE_EXPORT_TTL_HOURS:-168}
+      ARCHIVE_TEST_REPLICA_BUCKET: ${ARCHIVE_TEST_REPLICA_BUCKET:-gateway-archive-replica}
       MC_CONFIG_DIR: /tmp/mc
     volumes: ['./infrastructure/minio/init-buckets.sh:/init-buckets.sh:ro']
     depends_on:
@@ -1113,7 +1145,15 @@ services:
       mysql-replica-setup: { condition: service_completed_successfully }
       redis-dkim: { condition: service_healthy }
     environment:
-      <<: [*node-env, *scan-platform-env, *bec-env, *dlp-bounds-env, *sandbox-platform-env]
+      <<:
+        [
+          *node-env,
+          *scan-platform-env,
+          *bec-env,
+          *dlp-bounds-env,
+          *sandbox-platform-env,
+          *archive-shared-env,
+        ]
       HTTP_PORT: 3000
       # Sandbox (step 4.6 X17): what the deployed controller does, reported by the scan settings
       # API (informational only; files are not executed unless an approved backend exists).
@@ -1298,6 +1338,27 @@ services:
       POLICY_DRY_RUN_SAMPLE_MAX: ${POLICY_DRY_RUN_SAMPLE_MAX:-50}
       POLICY_DRY_RUN_DEADLINE_MS: ${POLICY_DRY_RUN_DEADLINE_MS:-10000}
       POLICY_SAMPLE_DRY_RUNS_PER_MINUTE: ${POLICY_SAMPLE_DRY_RUNS_PER_MINUTE:-6}
+      # Journaling and archiving (step 8.1 §4.8): the shared archive keys come from
+      # x-archive-shared-env (merged above); the export verification keys, download tokens, route
+      # limits and per-organization bounds are the api's.
+      ARCHIVE_EXPORT_SIGNING_PUBLIC_KEY: ${ARCHIVE_EXPORT_SIGNING_PUBLIC_KEY:?append the archiving keys from .env.example}
+      ARCHIVE_EXPORT_SIGNING_PUBLIC_KEY_ID: ${ARCHIVE_EXPORT_SIGNING_PUBLIC_KEY_ID:-es1}
+      ARCHIVE_EXPORT_SIGNING_PREVIOUS_PUBLIC_KEYS: ${ARCHIVE_EXPORT_SIGNING_PREVIOUS_PUBLIC_KEYS:-}
+      ARCHIVE_EXPORT_MAX_ITEMS: ${ARCHIVE_EXPORT_MAX_ITEMS:-10000}
+      ARCHIVE_EXPORT_MAX_BYTES: ${ARCHIVE_EXPORT_MAX_BYTES:-2147483648}
+      ARCHIVE_DOWNLOAD_TOKEN_KEY: ${ARCHIVE_DOWNLOAD_TOKEN_KEY:?append the archiving keys from .env.example}
+      ARCHIVE_DOWNLOAD_TOKEN_TTL_SECONDS: ${ARCHIVE_DOWNLOAD_TOKEN_TTL_SECONDS:-60}
+      ARCHIVE_DOWNLOAD_GRANTS_PER_HOUR: ${ARCHIVE_DOWNLOAD_GRANTS_PER_HOUR:-20}
+      ARCHIVE_PREVIEW_PER_MINUTE: ${ARCHIVE_PREVIEW_PER_MINUTE:-30}
+      ARCHIVE_REVEAL_PER_MINUTE: ${ARCHIVE_REVEAL_PER_MINUTE:-30}
+      ARCHIVE_SEARCH_MAX_RANGE_DAYS: ${ARCHIVE_SEARCH_MAX_RANGE_DAYS:-366}
+      ARCHIVE_CASE_SEARCH_MAX_RANGE_DAYS: ${ARCHIVE_CASE_SEARCH_MAX_RANGE_DAYS:-3650}
+      ARCHIVE_RETENTION_POLICIES_MAX_PER_ORG: ${ARCHIVE_RETENTION_POLICIES_MAX_PER_ORG:-50}
+      ARCHIVE_HOLDS_MAX_ACTIVE_PER_ORG: ${ARCHIVE_HOLDS_MAX_ACTIVE_PER_ORG:-100}
+      ARCHIVE_CASES_MAX_OPEN_PER_ORG: ${ARCHIVE_CASES_MAX_OPEN_PER_ORG:-200}
+      ARCHIVE_CASE_MAX_CUSTODIANS: ${ARCHIVE_CASE_MAX_CUSTODIANS:-1000}
+      ARCHIVE_CASE_MAX_ACTIVE_SEARCHES: ${ARCHIVE_CASE_MAX_ACTIVE_SEARCHES:-3}
+      ARCHIVE_REVIEW_MAX_ITEMS: ${ARCHIVE_REVIEW_MAX_ITEMS:-500}
     ports: ['127.0.0.1:${API_HOST_PORT:-3000}:3000']
     healthcheck:
       <<: *node-healthcheck
@@ -1958,8 +2019,54 @@ services:
       }
     image: email-gateway/archive-worker:local
     environment:
-      <<: *node-env
+      <<: [*node-env, *archive-shared-env]
       HTTP_PORT: 3060
+      # Step 8.1 §4.8: consumes email.archive as eg-archive (topology v12) and runs every role in
+      # this one container (Kubernetes: archive-worker = capture,index; archive-jobs =
+      # lifecycle,ediscovery). OpenSearch: profile `search` (ARCHIVE_SEARCH_URL above).
+      RABBITMQ_ARCHIVE_URL: amqp://${RABBITMQ_ARCHIVE_USER:-eg-archive}:${RABBITMQ_ARCHIVE_PASSWORD:?append the archiving keys from .env.example}@rabbitmq:5672/${RABBITMQ_VHOST:-email-gateway}
+      ARCHIVE_WORKER_ROLES: ${ARCHIVE_WORKER_ROLES:-capture,index,lifecycle,ediscovery}
+      ARCHIVE_PREFETCH: ${ARCHIVE_PREFETCH:-20}
+      ARCHIVE_DB_TX_TIMEOUT_MS: ${ARCHIVE_DB_TX_TIMEOUT_MS:-60000}
+      ARCHIVE_CAPTURE_CONCURRENCY: ${ARCHIVE_CAPTURE_CONCURRENCY:-4}
+      ARCHIVE_CAPTURE_LEASE_SECONDS: ${ARCHIVE_CAPTURE_LEASE_SECONDS:-600}
+      ARCHIVE_CAPTURE_RETRY_BASE_MS: ${ARCHIVE_CAPTURE_RETRY_BASE_MS:-5000}
+      ARCHIVE_CAPTURE_RETRY_MAX_MS: ${ARCHIVE_CAPTURE_RETRY_MAX_MS:-3600000}
+      ARCHIVE_INTENT_MAX_AGE_DAYS: ${ARCHIVE_INTENT_MAX_AGE_DAYS:-25}
+      ARCHIVE_OUTCOME_WINDOW_DAYS: ${ARCHIVE_OUTCOME_WINDOW_DAYS:-7}
+      ARCHIVE_SWEEP_INTERVAL_MS: ${ARCHIVE_SWEEP_INTERVAL_MS:-15000}
+      ARCHIVE_SWEEP_BATCH_SIZE: ${ARCHIVE_SWEEP_BATCH_SIZE:-1000}
+      ARCHIVE_SWEEP_SAFETY_LAG_SECONDS: ${ARCHIVE_SWEEP_SAFETY_LAG_SECONDS:-120}
+      ARCHIVE_POLICY_RECONCILE_SAFETY_LAG_SECONDS: ${ARCHIVE_POLICY_RECONCILE_SAFETY_LAG_SECONDS:-300}
+      ARCHIVE_JOURNAL_SWEEP_START: ${ARCHIVE_JOURNAL_SWEEP_START:-now}
+      ARCHIVE_POLICY_RECONCILE_START: ${ARCHIVE_POLICY_RECONCILE_START:-oldest}
+      ARCHIVE_S3_TIMEOUT_MS: ${ARCHIVE_S3_TIMEOUT_MS:-120000}
+      ARCHIVE_S3_PART_SIZE_BYTES: ${ARCHIVE_S3_PART_SIZE_BYTES:-8388608}
+      ARCHIVE_CHUNK_BYTES: ${ARCHIVE_CHUNK_BYTES:-65536}
+      ARCHIVE_PREVIEW_PART_MAX_BYTES: ${ARCHIVE_PREVIEW_PART_MAX_BYTES:-1048576}
+      ARCHIVE_SETTINGS_CACHE_TTL_MS: ${ARCHIVE_SETTINGS_CACHE_TTL_MS:-30000}
+      ARCHIVE_KEY_CACHE_TTL_MS: ${ARCHIVE_KEY_CACHE_TTL_MS:-60000}
+      ARCHIVE_INDEX_BATCH_SIZE: ${ARCHIVE_INDEX_BATCH_SIZE:-500}
+      ARCHIVE_INDEX_INTERVAL_MS: ${ARCHIVE_INDEX_INTERVAL_MS:-2000}
+      ARCHIVE_INDEX_SHARDS: ${ARCHIVE_INDEX_SHARDS:-1}
+      ARCHIVE_INDEX_REPLICAS: ${ARCHIVE_INDEX_REPLICAS:-0}
+      ARCHIVE_RECONCILE_INTERVAL_MS: ${ARCHIVE_RECONCILE_INTERVAL_MS:-600000}
+      ARCHIVE_RECONCILE_RECENT_DAYS: ${ARCHIVE_RECONCILE_RECENT_DAYS:-3}
+      ARCHIVE_LIFECYCLE_INTERVAL_MS: ${ARCHIVE_LIFECYCLE_INTERVAL_MS:-60000}
+      ARCHIVE_LIFECYCLE_BATCH_SIZE: ${ARCHIVE_LIFECYCLE_BATCH_SIZE:-200}
+      ARCHIVE_HOLD_EXTENSION_DAYS: ${ARCHIVE_HOLD_EXTENSION_DAYS:-30}
+      ARCHIVE_REVIEW_EXTENSION_DAYS: ${ARCHIVE_REVIEW_EXTENSION_DAYS:-30}
+      ARCHIVE_DISPOSAL_MAX_ATTEMPTS: ${ARCHIVE_DISPOSAL_MAX_ATTEMPTS:-20}
+      ARCHIVE_GOVERNANCE_BYPASS_ORPHANS: ${ARCHIVE_GOVERNANCE_BYPASS_ORPHANS:-true}
+      ARCHIVE_REPLICA_TARGETS: ${ARCHIVE_REPLICA_TARGETS:-}
+      ARCHIVE_EXPORT_SIGNING_KEY: ${ARCHIVE_EXPORT_SIGNING_KEY:?append the archiving keys from .env.example}
+      ARCHIVE_EXPORT_SIGNING_KEY_ID: ${ARCHIVE_EXPORT_SIGNING_KEY_ID:-es1}
+      ARCHIVE_EXPORT_MAX_ITEMS: ${ARCHIVE_EXPORT_MAX_ITEMS:-10000}
+      ARCHIVE_EXPORT_MAX_BYTES: ${ARCHIVE_EXPORT_MAX_BYTES:-2147483648}
+      ARCHIVE_EXPORT_TTL_HOURS: ${ARCHIVE_EXPORT_TTL_HOURS:-168}
+      ARCHIVE_EXPORT_CONCURRENCY: ${ARCHIVE_EXPORT_CONCURRENCY:-1}
+      ARCHIVE_CASE_SEARCH_MAX_HITS: ${ARCHIVE_CASE_SEARCH_MAX_HITS:-100000}
+      ARCHIVE_CASE_SEARCH_DEADLINE_MS: ${ARCHIVE_CASE_SEARCH_DEADLINE_MS:-600000}
     ports: ['127.0.0.1:${ARCHIVE_WORKER_HOST_PORT:-3060}:3060']
     healthcheck:
       <<: *node-healthcheck
@@ -2306,10 +2413,17 @@ services:
     ports: ['127.0.0.1:${RABBITMQ_CLUSTER_NODE3_HOST_PORT:-5703}:5672']
 
   # ---------------------------------------------------------------- search & analytics (profile: analytics)
+  # OpenSearch is also in profile `search` (step 8.1 A16, A29): the archive metadata index of the
+  # archive-worker and the api, started without ClickHouse:
+  #   docker compose --profile search up -d --wait opensearch
+  # Heap 512 MB; the cgroup limit (1.5 GB, like clamav's) confines it on the 16 GB Docker VM
+  # (docs/plan/steps/23-journaling-archiving.md A29 memory budget). Never start `analytics` or
+  # `observability` together with `apps`; `search` is fine with `apps`.
   opensearch:
-    profiles: [analytics]
+    profiles: [analytics, search]
     image: opensearchproject/opensearch:2.19.3
     restart: unless-stopped
+    mem_limit: 1536m
     environment:
       discovery.type: single-node
       bootstrap.memory_lock: 'true'

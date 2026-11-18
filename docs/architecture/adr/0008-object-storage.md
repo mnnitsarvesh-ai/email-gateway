@@ -1,6 +1,6 @@
 # ADR-0008: S3 for message content; MinIO for local development
 
-**Status:** Accepted
+**Status:** Accepted. Step 8.1 amendment: the archive key layout is fixed by [ADR-0065](0065-archive-storage-and-per-tenant-envelope-encryption.md) (`org/{organizationId}/archive/{yyyy}/{mm}/{dd}/{messagePublicId}/{captureId}/…`, encrypted `archive-object/1`) and the archive bucket is created with Object Lock ([ADR-0066](0066-archive-immutability-s3-object-lock.md)).
 
 **Decision.**
 

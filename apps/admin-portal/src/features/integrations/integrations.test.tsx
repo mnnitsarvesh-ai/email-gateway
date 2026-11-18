@@ -105,7 +105,15 @@ describe('IntegrationsPage', () => {
       '/mail-servers?tab=connectors',
     );
     expect(screen.getByText('Arrives in step 8.2')).toBeInTheDocument();
-    expect(screen.getByText('Arrives in step 8.1')).toBeInTheDocument();
+    expect(screen.queryByText('Arrives in step 8.1')).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Archive settings' })).toHaveAttribute(
+      'href',
+      '/settings?tab=archive',
+    );
+    expect(screen.getByRole('link', { name: 'Search the archive' })).toHaveAttribute(
+      'href',
+      '/archive',
+    );
     await expectNoAxeViolations(container);
   });
 
