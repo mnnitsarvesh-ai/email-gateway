@@ -101,6 +101,7 @@ export function sampleItem(
   messageId: string | null,
   outcome: PolicySampleOutcome,
   evaluation: PerRecipientEvaluation | null,
+  atoFactsSource: 'stored' | 'current' | 'none' = 'none',
 ): PolicySampleItem {
   const stored: PolicySampleItem['stored'] = {
     disposition: row.disposition,
@@ -136,6 +137,7 @@ export function sampleItem(
     outcome,
     stored,
     dryRun,
+    atoFactsSource,
     dispositionChanged: dryRun !== null && dryRun.disposition !== stored.disposition,
     decisiveChanged:
       dryRun !== null &&

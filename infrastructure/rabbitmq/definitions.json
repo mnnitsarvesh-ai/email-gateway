@@ -1,5 +1,5 @@
 {
-  "topology_version": 12,
+  "topology_version": 13,
   "exchanges": [
     {
       "name": "email.ingestion",
@@ -229,6 +229,33 @@
       }
     },
     {
+      "name": "ato.events",
+      "vhost": "email-gateway",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-queue-type": "quorum"
+      }
+    },
+    {
+      "name": "ato.mail",
+      "vhost": "email-gateway",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-queue-type": "quorum"
+      }
+    },
+    {
+      "name": "ato.responses",
+      "vhost": "email-gateway",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-queue-type": "quorum"
+      }
+    },
+    {
       "name": "email.analytics",
       "vhost": "email-gateway",
       "durable": true,
@@ -310,6 +337,38 @@
       "destination": "email.webhooks",
       "destination_type": "queue",
       "routing_key": "org.*.mail.delivery.approved.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.events",
+      "vhost": "email-gateway",
+      "destination": "ato.events",
+      "destination_type": "queue",
+      "routing_key": "org.*.auth.account.changed.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.events",
+      "vhost": "email-gateway",
+      "destination": "ato.events",
+      "destination_type": "queue",
+      "routing_key": "org.*.auth.login.recorded.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.events",
+      "vhost": "email-gateway",
+      "destination": "ato.events",
+      "destination_type": "queue",
+      "routing_key": "org.*.smtp.auth.recorded.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.events",
+      "vhost": "email-gateway",
+      "destination": "ato.events",
+      "destination_type": "queue",
+      "routing_key": "org.*.smtp.submission.recorded.v1",
       "arguments": {}
     },
     {
@@ -523,9 +582,73 @@
     {
       "source": "email.security",
       "vhost": "email-gateway",
+      "destination": "ato.events",
+      "destination_type": "queue",
+      "routing_key": "retry.ato.events.#",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
+      "destination": "ato.mail",
+      "destination_type": "queue",
+      "routing_key": "org.*.mail.message.scanned.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
+      "destination": "ato.mail",
+      "destination_type": "queue",
+      "routing_key": "retry.ato.mail.#",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
+      "destination": "ato.responses",
+      "destination_type": "queue",
+      "routing_key": "org.*.ato.response.requested.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
+      "destination": "ato.responses",
+      "destination_type": "queue",
+      "routing_key": "retry.ato.responses.#",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
+      "destination": "email.notifications",
+      "destination_type": "queue",
+      "routing_key": "org.*.ato.notification.requested.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
       "destination": "email.policy.evaluate",
       "destination_type": "queue",
       "routing_key": "org.*.mail.message.scanned.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
+      "destination": "email.webhooks",
+      "destination_type": "queue",
+      "routing_key": "org.*.ato.account.risk.updated.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
+      "destination": "email.webhooks",
+      "destination_type": "queue",
+      "routing_key": "org.*.ato.response.completed.v1",
       "arguments": {}
     },
     {
@@ -542,6 +665,22 @@
       "destination": "email.webhooks",
       "destination_type": "queue",
       "routing_key": "org.*.mail.message.scanned.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
+      "destination": "email.webhooks",
+      "destination_type": "queue",
+      "routing_key": "org.*.security.incident.created.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
+      "destination": "email.webhooks",
+      "destination_type": "queue",
+      "routing_key": "org.*.security.incident.updated.v1",
       "arguments": {}
     },
     {
@@ -991,6 +1130,48 @@
         "delivery-limit": 20,
         "dead-letter-exchange": "email.events",
         "dead-letter-routing-key": "dead-letter.email.webhooks",
+        "dead-letter-strategy": "at-least-once",
+        "overflow": "reject-publish",
+        "max-length": 1000000
+      }
+    },
+    {
+      "vhost": "email-gateway",
+      "name": "eg.ato.events",
+      "pattern": "^ato\\.events$",
+      "apply-to": "queues",
+      "priority": 10,
+      "definition": {
+        "delivery-limit": 20,
+        "dead-letter-exchange": "email.events",
+        "dead-letter-routing-key": "dead-letter.ato.events",
+        "dead-letter-strategy": "at-least-once",
+        "overflow": "reject-publish",
+        "max-length": 1000000
+      }
+    },
+    {
+      "vhost": "email-gateway",
+      "name": "eg.ato.mail",
+      "pattern": "^ato\\.mail$",
+      "apply-to": "queues",
+      "priority": 10,
+      "definition": {
+        "delivery-limit": 20,
+        "overflow": "drop-head",
+        "max-length": 500000
+      }
+    },
+    {
+      "vhost": "email-gateway",
+      "name": "eg.ato.responses",
+      "pattern": "^ato\\.responses$",
+      "apply-to": "queues",
+      "priority": 10,
+      "definition": {
+        "delivery-limit": 20,
+        "dead-letter-exchange": "email.events",
+        "dead-letter-routing-key": "dead-letter.ato.responses",
         "dead-letter-strategy": "at-least-once",
         "overflow": "reject-publish",
         "max-length": 1000000

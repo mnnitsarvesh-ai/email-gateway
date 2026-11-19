@@ -1,7 +1,7 @@
 'use client';
 
 import { CheckCheckIcon, FlaskConicalIcon, HistoryIcon, SaveIcon } from 'lucide-react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useMemo, useRef, useState } from 'react';
 import { z } from 'zod';
 import { FormErrorSummary, applyApiErrors, useZodForm } from '@/components/form';
@@ -30,6 +30,7 @@ import {
   canonicalJson,
   documentBytes,
   emptyDefinition,
+  factPresetById,
   PolicyBuilderEditor,
   useBuilderState,
   ViolationList,
@@ -140,8 +141,13 @@ function NewPolicyWorkspace({ catalog }: { catalog: BuilderCatalog }) {
     onOutcome: (outcome) => setCheck(checkOfOutcome(outcome)),
   });
   const [highlight, setHighlight] = useState<string | null>(null);
-  const [panel, setPanel] = useState<'test' | 'dry-run' | null>(null);
-  const [testState, setTestState] = useTestPanelState('inline');
+  // `?testPreset=<example id>` (step 8.4 D23: the ATO recommendation and settings link here)
+  // starts the test panel from that example and opens it when the user may test.
+  const testPreset = useSearchParams().get('testPreset');
+  const [panel, setPanel] = useState<'test' | 'dry-run' | null>(() =>
+    canTest && factPresetById(testPreset) ? 'test' : null,
+  );
+  const [testState, setTestState] = useTestPanelState('inline', testPreset);
   const [dryRunState, setDryRunState] = useDryRunPanelState('inline');
   const [messages, setMessages] = useState<string[]>([]);
   const create = useApiMutation('PolicyManagementController_create_v1', {

@@ -1192,6 +1192,299 @@ enum WebhookRequesterType {
   api_key
 }
 
+// Step 8.4 security incidents (shared by ATO and ATP; docs/plan/steps/24-account-takeover-core.md
+// D24, §3.1, ADR-0075). Every list equals the matching constant of
+// @email-gateway/security-contracts (src/security-incidents.ts; a test compares them) and is
+// APPEND-ONLY (ATP-4 appends categories, subject types, link types and origins).
+
+/// `security_incidents.category` (SECURITY_INCIDENT_CATEGORIES).
+enum SecurityIncidentCategory {
+  account_takeover
+}
+
+/// `security_incidents.subject_type` (SECURITY_INCIDENT_SUBJECT_TYPES): what the incident is about.
+enum SecurityIncidentSubjectType {
+  ato_account
+}
+
+/// `security_incidents.origin` (SECURITY_INCIDENT_ORIGINS).
+enum SecurityIncidentOrigin {
+  detection
+  manual
+}
+
+/// The six incident states (SECURITY_INCIDENT_STATUSES); `false_positive` and `resolved` are
+/// terminal. Transitions are enforced by @email-gateway/security-incidents (D12).
+enum SecurityIncidentStatus {
+  open
+  investigating
+  confirmed
+  false_positive
+  mitigated
+  resolved
+}
+
+/// SECURITY_INCIDENT_SEVERITIES, ascending.
+enum SecurityIncidentSeverity {
+  low
+  medium
+  high
+  critical
+}
+
+/// SECURITY_INCIDENT_RESOLUTION_CODES.
+enum SecurityIncidentResolutionCode {
+  remediated
+  false_positive
+  benign_activity
+  duplicate
+  other
+}
+
+/// `security_incident_links.link_type` (SECURITY_INCIDENT_LINK_TYPES): the referenced row is a
+/// message (`email_messages`), an ATO signal or an ATO authentication event.
+enum SecurityIncidentLinkType {
+  message
+  ato_signal
+  ato_auth_event
+}
+
+// Step 8.4 account takeover (docs/plan/steps/24-account-takeover-core.md §3.2, ADR-0070..0074).
+// Append-only; `AtoAccountKind` and `AtoRiskLevel` equal ATO_ACCOUNT_KINDS and ATO_RISK_LEVELS of
+// @email-gateway/security-contracts (a test compares them).
+
+/// `ato_accounts.kind` (D1): the three monitored credentials.
+enum AtoAccountKind {
+  mailbox
+  gateway_user
+  smtp_connector
+}
+
+/// `ato_accounts.status`: `retired` when the user or connector was deleted or the account had no
+/// event for 13 months (maintenance role).
+enum AtoAccountStatus {
+  active
+  retired
+}
+
+/// Account risk levels, ascending (ATO_RISK_LEVELS; bands are per-tenant settings, D11).
+enum AtoRiskLevel {
+  low
+  medium
+  high
+  critical
+}
+
+/// `ato_auth_events.source`.
+enum AtoAuthSource {
+  portal_login
+  portal_mfa
+  smtp_auth
+  idp_sign_in
+}
+
+/// `ato_auth_events.channel`.
+enum AtoAuthChannel {
+  portal
+  api
+  smtp
+  idp
+}
+
+/// `ato_auth_events.outcome`.
+enum AtoAuthOutcome {
+  success
+  failure
+  locked
+  mfa_required
+  mfa_failure
+  rate_limited
+  throttled
+  blocked
+}
+
+/// `ato_auth_events.geo_status` (D7: never a guessed location).
+enum AtoGeoStatus {
+  located
+  not_found
+  private
+  unavailable
+  stale
+}
+
+/// `ato_risk_signals.category`: the eleven rule categories of `ato-rules/1` (D10, D11).
+enum AtoSignalCategory {
+  authentication
+  access_context
+  geography
+  threat_intel
+  account_change
+  outbound_behaviour
+  outbound_content
+  mailbox_configuration
+  oauth_activity
+  provider_risk
+  correlation
+}
+
+/// `ato_risk_signals.strength` (D11 gates: weak-only cap, strong floor).
+enum AtoSignalStrength {
+  weak
+  moderate
+  strong
+}
+
+/// `ato_risk_signals.status`: `dismissed` by a false-positive resolution; `informational` never
+/// scores.
+enum AtoSignalStatus {
+  active
+  dismissed
+  informational
+}
+
+/// `ato_risk_signals.source_kind`: what produced the signal.
+enum AtoSignalSourceKind {
+  auth_event
+  message
+  telemetry
+  audit
+  provider
+  correlation
+  window
+}
+
+/// `ato_risk_scores.trigger` (and `ato.account.risk.updated.v1`).
+enum AtoScoreTrigger {
+  signal
+  decay
+  override
+  dismissal
+  settings
+  feedback
+}
+
+/// `ato_risk_overrides.verdict` (D11).
+enum AtoOverrideVerdict {
+  benign
+  compromised
+}
+
+/// `ato_trusted_contexts.kind`.
+enum AtoTrustedContextKind {
+  ip_cidr
+  asn
+  country
+  device
+}
+
+/// `ato_trusted_contexts.source`.
+enum AtoTrustedContextSource {
+  analyst
+  false_positive_feedback
+}
+
+/// `ato_response_actions.impact` (D13 catalogue).
+enum AtoResponseImpact {
+  low
+  medium
+  high
+}
+
+/// `ato_response_actions.status` (D13 state machine). Non-terminal: `pending_approval`,
+/// `approved`, `executing`, `rollback_requested` (the generated `active_marker` is 1 for them).
+enum AtoResponseStatus {
+  pending_approval
+  approved
+  executing
+  succeeded
+  failed
+  rejected
+  cancelled
+  expired
+  unsupported
+  rollback_requested
+  rolled_back
+  rollback_failed
+  attested
+}
+
+/// `ato_response_actions.authorization`: why the action may run.
+enum AtoResponseAuthorization {
+  manual
+  automation_policy
+  low_impact_default
+}
+
+/// `ato_response_actions.provider_status` (D13 status semantics: `confirmed` only with a provider
+/// reference; gateway restrictions are `applied`; notifications `unconfirmed`).
+enum AtoProviderStatus {
+  applied
+  confirmed
+  pending
+  unconfirmed
+  unsupported
+  failed
+}
+
+/// `ato_response_action_logs.phase`.
+enum AtoActionLogPhase {
+  authorize
+  execute
+  confirm
+  rollback
+}
+
+/// `ato_response_action_logs.outcome`.
+enum AtoActionLogOutcome {
+  succeeded
+  pending
+  failed
+  unsupported
+  retry_scheduled
+  skipped
+}
+
+/// `ato_smtp_restrictions.kind` (D14).
+enum AtoRestrictionKind {
+  send_block
+  auth_block
+}
+
+/// `ato_smtp_restrictions.scope` (`send_block`: mailbox, connector; `auth_block`: connector,
+/// connector_ip).
+enum AtoRestrictionScope {
+  mailbox
+  connector
+  connector_ip
+}
+
+/// `ato_smtp_restrictions.mode`: `REJECT 5.7.1` (default) or `DEFER_IF_PERMIT 4.7.1`.
+enum AtoRestrictionMode {
+  reject
+  defer
+}
+
+/// `ato_smtp_restrictions.status` (the generated `active_marker` is 1 for `active`).
+enum AtoRestrictionStatus {
+  active
+  lifted
+  expired
+}
+
+/// `ato_smtp_restrictions.lifted_by_type`.
+enum AtoLiftedByType {
+  user
+  system
+}
+
+/// `ato_provider_integrations.status` (the provider ingestion runner; adapters in step 8.5).
+enum AtoProviderIntegrationStatus {
+  active
+  paused
+  error
+  disabled
+}
+
 // ---------------------------------------------------------------------------------------------
 // 3.1 Tenant management
 // ---------------------------------------------------------------------------------------------
@@ -1323,6 +1616,14 @@ model Organization {
   policySettings           PolicySettings?
   tenantDepartments        TenantDepartment[]
   tenantDepartmentMembers  TenantDepartmentMember[]
+  securityIncidents        SecurityIncident[]
+  atoSettings              AtoSetting?
+  atoSettingsVersions      AtoSettingsVersion[]
+  atoAccounts              AtoAccount[]
+  atoRiskOverrides         AtoRiskOverride[]
+  atoResponseActions       AtoResponseAction[]
+  atoSmtpRestrictions      AtoSmtpRestriction[]
+  atoProviderIntegrations  AtoProviderIntegration[]
 
   @@index([status])
   @@index([status, purgeAfter])
@@ -1517,6 +1818,8 @@ model User {
   updatedDepartments           TenantDepartment[]          @relation("DepartmentUpdatedBy")
   departmentMemberships        TenantDepartmentMember[]    @relation("DepartmentMemberUser")
   createdDepartmentMembers     TenantDepartmentMember[]    @relation("DepartmentMemberCreatedBy")
+  assignedSecurityIncidents    SecurityIncident[]          @relation("SecurityIncidentAssignee")
+  updatedAtoSettings           AtoSetting[]                @relation("AtoSettingsUpdatedBy")
 
   @@unique([organizationId, email])
   @@index([organizationId, status])
@@ -3038,6 +3341,11 @@ model BecScanResult {
   aiShadow             Json?      @map("ai_shadow")
   durationMs           Int        @map("duration_ms") @db.UnsignedInt
   createdAt            DateTime   @default(now()) @map("created_at") @db.DateTime(3)
+  /// Step 8.4 D6 (ADR-0070): outbound observations of outbound and internal mail of organizations
+  /// with ATO enabled: `{ version: 'bec-outbound-obs/1', status: 'complete' | 'incomplete' |
+  /// 'unavailable', reason, categories, financialIdentifiers, links }` (counts and booleans only,
+  /// no spans, no text). The verdict stays `skipped` (`bec.not_inbound`); NULL otherwise.
+  outboundObservations Json?      @map("outbound_observations")
 
   @@id([id, receivedAt])
   @@unique([scanId, receivedAt])
@@ -4132,6 +4440,8 @@ model PolicyExecutionLog {
   durationUs              Int                     @map("duration_us") @db.UnsignedInt
   evaluatedAt             DateTime                @map("evaluated_at") @db.DateTime(3)
   createdAt               DateTime                @default(now()) @map("created_at") @db.DateTime(3)
+  /// `ato-policy-facts/1` block used by the evaluation (step 8.4 D23); NULL when absent.
+  atoFacts                Json?                   @map("ato_facts")
 
   @@id([id, receivedAt])
   @@unique([messageId, evaluationSeq, receivedAt])
@@ -5279,6 +5589,712 @@ model EdiscoveryExport {
   @@index([status, createdAt])
   @@index([status, expiresAt])
   @@map("ediscovery_exports")
+}
+
+// ---------------------------------------------------------------------------------------------
+// 3.11 Security incidents (step 8.4, shared by ATO and ATP: docs/plan/steps/24-account-takeover-core.md
+// D24, §3.1, ADR-0075) and account takeover (step 8.4 §3.2, ADR-0070..0074). No message content
+// in any of these tables (ids, codes, counts, hashes; never a password, token, subject, body or
+// recipient address). Written only through the shared IncidentStore and the ATO store
+// (ato-worker and api); the policy-engine reads ato_accounts and security_incidents (D23).
+// ---------------------------------------------------------------------------------------------
+
+/// A security incident of any category (D24): ATO (`account_takeover`, subject an `ato_accounts`
+/// row) in 8.4; ATP-4 appends categories. Category detail lives in category tables
+/// (`ato_incident_details`). One active incident per category and subject (unique key over the
+/// generated `active_marker`). Retention per category (ATO: closed incidents purged after
+/// ATO_RETENTION_INCIDENT_DAYS by the ato-worker).
+model SecurityIncident {
+  id                BigInt                          @id @default(autoincrement()) @db.UnsignedBigInt
+  /// UUIDv7; the only id the API exposes.
+  publicId          String                          @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId    BigInt                          @map("organization_id") @db.UnsignedBigInt
+  category          SecurityIncidentCategory
+  subjectType       SecurityIncidentSubjectType     @map("subject_type")
+  /// Id of the subject row (`ato_accounts.id` for `ato_account`; no FK, category-dependent).
+  subjectRefId      BigInt                          @map("subject_ref_id") @db.UnsignedBigInt
+  /// Partition key of a partitioned subject (ATP: a message's `received_at`); NULL for `ato_account`.
+  subjectRefTime    DateTime?                       @map("subject_ref_time") @db.DateTime(3)
+  /// The subject's public id (`ato_accounts.public_id`).
+  subjectPublicId   String                          @map("subject_public_id") @db.VarChar(64)
+  origin            SecurityIncidentOrigin
+  status            SecurityIncidentStatus          @default(open)
+  severity          SecurityIncidentSeverity
+  /// The top contribution's code (ATO: a rule code).
+  titleCode         String?                         @map("title_code") @db.VarChar(64)
+  /// JSON array (≤ 16) of reason codes (ATO: the contributing rule codes).
+  reasonCodes       Json                            @map("reason_codes")
+  /// Detector catalogue version (`ato-rules/1`); NULL for manual incidents.
+  detectorVersion   String?                         @map("detector_version") @db.VarChar(32)
+  detectedAt        DateTime                        @map("detected_at") @db.DateTime(3)
+  firstEvidenceAt   DateTime?                       @map("first_evidence_at") @db.DateTime(3)
+  lastEvidenceAt    DateTime?                       @map("last_evidence_at") @db.DateTime(3)
+  evidenceCount     Int                             @default(0) @map("evidence_count") @db.UnsignedInt
+  assignedUserId    BigInt?                         @map("assigned_user_id") @db.UnsignedBigInt
+  assignedAt        DateTime?                       @map("assigned_at") @db.DateTime(3)
+  escalatedAt       DateTime?                       @map("escalated_at") @db.DateTime(3)
+  confirmedAt       DateTime?                       @map("confirmed_at") @db.DateTime(3)
+  mitigatedAt       DateTime?                       @map("mitigated_at") @db.DateTime(3)
+  resolvedAt        DateTime?                       @map("resolved_at") @db.DateTime(3)
+  /// No FK: the trail survives the deletion of the user.
+  resolvedByUserId  BigInt?                         @map("resolved_by_user_id") @db.UnsignedBigInt
+  resolutionCode    SecurityIncidentResolutionCode? @map("resolution_code")
+  resolutionNote    String?                         @map("resolution_note") @db.VarChar(4000)
+  /// Last `security.incident.updated.v1` with `evidence` (the 15-minute throttle, D12).
+  lastUpdateEventAt DateTime?                       @map("last_update_event_at") @db.DateTime(3)
+  createdByType     ActorType                       @map("created_by_type")
+  /// Public id of the creating user or API key; NULL for `system`.
+  createdById       String?                         @map("created_by_id") @db.VarChar(64)
+  /// READ-ONLY, generated by MySQL: `GENERATED ALWAYS AS (IF(status IN ('open', 'investigating',
+  /// 'confirmed', 'mitigated'), 1, NULL)) STORED`. With the unique key below: one active incident
+  /// per organization, category and subject. Never write it.
+  activeMarker      Int?                            @map("active_marker") @db.UnsignedTinyInt
+  /// Optimistic concurrency (CAS) of the api.
+  rowVersion        Int                             @default(1) @map("row_version") @db.UnsignedInt
+  createdAt         DateTime                        @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt         DateTime                        @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization       Organization            @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  assignedUser       User?                   @relation("SecurityIncidentAssignee", fields: [assignedUserId], references: [id], onDelete: SetNull)
+  events             SecurityIncidentEvent[]
+  links              SecurityIncidentLink[]
+  atoDetail          AtoIncidentDetail?
+  atoResponseActions AtoResponseAction[]
+
+  @@unique([organizationId, category, subjectType, subjectRefId, activeMarker])
+  @@index([organizationId, detectedAt, id])
+  @@index([organizationId, category, status, detectedAt, id])
+  @@index([organizationId, category, severity, detectedAt, id])
+  @@index([organizationId, assignedUserId, status])
+  @@index([organizationId, subjectType, subjectRefId, detectedAt])
+  /// Retention purge per category (closed incidents by resolution time).
+  @@index([category, status, resolvedAt])
+  @@map("security_incidents")
+}
+
+/// Timeline and audit trail of an incident (D24): generic event types (`created`,
+/// `evidence_linked`, `severity_changed`, `status_changed`, `assigned`, `note_added`, `escalated`,
+/// `report_exported`) and category-prefixed ones (`ato.response_requested`, …,
+/// `ato.feedback_applied`). Append-only; deleted with the incident.
+model SecurityIncidentEvent {
+  id             BigInt                    @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId BigInt                    @map("organization_id") @db.UnsignedBigInt
+  incidentId     BigInt                    @map("incident_id") @db.UnsignedBigInt
+  eventType      String                    @map("event_type") @db.VarChar(48)
+  actorType      ActorType                 @map("actor_type")
+  /// Public id of the acting user or API key; NULL for `system`.
+  actorId        String?                   @map("actor_id") @db.VarChar(64)
+  fromStatus     SecurityIncidentStatus?   @map("from_status")
+  toStatus       SecurityIncidentStatus?   @map("to_status")
+  fromSeverity   SecurityIncidentSeverity? @map("from_severity")
+  toSeverity     SecurityIncidentSeverity? @map("to_severity")
+  /// Analyst note (investigation notes, transition reasons); never message content.
+  note           String?                   @db.Text
+  /// Bounded JSON (codes, ids, counts).
+  details        Json?
+  createdAt      DateTime                  @default(now()) @map("created_at") @db.DateTime(3)
+
+  incident SecurityIncident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+
+  @@index([incidentId, createdAt, id])
+  @@index([organizationId, createdAt])
+  @@map("security_incident_events")
+}
+
+/// Typed evidence reference of an incident (D24): `(ref_id, ref_time)` of a message
+/// (`email_messages.id`, `received_at`), an ATO signal (`ato_risk_signals.id`, `detected_at`) or
+/// an ATO authentication event (`ato_auth_events.id`, `occurred_at`). No FK (partitioned targets).
+/// Per-type caps are enforced by the store (ATO: 2 000 signals, 1 000 auth events, 500 messages).
+model SecurityIncidentLink {
+  id             BigInt                   @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId BigInt                   @map("organization_id") @db.UnsignedBigInt
+  incidentId     BigInt                   @map("incident_id") @db.UnsignedBigInt
+  linkType       SecurityIncidentLinkType @map("link_type")
+  refId          BigInt                   @map("ref_id") @db.UnsignedBigInt
+  /// Partition key of the referenced row.
+  refTime        DateTime                 @map("ref_time") @db.DateTime(3)
+  createdAt      DateTime                 @default(now()) @map("created_at") @db.DateTime(3)
+
+  incident SecurityIncident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+
+  @@unique([incidentId, linkType, refId, refTime])
+  @@index([organizationId, incidentId, linkType, refTime])
+  @@map("security_incident_links")
+}
+
+/// Per-organization ATO settings (`ato-settings/1`, §4.3; normalized, every key optional with
+/// defaults from DEFAULT_ATO_SETTINGS). One row per organization; written by the api (CAS on
+/// `row_version`); every change also appends `ato_settings_versions`. The feature itself is the
+/// plan/organization feature `ato_detection` (off by default, D21).
+model AtoSetting {
+  id                BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId    BigInt   @unique @map("organization_id") @db.UnsignedBigInt
+  settings          Json
+  /// Hex SHA-256 of the canonical settings JSON.
+  settingsSha256    String   @map("settings_sha256") @db.Char(64)
+  /// 1, +1 per change (recorded with every signal and score).
+  version           Int      @default(1) @db.UnsignedInt
+  rowVersion        Int      @default(1) @map("row_version") @db.UnsignedInt
+  /// Start of the tenant learning period (baseline-relative rules suppressed until it ends).
+  learningStartedAt DateTime @map("learning_started_at") @db.DateTime(3)
+  updatedByUserId   BigInt?  @map("updated_by_user_id") @db.UnsignedBigInt
+  createdAt         DateTime @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt         DateTime @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization  Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  updatedByUser User?        @relation("AtoSettingsUpdatedBy", fields: [updatedByUserId], references: [id], onDelete: SetNull)
+
+  @@map("ato_settings")
+}
+
+/// Append-only history of `ato_settings` (one row per version; purged after 730 days except the
+/// current version).
+model AtoSettingsVersion {
+  id              BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId  BigInt   @map("organization_id") @db.UnsignedBigInt
+  version         Int      @db.UnsignedInt
+  settings        Json
+  settingsSha256  String   @map("settings_sha256") @db.Char(64)
+  /// No FK: the trail survives the deletion of the user.
+  createdByUserId BigInt?  @map("created_by_user_id") @db.UnsignedBigInt
+  createdAt       DateTime @default(now()) @map("created_at") @db.DateTime(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  @@unique([organizationId, version])
+  @@map("ato_settings_versions")
+}
+
+/// A monitored subject (D1): a tenant mailbox (`address`), a portal user (`user_id`) or an SMTP
+/// connector (`connector_id`), keyed by `subject_hash` = atoSubjectHash(kind, subject) of
+/// @email-gateway/security-contracts. No directory data is copied (names, status, roles are
+/// joined live); `user_id` / `connector_id` have no FK so the trail survives deletion (the
+/// maintenance role marks the account `retired`). The policy-engine reads `risk_score`,
+/// `risk_level` and `active_incident_id` by the unique key (D23).
+model AtoAccount {
+  id                BigInt           @id @default(autoincrement()) @db.UnsignedBigInt
+  /// UUIDv7; the only id the API exposes.
+  publicId          String           @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId    BigInt           @map("organization_id") @db.UnsignedBigInt
+  kind              AtoAccountKind
+  /// Hex SHA-256 of `mailbox:<address>`, `user:<users.id>` or `connector:<smtp_connectors.id>`.
+  subjectHash       String           @map("subject_hash") @db.Char(64)
+  /// Lower-cased mailbox address (`mailbox` kind only; it has no other table).
+  address           String?          @db.VarChar(320)
+  /// domains.id of the address's domain (no FK).
+  domainId          BigInt?          @map("domain_id") @db.UnsignedBigInt
+  /// users.id (`gateway_user`; no FK).
+  userId            BigInt?          @map("user_id") @db.UnsignedBigInt
+  /// smtp_connectors.id (`smtp_connector`; no FK).
+  connectorId       BigInt?          @map("connector_id") @db.UnsignedBigInt
+  status            AtoAccountStatus @default(active)
+  /// Never acted on automatically (D13).
+  protected         Boolean          @default(false)
+  protectedReason   String?          @map("protected_reason") @db.VarChar(512)
+  protectedByUserId BigInt?          @map("protected_by_user_id") @db.UnsignedBigInt
+  protectedAt       DateTime?        @map("protected_at") @db.DateTime(3)
+  /// Current `ato-score/1` score, 0–100 (D11).
+  riskScore         Int              @default(0) @map("risk_score") @db.UnsignedTinyInt
+  riskLevel         AtoRiskLevel     @default(low) @map("risk_level")
+  riskUpdatedAt     DateTime?        @map("risk_updated_at") @db.DateTime(3)
+  /// The latest score explanation (copy of `ato_risk_scores.explanation`).
+  riskExplanation   Json?            @map("risk_explanation")
+  lastSignalAt      DateTime?        @map("last_signal_at") @db.DateTime(3)
+  /// security_incidents.id of the active `account_takeover` incident (no FK).
+  activeIncidentId  BigInt?          @map("active_incident_id") @db.UnsignedBigInt
+  /// ato_risk_overrides.id of the active override (no FK).
+  overrideId        BigInt?          @map("override_id") @db.UnsignedBigInt
+  firstSeenAt       DateTime         @map("first_seen_at") @db.DateTime(3)
+  lastSeenAt        DateTime         @map("last_seen_at") @db.DateTime(3)
+  lastAuthSuccessAt DateTime?        @map("last_auth_success_at") @db.DateTime(3)
+  /// Last successful authentication location `{ cc, lat, lon, km, at }` (fallback of Redis).
+  lastAuthGeo       Json?            @map("last_auth_geo")
+  rowVersion        Int              @default(1) @map("row_version") @db.UnsignedInt
+  createdAt         DateTime         @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt         DateTime         @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization    Organization         @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  baseline        AtoAccountBaseline?
+  overrides       AtoRiskOverride[]
+  trustedContexts AtoTrustedContext[]
+  incidentDetails AtoIncidentDetail[]
+  responseActions AtoResponseAction[]
+  identities      AtoAccountIdentity[]
+
+  @@unique([organizationId, kind, subjectHash])
+  @@index([organizationId, riskScore, id])
+  @@index([organizationId, lastSignalAt, id])
+  @@index([organizationId, address, id])
+  @@index([organizationId, kind, lastSeenAt])
+  @@index([organizationId, domainId, riskScore, id])
+  /// Decay sweep (accounts with a score whose last rescore is older than the interval).
+  @@index([riskUpdatedAt, riskScore])
+  @@map("ato_accounts")
+}
+
+/// Behavioural baseline of an account (`ato-baseline/1`, D9; rebuilt daily by the maintenance
+/// role from `ato_account_activity_daily` and `ato_auth_events`).
+model AtoAccountBaseline {
+  accountId      BigInt    @id @map("account_id") @db.UnsignedBigInt
+  organizationId BigInt    @map("organization_id") @db.UnsignedBigInt
+  baseline       Json
+  version        String    @db.VarChar(32)
+  eventCount     Int       @default(0) @map("event_count") @db.UnsignedInt
+  activeDays     Int       @default(0) @map("active_days") @db.UnsignedSmallInt
+  mature         Boolean   @default(false)
+  maturedAt      DateTime? @map("matured_at") @db.DateTime(3)
+  windowStart    DateTime  @map("window_start") @db.DateTime(3)
+  windowEnd      DateTime  @map("window_end") @db.DateTime(3)
+  rebuiltAt      DateTime  @map("rebuilt_at") @db.DateTime(3)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.DateTime(3)
+
+  account AtoAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, rebuiltAt])
+  @@map("ato_account_baselines")
+}
+
+/// PARTITIONED by RANGE COLUMNS(day_start), monthly, 6 months (tier core). Daily per-account
+/// aggregates (D9): counters and bounded JSON summaries; never an address, subject or body
+/// (recipient registrable domains and counts only). One row per account and UTC day.
+model AtoAccountActivityDaily {
+  id                 BigInt   @default(autoincrement()) @db.UnsignedBigInt
+  /// UTC midnight of the day.
+  dayStart           DateTime @map("day_start") @db.DateTime(3)
+  organizationId     BigInt   @map("organization_id") @db.UnsignedBigInt
+  /// ato_accounts.id (no FK: partitioned).
+  accountId          BigInt   @map("account_id") @db.UnsignedBigInt
+  authSuccess        Int      @default(0) @map("auth_success") @db.UnsignedInt
+  authFailure        Int      @default(0) @map("auth_failure") @db.UnsignedInt
+  messages           Int      @default(0) @db.UnsignedInt
+  recipients         Int      @default(0) @db.UnsignedInt
+  externalRecipients Int      @default(0) @map("external_recipients") @db.UnsignedInt
+  internalRecipients Int      @default(0) @map("internal_recipients") @db.UnsignedInt
+  attachments        Int      @default(0) @db.UnsignedInt
+  findings           Int      @default(0) @db.UnsignedInt
+  maxHourMessages    Int      @default(0) @map("max_hour_messages") @db.UnsignedInt
+  /// 24 × `{ m, a }` (messages, authentications per UTC hour).
+  hourCounts         Json     @map("hour_counts")
+  /// ≤ 20 `{ p, n, cc?, asn? }` (IP prefixes).
+  ipPrefixes         Json     @map("ip_prefixes")
+  /// ≤ 100 `{ d, n }` (registrable recipient domains).
+  recipientDomains   Json     @map("recipient_domains")
+  /// ≤ 20 attachment types with counts.
+  attachmentTypes    Json     @map("attachment_types")
+  /// ≤ 10 connectors of a mailbox or ≤ 50 sender hashes of a connector.
+  peers              Json
+  /// Content counts (finding categories, observation categories).
+  content            Json
+  createdAt          DateTime @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt          DateTime @updatedAt @map("updated_at") @db.DateTime(3)
+
+  @@id([id, dayStart])
+  @@unique([organizationId, accountId, dayStart])
+  @@index([organizationId, dayStart])
+  @@map("ato_account_activity_daily")
+}
+
+/// PARTITIONED by RANGE COLUMNS(occurred_at), monthly, 3 months (tier detail). Enriched
+/// authentication events (portal/API logins and MFA, SMTP AUTH, identity-provider sign-ins; D5,
+/// D7): geolocation, ASN, anonymizer flags, reputation, device. Never the attempted e-mail of an
+/// unknown account, a password or a raw SMTP username. Successful SMTP AUTHs are aggregated per
+/// (connector, IP, hour): `occurred_at` = hour start, `attempt_count`, `last_occurred_at`.
+model AtoAuthEvent {
+  id              BigInt         @default(autoincrement()) @db.UnsignedBigInt
+  occurredAt      DateTime       @map("occurred_at") @db.DateTime(3)
+  organizationId  BigInt         @map("organization_id") @db.UnsignedBigInt
+  /// ato_accounts.id; NULL for an unknown account (platform organization).
+  accountId       BigInt?        @map("account_id") @db.UnsignedBigInt
+  source          AtoAuthSource
+  channel         AtoAuthChannel
+  outcome         AtoAuthOutcome
+  failureCode     String?        @map("failure_code") @db.VarChar(64)
+  ipAddress       String?        @map("ip_address") @db.VarChar(45)
+  /// /24 (IPv4) or /48 (IPv6) prefix in CIDR notation.
+  ipPrefix        String?        @map("ip_prefix") @db.VarChar(49)
+  countryCode     String?        @map("country_code") @db.Char(2)
+  region          String?        @db.VarChar(64)
+  city            String?        @db.VarChar(64)
+  latitude        Decimal?       @db.Decimal(8, 4)
+  longitude       Decimal?       @db.Decimal(9, 4)
+  accuracyKm      Int?           @map("accuracy_km") @db.UnsignedSmallInt
+  geoStatus       AtoGeoStatus   @map("geo_status")
+  asn             Int?           @db.UnsignedInt
+  asnOrg          String?        @map("asn_org") @db.VarChar(128)
+  /// Bitmask of the Anonymous IP database flags (D7); NULL without that database.
+  anonymizerFlags Int?           @map("anonymizer_flags") @db.UnsignedSmallInt
+  /// `AtoIpReputation { status, severity, category, confidence, providers }` (D7).
+  reputation      Json?
+  /// First 16 hex of SHA-256 of `browser|major|os|platform`.
+  deviceHash      String?        @map("device_hash") @db.Char(16)
+  deviceLabel     String?        @map("device_label") @db.VarChar(96)
+  /// SASL mechanism (`plain`, `login`) of SMTP AUTH.
+  mechanism       String?        @db.VarChar(16)
+  attemptCount    Int            @default(1) @map("attempt_count") @db.UnsignedInt
+  lastOccurredAt  DateTime       @map("last_occurred_at") @db.DateTime(3)
+  /// Source row reference (`login_audit_logs.id`, `<eventId>:<seq>`, provider event id).
+  sourceRef       String?        @map("source_ref") @db.VarChar(64)
+  /// Hex SHA-256 of the source key (idempotency).
+  dedupeKey       String         @map("dedupe_key") @db.Char(64)
+  createdAt       DateTime       @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@id([id, occurredAt])
+  @@unique([organizationId, dedupeKey, occurredAt])
+  @@index([organizationId, accountId, occurredAt, id])
+  @@index([organizationId, occurredAt, id])
+  @@index([organizationId, ipAddress, occurredAt])
+  @@map("ato_auth_events")
+}
+
+/// PARTITIONED by RANGE COLUMNS(detected_at), monthly, 13 months (tier core). A detection signal
+/// of `ato-rules/1` (D10): stable rule code, category, strength, weight, evidence (bounded JSON,
+/// no content) and its source. Deduplicated under the account row lock by
+/// `(organization_id, account_id, dedupe_key)` within the rule's window (repetitions increase
+/// `occurrences`, never the score).
+model AtoRiskSignal {
+  id                  BigInt              @default(autoincrement()) @db.UnsignedBigInt
+  detectedAt          DateTime            @map("detected_at") @db.DateTime(3)
+  organizationId      BigInt              @map("organization_id") @db.UnsignedBigInt
+  /// ato_accounts.id (no FK: partitioned).
+  accountId           BigInt              @map("account_id") @db.UnsignedBigInt
+  ruleCode            String              @map("rule_code") @db.VarChar(64)
+  category            AtoSignalCategory
+  strength            AtoSignalStrength
+  weight              Int                 @db.UnsignedTinyInt
+  status              AtoSignalStatus     @default(active)
+  dedupeKey           String              @map("dedupe_key") @db.Char(64)
+  occurrences         Int                 @default(1) @db.UnsignedInt
+  firstOccurredAt     DateTime            @map("first_occurred_at") @db.DateTime(3)
+  lastOccurredAt      DateTime            @map("last_occurred_at") @db.DateTime(3)
+  evidence            Json
+  sourceKind          AtoSignalSourceKind @map("source_kind")
+  sourceRef           String?             @map("source_ref") @db.VarChar(64)
+  /// email_messages.id / received_at of a message signal (no FK).
+  messageId           BigInt?             @map("message_id") @db.UnsignedBigInt
+  messageReceivedAt   DateTime?           @map("message_received_at") @db.DateTime(3)
+  /// ato_auth_events.id / occurred_at of an authentication signal (no FK).
+  authEventId         BigInt?             @map("auth_event_id") @db.UnsignedBigInt
+  authEventOccurredAt DateTime?           @map("auth_event_occurred_at") @db.DateTime(3)
+  /// security_incidents.id the signal is linked to (no FK).
+  incidentId          BigInt?             @map("incident_id") @db.UnsignedBigInt
+  /// `ato-rules/1`.
+  rulesVersion        String              @map("rules_version") @db.VarChar(16)
+  /// ato_settings.version in force.
+  settingsVersion     Int                 @map("settings_version") @db.UnsignedInt
+  dismissedAt         DateTime?           @map("dismissed_at") @db.DateTime(3)
+  dismissedByUserId   BigInt?             @map("dismissed_by_user_id") @db.UnsignedBigInt
+  dismissReason       String?             @map("dismiss_reason") @db.VarChar(512)
+  createdAt           DateTime            @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt           DateTime            @updatedAt @map("updated_at") @db.DateTime(3)
+
+  @@id([id, detectedAt])
+  @@index([organizationId, accountId, detectedAt, id])
+  @@index([organizationId, accountId, dedupeKey])
+  @@index([organizationId, incidentId, detectedAt])
+  @@index([organizationId, detectedAt, id])
+  @@index([organizationId, category, detectedAt])
+  @@map("ato_risk_signals")
+}
+
+/// PARTITIONED by RANGE COLUMNS(computed_at), monthly, 13 months (tier core). Score history
+/// (`ato-score/1`, D11): a row per change with its explanation and the scorer, rules and settings
+/// versions.
+model AtoRiskScore {
+  id              BigInt          @default(autoincrement()) @db.UnsignedBigInt
+  computedAt      DateTime        @map("computed_at") @db.DateTime(3)
+  organizationId  BigInt          @map("organization_id") @db.UnsignedBigInt
+  /// ato_accounts.id (no FK: partitioned).
+  accountId       BigInt          @map("account_id") @db.UnsignedBigInt
+  score           Int             @db.UnsignedTinyInt
+  level           AtoRiskLevel
+  previousScore   Int             @map("previous_score") @db.UnsignedTinyInt
+  previousLevel   AtoRiskLevel    @map("previous_level")
+  trigger         AtoScoreTrigger
+  /// Top 10 contributions, group totals and caps, gates, override (`ato-score/1`).
+  explanation     Json
+  scorerVersion   String          @map("scorer_version") @db.VarChar(16)
+  rulesVersion    String          @map("rules_version") @db.VarChar(16)
+  settingsVersion Int             @map("settings_version") @db.UnsignedInt
+  createdAt       DateTime        @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@id([id, computedAt])
+  @@index([organizationId, accountId, computedAt, id])
+  @@index([organizationId, computedAt, level])
+  @@map("ato_risk_scores")
+}
+
+/// Analyst verdict on an account (D11): `compromised` raises the score to ≥ 90, `benign` caps it
+/// below the medium band unless a later strong signal contradicts it. Expires; cleared rows kept
+/// 730 days.
+model AtoRiskOverride {
+  id              BigInt             @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId        String             @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId  BigInt             @map("organization_id") @db.UnsignedBigInt
+  accountId       BigInt             @map("account_id") @db.UnsignedBigInt
+  verdict         AtoOverrideVerdict
+  reason          String             @db.VarChar(1000)
+  expiresAt       DateTime           @map("expires_at") @db.DateTime(3)
+  /// No FK: the trail survives the deletion of the user.
+  createdByUserId BigInt?            @map("created_by_user_id") @db.UnsignedBigInt
+  createdAt       DateTime           @default(now()) @map("created_at") @db.DateTime(3)
+  clearedAt       DateTime?          @map("cleared_at") @db.DateTime(3)
+  clearedByUserId BigInt?            @map("cleared_by_user_id") @db.UnsignedBigInt
+  clearReason     String?            @map("clear_reason") @db.VarChar(1000)
+  contradictedAt  DateTime?          @map("contradicted_at") @db.DateTime(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  account      AtoAccount   @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, accountId, createdAt])
+  @@map("ato_risk_overrides")
+}
+
+/// A trusted context of an account (IP CIDR, ASN, country, device; expiry ≤ 365 days) that
+/// suppresses novelty rules, added by an analyst or by false-positive feedback. Removal deletes
+/// the row (the audit log keeps the trail).
+model AtoTrustedContext {
+  id              BigInt                  @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId        String                  @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId  BigInt                  @map("organization_id") @db.UnsignedBigInt
+  accountId       BigInt                  @map("account_id") @db.UnsignedBigInt
+  kind            AtoTrustedContextKind
+  /// Canonical CIDR, ASN number, ISO country code or device hash.
+  value           String                  @db.VarChar(64)
+  ipVersion       Int?                    @map("ip_version") @db.UnsignedTinyInt
+  /// First and last address of an `ip_cidr` range (16 bytes, IPv4 mapped).
+  rangeStart      Bytes?                  @map("range_start") @db.VarBinary(16)
+  rangeEnd        Bytes?                  @map("range_end") @db.VarBinary(16)
+  reason          String                  @db.VarChar(512)
+  source          AtoTrustedContextSource
+  /// security_incidents.id of the false-positive resolution (no FK).
+  incidentId      BigInt?                 @map("incident_id") @db.UnsignedBigInt
+  createdByUserId BigInt?                 @map("created_by_user_id") @db.UnsignedBigInt
+  createdAt       DateTime                @default(now()) @map("created_at") @db.DateTime(3)
+  expiresAt       DateTime                @map("expires_at") @db.DateTime(3)
+
+  account AtoAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@unique([accountId, kind, value])
+  @@index([organizationId, accountId])
+  @@map("ato_trusted_contexts")
+}
+
+/// ATO category detail of a security incident (D12; one row per `account_takeover` incident,
+/// written in the opening transaction): scores, detection reason, recommendations, summaries and
+/// evidence counts beyond the link caps. No message content.
+model AtoIncidentDetail {
+  incidentId         BigInt    @id @map("incident_id") @db.UnsignedBigInt
+  organizationId     BigInt    @map("organization_id") @db.UnsignedBigInt
+  accountId          BigInt    @map("account_id") @db.UnsignedBigInt
+  riskScoreAtOpen    Int       @map("risk_score_at_open") @db.UnsignedTinyInt
+  peakRiskScore      Int       @map("peak_risk_score") @db.UnsignedTinyInt
+  /// Codes, contributions and versions at opening.
+  detectionReason    Json      @map("detection_reason")
+  /// `recommendResponses` output with availability (`available`, `requires_provider`, `manual`,
+  /// `policy`).
+  recommendedActions Json      @map("recommended_actions")
+  /// ≤ 20 `{ ip, cc, asn, reputation, counts }`.
+  relatedIps         Json      @map("related_ips")
+  geoSummary         Json?     @map("geo_summary")
+  deviceSummary      Json?     @map("device_summary")
+  signalCount        Int       @default(0) @map("signal_count") @db.UnsignedInt
+  authEventCount     Int       @default(0) @map("auth_event_count") @db.UnsignedInt
+  messageCount       Int       @default(0) @map("message_count") @db.UnsignedInt
+  findingCount       Int       @default(0) @map("finding_count") @db.UnsignedInt
+  lastSignalsEventAt DateTime? @map("last_signals_event_at") @db.DateTime(3)
+  createdAt          DateTime  @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt          DateTime  @updatedAt @map("updated_at") @db.DateTime(3)
+
+  incident SecurityIncident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+  account  AtoAccount       @relation(fields: [accountId], references: [id], onDelete: Restrict)
+
+  @@index([organizationId, accountId])
+  @@map("ato_incident_details")
+}
+
+/// A response action (D13, ADR-0072): gateway actions run inline in the authorizing transaction,
+/// provider actions asynchronously through `ato.response.requested.v1`, manual actions are
+/// `attested`. One non-terminal action per (incident, type, target): unique key over
+/// `dedupe_hash` and the generated `active_marker`.
+model AtoResponseAction {
+  id                 BigInt                   @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId           String                   @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId     BigInt                   @map("organization_id") @db.UnsignedBigInt
+  incidentId         BigInt?                  @map("incident_id") @db.UnsignedBigInt
+  accountId          BigInt                   @map("account_id") @db.UnsignedBigInt
+  /// RESPONSE_CATALOGUE type (`restrict_smtp_sending`, `revoke_sessions`, …).
+  actionType         String                   @map("action_type") @db.VarChar(48)
+  /// `gateway`, `manual` or a provider kind.
+  provider           String                   @db.VarChar(32)
+  impact             AtoResponseImpact
+  /// The target (connector id, mailbox hash, CIDR, provider identity), bounded JSON.
+  target             Json
+  params             Json
+  status             AtoResponseStatus
+  requiresApproval   Boolean                  @map("requires_approval")
+  authorization      AtoResponseAuthorization
+  requestedByType    ActorType                @map("requested_by_type")
+  requestedById      String?                  @map("requested_by_id") @db.VarChar(64)
+  requestReason      String?                  @map("request_reason") @db.VarChar(1000)
+  approvedByUserId   BigInt?                  @map("approved_by_user_id") @db.UnsignedBigInt
+  decidedAt          DateTime?                @map("decided_at") @db.DateTime(3)
+  decisionReason     String?                  @map("decision_reason") @db.VarChar(1000)
+  approvalExpiresAt  DateTime?                @map("approval_expires_at") @db.DateTime(3)
+  executedAt         DateTime?                @map("executed_at") @db.DateTime(3)
+  completedAt        DateTime?                @map("completed_at") @db.DateTime(3)
+  effectiveUntil     DateTime?                @map("effective_until") @db.DateTime(3)
+  nextCheckAt        DateTime?                @map("next_check_at") @db.DateTime(3)
+  providerReference  String?                  @map("provider_reference") @db.VarChar(128)
+  providerStatus     AtoProviderStatus?       @map("provider_status")
+  resultCode         String?                  @map("result_code") @db.VarChar(64)
+  attempts           Int                      @default(0) @db.UnsignedSmallInt
+  /// ato_smtp_restrictions.id of a gateway restriction (no FK).
+  restrictionId      BigInt?                  @map("restriction_id") @db.UnsignedBigInt
+  rolledBackByUserId BigInt?                  @map("rolled_back_by_user_id") @db.UnsignedBigInt
+  rollbackReason     String?                  @map("rollback_reason") @db.VarChar(1000)
+  /// Hex SHA-256 of (incident, type, target).
+  dedupeHash         String                   @map("dedupe_hash") @db.Char(64)
+  /// READ-ONLY, generated by MySQL: `GENERATED ALWAYS AS (IF(status IN ('pending_approval',
+  /// 'approved', 'executing', 'rollback_requested'), 1, NULL)) STORED`. Never write it.
+  activeMarker       Int?                     @map("active_marker") @db.UnsignedTinyInt
+  rowVersion         Int                      @default(1) @map("row_version") @db.UnsignedInt
+  createdAt          DateTime                 @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt          DateTime                 @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization Organization           @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  incident     SecurityIncident?      @relation(fields: [incidentId], references: [id], onDelete: Restrict)
+  account      AtoAccount             @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  logs         AtoResponseActionLog[]
+
+  @@unique([organizationId, dedupeHash, activeMarker])
+  @@index([organizationId, status, createdAt, id])
+  @@index([organizationId, incidentId])
+  @@index([organizationId, accountId, createdAt])
+  /// Approval expiry sweep.
+  @@index([status, approvalExpiresAt])
+  /// Provider confirmation polling.
+  @@index([status, nextCheckAt])
+  @@map("ato_response_actions")
+}
+
+/// Attempt log of a response action (one row per authorize / execute / confirm / rollback
+/// attempt; 730 days).
+model AtoResponseActionLog {
+  id             BigInt              @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId BigInt              @map("organization_id") @db.UnsignedBigInt
+  actionId       BigInt              @map("action_id") @db.UnsignedBigInt
+  phase          AtoActionLogPhase
+  attemptNo      Int                 @map("attempt_no") @db.UnsignedSmallInt
+  outcome        AtoActionLogOutcome
+  providerStatus String?             @map("provider_status") @db.VarChar(32)
+  errorCode      String?             @map("error_code") @db.VarChar(64)
+  durationMs     Int                 @map("duration_ms") @db.UnsignedInt
+  createdAt      DateTime            @default(now()) @map("created_at") @db.DateTime(3)
+
+  action AtoResponseAction @relation(fields: [actionId], references: [id], onDelete: Cascade)
+
+  @@index([actionId, createdAt])
+  @@index([createdAt])
+  @@map("ato_response_action_logs")
+}
+
+/// A temporary SMTP enforcement row (D14, ADR-0073; ≤ 7 days): `send_block` (mailbox or
+/// connector, checked by the smtp-adapter policy service at RCPT) or `auth_block` (connector or
+/// connector + CIDR, checked by the SASL service). Written only through the ATO store; cached
+/// per organization in Redis by the smtp-adapter. `mailbox_sha256` = atoMailboxSha256(address).
+/// One active row per subject: unique key over `subject_hash` and the generated `active_marker`.
+model AtoSmtpRestriction {
+  id               BigInt               @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId         String               @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId   BigInt               @map("organization_id") @db.UnsignedBigInt
+  kind             AtoRestrictionKind
+  scope            AtoRestrictionScope
+  /// smtp_connectors.id (no FK).
+  connectorId      BigInt?              @map("connector_id") @db.UnsignedBigInt
+  mailboxSha256    String?              @map("mailbox_sha256") @db.Char(64)
+  /// Lower-cased address for display (portal); never on the SMTP path.
+  mailboxAddress   String?              @map("mailbox_address") @db.VarChar(320)
+  ipCidr           String?              @map("ip_cidr") @db.VarChar(49)
+  ipVersion        Int?                 @map("ip_version") @db.UnsignedTinyInt
+  rangeStart       Bytes?               @map("range_start") @db.VarBinary(16)
+  rangeEnd         Bytes?               @map("range_end") @db.VarBinary(16)
+  mode             AtoRestrictionMode
+  status           AtoRestrictionStatus
+  reasonCode       String               @map("reason_code") @db.VarChar(64)
+  /// ato_response_actions.id that applied it (no FK).
+  responseActionId BigInt?              @map("response_action_id") @db.UnsignedBigInt
+  startsAt         DateTime             @map("starts_at") @db.DateTime(3)
+  expiresAt        DateTime             @map("expires_at") @db.DateTime(3)
+  liftedAt         DateTime?            @map("lifted_at") @db.DateTime(3)
+  liftedByType     AtoLiftedByType?     @map("lifted_by_type")
+  liftedById       String?              @map("lifted_by_id") @db.VarChar(64)
+  liftReason       String?              @map("lift_reason") @db.VarChar(512)
+  /// Hex SHA-256 of `kind|scope|connectorId|mailboxSha256|cidr`.
+  subjectHash      String               @map("subject_hash") @db.Char(64)
+  /// READ-ONLY, generated by MySQL: `GENERATED ALWAYS AS (IF(status = 'active', 1, NULL))
+  /// STORED`. Never write it.
+  activeMarker     Int?                 @map("active_marker") @db.UnsignedTinyInt
+  createdAt        DateTime             @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt        DateTime             @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  @@unique([organizationId, subjectHash, activeMarker])
+  @@index([organizationId, status, expiresAt])
+  /// Expiry sweep.
+  @@index([status, expiresAt])
+  @@map("ato_smtp_restrictions")
+}
+
+/// An identity-provider binding of the provider ingestion runner (D15): capabilities, stream
+/// cursors and health. Adapters and their bindings to step 8.2's connectors arrive in step 8.5;
+/// no secret is stored here (credentials stay with the 8.2 connector).
+model AtoProviderIntegration {
+  id                  BigInt                       @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId            String                       @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId      BigInt                       @map("organization_id") @db.UnsignedBigInt
+  provider            String                       @db.VarChar(32)
+  /// Step 8.2 connector public id (opaque in 8.4).
+  connectorRef        String?                      @map("connector_ref") @db.VarChar(64)
+  /// Hex SHA-256 of `provider|connector_ref or -`.
+  bindingKey          String                       @map("binding_key") @db.Char(64)
+  status              AtoProviderIntegrationStatus @default(active)
+  capabilities        Json
+  cursors             Json
+  lastSuccessAt       DateTime?                    @map("last_success_at") @db.DateTime(3)
+  lastErrorCode       String?                      @map("last_error_code") @db.VarChar(64)
+  consecutiveFailures Int                          @default(0) @map("consecutive_failures") @db.UnsignedSmallInt
+  nextPollAt          DateTime                     @map("next_poll_at") @db.DateTime(3)
+  rowVersion          Int                          @default(1) @map("row_version") @db.UnsignedInt
+  createdAt           DateTime                     @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt           DateTime                     @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  @@unique([organizationId, bindingKey])
+  @@index([status, nextPollAt])
+  @@map("ato_provider_integrations")
+}
+
+/// Mapping of an identity-provider identity to a `mailbox` account (D1, 8.5 adapters).
+/// `external_id_hash` = hex SHA-256 of the provider's immutable id.
+model AtoAccountIdentity {
+  id                BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId    BigInt   @map("organization_id") @db.UnsignedBigInt
+  accountId         BigInt   @map("account_id") @db.UnsignedBigInt
+  provider          String   @db.VarChar(32)
+  externalId        String   @map("external_id") @db.VarChar(128)
+  externalIdHash    String   @map("external_id_hash") @db.Char(64)
+  userPrincipalName String?  @map("user_principal_name") @db.VarChar(320)
+  firstSeenAt       DateTime @map("first_seen_at") @db.DateTime(3)
+  lastSeenAt        DateTime @map("last_seen_at") @db.DateTime(3)
+
+  account AtoAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, provider, externalIdHash])
+  @@index([accountId])
+  @@map("ato_account_identities")
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -1,0 +1,19 @@
+{
+  "rows:inbound-scanned": "92068bcd223b98c6967e2fccff00f8a116e13ca2fbc2c18c0c971f8aaf0ca549",
+  "rows:outbound-scanned": "e5ffe82de1626a1a8a41a45ebfb7c0f0f3493cd8ac28ccde9b44259d2456dfb7",
+  "rows:internal-scanned": "e71732e5857856ba10e5076c83c0b553c8cb8536c4942c313d211b57b6ed94f7",
+  "rows:inbound-scan-failed": "a0d7d786ee75d396f981fe9466fafd23ebbee142f6a122f18257da25e6042218",
+  "rows:outbound-parse-failed": "b7e2b85db56e4e1436d0fc5c1676fc044bd7460b8bd2d0a9aa78ad585d2af512",
+  "docs:1: trusted partner allow-override": "de39c4e5829a56d0ce48b8b5def81d59cbccf3709e917dfd0490e74cec98dc17",
+  "docs:2: department exception": "4d3f786aee1a962690dd84031f05a978d1be4d5962d1fc9fa40e85623c2e917c",
+  "docs:3: executive impersonation warning": "bfae78d2c59d85ab03725b8c5217c4bd0a42d1b6a2d06f9e87c0ec2a14a6927b",
+  "docs:4: outbound card numbers need approval": "df2fd669d70afc53dbc979a69176f83fea8ec87e2ac7f0081ef91c0515d7dc62",
+  "docs:5: after-hours outbound quarantine across DST": "8812915f065f7d75543f84385cfd463e74b0996dc913685ce07fee13bf2f3c14",
+  "docs:6: IP allow-list for a connector": "0f77032c2ae7255e5fe631a244e2860a428ea77517b477a8d1b08be4b068b977",
+  "docs:7: block ISO attachments": "4c660b9802daebfb1cd9f9d88aa81bb6715bf3125835e6d48844cc6206920188",
+  "docs:8: tag external mail": "43919357d4887f27b10ccc5299a7ff4232c391142cf165587cb8d46fa4ef7dfe",
+  "docs:9: require URL rewriting": "d066a06315008e068e5bc5e44a1615baf98904a8625a223fdc0e9e1406d74383",
+  "docs:10: archive legal team mail": "e98cd1fbd8268547257bdff22521b5c227d771983dcdc726c1633c6fd27a8a69",
+  "docs:11: alert on hard blocks": "dcb6fddb36cfc5298b98a8aab58701be73783cbe5489c0e476422918ff921aff",
+  "docs:12: what is refused": "5d775a4e8e62717b8265b204f053236319b996b96c2545f4924627cae0820372"
+}

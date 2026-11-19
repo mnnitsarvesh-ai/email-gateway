@@ -23,7 +23,10 @@ import { stack } from './support/env';
  * adds the webhook-worker user eg-webhook (email.webhooks) and extends the ops replay to
  * email.webhooks on email.events, docs/plan/steps/19-webhooks-notifications.md; step 8.1 A26
  * (topology v12) adds the archive-worker user eg-archive (email.archive) and extends the ops
- * replay to email.archive on email.archive, docs/plan/steps/23-journaling-archiving.md). Probes
+ * replay to email.archive on email.archive, docs/plan/steps/23-journaling-archiving.md; step 8.4
+ * §4.1 (topology v13) adds the ato-worker user eg-ato (ato.events, ato.mail, ato.responses) and
+ * extends the ops replay to the three ATO queues on email.security,
+ * docs/plan/steps/24-account-takeover-core.md). Probes
  * never leave a message in a real queue: every publish probe is one the broker refuses (a
  * refused publish routes nothing), and the allowed read is a passive checkQueue. Topic
  * permissions restrict the routing keys each user may publish: an allowed key always matches a
@@ -46,7 +49,8 @@ type Role =
   | 'policyEngine'
   | 'notification'
   | 'webhook'
-  | 'archive';
+  | 'archive'
+  | 'ato';
 const ROLES = [
   'relay',
   'emailWorker',
@@ -59,6 +63,7 @@ const ROLES = [
   'notification',
   'webhook',
   'archive',
+  'ato',
 ] as const;
 const models = new Map<Role, ChannelModel>();
 let countsBefore: number[] = [];
@@ -69,7 +74,8 @@ let countsBefore: number[] = [];
  * sandbox-controller user (`RABBITMQ_SANDBOX_URL`) and (step 5.2 P15) the policy-engine and
  * notification-worker users (`RABBITMQ_POLICY_ENGINE_URL`, `RABBITMQ_NOTIFICATION_URL`) and
  * (step 6.2) the webhook-worker user (`RABBITMQ_WEBHOOK_URL`) and (step 8.1) the archive-worker
- * user (`RABBITMQ_ARCHIVE_URL`); never logged.
+ * user (`RABBITMQ_ARCHIVE_URL`) and (step 8.4) the ato-worker user (`RABBITMQ_ATO_URL`); never
+ * logged.
  */
 function roleUrls(): Record<Role, string> {
   const urlBrowser = process.env.RABBITMQ_URL_BROWSER_URL;
@@ -84,6 +90,8 @@ function roleUrls(): Record<Role, string> {
   if (!webhook) throw new Error('RABBITMQ_WEBHOOK_URL is not set (step 6.2 .env keys)');
   const archive = process.env.RABBITMQ_ARCHIVE_URL;
   if (!archive) throw new Error('RABBITMQ_ARCHIVE_URL is not set (step 8.1 .env keys)');
+  const ato = process.env.RABBITMQ_ATO_URL;
+  if (!ato) throw new Error('RABBITMQ_ATO_URL is not set (step 8.4 .env keys)');
   return {
     ...stack.rabbitmqRoleUrls(),
     urlBrowser,
@@ -92,10 +100,11 @@ function roleUrls(): Record<Role, string> {
     notification,
     webhook,
     archive,
+    ato,
   };
 }
 
-/** Message counts of the 21 real queues (administrator, passive declares). */
+/** Message counts of the 24 real queues (administrator, passive declares). */
 async function queueCounts(): Promise<number[]> {
   const url = new URL(stack.rabbitmqUrl());
   url.pathname = `/${encodeURIComponent(stack.rabbitmqVhost())}`;
@@ -283,17 +292,31 @@ const EXPECTED_TOPICS: Record<Role, TopicPermission[]> = {
       read: '^$',
     },
   ],
+  // Step 8.4 §4.1 (v13): the ato-worker publishes only its three queues' retry hops
+  // (email.security) and dead-letter hops (email.events); its events go through the outbox.
+  ato: [
+    {
+      exchange: 'email.security',
+      write: '^retry\\.ato\\.(events|mail|responses)\\.',
+      read: '^$',
+    },
+    {
+      exchange: 'email.events',
+      write: '^dead-letter\\.ato\\.(events|mail|responses)(\\.|$)',
+      read: '^$',
+    },
+  ],
   ops: [
     { exchange: 'email.ingestion', write: '^retry\\.email\\.received\\.', read: '^$' },
     { exchange: 'email.delivery', write: '^retry\\.email\\.delivery\\.pending\\.', read: '^$' },
     // Step 4.1 S2 / 4.2 A2 / 4.3 U2 / 4.4 B3 / 4.5 D2 / 4.6 X11: replay of the work queues
     // scan.spam, scan.attachment, scan.url, scan.url.inspect, scan.url.results, scan.bec, scan.dlp,
     // scan.sandbox, scan.sandbox.submissions and scan.sandbox.results (home exchange
-    // email.security).
+    // email.security); step 8.4 (v13): and of ato.events, ato.mail and ato.responses.
     {
       exchange: 'email.security',
       write:
-        '^retry\\.scan\\.(spam|attachment|url|url\\.inspect|url\\.results|bec|dlp|sandbox|sandbox\\.submissions|sandbox\\.results)\\.',
+        '^retry\\.(scan\\.(spam|attachment|url|url\\.inspect|url\\.results|bec|dlp|sandbox|sandbox\\.submissions|sandbox\\.results)|ato\\.(events|mail|responses))\\.',
       read: '^$',
     },
     // Step 5.2 P15 (v9): replay of email.policy.evaluate and email.notifications; step 5.3 Q27
@@ -795,8 +818,9 @@ describe('RabbitMQ role permissions on the real vhost', () => {
     ['notification', ['email.notifications']],
     ['webhook', ['email.webhooks']],
     ['archive', ['email.archive']],
+    ['ato', ['ato.events', 'ato.mail', 'ato.responses']],
   ] as const)(
-    '%s (steps 5.2, 5.3, 6.2, 8.1) reads %s (passive) and nothing else',
+    '%s (steps 5.2, 5.3, 6.2, 8.1, 8.4) reads %s (passive) and nothing else',
     async (role, own) => {
       const channel = await model(role).createChannel();
       for (const queue of own) {
@@ -1044,6 +1068,66 @@ describe('RabbitMQ role permissions on the real vhost', () => {
       ),
     ).toBe(true);
     expect(write('email.events').test('dead-letter.email.archive')).toBe(true);
+  });
+
+  it('ato-worker (step 8.4, v13) publishes only the hops of its three queues: no event key, queue or exchange', async () => {
+    for (const key of [
+      PROBE_KEY,
+      // Its outputs go through the outbox and the relay; never an event key directly.
+      'org.1.ato.response.requested.v1',
+      'org.1.security.incident.created.v1',
+      'org.1.mail.message.scanned.v1',
+      // Not the hops of another email.security queue.
+      'retry.scan.spam.org.1.mail.message.parsed.v1',
+      'retry.ato.eventsx.org.1.auth.login.recorded.v1',
+    ]) {
+      expect(await publishKeyRefused('ato', 'email.security', key), key).toBe(ACCESS_REFUSED);
+    }
+    for (const key of [
+      PROBE_KEY,
+      'org.1.auth.login.recorded.v1',
+      'retry.email.webhooks.org.1.mail.message.received.v1',
+      'dead-letter.email.received',
+      'dead-letter.ato.eventsx',
+    ]) {
+      expect(await publishKeyRefused('ato', 'email.events', key), key).toBe(ACCESS_REFUSED);
+    }
+    for (const exchange of ['email.ingestion', 'email.policy', 'email.delivery', 'email.archive']) {
+      expect(await publishRefused('ato', exchange), exchange).toBe(ACCESS_REFUSED);
+    }
+    const permission = await api.get<{ configure: string; write: string; read: string }>(
+      `/permissions/${encodeURIComponent(stack.rabbitmqVhost())}/${encodeURIComponent(userOf('ato'))}`,
+    );
+    expect(permission).toMatchObject({
+      configure: '^$',
+      write: '^email\\.(security|events)$',
+      read: '^ato\\.(events|mail|responses)$',
+    });
+    // The allowed side (checked against the broker's topic permissions, never published).
+    const actual = await api.get<TopicPermission[]>(
+      `/topic-permissions/${encodeURIComponent(stack.rabbitmqVhost())}/${encodeURIComponent(userOf('ato'))}`,
+    );
+    const write = (exchange: string) =>
+      new RegExp(actual.find((t) => t.exchange === exchange)?.write ?? '^$');
+    for (const [queue, type] of [
+      ['ato.events', 'auth.login.recorded.v1'],
+      ['ato.mail', 'mail.message.scanned.v1'],
+      ['ato.responses', 'ato.response.requested.v1'],
+    ] as const) {
+      expect(write('email.security').test(`retry.${queue}.org.1.${type}`), queue).toBe(true);
+      expect(write('email.events').test(`dead-letter.${queue}.org.1.${type}`), queue).toBe(true);
+      expect(write('email.events').test(`dead-letter.${queue}`), queue).toBe(true);
+    }
+    // ops may replay the three ATO queues (retry hops on email.security only).
+    const ops = await api.get<TopicPermission[]>(
+      `/topic-permissions/${encodeURIComponent(stack.rabbitmqVhost())}/${encodeURIComponent(userOf('ops'))}`,
+    );
+    const opsSecurity = new RegExp(ops.find((t) => t.exchange === 'email.security')?.write ?? '^$');
+    expect(opsSecurity.test('retry.ato.responses.org.1.ato.response.requested.v1')).toBe(true);
+    expect(opsSecurity.test('org.1.ato.response.requested.v1')).toBe(false);
+    expect(
+      await publishKeyRefused('ops', 'email.security', 'org.1.ato.response.requested.v1'),
+    ).toBe(ACCESS_REFUSED);
   });
 
   it('relay may publish the two step 6.2 event keys (the org.<id>. prefix on every exchange)', async () => {

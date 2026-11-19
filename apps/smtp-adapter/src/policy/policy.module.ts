@@ -1,6 +1,7 @@
 import { Global, Module } from '@nestjs/common';
 import type { BlockList } from 'node:net';
 import { ADAPTER_CONFIG, INTERNAL_NETWORKS, type SmtpAdapterConfig } from '../config';
+import { AtoModule } from '../ato/ato.module';
 import { ConnectorsModule } from '../connectors/connectors.module';
 import { OutboundModule } from '../outbound/outbound.module';
 import { RateLimitModule } from '../rate-limit/rate-limit.module';
@@ -21,7 +22,7 @@ import {
  */
 @Global()
 @Module({
-  imports: [TenancyModule, RateLimitModule, ConnectorsModule, OutboundModule],
+  imports: [TenancyModule, RateLimitModule, ConnectorsModule, OutboundModule, AtoModule],
   providers: [
     {
       provide: POLICY_SERVER_OPTIONS,

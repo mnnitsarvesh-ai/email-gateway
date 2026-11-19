@@ -119,6 +119,20 @@ describe('step 5.2 policy routes (e2e, dependencies stubbed)', () => {
     expect(res.body.limits.policiesPerOrganization).toBe(10);
     expect(res.body.fields.length).toBeGreaterThan(50);
     expect(res.body.enforcement).toContain('step 8.1');
+    // Step 8.4 D23: the four strict-only ATO fields in the Account takeover group.
+    const ato = (res.body.fields as Array<{ name: string; strictOnly: boolean; group: string }>)
+      .filter((f) => f.strictOnly)
+      .map((f) => [f.name, f.group]);
+    expect(ato).toEqual([
+      ['ato.risk_score', 'account_takeover'],
+      ['ato.risk_level', 'account_takeover'],
+      ['ato.incident_severity', 'account_takeover'],
+      ['ato.incident_status', 'account_takeover'],
+    ]);
+    expect(res.body.fieldGroups).toContainEqual({
+      id: 'account_takeover',
+      label: 'Account takeover',
+    });
     await http()
       .get(`${P}/catalog`)
       .set(await ctx.as(['message:read']))
@@ -498,6 +512,9 @@ describe('step 5.2 policy routes (e2e, dependencies stubbed)', () => {
     expect(res.body.reproducible).toBe(true);
     expect(res.body.result.disposition).toBe('quarantine');
     expect(res.body.stored).toMatchObject({ disposition: 'quarantine', durationUs: 250 });
+    // Step 8.4 D23: an inbound round's stored evaluation has no ATO facts.
+    expect(res.body.atoFactsSource).toBe('none');
+    expect(res.body.stored.atoFacts).toBeNull();
     const platform = await http()
       .post(dryRunUrl)
       .set(await ctx.as(ANALYST))

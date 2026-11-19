@@ -1,5 +1,6 @@
 export * from './envelope';
 export * from './events';
+export * from './ato-events';
 export * from './registry';
 export * from './topology';
 export * from './definitions';

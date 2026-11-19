@@ -15,6 +15,9 @@ import {
 /**
  * The authenticated URL cache in the shared Redis (U6). Keys:
  *   eg:url:rep:v1:<providerId>:<providerVersion>:<kind>:<sha256(value)>   provider answers
+ *   eg:<namespace>:rep:v1:…                                            answers of another
+ *                                                                       namespace (step 8.4 D7:
+ *                                                                       `ato`, MAC under ATO_HMAC_KEY)
  *   eg:url:chain:v1:<fetcherVersion>:<sha256(identity url)>             redirect chains
  *   eg:url:dyn:v1:<url sha256>                                          dynamic inspection results
  * Value `<mac>.<json>`, mac = hex HMAC-SHA256 under URL_CACHE_HMAC_KEY over `key \n json`,
@@ -24,6 +27,14 @@ import {
  */
 
 export type CacheName = 'reputation' | 'chain' | 'dynamic';
+
+/**
+ * Key namespaces of reputation answers (step 8.4 D7). `url` is the URL engine's (the default, key
+ * layout unchanged); `ato` is the account takeover worker's IP lookups, sealed with its own key, so
+ * entries of one consumer are never read (or overwritten) by the other.
+ */
+export const CACHE_NAMESPACES = ['url', 'ato'] as const;
+export type CacheNamespace = (typeof CACHE_NAMESPACES)[number];
 export type CacheResult = 'hit' | 'miss' | 'set' | 'error' | 'rejected';
 
 export type CacheRead<T> =
@@ -69,6 +80,11 @@ export interface ReputationCacheOptions {
   /** URL_CACHE_TIMEOUT_MS. */
   timeoutMs?: number;
   onResult?: (cache: CacheName, result: CacheResult) => void;
+  /**
+   * Key namespace of reputation answers (default `url`, the U6 layout). Chains and dynamic results
+   * exist only in the `url` namespace: a cache of another namespace refuses them.
+   */
+  namespace?: CacheNamespace;
 }
 
 export const reputationCacheKey = (
@@ -76,7 +92,8 @@ export const reputationCacheKey = (
   providerVersion: string,
   kind: string,
   value: string,
-): string => `eg:url:rep:v1:${providerId}:${providerVersion}:${kind}:${sha256Hex(value)}`;
+  namespace: CacheNamespace = 'url',
+): string => `eg:${namespace}:rep:v1:${providerId}:${providerVersion}:${kind}:${sha256Hex(value)}`;
 export const chainCacheKey = (fetcherVersion: string, identityUrl: string): string =>
   `eg:url:chain:v1:${fetcherVersion}:${sha256Hex(identityUrl)}`;
 export const dynamicCacheKey = (urlSha256: string): string => `eg:url:dyn:v1:${urlSha256}`;
@@ -198,10 +215,15 @@ export class UrlCache {
   private readonly enabled: boolean;
   private readonly ttls: CacheTtls;
   private readonly timeoutMs: number;
+  readonly namespace: CacheNamespace;
 
   constructor(private readonly options: ReputationCacheOptions) {
     if (options.hmacKey.length < 32)
       throw new Error('URL_CACHE_HMAC_KEY must be at least 32 characters');
+    this.namespace = options.namespace ?? 'url';
+    if (!(CACHE_NAMESPACES as readonly string[]).includes(this.namespace)) {
+      throw new Error(`unknown cache namespace ${String(this.namespace)}`);
+    }
     this.key = Buffer.from(options.hmacKey, 'utf8');
     this.enabled = options.enabled ?? true;
     this.ttls = validateCacheTtls(options.ttls ?? DEFAULT_CACHE_TTLS);
@@ -300,7 +322,7 @@ export class UrlCache {
   ): Promise<CacheRead<ProviderAnswer>> {
     return this.read(
       'reputation',
-      reputationCacheKey(providerId, version, kind, value),
+      reputationCacheKey(providerId, version, kind, value, this.namespace),
       providerAnswerSchema,
     ).then((r) =>
       // A value moved under another key fails the MAC; this also checks the item itself.
@@ -313,17 +335,25 @@ export class UrlCache {
   setAnswer(providerId: string, version: string, answer: ProviderAnswer): Promise<boolean> {
     return this.write(
       'reputation',
-      reputationCacheKey(providerId, version, answer.kind, answer.value),
+      reputationCacheKey(providerId, version, answer.kind, answer.value, this.namespace),
       answer,
       answerTtl(answer, this.ttls),
     );
   }
 
+  private requireUrlNamespace(what: string): void {
+    if (this.namespace !== 'url') {
+      throw new Error(`${what} are cached only in the url namespace`);
+    }
+  }
+
   getChain(fetcherVersion: string, identityUrl: string): Promise<CacheRead<FetchResult>> {
+    this.requireUrlNamespace('redirect chains');
     return this.read('chain', chainCacheKey(fetcherVersion, identityUrl), fetchResultSchema);
   }
 
   setChain(fetcherVersion: string, identityUrl: string, result: FetchResult): Promise<boolean> {
+    this.requireUrlNamespace('redirect chains');
     return this.write(
       'chain',
       chainCacheKey(fetcherVersion, identityUrl),
@@ -333,10 +363,12 @@ export class UrlCache {
   }
 
   getDynamic(urlSha256: string): Promise<CacheRead<DynamicCacheValue>> {
+    this.requireUrlNamespace('dynamic results');
     return this.read('dynamic', dynamicCacheKey(urlSha256), dynamicCacheValueSchema);
   }
 
   setDynamic(urlSha256: string, value: DynamicCacheValue): Promise<boolean> {
+    this.requireUrlNamespace('dynamic results');
     return this.write(
       'dynamic',
       dynamicCacheKey(urlSha256),

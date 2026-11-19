@@ -68,5 +68,11 @@ export { PolicySummaryView } from './summary-view';
 export { DefinitionDiffView, type DiffViewMode } from './diff-view';
 export { ViolationList } from './violation-list';
 export { SyntheticFactsForm } from './facts-form';
-export { FACT_PRESETS, type PolicyTestResponse, type SyntheticFacts } from './facts';
+export {
+  ATO_HIGH_RISK_PRESET_ID,
+  FACT_PRESETS,
+  factPresetById,
+  type PolicyTestResponse,
+  type SyntheticFacts,
+} from './facts';
 export { EvaluationResultView } from './result-view';

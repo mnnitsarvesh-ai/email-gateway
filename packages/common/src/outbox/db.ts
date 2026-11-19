@@ -1,4 +1,4 @@
-import type { PrismaClient } from '@email-gateway/database';
+import type { Prisma, PrismaClient } from '@email-gateway/database';
 
 /**
  * The writer client with default interactive-transaction options. `processOnce` (and the
@@ -9,9 +9,22 @@ import type { PrismaClient } from '@email-gateway/database';
  */
 export function withTransactionDefaults(
   prisma: PrismaClient,
-  options: { timeoutMs: number; maxWaitMs?: number },
+  options: {
+    timeoutMs: number;
+    maxWaitMs?: number;
+    /**
+     * Isolation level of every interactive transaction that passes none (default: the server's,
+     * READ-COMMITTED per ADR-0004). Stores whose lock-then-read patterns need the latest committed
+     * row after a `FOR UPDATE` wait pin `ReadCommitted` here instead of relying on the server.
+     */
+    isolationLevel?: Prisma.TransactionIsolationLevel;
+  },
 ): PrismaClient {
-  const defaults = { timeout: options.timeoutMs, maxWait: options.maxWaitMs ?? options.timeoutMs };
+  const defaults = {
+    timeout: options.timeoutMs,
+    maxWait: options.maxWaitMs ?? options.timeoutMs,
+    ...(options.isolationLevel && { isolationLevel: options.isolationLevel }),
+  };
   return new Proxy(prisma, {
     get(target, prop, receiver) {
       if (prop === '$transaction') {

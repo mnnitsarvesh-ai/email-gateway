@@ -468,14 +468,15 @@ export class PolicyFactsRepository {
     scope: TenantScope,
     message: FactsMessageRow,
     scanId: bigint,
-  ): Promise<EvaluationRow | null> {
+  ): Promise<(EvaluationRow & { atoFacts: Prisma.JsonValue }) | null> {
     return this.db.policyExecutionLog.findFirst({
       where: tenantWhere(scope, {
         messageId: message.id,
         receivedAt: message.receivedAt,
         scanId,
       }),
-      select: evaluationSelect,
+      // Step 8.4 D23: the ATO facts block the evaluation used (dry-runs reuse it).
+      select: { ...evaluationSelect, atoFacts: true },
       orderBy: { evaluationSeq: 'desc' },
     });
   }

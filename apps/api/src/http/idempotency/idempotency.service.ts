@@ -56,6 +56,8 @@ export class IdempotencyRaceError extends Error {
 export interface ExecuteOptions {
   /** Writer transaction timeout (default 10 s). */
   timeoutMs?: number;
+  /** Isolation level of the writer transaction (default: the server's, READ-COMMITTED). */
+  isolationLevel?: Prisma.TransactionIsolationLevel;
 }
 
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -153,7 +155,10 @@ export class IdempotencyService {
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     for (let attempt = 1; ; attempt += 1) {
       try {
-        return await this.runner.run((tx) => this.runOnce(tx, request, work), { timeoutMs });
+        return await this.runner.run((tx) => this.runOnce(tx, request, work), {
+          timeoutMs,
+          ...(options.isolationLevel && { isolationLevel: options.isolationLevel }),
+        });
       } catch (error) {
         const race = error instanceof IdempotencyRaceError || isIdempotencyRace(error);
         if (!race) throw error;

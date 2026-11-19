@@ -20,10 +20,12 @@ import {
 import { type EventEnvelope, EventTypes } from '@email-gateway/event-contracts';
 import { createLogger, type Logger } from '@email-gateway/logger';
 import { canonicalJson, POLICY_DEFAULT_PLATFORM_ID, sha256Hex } from '@email-gateway/policy-dsl';
+import { atoSubjectHash } from '@email-gateway/security-contracts';
 import { urlRewriteConfig } from '../../src/core.module';
 import { loadWorkerConfig } from '../../src/config';
 import { S3PolicyCopyWriter } from '../../src/delivery/policy-copy';
 import { CopyFactsReader } from '../../src/delivery/policy-url-rewrite';
+import { atoFactsRepositoryFor } from '../../src/evaluation/ato-facts.repository';
 import { DirectoryRepository } from '../../src/evaluation/directory.repository';
 import {
   PolicyEvaluationService,
@@ -130,6 +132,7 @@ export function buildPipeline(
   };
   const evaluation = new PolicyEvaluationService({
     facts: new FactsRepository(inconsistent),
+    atoFacts: atoFactsRepositoryFor(metrics),
     snapshots: new SnapshotRepository(
       new SnapshotCache<LoadedSnapshot>(options.cacheEntries ?? 100),
       POLICY_DEFAULT_PLATFORM_ID,
@@ -727,11 +730,82 @@ export class Fixtures {
     };
   }
 
+  /**
+   * Step 8.4 D23: enables ATO for a synthetic organization (feature row; an optional
+   * `ato_settings` row with a mode). Never used on pre-existing organizations.
+   */
+  async enableAto(organizationId: bigint, mode?: 'off' | 'monitor'): Promise<void> {
+    await this.prisma.organizationFeature.create({
+      data: { organizationId, featureKey: 'ato_detection', enabled: true, source: 'override' },
+    });
+    if (mode !== undefined) {
+      await this.prisma.atoSetting.create({
+        data: {
+          organizationId,
+          settings: { mode },
+          settingsSha256: sha256Hex(canonicalJson({ mode })),
+          learningStartedAt: new Date(),
+        },
+      });
+    }
+  }
+
+  /** A synthetic `mailbox` ATO account with a score and level, optionally an active incident. */
+  async atoAccount(
+    organizationId: bigint,
+    address: string,
+    risk: { score: number; level: 'low' | 'medium' | 'high' | 'critical' },
+    incident?: { severity: 'low' | 'medium' | 'high' | 'critical'; status: 'open' | 'confirmed' },
+  ): Promise<bigint> {
+    const now = new Date();
+    const account = await this.prisma.atoAccount.create({
+      data: {
+        organizationId,
+        kind: 'mailbox',
+        subjectHash: atoSubjectHash('mailbox', address),
+        address: address.toLowerCase(),
+        riskScore: risk.score,
+        riskLevel: risk.level,
+        firstSeenAt: now,
+        lastSeenAt: now,
+      },
+      select: { id: true, publicId: true },
+    });
+    if (incident) {
+      const row = await this.prisma.securityIncident.create({
+        data: {
+          organizationId,
+          category: 'account_takeover',
+          subjectType: 'ato_account',
+          subjectRefId: account.id,
+          subjectPublicId: account.publicId,
+          origin: 'detection',
+          severity: incident.severity,
+          status: incident.status,
+          reasonCodes: [],
+          detectedAt: now,
+          createdByType: 'system',
+        },
+        select: { id: true },
+      });
+      await this.prisma.atoAccount.update({
+        where: { id: account.id },
+        data: { activeIncidentId: row.id },
+      });
+    }
+    return account.id;
+  }
+
   async cleanup(): Promise<void> {
     const ids = this.organizationIds;
     try {
       if (ids.length > 0) {
         const where = { organizationId: { in: ids } };
+        // Step 8.4: synthetic ATO rows (organizations are RESTRICT-referenced).
+        await this.prisma.atoAccount.deleteMany({ where });
+        await this.prisma.securityIncident.deleteMany({ where });
+        await this.prisma.atoSetting.deleteMany({ where });
+        await this.prisma.organizationFeature.deleteMany({ where });
         await this.prisma.quarantineReleaseLog.deleteMany({ where });
         await this.prisma.quarantineAction.deleteMany({ where });
         await this.prisma.quarantineApprovalRequest.deleteMany({ where });

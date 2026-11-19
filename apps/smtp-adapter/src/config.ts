@@ -190,6 +190,33 @@ export const routingConfigShape = {
   ROUTING_MAX_DESTINATIONS_PER_DOMAIN: positiveInt.max(10).default(10),
 };
 
+/**
+ * Account takeover telemetry and enforcement (step 8.4 D4, D14, §4.2; ADR-0073). Telemetry is
+ * recorded after the SMTP reply into a bounded in-process buffer and flushed into
+ * `message_outbox`; enforcement reads `ato_smtp_restrictions` through a short Redis cache.
+ */
+export const atoConfigShape = {
+  /** `false` records no AUTH or submission telemetry (nothing is buffered). */
+  SMTP_ATO_TELEMETRY_ENABLED: flag.default(true),
+  /** Flusher interval: buffered entries become outbox rows within this bound. */
+  SMTP_ATO_TELEMETRY_FLUSH_MS: positiveInt.min(100).max(10_000).default(1000),
+  /** Entries per outbox row (`smtp.*.recorded.v1` carries at most 200). */
+  SMTP_ATO_TELEMETRY_BATCH_MAX: positiveInt.min(10).max(200).default(200),
+  /** Buffer bound; a full buffer drops the newest entry (counted, never mail). */
+  SMTP_ATO_TELEMETRY_BUFFER_MAX: positiveInt.min(1000).max(100_000).default(10_000),
+  /** Entries still unflushed after this age (database down) are dropped (`expired`). */
+  SMTP_ATO_TELEMETRY_MAX_AGE_MS: positiveInt.min(1000).max(3_600_000).default(60_000),
+  /**
+   * HMAC key of unknown SASL usernames (`usernameHash`, first 16 hex). Secret; required while
+   * telemetry is enabled (see `loadSmtpAdapterConfig`).
+   */
+  SMTP_ATO_USERNAME_HASH_KEY: z.string().min(32).optional(),
+  /** TTL of the per-organization restriction cache `sa:ato:r:{organizationId}`. */
+  SMTP_ATO_RESTRICTION_CACHE_SECONDS: positiveInt.max(60).default(15),
+  /** Kill switch: `false` stops enforcing send and auth blocks (emergency control, runbook). */
+  SMTP_ATO_ENFORCEMENT_ENABLED: flag.default(true),
+};
+
 export const configSchema = baseConfigSchema
   .extend(httpConfigSchema(3010).shape)
   .extend(databaseConfigSchema.shape)
@@ -198,7 +225,8 @@ export const configSchema = baseConfigSchema
   .extend(inSessionConfigShape)
   .extend(ingestionConfigShape)
   .extend(bouncesConfigShape)
-  .extend(routingConfigShape);
+  .extend(routingConfigShape)
+  .extend(atoConfigShape);
 
 export type SmtpAdapterConfig = z.infer<typeof configSchema>;
 
@@ -227,6 +255,11 @@ export const loadSmtpAdapterConfig = (
   env: NodeJS.ProcessEnv = process.env,
 ): Readonly<SmtpAdapterConfig> => {
   const config = loadConfig(configSchema, ownEnv(env));
+  if (config.SMTP_ATO_TELEMETRY_ENABLED && config.SMTP_ATO_USERNAME_HASH_KEY === undefined) {
+    throw new Error(
+      'Invalid configuration: SMTP_ATO_USERNAME_HASH_KEY is required while SMTP_ATO_TELEMETRY_ENABLED=true',
+    );
+  }
   if (env.SMTP_RECIPIENT_DELIMITER === '') {
     return Object.freeze({ ...config, SMTP_RECIPIENT_DELIMITER: '' });
   }

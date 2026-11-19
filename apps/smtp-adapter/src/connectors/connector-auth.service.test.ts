@@ -8,6 +8,7 @@ import {
   silentLogger,
   testConfig,
 } from '../../integration/in-session-support/fakes';
+import type { AtoRestrictionService } from '../ato/restriction.service';
 import { FixedWindowLimiter } from '../rate-limit/fixed-window-limiter';
 import { argon2PasswordVerifier, ConnectorAuthService } from './connector-auth.service';
 
@@ -35,6 +36,9 @@ async function harness(env: Record<string, string> = {}) {
   };
   const redis = new FakeRedis();
   const verify = vi.fn(argon2PasswordVerifier);
+  const restrictions = {
+    authBlocked: vi.fn((_org: bigint, _connector: bigint, _ip: string) => Promise.resolve(false)),
+  };
   const service = new ConnectorAuthService(
     prismaService(prisma),
     redisService(redis),
@@ -42,8 +46,9 @@ async function harness(env: Record<string, string> = {}) {
     testConfig({ SMTP_AUTH_MAX_FAILURES_PER_IP: '3', ...env }),
     silentLogger(),
     verify,
+    restrictions as unknown as AtoRestrictionService,
   );
-  return { service, prisma, redis, verify, connector };
+  return { service, prisma, redis, verify, connector, restrictions };
 }
 
 describe('ConnectorAuthService (D10)', () => {
@@ -84,25 +89,66 @@ describe('ConnectorAuthService (D10)', () => {
     const h = await harness();
     expect(await h.service.authenticate('egc-abc', 'wrong', '192.0.2.1')).toEqual({
       result: 'fail',
+      reason: 'bad_credentials',
+      connector: { id: 5n, organizationId: 7n },
     });
     expect(await h.service.authenticate('egc-nobody', SECRET, '192.0.2.1')).toEqual({
       result: 'fail',
+      reason: 'bad_credentials',
+      connector: null,
     });
     expect(h.redis.store.get('sa:authfail:192.0.2.1')?.value).toBe('2');
     expect(h.redis.ttlMs.get('sa:authfail:192.0.2.1')).toBe(900_000);
   });
 
   it.each([
-    ['disabled connector', { status: 'disabled' }],
-    ['suspended organization', { organization: { status: 'suspended' } }],
-    ['non-sasl connector', { authType: 'source_ip' }],
-    ['connector without a hash', { secretHash: null }],
-  ])('fails a %s even with the right secret', async (_, overrides) => {
+    ['disabled connector', { status: 'disabled' }, 'connector_inactive'],
+    ['suspended organization', { organization: { status: 'suspended' } }, 'organization_inactive'],
+    ['non-sasl connector', { authType: 'source_ip' }, 'connector_inactive'],
+    ['connector without a hash', { secretHash: null }, 'connector_inactive'],
+  ])('fails a %s even with the right secret', async (_, overrides, reason) => {
     const h = await harness();
     h.prisma.smtpConnector.findUnique.mockResolvedValueOnce({ ...h.connector, ...overrides });
     expect(await h.service.authenticate('egc-abc', SECRET, '192.0.2.1')).toEqual({
       result: 'fail',
+      reason,
+      connector: { id: 5n, organizationId: 7n },
     });
+    expect(h.restrictions.authBlocked).not.toHaveBeenCalled();
+  });
+
+  it('an ATO auth_block answers blocked before the secret is verified and is not counted per IP (step 8.4 D14)', async () => {
+    const h = await harness();
+    h.restrictions.authBlocked.mockResolvedValue(true);
+    for (let i = 0; i < 5; i += 1) {
+      expect(await h.service.authenticate('egc-abc', SECRET, '192.0.2.44')).toEqual({
+        result: 'blocked',
+        connectorId: 5n,
+        organizationId: 7n,
+      });
+    }
+    expect(h.verify).not.toHaveBeenCalled();
+    expect(h.restrictions.authBlocked).toHaveBeenCalledWith(7n, 5n, '192.0.2.44');
+    expect(h.redis.store.get('sa:authfail:192.0.2.44')).toBeUndefined();
+    // Lifted: the same IP authenticates (never throttled by the blocked attempts).
+    h.restrictions.authBlocked.mockResolvedValue(false);
+    expect((await h.service.authenticate('egc-abc', SECRET, '192.0.2.44')).result).toBe('ok');
+  });
+
+  it('a blocked connector stays blocked even with a cached verification', async () => {
+    const h = await harness();
+    expect((await h.service.authenticate('egc-abc', SECRET, '192.0.2.1')).result).toBe('ok');
+    h.restrictions.authBlocked.mockResolvedValueOnce(true);
+    expect((await h.service.authenticate('egc-abc', SECRET, '192.0.2.1')).result).toBe('blocked');
+  });
+
+  it('fails closed (temp) when the restriction lookup fails', async () => {
+    const h = await harness();
+    h.restrictions.authBlocked.mockRejectedValueOnce(new Error('redis down'));
+    expect(await h.service.authenticate('egc-abc', SECRET, '192.0.2.1')).toEqual({
+      result: 'temp',
+    });
+    expect(h.verify).not.toHaveBeenCalled();
   });
 
   it('throttles an IP after SMTP_AUTH_MAX_FAILURES_PER_IP failures, even with the right secret', async () => {

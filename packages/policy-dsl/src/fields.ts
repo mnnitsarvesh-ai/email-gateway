@@ -13,6 +13,9 @@ import {
   ENGINE_NAMES,
   FILE_TYPE_FAMILIES,
   SCAN_VERDICTS,
+  ATO_RISK_LEVELS,
+  SECURITY_INCIDENT_ACTIVE_STATUSES,
+  SECURITY_INCIDENT_SEVERITIES,
   URL_HOST_KINDS,
   URL_VERDICTS,
 } from '@email-gateway/security-contracts';
@@ -86,6 +89,12 @@ export interface PolicyFieldDefinition {
   readonly senderIdentity: SenderIdentity | null;
   /** True for AI-derived facts (no hold disposition, no exception, P9.8). */
   readonly aiDerived: boolean;
+  /**
+   * True for facts that may only make a decision stricter (step 8.4 D23: the `ato.*` fields):
+   * refused in exceptions (rule `unless`, policy `exceptions`) and in the `when` of ALLOW and
+   * override rules (`field_strict_only`). A stale or missing fact must never release mail.
+   */
+  readonly strictOnly: boolean;
   /** Directions in which the fact can be known (else it evaluates to unknown or false). */
   readonly directions: readonly PolicyMessageDirection[];
   /** Closed value vocabulary of `enum` fields and of code sets with a fixed vocabulary. */
@@ -125,6 +134,7 @@ interface Spec {
   authenticatedIdentity?: boolean;
   senderIdentity?: SenderIdentity;
   aiDerived?: boolean;
+  strictOnly?: boolean;
   directions?: readonly PolicyMessageDirection[];
   values?: readonly string[];
   ordered?: boolean;
@@ -143,6 +153,7 @@ function field(spec: Spec): PolicyFieldDefinition {
     authenticatedIdentity: spec.authenticatedIdentity ?? false,
     senderIdentity: spec.senderIdentity ?? null,
     aiDerived: spec.aiDerived ?? false,
+    strictOnly: spec.strictOnly ?? false,
     directions: Object.freeze([...(spec.directions ?? ALL_DIRECTIONS)]),
     values: spec.values ? Object.freeze([...spec.values]) : null,
     ordered: spec.ordered ?? false,
@@ -598,6 +609,48 @@ export const POLICY_FIELDS = Object.freeze({
     type: 'time',
     ops: ['within'],
     description: 'Inclusive local date range in an IANA time zone.',
+  }),
+  // Step 8.4 D23 (ADR-0073): account takeover facts of the sending mailbox account, read by the
+  // policy-engine from the ATO tables in its evaluation transaction (the optional `ato` block of
+  // `policy-input/1`). Outbound/internal only; strict-only (never in exceptions, ALLOW or
+  // override rules); unknown when ATO is not enabled for the organization.
+  'ato.risk_score': field({
+    type: 'int',
+    ops: NUMERIC_OPS,
+    min: 0,
+    max: 100,
+    strictOnly: true,
+    directions: ['outbound', 'internal'],
+    description:
+      'ATO risk score of the sending mailbox account at evaluation time; 0 for an unmonitored sender of an ATO-enabled organization; unknown when ATO is not enabled.',
+  }),
+  'ato.risk_level': field({
+    type: 'enum',
+    ops: ORDERED_OPS,
+    values: ATO_RISK_LEVELS,
+    ordered: true,
+    strictOnly: true,
+    directions: ['outbound', 'internal'],
+    description: "ATO risk level of the sending mailbox account (the tenant's bands).",
+  }),
+  'ato.incident_severity': field({
+    type: 'enum',
+    ops: ORDERED_OPS,
+    values: SECURITY_INCIDENT_SEVERITIES,
+    ordered: true,
+    strictOnly: true,
+    directions: ['outbound', 'internal'],
+    description:
+      "Severity of the sender's active account takeover incident; unknown without an active incident.",
+  }),
+  'ato.incident_status': field({
+    type: 'enum',
+    ops: ENUM_OPS,
+    values: SECURITY_INCIDENT_ACTIVE_STATUSES,
+    strictOnly: true,
+    directions: ['outbound', 'internal'],
+    description:
+      "Status of the sender's active account takeover incident; unknown without an active incident.",
   }),
 } satisfies Record<string, PolicyFieldDefinition>);
 

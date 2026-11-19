@@ -373,6 +373,7 @@ export function catalogView(bounds: PolicyBounds): PolicyCatalog {
         authenticatedIdentity: f.authenticatedIdentity,
         senderIdentity: f.senderIdentity,
         aiDerived: f.aiDerived,
+        strictOnly: f.strictOnly,
         directions: [...f.directions],
         values: f.values === null ? null : [...f.values],
         ordered: f.ordered,

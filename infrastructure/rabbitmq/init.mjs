@@ -1,8 +1,9 @@
 #!/usr/bin/env node
-// RabbitMQ provisioning for topology v12 (step 3.2 Q5, Q10, ADR-0024; v2: step 3.3 L7; v3: step
+// RabbitMQ provisioning for topology v13 (step 3.2 Q5, Q10, ADR-0024; v2: step 3.3 L7; v3: step
 // 4.1 S2, ADR-0026; v4: step 4.2 A2, ADR-0028; v5: step 4.3 U2, ADR-0029; v6: step 4.4 B3,
 // ADR-0033; v7: step 4.5 D2, ADR-0036; v8: step 4.6 X11, ADR-0040; v9: step 5.2 P15, ADR-0044;
-// v10: step 5.3 Q27, ADR-0046; v11: step 6.2 §4.3, ADR-0055; v12: step 8.1 A26, ADR-0064).
+// v10: step 5.3 Q27, ADR-0046; v11: step 6.2 §4.3, ADR-0055; v12: step 8.1 A26, ADR-0064; v13:
+// step 8.4 §4.1, ADR-0070).
 // The only code that declares broker objects: services verify passively and their users cannot
 // configure.
 //
@@ -31,7 +32,7 @@
 //   6. --cleanup-legacy: delete the ADR-0005 objects on vhost "/" only when empty (queues with
 //      no messages and no consumers; RabbitMQ 4.x refuses `if-empty` deletes of quorum queues,
 //      so emptiness is checked first); --legacy-vhost points it at another vhost (tests only);
-//   7. verify: exactly the 6 exchanges and 21 quorum queues, exactly the bindings of the
+//   7. verify: exactly the 6 exchanges and 24 quorum queues, exactly the bindings of the
 //      definitions (no missing and no extra binding), every policy applied, and (--users) each
 //      role user's permissions and topic permissions exactly.
 // Exits non-zero on any failure. Logs object names and counts only: never a password, never a
@@ -132,6 +133,19 @@ const topic = (exchange, write) => ({ exchange, write, read: '^$' });
  * permission to the `retry.email.archive.` hops. `email.archive` is no dot-prefix of another queue
  * name. email.archive is not in RECONCILE_QUEUES (the archive-worker reconciles from
  * policy_execution_logs itself).
+ *
+ * Topology v13 (step 8.4 §4.1, ADR-0070) adds the ato-worker user (`eg-ato`, RABBITMQ_ATO_USER /
+ * RABBITMQ_ATO_PASSWORD): it reads only its three queues (ato.events, ato.mail, ato.responses;
+ * home exchange email.security) and publishes only their retry hops on email.security and their
+ * dead-letter hops on email.events; its own events (risk updates, incidents, responses,
+ * restrictions, notifications) go through the outbox and the relay (EVENT_KEYS covers the
+ * eleven new event types on email.events and email.security). It configures nothing. ops may
+ * replay the three queues: its email.security topic grant gains `retry.ato.(events|mail|
+ * responses).` (write on email.security is already granted). None of the three names is a
+ * dot-prefix of another queue name, so the plain `retry.<queue>.` prefixes cannot reach another
+ * queue's hops. ato.mail is lossy without dead-lettered heads (no dead-letter target in its
+ * policy; the worker's consumer dead letters still use the granted dead-letter keys).
+ * ato.responses is reconciled (RECONCILE_QUEUES gains it); ato.events and ato.mail are not.
  */
 const SCANNER_QUEUES =
   '(spam|attachment|url|url\\.results|bec|dlp|sandbox\\.submissions|sandbox\\.results)';
@@ -277,6 +291,21 @@ const ROLE_USERS = [
     ],
   },
   {
+    // Step 8.4 D3, §4.1 (v13): the ato-worker (roles detect, respond, maintenance, provider).
+    // Reads its three queues; publishes only their retry hops (home exchange email.security) and
+    // their dead-letter hops; everything it produces goes through the outbox.
+    role: 'ato-worker',
+    userKey: 'RABBITMQ_ATO_USER',
+    passwordKey: 'RABBITMQ_ATO_PASSWORD',
+    configure: '^$',
+    write: '^email\\.(security|events)$',
+    read: '^ato\\.(events|mail|responses)$',
+    topics: [
+      topic('email.security', '^retry\\.ato\\.(events|mail|responses)\\.'),
+      topic('email.events', '^dead-letter\\.ato\\.(events|mail|responses)(\\.|$)'),
+    ],
+  },
+  {
     role: 'ops',
     userKey: 'RABBITMQ_OPS_USER',
     passwordKey: 'RABBITMQ_OPS_PASSWORD',
@@ -287,7 +316,8 @@ const ROLE_USERS = [
     // (home exchange email.security), v9 email.policy.evaluate and email.notifications, v10
     // email.quarantine (home exchange email.policy), v11 email.webhooks (home exchange
     // email.events; its topic grant there is the retry prefix only), v12 email.archive (home
-    // exchange email.archive; retry prefix only).
+    // exchange email.archive; retry prefix only), v13 ato.events, ato.mail and ato.responses
+    // (home exchange email.security; retry prefixes only).
     write: '^email\\.(ingestion|delivery|security|policy|archive|events)$',
     read: '^email\\.dead-letter$',
     topics: [
@@ -295,7 +325,7 @@ const ROLE_USERS = [
       topic('email.delivery', '^retry\\.email\\.delivery\\.pending\\.'),
       topic(
         'email.security',
-        '^retry\\.scan\\.(spam|attachment|url|url\\.inspect|url\\.results|bec|dlp|sandbox|sandbox\\.submissions|sandbox\\.results)\\.',
+        '^retry\\.(scan\\.(spam|attachment|url|url\\.inspect|url\\.results|bec|dlp|sandbox|sandbox\\.submissions|sandbox\\.results)|ato\\.(events|mail|responses))\\.',
       ),
       topic('email.policy', '^retry\\.email\\.(policy\\.evaluate|notifications|quarantine)\\.'),
       topic('email.archive', '^retry\\.email\\.archive\\.'),

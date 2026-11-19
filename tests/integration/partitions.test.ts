@@ -43,11 +43,11 @@ async function partitionNames(table: string): Promise<string[]> {
 }
 
 describe('partition maintenance', () => {
-  it('manages the 35 partitioned tables, including the step 2.3, 3.1, 4.1, 4.2, 4.3, 4.4, 4.5, 5.1, 5.2, 6.2 and 8.1 tables (none added by 5.3)', () => {
+  it('manages the 39 partitioned tables, including the step 2.3, 3.1, 4.1, 4.2, 4.3, 4.4, 4.5, 5.1, 5.2, 6.2, 8.1 and 8.4 tables (none added by 5.3)', () => {
     // Step 4.6 §3 adds sandbox_analyses and sandbox_artifacts unpartitioned; step 5.1 §3 adds
     // message_risk_scores (partitioned) and the unpartitioned risk_scoring_profiles and
     // risk_scoring_profile_versions.
-    expect(PARTITION_REGISTRY).toHaveLength(35);
+    expect(PARTITION_REGISTRY).toHaveLength(39);
     expect(PARTITION_REGISTRY.map((s) => s.table)).not.toEqual(
       expect.arrayContaining(['risk_scoring_profiles']),
     );
@@ -77,6 +77,11 @@ describe('partition maintenance', () => {
         'dlp_scan_results',
         'dlp_evidence',
         'message_risk_scores',
+        // Step 8.4 §3.2 (D22).
+        'ato_account_activity_daily',
+        'ato_auth_events',
+        'ato_risk_signals',
+        'ato_risk_scores',
       ]),
     );
     // Step 5.2 §3 (P16): the policy decision record lives as long as the scan rounds (was 3

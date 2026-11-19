@@ -66,6 +66,25 @@ export async function loginWithMfa(
   user: FixtureUser,
   ip: string = uniqueIp(),
 ): Promise<TokenResponseBody> {
+  try {
+    return await loginWithMfaOnce(ctx, fixtures, user, ip);
+  } catch (error) {
+    // `totpNow` may hand out the previous step (so that one user can sign in several times
+    // within a step without a replay); under load the verification can then land after the next
+    // step boundary, outside the ±1 window (401). One retry with a fresh login takes a later step.
+    if (!(error instanceof Error) || error.message !== 'MFA verification failed with 401') {
+      throw error;
+    }
+    return loginWithMfaOnce(ctx, fixtures, user, ip);
+  }
+}
+
+async function loginWithMfaOnce(
+  ctx: IntegrationApp,
+  fixtures: Fixtures,
+  user: FixtureUser,
+  ip: string,
+): Promise<TokenResponseBody> {
   const first = await login(
     ctx,
     { email: user.email, password: user.password, organization: user.organization.slug },

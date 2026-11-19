@@ -124,6 +124,21 @@ export interface E2eState {
   };
   expected: { dashboard7d: DashboardExpectation };
   /** Step 8.1: archive tenants (seed/archive.ts); alpha's records are captured during the run. */
+  /** Step 8.4: account takeover accounts and incidents (seed/ato.ts) and the plan's figures. */
+  ato: {
+    alpha: Array<{ key: string; accountId: string; address: string; incidentId: string | null }>;
+    beta: Array<{ key: string; accountId: string; address: string; incidentId: string | null }>;
+    expected: {
+      monitored: number;
+      highRisk: number;
+      criticalRisk: number;
+      activeIncidents: number;
+      criticalIncidents: number;
+      failedLogins: number;
+      suspiciousLogins: number;
+      suspiciousOutbound: number;
+    };
+  };
   archive: {
     custodian: string;
     policyId: string;

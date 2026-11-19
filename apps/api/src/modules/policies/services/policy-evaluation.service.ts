@@ -1,5 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import {
+  type AtoPolicyFactsRow,
+  atoPolicyFactsSchema,
   buildPolicyInput,
   buildSyntheticInput,
   compileSnapshot,
@@ -50,6 +52,7 @@ import {
   SCAN_ROUND_NOT_COMPLETE,
   scanRoundNotComplete,
 } from '../policies.errors';
+import { AtoPolicyFactsRepository } from '../repositories/ato-policy-facts.repository';
 import {
   type FactsMessageRow,
   type FactsScanRow,
@@ -68,6 +71,35 @@ const RESULT_OF_CODE: Readonly<Record<string, PolicyDryRunResult>> = {
   [POLICY_TEST_FACTS_INVALID]: 'invalid',
   [POLICY_INPUT_INVALID]: 'invalid',
 };
+
+/**
+ * Where a dry-run took the round's ATO facts from (step 8.4 D23, §5.3): `stored` = the
+ * `ato_facts` block of the round's stored evaluation (reproducible); `current` = the sender's
+ * account state now (the round has no stored evaluation); `none` = the input has no ATO facts
+ * (inbound, no authenticated sender, ATO not enabled, or a stored evaluation without them).
+ */
+export type AtoFactsSource = 'stored' | 'current' | 'none';
+
+/**
+ * How a round evaluation obtains ATO facts: from its stored evaluation (`ato_facts`, NULL =
+ * absent) or from the current state on the replica.
+ */
+export type AtoFactsChoice = { kind: 'stored'; atoFacts: unknown } | { kind: 'current' };
+
+/** A round evaluation and the origin of its ATO facts. */
+export interface RoundEvaluation {
+  evaluation: PerRecipientEvaluation;
+  atoFactsSource: AtoFactsSource;
+}
+
+/** The facts row of a stored `ato_facts` block (`409 policy_input_invalid` when malformed). */
+function storedAtoFacts(value: unknown): AtoPolicyFactsRow | null {
+  if (value === null || value === undefined) return null;
+  const parsed = atoPolicyFactsSchema.safeParse(value);
+  if (!parsed.success) throw policyInputInvalid();
+  const { version: _version, ...row } = parsed.data;
+  return row;
+}
 
 /** The versions of a snapshot the current DSL no longer accepts (as every response lists them). */
 export const invalidVersions = (
@@ -140,6 +172,7 @@ export class PolicyEvaluationService {
     @Inject(API_CONFIG) private readonly settings: Settings,
     private readonly facts: PolicyFactsRepository,
     private readonly metrics: PolicyMetrics,
+    private readonly atoFacts: AtoPolicyFactsRepository,
   ) {}
 
   test(scope: TenantScope, body: PolicyTest, now: Date = new Date()): Promise<PolicyTestResponse> {
@@ -199,14 +232,28 @@ export class PolicyEvaluationService {
     if (!scan) throw policyScanNotFound();
     if (isOpenRound(scan)) throw scanRoundNotComplete(scan.status);
     const compiled = await this.compile(scope, body.target, inline);
-    const evaluation = await this.evaluateRound(scope, message, scan, compiled);
+    // Step 8.4 D23: ATO facts from the stored evaluation when there is one (reproducible), else
+    // the sender's current account state.
     const storedRow = await this.facts.storedEvaluation(scope, message, scanId);
-    const stored = storedRow === null ? null : evaluationViewOf(storedRow);
+    const { evaluation, atoFactsSource } = await this.evaluateRound(
+      scope,
+      message,
+      scan,
+      compiled,
+      referencedDirectoryIds(compiled),
+      storedRow === null ? { kind: 'current' } : { kind: 'stored', atoFacts: storedRow.atoFacts },
+    );
+    const storedView = storedRow === null ? null : evaluationViewOf(storedRow);
+    const stored =
+      storedView === null || storedRow === null
+        ? null
+        : { ...storedView, atoFacts: storedAtoFactsView(storedRow.atoFacts) };
     const view = perRecipientView(evaluation);
     const result = view.result;
     return {
       ...view,
       invalidVersions: invalidVersions(compiled),
+      atoFactsSource,
       stored,
       reproducible:
         body.target === 'active' &&
@@ -231,17 +278,35 @@ export class PolicyEvaluationService {
     refs: { departmentIds: readonly string[]; userIds: readonly string[] } = referencedDirectoryIds(
       compiled,
     ),
-  ): Promise<PerRecipientEvaluation> {
+    ato: AtoFactsChoice = { kind: 'current' },
+  ): Promise<RoundEvaluation> {
     const rows = await this.facts.roundRows(scope, message, scan.id);
     const directory =
       refs.departmentIds.length === 0 && refs.userIds.length === 0
         ? { departmentsByAddress: {}, usersByAddress: {} }
         : directoryMaps(await this.facts.directory(scope, roundAddresses(message, rows), refs));
     try {
-      return evaluatePolicyPerRecipient(
-        buildPolicyInput(policyRoundRowsOf(message, scan, rows, directory)),
-        compiled,
-      );
+      const roundRows = policyRoundRowsOf(message, scan, rows, directory);
+      let input = buildPolicyInput(roundRows);
+      let facts: AtoPolicyFactsRow | null = null;
+      let source: AtoFactsSource = 'none';
+      if (ato.kind === 'stored') {
+        facts = storedAtoFacts(ato.atoFacts);
+        if (facts !== null) source = 'stored';
+      } else if (input.direction !== 'inbound' && input.sender.authenticated !== null) {
+        // The same reader logic as the policy-engine, on the replica (no stored evaluation).
+        facts = await this.atoFacts.current(scope, input.sender.authenticated.address);
+        if (facts !== null) source = 'current';
+      }
+      if (facts !== null) {
+        input = buildPolicyInput({ ...roundRows, ato: facts });
+        // Inbound rounds never carry facts (`buildPolicyInput` drops them).
+        if (input.ato === undefined) source = 'none';
+      }
+      return {
+        evaluation: evaluatePolicyPerRecipient(input, compiled),
+        atoFactsSource: source,
+      };
     } catch (error) {
       if (error instanceof PolicyInputError) throw policyInputInvalid();
       throw error;
@@ -317,4 +382,11 @@ export class PolicyEvaluationService {
       users: mutable(maps.usersByAddress),
     };
   }
+}
+
+/** The stored `ato_facts` block as the views show it (null when absent or malformed). */
+export function storedAtoFactsView(value: unknown) {
+  if (value === null || value === undefined) return null;
+  const parsed = atoPolicyFactsSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
 }

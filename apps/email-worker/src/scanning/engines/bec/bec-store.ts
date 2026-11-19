@@ -103,6 +103,9 @@ export interface BecUrlResultRow {
   registrableDomain: string | null;
 }
 
+/** The feature that enables account takeover detection (step 8.4 D21), off by default. */
+export const ATO_FEATURE_KEY = 'ato_detection';
+
 /** Tenant data of one organization (B4 step 3), cached per organization. */
 export interface BecTenantRecord {
   tenantDomains: string[];
@@ -112,6 +115,11 @@ export interface BecTenantRecord {
   suppressions: SuppressionRule[];
   /** The url engine's tenant settings row (`scan_engine_settings`, engine `url`), or null. */
   urlSettingsRow: { settings: unknown; version: number } | null;
+  /**
+   * Step 8.4 D6: the organization's `ato_detection` feature is enabled (outbound observations
+   * are computed only then). Cached with the rest of the tenant data.
+   */
+  atoDetection: boolean;
 }
 
 export interface BecTenantLimits {
@@ -509,71 +517,76 @@ export class PrismaBecStore implements BecStore {
   private async loadTenant(organizationId: bigint): Promise<BecTenantRecord> {
     const now = this.now();
     const unexpired = { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] };
-    const [domains, executives, vendors, trusted, suppressions, urlRow] = await Promise.all([
-      this.prisma.domain.findMany({
-        where: { organizationId, status: 'active', deletedAt: null },
-        orderBy: { id: 'asc' },
-        take: BEC_MAX_TENANT_DOMAINS,
-        select: { organizationId: true, name: true, status: true, deletedAt: true },
-      }),
-      this.prisma.becExecutiveProfile.findMany({
-        where: { organizationId, enabled: true },
-        orderBy: { id: 'asc' },
-        take: this.limits.executives,
-        select: {
-          organizationId: true,
-          publicId: true,
-          displayName: true,
-          aliases: true,
-          knownAddresses: true,
-          enabled: true,
-        },
-      }),
-      this.prisma.becVendorProfile.findMany({
-        where: { organizationId, enabled: true },
-        orderBy: { id: 'asc' },
-        take: this.limits.vendors,
-        select: {
-          organizationId: true,
-          publicId: true,
-          name: true,
-          aliases: true,
-          domains: true,
-          knownSenders: true,
-          paymentChangeSensitive: true,
-          enabled: true,
-        },
-      }),
-      this.prisma.becTrustedSender.findMany({
-        where: { organizationId, ...unexpired },
-        orderBy: { id: 'asc' },
-        take: this.limits.trustedSenders,
-        select: {
-          organizationId: true,
-          publicId: true,
-          kind: true,
-          value: true,
-          expiresAt: true,
-        },
-      }),
-      this.prisma.becSuppressionRule.findMany({
-        where: { organizationId, expiresAt: { gt: now } },
-        orderBy: { id: 'asc' },
-        take: this.limits.suppressions,
-        select: {
-          organizationId: true,
-          publicId: true,
-          reasonCode: true,
-          senderScope: true,
-          senderValue: true,
-          expiresAt: true,
-        },
-      }),
-      this.prisma.scanEngineSetting.findUnique({
-        where: { organizationId_engine: { organizationId, engine: 'url' } },
-        select: { organizationId: true, engine: true, settings: true, version: true },
-      }),
-    ]);
+    const [domains, executives, vendors, trusted, suppressions, urlRow, atoFeature] =
+      await Promise.all([
+        this.prisma.domain.findMany({
+          where: { organizationId, status: 'active', deletedAt: null },
+          orderBy: { id: 'asc' },
+          take: BEC_MAX_TENANT_DOMAINS,
+          select: { organizationId: true, name: true, status: true, deletedAt: true },
+        }),
+        this.prisma.becExecutiveProfile.findMany({
+          where: { organizationId, enabled: true },
+          orderBy: { id: 'asc' },
+          take: this.limits.executives,
+          select: {
+            organizationId: true,
+            publicId: true,
+            displayName: true,
+            aliases: true,
+            knownAddresses: true,
+            enabled: true,
+          },
+        }),
+        this.prisma.becVendorProfile.findMany({
+          where: { organizationId, enabled: true },
+          orderBy: { id: 'asc' },
+          take: this.limits.vendors,
+          select: {
+            organizationId: true,
+            publicId: true,
+            name: true,
+            aliases: true,
+            domains: true,
+            knownSenders: true,
+            paymentChangeSensitive: true,
+            enabled: true,
+          },
+        }),
+        this.prisma.becTrustedSender.findMany({
+          where: { organizationId, ...unexpired },
+          orderBy: { id: 'asc' },
+          take: this.limits.trustedSenders,
+          select: {
+            organizationId: true,
+            publicId: true,
+            kind: true,
+            value: true,
+            expiresAt: true,
+          },
+        }),
+        this.prisma.becSuppressionRule.findMany({
+          where: { organizationId, expiresAt: { gt: now } },
+          orderBy: { id: 'asc' },
+          take: this.limits.suppressions,
+          select: {
+            organizationId: true,
+            publicId: true,
+            reasonCode: true,
+            senderScope: true,
+            senderValue: true,
+            expiresAt: true,
+          },
+        }),
+        this.prisma.scanEngineSetting.findUnique({
+          where: { organizationId_engine: { organizationId, engine: 'url' } },
+          select: { organizationId: true, engine: true, settings: true, version: true },
+        }),
+        this.prisma.organizationFeature.findUnique({
+          where: { organizationId_featureKey: { organizationId, featureKey: ATO_FEATURE_KEY } },
+          select: { organizationId: true, featureKey: true, enabled: true },
+        }),
+      ]);
     const echo = (rows: ReadonlyArray<{ organizationId: bigint }>, check: string): void => {
       if (rows.some((r) => r.organizationId !== organizationId)) {
         throw new InconsistentBecReadError('tenant', check);
@@ -598,6 +611,12 @@ export class PrismaBecStore implements BecStore {
     }
     if (urlRow && (urlRow.organizationId !== organizationId || urlRow.engine !== 'url')) {
       throw new InconsistentBecReadError('tenant', 'url settings');
+    }
+    if (
+      atoFeature &&
+      (atoFeature.organizationId !== organizationId || atoFeature.featureKey !== ATO_FEATURE_KEY)
+    ) {
+      throw new InconsistentBecReadError('tenant', 'ato feature');
     }
     return {
       tenantDomains: domains.map((d) => d.name.toLowerCase()),
@@ -629,6 +648,7 @@ export class PrismaBecStore implements BecStore {
         expiresAt: s.expiresAt,
       })),
       urlSettingsRow: urlRow ? { settings: urlRow.settings, version: urlRow.version } : null,
+      atoDetection: atoFeature?.enabled === true,
     };
   }
 

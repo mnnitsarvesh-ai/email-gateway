@@ -6,10 +6,11 @@ import {
   silentLogger,
   testConfig,
 } from '../../integration/in-session-support/fakes';
+import type { AtoRestrictionService } from '../ato/restriction.service';
 import { DomainCacheInvalidator } from './domain-cache-invalidator.service';
 import type { DomainPolicyService } from './domain-policy.service';
 
-type Row = { id: bigint; eventType?: string; payload: unknown };
+type Row = { id: bigint; organizationId?: bigint; eventType?: string; payload: unknown };
 
 function harness(rows: Row[][], env: Record<string, string> = {}, maxId: bigint | null = 41n) {
   const queries: unknown[][] = [];
@@ -21,15 +22,25 @@ function harness(rows: Row[][], env: Record<string, string> = {}, maxId: bigint 
   });
   const invalidate = vi.fn(() => Promise.resolve());
   const invalidateRouting = vi.fn(() => Promise.resolve());
+  const invalidateRestrictions = vi.fn((_: bigint) => Promise.resolve());
   const metrics = newMetrics();
   const invalidator = new DomainCacheInvalidator(
     prismaService({ $queryRaw: queryRaw }),
     { invalidate, invalidateRouting } as unknown as DomainPolicyService,
+    { invalidate: invalidateRestrictions } as unknown as AtoRestrictionService,
     metrics,
     testConfig(env),
     silentLogger(),
   );
-  return { invalidator, invalidate, invalidateRouting, queryRaw, queries, metrics };
+  return {
+    invalidator,
+    invalidate,
+    invalidateRouting,
+    invalidateRestrictions,
+    queryRaw,
+    queries,
+    metrics,
+  };
 }
 
 describe('DomainCacheInvalidator (D5)', () => {
@@ -52,6 +63,7 @@ describe('DomainCacheInvalidator (D5)', () => {
       41n,
       'domain.status.changed.v1',
       'domain.routing.changed.v1',
+      'ato.restriction.changed.v1',
       500,
     ]);
     await h.invalidator.poll();
@@ -92,6 +104,36 @@ describe('DomainCacheInvalidator (D5)', () => {
     expect(h.invalidate.mock.calls).toEqual([['b.test']]);
     await h.invalidator.poll();
     expect(h.queries[2]?.[0]).toBe(45n);
+  });
+
+  it('deletes the organization restriction cache on ato.restriction.changed (step 8.4 D14)', async () => {
+    const event = {
+      restrictionId: '51',
+      kind: 'send_block',
+      scope: 'connector',
+      connectorId: '12',
+      mailboxSha256: null,
+      status: 'active',
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+      changedAt: new Date().toISOString(),
+    };
+    const h = harness([
+      [
+        { id: 42n, organizationId: 77n, eventType: 'ato.restriction.changed.v1', payload: event },
+        {
+          id: 43n,
+          organizationId: 78n,
+          eventType: 'ato.restriction.changed.v1',
+          payload: JSON.stringify({ ...event, status: 'lifted' }),
+        },
+        // A malformed payload is skipped (warned), never applied.
+        { id: 44n, organizationId: 79n, eventType: 'ato.restriction.changed.v1', payload: {} },
+      ],
+    ]);
+    await h.invalidator.poll();
+    expect(await h.invalidator.poll()).toBe(2);
+    expect(h.invalidateRestrictions.mock.calls).toEqual([[77n], [78n]]);
+    expect(h.invalidate).not.toHaveBeenCalled();
   });
 
   it('starts at 0 on an empty outbox', async () => {

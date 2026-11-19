@@ -21,6 +21,8 @@ export const WEBHOOK_READS = [
   'event',
   'replay',
   'alert_window',
+  // Step 8.4 D16: the account kind of `ato.response.completed`.
+  'ato_account',
 ] as const;
 export type WebhookRead = (typeof WEBHOOK_READS)[number];
 

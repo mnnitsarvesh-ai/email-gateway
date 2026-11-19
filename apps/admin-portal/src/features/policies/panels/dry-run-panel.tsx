@@ -517,11 +517,13 @@ function SampleItems({ items }: { items: readonly SampleItem[] }) {
         </caption>
         <thead className="bg-muted/50 text-xs text-muted-foreground">
           <tr>
-            {['Message', 'Received', 'Direction', 'Stored', 'Dry run', 'Change'].map((h) => (
-              <th key={h} scope="col" className="px-2 py-1.5 font-medium whitespace-nowrap">
-                {h}
-              </th>
-            ))}
+            {['Message', 'Received', 'Direction', 'Stored', 'Dry run', 'Change', 'ATO facts'].map(
+              (h) => (
+                <th key={h} scope="col" className="px-2 py-1.5 font-medium whitespace-nowrap">
+                  {h}
+                </th>
+              ),
+            )}
           </tr>
         </thead>
         <tbody>
@@ -574,12 +576,36 @@ function SampleItems({ items }: { items: readonly SampleItem[] }) {
                   <span className="text-muted-foreground">Same</span>
                 )}
               </td>
+              <td className="px-2 py-1.5 text-xs whitespace-nowrap">
+                {atoFactsSourceLabel(item.atoFactsSource)}
+              </td>
             </tr>
           ))}
         </tbody>
       </table>
     </div>
   );
+}
+
+/**
+ * Where a round's account takeover facts came from (step 8.4 D23, `atoFactsSource`): the stored
+ * evaluation's block (reproducible), the sender account's state now, or none. Absent from older
+ * api versions (shown as "–").
+ */
+export type AtoFactsSource = 'stored' | 'current' | 'none';
+export const ATO_FACTS_SOURCE_LABELS: Record<AtoFactsSource, string> = {
+  stored: 'Stored with the evaluation',
+  current: 'Current account state',
+  none: 'None',
+};
+export const ATO_FACTS_SOURCE_HINTS: Record<AtoFactsSource, string> = {
+  stored: 'The facts the stored evaluation used (reproducible).',
+  current:
+    'No stored evaluation: the sender account’s risk and incident now, which may differ from when the message was evaluated.',
+  none: 'No account takeover facts: inbound mail, ATO not enabled, or no authenticated sender.',
+};
+export function atoFactsSourceLabel(source: AtoFactsSource | undefined): string {
+  return source ? ATO_FACTS_SOURCE_LABELS[source] : '–';
 }
 
 function MessageDryRunView({
@@ -794,6 +820,21 @@ function MessageResult({
               </span>
             ),
           },
+          ...(response.atoFactsSource
+            ? [
+                {
+                  label: 'Account takeover facts',
+                  value: (
+                    <span className="grid gap-0.5">
+                      <span>{atoFactsSourceLabel(response.atoFactsSource)}</span>
+                      <span className="text-xs text-muted-foreground">
+                        {ATO_FACTS_SOURCE_HINTS[response.atoFactsSource]}
+                      </span>
+                    </span>
+                  ),
+                },
+              ]
+            : []),
           {
             label: 'Reproducible',
             value: (

@@ -11,6 +11,18 @@ export const FORWARDER_TOKEN_HEADER = 'x-eg-forwarder-token';
 /** `outcome` of `api_trusted_forwarder_total`. */
 export type TrustedForwarderOutcome = 'accepted' | 'rejected' | 'invalid_ip' | 'disabled';
 
+/**
+ * Requests whose client address was accepted from the trusted forwarder (the admin portal BFF).
+ * Step 8.4 D5: the login telemetry channel is `portal` for these, `api` otherwise. A WeakSet, so
+ * nothing is added to the request object a handler could forge or serialize.
+ */
+const FORWARDED = new WeakSet<object>();
+
+/** Whether the trusted forwarder accepted this request (step 8.4 D5 login channel). */
+export function viaTrustedForwarder(req: object): boolean {
+  return FORWARDED.has(req);
+}
+
 /** `login_audit_logs.ip_address`, `audit_logs.source_ip` and friends are VARCHAR(45). */
 const MAX_IP_LENGTH = 45;
 
@@ -67,7 +79,8 @@ export interface TrustedForwarderOptions {
  *   valid IP: that address becomes the request's `req.ip` (an own property of this request
  *   instance, shadowing Express's `trust proxy` getter), so `clientIp(req)`, every per-IP rate
  *   limit, the login throttle, `login_audit_logs`, `audit_logs.source_ip` and session IPs see the
- *   browser behind the portal (`accepted`).
+ *   browser behind the portal (`accepted`); the request is marked (`viaTrustedForwarder`) so
+ *   login telemetry records the `portal` channel (step 8.4 D5).
  * - A missing or wrong token (`rejected`) or a missing or invalid address with the right token
  *   (`invalid_ip`): ignored, `req.ip` stays the socket / trust-proxy address; a warn log names
  *   the outcome only, never a header value.
@@ -114,6 +127,7 @@ export function trustedForwarderMiddleware(
       enumerable: true,
       writable: false,
     });
+    FORWARDED.add(req);
     options.outcomes.inc({ outcome: 'accepted' });
     next();
   };

@@ -1,4 +1,6 @@
 import type {
+  AtoAccountRiskUpdatedV1,
+  AtoResponseCompletedV1,
   AttachmentSandboxCompletedV1,
   DeliveryApprovedV1,
   DomainDnsRecordsChangedV1,
@@ -8,6 +10,8 @@ import type {
   MessageScannedV1,
   MessageStateChangedV1,
   PolicyDecidedV1,
+  SecurityIncidentCreatedV1,
+  SecurityIncidentUpdatedV1,
 } from '@email-gateway/event-contracts';
 import {
   DOMAIN_STATUSES,
@@ -18,6 +22,7 @@ import {
 } from '@email-gateway/webhooks';
 import type { ScanVerdict } from '@email-gateway/security-contracts';
 import {
+  type AtoAccountKind,
   type DomainFacts,
   type ExecutionLogFacts,
   type MessageFacts,
@@ -54,6 +59,8 @@ export interface FactsSource {
     submissionId: bigint,
   ): Promise<{ partIndex: number; sha256: string; detectedType: string }>;
   domain(organizationId: bigint, domainId: bigint, publicId: string): Promise<DomainFacts>;
+  /** Step 8.4: the kind of a monitored ATO account of the organization (by public id). */
+  atoAccountKind(organizationId: bigint, accountPublicId: string): Promise<AtoAccountKind>;
 }
 
 /** One public event ready for the envelope (W4) and the stored row. */
@@ -437,6 +444,78 @@ export async function buildPublicEvents(
             },
           },
           { message: null, domainId, domainPublicId: row.publicId },
+        );
+        break;
+      }
+      // Step 8.4 D16: public ids, codes, levels and times only (no address, IP or name).
+      case 'incident_created': {
+        const p = event.payload as SecurityIncidentCreatedV1;
+        push(
+          candidate,
+          {
+            incident: {
+              id: p.incidentPublicId,
+              category: p.category,
+              status: p.status,
+              severity: p.severity,
+              origin: p.origin,
+              detectedAt: p.detectedAt,
+              reasonCodes: p.reasonCodes,
+            },
+            subject: { type: p.subject.type, id: p.subject.publicId },
+          },
+          { message: null },
+        );
+        break;
+      }
+      case 'incident_updated': {
+        const p = event.payload as SecurityIncidentUpdatedV1;
+        push(
+          candidate,
+          {
+            incident: {
+              id: p.incidentPublicId,
+              category: p.category,
+              status: p.status,
+              severity: p.severity,
+            },
+            subject: { type: p.subject.type, id: p.subject.publicId },
+            previous: { status: p.previousStatus, severity: p.previousSeverity },
+            changedFields: p.changedFields,
+          },
+          { message: null },
+        );
+        break;
+      }
+      case 'ato_risk_changed': {
+        const p = event.payload as AtoAccountRiskUpdatedV1;
+        push(
+          candidate,
+          {
+            account: { id: p.accountPublicId, kind: p.kind },
+            risk: { score: p.score, level: p.level, previousLevel: p.previousLevel },
+          },
+          { message: null },
+        );
+        break;
+      }
+      case 'ato_response_completed': {
+        const p = event.payload as AtoResponseCompletedV1;
+        const kind = await facts.atoAccountKind(organizationId, p.accountPublicId);
+        push(
+          candidate,
+          {
+            response: {
+              id: p.actionPublicId,
+              type: p.actionType,
+              status: p.status,
+              provider: p.provider,
+              providerStatus: p.providerStatus,
+            },
+            incident: p.incidentPublicId === null ? null : { id: p.incidentPublicId },
+            account: { id: p.accountPublicId, kind },
+          },
+          { message: null },
         );
         break;
       }

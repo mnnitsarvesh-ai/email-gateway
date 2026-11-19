@@ -352,6 +352,17 @@ upserts (`INSERT … ON DUPLICATE KEY UPDATE` via `$executeRaw`, sorted keys, sa
 `infra` JSON read-modify-write under `SELECT … FOR UPDATE`, ≤ 51 rows) in the final row's
 transaction, only when the final row was inserted.
 
+**Outbound observations (step 8.4 D6).** For outbound and internal messages of organizations
+whose `ato_detection` feature is enabled (read with the cached tenant data) and while
+`BEC_OUTBOUND_OBSERVATIONS_ENABLED=true`, the engine also reads the stored subject and text parts
+with its existing limits and stores `evaluateOutboundObservations` (`@email-gateway/bec`) in
+`bec_scan_results.outbound_observations` (`bec-outbound-obs/1`: lexicon category counts,
+financial-identifier counts, link flags from the round's URL results; counts and booleans only).
+The verdict stays `skipped` (`bec.not_inbound`) and the stored verdict, codes, signals and score
+are byte-identical to a run without observations. Any read or time-budget failure is stored as
+`status: 'unavailable'` with a reason and never fails the attempt. Metric
+`scan_bec_outbound_observations_total{status}`.
+
 **Configuration** (`.env.example` section "Phishing and BEC detection (step 4.4)"; validated by
 `scanning/bec-config.ts`): `SCAN_ENGINES` default `rspamd,attachment,url,bec`, `SCAN_BEC_*`
 (attempts < 10), `BEC_TEXT_*`, the platform settings `BEC_SUSPICIOUS_SCORE` … `BEC_HISTORY_*_RETENTION_DAYS`

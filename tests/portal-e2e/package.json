@@ -2,7 +2,7 @@
   "name": "@email-gateway/portal-e2e",
   "version": "0.1.0",
   "private": true,
-  "description": "Playwright end-to-end tests of the admin portal against the real local stack (step 7.1 WP6, step 7.2 WP5).",
+  "description": "Playwright end-to-end tests of the admin portal against the real local stack (step 7.1 WP6, step 7.2 WP5; step 8.4 WP6: account takeover and incidents).",
   "scripts": {
     "browsers:install": "playwright install chromium",
     "seed": "tsx seed/cli.ts seed",
@@ -15,9 +15,11 @@
     "@aws-sdk/client-s3": "^3.890.0",
     "@axe-core/playwright": "4.14.0",
     "@email-gateway/archive": "workspace:*",
+    "@email-gateway/ato-detection": "workspace:*",
     "@email-gateway/database": "workspace:*",
     "@email-gateway/policy-dsl": "workspace:*",
     "@email-gateway/risk-scoring": "workspace:*",
+    "@email-gateway/security-incidents": "workspace:*",
     "@playwright/test": "1.64.1",
     "argon2": "^0.45.1",
     "tsx": "4.23.15"

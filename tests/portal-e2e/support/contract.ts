@@ -64,6 +64,8 @@ export const NAV_GATES: ReadonlyArray<{ label: string; href: string; gate: strin
       'RecipientSuppressionsController_list_v1',
     ],
   },
+  // Step 8.4: the generic incident list (top of the Security section).
+  { label: 'Incidents', href: '/incidents', gate: ['IncidentsController_list_v1'] },
   { label: 'Policy management', href: '/policies', gate: ['PolicyManagementController_list_v1'] },
   {
     label: 'Policy builder',
@@ -85,6 +87,11 @@ export const NAV_GATES: ReadonlyArray<{ label: string; href: string; gate: strin
     href: '/attachments',
     gate: ['AttachmentsController_search_v1', 'AttachmentRescansController_list_v1'],
   },
+  // Step 8.4: Account security.
+  { label: 'ATO dashboard', href: '/ato', gate: ['AtoOverviewController_overview_v1'] },
+  { label: 'Accounts', href: '/ato/accounts', gate: ['AtoAccountsController_list_v1'] },
+  { label: 'Responses', href: '/ato/responses', gate: ['AtoResponsesController_list_v1'] },
+  { label: 'ATO settings', href: '/ato/settings', gate: ['AtoSettingsController_get_v1'] },
   // Step 8.1: Compliance.
   { label: 'Archive', href: '/archive', gate: ['ArchiveMessagesController_list_v1'] },
   {

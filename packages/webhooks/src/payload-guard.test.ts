@@ -53,6 +53,16 @@ describe('assertWebhookPayloadSafe (W2, W4)', () => {
       code: 'forbidden_key',
       path: '$.data.message.subject',
     });
+    expect(refusal(withMessage({ subject: ['Q4 invoice'] }))).toEqual({
+      code: 'forbidden_key',
+      path: '$.data.message.subject',
+    });
+    // Step 8.4 D16: an incident subject reference is an object of a type and a public id.
+    expect(() =>
+      assertWebhookPayloadSafe({
+        data: { subject: { type: 'ato_account', id: '0193a1b2-0a1b-7c2d-9e3f-4a5b6c7d8e9f' } },
+      }),
+    ).not.toThrow();
     expect(refusal(withMessage({ envelopeFrom: 'alice@partner.example' }))).toEqual({
       code: 'forbidden_key',
       path: '$.data.message.envelopeFrom',
@@ -80,13 +90,15 @@ describe('assertWebhookPayloadSafe (W2, W4)', () => {
   });
 
   it('refuses every denied key, case-insensitively and at any depth', () => {
+    // `recipients` and `subject` are refused when they carry text (step 8.4 D16 for subject).
+    const textOnly = (key: string) => key === 'recipients' || key === 'subject';
     for (const key of WEBHOOK_DENIED_KEYS) {
-      const value = key === 'recipients' ? ['a.example'] : { nested: 1 };
+      const value = textOnly(key) ? ['a.example'] : { nested: 1 };
       expect(refusal(envelopeOf({ deep: [{ [key]: value }] })), key).toMatchObject({
         code: 'forbidden_key',
       });
       expect(
-        refusal(envelopeOf({ [key.toUpperCase()]: key === 'recipients' ? 'a' : 1 })),
+        refusal(envelopeOf({ [key.toUpperCase()]: textOnly(key) ? 'a' : 1 })),
         key,
       ).toMatchObject({ code: 'forbidden_key' });
     }

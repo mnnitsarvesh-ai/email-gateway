@@ -346,6 +346,11 @@ export function buildFacts(input: PolicyInput): Facts {
       : input.scan.engines.filter((e) => e.outcome === 'unknown').map((e) => e.engine),
     'time.window': Date.parse(input.evaluationTime),
     'time.date_range': Date.parse(input.evaluationTime),
+    // Step 8.4 D23: absent block → unknown; no active incident (null) → unknown.
+    'ato.risk_score': input.ato?.riskScore,
+    'ato.risk_level': input.ato?.riskLevel,
+    'ato.incident_severity': input.ato?.incidentSeverity,
+    'ato.incident_status': input.ato?.incidentStatus,
   };
   return {
     message,

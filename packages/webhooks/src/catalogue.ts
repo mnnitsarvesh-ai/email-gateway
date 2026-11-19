@@ -1,19 +1,39 @@
 import {
+  ATO_RESPONSE_COMPLETED_STATUS_VALUES,
+  ATO_RESPONSE_PROVIDER_STATUS_VALUES,
   ENGINE_OUTCOME_VALUES,
   POLICY_DECISION_SOURCE_VALUES,
   POLICY_DISPOSITION_VALUES,
   POLICY_FINAL_ACTION_VALUES,
   POLICY_RULE_ID_PATTERN,
+  SECURITY_INCIDENT_CHANGED_FIELD_VALUES,
 } from '@email-gateway/event-contracts';
-import { SCAN_VERDICTS } from '@email-gateway/security-contracts';
+import {
+  ATO_ACCOUNT_KINDS,
+  ATO_RISK_LEVELS,
+  SCAN_VERDICTS,
+  SECURITY_INCIDENT_CATEGORIES,
+  SECURITY_INCIDENT_ORIGINS,
+  SECURITY_INCIDENT_SEVERITIES,
+  SECURITY_INCIDENT_STATUSES,
+  SECURITY_INCIDENT_SUBJECT_TYPES,
+  type SecurityIncidentSeverity,
+} from '@email-gateway/security-contracts';
 import { z } from 'zod';
 
 /**
- * The public webhook event catalogue (step 6.2 §5, ADR-0054): ten subscribable types, all
- * version 1, plus the test-only `webhook.ping`. Every `data` schema is strict: a payload carries
- * public ids, the tenant's own domain names, codes, counts and times only — never a subject, an
- * address local part, a body, an attachment, a file name, an S3 key, a URL found in mail or a
+ * The public webhook event catalogue (step 6.2 §5, ADR-0054; step 8.4 D16): fourteen
+ * subscribable types, all version 1, plus the test-only `webhook.ping`. Every `data` schema is
+ * strict: a payload carries public ids, the tenant's own domain names, codes, counts and times
+ * only — never a subject, an address (local part or full), an IP address, a person's or
+ * connector's name, a body, an attachment, a file name, an S3 key, a URL found in mail or a
  * secret (§2.0 invariant 1; enforced again by `assertWebhookPayloadSafe`).
+ *
+ * Step 8.4 adds the security incident types (`security.incident.created`,
+ * `security.incident.updated`; every incident category of the shared model, ADR-0075) and the
+ * account takeover types (`ato.account.risk_changed`, `ato.response.completed`). Receivers
+ * filter incidents by `data.incident.category` and must **ignore unknown categories**: advanced
+ * threat protection categories arrive later under the same two types.
  */
 export const WEBHOOK_EVENT_TYPES = [
   'email.received',
@@ -26,6 +46,11 @@ export const WEBHOOK_EVENT_TYPES = [
   'email.rejected',
   'domain.verified',
   'domain.dns.failed',
+  // Step 8.4 D16 (security incidents of every category; account takeover).
+  'security.incident.created',
+  'security.incident.updated',
+  'ato.account.risk_changed',
+  'ato.response.completed',
 ] as const;
 export type WebhookEventType = (typeof WEBHOOK_EVENT_TYPES)[number];
 
@@ -389,6 +414,97 @@ const domainDnsFailedData = z
     }
   });
 
+// Step 8.4 D16: security incidents and account takeover. Metadata only: public ids, codes,
+// levels and times. No address, IP address or name (the account is its public id and kind).
+
+const incidentCategory = z.enum(SECURITY_INCIDENT_CATEGORIES);
+const incidentStatus = z.enum(SECURITY_INCIDENT_STATUSES);
+const incidentSeverity = z.enum(SECURITY_INCIDENT_SEVERITIES);
+const incidentSubject = z.strictObject({
+  type: z.enum(SECURITY_INCIDENT_SUBJECT_TYPES),
+  id: uuid,
+});
+const atoAccount = z.strictObject({ id: uuid, kind: z.enum(ATO_ACCOUNT_KINDS) });
+const atoRiskLevel = z.enum(ATO_RISK_LEVELS);
+/** Most reason codes of an incident (`security_incidents.reason_codes`). */
+export const MAX_INCIDENT_REASON_CODES = 16;
+
+const securityIncidentCreatedData = z.strictObject({
+  incident: z.strictObject({
+    id: uuid,
+    category: incidentCategory,
+    status: z.literal('open'),
+    severity: incidentSeverity,
+    origin: z.enum(SECURITY_INCIDENT_ORIGINS),
+    detectedAt: iso,
+    reasonCodes: uniqueArray(reasonCode, 0, MAX_INCIDENT_REASON_CODES),
+  }),
+  subject: incidentSubject,
+});
+
+const securityIncidentUpdatedData = z
+  .strictObject({
+    incident: z.strictObject({
+      id: uuid,
+      category: incidentCategory,
+      status: incidentStatus,
+      severity: incidentSeverity,
+    }),
+    subject: incidentSubject,
+    previous: z.strictObject({ status: incidentStatus, severity: incidentSeverity }),
+    changedFields: uniqueArray(z.enum(SECURITY_INCIDENT_CHANGED_FIELD_VALUES), 1, 5),
+  })
+  .superRefine((data, ctx) => {
+    if (data.changedFields.includes('status') !== (data.incident.status !== data.previous.status)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['changedFields'],
+        message: 'status is listed exactly when the status changed',
+      });
+    }
+    if (
+      data.changedFields.includes('severity') !==
+      (data.incident.severity !== data.previous.severity)
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['changedFields'],
+        message: 'severity is listed exactly when the severity changed',
+      });
+    }
+  });
+
+const atoAccountRiskChangedData = z
+  .strictObject({
+    account: atoAccount,
+    risk: z.strictObject({
+      score: z.number().int().min(0).max(100),
+      level: atoRiskLevel,
+      previousLevel: atoRiskLevel,
+    }),
+  })
+  .superRefine((data, ctx) => {
+    if (data.risk.level === data.risk.previousLevel) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['risk', 'level'],
+        message: 'Sent only when the level changes',
+      });
+    }
+  });
+
+const atoResponseCompletedData = z.strictObject({
+  response: z.strictObject({
+    id: uuid,
+    type: snakeCode(48),
+    status: z.enum(ATO_RESPONSE_COMPLETED_STATUS_VALUES),
+    provider: snakeCode(32),
+    providerStatus: z.enum(ATO_RESPONSE_PROVIDER_STATUS_VALUES).nullable(),
+  }),
+  incident: z.strictObject({ id: uuid }).nullable(),
+  account: atoAccount,
+});
+
 const webhookPingData = z.strictObject({ subscriptionId: uuid, requestedAt: iso });
 
 /** Strict `data` schema of every envelope type (§5.2). */
@@ -403,6 +519,10 @@ export const dataSchemas = {
   'email.rejected': emailRejectedData,
   'domain.verified': domainVerifiedData,
   'domain.dns.failed': domainDnsFailedData,
+  'security.incident.created': securityIncidentCreatedData,
+  'security.incident.updated': securityIncidentUpdatedData,
+  'ato.account.risk_changed': atoAccountRiskChangedData,
+  'ato.response.completed': atoResponseCompletedData,
   [WEBHOOK_PING_TYPE]: webhookPingData,
 } as const satisfies Record<WebhookEnvelopeType, z.ZodType>;
 
@@ -423,6 +543,17 @@ const VERDICT_SEVERITY: Readonly<Record<(typeof SCAN_VERDICTS)[number], Severity
 };
 /** DNS record purposes whose failure is `high` (mail flow and authentication). */
 const CRITICAL_RECORD_PURPOSES: readonly string[] = ['mx', 'spf', 'dkim', 'dmarc'];
+
+/**
+ * Step 8.4 D16: the public severity of an incident severity or an ATO risk level (critical and
+ * high → `high`, medium → `medium`, low → `low`; the exact level stays in `data`).
+ */
+export function incidentWebhookSeverity(level: SecurityIncidentSeverity): Severity {
+  return level === 'critical' || level === 'high' ? 'high' : level;
+}
+
+/** `ato.response.completed`: a failed execution or rollback is `medium`, every other end `info`. */
+const RESPONSE_FAILURE_STATUSES: readonly string[] = ['failed', 'rollback_failed'];
 
 /**
  * The severity of an event of `type` with (already validated) `data`, by the fixed rules of
@@ -454,6 +585,24 @@ export function eventSeverity<T extends WebhookEnvelopeType>(
         ? 'high'
         : 'medium';
     }
+    case 'security.incident.created':
+      return incidentWebhookSeverity(
+        (data as WebhookEventData<'security.incident.created'>).incident.severity,
+      );
+    case 'security.incident.updated':
+      return incidentWebhookSeverity(
+        (data as WebhookEventData<'security.incident.updated'>).incident.severity,
+      );
+    case 'ato.account.risk_changed':
+      return incidentWebhookSeverity(
+        (data as WebhookEventData<'ato.account.risk_changed'>).risk.level,
+      );
+    case 'ato.response.completed':
+      return RESPONSE_FAILURE_STATUSES.includes(
+        (data as WebhookEventData<'ato.response.completed'>).response.status,
+      )
+        ? 'medium'
+        : 'info';
     case 'email.received':
     case 'email.released':
     case 'email.delivered':
@@ -487,6 +636,8 @@ export interface WebhookCatalogueEntry {
 const MESSAGE_FILTERS = ['directions', 'domainIds', 'minSeverity'] as const;
 const VERDICT_FILTERS = ['directions', 'domainIds', 'minSeverity', 'verdicts'] as const;
 const DOMAIN_FILTERS = ['domainIds', 'minSeverity'] as const;
+/** Step 8.4: incident and ATO events carry no direction, domain or verdict. */
+const SEVERITY_FILTERS = ['minSeverity'] as const;
 
 const exampleMessage: WebhookMessage = {
   id: '0192f0c4-8a11-7c2e-9d3f-1a2b3c4d5e6f',
@@ -507,6 +658,8 @@ const exampleDomain: WebhookDomain = {
   status: 'active',
 };
 const examplePolicyId = '0192f0c4-9b22-7d3f-8e40-2b3c4d5e6f70';
+const exampleIncidentId = '0193a1b2-1c2d-7e3f-8a4b-5c6d7e8f9012';
+const exampleAccount = { id: '0193a1b2-0a1b-7c2d-9e3f-4a5b6c7d8e9f', kind: 'mailbox' as const };
 
 /** One valid example `data` object per envelope type (documentation and tests). */
 export const WEBHOOK_EXAMPLE_DATA: { readonly [T in WebhookEnvelopeType]: WebhookEventData<T> } = {
@@ -617,6 +770,44 @@ export const WEBHOOK_EXAMPLE_DATA: { readonly [T in WebhookEnvelopeType]: Webhoo
       checkedAt: '2026-11-13T09:00:00.000Z',
     },
   },
+  'security.incident.created': {
+    incident: {
+      id: exampleIncidentId,
+      category: 'account_takeover',
+      status: 'open',
+      severity: 'high',
+      origin: 'detection',
+      detectedAt: '2026-11-18T10:42:00.000Z',
+      reasonCodes: ['ato.geo.impossible_travel', 'ato.access.new_asn'],
+    },
+    subject: { type: 'ato_account', id: exampleAccount.id },
+  },
+  'security.incident.updated': {
+    incident: {
+      id: exampleIncidentId,
+      category: 'account_takeover',
+      status: 'confirmed',
+      severity: 'critical',
+    },
+    subject: { type: 'ato_account', id: exampleAccount.id },
+    previous: { status: 'investigating', severity: 'high' },
+    changedFields: ['status', 'severity'],
+  },
+  'ato.account.risk_changed': {
+    account: exampleAccount,
+    risk: { score: 78, level: 'critical', previousLevel: 'high' },
+  },
+  'ato.response.completed': {
+    response: {
+      id: '0193a1b2-2d3e-7f40-8b5c-6d7e8f901234',
+      type: 'restrict_smtp_sending',
+      status: 'succeeded',
+      provider: 'gateway',
+      providerStatus: 'applied',
+    },
+    incident: { id: exampleIncidentId },
+    account: exampleAccount,
+  },
   [WEBHOOK_PING_TYPE]: {
     subscriptionId: '0192f0c4-c355-7062-9b73-5e6f708192a3',
     requestedAt: '2026-11-13T09:20:00.000Z',
@@ -701,6 +892,37 @@ export const WEBHOOK_EVENT_CATALOGUE: Readonly<Record<WebhookEnvelopeType, Webho
       'verification → medium, mx/spf/dkim/dmarc records → high, other records → medium',
       DOMAIN_FILTERS,
     ),
+    'security.incident.created': entry(
+      'security.incident.created',
+      'A security incident was opened (by detection or manually). data.incident.category names ' +
+        'the category (account_takeover today). Receivers must ignore unknown categories: ' +
+        'advanced threat protection categories arrive under the same type later.',
+      'incident severity critical/high → high, medium → medium, low → low',
+      SEVERITY_FILTERS,
+    ),
+    'security.incident.updated': entry(
+      'security.incident.updated',
+      'A security incident changed status, severity, assignee or resolution, or gained evidence ' +
+        '(evidence-only updates at most once per 15 minutes per incident). Ignore unknown ' +
+        'categories (data.incident.category).',
+      'incident severity critical/high → high, medium → medium, low → low',
+      SEVERITY_FILTERS,
+    ),
+    'ato.account.risk_changed': entry(
+      'ato.account.risk_changed',
+      'The account takeover risk level of a monitored account (mailbox, gateway user or SMTP ' +
+        'connector) changed. The account is identified by its public id and kind only.',
+      'risk level critical/high → high, medium → medium, low → low',
+      SEVERITY_FILTERS,
+    ),
+    'ato.response.completed': entry(
+      'ato.response.completed',
+      'An account takeover response action reached its end (succeeded, failed, unsupported, ' +
+        'attested, rejected, cancelled, expired, rolled back or rollback failed). Gateway ' +
+        'restrictions report providerStatus applied; provider actions succeed only when confirmed.',
+      'failed/rollback_failed → medium, otherwise info',
+      SEVERITY_FILTERS,
+    ),
     [WEBHOOK_PING_TYPE]: entry(
       WEBHOOK_PING_TYPE,
       'Test event sent by POST /webhooks/{id}/test; not subscribable.',
@@ -709,12 +931,12 @@ export const WEBHOOK_EVENT_CATALOGUE: Readonly<Record<WebhookEnvelopeType, Webho
     ),
   });
 
-/** True for the ten subscribable types (never `webhook.ping`). */
+/** True for the fourteen subscribable types (never `webhook.ping`). */
 export function isWebhookEventType(value: string): value is WebhookEventType {
   return (WEBHOOK_EVENT_TYPES as readonly string[]).includes(value);
 }
 
-/** True for the ten types and the ping. */
+/** True for the fourteen types and the ping. */
 export function isWebhookEnvelopeType(value: string): value is WebhookEnvelopeType {
   return (WEBHOOK_ENVELOPE_TYPES as readonly string[]).includes(value);
 }

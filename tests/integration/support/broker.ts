@@ -300,6 +300,9 @@ export const DORMANT_QUEUES = [
   // work queue since v10 (step 5.3 Q27: the policy-engine's release executor) — never purged.
   // `email.archive` is a lossy work queue since v12 (step 8.1 A26: the archive-worker's capture
   // role; drop-head at 10 000, the worker reconciles from policy_execution_logs) — never purged.
+  // `ato.events`, `ato.mail` and `ato.responses` are work queues since v13 (step 8.4 D3: the
+  // ato-worker; `ato.mail` is lossy without dead-lettered heads, drop-head at 500 000, the worker
+  // catches up from email_messages) — never purged.
   'scan.auth',
   'email.analytics',
 ] as const;

@@ -34,7 +34,7 @@ export const subscriptionFiltersSchema = z.strictObject({
 });
 export type SubscriptionFilters = z.infer<typeof subscriptionFiltersSchema>;
 
-/** `eventTypes` of a subscription: 1–10 unique catalogue types, no wildcard (W5). */
+/** `eventTypes` of a subscription: 1–14 unique catalogue types (every type), no wildcard (W5). */
 export const subscriptionEventTypesSchema = uniqueList(
   z.enum(WEBHOOK_EVENT_TYPES),
   WEBHOOK_EVENT_TYPES.length,

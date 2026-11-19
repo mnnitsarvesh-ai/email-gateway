@@ -886,6 +886,115 @@ describe('route security (e2e, dependencies stubbed)', () => {
     }
   });
 
+  it('the step 8.4 account takeover and incident routes: exact permissions incl. the registry lists, users, MFA, classes, keys and cursors (§5.1, §5.2)', () => {
+    type Flags = {
+      any?: boolean;
+      mfa?: boolean;
+      user?: boolean;
+      cls?: string;
+      key?: string;
+      cursor?: boolean;
+    };
+    const R = 'ato:read';
+    const M = 'ato:manage';
+    const P = 'ato:respond';
+    const C = 'ato:configure';
+    const expected: Record<string, [string[], Flags?]> = {
+      'get /api/v1/ato/overview': [[R], { cls: 'expensive' }],
+      'get /api/v1/ato/attention': [[R]],
+      'get /api/v1/ato/accounts': [[R], { cursor: true }],
+      'get /api/v1/ato/accounts/:accountId': [[R]],
+      'patch /api/v1/ato/accounts/:accountId': [
+        [M],
+        { user: true, cls: 'sensitive', key: 'ato.account_update' },
+      ],
+      'get /api/v1/ato/accounts/:accountId/signals': [[R], { cursor: true }],
+      'get /api/v1/ato/accounts/:accountId/auth-events': [[R], { cursor: true }],
+      'get /api/v1/ato/accounts/:accountId/activity': [[R]],
+      'get /api/v1/ato/accounts/:accountId/score-history': [[R], { cursor: true }],
+      'put /api/v1/ato/accounts/:accountId/override': [
+        [M],
+        { user: true, cls: 'sensitive', key: 'ato.override_set' },
+      ],
+      'post /api/v1/ato/accounts/:accountId/override/clear': [
+        [M],
+        { user: true, cls: 'sensitive', key: 'ato.override_clear' },
+      ],
+      'post /api/v1/ato/accounts/:accountId/trusted-contexts': [
+        [M],
+        { user: true, cls: 'sensitive', key: 'ato.trusted_context_add' },
+      ],
+      'delete /api/v1/ato/accounts/:accountId/trusted-contexts/:contextId': [
+        [M],
+        { user: true, cls: 'sensitive', key: 'ato.trusted_context_remove' },
+      ],
+      'get /api/v1/ato/incidents/:incidentId/signals': [[R], { cursor: true }],
+      'get /api/v1/ato/incidents/:incidentId/auth-events': [[R], { cursor: true }],
+      'post /api/v1/ato/incidents/:incidentId/responses': [
+        [P],
+        { cls: 'sensitive', key: 'ato.response_request' },
+      ],
+      'get /api/v1/ato/responses': [[R], { cursor: true }],
+      'get /api/v1/ato/responses/:responseId': [[R]],
+      'post /api/v1/ato/responses/:responseId/approve': [
+        [P],
+        { user: true, mfa: true, cls: 'sensitive', key: 'ato.response_approve' },
+      ],
+      'post /api/v1/ato/responses/:responseId/reject': [
+        [P],
+        { user: true, cls: 'sensitive', key: 'ato.response_reject' },
+      ],
+      'post /api/v1/ato/responses/:responseId/cancel': [
+        [P],
+        { cls: 'sensitive', key: 'ato.response_cancel' },
+      ],
+      'post /api/v1/ato/responses/:responseId/rollback': [
+        [P],
+        { user: true, mfa: true, cls: 'sensitive', key: 'ato.response_rollback' },
+      ],
+      'get /api/v1/ato/restrictions': [[R], { cursor: true }],
+      'get /api/v1/ato/settings': [[R]],
+      'put /api/v1/ato/settings': [
+        [C],
+        { user: true, cls: 'sensitive', key: 'ato.settings_update' },
+      ],
+      'get /api/v1/ato/rules': [[R]],
+      // §5.2: RequireAnyPermission lists derived from the category registry (8.4: exactly ATO's).
+      'get /api/v1/incidents': [[R], { any: true, cursor: true }],
+      'post /api/v1/incidents': [[M], { any: true, cls: 'sensitive', key: 'incident.create' }],
+      'get /api/v1/incidents/:incidentId': [[R], { any: true }],
+      'patch /api/v1/incidents/:incidentId': [
+        [M],
+        { any: true, cls: 'sensitive', key: 'incident.update' },
+      ],
+      'post /api/v1/incidents/:incidentId/notes': [
+        [M],
+        { any: true, cls: 'sensitive', key: 'incident.note_add' },
+      ],
+      'get /api/v1/incidents/:incidentId/timeline': [[R], { any: true, cursor: true }],
+      'get /api/v1/incidents/:incidentId/messages': [[R], { any: true, cursor: true }],
+      'get /api/v1/incidents/:incidentId/report': [[R], { any: true, cls: 'expensive' }],
+    };
+    const stepRoutes = routes.filter((r) => /^\/api\/v1\/(ato|incidents)(\/|$)/.test(r.path));
+    expect(stepRoutes.map((r) => `${r.method} ${r.path}`).sort()).toEqual(
+      Object.keys(expected).sort(),
+    );
+    expect(stepRoutes).toHaveLength(34);
+    for (const [key, [permissions, flags]] of Object.entries(expected)) {
+      const route = routes.find((r) => `${r.method} ${r.path}` === key)!;
+      expect(route.isPublic, key).toBe(false);
+      expect(route.requirement, key).toEqual({ mode: flags?.any ? 'any' : 'all', permissions });
+      expect(route.requireMfa, key).toBe(flags?.mfa ?? false);
+      expect(route.userOnly, key).toBe(flags?.user ?? false);
+      expect(route.rateClass, key).toBe(flags?.cls ?? null);
+      // Transactional keys (IdempotencyService), never the reservation interceptor.
+      expect(route.idempotency, key).toBeNull();
+      expect(route.returnsSecret, key).toBe(false);
+      expect(route.rateLimits, key).toEqual([]);
+      expect(route.cursor, key).toBe(flags?.cursor ? 'v1' : null);
+    }
+  });
+
   it('every §3.5 legacy sensitive mutation is @Idempotent (legacy) in the sensitive class (step 6.1 D9, D10)', () => {
     for (const [key, operation] of Object.entries(LEGACY_SENSITIVE)) {
       const route = routes.find((r) => `${r.method} ${r.path}` === key);

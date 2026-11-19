@@ -1,4 +1,5 @@
 import {
+  Activity,
   Archive,
   BarChart3,
   Briefcase,
@@ -17,8 +18,12 @@ import {
   ScrollText,
   Server,
   Settings,
+  Settings2,
   ShieldAlert,
   ShieldCheck,
+  Siren,
+  UserCheck,
+  UserSearch,
   Users,
   Workflow,
   type LucideIcon,
@@ -44,6 +49,8 @@ export interface NavItem {
    * message's details need `archive:read`, the search page `archive:search`).
    */
   readonly childGate?: Gate;
+  /** A live badge rendered by the shell (step 8.4 D16: active critical incidents, approvals). */
+  readonly badge?: 'ato-attention';
 }
 
 export interface NavSection {
@@ -109,6 +116,16 @@ export const NAVIGATION: readonly NavSection[] = [
     label: 'Security',
     items: [
       {
+        // Step 8.4 D24: the generic, category-aware incident list (top-level; ATO is its first
+        // category, ATP categories join the same page later).
+        id: 'incidents',
+        label: 'Incidents',
+        href: '/incidents',
+        icon: Siren,
+        gate: ['IncidentsController_list_v1'],
+        childGate: ['IncidentsController_get_v1'],
+      },
+      {
         id: 'policies',
         label: 'Policy management',
         href: '/policies',
@@ -142,6 +159,43 @@ export const NAVIGATION: readonly NavSection[] = [
         href: '/attachments',
         icon: Paperclip,
         gate: ['AttachmentsController_search_v1', 'AttachmentRescansController_list_v1'],
+      },
+    ],
+  },
+  {
+    // Step 8.4 (§6, D18): account takeover detection.
+    id: 'account-security',
+    label: 'Account security',
+    items: [
+      {
+        id: 'ato',
+        label: 'ATO dashboard',
+        href: '/ato',
+        icon: Activity,
+        gate: ['AtoOverviewController_overview_v1'],
+        badge: 'ato-attention',
+      },
+      {
+        id: 'ato-accounts',
+        label: 'Accounts',
+        href: '/ato/accounts',
+        icon: UserSearch,
+        gate: ['AtoAccountsController_list_v1'],
+        childGate: ['AtoAccountsController_get_v1'],
+      },
+      {
+        id: 'ato-responses',
+        label: 'Responses',
+        href: '/ato/responses',
+        icon: UserCheck,
+        gate: ['AtoResponsesController_list_v1'],
+      },
+      {
+        id: 'ato-settings',
+        label: 'ATO settings',
+        href: '/ato/settings',
+        icon: Settings2,
+        gate: ['AtoSettingsController_get_v1'],
       },
     ],
   },
@@ -295,4 +349,6 @@ export const PLAN_STEPS: Readonly<Record<string, string>> = {
   '8.1': 'Step 8.1: Journaling and compliance archiving (docs/plan/execution-plan.md)',
   '8.2': 'Step 8.2: M365 / Google Workspace connectors (docs/plan/execution-plan.md)',
   '8.3': 'Step 8.3: Deployment manager (docs/plan/execution-plan.md)',
+  '8.5':
+    'Step 8.5: Microsoft 365 / Google Workspace identity-provider adapters for account takeover (docs/plan/execution-plan.md)',
 };

@@ -42,11 +42,15 @@ const EVENT_TYPES = [
   'email.rejected',
   'domain.verified',
   'domain.dns.failed',
+  'security.incident.created',
+  'security.incident.updated',
+  'ato.account.risk_changed',
+  'ato.response.completed',
 ] as const;
 
 /**
  * The webhook form (create and edit), mirroring the request schema: name, description, https URL,
- * 1–10 event types, optional filters (directions, own domain ids ≤ 20, minimum severity,
+ * one or more of the catalogue's event types, optional filters (directions, own domain ids ≤ 20, minimum severity,
  * verdicts), status on create and the concurrency cap.
  */
 export const webhookSchema = z
@@ -71,7 +75,10 @@ export const webhookSchema = z
           return false;
         }
       }, 'Enter an absolute https URL without credentials or #fragment'),
-    eventTypes: z.array(z.enum(EVENT_TYPES)).min(1, 'Choose at least one event type').max(10),
+    eventTypes: z
+      .array(z.enum(EVENT_TYPES))
+      .min(1, 'Choose at least one event type')
+      .max(EVENT_TYPES.length),
     directions: z.array(z.enum(DIRECTIONS)).max(3),
     domainIds: z.array(z.string().uuid()).max(20, 'At most 20 domains'),
     minSeverity: z.enum(['', ...SEVERITIES]),

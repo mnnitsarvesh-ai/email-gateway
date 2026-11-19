@@ -147,8 +147,9 @@ const sampleLeaf = (name: PolicyFieldName, op: PolicyOperator = exceptionOp(name
 describe('field presentation (completeness and label rules)', () => {
   it('covers exactly the catalogue fields', () => {
     expect(Object.keys(POLICY_FIELD_PRESENTATION)).toEqual([...names]);
-    // The catalogue holds 76 fields (the step brief's "75" is a miscount).
-    expect(names).toHaveLength(76);
+    // The catalogue holds 76 fields (the step brief's "75" is a miscount) plus the four ATO
+    // fields of step 8.4 D23.
+    expect(names).toHaveLength(80);
   });
 
   it('gives every field a unique plain-English label of 1..64 characters, never its code name', () => {
@@ -195,6 +196,7 @@ describe('field presentation (completeness and label rules)', () => {
       risk: 'Risk',
       dlp: 'Data loss prevention',
       bec: 'Business email compromise',
+      account_takeover: 'Account takeover',
       scan: 'Scan results',
       time: 'Time',
     });
@@ -209,6 +211,7 @@ describe('field presentation (completeness and label rules)', () => {
       [/^risk\./, 'risk'],
       [/^dlp\./, 'dlp'],
       [/^bec\./, 'bec'],
+      [/^ato\./, 'account_takeover'],
       [/^scan\./, 'scan'],
       [/^time\./, 'time'],
     ];
@@ -238,6 +241,7 @@ describe('field presentation (completeness and label rules)', () => {
       'attachment.size_bytes': 'bytes',
       'urls.count': 'count',
       'risk.score': 'score',
+      'ato.risk_score': 'score',
     });
     for (const name of names) {
       expect(POLICY_FIELD_PRESENTATION[name].unit !== null, name).toBe(
@@ -320,6 +324,13 @@ describe('field contexts agree with the validator (P6, P9.8)', () => {
       relaxingWhen: true,
       holdRule: false,
     });
+    // Step 8.4 D23: strict-only facts hold mail but never relax a decision.
+    expect(fieldContexts({ senderIdentity: null, aiDerived: false, strictOnly: true })).toEqual({
+      when: true,
+      exception: false,
+      relaxingWhen: false,
+      holdRule: true,
+    });
   });
 
   for (const name of names) {
@@ -345,6 +356,7 @@ describe('field contexts agree with the validator (P6, P9.8)', () => {
               'identity_unauthenticated',
               'ai_field_in_exception',
               'ai_field_in_hold_rule',
+              'field_strict_only',
             ]).toContain(code);
           }
         }

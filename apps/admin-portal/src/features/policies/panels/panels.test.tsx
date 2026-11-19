@@ -47,6 +47,8 @@ const item = (n: number, changed: boolean): Item => ({
   },
   dispositionChanged: changed,
   decisiveChanged: changed,
+  // Step 8.4 D23: where the round's account takeover facts came from.
+  atoFactsSource: n === 2 ? 'stored' : 'none',
 });
 
 const SAMPLE: Sample = {
@@ -179,6 +181,9 @@ describe('Dry-run panel (design B8)', () => {
       'href',
       '/messages/01933c3a-1b2c-7d4e-8f00-00000000b001',
     );
+    expect(within(table).getByRole('columnheader', { name: 'ATO facts' })).toBeInTheDocument();
+    expect(within(table).getByText('Stored with the evaluation')).toBeInTheDocument();
+    expect(within(table).getAllByText('None')).toHaveLength(2);
     await user.click(within(result).getByRole('checkbox', { name: 'Only changed decisions' }));
     expect(within(table).getAllByRole('row')).toHaveLength(2);
     expect(within(table).getByText('Disposition changed')).toBeInTheDocument();
@@ -266,7 +271,12 @@ describe('Dry-run panel (design B8)', () => {
         }),
       PolicyMessagesController_dryRun_v1: ({ params, body }) => {
         dryRuns.push({ params, body });
-        return okJson({ ...TEST_RESPONSE, stored: null, reproducible: false });
+        return okJson({
+          ...TEST_RESPONSE,
+          stored: null,
+          reproducible: false,
+          atoFactsSource: 'current',
+        });
       },
     });
     const { user } = openBuilder();
@@ -291,6 +301,8 @@ describe('Dry-run panel (design B8)', () => {
     const result = await within(panel).findByTestId('message-result');
     expect(within(result).getByText('No stored evaluation for this round')).toBeInTheDocument();
     expect(within(result).getByText(/differ from the stored evaluation/)).toBeInTheDocument();
+    expect(within(result).getByText('Account takeover facts')).toBeInTheDocument();
+    expect(within(result).getByText('Current account state')).toBeInTheDocument();
   });
 
   it('is not offered without the permissions (read-only users)', async () => {

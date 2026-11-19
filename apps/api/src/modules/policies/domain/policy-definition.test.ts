@@ -238,9 +238,31 @@ describe('catalogView', () => {
       'risk',
       'dlp',
       'bec',
+      'account_takeover',
       'scan',
       'time',
     ]);
+    // Step 8.4 D23: the four strict-only ATO fields.
+    const ato = catalog.fields.filter((f) => f.strictOnly);
+    expect(ato.map((f) => f.name)).toEqual([
+      'ato.risk_score',
+      'ato.risk_level',
+      'ato.incident_severity',
+      'ato.incident_status',
+    ]);
+    for (const field of ato) {
+      expect(field).toMatchObject({
+        group: 'account_takeover',
+        directions: ['outbound', 'internal'],
+        contexts: { when: true, exception: false, relaxingWhen: false, holdRule: true },
+      });
+    }
+    expect(catalog.fields.find((f) => f.name === 'ato.risk_score')).toMatchObject({
+      label: 'Sender account takeover risk score',
+      unit: 'score',
+      min: 0,
+      max: 100,
+    });
     expect(catalog.operatorDefinitions.map((o) => o.op)).toEqual([...POLICY_OPERATORS]);
     expect(catalog.operatorDefinitions.find((o) => o.op === 'regex')).toMatchObject({
       valueShape: 'list',

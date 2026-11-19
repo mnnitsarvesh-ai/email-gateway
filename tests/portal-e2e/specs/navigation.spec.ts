@@ -14,7 +14,8 @@ import type { UserKey } from '../support/state';
 async function visibleNav(page: Page): Promise<string[]> {
   const nav = page.getByRole('navigation', { name: 'Main' });
   await expect(nav.getByRole('link').first()).toBeVisible();
-  return (await nav.getByRole('link').allTextContents()).map((t) => t.trim());
+  // The label span only: a live badge (step 8.4 ATO attention) is not part of the item's label.
+  return (await nav.locator('[data-nav-label]').allTextContents()).map((t) => t.trim());
 }
 
 async function expectForbidden(page: Page, href: string): Promise<void> {

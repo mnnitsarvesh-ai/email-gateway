@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@email-gateway/archive": "workspace:*",
+    "@email-gateway/ato-detection": "workspace:*",
     "@email-gateway/bec": "workspace:*",
     "@email-gateway/common": "workspace:*",
     "@email-gateway/config": "workspace:*",
@@ -32,6 +33,7 @@
     "@email-gateway/rspamd": "workspace:*",
     "@email-gateway/sandbox": "workspace:*",
     "@email-gateway/security-contracts": "workspace:*",
+    "@email-gateway/security-incidents": "workspace:*",
     "@email-gateway/shared-types": "workspace:*",
     "@email-gateway/url-security": "workspace:*",
     "@email-gateway/webhooks": "workspace:*",

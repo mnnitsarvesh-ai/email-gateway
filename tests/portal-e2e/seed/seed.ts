@@ -4,7 +4,9 @@
  * over the last 7 days with deliveries, scan rounds and clicks, quarantine entries (one needs an
  * approver), sanitized preview and EML objects in MinIO, audit rows and one beta webhook (created
  * through the api); step 8.1: both tenants on the enterprise plan, archive settings and a
- * retention policy, a beta archive message (seed/archive.ts). Idempotent: the previous run's data is removed first (cleanup.ts).
+ * retention policy, a beta archive message (seed/archive.ts); step 8.4: `ato_detection` enabled
+ * for both e2e tenants with accounts, signals and incidents written through the ATO stores
+ * (seed/ato.ts). Idempotent: the previous run's data is removed first (cleanup.ts).
  *
  * Rows are written on the writer as the api integration helpers do (preconditions, metadata
  * only; message content lives only in MinIO). Reserved `.test` domains only. Passwords are
@@ -30,6 +32,7 @@ import {
   alphaArchiveDashboardPlans,
   prepareArchive,
 } from './archive';
+import { ALPHA_ATO_PLAN, BETA_ATO_PLAN, expectAtoDashboard, seedAto } from './ato';
 import { cleanup } from './cleanup';
 import { mailBucket, reader, writer } from './db';
 import { historyOf, requiredEnginesOf, scanVerdictOf, writeMessageDetails } from './details';
@@ -962,6 +965,12 @@ export async function seed(): Promise<SeedSummary> {
       await betaApi.logout();
     }
 
+    // Step 8.4: account takeover accounts, signals and incidents of both tenants (seed/ato.ts).
+    const ato = await seedAto(p, {
+      alpha: { id: alpha.id, domain: ALPHA_DOMAIN },
+      beta: { id: beta.id, domain: BETA_DOMAIN },
+    });
+
     // Expected figures for the dashboard's default range (7 days ending at the next full hour).
     const to = Math.ceil(Date.now() / 3_600_000) * 3_600_000;
     // Step 8.1: the alpha archive messages the archive spec inserts during the run count too
@@ -976,23 +985,26 @@ export async function seed(): Promise<SeedSummary> {
     // The api reads lists and reports from the replica: wait until it has every row.
     const lastAlpha = alphaMessages.at(-1)!;
     await waitForReplica(async (r) => {
-      const [messages, audits, approvalRow, members, versions, suppressions] = await Promise.all([
-        r.emailMessage.count({ where: { organizationId: alpha.id } }),
-        r.auditLog.count({
-          where: { organizationId: alpha.id, correlationId: `e2e-portal-${runId}` },
-        }),
-        r.quarantineApprovalRequest.count({ where: { id: betaApproval.id } }),
-        r.user.count({ where: { organizationId: alpha.id } }),
-        r.policyVersion.count({ where: { organizationId: { in: [alpha.id, beta.id] } } }),
-        r.becSuppressionRule.count({ where: { organizationId: { in: [alpha.id, beta.id] } } }),
-      ]);
+      const [messages, audits, approvalRow, members, versions, suppressions, atoAccounts] =
+        await Promise.all([
+          r.emailMessage.count({ where: { organizationId: alpha.id } }),
+          r.auditLog.count({
+            where: { organizationId: alpha.id, correlationId: `e2e-portal-${runId}` },
+          }),
+          r.quarantineApprovalRequest.count({ where: { id: betaApproval.id } }),
+          r.user.count({ where: { organizationId: alpha.id } }),
+          r.policyVersion.count({ where: { organizationId: { in: [alpha.id, beta.id] } } }),
+          r.becSuppressionRule.count({ where: { organizationId: { in: [alpha.id, beta.id] } } }),
+          r.atoAccount.count({ where: { organizationId: { in: [alpha.id, beta.id] } } }),
+        ]);
       return (
         messages === alphaMessages.length &&
         audits === ALPHA_AUDIT_ROWS + 2 &&
         approvalRow === 1 &&
         members === MEMBER_COUNT + ALPHA_ROLE_USERS &&
         versions === 4 &&
-        suppressions === 2
+        suppressions === 2 &&
+        atoAccounts === ALPHA_ATO_PLAN.length + BETA_ATO_PLAN.length
       );
     }, `alpha rows (last message ${lastAlpha.publicId})`);
 
@@ -1064,6 +1076,11 @@ export async function seed(): Promise<SeedSummary> {
         policyId: archive.alphaPolicyId,
         policyName: ARCHIVE_POLICY_NAME,
         betaMessageId: archive.betaMessages[0]!.publicId,
+      },
+      ato: {
+        alpha: ato.alpha,
+        beta: ato.beta,
+        expected: expectAtoDashboard(ALPHA_ATO_PLAN),
       },
     };
     writeState(state);

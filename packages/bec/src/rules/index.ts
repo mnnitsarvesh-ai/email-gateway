@@ -5,3 +5,4 @@ export * from './features';
 export * from './suppression';
 export * from './trust';
 export * from './types';
+export * from './outbound-observations';

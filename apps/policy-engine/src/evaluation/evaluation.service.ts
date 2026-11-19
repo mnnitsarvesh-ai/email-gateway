@@ -62,7 +62,7 @@ import type {
 import type { PolicyMetrics } from '../metrics/policy-metrics';
 import type { DirectoryRepository } from './directory.repository';
 import { type InconsistencySink, POLICY_INPUT_INVALID, wrongRead } from './errors';
-import { buildInputWithDirectory } from './input-builder';
+import { type AtoFactsSource, buildInputWithDirectory } from './input-builder';
 import type { FactsRepository, RoundRef } from './facts.repository';
 import type { SnapshotLookup, SnapshotRepository } from './snapshot.repository';
 
@@ -137,6 +137,8 @@ export interface EvaluationQuarantineDeps {
 
 export interface EvaluationDeps {
   facts: Pick<FactsRepository, 'read'>;
+  /** Step 8.4 D23: ATO facts of the authenticated outbound/internal sender (absent = none). */
+  atoFacts?: AtoFactsSource;
   snapshots: Pick<SnapshotRepository, 'get'>;
   directory: Pick<DirectoryRepository, 'resolve'>;
   copies: PolicyCopyWriter;
@@ -649,6 +651,8 @@ export class PolicyEvaluationService {
           split.recipientDecisions === null
             ? undefined
             : (split.recipientDecisions as unknown as Prisma.InputJsonValue),
+        // Step 8.4 D23: exactly the `ato` block the evaluation used (NULL when absent).
+        ...(input.ato !== undefined ? { atoFacts: input.ato } : {}),
       },
       select: { id: true },
     });
@@ -896,6 +900,7 @@ export class PolicyEvaluationService {
       facts,
       loaded.compiled,
       (fn) => this.guarded(fn, ids),
+      this.deps.atoFacts,
     );
     const evaluation = this.guarded(() => evaluatePolicyPerRecipient(input, loaded.compiled), ids);
     return { input, evaluation };

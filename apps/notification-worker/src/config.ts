@@ -32,6 +32,17 @@ export const configSchema = baseConfigSchema
     NOTIFICATION_DB_TX_TIMEOUT_MS: int(120_000, 600_000).default(120_000),
     /** Most administrators one policy alert is sent to (sorted by user id). */
     NOTIFICATION_MAX_RECIPIENTS: int(1, 500).default(50),
+    /**
+     * Step 8.4 D16: the platform SOC mailbox that receives critical account takeover incident
+     * alerts of every organization (audience `platform_soc`: organization slug, incident public
+     * id, severity and portal link only). Empty (default) = off.
+     */
+    NOTIFY_ATO_PLATFORM_SOC_EMAIL: z
+      .string()
+      .trim()
+      .default('')
+      .pipe(z.union([z.literal(''), z.email({ message: 'must be an e-mail address or empty' })]))
+      .transform((v) => v.toLowerCase()),
     /** Origin of the admin portal; notices link to `${PORTAL_PUBLIC_URL}/messages/<id>`. */
     PORTAL_PUBLIC_URL: z
       .url({ protocol: /^https?$/ })

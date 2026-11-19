@@ -111,6 +111,7 @@ function factsIn(tx: Prisma.TransactionClient, reads: FanoutReads): FactsSource 
     recipientOutcomes: (key) => reads.recipientOutcomes(tx, key),
     sandboxSubmission: (key, id) => reads.sandboxSubmission(tx, key, id),
     domain: (org, id, publicId) => reads.domain(tx, org, id, publicId),
+    atoAccountKind: (org, publicId) => reads.atoAccountKind(tx, org, publicId),
   };
 }
 

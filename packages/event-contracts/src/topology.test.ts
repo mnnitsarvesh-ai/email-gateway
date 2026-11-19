@@ -12,10 +12,12 @@ import {
   eventRoutingKey,
   eventTypesBoundTo,
   HOLD_MAX_DELAY_MS,
+  ATO_MAIL_QUEUE_MAX_LENGTH,
   LOSSY_WORK_QUEUE_MAX_LENGTH,
   parseRoutingKey,
   policyFor,
   policyKindOf,
+  policyOptionsOf,
   QUEUE_NAMES,
   type QueueDefinition,
   queueDefinition,
@@ -42,13 +44,13 @@ const mutableQueue = (topology: { queues: QueueDefinition[] }, name: QueueName) 
   return queue;
 };
 
-describe('TOPOLOGY v12', () => {
+describe('TOPOLOGY v13', () => {
   it('satisfies every invariant of design §3', () => {
     expect(validateTopology(TOPOLOGY)).toEqual([]);
   });
 
-  it('declares exactly the six exchanges and twenty-one queues (v12)', () => {
-    expect(TOPOLOGY_VERSION).toBe(12);
+  it('declares exactly the six exchanges and twenty-four queues (v13)', () => {
+    expect(TOPOLOGY_VERSION).toBe(13);
     expect(DEFAULT_VHOST).toBe('email-gateway');
     expect([...TOPOLOGY.exchanges]).toEqual([
       'email.ingestion',
@@ -59,9 +61,9 @@ describe('TOPOLOGY v12', () => {
       'email.events',
     ]);
     expect(EXCHANGE_NAMES).toHaveLength(6);
-    expect(QUEUE_NAMES).toHaveLength(21);
+    expect(QUEUE_NAMES).toHaveLength(24);
     expect(TOPOLOGY.queues.map((q) => q.name)).toEqual([...QUEUE_NAMES]);
-    expect(new Set(QUEUE_NAMES).size).toBe(21);
+    expect(new Set(QUEUE_NAMES).size).toBe(24);
     expect(QUEUE_NAMES).toEqual(
       expect.arrayContaining([
         'scan.url.inspect',
@@ -73,11 +75,23 @@ describe('TOPOLOGY v12', () => {
         'email.notifications',
         // v11 (step 6.2 §4.3).
         'email.webhooks',
+        // v13 (step 8.4 D3).
+        'ato.events',
+        'ato.mail',
+        'ato.responses',
       ]),
     );
+    // v13: no new queue name is a dot-prefix of another (plain retry bindings).
+    for (const name of ['ato.events', 'ato.mail', 'ato.responses']) {
+      expect(
+        QUEUE_NAMES.filter((other) => other.startsWith(`${name}.`)),
+        name,
+      ).toEqual([]);
+      expect(retryBindingKey(name)).toBe(`retry.${name}.#`);
+    }
   });
 
-  it('assigns roles: seventeen work queues, one delay, one dead-letter, two dormant (v12)', () => {
+  it('assigns roles: twenty work queues, one delay, one dead-letter, two dormant (v13)', () => {
     const byRole = (role: string) =>
       TOPOLOGY.queues.filter((q) => q.role === role).map((q) => q.name);
     expect(byRole('work')).toEqual([
@@ -101,6 +115,10 @@ describe('TOPOLOGY v12', () => {
       'email.notifications',
       // v11 (step 6.2 W1): the webhook-worker fanout.
       'email.webhooks',
+      // v13 (step 8.4 D3): the ato-worker's detect (events, mail) and respond roles.
+      'ato.events',
+      'ato.mail',
+      'ato.responses',
     ]);
     expect(byRole('delay')).toEqual(['email.delivery.retry']);
     expect(byRole('dead-letter')).toEqual(['email.dead-letter']);
@@ -121,6 +139,14 @@ describe('TOPOLOGY v12', () => {
     expect(queueDefinition('email.quarantine').lossy).toBeUndefined();
     // v11 (step 6.2 §4.3): webhook events are never dropped while the worker is down.
     expect(queueDefinition('email.webhooks').lossy).toBeUndefined();
+    // v13 (step 8.4 D3): only the mail feed is lossy; ATO events and responses never drop.
+    expect(queueDefinition('ato.events').lossy).toBeUndefined();
+    expect(queueDefinition('ato.responses').lossy).toBeUndefined();
+    expect(queueDefinition('ato.mail')).toMatchObject({
+      lossy: true,
+      lossyMaxLength: ATO_MAIL_QUEUE_MAX_LENGTH,
+      lossyDeadLetterHeads: false,
+    });
   });
 
   it('has the bindings and home exchanges of design §3', () => {
@@ -232,6 +258,8 @@ describe('TOPOLOGY v12', () => {
         'email.policy org.*.mail.quarantine.notification_requested.v1',
         // v11 (step 6.2 N2): security alerts of the webhook-worker.
         'email.policy org.*.notification.alert_requested.v1',
+        // v13 (step 8.4 D16): account takeover notifications.
+        'email.security org.*.ato.notification.requested.v1',
         'email.policy retry.email.notifications.#',
       ],
       // v11 (step 6.2 §4.3): each source event on the exchange it is published to.
@@ -245,7 +273,31 @@ describe('TOPOLOGY v12', () => {
         'email.events org.*.mail.message.state_changed.v1',
         'email.events org.*.domain.status.changed.v1',
         'email.events org.*.domain.dns.records_changed.v1',
+        // v13 (step 8.4 D16, D24).
+        'email.security org.*.security.incident.created.v1',
+        'email.security org.*.security.incident.updated.v1',
+        'email.security org.*.ato.account.risk.updated.v1',
+        'email.security org.*.ato.response.completed.v1',
         'email.events retry.email.webhooks.#',
+      ],
+      // v13 (step 8.4 D3): the ato-worker's three queues (home exchange email.security).
+      'ato.events': [
+        'email.security',
+        'email.events org.*.auth.login.recorded.v1',
+        'email.events org.*.auth.account.changed.v1',
+        'email.events org.*.smtp.auth.recorded.v1',
+        'email.events org.*.smtp.submission.recorded.v1',
+        'email.security retry.ato.events.#',
+      ],
+      'ato.mail': [
+        'email.security',
+        'email.security org.*.mail.message.scanned.v1',
+        'email.security retry.ato.mail.#',
+      ],
+      'ato.responses': [
+        'email.security',
+        'email.security org.*.ato.response.requested.v1',
+        'email.security retry.ato.responses.#',
       ],
       'email.analytics': [
         'email.events',
@@ -450,6 +502,46 @@ describe('TOPOLOGY v12', () => {
     expect(queueDefinition('email.archive').description).toBe(
       'Archive requests of policy ARCHIVE actions, consumed by the archive-worker (step 8.1); lossy by design: the worker reconciles from policy_execution_logs',
     );
+    // v13 (step 8.4 D3, ADR-0070): the ato-worker's three ledger consumers.
+    expect(
+      Object.fromEntries(
+        (['ato.events', 'ato.mail', 'ato.responses'] as const).map((name) => [
+          name,
+          [queueDefinition(name).consumer, queueDefinition(name).retry],
+        ]),
+      ),
+    ).toEqual({
+      'ato.events': [
+        { kind: 'ledger', ledgerName: 'ato-worker.events', service: 'ato-worker' },
+        {
+          strategy: 'hold',
+          maxAttempts: 10,
+          baseDelayMs: 2_000,
+          maxDelayMs: 60_000,
+          maxRetryAgeMs: 24 * 3_600_000,
+        },
+      ],
+      'ato.mail': [
+        { kind: 'ledger', ledgerName: 'ato-worker.mail', service: 'ato-worker' },
+        {
+          strategy: 'hold',
+          maxAttempts: 5,
+          baseDelayMs: 2_000,
+          maxDelayMs: 60_000,
+          maxRetryAgeMs: 6 * 3_600_000,
+        },
+      ],
+      'ato.responses': [
+        { kind: 'ledger', ledgerName: 'ato-worker.respond', service: 'ato-worker' },
+        {
+          strategy: 'hold',
+          maxAttempts: 10,
+          baseDelayMs: 5_000,
+          maxDelayMs: 60_000,
+          maxRetryAgeMs: 24 * 3_600_000,
+        },
+      ],
+    });
     expect(planned).toEqual({
       'email.analytics': 'not scheduled (ADR-0009)',
     });
@@ -465,13 +557,17 @@ describe('TOPOLOGY v12', () => {
 describe('policies (Q4)', () => {
   it('applies the policy of each role (and the lossy work policy of scan.url.inspect, v5, and scan.sandbox, v8)', () => {
     for (const queue of TOPOLOGY.queues) {
-      expect(queue.policy, queue.name).toEqual(policyFor(policyKindOf(queue), queue.name));
+      expect(queue.policy, queue.name).toEqual(
+        policyFor(policyKindOf(queue), queue.name, policyOptionsOf(queue)),
+      );
     }
     expect(TOPOLOGY.queues.filter((q) => q.lossy).map((q) => q.name)).toEqual([
       'scan.url.inspect',
       'scan.sandbox',
       // v12 (step 8.1 A26).
       'email.archive',
+      // v13 (step 8.4 D3).
+      'ato.mail',
     ]);
     // v12: drop-head at 10 000, heads dead-lettered at most once (policy eg.email.archive
     // replaced; dormant had no dead-letter target and no delivery limit).
@@ -562,6 +658,73 @@ describe('policies (Q4)', () => {
       overflow: 'reject-publish',
       'max-length': 1_000_000,
     });
+  });
+
+  it('keeps the v12 lossy policies byte-identical and drops ato.mail heads without dead-lettering (v13)', () => {
+    // Byte-for-byte the v12 definitions (key order included): the v13 policy options change
+    // nothing for scan.url.inspect, scan.sandbox and email.archive.
+    const v12Lossy = (queue: string) =>
+      `{"delivery-limit":20,"dead-letter-exchange":"email.events","dead-letter-routing-key":"dead-letter.${queue}","dead-letter-strategy":"at-most-once","overflow":"drop-head","max-length":10000}`;
+    for (const name of ['scan.url.inspect', 'scan.sandbox', 'email.archive'] as const) {
+      expect(JSON.stringify(queueDefinition(name).policy), name).toBe(v12Lossy(name));
+      expect(JSON.stringify(policyFor('work-lossy', name)), name).toBe(v12Lossy(name));
+      expect(JSON.stringify(policyFor('work-lossy', name, {})), name).toBe(v12Lossy(name));
+    }
+    expect(ATO_MAIL_QUEUE_MAX_LENGTH).toBe(500_000);
+    expect(JSON.stringify(queueDefinition('ato.mail').policy)).toBe(
+      '{"delivery-limit":20,"overflow":"drop-head","max-length":500000}',
+    );
+    // A larger bound alone keeps the dead-lettered heads.
+    expect(policyFor('work-lossy', 'x', { lossyMaxLength: 7 })).toEqual({
+      'delivery-limit': 20,
+      'dead-letter-exchange': 'email.events',
+      'dead-letter-routing-key': 'dead-letter.x',
+      'dead-letter-strategy': 'at-most-once',
+      overflow: 'drop-head',
+      'max-length': 7,
+    });
+    // The options never change the other kinds.
+    for (const kind of ['work', 'dormant', 'delay', 'dead-letter'] as const) {
+      expect(
+        policyFor(kind, 'q', { lossyMaxLength: 7, lossyDeadLetterHeads: false }),
+        kind,
+      ).toEqual(policyFor(kind, 'q'));
+    }
+    // v13: ato.events and ato.responses are ordinary work queues (reject-publish at 1 000 000).
+    for (const name of ['ato.events', 'ato.responses'] as const) {
+      expect(queueDefinition(name).policy, name).toEqual({
+        'delivery-limit': 20,
+        'dead-letter-exchange': 'email.events',
+        'dead-letter-routing-key': `dead-letter.${name}`,
+        'dead-letter-strategy': 'at-least-once',
+        overflow: 'reject-publish',
+        'max-length': 1_000_000,
+      });
+    }
+  });
+
+  it('refuses lossy options on a non-lossy queue and dead-letter keys on ato.mail', () => {
+    const withOptions = clone();
+    mutableQueue(withOptions, 'ato.events').lossyDeadLetterHeads = false;
+    expect(validateTopology(withOptions)).toContain(
+      'ato.events: lossy options need a lossy work queue',
+    );
+    const badBound = clone();
+    mutableQueue(badBound, 'ato.mail').lossyMaxLength = 0;
+    expect(validateTopology(badBound)).toContain(
+      'ato.mail: lossyMaxLength must be a positive integer',
+    );
+    const withDlx = clone();
+    mutableQueue(withDlx, 'ato.mail').policy = {
+      ...queueDefinition('ato.mail').policy,
+      'dead-letter-exchange': 'email.events',
+    };
+    expect(validateTopology(withDlx)).toEqual(
+      expect.arrayContaining([
+        'ato.mail: policy differs from the work-lossy policy',
+        'ato.mail: a queue without dead-lettered heads has no dead-letter exchange',
+      ]),
+    );
   });
 
   it('limits deliveries only on consumed work queues (a basic.get scan never drops a message)', () => {
@@ -845,7 +1008,9 @@ describe('routing (topic semantics)', () => {
       'email.analytics',
       'email.policy.evaluate',
     ]);
+    // v13 (step 8.4 D3): and the lossy ATO mail feed.
     expect(route('mail.message.scanned.v1')).toEqual([
+      'ato.mail',
       'email.analytics',
       'email.policy.evaluate',
       'email.webhooks',
@@ -925,6 +1090,32 @@ describe('routing (topic semantics)', () => {
       'email.analytics',
       'email.notifications',
     ]);
+    // Topology v13 (step 8.4 D2, D3): the four ATO sources reach ato.events (published to
+    // email.events, bound there only once); the outputs their consumers; the restriction change
+    // only the firehose (the smtp-adapter reads it from the outbox tail).
+    for (const type of [
+      'auth.login.recorded.v1',
+      'auth.account.changed.v1',
+      'smtp.auth.recorded.v1',
+      'smtp.submission.recorded.v1',
+    ] as const) {
+      expect(EVENT_REGISTRY[type].exchange, type).toBe('email.events');
+      expect(route(type), type).toEqual(['ato.events', 'email.analytics']);
+    }
+    for (const type of [
+      'security.incident.created.v1',
+      'security.incident.updated.v1',
+      'ato.account.risk.updated.v1',
+      'ato.response.completed.v1',
+    ] as const) {
+      expect(route(type), type).toEqual(['email.analytics', 'email.webhooks']);
+    }
+    expect(route('ato.response.requested.v1')).toEqual(['ato.responses', 'email.analytics']);
+    expect(route('ato.notification.requested.v1')).toEqual([
+      'email.analytics',
+      'email.notifications',
+    ]);
+    expect(route('ato.restriction.changed.v1')).toEqual(['email.analytics']);
   });
 
   it('keeps the retry hops of dot-prefixed queue names apart (v5 scan.url, scan.url.*)', () => {
@@ -943,6 +1134,10 @@ describe('routing (topic semantics)', () => {
     expect(retryBindingKey('email.notifications')).toBe('retry.email.notifications.#');
     // v11 (step 6.2): no other queue name starts with email.webhooks.
     expect(retryBindingKey('email.webhooks')).toBe('retry.email.webhooks.#');
+    // v13 (step 8.4): no new dot-prefix: plain retry bindings.
+    expect(retryBindingKey('ato.events')).toBe('retry.ato.events.#');
+    expect(retryBindingKey('ato.mail')).toBe('retry.ato.mail.#');
+    expect(retryBindingKey('ato.responses')).toBe('retry.ato.responses.#');
     // Every retry key of every work/dormant queue and every event type reaches exactly that queue.
     const types = [...Object.keys(EVENT_REGISTRY), ...Object.keys(RESERVED_EVENT_TYPES)];
     for (const queue of TOPOLOGY.queues.filter((q) => q.role === 'work' || q.role === 'dormant')) {
@@ -1054,12 +1249,48 @@ describe('routing (topic semantics)', () => {
         'mail.message.state_changed.v1',
         'domain.status.changed.v1',
         'domain.dns.records_changed.v1',
+        // v13 (step 8.4 D16, D24).
+        'security.incident.created.v1',
+        'security.incident.updated.v1',
+        'ato.account.risk.updated.v1',
+        'ato.response.completed.v1',
       ].sort(),
     );
     expect(eventTypesBoundTo('email.notifications')).toEqual([
+      'ato.notification.requested.v1',
       'mail.policy.notification_requested.v1',
       'mail.quarantine.notification_requested.v1',
       'notification.alert_requested.v1',
+    ]);
+    // v13 (step 8.4 D3).
+    expect(eventTypesBoundTo('ato.events')).toEqual([
+      'auth.account.changed.v1',
+      'auth.login.recorded.v1',
+      'smtp.auth.recorded.v1',
+      'smtp.submission.recorded.v1',
+    ]);
+    expect(eventTypesBoundTo('ato.mail')).toEqual(['mail.message.scanned.v1']);
+    expect(eventTypesBoundTo('ato.responses')).toEqual(['ato.response.requested.v1']);
+  });
+
+  it('keeps the ATO hops apart (v13): retry on email.security, dead letters to email.dead-letter', () => {
+    for (const queue of ['ato.events', 'ato.mail', 'ato.responses'] as const) {
+      for (const type of eventTypesBoundTo(queue)) {
+        expect(
+          routeMessage('email.security', retryRoutingKey(queue, '42', type)),
+          `${queue} ${type}`,
+        ).toEqual([queue]);
+        // Consumer dead letters (also of ato.mail, whose policy has no dead-letter target).
+        expect(
+          routeMessage('email.events', deadLetterRoutingKey(queue, '42', type)),
+          `${queue} ${type}`,
+        ).toEqual(['email.dead-letter']);
+      }
+    }
+    // An ATO source published once to email.events reaches ato.events once.
+    expect(routeMessage('email.events', eventRoutingKey('42', 'auth.login.recorded.v1'))).toEqual([
+      'ato.events',
+      'email.analytics',
     ]);
   });
 
@@ -1294,7 +1525,7 @@ describe('toRabbitDefinitions (Q5)', () => {
   const definitions = toRabbitDefinitions(TOPOLOGY, { vhost: DEFAULT_VHOST });
 
   it('declares topic exchanges and quorum queues with no other argument', () => {
-    expect(definitions.topology_version).toBe(12);
+    expect(definitions.topology_version).toBe(13);
     expect(definitions.exchanges).toHaveLength(6);
     for (const exchange of definitions.exchanges) {
       expect(exchange).toEqual({
@@ -1307,7 +1538,7 @@ describe('toRabbitDefinitions (Q5)', () => {
         arguments: {},
       });
     }
-    expect(definitions.queues).toHaveLength(21);
+    expect(definitions.queues).toHaveLength(24);
     for (const queue of definitions.queues) {
       expect(queue).toEqual({
         name: queue.name,
@@ -1336,8 +1567,10 @@ describe('toRabbitDefinitions (Q5)', () => {
     // replaces policy.decided.v1), email.notifications adds one: 43 queue + 5 exchange = 48.
     // v11 (step 6.2 §4.3): email.webhooks adds nine (eight events + retry), email.notifications
     // one (alert_requested.v1): 53 queue + 5 exchange = 58. v12 (step 8.1 A26): email.archive
-    // keeps its two bindings (dormant → work): still 58.
-    expect(definitions.bindings).toHaveLength(58);
+    // keeps its two bindings (dormant → work): still 58. v13 (step 8.4 §4.1): ato.events five
+    // (four events + retry), ato.mail two, ato.responses two, email.webhooks four,
+    // email.notifications one: 67 queue + 5 exchange = 72.
+    expect(definitions.bindings).toHaveLength(72);
     const keys = definitions.bindings.map(
       (b) => `${b.source}|${b.destination_type}|${b.destination}|${b.routing_key}`,
     );
@@ -1365,7 +1598,7 @@ describe('toRabbitDefinitions (Q5)', () => {
   });
 
   it('generates one anchored policy per queue', () => {
-    expect(definitions.policies).toHaveLength(21);
+    expect(definitions.policies).toHaveLength(24);
     for (const policy of definitions.policies) {
       const queue = policy.name.slice('eg.'.length);
       expect(policy).toEqual({

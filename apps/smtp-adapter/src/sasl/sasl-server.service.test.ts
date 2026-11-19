@@ -3,9 +3,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   metricValue,
   newMetrics,
+  prismaService,
   silentLogger,
   testConfig,
 } from '../../integration/in-session-support/fakes';
+import { AtoTelemetryRecorder } from '../ato/telemetry-recorder';
 import type { AuthResult, ConnectorAuthService } from '../connectors/connector-auth.service';
 import { parseNetworkList } from '../shared/internal-networks';
 import {
@@ -17,6 +19,7 @@ import {
 } from './dovecot-auth-protocol';
 import { SaslServerService } from './sasl-server.service';
 
+const bigintSafe = (_: string, v: unknown) => (typeof v === 'bigint' ? String(v) : v);
 const b64 = (text: string) => Buffer.from(text, 'utf8').toString('base64');
 const plain = (authzid: string, user: string, pass: string) => b64(`${authzid}\0${user}\0${pass}`);
 
@@ -122,10 +125,38 @@ describe('SaslServerService', () => {
 
   async function start(
     authenticate: (user: string, secret: string, ip: string) => Promise<AuthResult>,
-    options: { networks?: string; delayMs?: number } = {},
+    options: { networks?: string; delayMs?: number; hangOutbox?: boolean } = {},
   ) {
     const auth = { authenticate: vi.fn(authenticate) };
     const metrics = newMetrics();
+    const outbox: { organizationId: bigint; payload: { entries: Record<string, unknown>[] } }[] =
+      [];
+    const telemetry = new AtoTelemetryRecorder(
+      prismaService({
+        messageOutbox: {
+          createMany: vi.fn(({ data }: { data: typeof outbox }) => {
+            // A database that never answers (step 8.4 D4: replies must not wait for it).
+            if (options.hangOutbox) return new Promise(() => undefined);
+            outbox.push(...data);
+            return Promise.resolve({ count: data.length });
+          }),
+        },
+        organization: { findFirst: vi.fn(() => Promise.resolve({ id: 1n })) },
+      }),
+      metrics,
+      testConfig(),
+      silentLogger(),
+    );
+    /** Flushed AUTH entries (platform organization = 1). */
+    const recorded = async () => {
+      await telemetry.flush();
+      return outbox.flatMap((row) =>
+        row.payload.entries.map((entry): Record<string, unknown> => ({
+          org: row.organizationId,
+          ...entry,
+        })),
+      );
+    };
     server = new SaslServerService(
       {
         host: '127.0.0.1',
@@ -136,6 +167,7 @@ describe('SaslServerService', () => {
       metrics,
       testConfig({ SMTP_AUTH_FAILURE_DELAY_MS: String(options.delayMs ?? 0) }),
       silentLogger(),
+      telemetry,
     );
     await server.onModuleInit();
     const port = server.address();
@@ -148,7 +180,7 @@ describe('SaslServerService', () => {
       }
       return client;
     };
-    return { auth, metrics, connect };
+    return { auth, metrics, connect, telemetry, recorded };
   }
 
   const ok = (): Promise<AuthResult> =>
@@ -230,7 +262,10 @@ describe('SaslServerService', () => {
   });
 
   it('wrong credentials: FAIL with the username after the failure delay', async () => {
-    const s = await start(() => Promise.resolve({ result: 'fail' }), { delayMs: 150 });
+    const s = await start(
+      () => Promise.resolve({ result: 'fail', reason: 'bad_credentials', connector: null }),
+      { delayMs: 150 },
+    );
     const client = await s.connect();
     const started = Date.now();
     client.send(`AUTH\t8\tPLAIN\t${SECURED}\tresp=${plain('', 'egc-abc', 'nope')}\n`);
@@ -239,6 +274,118 @@ describe('SaslServerService', () => {
     expect(
       await metricValue(s.metrics, 'smtp_sasl_auth_total', { mech: 'plain', result: 'fail' }),
     ).toBe(1);
+  });
+
+  it('an ATO authentication block answers the same FAIL as wrong credentials (step 8.4 D14)', async () => {
+    const s = await start(
+      () => Promise.resolve({ result: 'blocked', connectorId: 5n, organizationId: 7n }),
+      { delayMs: 100 },
+    );
+    const client = await s.connect();
+    const started = Date.now();
+    client.send(`AUTH\t8\tPLAIN\t${SECURED}\tresp=${plain('', 'egc-abc', 's3cret')}\n`);
+    expect(await client.line()).toBe('FAIL\t8\tuser=egc-abc');
+    expect(Date.now() - started).toBeGreaterThanOrEqual(90);
+    expect(
+      await metricValue(s.metrics, 'smtp_sasl_auth_total', { mech: 'plain', result: 'blocked' }),
+    ).toBe(1);
+    expect(await s.recorded()).toEqual([
+      expect.objectContaining({
+        org: 7n,
+        result: 'blocked',
+        connectorId: '5',
+        usernameClass: 'connector',
+        usernameHash: null,
+        failureReason: 'ato_blocked',
+      }),
+    ]);
+  });
+
+  it('records ATO telemetry after the reply: ok, unknown username (hashed, platform), throttled, malformed; never temp (D4)', async () => {
+    const answers: AuthResult[] = [
+      { result: 'ok', connectorId: 5n, organizationId: 7n },
+      { result: 'fail', reason: 'bad_credentials', connector: null },
+      {
+        result: 'fail',
+        reason: 'connector_inactive',
+        connector: { id: 6n, organizationId: 7n },
+      },
+      { result: 'throttled' },
+      { result: 'temp' },
+    ];
+    const s = await start(() => Promise.resolve(answers.shift()!));
+    const client = await s.connect();
+    client.send(`AUTH\t1\tPLAIN\t${SECURED}\tresp=${plain('', 'egc-abc', 's3cret')}\n`);
+    expect(await client.line()).toBe('OK\t1\tuser=egc-abc');
+    const unknownUser = `egc-${'a'.repeat(20)}`;
+    client.send(`AUTH\t2\tLOGIN\t${SECURED}\tresp=${b64(unknownUser)}\n`);
+    await client.line();
+    client.send(`CONT\t2\t${b64('nope')}\n`);
+    expect(await client.line()).toBe(`FAIL\t2\tuser=${unknownUser}`);
+    client.send(`AUTH\t3\tPLAIN\t${SECURED}\tresp=${plain('', 'egc-old', 's3cret')}\n`);
+    expect(await client.line()).toBe('FAIL\t3\tuser=egc-old');
+    client.send(`AUTH\t4\tPLAIN\t${SECURED}\tresp=${plain('egc-x', 'egc-y', 's3cret')}\n`);
+    expect(await client.line()).toBe('FAIL\t4');
+    client.send(`AUTH\t5\tPLAIN\t${SECURED}\tresp=${plain('', 'someone', 's3cret')}\n`);
+    expect(await client.line()).toBeNull(); // throttled: closed
+    const second = await s.connect();
+    second.send(`AUTH\t6\tPLAIN\t${SECURED}\tresp=${plain('', 'egc-abc', 's3cret')}\n`);
+    expect(await second.line()).toBeNull(); // temp: closed, not recorded
+
+    const entries = await s.recorded();
+    expect(entries).toHaveLength(5);
+    const byResult = (result: string, reason: string | null) =>
+      entries.find((e) => e.result === result && e.failureReason === reason);
+    expect(byResult('ok', null)).toMatchObject({
+      org: 7n,
+      mechanism: 'plain',
+      connectorId: '5',
+      clientIp: '203.0.113.7',
+      usernameClass: 'connector',
+      usernameHash: null,
+    });
+    const unknown = byResult('fail', 'bad_credentials')!;
+    expect(unknown).toMatchObject({
+      org: 1n,
+      mechanism: 'login',
+      connectorId: null,
+      usernameClass: 'unknown_generated_format',
+    });
+    expect(unknown.usernameHash).toMatch(/^[0-9a-f]{16}$/);
+    expect(JSON.stringify(entries, bigintSafe)).not.toContain(unknownUser);
+    expect(byResult('fail', 'connector_inactive')).toMatchObject({ org: 7n, connectorId: '6' });
+    expect(byResult('fail', 'malformed')).toMatchObject({
+      org: 1n,
+      usernameClass: 'unknown_other',
+    });
+    expect(byResult('throttled', 'ip_throttled')).toMatchObject({
+      org: 1n,
+      usernameClass: 'unknown_other',
+    });
+  });
+
+  it('answers without waiting for telemetry: a hanging outbox insert never delays a reply (D4)', async () => {
+    const s = await start(ok, { hangOutbox: true });
+    const client = await s.connect();
+    // A flush is in flight and never completes; the buffer keeps accepting entries.
+    s.telemetry.recordAuth({
+      occurredAt: new Date(),
+      result: 'ok',
+      mechanism: 'plain',
+      clientIp: '203.0.113.7',
+      connector: { id: 5n, organizationId: 7n },
+      username: null,
+      failureReason: null,
+    });
+    void s.telemetry.flush();
+    const started = performance.now();
+    for (let id = 1; id <= 20; id += 1) {
+      client.send(`AUTH\t${id}\tPLAIN\t${SECURED}\tresp=${plain('', 'egc-abc', 's3cret')}\n`);
+      expect(await client.line()).toBe(`OK\t${id}\tuser=egc-abc`);
+    }
+    // 20 round trips on loopback; a reply that awaited the hanging insert would never arrive.
+    expect(performance.now() - started).toBeLessThan(2000);
+    expect(s.telemetry.size).toBe(20);
   });
 
   it.each([

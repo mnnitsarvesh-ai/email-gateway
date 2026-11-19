@@ -4,6 +4,11 @@ import type { Logger } from '@email-gateway/logger';
 import { randomBytes } from 'node:crypto';
 import type { BlockList, Socket } from 'node:net';
 import { setTimeout as sleep } from 'node:timers/promises';
+import {
+  type AuthTelemetry,
+  AtoTelemetryRecorder,
+  type TelemetryAuthFailureReason,
+} from '../ato/telemetry-recorder';
 import { ADAPTER_CONFIG, ADAPTER_LOGGER, type SmtpAdapterConfig } from '../config';
 import { type AuthResult, ConnectorAuthService } from '../connectors/connector-auth.service';
 import { TcpListener } from '../listener/tcp-listener';
@@ -34,7 +39,7 @@ export interface SaslServerOptions {
 /** Postfix keeps one auth connection per smtpd process; close it only after a long idle. */
 export const SASL_IDLE_TIMEOUT_MS = 330_000;
 
-export type SaslResult = 'ok' | 'fail' | 'temp' | 'throttled';
+export type SaslResult = 'ok' | 'fail' | 'temp' | 'throttled' | 'blocked';
 
 interface Pending {
   mechanism: Mechanism;
@@ -67,6 +72,11 @@ interface Connection {
  * - malformed input or a line over 64 KiB closes the connection.
  *
  * Postfix itself holds no credentials (security boundary Z2). Secrets are never logged.
+ *
+ * Step 8.4 D4/D14: an ATO authentication block answers the same FAIL as wrong credentials
+ * (`smtp_sasl_auth_total{result="blocked"}`), and every decision except a temporary failure is
+ * recorded for account takeover detection **after** its reply line was written
+ * (`AtoTelemetryRecorder.recordAuth`, a synchronous push into memory, never awaited by the reply).
  */
 @Injectable()
 export class SaslServerService implements OnModuleInit, OnModuleDestroy, HealthIndicator {
@@ -84,6 +94,7 @@ export class SaslServerService implements OnModuleInit, OnModuleDestroy, HealthI
     @Inject(ADAPTER_CONFIG)
     private readonly config: Pick<SmtpAdapterConfig, 'SMTP_AUTH_FAILURE_DELAY_MS'>,
     @Inject(ADAPTER_LOGGER) logger: Logger,
+    private readonly telemetry: AtoTelemetryRecorder,
   ) {
     this.logger = logger.child({ component: 'sasl-server' });
     this.attempts = metrics.counter(
@@ -188,9 +199,11 @@ export class SaslServerService implements OnModuleInit, OnModuleDestroy, HealthI
   private async begin(connection: Connection, request: AuthRequest): Promise<void> {
     const mechanism = MECHANISMS.find((m) => m === request.mechanism);
     const mechLabel = mechanism?.toLowerCase() ?? 'unknown';
+    const clientIp = normalizeClientAddress(request.params.get('rip'))?.address ?? '';
     if (!mechanism) {
       this.attempts.inc({ mech: mechLabel, result: 'fail' });
       this.send(connection, `FAIL\t${request.id}`);
+      this.recordMalformed('unknown', clientIp, null);
       return;
     }
     if (!request.flags.has('secured')) {
@@ -198,9 +211,9 @@ export class SaslServerService implements OnModuleInit, OnModuleDestroy, HealthI
       this.attempts.inc({ mech: mechLabel, result: 'fail' });
       this.logger.warn('AUTH without TLS refused');
       this.send(connection, `FAIL\t${request.id}`);
+      this.recordMalformed(mechanism === 'PLAIN' ? 'plain' : 'login', clientIp, null);
       return;
     }
-    const clientIp = normalizeClientAddress(request.params.get('rip'))?.address ?? '';
     const response = request.params.get('resp');
     const pending: Pending = { mechanism, clientIp };
     if (response === undefined) {
@@ -232,6 +245,7 @@ export class SaslServerService implements OnModuleInit, OnModuleDestroy, HealthI
         this.attempts.inc({ mech: 'plain', result: 'fail' });
         await this.delayFailure();
         this.send(connection, `FAIL\t${id}`);
+        this.recordMalformed('plain', pending.clientIp, credentials?.authcid ?? null);
         return;
       }
       await this.verify(connection, id, pending, credentials.authcid, credentials.password);
@@ -243,6 +257,7 @@ export class SaslServerService implements OnModuleInit, OnModuleDestroy, HealthI
       this.attempts.inc({ mech: 'login', result: 'fail' });
       await this.delayFailure();
       this.send(connection, `FAIL\t${id}`);
+      this.recordMalformed('login', pending.clientIp, pending.username ?? null);
       return;
     }
     if (pending.username === undefined) {
@@ -260,11 +275,12 @@ export class SaslServerService implements OnModuleInit, OnModuleDestroy, HealthI
     username: string,
     secret: string,
   ): Promise<void> {
-    const mech = pending.mechanism.toLowerCase();
+    const mech = pending.mechanism === 'PLAIN' ? 'plain' : 'login';
     if (!isSafeUsername(username)) {
       this.attempts.inc({ mech, result: 'fail' });
       await this.delayFailure();
       this.send(connection, `FAIL\t${id}`);
+      this.recordMalformed(mech, pending.clientIp, username);
       return;
     }
     let outcome: AuthResult;
@@ -275,6 +291,7 @@ export class SaslServerService implements OnModuleInit, OnModuleDestroy, HealthI
       outcome = { result: 'temp' };
     }
     this.attempts.inc({ mech, result: outcome.result });
+    const base = { mechanism: mech, clientIp: pending.clientIp || null } as const;
     switch (outcome.result) {
       case 'ok':
         this.logger.info(
@@ -285,20 +302,79 @@ export class SaslServerService implements OnModuleInit, OnModuleDestroy, HealthI
           'SASL authentication succeeded',
         );
         this.send(connection, `OK\t${id}\tuser=${username}`);
+        this.record({
+          ...base,
+          result: 'ok',
+          connector: { id: outcome.connectorId, organizationId: outcome.organizationId },
+          username: null,
+          failureReason: null,
+        });
         return;
       case 'fail':
         this.logger.info({ username, clientIp: pending.clientIp }, 'SASL authentication failed');
         await this.delayFailure();
         this.send(connection, `FAIL\t${id}\tuser=${username}`);
+        this.record({
+          ...base,
+          result: 'fail',
+          connector: outcome.connector,
+          username: outcome.connector ? null : username,
+          failureReason: outcome.reason,
+        });
+        return;
+      case 'blocked':
+        // Indistinguishable from wrong credentials for the client (D14).
+        await this.delayFailure();
+        this.send(connection, `FAIL\t${id}\tuser=${username}`);
+        this.record({
+          ...base,
+          result: 'blocked',
+          connector: { id: outcome.connectorId, organizationId: outcome.organizationId },
+          username: null,
+          failureReason: 'ato_blocked',
+        });
         return;
       case 'throttled':
         this.logger.warn({ clientIp: pending.clientIp }, 'SASL authentication throttled');
         await this.delayFailure();
         this.failTemporarily(connection);
+        // The username was not looked up (the throttle comes first): recorded as unresolved.
+        this.record({
+          ...base,
+          result: 'throttled',
+          connector: null,
+          username,
+          failureReason: 'ip_throttled',
+        });
         return;
       case 'temp':
         this.failTemporarily(connection);
         return;
+    }
+  }
+
+  /** A refused request that never reached the credential check (after its reply). */
+  private recordMalformed(
+    mechanism: AuthTelemetry['mechanism'],
+    clientIp: string,
+    username: string | null,
+  ): void {
+    this.record({
+      mechanism,
+      clientIp: clientIp || null,
+      result: 'fail',
+      connector: null,
+      username,
+      failureReason: 'malformed' satisfies TelemetryAuthFailureReason,
+    });
+  }
+
+  /** Telemetry never affects the AUTH answer: a recorder error is logged and ignored. */
+  private record(entry: Omit<AuthTelemetry, 'occurredAt'>): void {
+    try {
+      this.telemetry.recordAuth({ ...entry, occurredAt: new Date() });
+    } catch (err) {
+      this.logger.warn({ err }, 'ATO telemetry not recorded');
     }
   }
 

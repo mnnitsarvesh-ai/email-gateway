@@ -18,13 +18,15 @@ export type AlertSuppressionReason = 'opt_out' | 'disabled' | 'invalid_contact';
  * result}` and `notification_send_duration_seconds`; step 5.3 Q20 adds
  * `notification_quarantine_messages_total{kind,result}`; step 6.2 N4 adds
  * `notification_alert_messages_total{kind,result}` and
- * `notification_alerts_suppressed_total{kind,reason}`. Bounded labels; never a tenant or address.
+ * `notification_alerts_suppressed_total{kind,reason}`; step 8.4 D16 adds
+ * `notification_ato_messages_total{kind,audience,result}`. Bounded labels; never a tenant or address.
  */
 export class NotificationMetrics {
   readonly messages: Counter<'kind' | 'result'>;
   readonly quarantineMessages: Counter<'kind' | 'result'>;
   readonly alertMessages: Counter<'kind' | 'result'>;
   readonly alertsSuppressed: Counter<'kind' | 'reason'>;
+  readonly atoMessages: Counter<'kind' | 'audience' | 'result'>;
   readonly sendDuration: Histogram<'kind'>;
 
   constructor(metrics: MetricsService) {
@@ -47,6 +49,11 @@ export class NotificationMetrics {
       'notification_alerts_suppressed_total',
       'Recipients or alerts left out at send time (step 6.2 N4), by kind (alert kinds, policy_alert, quarantine_admin_alert, quarantine_approval_requested) and reason (opt_out, disabled, invalid_contact)',
       ['kind', 'reason'],
+    );
+    this.atoMessages = metrics.counter(
+      'notification_ato_messages_total',
+      'Account takeover notices handled (step 8.4 D16), by kind (incident_alert, approval_requested, response_failed, digest), audience (tenant, soc, platform_soc) and result (sent, no_recipients, disabled, not_applicable, failed)',
+      ['kind', 'audience', 'result'],
     );
     this.sendDuration = metrics.histogram(
       'notification_send_duration_seconds',

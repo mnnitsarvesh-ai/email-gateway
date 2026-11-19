@@ -379,6 +379,131 @@ function HardBlocks({ ctl }: { ctl: FactControl }) {
   );
 }
 
+/**
+ * The "Account takeover" facts (step 8.4 D23). The section is driven by the catalogue group
+ * `ACCOUNT_TAKEOVER_GROUP`: every field of that group gets a control whose facts key is derived
+ * from the field name (`<prefix>.<snake_case>` → facts `<prefix>.<camelCase>`), its label,
+ * vocabulary and bounds come from the catalogue, so no DSL field name lives in the portal
+ * (ADR-0063). The block is all-or-nothing on the server (score and level required when present);
+ * "Account known" is the facts' own flag (default true on the server).
+ */
+export const ACCOUNT_TAKEOVER_GROUP = 'account_takeover';
+/** Facts keys the server requires once the block is present (synthetic facts schema). */
+const ATO_REQUIRED_FACT_KEYS = ['riskScore', 'riskLevel'] as const;
+
+const camelCase = (snake: string) =>
+  snake.replace(/_([a-z0-9])/g, (_, c: string) => c.toUpperCase());
+
+/** `{ root, key }` of a catalogue field in the synthetic facts (`a.b_c` → `a`, `bC`). */
+export function factKeyOfField(name: string): { root: string; key: string } | null {
+  const dot = name.indexOf('.');
+  if (dot <= 0 || dot === name.length - 1) return null;
+  return { root: name.slice(0, dot), key: camelCase(name.slice(dot + 1)) };
+}
+
+/** The account takeover fields of the catalogue with their facts keys (catalogue order). */
+export function accountTakeoverFactFields(
+  catalog: BuilderCatalog,
+): Array<{ field: CatalogField; root: string; key: string }> {
+  return catalog.fields.flatMap((field) => {
+    if (field.group !== ACCOUNT_TAKEOVER_GROUP) return [];
+    const keyed = factKeyOfField(field.name);
+    return keyed ? [{ field, ...keyed }] : [];
+  });
+}
+
+/** A new facts block with the required keys at their first catalogue value (score: its minimum). */
+export function initialAccountTakeoverFacts(catalog: BuilderCatalog): Record<string, unknown> {
+  const block: Record<string, unknown> = {};
+  for (const { field, key } of accountTakeoverFactFields(catalog)) {
+    if (!(ATO_REQUIRED_FACT_KEYS as readonly string[]).includes(key)) continue;
+    block[key] = field.values ? field.values[0] : (field.min ?? 0);
+  }
+  return block;
+}
+
+function AccountTakeoverFacts({ ctl }: { ctl: FactControl }) {
+  const includeId = useId();
+  const fields = accountTakeoverFactFields(ctl.catalog);
+  if (fields.length === 0) return null;
+  const root = fields[0]!.root;
+  const block = getFact(ctl.facts, [root]);
+  const present = isPlainObjectFact(block);
+  const title =
+    ctl.catalog.fieldGroups.find((g) => g.id === ACCOUNT_TAKEOVER_GROUP)?.label ??
+    'Account takeover';
+  return (
+    <Section title={title}>
+      <Row
+        label={(id) => (
+          <span id={id} className="text-xs text-muted-foreground">
+            Sender account facts
+          </span>
+        )}
+        hint="Outbound and internal mail only: the server drops these facts for inbound mail."
+      >
+        {(labelId) => (
+          <ChoiceSelect
+            id={includeId}
+            labelledBy={labelId}
+            value={present ? 'yes' : undefined}
+            unsetLabel="None (fields are unknown)"
+            options={[{ value: 'yes', label: 'Set account takeover facts' }]}
+            onChange={(next) =>
+              ctl.set([root], next === 'yes' ? initialAccountTakeoverFacts(ctl.catalog) : undefined)
+            }
+          />
+        )}
+      </Row>
+      {present ? (
+        <>
+          {fields.map(({ field, key }) => {
+            const required = (ATO_REQUIRED_FACT_KEYS as readonly string[]).includes(key);
+            const path = [root, key];
+            const current = getFact(ctl.facts, path);
+            if (field.values) {
+              return (
+                <Row key={field.name} label={textLabel(field.label)}>
+                  {(labelId) => (
+                    <ChoiceSelect
+                      labelledBy={labelId}
+                      value={typeof current === 'string' ? current : undefined}
+                      unsetLabel={required ? undefined : 'None (no active incident)'}
+                      options={optionsOf(field.values)}
+                      onChange={(next) => {
+                        if (required && next === undefined) return;
+                        ctl.set(path, next);
+                      }}
+                    />
+                  )}
+                </Row>
+              );
+            }
+            return (
+              <Row key={field.name} label={textLabel(field.label)}>
+                {(labelId) => (
+                  <IntegerInput
+                    labelledBy={labelId}
+                    value={typeof current === 'number' ? current : undefined}
+                    required={required}
+                    min={field.min ?? undefined}
+                    max={field.max ?? undefined}
+                    onChange={(next) => ctl.set(path, next)}
+                  />
+                )}
+              </Row>
+            );
+          })}
+          <BooleanFact ctl={ctl} path={[root, 'accountKnown']} label="Account known (monitored)" />
+        </>
+      ) : null}
+    </Section>
+  );
+}
+
+const isPlainObjectFact = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
 export function SyntheticFactsForm({ catalog, value, onChange }: Props) {
   const ctl: FactControl = {
     catalog,
@@ -742,6 +867,8 @@ export function SyntheticFactsForm({ catalog, value, onChange }: Props) {
           </>
         ) : null}
       </Section>
+
+      <AccountTakeoverFacts ctl={ctl} />
 
       <Section title="Scan" show={has(catalog, 'scan.verdict', 'scan.reason_codes')}>
         <VocabularySelect ctl={ctl} fieldName="scan.verdict" path={['scan', 'verdict']} />

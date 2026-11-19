@@ -112,6 +112,16 @@ export const TOO_BIG = 'REJECT 5.3.4 Message too big';
 /** D10/D11: connector requires TLS and the session is unencrypted. */
 export const MUST_STARTTLS = 'REJECT 5.7.1 Must issue a STARTTLS command first';
 
+/**
+ * Step 8.4 D14 (ADR-0073): an active ATO `send_block` on the connector or the sender's mailbox,
+ * mode `reject` (default: a deferred message would be delivered once the block is lifted).
+ */
+export const ATO_SEND_RESTRICTED = 'REJECT 5.7.1 Sending temporarily restricted by security policy';
+
+/** Step 8.4 D14: the same restriction in mode `defer` (the tenant MTA keeps the message queued). */
+export const ATO_SEND_RESTRICTED_DEFER =
+  'DEFER_IF_PERMIT 4.7.1 Sending temporarily restricted by security policy, try again later';
+
 // --- Socketmap answers (D2, D11) ---------------------------------------------------------------
 
 /** relay_domain: active, inbound-enabled tenant domain. */

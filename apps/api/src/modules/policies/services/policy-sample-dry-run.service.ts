@@ -169,8 +169,16 @@ export class PolicySampleDryRunService {
     if (!scan) return sampleItem(row, messageId, 'not_found', null);
     if (isOpenRound(scan)) return sampleItem(row, messageId, 'not_complete', null);
     try {
-      const evaluation = await this.evaluation.evaluateRound(scope, message, scan, compiled, refs);
-      return sampleItem(row, messageId, 'evaluated', evaluation);
+      // Step 8.4 D23: the sampled round has a stored evaluation; its ATO facts are reused.
+      const { evaluation, atoFactsSource } = await this.evaluation.evaluateRound(
+        scope,
+        message,
+        scan,
+        compiled,
+        refs,
+        { kind: 'stored', atoFacts: row.atoFacts },
+      );
+      return sampleItem(row, messageId, 'evaluated', evaluation, atoFactsSource);
     } catch (error) {
       if (error instanceof CodedHttpException && error.code === POLICY_INPUT_INVALID) {
         return sampleItem(row, messageId, 'input_invalid', null);

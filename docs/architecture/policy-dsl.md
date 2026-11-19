@@ -34,18 +34,19 @@ Leaf = { "field", "op", "value"?, "quantifier"?: "any" | "all" }
 
 Objects are strict: an unknown key anywhere is refused (`unknown_key`). Validation returns **all** violations, sorted by path, each `{ path, code, message }` with a stable code:
 
-| Code                                                                                                                       | Meaning                                                             |
-| -------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| `unknown_key`, `unknown_field`, `unknown_operator`, `unknown_action`                                                       | Not in the schema or catalog                                        |
-| `operator_not_allowed`, `quantifier_not_allowed`                                                                           | The field does not support it                                       |
-| `value_required`, `value_invalid`                                                                                          | Missing or malformed value (type, vocabulary, format)               |
-| `limit_exceeded`                                                                                                           | A bound of §10 was exceeded                                         |
-| `dsl_version_unsupported`                                                                                                  | `dslVersion` is not `policy-dsl/1`                                  |
-| `duplicate_rule_id`, `duplicate_rule_priority`, `duplicate_action`, `multiple_dispositions`                                | Rule structure                                                      |
-| `override_without_disposition`, `direction_not_in_policy`                                                                  | Rule structure                                                      |
-| `exception_negation`, `exception_quantifier`, `identity_unauthenticated`, `ai_field_in_exception`, `ai_field_in_hold_rule` | Safety restrictions (§5, §7)                                        |
-| `regex_invalid`, `glob_invalid`, `cidr_invalid`, `time_zone_invalid`                                                       | Pattern and value checks                                            |
-| `definition_hash_mismatch`                                                                                                 | A stored definition whose SHA-256 no longer matches (snapshot only) |
+| Code                                                                                                                       | Meaning                                                                                    |
+| -------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `unknown_key`, `unknown_field`, `unknown_operator`, `unknown_action`                                                       | Not in the schema or catalog                                                               |
+| `operator_not_allowed`, `quantifier_not_allowed`                                                                           | The field does not support it                                                              |
+| `value_required`, `value_invalid`                                                                                          | Missing or malformed value (type, vocabulary, format)                                      |
+| `limit_exceeded`                                                                                                           | A bound of §10 was exceeded                                                                |
+| `dsl_version_unsupported`                                                                                                  | `dslVersion` is not `policy-dsl/1`                                                         |
+| `duplicate_rule_id`, `duplicate_rule_priority`, `duplicate_action`, `multiple_dispositions`                                | Rule structure                                                                             |
+| `override_without_disposition`, `direction_not_in_policy`                                                                  | Rule structure                                                                             |
+| `exception_negation`, `exception_quantifier`, `identity_unauthenticated`, `ai_field_in_exception`, `ai_field_in_hold_rule` | Safety restrictions (§5, §7)                                                               |
+| `field_strict_only`                                                                                                        | A strict-only field (`ato.*`, step 8.4) in an exception, an ALLOW or an override rule (§5) |
+| `regex_invalid`, `glob_invalid`, `cidr_invalid`, `time_zone_invalid`                                                       | Pattern and value checks                                                                   |
+| `definition_hash_mismatch`                                                                                                 | A stored definition whose SHA-256 no longer matches (snapshot only)                        |
 
 ## 2. Field catalog
 
@@ -131,6 +132,10 @@ Types: `address` and `domain` compare after Unicode NFC and lower-casing, domain
 | `scan.unknown_engines`         | codes   | message     | `contains_any`, `exists`                                         |                       |            | Values: `rspamd`, `attachment`, `url`, `bec`, `dlp`, `sandbox`. Engines with an `unknown` outcome.                                                                                                                                                   |
 | `time.window`                  | time    | message     | `within`                                                         |                       |            | Weekly local-time window in an IANA time zone.                                                                                                                                                                                                       |
 | `time.date_range`              | time    | message     | `within`                                                         |                       |            | Inclusive local date range in an IANA time zone.                                                                                                                                                                                                     |
+| `ato.risk_score`               | int     | message     | `eq`, `gt`, `gte`, `lt`, `lte`, `between`                        |                       |            | 0–100; outbound/internal only; strict-only (§5). ATO risk score of the sending mailbox account at evaluation time; 0 for an unmonitored sender of an ATO-enabled organization; unknown when ATO is not enabled.                                      |
+| `ato.risk_level`               | enum    | message     | `equals`, `in`, `gte`, `lte`                                     |                       |            | Ordered: `low` < `medium` < `high` < `critical`; outbound/internal only; strict-only (§5). ATO risk level of the sending mailbox account (the tenant's bands).                                                                                       |
+| `ato.incident_severity`        | enum    | message     | `equals`, `in`, `gte`, `lte`                                     |                       |            | Ordered: `low` < `medium` < `high` < `critical`; outbound/internal only; strict-only (§5). Severity of the sender's active account takeover incident; unknown without an active incident.                                                            |
+| `ato.incident_status`          | enum    | message     | `equals`, `in`                                                   |                       |            | Values: `open`, `investigating`, `confirmed`, `mitigated`; outbound/internal only; strict-only (§5). Status of the sender's active account takeover incident; unknown without an active incident.                                                    |
 
 <!-- field-table:end -->
 
@@ -187,6 +192,26 @@ List fields take a `quantifier` (`any` by default in `when`; `all` required in e
 - no AI-derived field (`ai_field_in_exception`).
 
 The `when` of a rule whose disposition is `ALLOW` or which has `override: true` follows the same sender identity restriction: a relaxing rule must not be reachable by forging an address. Raw sender fields remain available to rules that tag, warn or hold (forging them can only make mail stricter).
+
+**Strict-only fields (step 8.4, [ADR-0073](adr/0073-ato-enforcement-smtp-and-policy-facts.md)).** The account takeover fields `ato.risk_score`, `ato.risk_level`, `ato.incident_severity` and `ato.incident_status` may only make a decision stricter: they are refused in exceptions (rule `unless`, policy `exceptions`) and in the `when` of `ALLOW` and override rules (`field_strict_only`); they are allowed in rules that tag, warn, alert or hold (`QUARANTINE`, `REQUIRE_APPROVAL`, `REJECT`). A stale or missing score must never release mail, and an attacker must not gain an exception by sending from an account with a low recorded risk. The catalogue marks them with `strictOnly: true` (contexts `exception: false`, `relaxingWhen: false`, `holdRule: true`).
+
+**ATO facts (step 8.4 D23).** For outbound and internal mail of an organization whose `ato_detection` feature is enabled and whose ATO mode is not `off`, the policy-engine reads the sending mailbox account (the organization-authenticated envelope sender) and its active account takeover incident from the ATO tables inside its evaluation transaction and adds the optional block `ato: { version: "ato-policy-facts/1", accountKnown, riskScore, riskLevel, incidentSeverity, incidentStatus }` to `policy-input/1` (`POLICY_INPUT_VERSION` is unchanged: the key is absent for every input without ATO facts, so stored `inputSha256` values stay reproducible). An unmonitored sender is `accountKnown: false`, score 0, level `low`, no incident. The block is stored with the evaluation (`policy_execution_logs.ato_facts`); dry-runs use the stored block when the round has a stored evaluation, else the current account state (`atoFactsSource: "stored" | "current" | "none"`). Without the block every `ato.*` field is unknown (an unknown condition never matches); without an active incident `ato.incident_severity` and `ato.incident_status` are unknown. Synthetic facts of `POST /policies/test` accept `ato: { riskScore, riskLevel, incidentSeverity?, incidentStatus?, accountKnown? (default true) }` (ignored for inbound). Example of a hold rule:
+
+```json
+{
+  "dslVersion": "policy-dsl/1",
+  "direction": "outbound",
+  "priority": 100,
+  "rules": [
+    {
+      "id": "ato-high-risk-hold",
+      "priority": 10,
+      "when": { "field": "ato.risk_level", "op": "gte", "value": "high" },
+      "actions": [{ "type": "QUARANTINE" }]
+    }
+  ]
+}
+```
 
 ## 6. Actions
 

@@ -23,7 +23,7 @@
 #     BEC_LLM_MAX_OUTPUT_TOKENS, BEC_LLM_MAX_EXCERPT_CHARS, BEC_LLM_MIN_SCORE,
 #     BEC_LLM_CONCURRENCY, BEC_LLM_MAX_CALLS_PER_MINUTE, BEC_LLM_BREAKER_*,
 #     BEC_HISTORY_MIN_MESSAGES, BEC_HISTORY_MAX_RECIPIENTS, BEC_HISTORY_SWEEP_INTERVAL_MS,
-#     BEC_TENANT_DATA_CACHE_TTL_MS.
+#     BEC_TENANT_DATA_CACHE_TTL_MS, BEC_OUTBOUND_OBSERVATIONS_ENABLED (step 8.4 D6).
 #   Secrets (External Secrets): BEC_CONTEXT_HMAC_KEY (file) from email-gateway-bec-context-key
 #     (key `hmac-key`, >= 32 random bytes; rotating it restarts history, docs/runbooks/
 #     bec-detection.md); BEC_LLM_API_KEY (optional env, key `api-key`) from email-gateway-bec-llm —
@@ -137,6 +137,8 @@ spec:
             - { name: BEC_HISTORY_MAX_RECIPIENTS, value: '50' }
             - { name: BEC_HISTORY_SWEEP_INTERVAL_MS, value: '3600000' }
             - { name: BEC_TENANT_DATA_CACHE_TTL_MS, value: '30000' }
+            # Step 8.4 D6: outbound observations for organizations with ato_detection.
+            - { name: BEC_OUTBOUND_OBSERVATIONS_ENABLED, value: 'true' }
             # Secrets are mounted as files by External Secrets and read via the <KEY>_FILE convention.
             - { name: DATABASE_URL_FILE, value: /var/run/secrets/gateway/database-url }
             - {

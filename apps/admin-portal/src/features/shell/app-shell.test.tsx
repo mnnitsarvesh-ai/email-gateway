@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   TEST_ORIGIN,
   apiErrorJson,
@@ -20,6 +20,14 @@ import { overrideFormSchema } from './tenant-switcher';
 const page = <p>page content</p>;
 
 describe('AppShell (design P11)', () => {
+  // Step 8.4 D16: the shell polls the ATO attention badge for holders of ato:read.
+  beforeEach(() => {
+    mockApi({
+      AtoOverviewController_attention_v1: () =>
+        okJson({ criticalIncidents: 0, pendingApprovals: 0 }),
+    });
+  });
+
   it('shows the navigation the role permits, the tenant and the page', async () => {
     const { container } = renderWithProviders(<AppShell>{page}</AppShell>, {
       role: 'read_only_user',
@@ -355,5 +363,35 @@ describe('override form contract', () => {
     expect(() =>
       overrideFormSchema.parse({ organizationId: 'x', reason: 'short', durationMinutes: 1 }),
     ).toThrow();
+  });
+
+  it('shows the account takeover attention badge on the ATO dashboard item (step 8.4 D16)', async () => {
+    mockApi({
+      AtoOverviewController_attention_v1: () =>
+        okJson({ criticalIncidents: 2, pendingApprovals: 1 }),
+    });
+    const { container } = renderWithProviders(<AppShell>{page}</AppShell>, {
+      role: 'security_analyst',
+      route: '/ato',
+    });
+    const nav = screen.getByRole('navigation', { name: 'Main' });
+    const link = within(nav).getByRole('link', { name: /ATO dashboard/ });
+    expect(link).toHaveAttribute('aria-current', 'page');
+    await waitFor(() =>
+      expect(link).toHaveAccessibleName('ATO dashboard: 2 critical incidents, 1 pending approval'),
+    );
+    expect(within(nav).getByRole('link', { name: 'Incidents' })).toHaveAttribute(
+      'href',
+      '/incidents',
+    );
+    expect(within(nav).getByRole('link', { name: 'ATO settings' })).toBeInTheDocument();
+    await expectNoAxeViolations(container);
+  });
+
+  it('shows no Account security section without a category permission', () => {
+    renderWithProviders(<AppShell>{page}</AppShell>, { role: 'domain_admin', route: '/dashboard' });
+    const nav = screen.getByRole('navigation', { name: 'Main' });
+    expect(within(nav).queryByText('Account security')).not.toBeInTheDocument();
+    expect(within(nav).queryByRole('link', { name: 'Incidents' })).not.toBeInTheDocument();
   });
 });

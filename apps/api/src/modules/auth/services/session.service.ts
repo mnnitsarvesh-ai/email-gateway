@@ -26,6 +26,11 @@ export type SessionConfig = Pick<
 export interface ClientContext {
   ip: string | null;
   userAgent: string | null;
+  /**
+   * Step 8.4 D5: `portal` when the request came through the trusted forwarder (ADR-0060), else
+   * `api` (absent = `api`). Login telemetry only; never stored in `login_audit_logs`.
+   */
+  channel?: 'portal' | 'api';
 }
 
 /** The token response of login, MFA verification and refresh (§4.1). */

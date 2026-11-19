@@ -243,6 +243,30 @@ export const PERMISSIONS = Object.freeze([
     key: 'ediscovery:manage',
     description: 'Manage eDiscovery cases, custodians, searches, review and exports',
   },
+  // Step 8.4 (docs/plan/steps/24-account-takeover-core.md §3.3, D17, D24): account takeover.
+  // organization_admin and super_admin hold them through TENANT_PERMISSIONS / ALL_PERMISSIONS;
+  // security_analyst gets ato:read, ato:manage and ato:respond, compliance_auditor and
+  // platform_admin ato:read, explicitly. None is in TENANT_READ_PERMISSIONS (read_only_user):
+  // signals and incidents reveal who signs in from where. There is no generic incident:*
+  // permission (ADR-0075): incident access is per category (these keys for account_takeover).
+  {
+    key: 'ato:read',
+    description: 'View account takeover dashboards, accounts, signals and incidents (step 8.4)',
+  },
+  {
+    key: 'ato:manage',
+    description:
+      'Triage account takeover incidents, notes, overrides and trusted contexts (step 8.4)',
+  },
+  {
+    key: 'ato:respond',
+    description: 'Request, approve and roll back account takeover responses (step 8.4)',
+  },
+  {
+    key: 'ato:configure',
+    description:
+      'Configure account takeover detection, scoring, notifications and automation (step 8.4)',
+  },
 ] as const satisfies readonly PermissionDef[]);
 
 /** Every permission key of the catalog. */
@@ -349,6 +373,8 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       ...TENANT_READ_PERMISSIONS,
       'audit:read',
       'threat_intel:read',
+      // Step 8.4: account takeover read access (platform view of tenant ATO data).
+      'ato:read',
     ],
   },
   {
@@ -412,6 +438,9 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'webhook:read',
       'message:reveal',
       'archive:search',
+      'ato:read',
+      'ato:manage',
+      'ato:respond',
     ],
   },
   {
@@ -449,6 +478,7 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'archive:search',
       'archive:retrieve',
       'ediscovery:manage',
+      'ato:read',
     ],
   },
   {
@@ -500,8 +530,20 @@ export const FEATURE_KEYS = [
   'api_access',
   'sso',
   'webhooks',
+  // Step 8.4 (D21, PO1): account takeover detection is off by default in every plan; a platform
+  // operator enables it per organization (`PUT /organizations/{id}/features/ato_detection`).
+  // Plan defaults are a product-owner decision after calibration on real data.
+  'ato_detection',
 ] as const;
 export type FeatureKey = (typeof FEATURE_KEYS)[number];
+
+/**
+ * Feature keys that are never enabled by a plan (step 8.4 D21): `features([...FEATURE_KEYS])`
+ * of the full plans leaves them out, so they stay `false` until an operator override.
+ */
+export const OPERATOR_ENABLED_FEATURE_KEYS: readonly FeatureKey[] = Object.freeze([
+  'ato_detection',
+]);
 
 export interface PlanDef {
   code: string;
@@ -582,7 +624,7 @@ export const PLANS: readonly PlanDef[] = Object.freeze([
       outbound_recipients_per_domain_per_minute: 600,
       outbound_recipients_per_day: 500_000,
     },
-    features: features([...FEATURE_KEYS]),
+    features: features(FEATURE_KEYS.filter((key) => !OPERATOR_ENABLED_FEATURE_KEYS.includes(key))),
   },
   {
     code: 'dedicated',
@@ -601,7 +643,7 @@ export const PLANS: readonly PlanDef[] = Object.freeze([
       outbound_recipients_per_domain_per_minute: 1_500,
       outbound_recipients_per_day: 2_000_000,
     },
-    features: features([...FEATURE_KEYS]),
+    features: features(FEATURE_KEYS.filter((key) => !OPERATOR_ENABLED_FEATURE_KEYS.includes(key))),
   },
 ]);
 

@@ -1539,4 +1539,50 @@ describe('loadApiConfig: email explorer and details (step 7.2 §2 E16)', () => {
       ).toContain('ARCHIVE_ROOT_KEY_PREVIOUS');
     });
   });
+
+  describe('account takeover keys (step 8.4 §4.2)', () => {
+    it('parses the ATO defaults', () => {
+      expect(loadApiConfig(valid)).toMatchObject({
+        API_ATO_OVERVIEW_CACHE_SECONDS: 60,
+        API_ATO_REPORT_MAX_ITEMS: 500,
+        ATO_APPROVAL_TTL_HOURS: 24,
+        ATO_AUTOMATED_RESPONSES_ENABLED: true,
+        ATO_MAX_AUTOMATED_RESPONSES_PER_ORG_PER_HOUR: 10,
+        ATO_MAX_ACTIVE_RESTRICTIONS_PER_ORG: 500,
+      });
+      expect(
+        loadApiConfig({
+          ...valid,
+          API_ATO_OVERVIEW_CACHE_SECONDS: '5',
+          API_ATO_REPORT_MAX_ITEMS: '5000',
+          ATO_APPROVAL_TTL_HOURS: '168',
+          ATO_AUTOMATED_RESPONSES_ENABLED: 'false',
+          ATO_MAX_AUTOMATED_RESPONSES_PER_ORG_PER_HOUR: '0',
+          ATO_MAX_ACTIVE_RESTRICTIONS_PER_ORG: '1',
+        }),
+      ).toMatchObject({
+        API_ATO_OVERVIEW_CACHE_SECONDS: 5,
+        API_ATO_REPORT_MAX_ITEMS: 5000,
+        ATO_APPROVAL_TTL_HOURS: 168,
+        ATO_AUTOMATED_RESPONSES_ENABLED: false,
+        ATO_MAX_AUTOMATED_RESPONSES_PER_ORG_PER_HOUR: 0,
+        ATO_MAX_ACTIVE_RESTRICTIONS_PER_ORG: 1,
+      });
+    });
+
+    it.each([
+      ['API_ATO_OVERVIEW_CACHE_SECONDS', '0'],
+      ['API_ATO_OVERVIEW_CACHE_SECONDS', '3601'],
+      ['API_ATO_REPORT_MAX_ITEMS', '0'],
+      ['API_ATO_REPORT_MAX_ITEMS', '5001'],
+      ['ATO_APPROVAL_TTL_HOURS', '0'],
+      ['ATO_APPROVAL_TTL_HOURS', '169'],
+      ['ATO_AUTOMATED_RESPONSES_ENABLED', 'yes'],
+      ['ATO_MAX_AUTOMATED_RESPONSES_PER_ORG_PER_HOUR', '101'],
+      ['ATO_MAX_ACTIVE_RESTRICTIONS_PER_ORG', '0'],
+      ['ATO_MAX_ACTIVE_RESTRICTIONS_PER_ORG', '501'],
+    ])('refuses %s=%s naming the key', (key, value) => {
+      expect(rejection({ ...valid, [key]: value })).toContain(key);
+    });
+  });
 });

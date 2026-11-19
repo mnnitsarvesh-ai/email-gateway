@@ -11,6 +11,7 @@ import {
   FakeBecLlmProvider,
   loadBecStaticData,
   loadLocalModel,
+  type OutboundObservations,
 } from '@email-gateway/bec';
 import { MetricsService } from '@email-gateway/common';
 import { createLogger } from '@email-gateway/logger';
@@ -110,6 +111,7 @@ class FakeStore implements BecStore {
     trustedSenders: [],
     suppressions: [],
     urlSettingsRow: null,
+    atoDetection: false,
   };
   history = new Map<string, BecHistoryRead>();
   failOn: { read: string; error: Error } | null = null;
@@ -225,7 +227,12 @@ function settings(override: Record<string, unknown> | null = null): BecEffective
 }
 
 function build(
-  options: { budget?: FixedBudget; llm?: CountingProvider | null; textMaxBytes?: number } = {},
+  options: {
+    budget?: FixedBudget;
+    llm?: CountingProvider | null;
+    textMaxBytes?: number;
+    outboundObservations?: boolean;
+  } = {},
 ) {
   const store = new FakeStore();
   const parts = new FakeParts();
@@ -270,6 +277,7 @@ function build(
     lookalike: DEFAULT_LOOKALIKE_PARAMS,
     platformExtraDomains: [],
     urlSettings,
+    outboundObservations: options.outboundObservations ?? false,
     readiness: { localModel: 'bec-lr/1' },
     metrics,
     logger,
@@ -602,6 +610,150 @@ describe('BecEngine (step 4.4 B4)', () => {
         .childRows!.bec!.history,
     ).toEqual([]);
     expect(definite(await run(t.engine, ctx(outbound))).childRows!.bec!.history).toEqual([]);
+  });
+
+  describe('outbound observations (step 8.4 D6)', () => {
+    const outbound = {
+      direction: 'outbound' as const,
+      envelope: {
+        clientIp: '10.0.0.5',
+        clientHelo: null,
+        clientName: null,
+        envelopeFrom: 'finance@acmecorp.test',
+        recipients: ['billing@globexsupplies.test'],
+        queueId: null,
+      },
+    };
+    const OUTBOUND_TEXT =
+      'Please make the payment today and buy gift cards, it is urgent. Keep this confidential. ' +
+      'New bank details: IBAN DE89 3704 0044 0532 0130 00, amount €2,500.';
+    /** Everything but the timing fields and the observations column, as stored JSON. */
+    const comparable = (out: EngineDefinite): string => {
+      const row = { ...out.childRows!.bec!.result } as Record<string, unknown>;
+      delete row.durationMs;
+      delete row.outboundObservations;
+      const result = { ...out.result } as Record<string, unknown>;
+      delete result.durationMs;
+      return JSON.stringify({ result, row, history: out.childRows!.bec!.history }, (_, v) =>
+        typeof v === 'bigint' ? v.toString() : (v as unknown),
+      );
+    };
+    const prepare = (t: ReturnType<typeof build>, ato: boolean) => {
+      t.store.headers = {
+        From: ['Finance <finance@acmecorp.test>'],
+        To: ['billing@globexsupplies.test'],
+      };
+      t.store.subject = 'Updated invoice';
+      t.store.tenant = { ...t.store.tenant, atoDetection: ato };
+      t.store.urls = [
+        {
+          urlSeq: 1,
+          verdict: 'suspicious',
+          reasonCodes: ['url.credential_form', 'url.lookalike_brand'],
+          host: 'login.acrne.test',
+          registrableDomain: 'acrne.test',
+        },
+      ];
+      withText(t.store, t.parts, OUTBOUND_TEXT);
+    };
+
+    it('records counts for ATO-enabled organizations; verdict, codes, signals and score are byte-identical', async () => {
+      const on = build({ outboundObservations: true });
+      prepare(on, true);
+      const off = build({ outboundObservations: false });
+      prepare(off, true);
+      const observed = definite(await run(on.engine, ctx(outbound)));
+      const plain = definite(await run(off.engine, ctx(outbound)));
+      expect(comparable(observed)).toBe(comparable(plain));
+      expect(observed.result).toMatchObject({
+        outcome: 'skipped',
+        reasonCodes: ['bec.not_inbound'],
+        score: null,
+      });
+      expect(plain.childRows!.bec!.result.outboundObservations).toBeUndefined();
+      const obs = observed.childRows!.bec!.result
+        .outboundObservations as unknown as OutboundObservations;
+      expect(obs).toMatchObject({
+        version: 'bec-outbound-obs/1',
+        status: 'complete',
+        reason: null,
+        financialIdentifiers: { iban: 1, amount: 1 },
+        links: {
+          credentialHarvesting: true,
+          credentialForm: true,
+          lookalike: true,
+          malicious: false,
+        },
+      });
+      expect(obs.categories.payment_request).toBeGreaterThanOrEqual(1);
+      expect(obs.categories.gift_card).toBeGreaterThanOrEqual(1);
+      // Counts and booleans only: no text, spans, hosts or addresses.
+      expect(JSON.stringify(obs)).not.toMatch(/gift cards|DE89|acrne|acmecorp|"spans"/);
+      expect(await on.registry.metrics()).toMatch(
+        /scan_bec_outbound_observations_total\{status="complete"[^}]*\} 1/,
+      );
+    });
+
+    it('skips organizations without ato_detection, inbound mail and a disabled platform switch', async () => {
+      const t = build({ outboundObservations: true });
+      prepare(t, false);
+      const out = definite(await run(t.engine, ctx(outbound)));
+      expect(out.childRows!.bec!.result.outboundObservations).toBeUndefined();
+      expect(t.store.calls).not.toContain('parse');
+      const disabled = build({ outboundObservations: false });
+      prepare(disabled, true);
+      definite(await run(disabled.engine, ctx(outbound)));
+      expect(disabled.store.calls).not.toContain('parse');
+      const inbound = build({ outboundObservations: true });
+      inbound.store.tenant = { ...inbound.store.tenant, atoDetection: true };
+      withText(inbound.store, inbound.parts, CEO_TEXT);
+      const inboundOut = definite(
+        await run(inbound.engine, ctx({}, settings({ ai: { llm: 'off', localModel: 'off' } }))),
+      );
+      expect(inboundOut.childRows!.bec!.result.outboundObservations).toBeUndefined();
+    });
+
+    it('a read failure is recorded as unavailable and never fails the attempt', async () => {
+      const missing = build({ outboundObservations: true });
+      prepare(missing, true);
+      missing.parts.objects.clear();
+      const out = definite(await run(missing.engine, ctx(outbound)));
+      expect(out.result.outcome).toBe('skipped');
+      expect(out.childRows!.bec!.result.outboundObservations).toMatchObject({
+        status: 'unavailable',
+        reason: 'part_unavailable',
+      });
+      expect(await missing.registry.metrics()).toMatch(
+        /scan_bec_outbound_observations_total\{status="unavailable"[^}]*\} 1/,
+      );
+
+      const broken = build({ outboundObservations: true });
+      prepare(broken, true);
+      broken.store.failOn = { read: 'parse', error: new Error('db down') };
+      expect(
+        definite(await run(broken.engine, ctx(outbound))).childRows!.bec!.result
+          .outboundObservations,
+      ).toMatchObject({ status: 'unavailable', reason: 'error' });
+
+      const inconsistent = build({ outboundObservations: true });
+      prepare(inconsistent, true);
+      inconsistent.store.failOn = {
+        read: 'message',
+        error: new InconsistentBecReadError('message', 'identity echo'),
+      };
+      expect(
+        definite(await run(inconsistent.engine, ctx(outbound))).childRows!.bec!.result
+          .outboundObservations,
+      ).toMatchObject({ status: 'unavailable', reason: 'read_failed' });
+
+      const noParse = build({ outboundObservations: true });
+      prepare(noParse, true);
+      noParse.store.parse = null;
+      expect(
+        definite(await run(noParse.engine, ctx(outbound))).childRows!.bec!.result
+          .outboundObservations,
+      ).toMatchObject({ status: 'unavailable', reason: 'parse_row_missing' });
+    });
   });
 
   it('inbound history: reads keyed hashes, fires first contact, writes sender + pair updates on round 0', async () => {

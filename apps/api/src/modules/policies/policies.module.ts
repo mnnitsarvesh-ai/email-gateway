@@ -7,6 +7,7 @@ import { PoliciesManagementRepository } from './repositories/policies-management
 import { PolicyExecutionsRepository } from './repositories/policy-executions.repository';
 import { PolicySampleDryRunRateLimitGuard } from './policy-sample-dry-run-rate-limit';
 import { PolicyFactsRepository } from './repositories/policy-facts.repository';
+import { AtoPolicyFactsRepository } from './repositories/ato-policy-facts.repository';
 import { PoliciesService } from './services/policies.service';
 import { PolicyEvaluationService } from './services/policy-evaluation.service';
 import { PolicyHistoryService } from './services/policy-history.service';
@@ -40,6 +41,7 @@ import { PolicyAuditor, PolicyMetrics, PolicyWriter } from './services/policy-wr
     PolicyMetrics,
     PoliciesManagementRepository,
     PolicyFactsRepository,
+    AtoPolicyFactsRepository,
     PolicyExecutionsRepository,
     PoliciesService,
     PolicyEvaluationService,

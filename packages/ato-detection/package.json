@@ -1,0 +1,58 @@
+{
+  "name": "@email-gateway/ato-detection",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/index.d.ts",
+      "default": "./dist/testing/index.js"
+    },
+    "./fake-provider": {
+      "types": "./dist/testing/fake-provider.d.ts",
+      "default": "./dist/testing/fake-provider.js"
+    }
+  },
+  "typesVersions": {
+    "*": {
+      "testing": [
+        "dist/testing/index.d.ts"
+      ],
+      "fake-provider": [
+        "dist/testing/fake-provider.d.ts"
+      ]
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src scripts integration",
+    "test": "vitest run --dir src",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "geoip:synthetic": "tsx scripts/generate-synthetic-geoip.ts"
+  },
+  "dependencies": {
+    "@email-gateway/common": "workspace:*",
+    "@email-gateway/database": "workspace:*",
+    "@email-gateway/event-contracts": "workspace:*",
+    "@email-gateway/logger": "workspace:*",
+    "@email-gateway/security-contracts": "workspace:*",
+    "@email-gateway/security-incidents": "workspace:*",
+    "@maxmind/geoip2-node": "7.1.0",
+    "bowser": "2.15.0",
+    "maxmind": "5.0.8",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "ioredis": "^5.8.0",
+    "tsx": "4.23.15"
+  }
+}

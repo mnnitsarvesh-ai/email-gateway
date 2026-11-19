@@ -82,6 +82,13 @@ describe('policy actions (D4, D11)', () => {
     expect(TOO_BIG_FOR_RECIPIENT).toBe('REJECT 5.3.4 Message too big for recipient');
     expect(TOO_BIG).toBe('REJECT 5.3.4 Message too big');
     expect(MUST_STARTTLS).toBe('REJECT 5.7.1 Must issue a STARTTLS command first');
+    // Step 8.4 D14 (ADR-0073).
+    expect(replies.ATO_SEND_RESTRICTED).toBe(
+      'REJECT 5.7.1 Sending temporarily restricted by security policy',
+    );
+    expect(replies.ATO_SEND_RESTRICTED_DEFER).toBe(
+      'DEFER_IF_PERMIT 4.7.1 Sending temporarily restricted by security policy, try again later',
+    );
   });
 
   it('never answers OK, and every action is a single line Postfix accepts', () => {
@@ -92,7 +99,7 @@ describe('policy actions (D4, D11)', () => {
           !name.startsWith('SOCKETMAP_') && name !== 'TRANSPORT_DESTINATION_NOT_CONFIGURED',
       )
       .map(([, v]) => v as string);
-    expect(actions.length).toBe(12);
+    expect(actions.length).toBe(14);
     for (const action of actions) {
       expect(action).toMatch(/^(DUNNO|REJECT 5\.\d\.\d+ \S.*|DEFER_IF_PERMIT 4\.\d\.\d+ \S.*)$/);
       expect(action).not.toMatch(/[\r\n]/);

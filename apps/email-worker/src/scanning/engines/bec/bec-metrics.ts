@@ -1,4 +1,5 @@
 import type { Counter, Gauge, Histogram, MetricsService } from '@email-gateway/common';
+import { OUTBOUND_OBSERVATION_STATUSES } from '@email-gateway/bec';
 import { BEC_AI_STATUSES, BEC_REASON_CODES, BEC_VERDICTS } from '@email-gateway/security-contracts';
 import { CIRCUIT_STATE_VALUE, type CircuitState } from '../../circuit-breaker';
 
@@ -66,6 +67,7 @@ export class BecMetrics {
   readonly historyUpdates: Counter<'result'>;
   readonly historyRowsDeleted: Counter;
   readonly historySweeperErrors: Counter;
+  readonly outboundObservations: Counter<'status'>;
 
   /** One instance per registry (the engine, the repository hook and the sweeper share it). */
   static for(registry: MetricsService): BecMetrics {
@@ -141,7 +143,14 @@ export class BecMetrics {
       'bec_history_sweeper_errors_total',
       'Database errors of the communication history retention sweeper (it backs off and continues)',
     );
+    this.outboundObservations = metrics.counter(
+      'scan_bec_outbound_observations_total',
+      'Outbound observations of the bec engine for account takeover detection (step 8.4 D6), by status (complete, incomplete, unavailable)',
+      ['status'],
+    );
     // Zero series so the alert rules see them before the first event.
+    for (const status of OUTBOUND_OBSERVATION_STATUSES)
+      this.outboundObservations.inc({ status }, 0);
     for (const result of BUDGET_RESULTS) this.llmBudget.inc({ result }, 0);
     for (const read of BEC_READS) this.inconsistentReads.inc({ read }, 0);
     for (const result of HISTORY_UPDATE_RESULTS) this.historyUpdates.inc({ result }, 0);
@@ -203,5 +212,9 @@ export class BecMetrics {
 
   historyUpdate(result: 'inserted' | 'updated'): void {
     this.historyUpdates.inc({ result });
+  }
+
+  outboundObservation(status: (typeof OUTBOUND_OBSERVATION_STATUSES)[number]): void {
+    this.outboundObservations.inc({ status });
   }
 }

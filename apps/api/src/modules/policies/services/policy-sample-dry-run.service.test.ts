@@ -1,3 +1,4 @@
+import type { AtoPolicyFactsRepository } from '../repositories/ato-policy-facts.repository';
 import { BadRequestException } from '@nestjs/common';
 import {
   buildPolicyInput,
@@ -153,6 +154,7 @@ function setup(settings: Partial<typeof bounds> = {}) {
     bounds,
     facts,
     metrics as unknown as PolicyMetrics,
+    { current: vi.fn(() => Promise.resolve(null)) } as unknown as AtoPolicyFactsRepository,
   );
   // The stored evaluations: what the platform default decided for every round (no tenant policy).
   const platform = compileSnapshot(
@@ -193,6 +195,7 @@ function setup(settings: Partial<typeof bounds> = {}) {
         decisionSource: decided?.decisive.source ?? 'platform_default',
         decisivePolicyPublicId: null,
         decisiveRuleId: null,
+        atoFacts: null,
         policyVersions: [],
         evaluatedAt: new Date(fixture.receivedAt.getTime() + 5_000),
       });

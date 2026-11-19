@@ -5,12 +5,19 @@ import { z } from 'zod';
 export const ALERT_KINDS = ['threat_detected', 'domain_dns_failed', 'webhook_disabled'] as const;
 export type AlertKind = (typeof ALERT_KINDS)[number];
 
-/** Kinds a user may opt out of (N3): the three alerts and the existing admin notifications. */
+/**
+ * Kinds a user may opt out of (N3): the three alerts, the existing admin notifications and the
+ * step 8.4 account takeover e-mails (D16: incident alerts and response failures, approval
+ * requests, daily and weekly digests). Append-only.
+ */
 export const PREFERENCE_KINDS = [
   ...ALERT_KINDS,
   'policy_alert',
   'quarantine_admin_alert',
   'quarantine_approval_requested',
+  'ato_incident',
+  'ato_approval_requested',
+  'ato_digest',
 ] as const;
 export type PreferenceKind = (typeof PREFERENCE_KINDS)[number];
 

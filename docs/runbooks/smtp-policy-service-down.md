@@ -20,6 +20,7 @@ For platform operators. Both Postfix instances depend on smtp-adapter for every 
   | 10026 / 10027               | `450 4.3.5 <rcpt>: Recipient address rejected: Policy service unavailable`                                                                               |
 
 - Policy answering but erroring: `smtp_policy_decisions_total{action="tempfail"}` and `smtp_socketmap_lookups_total{result="temp"}` rising (Redis or MySQL behind the adapter).
+- Only connector submissions tempfail and `smtp_ato_restriction_lookups_total{result="error"}` rises: the ATO restriction lookup fails closed (step 8.4); see [smtp-ato-enforcement.md](smtp-ato-enforcement.md).
 
 ## Impact
 

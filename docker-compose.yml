@@ -494,6 +494,10 @@ services:
       # Archive worker (step 8.1 A26, topology v12): reads email.archive, publishes its own hops only.
       RABBITMQ_ARCHIVE_USER: ${RABBITMQ_ARCHIVE_USER:-eg-archive}
       RABBITMQ_ARCHIVE_PASSWORD: ${RABBITMQ_ARCHIVE_PASSWORD:?append the archiving keys from .env.example}
+      # ATO worker (step 8.4 §4.1, topology v13): reads ato.events, ato.mail and ato.responses,
+      # publishes their own retry and dead-letter hops only.
+      RABBITMQ_ATO_USER: ${RABBITMQ_ATO_USER:-eg-ato}
+      RABBITMQ_ATO_PASSWORD: ${RABBITMQ_ATO_PASSWORD:?append the RabbitMQ keys from .env.example}
     volumes: ['./infrastructure/rabbitmq:/rabbitmq:ro']
     depends_on:
       rabbitmq: { condition: service_healthy }
@@ -1416,6 +1420,15 @@ services:
       SMTP_AUTH_MAX_FAILURES_PER_IP: ${SMTP_AUTH_MAX_FAILURES_PER_IP:-20}
       SMTP_AUTH_FAILURE_WINDOW_SECONDS: ${SMTP_AUTH_FAILURE_WINDOW_SECONDS:-900}
       SMTP_AUTH_VERIFY_CACHE_SECONDS: ${SMTP_AUTH_VERIFY_CACHE_SECONDS:-300}
+      # Account takeover telemetry and enforcement (step 8.4 D4, D14, ADR-0073).
+      SMTP_ATO_TELEMETRY_ENABLED: ${SMTP_ATO_TELEMETRY_ENABLED:-true}
+      SMTP_ATO_TELEMETRY_FLUSH_MS: ${SMTP_ATO_TELEMETRY_FLUSH_MS:-1000}
+      SMTP_ATO_TELEMETRY_BATCH_MAX: ${SMTP_ATO_TELEMETRY_BATCH_MAX:-200}
+      SMTP_ATO_TELEMETRY_BUFFER_MAX: ${SMTP_ATO_TELEMETRY_BUFFER_MAX:-10000}
+      SMTP_ATO_TELEMETRY_MAX_AGE_MS: ${SMTP_ATO_TELEMETRY_MAX_AGE_MS:-60000}
+      SMTP_ATO_USERNAME_HASH_KEY: ${SMTP_ATO_USERNAME_HASH_KEY:?append the SMTP gateway ATO keys from .env.example}
+      SMTP_ATO_RESTRICTION_CACHE_SECONDS: ${SMTP_ATO_RESTRICTION_CACHE_SECONDS:-15}
+      SMTP_ATO_ENFORCEMENT_ENABLED: ${SMTP_ATO_ENFORCEMENT_ENABLED:-true}
       # LMTP ingestion (D7) and bounce notices (D13). S3_* come from the node env anchor.
       LMTP_MAX_CLIENTS: ${LMTP_MAX_CLIENTS:-20}
       INGEST_MAX_MESSAGE_BYTES: ${INGEST_MAX_MESSAGE_BYTES:-53477376}
@@ -1644,6 +1657,8 @@ services:
       BEC_HISTORY_MAX_RECIPIENTS: ${BEC_HISTORY_MAX_RECIPIENTS:-50}
       BEC_HISTORY_SWEEP_INTERVAL_MS: ${BEC_HISTORY_SWEEP_INTERVAL_MS:-3600000}
       BEC_TENANT_DATA_CACHE_TTL_MS: ${BEC_TENANT_DATA_CACHE_TTL_MS:-30000}
+      # Step 8.4 D6: outbound observations for organizations with ato_detection (verdict unchanged).
+      BEC_OUTBOUND_OBSERVATIONS_ENABLED: ${BEC_OUTBOUND_OBSERVATIONS_ENABLED:-true}
       # Data loss prevention (step 4.5, docs/plan/steps/13-dlp.md §5): the dlp engine (scan.dlp,
       # stage 1), the extractor child pool and the evidence sweeper (keys: x-dlp-env). The
       # evidence key-encryption key reaches only this service and the api (D24).
@@ -1867,7 +1882,7 @@ services:
       RECONCILE_MAX_REDRIVES: ${RECONCILE_MAX_REDRIVES:-3}
       RECONCILE_LOOKBACK_HOURS: ${RECONCILE_LOOKBACK_HOURS:-72}
       RECONCILE_BATCH_SIZE: ${RECONCILE_BATCH_SIZE:-1000}
-      RECONCILE_QUEUES: ${RECONCILE_QUEUES:-email.received,email.delivery.pending,scan.spam,scan.attachment,scan.url,scan.bec,scan.dlp,scan.sandbox.submissions,email.policy.evaluate,email.notifications,email.quarantine}
+      RECONCILE_QUEUES: ${RECONCILE_QUEUES:-email.received,email.delivery.pending,scan.spam,scan.attachment,scan.url,scan.bec,scan.dlp,scan.sandbox.submissions,email.policy.evaluate,email.notifications,email.quarantine,ato.responses}
       RECONCILE_START_POSITION: ${RECONCILE_START_POSITION:-oldest}
       # Message lifecycle jobs (step 3.3 L13, L14; docs/plan/steps/08-message-lifecycle.md §5).
       LIFECYCLE_EXPIRY_ENABLED: ${LIFECYCLE_EXPIRY_ENABLED:-true}
@@ -1930,6 +1945,8 @@ services:
       NOTIFICATION_PREFETCH: ${NOTIFICATION_PREFETCH:-4}
       NOTIFICATION_DB_TX_TIMEOUT_MS: ${NOTIFICATION_DB_TX_TIMEOUT_MS:-120000}
       NOTIFICATION_MAX_RECIPIENTS: ${NOTIFICATION_MAX_RECIPIENTS:-50}
+      # Step 8.4 D16: platform SOC mailbox of critical ATO incident alerts (empty = off).
+      NOTIFY_ATO_PLATFORM_SOC_EMAIL: ${NOTIFY_ATO_PLATFORM_SOC_EMAIL:-}
     ports: ['127.0.0.1:${NOTIFICATION_WORKER_HOST_PORT:-3050}:3050']
     healthcheck:
       <<: *node-healthcheck
@@ -2076,6 +2093,77 @@ services:
           'node',
           '-e',
           "fetch('http://127.0.0.1:3060/health/ready').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))",
+        ]
+
+  # Account takeover worker (step 8.4 D3, ADR-0070..0075; docs/deployment/account-takeover.md):
+  # every role in this one container (Kubernetes: ato-detect = detect, ato-respond =
+  # respond,maintenance,provider). Consumes ato.events, the lossy ato.mail and ato.responses as
+  # eg-ato (topology v13); writer-only MySQL, Redis; no S3. GeoIP: the TEST-ONLY synthetic databases
+  # (documentation ranges) are mounted read-only at /opt/ato/geoip with explicit container paths;
+  # production mounts the geoipupdate volume at /var/lib/geoip. ATO stays off for every
+  # organization until a platform operator enables the ato_detection feature.
+  ato-worker:
+    <<: *node-service
+    build:
+      {
+        context: .,
+        dockerfile: infrastructure/docker/node-service.Dockerfile,
+        args: { APP: ato-worker },
+      }
+    image: email-gateway/ato-worker:local
+    environment:
+      <<: *node-env
+      HTTP_PORT: 3085
+      RABBITMQ_ATO_URL: amqp://${RABBITMQ_ATO_USER:-eg-ato}:${RABBITMQ_ATO_PASSWORD:?append the RabbitMQ ATO keys from .env.example}@rabbitmq:5672/${RABBITMQ_VHOST:-email-gateway}
+      ATO_WORKER_ROLES: ${ATO_WORKER_ROLES:-detect,respond,maintenance,provider}
+      ATO_EVENTS_PREFETCH: ${ATO_EVENTS_PREFETCH:-32}
+      ATO_MAIL_PREFETCH: ${ATO_MAIL_PREFETCH:-32}
+      ATO_RESPONSES_PREFETCH: ${ATO_RESPONSES_PREFETCH:-4}
+      ATO_TX_TIMEOUT_MS: ${ATO_TX_TIMEOUT_MS:-120000}
+      ATO_SETTINGS_CACHE_SECONDS: ${ATO_SETTINGS_CACHE_SECONDS:-30}
+      ATO_HMAC_KEY: ${ATO_HMAC_KEY:?append the account takeover keys from .env.example}
+      ATO_GEOIP_CITY_DB_PATH: /opt/ato/geoip/synthetic-city.mmdb
+      ATO_GEOIP_ASN_DB_PATH: /opt/ato/geoip/synthetic-asn.mmdb
+      ATO_GEOIP_ANONYMOUS_DB_PATH: /opt/ato/geoip/synthetic-anonymous.mmdb
+      ATO_GEOIP_RELOAD_SECONDS: ${ATO_GEOIP_RELOAD_SECONDS:-3600}
+      ATO_GEOIP_MAX_AGE_DAYS: ${ATO_GEOIP_MAX_AGE_DAYS:-35}
+      # TEST-ONLY with the synthetic databases (refused unless APP_ENV is local or ci).
+      ATO_GEOIP_ALLOW_DOCUMENTATION_RANGES: ${ATO_GEOIP_ALLOW_DOCUMENTATION_RANGES:-true}
+      ATO_DNSBL_IP_ZONES: ${ATO_DNSBL_IP_ZONES:-}
+      ATO_DNS_SERVERS: ${ATO_DNS_SERVERS:-}
+      ATO_REPUTATION_TIMEOUT_MS: ${ATO_REPUTATION_TIMEOUT_MS:-1500}
+      ATO_IP_CAMPAIGN_MIN_ACCOUNTS: ${ATO_IP_CAMPAIGN_MIN_ACCOUNTS:-10}
+      ATO_IP_CAMPAIGN_WINDOW_MINUTES: ${ATO_IP_CAMPAIGN_WINDOW_MINUTES:-60}
+      ATO_IP_CAMPAIGN_FLAG_HOURS: ${ATO_IP_CAMPAIGN_FLAG_HOURS:-24}
+      ATO_AUTOMATED_RESPONSES_ENABLED: ${ATO_AUTOMATED_RESPONSES_ENABLED:-true}
+      ATO_MAX_AUTOMATED_RESPONSES_PER_ORG_PER_HOUR: ${ATO_MAX_AUTOMATED_RESPONSES_PER_ORG_PER_HOUR:-10}
+      ATO_MAX_ACTIVE_RESTRICTIONS_PER_ORG: ${ATO_MAX_ACTIVE_RESTRICTIONS_PER_ORG:-500}
+      ATO_APPROVAL_TTL_HOURS: ${ATO_APPROVAL_TTL_HOURS:-24}
+      ATO_DECAY_SWEEP_INTERVAL_SECONDS: ${ATO_DECAY_SWEEP_INTERVAL_SECONDS:-900}
+      ATO_BASELINE_REBUILD_HOUR_UTC: ${ATO_BASELINE_REBUILD_HOUR_UTC:-2}
+      ATO_BASELINE_BATCH: ${ATO_BASELINE_BATCH:-500}
+      ATO_MAINTENANCE_INTERVAL_SECONDS: ${ATO_MAINTENANCE_INTERVAL_SECONDS:-60}
+      ATO_RETENTION_INCIDENT_DAYS: ${ATO_RETENTION_INCIDENT_DAYS:-730}
+      ATO_MAIL_CATCHUP_INTERVAL_SECONDS: ${ATO_MAIL_CATCHUP_INTERVAL_SECONDS:-600}
+      ATO_MAIL_CATCHUP_LAG_SECONDS: ${ATO_MAIL_CATCHUP_LAG_SECONDS:-900}
+      ATO_MAIL_CATCHUP_BATCH: ${ATO_MAIL_CATCHUP_BATCH:-1000}
+      ATO_MAIL_CATCHUP_MAX_AGE_HOURS: ${ATO_MAIL_CATCHUP_MAX_AGE_HOURS:-24}
+      ATO_PROVIDER_FAKE_ENABLED: ${ATO_PROVIDER_FAKE_ENABLED:-false}
+      ATO_PROVIDER_POLL_INTERVAL_SECONDS: ${ATO_PROVIDER_POLL_INTERVAL_SECONDS:-60}
+      ATO_PROVIDER_MAX_PAGES_PER_POLL: ${ATO_PROVIDER_MAX_PAGES_PER_POLL:-10}
+      ATO_PROVIDER_MAX_CONSECUTIVE_FAILURES: ${ATO_PROVIDER_MAX_CONSECUTIVE_FAILURES:-10}
+      ATO_DIGEST_ENABLED: ${ATO_DIGEST_ENABLED:-true}
+    volumes:
+      - ./packages/ato-detection/test-fixtures/geoip:/opt/ato/geoip:ro
+    ports: ['127.0.0.1:${ATO_WORKER_HOST_PORT:-3085}:3085']
+    healthcheck:
+      <<: *node-healthcheck
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3085/health/ready').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))",
         ]
 
   # Time-of-click service (step 4.3 U14, ADR-0031): public 3080 (GET /c/:token), admin 3081

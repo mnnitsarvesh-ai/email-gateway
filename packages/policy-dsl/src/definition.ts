@@ -162,6 +162,7 @@ export const POLICY_VIOLATION_CODES = [
   'cidr_invalid',
   'time_zone_invalid',
   'definition_hash_mismatch',
+  'field_strict_only',
 ] as const;
 export type PolicyViolationCode = (typeof POLICY_VIOLATION_CODES)[number];
 
@@ -601,6 +602,14 @@ function checkLeaf(
       mode.kind === 'exception'
         ? 'Exceptions see the sender only through sender.authenticated.*, sender.trusted, sender.department or sender.user'
         : 'ALLOW and override rules see the sender only through authenticated fields',
+    );
+  }
+  if (def.strictOnly && (mode.kind === 'exception' || mode.relaxing)) {
+    // Step 8.4 D23: a stale or missing ATO fact must never release mail.
+    c.add(
+      [...at, 'field'],
+      'field_strict_only',
+      'Account takeover fields may only make a decision stricter: not in exceptions, ALLOW or override rules',
     );
   }
   if (def.aiDerived) {

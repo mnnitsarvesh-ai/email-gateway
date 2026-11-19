@@ -9,7 +9,9 @@ import {
   normalizeForwardedIp,
   type TrustedForwarderOutcome,
   trustedForwarderMiddleware,
+  viaTrustedForwarder,
 } from './trusted-forwarder.middleware';
+import { clientContextOf } from '../modules/auth/client-context.decorator';
 
 const TOKEN = 'f'.repeat(48);
 
@@ -84,6 +86,30 @@ describe('trustedForwarderMiddleware', () => {
     expect(clientIp(req)).toBe('203.0.113.7');
     expect(outcomes).toEqual(['accepted']);
     expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('marks accepted requests as the portal channel (step 8.4 D5), never the others', () => {
+    const accepted = run(TOKEN, {
+      [CLIENT_IP_HEADER]: '203.0.113.7',
+      [FORWARDER_TOKEN_HEADER]: TOKEN,
+    });
+    expect(viaTrustedForwarder(accepted.req)).toBe(true);
+    expect(clientContextOf(accepted.req).channel).toBe('portal');
+    const others: Array<Record<string, string>> = [
+      { [CLIENT_IP_HEADER]: '203.0.113.7', [FORWARDER_TOKEN_HEADER]: `${TOKEN.slice(1)}x` },
+      { [CLIENT_IP_HEADER]: 'evil.example', [FORWARDER_TOKEN_HEADER]: TOKEN },
+      {},
+    ];
+    for (const headers of others) {
+      const { req } = run(TOKEN, headers);
+      expect(viaTrustedForwarder(req)).toBe(false);
+      expect(clientContextOf(req).channel).toBe('api');
+    }
+    const disabled = run(undefined, {
+      [CLIENT_IP_HEADER]: '203.0.113.7',
+      [FORWARDER_TOKEN_HEADER]: TOKEN,
+    });
+    expect(viaTrustedForwarder(disabled.req)).toBe(false);
   });
 
   it('normalizes an IPv4-mapped forwarded address', () => {

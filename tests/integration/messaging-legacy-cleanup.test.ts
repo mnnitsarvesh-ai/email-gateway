@@ -93,15 +93,20 @@ afterAll(async () => {
 }, 60_000);
 
 describe('init.mjs --cleanup-legacy (quorum legacy queues)', () => {
-  it('provisions the v12 topology in the test vhost: email.archive is a lossy work queue, not dormant (step 8.1 A26)', async () => {
+  it('provisions the v13 topology in the test vhost: email.archive and ato.mail are lossy work queues (steps 8.1 A26, 8.4 D3)', async () => {
     const info = await mgmt.get<{ description?: string }>(
       `/vhosts/${encodeURIComponent(vhost.vhost)}`,
     );
     expect(info.description).toBe(`email-gateway topology v${TOPOLOGY_VERSION}`);
-    expect(TOPOLOGY_VERSION).toBe(12);
+    expect(TOPOLOGY_VERSION).toBe(13);
     expect(queueDefinition('email.archive')).toMatchObject({ role: 'work', lossy: true });
     const archive = (await mgmt.queues(vhost.vhost)).find((q) => q.name === 'email.archive');
     expect(archive?.effective_policy_definition).toEqual(policyFor('work-lossy', 'email.archive'));
+    // v13 (step 8.4 D3): ato.mail drops heads at 500 000 without dead-lettering them.
+    expect(
+      (await mgmt.queues(vhost.vhost)).find((q) => q.name === 'ato.mail')
+        ?.effective_policy_definition,
+    ).toEqual({ 'delivery-limit': 20, overflow: 'drop-head', 'max-length': 500_000 });
     // The ADR-0005 queue name of the archive-worker is a legacy object, never a topology queue.
     expect(QUEUE_NAMES).not.toContain('archive-worker.policy-decided');
   });
@@ -142,8 +147,9 @@ describe('init.mjs --cleanup-legacy (quorum legacy queues)', () => {
     expect(exchanges.has('mail.events')).toBe(true); // still bound to the kept queue
     // The topology vhost is untouched (every queue of the current topology, 21 since v11: step 5.2
     // P15 added `email.notifications`, step 6.2 `email.webhooks`; v12 (step 8.1) turned the
-    // dormant `email.archive` into a work queue, the count is unchanged).
-    expect(QUEUE_NAMES).toHaveLength(21);
+    // dormant `email.archive` into a work queue, the count is unchanged; 24 since v13: step 8.4
+    // added `ato.events`, `ato.mail` and `ato.responses`).
+    expect(QUEUE_NAMES).toHaveLength(24);
     expect((await mgmt.queues(vhost.vhost)).length).toBe(QUEUE_NAMES.length);
 
     // Idempotent: a second run changes nothing and still succeeds.

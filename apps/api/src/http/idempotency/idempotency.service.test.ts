@@ -300,6 +300,17 @@ describe('IdempotencyService', () => {
     });
     expect(store.runner.run).toHaveBeenCalledWith(expect.any(Function), { timeoutMs: 1234 });
   });
+
+  it('passes a pinned isolation level to the runner (ATO and incident mutations)', async () => {
+    await service.execute(request, () => Promise.resolve({ statusCode: 200, body: null }), {
+      timeoutMs: 1234,
+      isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+    });
+    expect(store.runner.run).toHaveBeenCalledWith(expect.any(Function), {
+      timeoutMs: 1234,
+      isolationLevel: 'ReadCommitted',
+    });
+  });
 });
 
 describe('isIdempotencyKeyViolation', () => {

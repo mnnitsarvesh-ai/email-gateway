@@ -29,6 +29,27 @@ describe('withTransactionDefaults', () => {
       'client',
     );
   });
+
+  it('pins an isolation level when asked (callers may still pass their own)', async () => {
+    const calls: unknown[] = [];
+    const fake = {
+      $transaction(_arg: unknown, opts?: unknown) {
+        calls.push(opts);
+        return Promise.resolve('ok');
+      },
+    };
+    const wrapped = withTransactionDefaults(fake as unknown as PrismaClient, {
+      timeoutMs: 120_000,
+      maxWaitMs: 30_000,
+      isolationLevel: 'ReadCommitted',
+    });
+    await wrapped.$transaction(() => Promise.resolve());
+    await wrapped.$transaction(() => Promise.resolve(), { isolationLevel: 'Serializable' });
+    expect(calls).toEqual([
+      { timeout: 120_000, maxWait: 30_000, isolationLevel: 'ReadCommitted' },
+      { timeout: 120_000, maxWait: 30_000, isolationLevel: 'Serializable' },
+    ]);
+  });
 });
 
 describe('db helpers', () => {

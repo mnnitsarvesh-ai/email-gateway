@@ -20,7 +20,7 @@ const ok = (type: WebhookEnvelopeType, data: unknown): boolean =>
   dataSchemas[type].safeParse(data).success;
 
 describe('catalogue (§5)', () => {
-  it('lists exactly the ten subscribable types plus the ping', () => {
+  it('lists exactly the fourteen subscribable types plus the ping (6.2 and 8.4 D16)', () => {
     expect([...WEBHOOK_EVENT_TYPES]).toEqual([
       'email.received',
       'email.scanned',
@@ -32,7 +32,12 @@ describe('catalogue (§5)', () => {
       'email.rejected',
       'domain.verified',
       'domain.dns.failed',
+      'security.incident.created',
+      'security.incident.updated',
+      'ato.account.risk_changed',
+      'ato.response.completed',
     ]);
+    expect(WEBHOOK_EVENT_TYPES).toHaveLength(14);
     expect(WEBHOOK_PING_TYPE).toBe('webhook.ping');
     expect(WEBHOOK_ENVELOPE_TYPES).toEqual([...WEBHOOK_EVENT_TYPES, 'webhook.ping']);
     expect(webhookEventTypeSchema.safeParse('webhook.ping').success).toBe(false);

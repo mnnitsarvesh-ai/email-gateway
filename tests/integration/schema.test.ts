@@ -27,7 +27,8 @@ import { stack } from './support/env';
  * (17-quarantine.md §3), the webhook and notification tables and columns of step 6.2
  * (19-webhooks-notifications.md §3), the explorer search keys, driver indexes and saved views
  * of step 7.2 (21-email-explorer-details.md §3.1) and the journaling and archiving tables and
- * columns of step 8.1 (23-journaling-archiving.md §3).
+ * columns of step 8.1 (23-journaling-archiving.md §3) and the security incident and account
+ * takeover tables and columns of step 8.4 (24-account-takeover-core.md §3).
  */
 const prisma = new PrismaClient({ datasourceUrl: stack.databaseUrl() });
 
@@ -80,6 +81,11 @@ const PARTITIONED: Record<string, string> = {
   // Step 8.1 §3: capture intents (operational) and the disposal log (compliance).
   archive_capture_intents: 'received_at',
   archive_disposals: 'requested_at',
+  // Step 8.4 §3.2: ATO sign-in events, daily activity, signals and the score history.
+  ato_account_activity_daily: 'day_start',
+  ato_auth_events: 'occurred_at',
+  ato_risk_signals: 'detected_at',
+  ato_risk_scores: 'computed_at',
 };
 
 /**
@@ -267,22 +273,43 @@ const TENANT_OWNED = [
   'api_idempotency_keys',
   // Step 7.2 §3.1.
   'saved_views',
+  // Step 8.4 §3.1: the security incident model shared by ATO and ATP.
+  'security_incidents',
+  'security_incident_events',
+  'security_incident_links',
+  // Step 8.4 §3.2: account takeover.
+  'ato_settings',
+  'ato_settings_versions',
+  'ato_accounts',
+  'ato_account_identities',
+  'ato_account_baselines',
+  'ato_account_activity_daily',
+  'ato_auth_events',
+  'ato_risk_signals',
+  'ato_risk_scores',
+  'ato_risk_overrides',
+  'ato_trusted_contexts',
+  'ato_incident_details',
+  'ato_response_actions',
+  'ato_response_action_logs',
+  'ato_smtp_restrictions',
+  'ato_provider_integrations',
 ];
 
 const ALL_TABLES = [...NOT_TENANT_OWNED, ...TENANT_OWNED];
 
 describe('MySQL schema', () => {
-  it('has exactly the 132 data-model tables plus _prisma_migrations', async () => {
+  it('has exactly the 151 data-model tables plus _prisma_migrations', async () => {
     const rows = await prisma.$queryRaw<{ name: string }[]>`
       SELECT TABLE_NAME AS name FROM information_schema.TABLES
       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'`;
-    expect(ALL_TABLES).toHaveLength(132);
-    expect(new Set(ALL_TABLES).size).toBe(132);
+    expect(ALL_TABLES).toHaveLength(151);
+    expect(new Set(ALL_TABLES).size).toBe(151);
     expect(rows.map((r) => r.name).sort()).toEqual([...ALL_TABLES, '_prisma_migrations'].sort());
   });
 
-  it('partitions the 35 high-volume tables by RANGE COLUMNS with a pmax partition', async () => {
-    expect(Object.keys(PARTITIONED)).toHaveLength(35);
+  it('partitions the 39 high-volume tables by RANGE COLUMNS with a pmax partition', async () => {
+    expect(Object.keys(PARTITIONED)).toHaveLength(39);
     const rows = await prisma.$queryRaw<
       { tableName: string; method: string; expression: string; partitionName: string }[]
     >`
@@ -3961,6 +3988,8 @@ describe('policy engine schema (step 5.2, docs/plan/steps/16-policy-engine.md §
       duration_us: ['int unsigned', 'NO'],
       evaluated_at: ['datetime(3)', 'NO'],
       created_at: ['datetime(3)', 'NO'],
+      // Step 8.4 D23: the `ato-policy-facts/1` block of the evaluation (NULL when absent).
+      ato_facts: ['json', 'YES'],
     });
     expect(cols.get('policy_execution_logs.override_applied')?.columnDefault).toBe('0');
     expect(cols.get('policy_execution_logs.recipient_split')?.columnDefault).toBe('0');

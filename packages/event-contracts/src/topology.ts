@@ -7,11 +7,12 @@ import {
 } from './registry';
 
 /**
- * RabbitMQ topology v12 as data (step 3.2 §3, ADR-0024; v2: step 3.3 L7, ADR-0025; v3: step 4.1
+ * RabbitMQ topology v13 as data (step 3.2 §3, ADR-0024; v2: step 3.3 L7, ADR-0025; v3: step 4.1
  * S2, ADR-0026; v4: step 4.2 A2, ADR-0028; v5: step 4.3 U2, ADR-0029; v6: step 4.4 B3,
  * ADR-0033; v7: step 4.5 D2, ADR-0036; v8: step 4.6 X11, ADR-0040; v9: step 5.2 P15, ADR-0044;
- * v10: step 5.3 Q27, ADR-0046; v11: step 6.2 §4.3, ADR-0055; v12: step 8.1 A26, ADR-0064):
- * exactly six topic exchanges and twenty-one quorum queues in the vhost `email-gateway`. v2 added the bindings of `mail.message.rescan_requested.v1`
+ * v10: step 5.3 Q27, ADR-0046; v11: step 6.2 §4.3, ADR-0055; v12: step 8.1 A26, ADR-0064; v13:
+ * step 8.4 D3, ADR-0070): exactly six topic exchanges and twenty-four quorum queues in the vhost
+ * `email-gateway`. v2 added the bindings of `mail.message.rescan_requested.v1`
  * (`email.security`) to the five scan queues, and `mail.message.state_changed.v1`
  * (`email.events`) reaches only the `email.analytics` firehose. v3 makes `scan.spam` a work queue
  * (the Rspamd engine of the email-worker scan role, ledger consumer `email-worker.scan.rspamd`)
@@ -118,6 +119,32 @@ import {
  * policy reconciler (A2) replaces the outbox re-drive. The exchanges and the other queues are
  * unchanged.
  *
+ * v13 (step 8.4 D2, D3, §4.1, ADR-0070) adds the account takeover worker's three queues (ledger
+ * consumers of the `ato-worker`; broker user `eg-ato`), each with home exchange `email.security`
+ * and its plain retry binding (`ato.events`, `ato.mail` and `ato.responses` are no dot-prefix of
+ * another queue name):
+ *   - `ato.events` (work, reject-publish at 1 000 000: it carries ATO-only events, so a full queue
+ *     only defers ATO rows in the outbox) binds the four source events on `email.events`
+ *     (`auth.login.recorded.v1`, `auth.account.changed.v1`, `smtp.auth.recorded.v1`,
+ *     `smtp.submission.recorded.v1`); retry `hold` 10 attempts 2 s–60 s within 24 h;
+ *   - `ato.mail` (work, **lossy without dead-lettered heads**: policy `work-lossy` with
+ *     `lossyMaxLength` ATO_MAIL_QUEUE_MAX_LENGTH (500 000) and `lossyDeadLetterHeads: false`, so
+ *     the policy has no dead-letter keys and up to 500 000 dropped heads never flood
+ *     `email.dead-letter`; consumer dead letters are still published by the consumer library)
+ *     binds `mail.message.scanned.v1` on `email.security`: a stopped ato-worker can never make the
+ *     broker nack a mail event (§1.4.5), and the maintenance role's catch-up over
+ *     `email_messages` restores completeness; retry `hold` 5 attempts 2 s–60 s within 6 h;
+ *   - `ato.responses` (work, reject-publish) binds `ato.response.requested.v1` on
+ *     `email.security` (provider response actions of the `respond` role); retry `hold` 10
+ *     attempts 5 s–60 s within 24 h; reconciled (`RECONCILE_QUEUES` gains `ato.responses`).
+ * `email.webhooks` gains four bindings on `email.security` (`security.incident.created.v1`,
+ * `security.incident.updated.v1`, `ato.account.risk.updated.v1`, `ato.response.completed.v1`)
+ * and `email.notifications` one (`ato.notification.requested.v1` on `email.security`).
+ * `ato.restriction.changed.v1` has no queue binding (smtp-adapter outbox tail; analytics
+ * firehose). Counts: six exchanges, twenty-four queues, seventy-two bindings (67 queue + 5
+ * exchange; +14) and twenty-four policies (+3); the other queues' policies are byte-identical to
+ * v12.
+ *
  * `infrastructure/rabbitmq/definitions.json` is
  * generated from `TOPOLOGY` (`pnpm --filter @email-gateway/event-contracts topology:export`) and
  * imported by `infrastructure/rabbitmq/init.mjs`; services never declare, they verify passively.
@@ -126,7 +153,7 @@ import {
  * target, overflow, length limits) is a per-queue policy `eg.<queue>` (Q4), so it changes without
  * re-declaring a queue.
  */
-export const TOPOLOGY_VERSION = 12;
+export const TOPOLOGY_VERSION = 13;
 export const DEFAULT_VHOST = 'email-gateway';
 
 /** The six exchanges of the topology (ADR-0024): all topic, durable, not internal. */
@@ -160,6 +187,9 @@ export const QUEUE_NAMES = [
   'email.archive',
   'email.notifications',
   'email.webhooks',
+  'ato.events',
+  'ato.mail',
+  'ato.responses',
   'email.analytics',
   'email.dead-letter',
 ] as const;
@@ -226,6 +256,17 @@ export interface QueueDefinition {
    * at `LOSSY_WORK_QUEUE_MAX_LENGTH`) instead of rejecting publishes when full.
    */
   lossy?: true;
+  /**
+   * Lossy work queues only (v13): the drop-head bound instead of `LOSSY_WORK_QUEUE_MAX_LENGTH`
+   * (`ato.mail`: ATO_MAIL_QUEUE_MAX_LENGTH).
+   */
+  lossyMaxLength?: number;
+  /**
+   * Lossy work queues only (v13): `false` = heads dropped at the bound are not dead-lettered (the
+   * policy has no dead-letter keys), for a high-volume feed whose completeness comes from a
+   * catch-up over the source of truth (`ato.mail`). Absent = dead-lettered at most once (v5).
+   */
+  lossyDeadLetterHeads?: false;
   /** Present for work and dormant queues (dormant: for their future consumer). */
   retry?: RetryPolicy;
   /** The definition of policy `eg.<queue>` (Q4). */
@@ -254,6 +295,20 @@ const WORK_QUEUE_MAX_LENGTH = 1_000_000;
 const DORMANT_QUEUE_MAX_LENGTH = 10_000;
 /** Length bound of a lossy work queue (v5 `scan.url.inspect`, step 4.3 U2). */
 export const LOSSY_WORK_QUEUE_MAX_LENGTH = 10_000;
+/**
+ * Length bound of `ato.mail` (v13, step 8.4 D3): the lossy feed of outbound and internal
+ * `mail.message.scanned.v1` events for the ato-worker (about 12 hours of outbound mail at 1M
+ * messages a day); the catch-up job processes what was dropped.
+ */
+export const ATO_MAIL_QUEUE_MAX_LENGTH = 500_000;
+
+/** Options of a `work-lossy` policy (v13); ignored by the other kinds. */
+export interface PolicyOptions {
+  /** Drop-head bound (default `LOSSY_WORK_QUEUE_MAX_LENGTH`). */
+  lossyMaxLength?: number;
+  /** `false` omits the dead-letter keys: dropped heads are not dead-lettered. */
+  lossyDeadLetterHeads?: false;
+}
 
 /**
  * `delivery-limit: -1` disables the quorum-queue delivery limit. RabbitMQ 4.x applies a default
@@ -277,8 +332,25 @@ export type PolicyKind = QueueRole | 'work-lossy';
 export const policyKindOf = (queue: Pick<QueueDefinition, 'role' | 'lossy'>): PolicyKind =>
   queue.role === 'work' && queue.lossy === true ? 'work-lossy' : queue.role;
 
-/** The Q4 policy definition of a queue of policy kind `kind`. */
-export function policyFor(kind: PolicyKind, queue: string): Record<string, string | number> {
+/** The policy options a queue definition declares (v13). */
+export const policyOptionsOf = (
+  queue: Pick<QueueDefinition, 'lossyMaxLength' | 'lossyDeadLetterHeads'>,
+): PolicyOptions => ({
+  ...(queue.lossyMaxLength !== undefined ? { lossyMaxLength: queue.lossyMaxLength } : {}),
+  ...(queue.lossyDeadLetterHeads !== undefined
+    ? { lossyDeadLetterHeads: queue.lossyDeadLetterHeads }
+    : {}),
+});
+
+/**
+ * The Q4 policy definition of a queue of policy kind `kind`. `options` (v13) apply to
+ * `work-lossy` only; without them every policy is byte-identical to v12.
+ */
+export function policyFor(
+  kind: PolicyKind,
+  queue: string,
+  options: PolicyOptions = {},
+): Record<string, string | number> {
   switch (kind) {
     case 'work':
       return {
@@ -290,6 +362,18 @@ export function policyFor(kind: PolicyKind, queue: string): Record<string, strin
         'max-length': WORK_QUEUE_MAX_LENGTH,
       };
     case 'work-lossy':
+      // v13 (step 8.4 D3): without dead-lettered heads (`ato.mail`) the policy has no
+      // dead-letter keys at all: up to the bound of dropped heads must not flood
+      // email.dead-letter. Consumer dead letters are published by the consumer library and still
+      // reach email.dead-letter; a message over the delivery limit is dropped (the catch-up job
+      // processes it from the source of truth).
+      if (options.lossyDeadLetterHeads === false) {
+        return {
+          'delivery-limit': 20,
+          overflow: 'drop-head',
+          'max-length': options.lossyMaxLength ?? LOSSY_WORK_QUEUE_MAX_LENGTH,
+        };
+      }
       // Dead-lettered like a work queue (delivery limit, consumer dead letters). RabbitMQ
       // supports at-least-once dead-lettering of quorum queues only with overflow reject-publish
       // (with drop-head it falls back to at-most-once), so the strategy is stated as what the
@@ -301,7 +385,7 @@ export function policyFor(kind: PolicyKind, queue: string): Record<string, strin
         'dead-letter-routing-key': `dead-letter.${queue}`,
         'dead-letter-strategy': 'at-most-once',
         overflow: 'drop-head',
-        'max-length': LOSSY_WORK_QUEUE_MAX_LENGTH,
+        'max-length': options.lossyMaxLength ?? LOSSY_WORK_QUEUE_MAX_LENGTH,
       };
     case 'dormant':
       return {
@@ -828,6 +912,8 @@ export const TOPOLOGY: Topology = {
         eventBinding('email.policy', 'mail.quarantine.notification_requested.v1'),
         // v11 (step 6.2 N2): security alerts requested by the webhook-worker.
         eventBinding('email.policy', 'notification.alert_requested.v1'),
+        // v13 (step 8.4 D16): account takeover alerts, approvals, failures and digests.
+        eventBinding('email.security', 'ato.notification.requested.v1'),
         retryBinding('email.policy', 'email.notifications'),
       ],
       consumer: {
@@ -844,7 +930,7 @@ export const TOPOLOGY: Topology = {
       },
       policy: policyFor('work', 'email.notifications'),
       description:
-        'Policy alert and sender non-delivery notifications (step 5.2), quarantine notifications (step 5.3) and security alerts (step 6.2)',
+        'Policy alert and sender non-delivery notifications (step 5.2), quarantine notifications (step 5.3), security alerts (step 6.2) and account takeover notifications (step 8.4)',
     },
     {
       // v11 (step 6.2 W1, W3, §4.3, ADR-0055): the webhook-worker fanout projects these internal
@@ -863,6 +949,12 @@ export const TOPOLOGY: Topology = {
         eventBinding('email.events', 'mail.message.state_changed.v1'),
         eventBinding('email.events', 'domain.status.changed.v1'),
         eventBinding('email.events', 'domain.dns.records_changed.v1'),
+        // v13 (step 8.4 D16, D24): security incidents (every category) and account takeover
+        // risk changes and completed responses, projected to four public types.
+        eventBinding('email.security', 'security.incident.created.v1'),
+        eventBinding('email.security', 'security.incident.updated.v1'),
+        eventBinding('email.security', 'ato.account.risk.updated.v1'),
+        eventBinding('email.security', 'ato.response.completed.v1'),
         retryBinding('email.events', 'email.webhooks'),
       ],
       consumer: {
@@ -879,7 +971,90 @@ export const TOPOLOGY: Topology = {
       },
       policy: policyFor('work', 'email.webhooks'),
       description:
-        'Internal events projected to public webhook events and security alerts by the webhook-worker (step 6.2)',
+        'Internal events projected to public webhook events and security alerts by the webhook-worker (step 6.2; security incidents and account takeover since step 8.4)',
+    },
+    {
+      // v13 (step 8.4 D2, D3, ADR-0070): the ato-worker's `detect` role consumes the
+      // authentication and account-change events of the api and the SMTP telemetry of the
+      // smtp-adapter. A work queue (reject-publish): it carries ATO-only events, so a full queue
+      // only defers ATO outbox rows. Not reconciled (no-op events leave no ledger row).
+      name: 'ato.events',
+      role: 'work',
+      homeExchange: 'email.security',
+      bindings: [
+        eventBinding('email.events', 'auth.login.recorded.v1'),
+        eventBinding('email.events', 'auth.account.changed.v1'),
+        eventBinding('email.events', 'smtp.auth.recorded.v1'),
+        eventBinding('email.events', 'smtp.submission.recorded.v1'),
+        retryBinding('email.security', 'ato.events'),
+      ],
+      consumer: { kind: 'ledger', ledgerName: 'ato-worker.events', service: 'ato-worker' },
+      retry: {
+        strategy: 'hold',
+        maxAttempts: 10,
+        baseDelayMs: 2 * SECOND,
+        maxDelayMs: MINUTE,
+        maxRetryAgeMs: 24 * HOUR,
+      },
+      policy: policyFor('work', 'ato.events'),
+      description:
+        'Authentication, account-change and SMTP telemetry events for account takeover detection (step 8.4)',
+    },
+    {
+      // v13 (step 8.4 D3, D6): the `detect` role's feed of scanned outbound and internal mail.
+      // Lossy WITHOUT dead-lettered heads: `scanned.v1` is a mail-path event, so a full
+      // reject-publish queue would nack its publish and block the message's aggregate in the
+      // relay (stalling delivery); drop-head bounds the queue at ATO_MAIL_QUEUE_MAX_LENGTH and
+      // the dropped heads are not dead-lettered (500 000 dead letters during an outage would
+      // flood email.dead-letter). The maintenance role's catch-up over email_messages (shared
+      // deterministic keys) restores completeness. Not reconciled (lossy; catch-up instead).
+      name: 'ato.mail',
+      role: 'work',
+      homeExchange: 'email.security',
+      bindings: [
+        eventBinding('email.security', 'mail.message.scanned.v1'),
+        retryBinding('email.security', 'ato.mail'),
+      ],
+      consumer: { kind: 'ledger', ledgerName: 'ato-worker.mail', service: 'ato-worker' },
+      retry: {
+        strategy: 'hold',
+        maxAttempts: 5,
+        baseDelayMs: 2 * SECOND,
+        maxDelayMs: MINUTE,
+        maxRetryAgeMs: 6 * HOUR,
+      },
+      lossy: true,
+      lossyMaxLength: ATO_MAIL_QUEUE_MAX_LENGTH,
+      lossyDeadLetterHeads: false,
+      policy: policyFor('work-lossy', 'ato.mail', {
+        lossyMaxLength: ATO_MAIL_QUEUE_MAX_LENGTH,
+        lossyDeadLetterHeads: false,
+      }),
+      description:
+        'Scanned outbound and internal mail for account takeover detection (step 8.4); lossy by design without dead-lettered heads: the ato-worker catches up from email_messages',
+    },
+    {
+      // v13 (step 8.4 D13, D15): the `respond` role executes provider response actions (and
+      // their rollbacks) outside any database transaction. A work queue (reject-publish): a
+      // requested response is never dropped. Reconciled (RECONCILE_QUEUES gains ato.responses).
+      name: 'ato.responses',
+      role: 'work',
+      homeExchange: 'email.security',
+      bindings: [
+        eventBinding('email.security', 'ato.response.requested.v1'),
+        retryBinding('email.security', 'ato.responses'),
+      ],
+      consumer: { kind: 'ledger', ledgerName: 'ato-worker.respond', service: 'ato-worker' },
+      retry: {
+        strategy: 'hold',
+        maxAttempts: 10,
+        baseDelayMs: 5 * SECOND,
+        maxDelayMs: MINUTE,
+        maxRetryAgeMs: 24 * HOUR,
+      },
+      policy: policyFor('work', 'ato.responses'),
+      description:
+        'Provider response actions of account takeover incidents, executed by the ato-worker (step 8.4)',
     },
     dormant(
       'email.analytics',
@@ -1217,8 +1392,20 @@ export function validateTopology(topology: Topology): string[] {
     if (queue.lossy !== undefined && queue.role !== 'work') {
       add(`${q}: only a work queue can be lossy`);
     }
+    if (
+      (queue.lossyMaxLength !== undefined || queue.lossyDeadLetterHeads !== undefined) &&
+      queue.lossy !== true
+    ) {
+      add(`${q}: lossy options need a lossy work queue`);
+    }
+    if (
+      queue.lossyMaxLength !== undefined &&
+      (!Number.isSafeInteger(queue.lossyMaxLength) || queue.lossyMaxLength < 1)
+    ) {
+      add(`${q}: lossyMaxLength must be a positive integer`);
+    }
     const policyKind = policyKindOf(queue);
-    const expectedPolicy = policyFor(policyKind, q);
+    const expectedPolicy = policyFor(policyKind, q, policyOptionsOf(queue));
     if (JSON.stringify(queue.policy) !== JSON.stringify(expectedPolicy)) {
       add(`${q}: policy differs from the ${policyKind} policy`);
     }
@@ -1266,13 +1453,20 @@ export function validateTopology(topology: Topology): string[] {
     }
 
     if (queue.role === 'work') {
-      const target = routeMessage(
-        String(queue.policy['dead-letter-exchange']),
-        String(queue.policy['dead-letter-routing-key']),
-        topology,
-      );
-      if (target.length !== 1 || target[0] !== 'email.dead-letter') {
-        add(`${q}: broker dead letters must reach exactly email.dead-letter`);
+      // v13: a lossy queue without dead-lettered heads has no dead-letter keys in its policy
+      // (checked against the expected policy above); its consumer dead letters are checked below.
+      const deadLettered = queue.lossyDeadLetterHeads !== false;
+      if (deadLettered) {
+        const target = routeMessage(
+          String(queue.policy['dead-letter-exchange']),
+          String(queue.policy['dead-letter-routing-key']),
+          topology,
+        );
+        if (target.length !== 1 || target[0] !== 'email.dead-letter') {
+          add(`${q}: broker dead letters must reach exactly email.dead-letter`);
+        }
+      } else if ('dead-letter-exchange' in queue.policy) {
+        add(`${q}: a queue without dead-lettered heads has no dead-letter exchange`);
       }
     }
 

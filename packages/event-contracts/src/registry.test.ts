@@ -67,6 +67,19 @@ describe('EVENT_REGISTRY', () => {
       // (aggregate organization).
       'domain.dns.records_changed.v1': ['email.events', 'domain'],
       'notification.alert_requested.v1': ['email.policy', 'organization'],
+      // Step 8.4 D2: the four ATO sources on email.events, the outputs and the shared incident
+      // events on email.security, each with its own aggregate type.
+      'auth.login.recorded.v1': ['email.events', 'login'],
+      'auth.account.changed.v1': ['email.events', 'audit'],
+      'smtp.auth.recorded.v1': ['email.events', 'smtp_telemetry'],
+      'smtp.submission.recorded.v1': ['email.events', 'smtp_telemetry'],
+      'ato.account.risk.updated.v1': ['email.security', 'ato_account'],
+      'security.incident.created.v1': ['email.security', 'security_incident'],
+      'security.incident.updated.v1': ['email.security', 'security_incident'],
+      'ato.response.requested.v1': ['email.security', 'ato_response'],
+      'ato.response.completed.v1': ['email.security', 'ato_response'],
+      'ato.restriction.changed.v1': ['email.security', 'ato_restriction'],
+      'ato.notification.requested.v1': ['email.security', 'ato_notification'],
     });
     for (const definition of Object.values(EVENT_REGISTRY)) {
       expect(EXCHANGE_NAMES).toContain(definition.exchange);

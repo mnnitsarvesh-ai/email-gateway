@@ -5,8 +5,13 @@ import {
   type OnModuleDestroy,
 } from '@nestjs/common';
 import { type Counter, MetricsService, PrismaService } from '@email-gateway/common';
-import { domainRoutingChangedV1, EventTypes } from '@email-gateway/event-contracts';
+import {
+  atoRestrictionChangedV1,
+  domainRoutingChangedV1,
+  EventTypes,
+} from '@email-gateway/event-contracts';
 import type { Logger } from '@email-gateway/logger';
+import { AtoRestrictionService } from '../ato/restriction.service';
 import { ADAPTER_CONFIG, ADAPTER_LOGGER, type SmtpAdapterConfig } from '../config';
 import { DomainPolicyService } from './domain-policy.service';
 
@@ -15,6 +20,7 @@ export const INVALIDATION_BATCH_SIZE = 500;
 
 interface OutboxRow {
   id: bigint;
+  organizationId: bigint;
   eventType: string;
   payload: unknown;
 }
@@ -26,7 +32,10 @@ interface OutboxRow {
  * - `domain.status.changed.v1`: deletes the cached view (`sa:dom:{name}`) plus the socketmap
  *   keys derived from the name;
  * - `domain.routing.changed.v1` (step 2.3 R2, written by the api on every destination change):
- *   deletes the domain's route list and the TLS policy keys of every old and new host.
+ *   deletes the domain's route list and the TLS policy keys of every old and new host;
+ * - `ato.restriction.changed.v1` (step 8.4 D14, written by the ATO store when a restriction is
+ *   applied, lifted or expires): deletes the organization's restriction cache
+ *   (`sa:ato:r:{organizationId}`, the row's own `organization_id`).
  *
  * Starts at `MAX(id)` (the TTL already bounds anything older). Ids committed out of order may
  * be skipped; the TTL is the guarantee, the tail only makes changes visible within seconds.
@@ -46,6 +55,7 @@ export class DomainCacheInvalidator implements OnApplicationBootstrap, OnModuleD
   constructor(
     private readonly prisma: PrismaService,
     private readonly domains: DomainPolicyService,
+    private readonly restrictions: AtoRestrictionService,
     metrics: MetricsService,
     @Inject(ADAPTER_CONFIG)
     private readonly config: Pick<SmtpAdapterConfig, 'SMTP_CACHE_INVALIDATION_POLL_MS'>,
@@ -81,9 +91,11 @@ export class DomainCacheInvalidator implements OnApplicationBootstrap, OnModuleD
       return 0;
     }
     const rows = await this.prisma.$queryRaw<OutboxRow[]>`
-      SELECT id, event_type AS eventType, payload FROM message_outbox
+      SELECT id, organization_id AS organizationId, event_type AS eventType, payload
+      FROM message_outbox
       WHERE id > ${this.lastId}
-        AND event_type IN (${EventTypes.DomainStatusChanged}, ${EventTypes.DomainRoutingChanged})
+        AND event_type IN (${EventTypes.DomainStatusChanged}, ${EventTypes.DomainRoutingChanged},
+                           ${EventTypes.AtoRestrictionChanged})
       ORDER BY id LIMIT ${INVALIDATION_BATCH_SIZE}`;
     let count = 0;
     for (const row of rows) {
@@ -99,6 +111,14 @@ export class DomainCacheInvalidator implements OnApplicationBootstrap, OnModuleD
   /** Invalidates what one outbox row names; false (warned) for an unusable payload. */
   private async apply(row: OutboxRow): Promise<boolean> {
     const payload: unknown = typeof row.payload === 'string' ? safeJson(row.payload) : row.payload;
+    if (row.eventType === EventTypes.AtoRestrictionChanged) {
+      if (!atoRestrictionChangedV1.safeParse(payload).success) {
+        this.logger.warn({ outboxId: String(row.id) }, 'invalid restriction event; skipped');
+        return false;
+      }
+      await this.restrictions.invalidate(BigInt(row.organizationId));
+      return true;
+    }
     if (row.eventType === EventTypes.DomainRoutingChanged) {
       const event = domainRoutingChangedV1.safeParse(payload);
       if (!event.success) {

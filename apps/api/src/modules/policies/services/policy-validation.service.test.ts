@@ -90,6 +90,41 @@ describe('PolicyValidationService.validate (step 7.3 §4.2)', () => {
     expect(ctx.metrics.validations.inc).toHaveBeenCalledWith({ result: 'invalid' });
   });
 
+  it('reports field_strict_only for an ATO field in an ALLOW rule or an exception (step 8.4 D23)', async () => {
+    const ctx = setup();
+    const ato = { field: 'ato.risk_level', op: 'lte', value: 'low' };
+    const definition = {
+      dslVersion: 'policy-dsl/1',
+      direction: 'outbound',
+      priority: 100,
+      rules: [
+        { id: 'allow-low-risk', priority: 10, when: ato, actions: [{ type: 'ALLOW' }] },
+        {
+          id: 'hold',
+          priority: 20,
+          when: { field: 'direction', op: 'equals', value: 'outbound' },
+          unless: [ato],
+          actions: [{ type: 'QUARANTINE' }],
+        },
+      ],
+    };
+    const res = await ctx.service.validate(SCOPE, body(definition));
+    expect(res.valid).toBe(false);
+    expect(res.violations.map((v) => [v.path, v.code])).toEqual([
+      ['rules[0].when.field', 'field_strict_only'],
+      ['rules[1].unless[0].field', 'field_strict_only'],
+    ]);
+    // The same field in a hold rule's when is valid.
+    const hold = await ctx.service.validate(
+      SCOPE,
+      body({
+        ...definition,
+        rules: [{ id: 'hold', priority: 10, when: ato, actions: [{ type: 'QUARANTINE' }] }],
+      }),
+    );
+    expect(hold.valid).toBe(true);
+  });
+
   it('lists at most 100 violations', async () => {
     const ctx = setup();
     const rules = Array.from({ length: 60 }, (_, i) => ({

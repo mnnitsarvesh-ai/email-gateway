@@ -12,6 +12,7 @@ import { useCan } from '@/lib/auth/me';
 import {
   EvaluationResultView,
   FACT_PRESETS,
+  factPresetById,
   SyntheticFactsForm,
   ViolationList,
   type BuilderCatalog,
@@ -35,14 +36,21 @@ export interface TestPanelState {
   readonly responseTarget: TargetId | null;
 }
 
-export function useTestPanelState(defaultTarget: TargetId) {
-  return useState<TestPanelState>(() => ({
-    targetId: defaultTarget,
-    facts: {},
-    presetId: null,
-    response: null,
-    responseTarget: null,
-  }));
+/**
+ * The panel state; `initialPresetId` (an example's id, e.g. from `?testPreset=` on
+ * `/policies/new`) starts the facts from that example. Unknown ids are ignored.
+ */
+export function useTestPanelState(defaultTarget: TargetId, initialPresetId?: string | null) {
+  return useState<TestPanelState>(() => {
+    const preset = factPresetById(initialPresetId);
+    return {
+      targetId: defaultTarget,
+      facts: preset ? preset.facts : {},
+      presetId: preset ? preset.id : null,
+      response: null,
+      responseTarget: null,
+    };
+  });
 }
 
 const isPlainObject = (value: unknown): value is Record<string, unknown> =>

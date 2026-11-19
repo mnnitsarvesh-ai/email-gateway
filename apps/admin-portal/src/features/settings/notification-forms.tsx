@@ -333,6 +333,9 @@ export const KIND_LABELS: Record<Kind, string> = {
   policy_alert: 'Policy alerts',
   quarantine_admin_alert: 'Quarantine administrator alerts',
   quarantine_approval_requested: 'Quarantine release approval requested',
+  ato_incident: 'Account takeover incidents and failed responses',
+  ato_approval_requested: 'Account takeover response approval requested',
+  ato_digest: 'Account takeover daily and weekly digests',
 };
 
 export const preferencesSchema = z
@@ -346,9 +349,12 @@ export const preferencesSchema = z
           'policy_alert',
           'quarantine_admin_alert',
           'quarantine_approval_requested',
+          'ato_incident',
+          'ato_approval_requested',
+          'ato_digest',
         ]),
       )
-      .max(6),
+      .max(9),
     quarantineDigestOptOut: z.boolean(),
   })
   .strict();

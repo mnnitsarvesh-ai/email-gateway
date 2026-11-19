@@ -36,10 +36,32 @@ const daily = (...names: string[]): ExistingPartition[] => [
 const utc = (iso: string) => new Date(iso);
 
 describe('registry', () => {
-  it('lists the 35 partitioned tables (D3, steps 2.3, 3.1, 4.1, 4.2, 4.3, 4.4, 4.5, 5.1, 6.2 and 8.1) with their retention', () => {
-    expect(PARTITION_REGISTRY).toHaveLength(35);
-    expect(new Set(PARTITION_REGISTRY.map((s) => s.table)).size).toBe(35);
+  it('lists the 39 partitioned tables (D3, steps 2.3, 3.1, 4.1, 4.2, 4.3, 4.4, 4.5, 5.1, 6.2, 8.1 and 8.4) with their retention', () => {
+    expect(PARTITION_REGISTRY).toHaveLength(39);
+    expect(new Set(PARTITION_REGISTRY.map((s) => s.table)).size).toBe(39);
     const byTable = Object.fromEntries(PARTITION_REGISTRY.map((s) => [s.table, s]));
+    // Step 8.4 (§3.3, D22): the four account takeover tables, monthly, dropped after retention.
+    expect(
+      Object.fromEntries(
+        [
+          'ato_auth_events',
+          'ato_account_activity_daily',
+          'ato_risk_signals',
+          'ato_risk_scores',
+        ].map((table) => {
+          const spec = byTable[table]!;
+          return [table, [spec.column, spec.granularity, spec.retention, spec.drop, spec.tier]];
+        }),
+      ),
+    ).toEqual({
+      ato_auth_events: ['occurred_at', 'month', 3, true, 'detail'],
+      ato_account_activity_daily: ['day_start', 'month', 6, true, 'core'],
+      ato_risk_signals: ['detected_at', 'month', 13, true, 'core'],
+      ato_risk_scores: ['computed_at', 'month', 13, true, 'core'],
+    });
+    for (const table of ['ato_auth_events', 'ato_risk_signals']) {
+      expect(byTable[table]!.guard, table).toBeUndefined();
+    }
     expect(byTable.email_messages).toMatchObject({
       column: 'received_at',
       granularity: 'month',

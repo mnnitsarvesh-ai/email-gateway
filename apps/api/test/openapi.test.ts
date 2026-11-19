@@ -210,8 +210,9 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     // WP1 (docs/plan/steps/21-email-explorer-details.md §3.3): 274; plus the headers route and the
     // two reveal operations of step 7.2 WP2: 277; plus the validate and sample dry-run routes of
     // step 7.3 (docs/plan/steps/22-policy-builder.md §4.4): 279; step 8.1
-    // (docs/plan/steps/23-journaling-archiving.md §4.4): 320, all under /api/v1.
-    expect(count).toBe(320);
+    // (docs/plan/steps/23-journaling-archiving.md §4.4): 320; step 8.4
+    // (docs/plan/steps/24-account-takeover-core.md §5.1, §5.2): 354, all under /api/v1.
+    expect(count).toBe(354);
   });
 
   it('gives every /api/v1 operation a tag', () => {
@@ -916,8 +917,9 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     }
     // §3.5: 13 transactional since 3.3/5.3, 2 new transactional, 22 legacy (interceptor);
     // step 6.2: 5 transactional webhook routes (create, delete, rotate, replay, range replay);
-    // step 8.1: 15 transactional archive, legal hold and eDiscovery mutations.
-    expect(keyed).toHaveLength(57);
+    // step 8.1: 15 transactional archive, legal hold and eDiscovery mutations; step 8.4: 14
+    // transactional account takeover and incident mutations.
+    expect(keyed).toHaveLength(71);
   });
 
   it('documents the 17 step 6.2 routes with their tags, permissions and the redacted replay (§6.1, ADR-0057)', () => {
@@ -1188,6 +1190,71 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     );
     expect(archiveDocs).toContain('archive_override_forbidden');
     expect(archiveDocs).toContain('X-EG-Index-Lag-Seconds');
+  });
+
+  it('documents the step 8.4 account takeover and incident operations (§5) with their operation ids and no secret-shaped examples', () => {
+    const ops = operations(doc).filter(
+      (op) => op.key.includes(' /api/v1/ato/') || /\/api\/v1\/incidents($|\/)/.test(op.key),
+    );
+    expect(ops).toHaveLength(34);
+    for (const op of ops) {
+      expect(op.tags, op.key).toEqual([op.key.includes('/ato/') ? 'ato' : 'incidents']);
+    }
+    const operationIds = Object.values(doc.paths)
+      .flatMap((p) => Object.values(p as Record<string, { operationId?: string }>))
+      .map((o) => o.operationId)
+      .filter((id): id is string => /^(Ato|Incidents)[A-Za-z]*Controller_/.test(id ?? ''));
+    expect(operationIds.sort()).toEqual(
+      [
+        'AtoOverviewController_overview_v1',
+        'AtoOverviewController_attention_v1',
+        'AtoAccountsController_list_v1',
+        'AtoAccountsController_get_v1',
+        'AtoAccountsController_update_v1',
+        'AtoAccountsController_signals_v1',
+        'AtoAccountsController_authEvents_v1',
+        'AtoAccountsController_activity_v1',
+        'AtoAccountsController_scoreHistory_v1',
+        'AtoAccountsController_setOverride_v1',
+        'AtoAccountsController_clearOverride_v1',
+        'AtoAccountsController_addTrustedContext_v1',
+        'AtoAccountsController_removeTrustedContext_v1',
+        'AtoIncidentEvidenceController_signals_v1',
+        'AtoIncidentEvidenceController_authEvents_v1',
+        'AtoResponsesController_request_v1',
+        'AtoResponsesController_list_v1',
+        'AtoResponsesController_get_v1',
+        'AtoResponsesController_approve_v1',
+        'AtoResponsesController_reject_v1',
+        'AtoResponsesController_cancel_v1',
+        'AtoResponsesController_rollback_v1',
+        'AtoRestrictionsController_list_v1',
+        'AtoSettingsController_get_v1',
+        'AtoSettingsController_update_v1',
+        'AtoRulesController_list_v1',
+        'IncidentsController_list_v1',
+        'IncidentsController_create_v1',
+        'IncidentsController_get_v1',
+        'IncidentsController_update_v1',
+        'IncidentsController_addNote_v1',
+        'IncidentsController_timeline_v1',
+        'IncidentsController_messages_v1',
+        'IncidentsController_report_v1',
+      ].sort(),
+    );
+    const docs = JSON.stringify(
+      Object.entries(doc.paths).filter(
+        ([path]) => path.startsWith('/api/v1/ato/') || /^\/api\/v1\/incidents($|\/)/.test(path),
+      ),
+    );
+    expect(docs).toContain('EXAMPLE');
+    expect(docs).toContain('ato_not_enabled');
+    expect(docs).toContain('incident_not_found');
+    expect(docs).toContain('x-eg-permissions');
+    expect(docs).not.toMatch(/whsec_|AKIA|ghp_|BEGIN [A-Z ]*PRIVATE KEY|egk_|sk-[A-Za-z0-9]{8}/);
+    const tags = new Map((doc.tags ?? []).map((t) => [t.name, t.description ?? '']));
+    expect(tags.get('ato')).toContain('Step 8.4');
+    expect(tags.get('incidents')).toContain('Step 8.4');
   });
 
   it('matches the committed policy catalogue snapshot docs/api/policy-catalog.json (step 7.3 B1)', async () => {

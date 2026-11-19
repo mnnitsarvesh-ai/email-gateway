@@ -1,0 +1,24 @@
+# Optional component (step 8.4 D7, ADR-0074; docs/deployment/account-takeover.md "GeoIP"): the
+# operator's MaxMind databases for the two ATO Deployments. Adds MaxMind's geoipupdate as a native
+# sidecar (an init container with restartPolicy Always) that downloads GeoLite2-City and
+# GeoLite2-ASN (and, with a commercial licence, GeoIP2-Anonymous-IP via GEOIPUPDATE_EDITION_IDS)
+# into a shared emptyDir at /var/lib/geoip, refreshes them every 72 hours, and points the worker at
+# the files (reloaded on modification time). Credentials come from the Secret email-gateway-geoip
+# (keys account-id, license-key), mounted into the sidecar only. Without this component the base
+# runs with geography honestly unavailable.
+#
+# Enable in an overlay:   components: [../../components/ato-geoip]
+#
+# GeoLite2 requires a MaxMind account and acceptance of the GeoLite2 EULA; attribution: "This
+# product includes GeoLite2 data created by MaxMind, available from https://www.maxmind.com".
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - path: geoip-sidecar.yaml
+    target: { kind: Deployment, name: ato-detect }
+  - path: geoip-sidecar.yaml
+    target: { kind: Deployment, name: ato-respond }
+  - path: geoip-egress.yaml
+    target: { kind: NetworkPolicy, name: ato-detect }
+  - path: geoip-egress.yaml
+    target: { kind: NetworkPolicy, name: ato-respond }

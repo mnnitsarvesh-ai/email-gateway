@@ -3,6 +3,7 @@ import { API_CONFIG } from '../../../api-config.token';
 import type { TenantScope } from '../../../auth-contracts/tenant-scope';
 import { messageNotFound } from '../../messages/messages.errors';
 import { evaluationViewOf } from '../domain/evaluation-view';
+import { storedAtoFactsView } from './policy-evaluation.service';
 import type {
   MessagePolicyEvaluations,
   PolicyExecution,
@@ -76,6 +77,7 @@ export function executionOf(row: HistoryRow, messageId: string | null): PolicyEx
     overrideApplied: row.overrideApplied,
     generation: row.policyGeneration.toString(),
     inputSha256: row.inputSha256,
+    atoFacts: storedAtoFactsView(row.atoFacts),
     durationUs: row.durationUs,
     evaluatedAt: row.evaluatedAt.toISOString(),
   };
@@ -135,7 +137,8 @@ export class PolicyHistoryService {
     const data: MessagePolicyEvaluations['data'] = [];
     for (const row of rows) {
       const view = evaluationViewOf(row);
-      if (view !== null) data.push(view); // Malformed stored JSON is left out.
+      // Malformed stored JSON is left out; step 8.4 D23: the ATO facts block next to the view.
+      if (view !== null) data.push({ ...view, atoFacts: storedAtoFactsView(row.atoFacts) });
     }
     return { messageId: message.publicId, data };
   }

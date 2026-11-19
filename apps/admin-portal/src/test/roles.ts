@@ -86,6 +86,10 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'archive:retrieve',
     'archive:manage',
     'ediscovery:manage',
+    'ato:read',
+    'ato:manage',
+    'ato:respond',
+    'ato:configure',
   ],
   platform_admin: [
     'organization:read',
@@ -109,6 +113,7 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'platform:threat_intel_manage',
     'platform:scan_rescan',
     'threat_intel:read',
+    'ato:read',
   ],
   organization_admin: [
     'organization:read',
@@ -168,6 +173,10 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'archive:retrieve',
     'archive:manage',
     'ediscovery:manage',
+    'ato:read',
+    'ato:manage',
+    'ato:respond',
+    'ato:configure',
   ],
   domain_admin: [
     'organization:read',
@@ -215,6 +224,9 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'webhook:read',
     'message:reveal',
     'archive:search',
+    'ato:read',
+    'ato:manage',
+    'ato:respond',
   ],
   quarantine_reviewer: [
     'organization:read',
@@ -252,6 +264,7 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'archive:search',
     'archive:retrieve',
     'ediscovery:manage',
+    'ato:read',
   ],
   read_only_user: [
     'organization:read',

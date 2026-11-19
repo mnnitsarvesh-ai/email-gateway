@@ -1602,7 +1602,7 @@ const isoInstant = z.iso.datetime();
  * A canonical IP literal: dotted-quad IPv4 without leading zeros, or IPv6 as WHATWG serializes
  * it (lower case, compressed, no brackets, no zone).
  */
-function isCanonicalIpLiteral(value: string): boolean {
+export function isCanonicalIpLiteral(value: string): boolean {
   if (/^\d{1,3}(\.\d{1,3}){3}$/.test(value)) {
     return value.split('.').every((o) => o === String(Number(o)) && Number(o) <= 255);
   }
@@ -2148,4 +2148,17 @@ export const EventTypes = {
   QuarantineNotificationRequested: 'mail.quarantine.notification_requested.v1',
   DomainDnsRecordsChanged: 'domain.dns.records_changed.v1',
   NotificationAlertRequested: 'notification.alert_requested.v1',
+  // Step 8.4 (docs/plan/steps/24-account-takeover-core.md D2): account takeover sources and
+  // outputs, and the security incident events shared with ATP (schemas in ato-events.ts).
+  AuthLoginRecorded: 'auth.login.recorded.v1',
+  AuthAccountChanged: 'auth.account.changed.v1',
+  SmtpAuthRecorded: 'smtp.auth.recorded.v1',
+  SmtpSubmissionRecorded: 'smtp.submission.recorded.v1',
+  AtoAccountRiskUpdated: 'ato.account.risk.updated.v1',
+  SecurityIncidentCreated: 'security.incident.created.v1',
+  SecurityIncidentUpdated: 'security.incident.updated.v1',
+  AtoResponseRequested: 'ato.response.requested.v1',
+  AtoResponseCompleted: 'ato.response.completed.v1',
+  AtoRestrictionChanged: 'ato.restriction.changed.v1',
+  AtoNotificationRequested: 'ato.notification.requested.v1',
 } as const;

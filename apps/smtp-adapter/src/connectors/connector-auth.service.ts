@@ -3,6 +3,7 @@ import { PrismaService, RedisService } from '@email-gateway/common';
 import type { Logger } from '@email-gateway/logger';
 import { verify as argon2Verify } from 'argon2';
 import { createHmac, randomBytes } from 'node:crypto';
+import { AtoRestrictionService } from '../ato/restriction.service';
 import { ADAPTER_CONFIG, ADAPTER_LOGGER, type SmtpAdapterConfig } from '../config';
 import { FixedWindowLimiter } from '../rate-limit/fixed-window-limiter';
 import { cacheKeys } from '../tenancy/cache-keys';
@@ -12,10 +13,24 @@ import { cacheKeys } from '../tenancy/cache-keys';
  * - `fail`: wrong or unknown credentials, or connector/organization not active.
  * - `temp`: database, Redis or hash failure (Postfix answers 454 4.7.0).
  * - `throttled`: too many failures from this client IP (also a temporary failure).
+ * - `blocked`: an active ATO `auth_block` covers the connector (or the connector and the client
+ *   IP); answered like wrong credentials, never counted per IP (step 8.4 D14).
+ *
+ * `fail` names the connector when the username resolved to one (telemetry, D4) and why it
+ * failed; the SASL reply is identical for every reason.
  */
+export type AuthFailureReason = 'bad_credentials' | 'connector_inactive' | 'organization_inactive';
+
+export interface ResolvedConnector {
+  id: bigint;
+  organizationId: bigint;
+}
+
 export type AuthResult =
   | { result: 'ok'; connectorId: bigint; organizationId: bigint }
-  | { result: 'fail' | 'temp' | 'throttled' };
+  | { result: 'fail'; reason: AuthFailureReason; connector: ResolvedConnector | null }
+  | { result: 'blocked'; connectorId: bigint; organizationId: bigint }
+  | { result: 'temp' | 'throttled' };
 
 export type ConnectorAuthConfig = Pick<
   SmtpAdapterConfig,
@@ -43,6 +58,12 @@ export const argon2PasswordVerifier: PasswordVerifier = (hash, secret) =>
  * HMAC-SHA256(per-process random key, username NUL secret NUL connector updated_at), so a
  * rotated secret or a changed connector never hits a stale entry and the secret itself is never
  * kept. Failures increment the IP counter. Secrets are never logged.
+ *
+ * Step 8.4 D14 (ADR-0073): after the connector lookup and **before** the secret is verified, an
+ * active ATO `auth_block` of the connector (scope `connector`, or `connector_ip` with the client
+ * IP in its range) answers `blocked`: the reply is the same FAIL as wrong credentials (after the
+ * usual delay), the secret is never verified and the per-IP counter is not incremented, so the
+ * legitimate server's IP is not throttled. A lookup error is a temporary failure (fail closed).
  */
 @Injectable()
 export class ConnectorAuthService {
@@ -58,6 +79,7 @@ export class ConnectorAuthService {
     @Inject(ADAPTER_CONFIG) private readonly config: ConnectorAuthConfig,
     @Inject(ADAPTER_LOGGER) logger: Logger,
     @Inject(PASSWORD_VERIFIER) private readonly verifyPassword: PasswordVerifier,
+    private readonly restrictions: AtoRestrictionService,
   ) {
     this.logger = logger.child({ component: 'connector-auth' });
   }
@@ -91,6 +113,9 @@ export class ConnectorAuthService {
       return { result: 'temp' };
     }
 
+    const resolved: ResolvedConnector | null = connector
+      ? { id: connector.id, organizationId: connector.organizationId }
+      : null;
     if (
       connector &&
       connector.authType === 'sasl' &&
@@ -98,6 +123,31 @@ export class ConnectorAuthService {
       connector.organization.status === 'active' &&
       connector.secretHash
     ) {
+      let blocked: boolean;
+      try {
+        blocked = await this.restrictions.authBlocked(
+          connector.organizationId,
+          connector.id,
+          clientIp,
+        );
+      } catch (err) {
+        this.logger.error(
+          { err, connectorId: String(connector.id) },
+          'ATO restriction lookup failed; temporary failure',
+        );
+        return { result: 'temp' };
+      }
+      if (blocked) {
+        this.logger.info(
+          { connectorId: String(connector.id), organizationId: String(connector.organizationId) },
+          'SASL authentication refused by an ATO authentication block',
+        );
+        return {
+          result: 'blocked',
+          connectorId: connector.id,
+          organizationId: connector.organizationId,
+        };
+      }
       const cacheKey = this.verifyCacheKey(username, secret, connector.updatedAt);
       if (this.isCached(cacheKey)) {
         return {
@@ -127,7 +177,7 @@ export class ConnectorAuthService {
     }
 
     await this.countFailure(failureKey);
-    return { result: 'fail' };
+    return { result: 'fail', reason: failureReason(connector), connector: resolved };
   }
 
   private async countFailure(key: string): Promise<void> {
@@ -162,4 +212,21 @@ export class ConnectorAuthService {
     }
     this.verified.set(key, Date.now() + ttlMs);
   }
+}
+
+/** Why a resolved (or unknown) username failed; the SASL reply does not differ. */
+function failureReason(
+  connector: {
+    authType: string;
+    status: string;
+    secretHash: string | null;
+    organization: { status: string };
+  } | null,
+): AuthFailureReason {
+  if (!connector) return 'bad_credentials';
+  if (connector.organization.status !== 'active') return 'organization_inactive';
+  if (connector.authType !== 'sasl' || connector.status !== 'active' || !connector.secretHash) {
+    return 'connector_inactive';
+  }
+  return 'bad_credentials';
 }

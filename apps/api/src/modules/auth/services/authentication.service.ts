@@ -79,6 +79,7 @@ export class AuthenticationService {
         failureReason: partial.failureReason,
         ipAddress: context.ip,
         userAgent: context.userAgent,
+        channel: context.channel ?? 'api',
       });
 
     // 2. Per-IP failure block.
@@ -181,6 +182,7 @@ export class AuthenticationService {
         failureReason,
         ipAddress: context.ip,
         userAgent: context.userAgent,
+        channel: context.channel ?? 'api',
       });
 
     const challenge = await this.mfa.readChallenge(input.mfaToken);

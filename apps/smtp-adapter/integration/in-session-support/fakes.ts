@@ -21,6 +21,7 @@ export const TEST_ENV: Record<string, string> = {
   S3_BUCKET_MAIL: 'test-mail',
   S3_BUCKET_ARCHIVE: 'test-archive',
   GATEWAY_TRACE_SECRET: 'test-trace-secret-0123456789abcdef0123456789',
+  SMTP_ATO_USERNAME_HASH_KEY: 'test-ato-username-hash-key'.padEnd(40, '0'),
 };
 
 export function testConfig(overrides: Record<string, string> = {}): Readonly<SmtpAdapterConfig> {

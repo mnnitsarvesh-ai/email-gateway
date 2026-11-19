@@ -28,8 +28,8 @@ function refusal(value: unknown): { code: ContentGuardCode; path: string } {
 describe('assertMetadataOnly: valid envelopes pass', () => {
   const types = Object.keys(EVENT_REGISTRY) as RegisteredEventType[];
 
-  it('covers all twenty-six registered event types (two added by step 3.3, one by step 4.2, three by step 4.3, one by step 4.4, one by step 4.5, three by step 4.6, two by step 5.2, two by step 5.3, two by step 6.2)', () => {
-    expect(types).toHaveLength(26);
+  it('covers all thirty-seven registered event types (two added by step 3.3, one by step 4.2, three by step 4.3, one by step 4.4, one by step 4.5, three by step 4.6, two by step 5.2, two by step 5.3, two by step 6.2, eleven by step 8.4)', () => {
+    expect(types).toHaveLength(37);
     expect(types).toContain('mail.message.dlp_incident.v1');
     expect(types).toEqual(
       expect.arrayContaining([
@@ -46,6 +46,18 @@ describe('assertMetadataOnly: valid envelopes pass', () => {
         // Step 6.2 §4.1.
         'domain.dns.records_changed.v1',
         'notification.alert_requested.v1',
+        // Step 8.4 D2 (ATO sources and outputs, shared security incident events).
+        'auth.login.recorded.v1',
+        'auth.account.changed.v1',
+        'smtp.auth.recorded.v1',
+        'smtp.submission.recorded.v1',
+        'ato.account.risk.updated.v1',
+        'security.incident.created.v1',
+        'security.incident.updated.v1',
+        'ato.response.requested.v1',
+        'ato.response.completed.v1',
+        'ato.restriction.changed.v1',
+        'ato.notification.requested.v1',
       ]),
     );
   });

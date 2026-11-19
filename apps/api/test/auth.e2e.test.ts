@@ -225,7 +225,7 @@ describe('auth endpoints (e2e, services stubbed)', () => {
     expect(res.body).toEqual({ mfaRequired: true, mfaToken: 'egt_y', expiresIn: 300 });
     expect(authentication.login).toHaveBeenCalledWith(
       { email: 'alice@example.com', password: 'secret-password', organization: 'acme' },
-      { ip: '198.51.100.77', userAgent: 'e2e-agent' },
+      { ip: '198.51.100.77', userAgent: 'e2e-agent', channel: 'api' },
     );
   });
 

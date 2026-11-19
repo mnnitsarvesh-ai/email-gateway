@@ -55,6 +55,7 @@ export const POLICY_FIELD_GROUP_IDS = [
   'risk',
   'dlp',
   'bec',
+  'account_takeover',
   'scan',
   'time',
 ] as const;
@@ -79,6 +80,7 @@ export const POLICY_FIELD_GROUPS: readonly PolicyFieldGroup[] = Object.freeze(
       ['risk', 'Risk'],
       ['dlp', 'Data loss prevention'],
       ['bec', 'Business email compromise'],
+      ['account_takeover', 'Account takeover'],
       ['scan', 'Scan results'],
       ['time', 'Time'],
     ] as const
@@ -106,7 +108,8 @@ export interface PolicyFieldPresentation {
  * Where a field may be used (P6, P9.8): every field in a `when`; in exceptions (rule `unless`
  * and policy `exceptions`) only authenticated, non-AI fields; in the `when` of ALLOW and override
  * rules only fields that are not raw sender identity; in rules that hold mail (REQUIRE_APPROVAL,
- * QUARANTINE, REJECT) no AI-derived field.
+ * QUARANTINE, REJECT) no AI-derived field. Strict-only fields (step 8.4 D23, `ato.*`) are allowed
+ * only in a `when` that cannot relax a decision (never in exceptions, ALLOW or override rules).
  */
 export interface PolicyFieldContexts {
   readonly when: true;
@@ -116,12 +119,15 @@ export interface PolicyFieldContexts {
 }
 
 export function fieldContexts(
-  def: Pick<PolicyFieldDefinition, 'senderIdentity' | 'aiDerived'>,
+  def: Pick<PolicyFieldDefinition, 'senderIdentity' | 'aiDerived'> &
+    Partial<Pick<PolicyFieldDefinition, 'strictOnly'>>,
 ): PolicyFieldContexts {
+  // Step 8.4 D23: strict-only facts (the `ato.*` fields) never relax a decision.
+  const strict = def.strictOnly === true;
   return Object.freeze({
     when: true as const,
-    exception: def.senderIdentity !== 'raw' && !def.aiDerived,
-    relaxingWhen: def.senderIdentity !== 'raw',
+    exception: def.senderIdentity !== 'raw' && !def.aiDerived && !strict,
+    relaxingWhen: def.senderIdentity !== 'raw' && !strict,
     holdRule: !def.aiDerived,
   });
 }
@@ -184,6 +190,7 @@ function groupOf(name: PolicyFieldName): PolicyFieldGroupId {
   if (name.startsWith('bec.')) return 'bec';
   if (name.startsWith('scan.')) return 'scan';
   if (name.startsWith('time.')) return 'time';
+  if (name.startsWith('ato.')) return 'account_takeover';
   throw new Error(`policy field without a presentation group: ${name}`);
 }
 
@@ -195,6 +202,7 @@ const UNITS: Readonly<Partial<Record<PolicyFieldName, PolicyFieldUnit>>> = Objec
   'attachments.count': 'count',
   'urls.count': 'count',
   'risk.score': 'score',
+  'ato.risk_score': 'score',
 });
 
 /** Plain-English labels (raw sender identity says so; AI-derived facts say so). */
@@ -275,6 +283,10 @@ const LABELS: Readonly<Record<PolicyFieldName, string>> = Object.freeze({
   'scan.unknown_engines': 'Scan engines with unknown results',
   'time.window': 'Weekly time window',
   'time.date_range': 'Date range',
+  'ato.risk_score': 'Sender account takeover risk score',
+  'ato.risk_level': 'Sender account takeover risk level',
+  'ato.incident_severity': 'Active account takeover incident severity',
+  'ato.incident_status': 'Active account takeover incident status',
 });
 
 function presentationOf(name: PolicyFieldName): PolicyFieldPresentation {

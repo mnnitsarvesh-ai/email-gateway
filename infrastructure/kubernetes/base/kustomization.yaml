@@ -47,6 +47,12 @@ resources:
   # version-delete permissions).
   - archive-worker.yaml
   - archive-jobs.yaml
+  # Account takeover detection (step 8.4 D3, docs/deployment/account-takeover.md): the ato-worker
+  # image as ato-detect (detect: ato.events and the lossy ato.mail as eg-ato, 2 replicas, HPA) and
+  # ato-respond (respond,maintenance,provider: ato.responses and the leader-elected jobs). The
+  # MaxMind GeoIP databases are optional: components/ato-geoip adds the geoipupdate sidecar.
+  - ato-detect.yaml
+  - ato-respond.yaml
   # Outbox relay and reconciliation (step 3.2, ADR-0023).
   - event-relay.yaml
   - admin-portal.yaml

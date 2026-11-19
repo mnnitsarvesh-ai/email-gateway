@@ -7,12 +7,13 @@
  * vertical tabs (desktop), a horizontal tab list (tablet) or a labelled select (mobile). Step 7.3:
  * the policy builder (summary beside the editor from 1280 px, above it below; stacked condition
  * rows and full-screen panel sheets below 640 px), the policy pages and the DLP/BEC editor sheets
- * fit every viewport.
+ * fit every viewport. Step 8.4: the account takeover and incident pages fit every viewport.
  */
 import type { Page, TestInfo } from '@playwright/test';
 import { signIn } from '../support/auth';
 import { NAV_GATES } from '../support/contract';
 import { expect, test } from '../support/fixtures';
+import { atoAccount } from '../support/ato';
 import { messageOf } from '../support/messages';
 import { expectNoSeriousA11yViolations } from '../support/pages';
 import { readState } from '../support/state';
@@ -293,4 +294,33 @@ test('DLP and BEC editor sheets fit the viewport', async ({ page }, testInfo) =>
     await sheet.getByRole('button', { name: 'Cancel' }).click();
     await expect(sheet).toHaveCount(0);
   }
+});
+
+test('account takeover and incident pages fit the viewport (step 8.4)', async ({
+  page,
+}, testInfo) => {
+  test.setTimeout(240_000);
+  const layout = layoutOf(testInfo);
+  const victim = atoAccount('victim');
+  await signIn(page, 'alphaAdmin', { next: '/ato' });
+  const offenders: string[] = [];
+  for (const path of [
+    '/ato?range=7d',
+    '/ato/accounts',
+    `/ato/accounts/${victim.accountId}`,
+    `/ato/accounts/${victim.accountId}?tab=sign-ins`,
+    '/ato/responses?tab=all',
+    '/ato/settings?tab=automation',
+    '/incidents',
+    `/incidents/${victim.incidentId}`,
+    `/incidents/${victim.incidentId}/report`,
+  ]) {
+    await page.goto(path);
+    await expect(page.locator('main h1').first()).toBeVisible({ timeout: 20_000 });
+    await expect(page.locator('main [aria-busy="true"]')).toHaveCount(0, { timeout: 20_000 });
+    const overflow = await horizontalOverflow(page);
+    if (overflow > 1) offenders.push(`${path}: ${overflow}px`);
+    await expectNoSeriousA11yViolations(page, `${path} (${layout})`);
+  }
+  expect(offenders, `account takeover pages wider than the ${layout} viewport`).toEqual([]);
 });

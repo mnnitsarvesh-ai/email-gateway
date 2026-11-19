@@ -7,11 +7,15 @@ import {
   silentLogger,
   testConfig,
 } from '../../integration/in-session-support/fakes';
+import type { AtoRestrictionService, RestrictionMode } from '../ato/restriction.service';
+import type { AtoTelemetryRecorder, SubmissionTelemetry } from '../ato/telemetry-recorder';
 import type { ConnectorResolver, ConnectorView } from '../connectors/connector-resolver.service';
 import type { DkimReadinessService } from '../outbound/dkim-readiness.service';
 import type { SuppressionService } from '../outbound/suppression.service';
 import type { FixedWindowLimiter, RateScope } from '../rate-limit/fixed-window-limiter';
 import {
+  ATO_SEND_RESTRICTED,
+  ATO_SEND_RESTRICTED_DEFER,
   DUNNO,
   MUST_STARTTLS,
   NOT_READY_FOR_OUTBOUND,
@@ -97,7 +101,14 @@ function harness(env: Record<string, string> = {}) {
   const dkim = { isReady: vi.fn(() => Promise.resolve(true)) };
   const redis = new FakeRedis();
   const reputation = { record: vi.fn(() => Promise.resolve()) };
+  const restrictions = {
+    sendBlock: vi.fn((_org: bigint, _connector: bigint, _sender: string, _now?: Date) =>
+      Promise.resolve<RestrictionMode | null>(null),
+    ),
+  };
+  const telemetry = { enabled: true, recordSubmission: vi.fn((_: SubmissionTelemetry) => {}) };
   const metrics = newMetrics();
+  const sizes = new InstanceSizeStore(redisService(redis));
   const service = new PolicyDecisionService(
     domains as unknown as DomainPolicyService,
     tenantLimits as unknown as TenantLimitsService,
@@ -106,14 +117,19 @@ function harness(env: Record<string, string> = {}) {
     connectors as unknown as ConnectorResolver,
     suppressions as unknown as SuppressionService,
     dkim as unknown as DkimReadinessService,
-    new InstanceSizeStore(redisService(redis)),
+    sizes,
     reputation as unknown as ReputationRecorder,
     metrics,
     testConfig(env),
     silentLogger(),
+    restrictions as unknown as AtoRestrictionService,
+    telemetry as unknown as AtoTelemetryRecorder,
   );
   return {
     service,
+    restrictions,
+    telemetry,
+    sizes,
     views,
     limits,
     exceeded,
@@ -474,6 +490,120 @@ describe('PolicyDecisionService: submission and relay (D11)', () => {
     expect(
       await h.service.decide(submission({ policy_context: 'relay', client_address: 'unknown' })),
     ).toBe(RELAY_DENIED);
+  });
+});
+
+describe('PolicyDecisionService: ATO sending restriction and telemetry (step 8.4 D14, D4)', () => {
+  it('refuses a restricted submission with the D14 texts (reject and defer) before suppression and rate limits', async () => {
+    const h = harness();
+    h.connectors.bySaslUsername.mockResolvedValue(connector({ id: 12n }));
+    h.restrictions.sendBlock.mockResolvedValueOnce('reject');
+    expect(await h.service.decide(submission({ sender: 'Alice@Tenant.test' }))).toBe(
+      ATO_SEND_RESTRICTED,
+    );
+    expect(h.restrictions.sendBlock).toHaveBeenCalledWith(
+      ORG,
+      12n,
+      'alice@tenant.test',
+      expect.any(Date),
+    );
+    expect(h.suppressions.isSuppressed).not.toHaveBeenCalled();
+    expect(h.limiter.exceeded).not.toHaveBeenCalled();
+    h.restrictions.sendBlock.mockResolvedValueOnce('defer');
+    expect(await h.service.decide(submission({ policy_context: 'relay', sasl_username: '' }))).toBe(
+      RELAY_DENIED,
+    );
+    h.connectors.byClientAddress.mockResolvedValue(connector({ authType: 'source_ip' }));
+    expect(await h.service.decide(submission({ policy_context: 'relay', sasl_username: '' }))).toBe(
+      ATO_SEND_RESTRICTED_DEFER,
+    );
+    expect(ATO_SEND_RESTRICTED).toBe(
+      'REJECT 5.7.1 Sending temporarily restricted by security policy',
+    );
+    expect(ATO_SEND_RESTRICTED_DEFER).toBe(
+      'DEFER_IF_PERMIT 4.7.1 Sending temporarily restricted by security policy, try again later',
+    );
+    expect(
+      await metricValue(h.metrics, 'smtp_policy_decisions_total', {
+        context: 'submission',
+        action: 'reject',
+      }),
+    ).toBe(1);
+  });
+
+  it('checks the restriction only after the sender checks', async () => {
+    const h = harness();
+    h.connectors.bySaslUsername.mockResolvedValue(connector({ organizationId: OTHER_ORG }));
+    expect(await h.service.decide(submission())).toBe(SENDER_NOT_AUTHORIZED);
+    expect(h.restrictions.sendBlock).not.toHaveBeenCalled();
+  });
+
+  it('never consults restrictions for inbound, reinjection or END-OF-MESSAGE', async () => {
+    const h = harness();
+    h.restrictions.sendBlock.mockResolvedValue('reject');
+    expect(await h.service.decide(inbound())).toBe(DUNNO);
+    expect(
+      await h.service.decide({
+        ...base,
+        policy_context: 'reinject-outbound',
+        recipient: 'c@r.example',
+      }),
+    ).toBe(DUNNO);
+    expect(
+      await h.service.decide({
+        ...base,
+        policy_context: 'reinject-inbound',
+        recipient: 'b@tenant.test',
+      }),
+    ).toBe(DUNNO);
+    expect(h.restrictions.sendBlock).not.toHaveBeenCalled();
+  });
+
+  it('tempfails when the restriction lookup fails (fail closed)', async () => {
+    const h = harness();
+    h.connectors.bySaslUsername.mockResolvedValue(connector());
+    h.restrictions.sendBlock.mockRejectedValueOnce(new Error('redis down'));
+    expect(await h.service.decide(submission())).toBe(POLICY_TEMPFAIL);
+  });
+
+  it('records a passed submission at END-OF-MESSAGE after the answer, never a refused one or inbound', async () => {
+    const h = harness();
+    h.connectors.bySaslUsername.mockResolvedValue(connector({ id: 12n }));
+    const eom = {
+      protocol_state: 'END-OF-MESSAGE',
+      queue_id: '4XyZ1abC',
+      helo_name: 'mail.tenant.test',
+      recipient_count: '3',
+      size: '2048',
+      client_address: '203.0.113.9',
+    };
+    expect(await h.service.decide(submission(eom))).toBe(DUNNO);
+    // Recorded on the next turn of the event loop, after the answer was returned.
+    expect(h.telemetry.recordSubmission).not.toHaveBeenCalled();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(h.telemetry.recordSubmission).toHaveBeenCalledTimes(1);
+    expect(h.telemetry.recordSubmission.mock.calls[0]![0]).toMatchObject({
+      organizationId: ORG,
+      context: 'submission',
+      connectorId: 12n,
+      connectorAuthType: 'sasl',
+      queueId: '4XyZ1abC',
+      clientIp: '203.0.113.9',
+      heloName: 'mail.tenant.test',
+      tlsProtocol: 'TLSv1.3',
+      senderAddress: 'alice@tenant.test',
+      recipientCount: 3,
+      sizeBytes: 2048,
+    });
+
+    await h.service.decide(inbound({ protocol_state: 'END-OF-MESSAGE' }));
+    // A limit recorded at RCPT makes END-OF-MESSAGE refuse: not recorded.
+    await h.sizes.recordLimit(base.instance, 10);
+    expect(await h.service.decide(submission(eom))).toBe(TOO_BIG);
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(h.telemetry.recordSubmission).toHaveBeenCalledTimes(1);
   });
 });
 

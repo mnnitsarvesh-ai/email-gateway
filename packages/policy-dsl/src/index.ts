@@ -133,6 +133,8 @@ export {
 export {
   policyInputSchema,
   riskFactsSchema,
+  atoPolicyFactsSchema,
+  atoPolicyFactsOf,
   buildPolicyInput,
   PolicyInputError,
   RISK_FAILURE_STATUSES,
@@ -140,6 +142,8 @@ export {
   AUTH_FAILURE_CODES,
   type PolicyInput,
   type PolicyRoundRows,
+  type AtoPolicyFacts,
+  type AtoPolicyFactsRow,
   type RiskFacts,
   type Addr,
   type EngineFinalState,

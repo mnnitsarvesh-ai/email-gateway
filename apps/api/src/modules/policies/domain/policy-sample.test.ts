@@ -27,6 +27,7 @@ function sampleRow(over: Partial<SampleRoundRow> = {}): SampleRoundRow {
     decisiveRuleId: null,
     policyVersions: [],
     evaluatedAt: new Date('2026-11-15T10:00:05.000Z'),
+    atoFacts: null,
     ...over,
   };
 }

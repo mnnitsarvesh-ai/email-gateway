@@ -25,6 +25,8 @@ const historySelect = {
   inputSha256: true,
   durationUs: true,
   evaluatedAt: true,
+  // Step 8.4 D23: shown with the input hash.
+  atoFacts: true,
 } satisfies Prisma.PolicyExecutionLogSelect;
 export type HistoryRow = Prisma.PolicyExecutionLogGetPayload<{ select: typeof historySelect }>;
 
@@ -61,6 +63,8 @@ const sampleSelect = {
   decisiveRuleId: true,
   policyVersions: true,
   evaluatedAt: true,
+  // Step 8.4 D23: the ATO facts the stored evaluation used (reused by the sample dry-run).
+  atoFacts: true,
 } satisfies Prisma.PolicyExecutionLogSelect;
 export type SampleRoundRow = Prisma.PolicyExecutionLogGetPayload<{ select: typeof sampleSelect }>;
 
@@ -147,10 +151,10 @@ export class PolicyExecutionsRepository {
   forMessage(
     scope: TenantScope,
     message: { id: bigint; receivedAt: Date },
-  ): Promise<EvaluationRow[]> {
+  ): Promise<Array<EvaluationRow & { atoFacts: Prisma.JsonValue }>> {
     return this.db.policyExecutionLog.findMany({
       where: tenantWhere(scope, { messageId: message.id, receivedAt: message.receivedAt }),
-      select: evaluationSelect,
+      select: { ...evaluationSelect, atoFacts: true },
       orderBy: [{ evaluationSeq: 'desc' }, { id: 'desc' }],
       take: MAX_MESSAGE_EVALUATIONS,
     });

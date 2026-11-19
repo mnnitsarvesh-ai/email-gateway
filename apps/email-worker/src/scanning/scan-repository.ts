@@ -785,6 +785,9 @@ export class ScanRepository implements ScanStore {
           ...(result.identity ? { identity: json(result.identity) } : {}),
           ...(result.ai ? { ai: json(result.ai) } : {}),
           ...(result.aiShadow ? { aiShadow: json(result.aiShadow) } : {}),
+          ...(result.outboundObservations
+            ? { outboundObservations: json(result.outboundObservations) }
+            : {}),
           durationMs: Math.max(0, Math.round(result.durationMs)),
         },
       ],

@@ -23,6 +23,7 @@ import { PolicyMetrics } from '../metrics/policy-metrics';
 import { QuarantineMetrics } from '../metrics/quarantine-metrics';
 import { QuarantineSettingsRepository } from '../quarantine/settings.repository';
 import { QuarantineStoreWriter } from '../quarantine/store-writer';
+import { atoFactsRepositoryFor } from './ato-facts.repository';
 import { DirectoryRepository } from './directory.repository';
 import { PolicyEvaluationService } from './evaluation.service';
 import { FactsRepository } from './facts.repository';
@@ -71,6 +72,8 @@ export class EvaluationModule {
           ) =>
             new PolicyEvaluationService({
               facts,
+              // Step 8.4 D23: ATO facts of authenticated outbound/internal senders.
+              atoFacts: atoFactsRepositoryFor(metrics),
               snapshots,
               directory,
               copies,

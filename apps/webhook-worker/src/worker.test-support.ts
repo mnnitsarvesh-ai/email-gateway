@@ -126,6 +126,7 @@ export function fakeFacts(overrides: Partial<FactsSource> = {}): FactsSource & {
       Promise.resolve({ partIndex: 3, sha256: 'c'.repeat(64), detectedType: 'seven_zip' }),
     domain: (_org, id, publicId) =>
       Promise.resolve({ id, publicId, name: 'acme.example', status: 'active' }),
+    atoAccountKind: () => Promise.resolve('mailbox' as const),
   };
   const merged = { ...base, ...overrides };
   return {
@@ -138,6 +139,7 @@ export function fakeFacts(overrides: Partial<FactsSource> = {}): FactsSource & {
     recipientOutcomes: track('recipientOutcomes', merged.recipientOutcomes),
     sandboxSubmission: track('sandboxSubmission', merged.sandboxSubmission),
     domain: track('domain', merged.domain),
+    atoAccountKind: track('atoAccountKind', merged.atoAccountKind),
   };
 }
 

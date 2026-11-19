@@ -395,3 +395,110 @@ test('build, save, validate, test, dry run, publish, version, compare, roll back
     expect.arrayContaining(['policy.disabled', 'policy.enabled']),
   );
 });
+
+/**
+ * Step 8.4 (D23, §10.6): the account takeover fields reach the builder only through the catalogue
+ * (group "Account takeover"); they are offered in a hold rule's conditions, never in exceptions
+ * or in a rule that allows mail (the server refuses that with `field_strict_only`); the test
+ * panel's ATO example runs against the unsaved policy; the policy is published, then disabled
+ * again so the tenant's delivery is unchanged for later specs.
+ */
+test('account takeover fields: hold rule only, strict-only refusal, ATO test example, publish', async ({
+  page,
+}) => {
+  const name = `E2E ATO hold ${Date.now().toString(36)}`;
+  const ruleId = 'ato-hold';
+  await signIn(page, 'alphaAdmin', { next: '/policies/new' });
+  await expect(page.getByRole('heading', { level: 1, name: 'New policy' })).toBeVisible();
+  await page.getByRole('textbox', { name: 'Name (required)' }).fill(name);
+  await chooseOption(page, page.getByRole('combobox', { name: 'Policy direction' }), 'Outbound');
+  await page
+    .getByRole('region', { name: 'Rule rule-1', exact: true })
+    .getByRole('textbox', { name: 'Rule id' })
+    .fill(ruleId);
+  const r = page.getByRole('region', { name: `Rule ${ruleId}`, exact: true });
+  await addAction(page, r, 'Quarantine');
+  const top = r.getByRole('group', {
+    name: `Conditions of rule ${ruleId}, all of the following (AND), level 1`,
+    exact: true,
+  });
+  const c1 = conditionIn(top, 1, 'AND', 1);
+  await pickField(page, c1, 'Sender account takeover risk level');
+  await chooseOperator(page, c1, '≥');
+  await chooseOption(page, c1.getByRole('combobox', { name: 'Value' }), 'High');
+  const article = summary(page).getByRole('article', { name: new RegExp(`^Rule ${ruleId} `) });
+  await expect(article.getByRole('list', { name: `Conditions of rule ${ruleId}` })).toContainText(
+    'Sender account takeover risk level is at least High',
+  );
+
+  // Not offered in an exception.
+  await r.getByRole('button', { name: 'Add exception' }).click();
+  const exception = r.getByRole('group', { name: `Exception 1 of rule ${ruleId}`, exact: true });
+  await exception.getByRole('combobox', { name: /^Field / }).click();
+  await page.getByRole('combobox', { name: 'Search fields' }).fill('account takeover');
+  await expect(page.getByText('No field matches.')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await exception
+    .getByRole('button', { name: /^Remove / })
+    .first()
+    .click();
+  await expect(exception).toHaveCount(0);
+
+  // An ALLOW rule over an ATO field: warned in the builder, refused by the server (the action
+  // menu offers ALLOW only when no holding action is present, so the QUARANTINE goes first).
+  await r.getByRole('button', { name: 'Remove action Quarantine' }).click();
+  await addAction(page, r, 'Allow');
+  await expect(c1).toContainText(/is not accepted in a rule with Allow/);
+  await page.getByRole('button', { name: 'Validate' }).first().click();
+  await expect(main(page)).toContainText(
+    'Account takeover fields may only make a decision stricter',
+  );
+  await r.getByRole('button', { name: 'Remove action Allow' }).click();
+  await addAction(page, r, 'Quarantine');
+  await page.getByRole('button', { name: 'Validate' }).first().click();
+  await expect(main(page).getByText('The server accepts this document.')).toBeVisible();
+  await expectNoSeriousA11yViolations(page, 'builder with an ATO hold rule');
+
+  // Test the unsaved policy with the ATO example: the server holds the message.
+  await page.getByRole('button', { name: 'Test' }).first().click();
+  const testDialog = page.getByRole('dialog', { name: 'Test with synthetic facts' });
+  await chooseOption(
+    page,
+    testDialog.getByRole('combobox', { name: 'Start from an example' }),
+    'Outbound from a high-risk account',
+  );
+  await expect(testDialog.getByRole('group', { name: 'Account takeover' })).toBeVisible();
+  const tests = spy(page, (q) => q.url().endsWith('/bff/api/v1/policies/test'));
+  await testDialog.getByRole('button', { name: 'Run test' }).click();
+  const result = testDialog.getByRole('region', { name: 'Test result (evaluated by the server)' });
+  await expect(result).toBeVisible();
+  const body = JSON.parse(tests.seen[0]!.body ?? '{}') as { facts: { ato?: unknown } };
+  expect(body.facts.ato).toEqual({ riskScore: 65, riskLevel: 'high' });
+  expect(await definitionOf(result, 'Disposition')).toBe('Quarantine');
+  expect(await definitionOf(result, 'Decided by')).toContain(ruleId);
+  await testDialog.getByRole('button', { name: 'Close' }).last().click();
+
+  // Save, publish and activate; then disable the policy again (later specs see no ATO hold).
+  await page.getByRole('button', { name: 'Save draft' }).click();
+  await page.waitForURL(/\/policies\/[0-9a-f-]{36}\/versions\/1$/);
+  const policyId = policyIdOf(page.url());
+  await versionActions(page).getByRole('button', { name: 'Publish…' }).click();
+  await page
+    .getByRole('dialog', { name: 'Publish version 1' })
+    .getByRole('button', { name: 'Publish and activate' })
+    .click();
+  await page
+    .getByRole('dialog', { name: 'Version 1 published' })
+    .getByRole('button', { name: 'Done' })
+    .click();
+  await page.goto(`/policies/${policyId}`);
+  const enabled = page.getByRole('switch', { name: 'Enabled' });
+  await expect(enabled).toBeChecked();
+  await enabled.click();
+  await page
+    .getByRole('alertdialog', { name: 'Disable this policy?' })
+    .or(page.getByRole('dialog', { name: 'Disable this policy?' }))
+    .getByRole('button', { name: 'Disable', exact: true })
+    .click();
+  await expect(enabled).not.toBeChecked();
+});

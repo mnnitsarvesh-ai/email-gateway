@@ -1,0 +1,191 @@
+# ATO detection (step 8.4 D3, docs/plan/steps/24-account-takeover-core.md; ADR-0070..0075;
+# docs/deployment/account-takeover.md): the ato-worker image with ATO_WORKER_ROLES=detect. Consumes
+# ato.events (logins, account changes, SMTP telemetry) and the lossy ato.mail (scanned outbound and
+# internal mail) as the role user eg-ato (topology v13), writes signals, scores and incidents in
+# short writer transactions (ledgers ato-worker.events / ato-worker.mail). Writer-only MySQL, Redis
+# (windows, attribution, the eg:ato:rep:v1 reputation cache; readiness), no object storage and no
+# Internet egress (DNS only, for the optional ATO DNSBL zones). Scales with the queue depth of
+# ato.events / ato.mail (AtoEventsBacklog, AtoMailQueueNearBound). GeoIP: the base runs without
+# the MaxMind databases (geography honestly unavailable); the component
+# components/ato-geoip adds the geoipupdate sidecar and the database paths.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ato-detect
+  labels: { app.kubernetes.io/name: ato-detect, app.kubernetes.io/part-of: email-gateway }
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels: { app.kubernetes.io/name: ato-detect }
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: ato-detect, app.kubernetes.io/part-of: email-gateway }
+    spec:
+      serviceAccountName: ato-detect
+      automountServiceAccountToken: false
+      # Longer than one writer transaction budget (ATO_TX_TIMEOUT_MS) plus the consumer stop grace:
+      # in-flight events finish and are acked, never half-applied (ledgers make redelivery safe).
+      terminationGracePeriodSeconds: 150
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile: { type: RuntimeDefault }
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app.kubernetes.io/name: ato-detect }
+      containers:
+        - name: ato-detect
+          image: email-gateway/ato-worker:latest
+          ports:
+            - { name: http, containerPort: 3085 }
+          envFrom:
+            - configMapRef: { name: email-gateway-config }
+          env:
+            - { name: HTTP_PORT, value: '3085' }
+            - { name: ATO_WORKER_ROLES, value: detect }
+            # Detection tunables (step 8.4 §4.2); the automation switches and caps are platform
+            # decisions documented in docs/deployment/account-takeover.md.
+            - { name: ATO_EVENTS_PREFETCH, value: '32' }
+            - { name: ATO_MAIL_PREFETCH, value: '32' }
+            - { name: ATO_TX_TIMEOUT_MS, value: '120000' }
+            - { name: ATO_SETTINGS_CACHE_SECONDS, value: '30' }
+            - { name: ATO_REPUTATION_TIMEOUT_MS, value: '1500' }
+            # Exploited-host DNSBL zones only (never policy lists such as PBL); empty = T2 unavailable.
+            - { name: ATO_DNSBL_IP_ZONES, value: '' }
+            - { name: ATO_IP_CAMPAIGN_MIN_ACCOUNTS, value: '10' }
+            - { name: ATO_IP_CAMPAIGN_WINDOW_MINUTES, value: '60' }
+            - { name: ATO_IP_CAMPAIGN_FLAG_HOURS, value: '24' }
+            - { name: ATO_AUTOMATED_RESPONSES_ENABLED, value: 'true' }
+            - { name: ATO_MAX_AUTOMATED_RESPONSES_PER_ORG_PER_HOUR, value: '10' }
+            - { name: ATO_MAX_ACTIVE_RESTRICTIONS_PER_ORG, value: '500' }
+            - { name: ATO_APPROVAL_TTL_HOURS, value: '24' }
+            - { name: ATO_GEOIP_MAX_AGE_DAYS, value: '35' }
+            # Secrets are mounted as files by External Secrets and read via the <KEY>_FILE convention.
+            - { name: DATABASE_URL_FILE, value: /var/run/secrets/gateway/database-url }
+            - { name: REDIS_URL_FILE, value: /var/run/secrets/gateway/redis-url }
+            # Role user eg-ato (topology v13): reads ato.events, ato.mail, ato.responses; publishes
+            # its own retry and dead-letter hops only.
+            - { name: RABBITMQ_ATO_URL_FILE, value: /var/run/secrets/gateway/rabbitmq-ato-url }
+            # HMAC key of Redis members and the ato reputation cache namespace: its own Secret,
+            # mounted by the two ATO Deployments only.
+            - { name: ATO_HMAC_KEY_FILE, value: /var/run/secrets/ato-key/hmac-key }
+          volumeMounts:
+            - { name: secrets, mountPath: /var/run/secrets/gateway, readOnly: true }
+            - { name: ato-key, mountPath: /var/run/secrets/ato-key, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+          # Readiness: mysql, redis and rabbitmq (ato.events and ato.mail verified passively).
+          readinessProbe:
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /health/live, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          startupProbe:
+            httpGet: { path: /health/live, port: http }
+            periodSeconds: 5
+            failureThreshold: 24
+          # The MaxMind City database is held in memory (~70 MiB for GeoLite2-City).
+          resources:
+            requests: { cpu: 250m, memory: 384Mi }
+            limits: { memory: 768Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+      volumes:
+        - name: secrets
+          secret: { secretName: email-gateway-secrets }
+        - name: ato-key
+          secret:
+            secretName: email-gateway-ato-key
+            items: [{ key: hmac-key, path: hmac-key }]
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ato-detect
+---
+# Metrics (/metrics) and health on the http port.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ato-detect
+  labels: { app.kubernetes.io/name: ato-detect }
+spec:
+  selector: { app.kubernetes.io/name: ato-detect }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ato-detect
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: ato-detect }
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 65 }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ato-detect
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: ato-detect }
+---
+# Egress: MySQL, Redis, RabbitMQ, DNS (cluster DNS also resolves the DNSBL zones) and OTLP only.
+# No object storage, no Internet egress.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ato-detect
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: ato-detect }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # Metrics and probes only (Prometheus; the kubelet's probes are not subject to policies).
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: observability }
+          podSelector:
+            matchLabels: { app.kubernetes.io/name: prometheus }
+      ports: [{ protocol: TCP, port: 3085 }]
+  egress:
+    # MySQL writer (RDS/Aurora subnet).
+    - to: [{ ipBlock: { cidr: 10.0.32.0/20 } }]
+      ports: [{ protocol: TCP, port: 3306 }]
+    # Redis (ElastiCache subnet).
+    - to: [{ ipBlock: { cidr: 10.0.48.0/20 } }]
+      ports: [{ protocol: TCP, port: 6379 }]
+    # RabbitMQ (Amazon MQ subnet).
+    - to: [{ ipBlock: { cidr: 10.0.64.0/20 } }]
+      ports: [{ protocol: TCP, port: 5671 }, { protocol: TCP, port: 5672 }]
+    # Cluster DNS.
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }]
+    # OTLP traces / logs to the collector.
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: observability }
+      ports: [{ protocol: TCP, port: 4318 }]

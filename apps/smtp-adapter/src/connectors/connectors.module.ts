@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { AtoModule } from '../ato/ato.module';
 import { RateLimitModule } from '../rate-limit/rate-limit.module';
 import { TenancyModule } from '../tenancy/tenancy.module';
 import {
@@ -10,7 +11,7 @@ import { ConnectorResolver } from './connector-resolver.service';
 
 /** Outbound connector resolution and SASL credential checks (step 2.2 D10, D11). */
 @Module({
-  imports: [TenancyModule, RateLimitModule],
+  imports: [TenancyModule, RateLimitModule, AtoModule],
   providers: [
     ConnectorResolver,
     ConnectorAuthService,

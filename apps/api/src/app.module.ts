@@ -18,6 +18,7 @@ import type { ApiConfig } from './config';
 import { MetaModule } from './meta/meta.module';
 import { ApiKeysModule } from './modules/api-keys/api-keys.module';
 import { ArchiveModule } from './modules/archive/archive.module';
+import { AtoModule } from './modules/ato/ato.module';
 import { AttachmentsModule } from './modules/attachments/attachments.module';
 import { AuditLogsModule } from './modules/audit-logs/audit-logs.module';
 import { AuthModule } from './modules/auth/auth.module';
@@ -29,6 +30,7 @@ import { DeliveriesModule } from './modules/deliveries/deliveries.module';
 import { DomainDestinationsModule } from './modules/domain-destinations/domain-destinations.module';
 import { DomainsModule } from './modules/domains/domains.module';
 import { EdiscoveryModule } from './modules/ediscovery/ediscovery.module';
+import { IncidentsModule } from './modules/incidents/incidents.module';
 import { LoginAuditModule } from './modules/login-audit/login-audit.module';
 import { MessagesModule } from './modules/messages/messages.module';
 import { OrganizationsModule } from './modules/organizations/organizations.module';
@@ -130,6 +132,11 @@ export class AppModule {
         // content access, downloads) and legal holds / eDiscovery (cases, searches, exports).
         ArchiveModule,
         EdiscoveryModule,
+        // Step 8.4: security incidents shared by ATO and ATP (generic routes, category registry,
+        // the transactional stores) and account takeover (overview, accounts, evidence,
+        // responses, restrictions, settings, rules).
+        IncidentsModule,
+        AtoModule,
       ],
       providers: [{ provide: API_CONFIG, useValue: config }],
       exports: [API_CONFIG],

@@ -81,8 +81,12 @@ The `permissions` table is seeded from `PERMISSIONS` in `packages/database/src/s
 | `archive:retrieve`             | View the sanitized preview and download original archived messages (audited) (step 8.1)                                                  |
 | `archive:manage`               | Manage archive settings, retention policies, encryption keys, capture issues and disposal of reviewed records (step 8.1)                 |
 | `ediscovery:manage`            | Manage eDiscovery cases, custodians, searches, review and exports (step 8.1)                                                             |
+| `ato:read`                     | View account takeover dashboards, accounts, signals and incidents (step 8.4)                                                             |
+| `ato:manage`                   | Triage account takeover incidents, notes, overrides and trusted contexts (step 8.4)                                                      |
+| `ato:respond`                  | Request, approve and roll back account takeover responses (step 8.4)                                                                     |
+| `ato:configure`                | Configure account takeover detection, scoring, notifications and automation (step 8.4)                                                   |
 
-The catalog has **64** permissions (60 before step 8.1, 59 before step 7.2, 58 before step 6.2, 55 before step 6.1, 49 before step 5.3).
+The catalog has **68** permissions (64 before step 8.4, 60 before step 8.1, 59 before step 7.2, 58 before step 6.2, 55 before step 6.1, 49 before step 5.3). There is no generic `incident:*` permission: access to security incidents is per category (see [Account takeover and security incidents](#account-takeover-and-security-incidents-step-84)).
 
 `GET /permissions` lists `platform:*` keys only to users of the platform organization who are not under an override; customer users and API keys see the tenant permissions only.
 
@@ -171,6 +175,10 @@ Generated from the seed catalog (`SYSTEM_ROLES`); if the catalog changes, regene
 | `archive:retrieve`             |  ✓  |     |  ✓  |     |     |     |  ✓  |     |     |
 | `archive:manage`               |  ✓  |     |  ✓  |     |     |     |     |     |     |
 | `ediscovery:manage`            |  ✓  |     |  ✓  |     |     |     |  ✓  |     |     |
+| `ato:read`                     |  ✓  |  ✓  |  ✓  |     |  ✓  |     |  ✓  |     |     |
+| `ato:manage`                   |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |
+| `ato:respond`                  |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |
+| `ato:configure`                |  ✓  |     |  ✓  |     |     |     |     |     |     |
 
 **Platform roles** are the roles that hold any `platform:*` permission: `super_admin` and `platform_admin` (`PLATFORM_ROLE_KEYS`). They can be assigned only to users of the platform organization (`kind = platform`); assigning one in a customer organization is `400`. Customer organizations never see platform roles in `GET /roles` or `GET /roles/{key}` (`404`). Domain Admin is organization-wide; per-domain scoping of roles is out of scope for now.
 
@@ -475,6 +483,29 @@ Design [23-journaling-archiving.md](../plan/steps/23-journaling-archiving.md) A2
 **Hold confidentiality.** Who is under hold reveals litigation: hold lists and details need `archive:legal_hold` or `ediscovery:manage`; the archive detail lists the holds matching a record only for those holders (`holds: null` otherwise); the `holdId` search filter needs them too. Hold audit rows name criteria and counts, never custodian addresses.
 
 **Entitlement.** Mutations other than settings, keys, holds and disposal need the plan feature `archiving` (`403 archiving_not_enabled`); enabling archiving needs it too.
+
+## Account takeover and security incidents (step 8.4)
+
+Design [24-account-takeover-core.md](../plan/steps/24-account-takeover-core.md) §3.3, §5, D13, D17, D24; [ADR-0072](../architecture/adr/0072-ato-response-safeguards-and-approvals.md), [ADR-0075](../architecture/adr/0075-security-incident-model-shared-ato-atp.md). Permissions: `ato:read` (overview, attention badge, accounts, signals, auth events, activity, score history, incident evidence, responses, restrictions, settings, rules; ATO incidents through the generic incident routes), `ato:manage` (account protection, overrides, trusted contexts; triage of ATO incidents: create, update, notes), `ato:respond` (request, approve, reject, cancel and roll back responses), `ato:configure` (ATO settings). None is part of `TENANT_READ_PERMISSIONS`. ATO is off for every plan: while the plan feature `ato_detection` is off for the organization, ATO reads answer empty data (details `404`) and ATO mutations `403 ato_not_enabled`.
+
+| Route                                                                                                                                                                                                                                       | Permission                                           | Principal  | API keys |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- | ---------- | -------- |
+| `GET /ato/overview`, `/attention`, `/accounts[/{id}]`, `…/signals`, `…/auth-events`, `…/activity`, `…/score-history`, `/incidents/{id}/signals`, `/incidents/{id}/auth-events`, `/responses[/{id}]`, `/restrictions`, `/settings`, `/rules` | `ato:read`                                           | —          | yes      |
+| `PATCH /ato/accounts/{id}`, `PUT …/override`, `POST …/override/clear`, `POST`/`DELETE …/trusted-contexts`                                                                                                                                   | `ato:manage`                                         | users      | no       |
+| `POST /ato/incidents/{id}/responses`, `POST /ato/responses/{id}/cancel`                                                                                                                                                                     | `ato:respond`                                        | —          | yes      |
+| `POST /ato/responses/{id}/approve`, `…/rollback`                                                                                                                                                                                            | `ato:respond`                                        | users, MFA | no       |
+| `POST /ato/responses/{id}/reject`                                                                                                                                                                                                           | `ato:respond`                                        | users      | no       |
+| `PUT /ato/settings`                                                                                                                                                                                                                         | `ato:configure`                                      | users      | no       |
+| `GET /incidents[/{id}]`, `…/timeline`, `…/messages`, `…/report`                                                                                                                                                                             | any category's read permission (8.4: `ato:read`)     | —          | yes      |
+| `POST /incidents`, `PATCH /incidents/{id}`, `POST …/notes`                                                                                                                                                                                  | any category's manage permission (8.4: `ato:manage`) | —          | yes      |
+
+**Per-category incident access (D17, D24).** The generic incident routes admit a principal that holds the read (or manage) permission of **any** registered incident category; the lists are derived from the category registry (`apps/api/src/modules/incidents/incident-categories.ts`), so the categories advanced threat protection adds later bring their own permissions without a route change. The service then restricts every query to the categories whose read permission the principal holds (and whose plan feature is enabled): an incident of another category answers `404 incident_not_found`, exactly like an unknown id or another tenant's; a mutation needs the incident category's manage permission (else `404`) and its feature (else that category's `403`, ATO: `ato_not_enabled`). A `category` filter never widens access.
+
+**Separation of duties (ADR-0072).** Medium- and high-impact responses wait for an approval by a user with `ato:respond` and an MFA session who is not the requester (`403 ato_approval_self`); API keys may request and cancel, never approve, reject or roll back. Low-impact gateway actions (alerts, SOC notification, escalation) run on request; identity-provider actions are `unsupported` until step 8.5.
+
+**Role matrix excerpt** (seed catalog): super_admin and organization_admin all four; security_analyst `ato:read`, `ato:manage`, `ato:respond` (not `ato:configure`: the analyst who investigates does not change detection); compliance_auditor and platform_admin `ato:read`; quarantine_reviewer, domain_admin, read_only_user and mailbox_user none. Auditors therefore read ATO incidents and export their reports but cannot triage them.
+
+**Audited reads.** The first page of an account's authentication events (`ato.auth_events.viewed`: account, range, filter names; no IP addresses) and every incident report (`security_incident.report_exported`). Every mutation is audited by the ATO and incident stores (actor, changed paths or states, never values of secrets).
 
 ## Custom roles
 

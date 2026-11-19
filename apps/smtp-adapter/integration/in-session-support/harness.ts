@@ -13,6 +13,7 @@ import {
   type TlsMode,
 } from '@email-gateway/database';
 import { AdapterCoreModule } from '../../src/app.module';
+import { telemetryInstanceName } from '../../src/ato/telemetry-recorder';
 import { loadSmtpAdapterConfig, type SmtpAdapterConfig } from '../../src/config';
 import { PolicyModule } from '../../src/policy/policy.module';
 import { PolicyServerService } from '../../src/policy/policy-server.service';
@@ -195,6 +196,16 @@ export class SaslClient {
 }
 
 // --- Database fixtures ------------------------------------------------------------------------
+
+/** The fields of an ATO telemetry outbox row the integration suite asserts on. */
+export interface TelemetryOutboxRow {
+  id: bigint;
+  organizationId: bigint;
+  eventType: string;
+  aggregateType: string;
+  aggregateId: string;
+  payload: Record<string, unknown>;
+}
 
 export class InSessionFixtures {
   readonly prisma: PrismaClient = new PrismaClient({ datasourceUrl: requireEnv('DATABASE_URL') });
@@ -463,6 +474,91 @@ export class InSessionFixtures {
     });
   }
 
+  /** An ATO SMTP restriction row (step 8.4 D14), as the ATO store writes it. */
+  async restriction(
+    organizationId: bigint,
+    input: {
+      kind: 'send_block' | 'auth_block';
+      scope: 'mailbox' | 'connector' | 'connector_ip';
+      connectorId?: bigint;
+      mailboxSha256?: string;
+      range?: { cidr: string; version: 4 | 6; start: Buffer; end: Buffer };
+      mode?: 'reject' | 'defer';
+      status?: 'active' | 'lifted' | 'expired';
+      expiresAt?: Date;
+    },
+  ): Promise<bigint> {
+    const row = await this.prisma.atoSmtpRestriction.create({
+      data: {
+        organizationId,
+        kind: input.kind,
+        scope: input.scope,
+        connectorId: input.connectorId ?? null,
+        mailboxSha256: input.mailboxSha256 ?? null,
+        ipCidr: input.range?.cidr ?? null,
+        ipVersion: input.range?.version ?? null,
+        rangeStart: input.range ? new Uint8Array(input.range.start) : null,
+        rangeEnd: input.range ? new Uint8Array(input.range.end) : null,
+        mode: input.mode ?? 'reject',
+        status: input.status ?? 'active',
+        reasonCode: 'it.synthetic',
+        startsAt: new Date(),
+        expiresAt: input.expiresAt ?? new Date(Date.now() + 3_600_000),
+        subjectHash: randomBytes(32).toString('hex'),
+      },
+    });
+    return row.id;
+  }
+
+  /** An `ato.restriction.changed.v1` outbox row (step 8.4 D14), as the ATO store writes it. */
+  async restrictionChangedEvent(
+    organizationId: bigint,
+    restrictionId: bigint,
+    payload: Record<string, unknown>,
+  ): Promise<void> {
+    const eventId = randomUUID();
+    this.outboxEventIds.push(eventId);
+    await this.prisma.messageOutbox.create({
+      data: {
+        eventId,
+        organizationId,
+        eventType: 'ato.restriction.changed.v1',
+        aggregateType: 'ato_restriction',
+        aggregateId: String(restrictionId),
+        correlationId: `it-${this.suffix}`,
+        payload: {
+          restrictionId: String(restrictionId),
+          changedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+          ...payload,
+        },
+      },
+    });
+  }
+
+  /** ATO telemetry outbox rows this process wrote (its producer instance), oldest first. */
+  async telemetryRows(organizationIds: readonly bigint[]): Promise<TelemetryOutboxRow[]> {
+    if (organizationIds.length === 0) return [];
+    const rows = await this.prisma.messageOutbox.findMany({
+      where: { aggregateType: 'smtp_telemetry', organizationId: { in: [...organizationIds] } },
+      orderBy: { id: 'asc' },
+    });
+    return rows
+      .filter(
+        (row) =>
+          (row.payload as { producer?: { instance?: string } }).producer?.instance ===
+          telemetryInstanceName(),
+      )
+      .map((row) => ({
+        id: row.id,
+        organizationId: row.organizationId,
+        eventType: row.eventType,
+        aggregateType: row.aggregateType,
+        aggregateId: row.aggregateId,
+        payload: row.payload as Record<string, unknown>,
+      }));
+  }
+
   async cleanup(): Promise<void> {
     try {
       const orgs = this.organizationIds;
@@ -471,8 +567,15 @@ export class InSessionFixtures {
           where: { eventId: { in: this.outboxEventIds } },
         });
       }
+      // ATO telemetry written by this process (test organizations and the platform batch of
+      // unknown usernames): never left for the event-relay.
+      await this.prisma.$executeRaw`
+        DELETE FROM message_outbox
+        WHERE aggregate_type = 'smtp_telemetry' AND published_at IS NULL
+          AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.producer.instance')) = ${telemetryInstanceName()}`;
       if (orgs.length > 0) {
         const where = { organizationId: { in: orgs } };
+        await this.prisma.atoSmtpRestriction.deleteMany({ where });
         await this.prisma.smtpConnectorNetwork.deleteMany({ where });
         await this.prisma.smtpConnector.deleteMany({ where });
         await this.prisma.deliverySuppression.deleteMany({ where });
@@ -498,7 +601,12 @@ export class InSessionFixtures {
     const patterns = [
       ...this.redisPatterns,
       `sa:*${this.suffix}*`,
-      ...this.organizationIds.flatMap((id) => [`sa:lim:${id}`, `sa:rl:*:${id}:*`, `rep:${id}:*`]),
+      ...this.organizationIds.flatMap((id) => [
+        `sa:lim:${id}`,
+        `sa:rl:*:${id}:*`,
+        `rep:${id}:*`,
+        `sa:ato:r:${id}`,
+      ]),
     ];
     const keys = new Set(this.extraRedisKeys);
     for (const pattern of patterns) {

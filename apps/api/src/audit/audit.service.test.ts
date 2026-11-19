@@ -6,9 +6,22 @@ import type { ApiKeyPrincipal, UserPrincipal } from '../auth-contracts/principal
 import { AuditService, scrubMetadata, SYSTEM_ACTOR } from './audit.service';
 
 function service() {
-  const create = vi.fn().mockResolvedValue({});
-  const prisma = { auditLog: { create } } as unknown as PrismaService;
-  return { create, audit: new AuditService(prisma) };
+  const create = vi
+    .fn()
+    .mockResolvedValue({ id: 901n, createdAt: new Date('2026-11-18T10:00:00.000Z') });
+  const outbox = vi.fn().mockResolvedValue({ id: 1n });
+  const prisma: Record<string, unknown> = {
+    auditLog: { create },
+    messageOutbox: { create: outbox },
+  };
+  const transaction = vi.fn((fn: (tx: unknown) => Promise<unknown>) => fn(prisma));
+  prisma.$transaction = transaction;
+  return {
+    create,
+    outbox,
+    transaction,
+    audit: new AuditService(prisma as unknown as PrismaService),
+  };
 }
 
 const user: UserPrincipal = {
@@ -84,6 +97,7 @@ describe('AuditService.record', () => {
       }),
     );
     expect(create).toHaveBeenCalledWith({
+      select: { id: true, createdAt: true },
       data: {
         organizationId: 7n,
         actorType: 'user',
@@ -153,6 +167,95 @@ describe('AuditService.record', () => {
     );
     expect(txCreate).toHaveBeenCalledTimes(1);
     expect(create).not.toHaveBeenCalled();
+  });
+
+  it('writes auth.account.changed.v1 with the audit row for ATO account-change actions (step 8.4 D5)', async () => {
+    const { audit, create, outbox, transaction } = service();
+    await runWithContext({ correlationId: 'corr-ato-0001' }, () =>
+      audit.record({
+        organizationId: 7n,
+        actor: { type: 'user', id: user.userPublicId },
+        action: 'auth.password_changed',
+        resourceType: 'user',
+        resourceId: user.userPublicId,
+        sourceIp: '203.0.113.5',
+        metadata: { reason: 'self_service' },
+      }),
+    );
+    // Without a caller transaction both inserts run in a new one.
+    expect(transaction).toHaveBeenCalledTimes(1);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(outbox).toHaveBeenCalledWith({
+      data: {
+        eventId: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-/),
+        organizationId: 7n,
+        eventType: 'auth.account.changed.v1',
+        aggregateType: 'audit',
+        aggregateId: '901',
+        correlationId: 'corr-ato-0001',
+        payload: {
+          auditLogId: '901',
+          auditCreatedAt: '2026-11-18T10:00:00.000Z',
+          action: 'auth.password_changed',
+          actorType: 'user',
+          actorPublicId: user.userPublicId,
+          resourceType: 'user',
+          resourcePublicId: user.userPublicId,
+        },
+      },
+      select: { id: true },
+    });
+  });
+
+  it('uses the caller transaction for both rows; system actors have no public id', async () => {
+    const { audit, transaction } = service();
+    const txAudit = vi.fn().mockResolvedValue({ id: 5n, createdAt: new Date(0) });
+    const txOutbox = vi.fn().mockResolvedValue({ id: 1n });
+    const tx = {
+      auditLog: { create: txAudit },
+      messageOutbox: { create: txOutbox },
+    } as unknown as Prisma.TransactionClient;
+    await audit.record(
+      {
+        organizationId: 3n,
+        actor: SYSTEM_ACTOR,
+        action: 'session.revoked_all',
+        resourceType: 'user',
+        resourceId: null,
+      },
+      tx,
+    );
+    expect(transaction).not.toHaveBeenCalled();
+    expect(txOutbox.mock.calls[0]![0].data.payload).toMatchObject({
+      actorType: 'system',
+      actorPublicId: null,
+      resourcePublicId: null,
+    });
+  });
+
+  it('writes no event for platform-only rows, other actions, or rows outside the contract', async () => {
+    const { audit, outbox, transaction } = service();
+    await audit.record({
+      organizationId: null,
+      actor: SYSTEM_ACTOR,
+      action: 'auth.password_changed',
+      resourceType: 'user',
+    });
+    await audit.record({
+      organizationId: 7n,
+      actor: { type: 'user', id: user.userPublicId },
+      action: 'domain.created',
+      resourceType: 'domain',
+    });
+    expect(transaction).not.toHaveBeenCalled();
+    // A non-UUID actor id: the audit row is still written, the event is skipped.
+    await audit.record({
+      organizationId: 7n,
+      actor: { type: 'user', id: 'not-a-uuid' },
+      action: 'auth.mfa_enabled',
+      resourceType: 'user',
+    });
+    expect(outbox).not.toHaveBeenCalled();
   });
 
   it('propagates write errors', async () => {

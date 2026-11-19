@@ -1,3 +1,4 @@
+import type { AtoPolicyFactsRepository } from '../repositories/ato-policy-facts.repository';
 import {
   buildPolicyInput,
   compileSnapshot,
@@ -89,12 +90,23 @@ function setup() {
     roundRows: vi.fn(() => Promise.resolve(round.rows)),
     storedEvaluation: vi.fn(() => Promise.resolve(stored)),
   } as unknown as PolicyFactsRepository;
-  const service = new PolicyEvaluationService(bounds, facts, metrics as unknown as PolicyMetrics);
+  const atoFacts = {
+    current: vi.fn((_scope: unknown, _sender: string) =>
+      Promise.resolve<Record<string, unknown> | null>(null),
+    ),
+  };
+  const service = new PolicyEvaluationService(
+    bounds,
+    facts,
+    metrics as unknown as PolicyMetrics,
+    atoFacts as unknown as AtoPolicyFactsRepository,
+  );
   return {
     store,
     policies,
     departments,
     service,
+    atoFacts,
     metrics,
     round,
     message,
@@ -237,6 +249,157 @@ describe('PolicyEvaluationService.test (P23)', () => {
       PolicyTestSchema.parse({ facts: { recipients: [{ address: 'alice@acme.example' }] } }),
     );
     expect(unresolved.result.disposition).toBe('quarantine');
+  });
+});
+
+describe('dry-runs with ATO facts (step 8.4 D23, §5.3)', () => {
+  const HIGH = {
+    accountKnown: true,
+    riskScore: 70,
+    riskLevel: 'high',
+    incidentSeverity: 'high',
+    incidentStatus: 'open',
+  };
+  const holdHighRisk = {
+    dslVersion: 'policy-dsl/1',
+    direction: 'outbound',
+    priority: 100,
+    rules: [
+      {
+        id: 'ato-hold',
+        priority: 10,
+        when: { field: 'ato.risk_level', op: 'gte', value: 'high' },
+        actions: [{ type: 'QUARANTINE' }],
+      },
+    ],
+  };
+
+  async function outboundWithPolicy() {
+    const ctx = setup();
+    // The round as outbound mail of the tenant (authenticated sender = the envelope sender).
+    (ctx.message as { direction: string }).direction = 'outbound';
+    const { policy } = await ctx.policies.create(
+      principal,
+      SCOPE,
+      { name: 'ato', definition: holdHighRisk },
+      client,
+    );
+    await ctx.policies.publish(
+      principal,
+      SCOPE,
+      policy.id,
+      1,
+      { expectedRowVersion: 1, activate: true },
+      client,
+    );
+    return ctx;
+  }
+
+  it('without a stored evaluation the current account state is read (atoFactsSource current)', async () => {
+    const ctx = await outboundWithPolicy();
+    ctx.atoFacts.current.mockResolvedValueOnce(HIGH);
+    const res = await ctx.service.dryRun(SCOPE, MESSAGE, 900n, PolicyDryRunSchema.parse({}));
+    expect(ctx.atoFacts.current).toHaveBeenCalledWith(SCOPE, 'sender@partner.example');
+    expect(res.atoFactsSource).toBe('current');
+    expect(res.result.disposition).toBe('quarantine');
+    expect(res.stored).toBeNull();
+    expect(res.reproducible).toBe(false);
+  });
+
+  it('with a stored evaluation its ato_facts block is reused (stored, reproducible), never the current state', async () => {
+    const ctx = await outboundWithPolicy();
+    const snapshot = compileSnapshot(
+      snapshotSource(await ctx.store.facts.snapshot(SCOPE), 'pol-default/1', { kind: 'active' }),
+    );
+    const rows = policyRoundRowsOf(ctx.message, ctx.round.scan as never, ctx.round.rows, {
+      departmentsByAddress: {},
+      usersByAddress: {},
+    });
+    const input = buildPolicyInput({ ...rows, ato: HIGH });
+    const result = evaluatePolicyPerRecipient(input, snapshot).message;
+    const json = evaluationResultToRow(result);
+    ctx.setStored({
+      ...json,
+      id: 1n,
+      receivedAt: ctx.message.receivedAt,
+      messageId: 77n,
+      scanId: 900n,
+      policyGeneration: BigInt(json.policyGeneration),
+      durationUs: 300,
+      evaluatedAt: new Date('2026-11-11T08:00:06.000Z'),
+      atoFacts: input.ato,
+    });
+    // The account state changed since: the stored facts still decide.
+    ctx.atoFacts.current.mockResolvedValue({ ...HIGH, riskScore: 5, riskLevel: 'low' });
+    const res = await ctx.service.dryRun(SCOPE, MESSAGE, 900n, PolicyDryRunSchema.parse({}));
+    expect(ctx.atoFacts.current).not.toHaveBeenCalled();
+    expect(res.atoFactsSource).toBe('stored');
+    expect(res.result.disposition).toBe('quarantine');
+    expect(res.reproducible).toBe(true);
+    expect(res.stored?.atoFacts).toEqual({ version: 'ato-policy-facts/1', ...HIGH });
+
+    // A stored evaluation without facts: absent (none), reproducible, allowed.
+    const plainInput = buildPolicyInput(rows);
+    const plain = evaluatePolicyPerRecipient(plainInput, snapshot).message;
+    const plainJson = evaluationResultToRow(plain);
+    ctx.setStored({
+      ...plainJson,
+      id: 2n,
+      receivedAt: ctx.message.receivedAt,
+      messageId: 77n,
+      scanId: 900n,
+      policyGeneration: BigInt(plainJson.policyGeneration),
+      durationUs: 300,
+      evaluatedAt: new Date('2026-11-11T08:00:06.000Z'),
+      atoFacts: null,
+    });
+    const none = await ctx.service.dryRun(SCOPE, MESSAGE, 900n, PolicyDryRunSchema.parse({}));
+    expect(none.atoFactsSource).toBe('none');
+    expect(none.result.disposition).toBe('allow');
+    expect(none.reproducible).toBe(true);
+    expect(none.stored?.atoFacts).toBeNull();
+  });
+
+  it('inbound rounds never read ATO facts (none)', async () => {
+    const ctx = setup();
+    ctx.atoFacts.current.mockResolvedValue(HIGH);
+    const res = await ctx.service.dryRun(SCOPE, MESSAGE, 900n, PolicyDryRunSchema.parse({}));
+    expect(ctx.atoFacts.current).not.toHaveBeenCalled();
+    expect(res.atoFactsSource).toBe('none');
+  });
+
+  it('a malformed stored block is policy_input_invalid', async () => {
+    const ctx = await outboundWithPolicy();
+    ctx.setStored({ id: 3n, atoFacts: { version: 'ato-policy-facts/1', riskScore: 900 } });
+    expect(
+      await codeOf(ctx.service.dryRun(SCOPE, MESSAGE, 900n, PolicyDryRunSchema.parse({}))),
+    ).toBe('policy_input_invalid');
+  });
+
+  it('POST /policies/test accepts synthetic ATO facts', async () => {
+    const ctx = await outboundWithPolicy();
+    const res = await ctx.service.test(
+      SCOPE,
+      PolicyTestSchema.parse({
+        facts: {
+          direction: 'outbound',
+          sender: { envelope: 'ceo@acme.example' },
+          ato: { riskScore: 80, riskLevel: 'critical' },
+        },
+      }),
+    );
+    expect(res.result.disposition).toBe('quarantine');
+    const low = await ctx.service.test(
+      SCOPE,
+      PolicyTestSchema.parse({
+        facts: {
+          direction: 'outbound',
+          sender: { envelope: 'ceo@acme.example' },
+          ato: { riskScore: 10, riskLevel: 'low' },
+        },
+      }),
+    );
+    expect(low.result.disposition).toBe('allow');
   });
 });
 

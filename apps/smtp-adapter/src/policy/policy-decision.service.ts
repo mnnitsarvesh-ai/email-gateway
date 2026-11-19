@@ -1,6 +1,8 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { type Counter, type Histogram, MetricsService } from '@email-gateway/common';
 import type { Logger } from '@email-gateway/logger';
+import { AtoRestrictionService } from '../ato/restriction.service';
+import { AtoTelemetryRecorder } from '../ato/telemetry-recorder';
 import { ADAPTER_CONFIG, ADAPTER_LOGGER, type SmtpAdapterConfig } from '../config';
 import { parseIpKey } from '../connectors/addresses';
 import {
@@ -12,6 +14,8 @@ import { DkimReadinessService } from '../outbound/dkim-readiness.service';
 import { SuppressionService } from '../outbound/suppression.service';
 import { FixedWindowLimiter } from '../rate-limit/fixed-window-limiter';
 import {
+  ATO_SEND_RESTRICTED,
+  ATO_SEND_RESTRICTED_DEFER,
   DUNNO,
   MUST_STARTTLS,
   NOT_READY_FOR_OUTBOUND,
@@ -100,6 +104,12 @@ function minLimit(...limits: (number | null)[]): number | null {
  * `DEFER_IF_PERMIT 4.3.5`. The adapter never answers `OK`: a pass is `DUNNO`, which hands the
  * decision back to Postfix's own restrictions. Full recipient addresses are never logged above
  * debug, and only the domain part even there.
+ *
+ * Step 8.4 (ADR-0073): in `submission` / `relay` at RCPT an active ATO `send_block` on the
+ * connector or on the envelope sender's mailbox answers ATO_SEND_RESTRICTED (or its defer form)
+ * after the sender checks and before suppression and rate limits (D14; inbound, reinjection and
+ * bounce paths are never affected); at END-OF-MESSAGE a passed submission is recorded for ATO
+ * detection after the answer (D4, never awaited by the reply).
  */
 @Injectable()
 export class PolicyDecisionService {
@@ -120,6 +130,8 @@ export class PolicyDecisionService {
     metrics: MetricsService,
     @Inject(ADAPTER_CONFIG) private readonly config: PolicyDecisionConfig,
     @Inject(ADAPTER_LOGGER) logger: Logger,
+    private readonly restrictions: AtoRestrictionService,
+    private readonly telemetry: AtoTelemetryRecorder,
   ) {
     this.logger = logger.child({ component: 'policy-decision' });
     this.decisions = metrics.counter(
@@ -211,7 +223,12 @@ export class PolicyDecisionService {
       state === 'END-OF-MESSAGE' &&
       (context === 'inbound' || context === 'submission' || context === 'relay')
     ) {
-      return this.endOfMessage(request);
+      const action = await this.endOfMessage(request);
+      if (action === DUNNO && context !== 'inbound') {
+        // After the answer: the connector lookup (cached) never delays the reply.
+        setImmediate(() => void this.recordSubmission(request, context, now));
+      }
+      return action;
     }
     throw new PolicyMisconfiguredError(`unexpected protocol_state for ${context}`);
   }
@@ -291,6 +308,20 @@ export class PolicyDecisionService {
     }
 
     const orgId = connector.organizationId;
+    // D14: ATO sending restriction (cached per organization; errors propagate = tempfail).
+    const restriction = await this.restrictions.sendBlock(
+      orgId,
+      connector.id,
+      (request.sender ?? '').toLowerCase(),
+      now,
+    );
+    if (restriction !== null) {
+      this.logger.info(
+        { context, organizationId: String(orgId), connectorId: connector.publicId, restriction },
+        'submission refused by an ATO sending restriction',
+      );
+      return restriction === 'reject' ? ATO_SEND_RESTRICTED : ATO_SEND_RESTRICTED_DEFER;
+    }
     const recipient = request.recipient ?? '';
     const recipientParts = splitAddress(recipient);
     if (!recipientParts) return RELAY_DENIED;
@@ -335,6 +366,36 @@ export class PolicyDecisionService {
       'outbound recipient accepted by policy',
     );
     return DUNNO;
+  }
+
+  /** D4: one accepted submission for ATO detection; failures are logged, never answered. */
+  private async recordSubmission(
+    request: PolicyRequest,
+    context: 'submission' | 'relay',
+    now: Date,
+  ): Promise<void> {
+    if (!this.telemetry.enabled) return;
+    try {
+      const connector = await this.resolveConnector(request, context);
+      if (!connector) return;
+      const recipients = Number(request.recipient_count ?? '0');
+      this.telemetry.recordSubmission({
+        occurredAt: now,
+        organizationId: connector.organizationId,
+        context,
+        connectorId: connector.id,
+        connectorAuthType: connector.authType,
+        queueId: request.queue_id,
+        clientIp: request.client_address,
+        heloName: request.helo_name,
+        tlsProtocol: request.encryption_protocol,
+        senderAddress: request.sender,
+        recipientCount: Number.isSafeInteger(recipients) ? recipients : 0,
+        sizeBytes: sizeOf(request),
+      });
+    } catch (err) {
+      this.logger.warn({ err, context }, 'ATO submission telemetry not recorded');
+    }
   }
 
   /** Certificate wins over IP (D11). A certificate connector's networks restrict the client. */

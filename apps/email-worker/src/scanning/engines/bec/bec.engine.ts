@@ -8,6 +8,10 @@ import {
   type BecTenantData,
   type BecUrlInput,
   BecTextTimeoutError,
+  evaluateOutboundObservations,
+  type OutboundObservationReason,
+  type OutboundObservations,
+  unavailableOutboundObservations,
   buildHistoryUpdates,
   computeAlignment,
   Deadline,
@@ -90,6 +94,11 @@ export interface BecEngineOptions {
   platformExtraDomains: readonly string[];
   /** The url engine's effective settings of a tenant row (its `lookalike.extraProtectedDomains`). */
   urlSettings: (row: BecTenantRecord['urlSettingsRow']) => UrlEffectiveSettings;
+  /**
+   * BEC_OUTBOUND_OBSERVATIONS_ENABLED (step 8.4 D6): observe outbound/internal mail of
+   * organizations with `ato_detection`. Absent = false.
+   */
+  outboundObservations?: boolean;
   /** Readiness details (versions and modes only). */
   readiness: Record<string, string>;
   metrics: BecMetrics;
@@ -163,7 +172,11 @@ function storedAssessment(entry: AiEntry, effect: string | null): Record<string,
  *    the invariant;
  * 5. returns the definite result with the `bec_scan_results` row and (round 0 of an initial scan)
  *    the history upserts as child rows (B14). Outbound/internal mail is `skipped`
- *    (`bec.not_inbound`) with the history pair updates only.
+ *    (`bec.not_inbound`) with the history pair updates only; for organizations with the
+ *    `ato_detection` feature (and BEC_OUTBOUND_OBSERVATIONS_ENABLED) the stored subject and
+ *    bodies are also observed (`bec_scan_results.outbound_observations`, step 8.4 D6): counts and
+ *    booleans only, the verdict, codes, signals and score unchanged, and any failure of the
+ *    observation is recorded as `unavailable`, never as an attempt failure.
  *
  * Failure classes: MySQL/S3/network errors are thrown (transient); a wrong read, a part
  * integrity/unavailable/key problem, a missing parse row and the text time budget are attempt
@@ -455,7 +468,12 @@ export class BecEngine implements ScanEngineAdapter {
         null,
         false,
       );
-      return this.result(ctx, rules, null, history, elapsed, ids);
+      // Step 8.4 D6: observations for ATO-enabled organizations (never changes the verdict).
+      const observations =
+        options.outboundObservations === true && tenantRecord.atoDetection
+          ? await this.observeOutbound(scope, url, signal, ids)
+          : null;
+      return this.result(ctx, rules, null, history, elapsed, ids, observations);
     }
 
     // 3. Text parts (B8).
@@ -533,6 +551,58 @@ export class BecEngine implements ScanEngineAdapter {
     return this.result(ctx, rules, ai, updates, elapsed, ids);
   }
 
+  /**
+   * Step 8.4 D6: outbound observations of one outbound/internal message from the stored subject
+   * and bodies (the same reads, limits and budget as inbound text analysis) and the round's URL
+   * results. Every read or budget failure is `unavailable` with a reason code; nothing here can
+   * fail the attempt.
+   */
+  private async observeOutbound(
+    scope: BecReadScope,
+    url: BecUrlInput,
+    signal: AbortSignal,
+    ids: Record<string, string | number>,
+  ): Promise<OutboundObservations> {
+    const { store, data, limits } = this.options;
+    const unavailable = (reason: OutboundObservationReason): OutboundObservations =>
+      unavailableOutboundObservations(reason);
+    try {
+      const parse = await store.loadParse(scope);
+      if (!parse) return unavailable('parse_row_missing');
+      const subject = await store.loadSubject(scope);
+      const prefix = `org/${scope.organizationId.toString()}/part/`;
+      const textBody = await this.readText(parse.textBody, prefix, signal);
+      const htmlBody = await this.readText(parse.htmlBody, prefix, signal);
+      if (signal.aborted) return unavailable('timeout');
+      return evaluateOutboundObservations(
+        {
+          text: {
+            subject,
+            textBody,
+            htmlBody,
+            parseIncomplete: !parseComplete(parse.status, parse.limitsExceeded),
+          },
+          url,
+        },
+        data.lexicon,
+        { maxChars: limits.textMaxChars, deadline: Deadline.after(limits.textTimeoutMs) },
+      );
+    } catch (error) {
+      if (error instanceof BecTextTimeoutError) return unavailable('timeout');
+      if (error instanceof AttemptFailure) {
+        return unavailable(
+          error.failure.errorCode === 'part_unavailable' ? 'part_unavailable' : 'read_failed',
+        );
+      }
+      if (error instanceof InconsistentBecReadError) return unavailable('read_failed');
+      this.logger.warn(
+        { ...ids, ...errorFields(error) },
+        'bec engine: outbound observations failed; recorded as unavailable',
+      );
+      return unavailable(signal.aborted ? 'timeout' : 'error');
+    }
+  }
+
   private result(
     ctx: EngineScanContext,
     rules: BecRulesResult,
@@ -540,6 +610,7 @@ export class BecEngine implements ScanEngineAdapter {
     history: HistoryUpdate[],
     elapsed: () => number,
     ids: Record<string, string | number>,
+    observations: OutboundObservations | null = null,
   ): EngineScanOutcome {
     const { metrics, data } = this.options;
     const settings = ctx.settings as BecEffectiveSettings;
@@ -581,7 +652,11 @@ export class BecEngine implements ScanEngineAdapter {
       ai: applied.length > 0 ? applied : null,
       aiShadow: shadow.length > 0 ? shadow : null,
       durationMs: elapsed(),
+      ...(observations !== null
+        ? { outboundObservations: observations as unknown as Record<string, unknown> }
+        : {}),
     };
+    if (observations !== null) metrics.outboundObservation(observations.status);
     const base = {
       engine: this.name,
       engineVersion: data.engineVersion,

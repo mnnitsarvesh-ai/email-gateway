@@ -18,7 +18,7 @@ const summary = (eventType: string, overrides: Record<string, unknown> = {}) =>
   }));
 
 describe('projection rules (W3)', () => {
-  it('covers exactly the eight event types bound to email.webhooks', () => {
+  it('covers exactly the twelve event types bound to email.webhooks (v11 eight + 8.4 four)', () => {
     expect([...FANOUT_SOURCE_TYPES].sort()).toEqual(
       [...eventTypesBoundTo('email.webhooks')].sort(),
     );

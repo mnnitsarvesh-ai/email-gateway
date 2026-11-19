@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { AtoModule } from '../ato/ato.module';
 import { DomainCacheInvalidator } from './domain-cache-invalidator.service';
 import { DomainPolicyService } from './domain-policy.service';
 import { RecipientValidator } from './recipient-validator.service';
@@ -12,6 +13,7 @@ import { TenantLimitsService } from './tenant-limits.service';
  * ADAPTER_CONFIG / ADAPTER_LOGGER providers.
  */
 @Module({
+  imports: [AtoModule],
   providers: [
     RedisJsonCache,
     DomainPolicyService,

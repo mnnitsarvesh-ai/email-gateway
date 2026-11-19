@@ -42,6 +42,9 @@ spec:
             - { name: NOTIFICATION_PREFETCH, value: '4' }
             - { name: NOTIFICATION_DB_TX_TIMEOUT_MS, value: '120000' }
             - { name: NOTIFICATION_MAX_RECIPIENTS, value: '50' }
+            # Step 8.4 D16: platform SOC mailbox of critical ATO incident alerts; empty = off. Set
+            # the address per overlay (e.g. soc@<operator domain>).
+            - { name: NOTIFY_ATO_PLATFORM_SOC_EMAIL, value: '' }
             # Secrets are mounted as files by External Secrets and read via the <KEY>_FILE convention.
             - { name: DATABASE_URL_FILE, value: /var/run/secrets/gateway/database-url }
             # Role user eg-notification (step 5.2 P15): consumes email.notifications.

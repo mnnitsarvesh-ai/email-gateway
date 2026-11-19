@@ -249,6 +249,43 @@ describe('New policy (/policies/new, design B6)', () => {
     expect(screen.getByRole('group', { name: /^Condition 1 of 1/ }).className).toContain('ring-2');
   });
 
+  it('?testPreset=outbound_high_risk_account opens the test panel with the ATO example (step 8.4 D23)', async () => {
+    mockReads();
+    const tests: unknown[] = [];
+    mockApi({
+      PolicyToolsController_test_v1: ({ body }) => {
+        tests.push(body);
+        return okJson(TEST_RESPONSE);
+      },
+    });
+    const { user } = renderWithProviders(<NewPolicyPage />, {
+      route: '/policies/new?testPreset=outbound_high_risk_account',
+    });
+    const panel = await screen.findByRole('dialog', { name: 'Test with synthetic facts' });
+    expect(
+      within(panel).getByRole('combobox', { name: 'Start from an example' }),
+    ).toHaveTextContent('Outbound from a high-risk account');
+    expect(within(panel).getByRole('group', { name: 'Account takeover' })).toBeInTheDocument();
+    await user.click(within(panel).getByRole('button', { name: 'Run test' }));
+    await waitFor(() => expect(tests).toHaveLength(1));
+    expectRequestMatchesContract('PolicyToolsController_test_v1', tests[0]);
+    expect((tests[0] as { facts: { ato?: unknown } }).facts.ato).toEqual({
+      riskScore: 65,
+      riskLevel: 'high',
+    });
+  });
+
+  it('an unknown ?testPreset is ignored (no panel opens)', async () => {
+    mockReads();
+    renderWithProviders(<NewPolicyPage />, { route: '/policies/new?testPreset=nope' });
+    expect(
+      await screen.findByRole('heading', { name: 'New policy', level: 1 }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('dialog', { name: 'Test with synthetic facts' }),
+    ).not.toBeInTheDocument();
+  });
+
   it('is forbidden without policy:manage', async () => {
     renderWithProviders(<NewPolicyPage />, { role: 'read_only_user', route: '/policies/new' });
     expect(await screen.findByText(/policy:manage/)).toBeInTheDocument();

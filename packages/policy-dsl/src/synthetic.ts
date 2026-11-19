@@ -6,6 +6,8 @@ import {
   SANDBOX_INPUT_OUTCOMES,
 } from '@email-gateway/risk-scoring';
 import {
+  ATO_POLICY_FACTS_VERSION,
+  ATO_RISK_LEVELS,
   ATTACHMENT_VERDICTS,
   AUTH_OUTCOMES,
   BEC_VERDICTS,
@@ -20,6 +22,8 @@ import {
   reasonCodeSchema,
   REWRITE_SKIP_REASONS,
   SCAN_VERDICTS,
+  SECURITY_INCIDENT_ACTIVE_STATUSES,
+  SECURITY_INCIDENT_SEVERITIES,
   URL_VERDICTS,
 } from '@email-gateway/security-contracts';
 import { getDomain } from 'tldts';
@@ -194,6 +198,20 @@ export const syntheticFactsSchema = z.strictObject({
         )
         .max(ENGINE_NAMES.length)
         .optional(),
+    })
+    .optional(),
+  /**
+   * Step 8.4 D23: ATO facts of the sending mailbox account (outbound/internal only; ignored for
+   * inbound mail, like stored facts). Default absent (the `ato.*` fields are unknown).
+   */
+  ato: z
+    .strictObject({
+      riskScore: z.number().int().min(0).max(100),
+      riskLevel: z.enum(ATO_RISK_LEVELS),
+      incidentSeverity: optionalNullable(z.enum(SECURITY_INCIDENT_SEVERITIES)),
+      incidentStatus: optionalNullable(z.enum(SECURITY_INCIDENT_ACTIVE_STATUSES)),
+      /** Default true (a monitored account). */
+      accountKnown: z.boolean().optional(),
     })
     .optional(),
   /** Memberships by address (the api may resolve them from the replica instead). */
@@ -429,6 +447,18 @@ export function buildSyntheticInput(raw: SyntheticFacts): PolicyInput {
     dlpFinal: f.dlpFinal ?? (dlp ? 'definite' : 'absent'),
     bec,
     becFinal: f.becFinal ?? (bec ? 'definite' : 'absent'),
+    ...(f.ato !== undefined && direction !== 'inbound'
+      ? {
+          ato: {
+            version: ATO_POLICY_FACTS_VERSION,
+            accountKnown: f.ato.accountKnown ?? true,
+            riskScore: f.ato.riskScore,
+            riskLevel: f.ato.riskLevel,
+            incidentSeverity: f.ato.incidentSeverity ?? null,
+            incidentStatus: f.ato.incidentStatus ?? null,
+          },
+        }
+      : {}),
   };
   const result = policyInputSchema.safeParse(input);
   if (!result.success) {

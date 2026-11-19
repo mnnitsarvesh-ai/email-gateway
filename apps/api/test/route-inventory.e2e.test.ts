@@ -34,7 +34,10 @@
  * `expensive`). Step 8.1 (docs/plan/steps/23-journaling-archiving.md §4.4) adds the 41 archive,
  * legal hold and eDiscovery operations (`NEW_IN_8_1`, examples required, every list v1, the
  * archive manifest): 15 transactional keyed mutations (13 `sensitive`, the case search and
- * export requests `expensive`), the expensive archive search.
+ * export requests `expensive`), the expensive archive search. Step 8.4
+ * (docs/plan/steps/24-account-takeover-core.md §5) adds the 26 account takeover and 8 security
+ * incident operations (`NEW_IN_8_4`, examples required, every list v1, the ato and incidents
+ * manifests): 14 transactional keyed mutations (`sensitive`), the expensive overview and report.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -196,6 +199,21 @@ const SENSITIVE_TRANSACTIONAL = [
   'patch /api/v1/ediscovery/cases/:caseId',
   'post /api/v1/ediscovery/cases/:caseId/close',
   'post /api/v1/ediscovery/cases/:caseId/searches/:searchId/review',
+  // Step 8.4 §5.1, §5.2 (every ATO and incident mutation).
+  'patch /api/v1/ato/accounts/:accountId',
+  'put /api/v1/ato/accounts/:accountId/override',
+  'post /api/v1/ato/accounts/:accountId/override/clear',
+  'post /api/v1/ato/accounts/:accountId/trusted-contexts',
+  'delete /api/v1/ato/accounts/:accountId/trusted-contexts/:contextId',
+  'post /api/v1/ato/incidents/:incidentId/responses',
+  'post /api/v1/ato/responses/:responseId/approve',
+  'post /api/v1/ato/responses/:responseId/reject',
+  'post /api/v1/ato/responses/:responseId/cancel',
+  'post /api/v1/ato/responses/:responseId/rollback',
+  'put /api/v1/ato/settings',
+  'post /api/v1/incidents',
+  'patch /api/v1/incidents/:incidentId',
+  'post /api/v1/incidents/:incidentId/notes',
 ];
 
 /** §3.5: the legacy sensitive mutations keyed by the reservation interceptor (`@Idempotent`). */
@@ -304,6 +322,48 @@ const NEW_IN_8_1 = [
   'post /api/v1/ediscovery/cases/:caseId/exports/:exportId/download-grants',
 ];
 
+/**
+ * Step 8.4 §5.1, §5.2 (docs/plan/steps/24-account-takeover-core.md): the 26 account takeover and
+ * 8 security incident operations (examples required, lists v1, exactly the ato and incidents
+ * manifests).
+ */
+const NEW_IN_8_4 = [
+  'get /api/v1/ato/overview',
+  'get /api/v1/ato/attention',
+  'get /api/v1/ato/accounts',
+  'get /api/v1/ato/accounts/:accountId',
+  'patch /api/v1/ato/accounts/:accountId',
+  'get /api/v1/ato/accounts/:accountId/signals',
+  'get /api/v1/ato/accounts/:accountId/auth-events',
+  'get /api/v1/ato/accounts/:accountId/activity',
+  'get /api/v1/ato/accounts/:accountId/score-history',
+  'put /api/v1/ato/accounts/:accountId/override',
+  'post /api/v1/ato/accounts/:accountId/override/clear',
+  'post /api/v1/ato/accounts/:accountId/trusted-contexts',
+  'delete /api/v1/ato/accounts/:accountId/trusted-contexts/:contextId',
+  'get /api/v1/ato/incidents/:incidentId/signals',
+  'get /api/v1/ato/incidents/:incidentId/auth-events',
+  'post /api/v1/ato/incidents/:incidentId/responses',
+  'get /api/v1/ato/responses',
+  'get /api/v1/ato/responses/:responseId',
+  'post /api/v1/ato/responses/:responseId/approve',
+  'post /api/v1/ato/responses/:responseId/reject',
+  'post /api/v1/ato/responses/:responseId/cancel',
+  'post /api/v1/ato/responses/:responseId/rollback',
+  'get /api/v1/ato/restrictions',
+  'get /api/v1/ato/settings',
+  'put /api/v1/ato/settings',
+  'get /api/v1/ato/rules',
+  'get /api/v1/incidents',
+  'post /api/v1/incidents',
+  'get /api/v1/incidents/:incidentId',
+  'patch /api/v1/incidents/:incidentId',
+  'post /api/v1/incidents/:incidentId/notes',
+  'get /api/v1/incidents/:incidentId/timeline',
+  'get /api/v1/incidents/:incidentId/messages',
+  'get /api/v1/incidents/:incidentId/report',
+];
+
 /** Step 8.1: binary downloads (`application/octet-stream`; no JSON example applies). */
 const BINARY_DOWNLOADS = ['get /api/v1/archive/downloads/:token'];
 
@@ -340,6 +400,9 @@ const EXPENSIVE = [
   // Step 8.1 §4.4: the archive search and the two worker-queued keyed requests.
   'get /api/v1/archive/messages',
   ...EXPENSIVE_TRANSACTIONAL,
+  // Step 8.4 §5: the ATO overview and the incident report.
+  'get /api/v1/ato/overview',
+  'get /api/v1/incidents/:incidentId/report',
 ];
 
 /**
@@ -497,13 +560,14 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     await api?.close();
   });
 
-  it('discovers every route once (320 operations under /api/v1 plus the 3 internal endpoints)', () => {
+  it('discovers every route once (354 operations under /api/v1 plus the 3 internal endpoints)', () => {
     expect(facts.length).toBe(byKey.size);
     // 249 after step 6.1, plus the 17 routes of step 6.2, plus the 3 reports of step 7.1, plus
     // the 5 saved views routes (WP1) and the headers and two reveal routes (WP2) of step 7.2,
     // plus the validate and sample dry-run routes of step 7.3, plus the 41 archive, legal hold
-    // and eDiscovery operations of step 8.1.
-    expect(facts.filter((f) => f.key.includes(' /api/v1/')).length).toBe(320);
+    // and eDiscovery operations of step 8.1, plus the 26 account takeover and 8 security incident
+    // operations of step 8.4.
+    expect(facts.filter((f) => f.key.includes(' /api/v1/')).length).toBe(354);
     expect(
       facts
         .filter((f) => isInternal(f.key))
@@ -598,7 +662,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     }
   });
 
-  it('gives every route new in 6.1, 6.2, 7.1, 7.2, 7.3 and 8.1 explicit response examples (D14)', () => {
+  it('gives every route new in 6.1, 6.2, 7.1, 7.2, 7.3, 8.1 and 8.4 explicit response examples (D14)', () => {
     const failures: string[] = [];
     for (const key of [
       ...NEW_IN_6_1,
@@ -607,6 +671,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
       ...NEW_IN_7_2,
       ...NEW_IN_7_3,
       ...NEW_IN_8_1,
+      ...NEW_IN_8_4,
     ]) {
       const op = operation(key);
       if (!op) {
@@ -659,6 +724,12 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     // NEW_IN_8_1 is exactly the step 8.1 archive manifest (41 operations).
     expect(COVERAGE_BY_AREA.archive.map((c) => c.route).sort()).toEqual([...NEW_IN_8_1].sort());
     expect(NEW_IN_8_1).toHaveLength(41);
+    // NEW_IN_8_4 is exactly the step 8.4 ato and incidents manifests (26 + 8 operations).
+    expect(
+      [...COVERAGE_BY_AREA.ato, ...COVERAGE_BY_AREA.incidents].map((c) => c.route).sort(),
+    ).toEqual([...NEW_IN_8_4].sort());
+    expect(COVERAGE_BY_AREA.ato).toHaveLength(26);
+    expect(COVERAGE_BY_AREA.incidents).toHaveLength(8);
   });
 
   it('has one coverage entry per served route and none for a route that does not exist (§3.8)', () => {
@@ -676,6 +747,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
       expect(NEW_IN_7_2.includes(route), route).toBe(false);
       expect(NEW_IN_7_3.includes(route), route).toBe(false);
       expect(NEW_IN_8_1.includes(route), route).toBe(false);
+      expect(NEW_IN_8_4.includes(route), route).toBe(false);
     }
   });
 
@@ -724,10 +796,11 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
           NEW_IN_7_1.includes(key) ||
           NEW_IN_7_2.includes(key) ||
           NEW_IN_7_3.includes(key) ||
-          NEW_IN_8_1.includes(key)) &&
+          NEW_IN_8_1.includes(key) ||
+          NEW_IN_8_4.includes(key)) &&
         route.cursor === 'v0'
       )
-        failures.push(`${key}: 6.1/6.2/7.1/7.2/7.3/8.1 list on v0`);
+        failures.push(`${key}: 6.1/6.2/7.1/7.2/7.3/8.1/8.4 list on v0`);
       if (route.cursor !== null && operation(key)!['x-eg-cursor'] !== route.cursor) {
         failures.push(`${key}: x-eg-cursor not documented`);
       }
@@ -736,8 +809,9 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     const counts = { v0: 0, v1: 0 };
     for (const { route } of facts) if (route.cursor) counts[route.cursor] += 1;
     // 33 pre-6.1 lists keep the unsigned v0 cursors; the 9 lists of 6.1, the 2 of 6.2
-    // (webhooks, deliveries), the saved views list of 7.2 and the 10 lists of 8.1 are signed v1.
-    expect(counts).toEqual({ v0: 33, v1: 22 });
+    // (webhooks, deliveries), the saved views list of 7.2, the 10 lists of 8.1 and the 11 lists
+    // of 8.4 (8 ato, 3 incidents) are signed v1.
+    expect(counts).toEqual({ v0: 33, v1: 33 });
   });
 
   it('every body and query schema of every route is strict at every object node (D1)', () => {
@@ -797,8 +871,9 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
       [f.route.idempotency?.operation, f.transactional?.operation].filter(Boolean),
     );
     expect(new Set(operations).size).toBe(operations.length);
-    // 42 before step 8.1, plus its 15 keyed archive, legal hold and eDiscovery mutations.
-    expect(operations).toHaveLength(57);
+    // 42 before step 8.1, plus its 15 keyed archive, legal hold and eDiscovery mutations, plus
+    // the 14 keyed ATO and incident mutations of step 8.4.
+    expect(operations).toHaveLength(71);
   });
 
   it('no route is both @Idempotent() and @ReturnsSecret(); secret-bearing and expensive routes carry their class (D8, D9, ADR-0057)', () => {

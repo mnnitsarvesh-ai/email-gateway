@@ -214,6 +214,7 @@ export function createBecEngine(deps: EngineDeps, overrides: BecEngineOverrides 
     },
     platformExtraDomains: config.URL_PROTECTED_EXTRA_DOMAINS,
     urlSettings: (row) => urlSettingsFor(config, row).settings as never,
+    outboundObservations: config.BEC_OUTBOUND_OBSERVATIONS_ENABLED,
     readiness: {
       localModel: local.active.modelVersion,
       localModelMode: config.BEC_LOCAL_MODEL_MODE,

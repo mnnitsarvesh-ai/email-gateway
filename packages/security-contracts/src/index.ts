@@ -15,7 +15,9 @@
  * codes, skip reasons, finding codes with fixed severities, reason codes of `sandbox-map/1`),
  * artifact kinds, the observation and stored report schemas, the task limits and the settings,
  * and (step 5.1 docs/plan/steps/15-risk-scoring.md R18) the `rspamd-map/2` reason codes as a
- * contract list.
+ * contract list, and (step 8.4 docs/plan/steps/24-account-takeover-core.md D1, D23, D24, §3.3;
+ * ADR-0070, ADR-0075) the account takeover vocabulary and subject keys and the vocabulary of the
+ * security incident model shared by ATO and ATP.
  *
  * Engines classify, policy decides (§2.0 invariant 8): nothing here rejects, quarantines or
  * delivers. The adapter interface itself lives with the adapters (email-worker
@@ -32,3 +34,5 @@ export * from './bec';
 export * from './dlp';
 export * from './sandbox';
 export * from './rspamd';
+export * from './ato';
+export * from './security-incidents';

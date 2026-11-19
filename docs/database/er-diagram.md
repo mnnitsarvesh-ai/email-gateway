@@ -1276,6 +1276,90 @@ erDiagram
   }
 ```
 
+## Security incidents and account takeover
+
+Step 8.4 ([design §3](../plan/steps/24-account-takeover-core.md#3-data-model-two-forward-migrations-wp1), ADR-0070, ADR-0075). Solid lines are foreign keys; dotted lines are logical references (partitioned tables have no foreign keys, and `ato_accounts` keeps no foreign key to the subject it monitors, so the trail survives a deleted user or connector).
+
+```mermaid
+erDiagram
+  organizations ||--o{ security_incidents : "RESTRICT"
+  users |o--o{ security_incidents : "assigned_user SET NULL"
+  security_incidents ||--o{ security_incident_events : "CASCADE"
+  security_incidents ||--o{ security_incident_links : "CASCADE"
+  security_incident_links }o..o| email_messages : "message: ref_id + ref_time"
+  security_incident_links }o..o| ato_risk_signals : "ato_signal: ref_id + ref_time"
+  security_incident_links }o..o| ato_auth_events : "ato_auth_event: ref_id + ref_time"
+  security_incidents ||--o| ato_incident_details : "1:1, CASCADE"
+  security_incidents |o..o| ato_accounts : "subject_ref_id (ato_account); active_incident_id"
+  organizations ||--o| ato_settings : "1:1, RESTRICT"
+  users |o--o{ ato_settings : "updated_by SET NULL"
+  organizations ||--o{ ato_settings_versions : "RESTRICT"
+  organizations ||--o{ ato_accounts : "RESTRICT"
+  users |o..o{ ato_accounts : "user_id (gateway_user)"
+  smtp_connectors |o..o{ ato_accounts : "connector_id (smtp_connector)"
+  ato_accounts ||--o| ato_account_baselines : "1:1, CASCADE"
+  ato_accounts ||..o{ ato_account_activity_daily : "account_id + day_start (UQ)"
+  ato_accounts |o..o{ ato_auth_events : "account_id"
+  ato_accounts ||..o{ ato_risk_signals : "account_id"
+  ato_accounts ||..o{ ato_risk_scores : "account_id"
+  ato_accounts ||--o{ ato_risk_overrides : "CASCADE"
+  ato_accounts ||--o{ ato_trusted_contexts : "CASCADE"
+  ato_accounts ||--o{ ato_account_identities : "CASCADE"
+  ato_accounts ||--o{ ato_incident_details : "RESTRICT"
+  ato_accounts ||--o{ ato_response_actions : "RESTRICT"
+  security_incidents |o--o{ ato_response_actions : "RESTRICT"
+  ato_response_actions ||--o{ ato_response_action_logs : "CASCADE"
+  ato_response_actions |o..o| ato_smtp_restrictions : "restriction_id / response_action_id"
+  organizations ||--o{ ato_smtp_restrictions : "RESTRICT"
+  organizations ||--o{ ato_provider_integrations : "RESTRICT"
+  security_incidents {
+    bigint id PK
+    char public_id UK
+    bigint organization_id FK
+    enum category "account_takeover (append-only)"
+    enum subject_type "ato_account (append-only)"
+    bigint subject_ref_id "UQ with org, category, subject_type, active_marker"
+    enum status "six states"
+    tinyint active_marker "GENERATED STORED"
+  }
+  ato_accounts {
+    bigint id PK
+    char public_id UK
+    bigint organization_id FK
+    enum kind "mailbox, gateway_user, smtp_connector"
+    char subject_hash "UQ with organization_id, kind"
+    tinyint risk_score
+    bigint active_incident_id "logical"
+  }
+  ato_auth_events {
+    bigint id PK
+    datetime occurred_at PK "PARTITIONED month, 3 months"
+    char dedupe_key "UQ with organization_id, occurred_at"
+  }
+  ato_account_activity_daily {
+    bigint id PK
+    datetime day_start PK "PARTITIONED month, 6 months"
+  }
+  ato_risk_signals {
+    bigint id PK
+    datetime detected_at PK "PARTITIONED month, 13 months"
+  }
+  ato_risk_scores {
+    bigint id PK
+    datetime computed_at PK "PARTITIONED month, 13 months"
+  }
+  ato_response_actions {
+    bigint id PK
+    char dedupe_hash "UQ with organization_id, active_marker"
+    tinyint active_marker "GENERATED STORED"
+  }
+  ato_smtp_restrictions {
+    bigint id PK
+    char subject_hash "UQ with organization_id, active_marker"
+    tinyint active_marker "GENERATED STORED"
+  }
+```
+
 ## Platform operations
 
 ```mermaid

@@ -222,6 +222,12 @@ export interface BecResultInput {
   /** Shadow assessments (≤ 3), null when none ran. */
   aiShadow: Array<Record<string, unknown>> | null;
   durationMs: number;
+  /**
+   * Step 8.4 D6: `bec-outbound-obs/1` counts and booleans of an outbound or internal message of an
+   * organization with `ato_detection` (`bec_scan_results.outbound_observations`); absent/null
+   * otherwise. Never text, spans or addresses.
+   */
+  outboundObservations?: Record<string, unknown> | null;
 }
 
 /** One `bec_contact_history` upsert (B12): keyed hashes and counts only. */

@@ -1,4 +1,6 @@
 import {
+  type AtoAccountRiskUpdatedV1,
+  type AtoResponseCompletedV1,
   type AttachmentSandboxCompletedV1,
   type DeliveryApprovedV1,
   type DomainDnsRecordsChangedV1,
@@ -9,14 +11,17 @@ import {
   type MessageScannedV1,
   type MessageStateChangedV1,
   type PolicyDecidedV1,
+  type SecurityIncidentCreatedV1,
+  type SecurityIncidentUpdatedV1,
 } from '@email-gateway/event-contracts';
 import type { ScanVerdict } from '@email-gateway/security-contracts';
-import type {
-  AlertKind,
-  Severity,
-  ThreatVerdict,
-  WebhookDirection,
-  WebhookEventType,
+import {
+  type AlertKind,
+  incidentWebhookSeverity,
+  type Severity,
+  type ThreatVerdict,
+  type WebhookDirection,
+  type WebhookEventType,
 } from '@email-gateway/webhooks';
 
 /**
@@ -26,7 +31,10 @@ import type {
  * direction, verdict; the domain is known only after the writer read and passes the pre-filter).
  */
 
-/** The eight internal events bound to `email.webhooks` (topology v11, §4.3). */
+/**
+ * The twelve internal events bound to `email.webhooks`: the eight of topology v11 (§4.3) and the
+ * four security incident / account takeover events of topology v13 (step 8.4 D16).
+ */
 export const FANOUT_SOURCE_TYPES = [
   EventTypes.MessageReceived,
   EventTypes.MessageScanned,
@@ -36,6 +44,10 @@ export const FANOUT_SOURCE_TYPES = [
   EventTypes.AttachmentSandboxCompleted,
   EventTypes.DomainStatusChanged,
   EventTypes.DomainDnsRecordsChanged,
+  EventTypes.SecurityIncidentCreated,
+  EventTypes.SecurityIncidentUpdated,
+  EventTypes.AtoAccountRiskUpdated,
+  EventTypes.AtoResponseCompleted,
 ] as const;
 export type FanoutSourceType = (typeof FANOUT_SOURCE_TYPES)[number];
 
@@ -56,7 +68,11 @@ export type CandidateRule =
   | 'threat_sandbox'
   | 'domain_verified'
   | 'dns_failed_verification'
-  | 'dns_failed_records';
+  | 'dns_failed_records'
+  | 'incident_created'
+  | 'incident_updated'
+  | 'ato_risk_changed'
+  | 'ato_response_completed';
 
 /** One public event an internal event may yield (W3 table row). */
 export interface Candidate {
@@ -316,6 +332,57 @@ export function projectCandidates(event: EventEnvelope<unknown>): Candidate[] {
           subKey: 'records',
           severity: failing.some((r) => CRITICAL_PURPOSES.includes(r.purpose)) ? 'high' : 'medium',
           alert: 'domain_dns_failed',
+        },
+      ];
+    }
+    // Step 8.4 D16: metadata-only public events built from the payload (no direction, domain or
+    // verdict: they pass those filters; `minSeverity` applies).
+    case EventTypes.SecurityIncidentCreated: {
+      const p = event.payload as SecurityIncidentCreatedV1;
+      return [
+        {
+          rule: 'incident_created',
+          type: 'security.incident.created',
+          subKey: '',
+          severity: incidentWebhookSeverity(p.severity),
+          alert: null,
+        },
+      ];
+    }
+    case EventTypes.SecurityIncidentUpdated: {
+      const p = event.payload as SecurityIncidentUpdatedV1;
+      return [
+        {
+          rule: 'incident_updated',
+          type: 'security.incident.updated',
+          subKey: '',
+          severity: incidentWebhookSeverity(p.severity),
+          alert: null,
+        },
+      ];
+    }
+    case EventTypes.AtoAccountRiskUpdated: {
+      const p = event.payload as AtoAccountRiskUpdatedV1;
+      if (p.level === p.previousLevel) return [];
+      return [
+        {
+          rule: 'ato_risk_changed',
+          type: 'ato.account.risk_changed',
+          subKey: '',
+          severity: incidentWebhookSeverity(p.level),
+          alert: null,
+        },
+      ];
+    }
+    case EventTypes.AtoResponseCompleted: {
+      const p = event.payload as AtoResponseCompletedV1;
+      return [
+        {
+          rule: 'ato_response_completed',
+          type: 'ato.response.completed',
+          subKey: p.phase,
+          severity: p.status === 'failed' || p.status === 'rollback_failed' ? 'medium' : 'info',
+          alert: null,
         },
       ];
     }

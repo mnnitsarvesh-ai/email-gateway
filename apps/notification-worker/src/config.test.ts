@@ -25,6 +25,22 @@ describe('loadWorkerConfig (step 5.2 §5, P25)', () => {
     expect(cfg.PORTAL_PUBLIC_URL).toBe('http://localhost:3001');
     expect(cfg.RABBITMQ_NOTIFICATION_URL).toHaveLength(1);
     expect(cfg.NOTIFY_SMTP_HOST).toBeUndefined();
+    // Step 8.4 D16: the platform SOC audience is off by default.
+    expect(cfg.NOTIFY_ATO_PLATFORM_SOC_EMAIL).toBe('');
+  });
+
+  it('reads NOTIFY_ATO_PLATFORM_SOC_EMAIL (trimmed, lower-cased; empty = off) (step 8.4 D16)', () => {
+    expect(
+      loadWorkerConfig({ ...valid, NOTIFY_ATO_PLATFORM_SOC_EMAIL: ' SOC@Platform.Example ' })
+        .NOTIFY_ATO_PLATFORM_SOC_EMAIL,
+    ).toBe('soc@platform.example');
+    expect(
+      loadWorkerConfig({ ...valid, NOTIFY_ATO_PLATFORM_SOC_EMAIL: '' })
+        .NOTIFY_ATO_PLATFORM_SOC_EMAIL,
+    ).toBe('');
+    expect(rejection({ ...valid, NOTIFY_ATO_PLATFORM_SOC_EMAIL: 'not-an-address' })).toContain(
+      'NOTIFY_ATO_PLATFORM_SOC_EMAIL',
+    );
   });
 
   it('reads the relay keys and the bounds', () => {

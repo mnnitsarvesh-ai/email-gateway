@@ -39,8 +39,21 @@ spec:
             # Secrets are mounted as files by External Secrets and read via the <KEY>_FILE convention.
             - { name: DATABASE_URL_FILE, value: /var/run/secrets/gateway/database-url }
             - { name: REDIS_URL_FILE, value: /var/run/secrets/gateway/redis-url }
+            # Step 8.4 (ADR-0073): HMAC key of unknown SASL usernames in ATO telemetry (required
+            # while SMTP_ATO_TELEMETRY_ENABLED=true; >= 32 characters). Its own Secret
+            # `email-gateway-smtp-ato-key` (key `username-hash-key`), mounted by this Deployment
+            # only (not in email-gateway-secrets, which every Deployment mounts). The other
+            # SMTP_ATO_* keys keep their defaults (telemetry on, 15 s restriction cache); the
+            # enforcement kill switch is explicit here so an emergency stop is a one-line change
+            # (docs/runbooks/smtp-ato-enforcement.md).
+            - {
+                name: SMTP_ATO_USERNAME_HASH_KEY_FILE,
+                value: /var/run/secrets/smtp-ato/username-hash-key,
+              }
+            - { name: SMTP_ATO_ENFORCEMENT_ENABLED, value: 'true' }
           volumeMounts:
             - { name: secrets, mountPath: /var/run/secrets/gateway, readOnly: true }
+            - { name: smtp-ato-key, mountPath: /var/run/secrets/smtp-ato, readOnly: true }
             - { name: tmp, mountPath: /tmp }
           readinessProbe:
             httpGet: { path: /health/ready, port: http }
@@ -64,6 +77,8 @@ spec:
       volumes:
         - name: secrets
           secret: { secretName: email-gateway-secrets }
+        - name: smtp-ato-key
+          secret: { secretName: email-gateway-smtp-ato-key }
         - name: tmp
           emptyDir: {}
 ---

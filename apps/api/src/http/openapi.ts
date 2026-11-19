@@ -492,6 +492,30 @@ export const OPENAPI_TAGS: ReadonlyArray<{ name: string; description: string }> 
       'bounds.',
   },
   {
+    name: 'ato',
+    description:
+      'Step 8.4: account takeover detection (off by default; a platform operator enables the ' +
+      'plan feature `ato_detection` per organization). Overview and attention counts, monitored ' +
+      'accounts (mailboxes, gateway users, SMTP connectors) with explainable risk scores, ' +
+      'signals, authentication events, activity and score history, analyst overrides, ' +
+      'protection and trusted contexts, the ATO evidence of incidents, response actions with ' +
+      'approvals (four eyes, MFA) and rollback, SMTP sending restrictions and authentication ' +
+      'blocks, settings and the rule catalogue. `ato:read`, `ato:manage`, `ato:respond`, ' +
+      '`ato:configure`. Not offered: Microsoft Entra ID / Google Workspace adapters and ' +
+      'provider-confirmed actions (step 8.5), platform-wide views across tenants.',
+  },
+  {
+    name: 'incidents',
+    description:
+      'Step 8.4: security incidents shared by account takeover and (later) advanced threat ' +
+      'protection: list, manual creation, detail with the category detail, status transitions ' +
+      '(open, investigating, confirmed, false positive, mitigated, resolved), assignment, notes, ' +
+      'timeline, linked messages and the audited report. Access is per category: a category’s ' +
+      'incidents need its read/manage permission (account takeover: `ato:read`/`ato:manage`); ' +
+      'others answer 404. Receivers of the `security.incident.*` webhooks ignore unknown ' +
+      'categories.',
+  },
+  {
     name: 'platform',
     description:
       'Platform staff only: overrides (1.3), dead letters (3.2), scan training (4.1), threat ' +

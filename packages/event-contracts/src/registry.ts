@@ -1,5 +1,18 @@
 import type { z } from 'zod';
 import {
+  atoAccountRiskUpdatedV1,
+  atoNotificationRequestedV1,
+  atoResponseCompletedV1,
+  atoResponseRequestedV1,
+  atoRestrictionChangedV1,
+  authAccountChangedV1,
+  authLoginRecordedV1,
+  securityIncidentCreatedV1,
+  securityIncidentUpdatedV1,
+  smtpAuthRecordedV1,
+  smtpSubmissionRecordedV1,
+} from './ato-events';
+import {
   attachmentSandboxCompletedV1,
   attachmentSandboxRequestedV1,
   deliveryApprovedV1,
@@ -45,9 +58,29 @@ import type { ExchangeName } from './topology';
  * quarantine notification of an organization (`aggregate_id` = the decimal organization id).
  * `organization` (step 6.2 §4.1): a security alert request of an organization (`aggregate_id` =
  * the decimal organization id).
+ *
+ * Step 8.4 (D2): own aggregate types keep ATO and incident rows out of the ordering chains of
+ * messages and organizations (a nacked publish blocks only its aggregate): `login`
+ * (`login_audit_logs.id`), `audit` (`audit_logs.id`), `smtp_telemetry` (the organization id of a
+ * telemetry batch), `ato_account` (`ato_accounts.id`), `security_incident`
+ * (`security_incidents.id`), `ato_response` (`ato_response_actions.id`), `ato_restriction`
+ * (`ato_smtp_restrictions.id`), `ato_notification` (the organization id).
  */
 export type AggregateType =
-  'message' | 'domain' | 'attachment' | 'sandbox_analysis' | 'quarantine' | 'organization';
+  | 'message'
+  | 'domain'
+  | 'attachment'
+  | 'sandbox_analysis'
+  | 'quarantine'
+  | 'organization'
+  | 'login'
+  | 'audit'
+  | 'smtp_telemetry'
+  | 'ato_account'
+  | 'security_incident'
+  | 'ato_response'
+  | 'ato_restriction'
+  | 'ato_notification';
 
 export interface EventDefinition<S extends z.ZodType = z.ZodType> {
   type: string;
@@ -266,6 +299,88 @@ export const EVENT_REGISTRY = {
     'email.policy',
     notificationAlertRequestedV1,
     'organization',
+  ),
+  // Step 8.4 D2, D5: producer api (LoginAuditRepository, same transaction as the
+  // login_audit_logs row) through the outbox; bound to ato.events (topology v13).
+  [EventTypes.AuthLoginRecorded]: define(
+    EventTypes.AuthLoginRecorded,
+    'email.events',
+    authLoginRecordedV1,
+    'login',
+  ),
+  // Step 8.4 D2, D5: producer api (AuditService, same client as the audit_logs row) for
+  // ATO_ACCOUNT_CHANGE_ACTIONS; bound to ato.events.
+  [EventTypes.AuthAccountChanged]: define(
+    EventTypes.AuthAccountChanged,
+    'email.events',
+    authAccountChangedV1,
+    'audit',
+  ),
+  // Step 8.4 D4: producer smtp-adapter (telemetry flusher, after the SMTP reply); bound to
+  // ato.events.
+  [EventTypes.SmtpAuthRecorded]: define(
+    EventTypes.SmtpAuthRecorded,
+    'email.events',
+    smtpAuthRecordedV1,
+    'smtp_telemetry',
+  ),
+  [EventTypes.SmtpSubmissionRecorded]: define(
+    EventTypes.SmtpSubmissionRecorded,
+    'email.events',
+    smtpSubmissionRecordedV1,
+    'smtp_telemetry',
+  ),
+  // Step 8.4 D11: producer ATO store (worker or api) when the level changes; bound to
+  // email.webhooks (webhook-worker fanout).
+  [EventTypes.AtoAccountRiskUpdated]: define(
+    EventTypes.AtoAccountRiskUpdated,
+    'email.security',
+    atoAccountRiskUpdatedV1,
+    'ato_account',
+  ),
+  // Step 8.4 D24: producer the shared IncidentStore (every category); bound to email.webhooks.
+  [EventTypes.SecurityIncidentCreated]: define(
+    EventTypes.SecurityIncidentCreated,
+    'email.security',
+    securityIncidentCreatedV1,
+    'security_incident',
+  ),
+  [EventTypes.SecurityIncidentUpdated]: define(
+    EventTypes.SecurityIncidentUpdated,
+    'email.security',
+    securityIncidentUpdatedV1,
+    'security_incident',
+  ),
+  // Step 8.4 D13, D15: producer ATO store, provider actions only; bound to ato.responses
+  // (consumer: ato-worker respond role).
+  [EventTypes.AtoResponseRequested]: define(
+    EventTypes.AtoResponseRequested,
+    'email.security',
+    atoResponseRequestedV1,
+    'ato_response',
+  ),
+  // Step 8.4 D13: producer ATO store on every terminal state; bound to email.webhooks.
+  [EventTypes.AtoResponseCompleted]: define(
+    EventTypes.AtoResponseCompleted,
+    'email.security',
+    atoResponseCompletedV1,
+    'ato_response',
+  ),
+  // Step 8.4 D14: producer ATO store and the expiry sweeper; no queue binding (smtp-adapter
+  // outbox tail for cache invalidation; analytics firehose).
+  [EventTypes.AtoRestrictionChanged]: define(
+    EventTypes.AtoRestrictionChanged,
+    'email.security',
+    atoRestrictionChangedV1,
+    'ato_restriction',
+  ),
+  // Step 8.4 D16: producer ATO store (first event of a throttle window); bound to
+  // email.notifications (consumer: notification-worker).
+  [EventTypes.AtoNotificationRequested]: define(
+    EventTypes.AtoNotificationRequested,
+    'email.security',
+    atoNotificationRequestedV1,
+    'ato_notification',
   ),
 } as const satisfies Record<string, EventDefinition>;
 

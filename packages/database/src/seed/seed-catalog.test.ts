@@ -5,6 +5,7 @@ import {
   FEATURE_KEYS,
   LIMIT_KEYS,
   MAIL_DESTINATION_PRESETS,
+  OPERATOR_ENABLED_FEATURE_KEYS,
   PERMISSIONS,
   PLANS,
   PLATFORM_ORGANIZATION,
@@ -73,7 +74,7 @@ describe('seed catalog', () => {
   const sorted = (list: readonly string[]) => [...list].sort();
   const role = (key: string) => SYSTEM_ROLES.find((r) => r.key === key)!.permissions;
 
-  it('contains the 64 permissions of D7, D8, steps 2.1 D14, 2.2, 2.3, 3.2, 3.3, 4.1, 4.2, 4.4, 4.5, 5.3, 6.1, 6.2, 7.2 and 8.1, without duplicates', () => {
+  it('contains the 68 permissions of D7, D8, steps 2.1 D14, 2.2, 2.3, 3.2, 3.3, 4.1, 4.2, 4.4, 4.5, 5.3, 6.1, 6.2, 7.2, 8.1 and 8.4, without duplicates', () => {
     expect(new Set(keys).size).toBe(keys.length);
     expect(sorted(keys)).toEqual(
       sorted([
@@ -141,14 +142,18 @@ describe('seed catalog', () => {
         'archive:retrieve',
         'archive:manage',
         'ediscovery:manage',
+        'ato:read',
+        'ato:manage',
+        'ato:respond',
+        'ato:configure',
       ]),
     );
-    expect(keys).toHaveLength(64);
+    expect(keys).toHaveLength(68);
     // Step 3.3 placed message:rescan next to the other message permissions (design §3.3); the
     // seed upserts by key, so on an existing database it simply gets the next id.
     expect(keys.indexOf('message:rescan')).toBe(keys.indexOf('message:read_content') + 1);
     // Otherwise appended in catalog order (permission ids follow it on a fresh database).
-    expect(keys.slice(-32)).toEqual([
+    expect(keys.slice(-36)).toEqual([
       'connector:read',
       'connector:manage',
       'domain:routing_manage',
@@ -181,6 +186,10 @@ describe('seed catalog', () => {
       'archive:retrieve',
       'archive:manage',
       'ediscovery:manage',
+      'ato:read',
+      'ato:manage',
+      'ato:respond',
+      'ato:configure',
     ]);
     // `resource:action`; the resource may contain underscores since step 6.1 (`threat_intel`).
     for (const key of keys) expect(key).toMatch(/^[a-z]+(?:_[a-z]+)*:[a-z_]+$/);
@@ -356,6 +365,62 @@ describe('seed catalog', () => {
     expect(holders('archive:legal_hold')).toEqual(['organization_admin', 'super_admin']);
   });
 
+  it('grants the step 8.4 account takeover permissions exactly as §3.3 says', () => {
+    const holders = (permission: string) =>
+      SYSTEM_ROLES.filter((r) => (r.permissions as readonly string[]).includes(permission))
+        .map((r) => r.key)
+        .sort();
+    const description = (key: string) => PERMISSIONS.find((p) => p.key === key)?.description;
+    expect(description('ato:read')).toBe(
+      'View account takeover dashboards, accounts, signals and incidents (step 8.4)',
+    );
+    expect(description('ato:manage')).toBe(
+      'Triage account takeover incidents, notes, overrides and trusted contexts (step 8.4)',
+    );
+    expect(description('ato:respond')).toBe(
+      'Request, approve and roll back account takeover responses (step 8.4)',
+    );
+    expect(description('ato:configure')).toBe(
+      'Configure account takeover detection, scoring, notifications and automation (step 8.4)',
+    );
+    expect(holders('ato:read')).toEqual(
+      [
+        'compliance_auditor',
+        'organization_admin',
+        'platform_admin',
+        'security_analyst',
+        'super_admin',
+      ].sort(),
+    );
+    for (const key of ['ato:manage', 'ato:respond']) {
+      expect(holders(key), key).toEqual(
+        ['organization_admin', 'security_analyst', 'super_admin'].sort(),
+      );
+    }
+    expect(holders('ato:configure')).toEqual(['organization_admin', 'super_admin']);
+    for (const key of ['ato:read', 'ato:manage', 'ato:respond', 'ato:configure']) {
+      expect(TENANT_PERMISSIONS, key).toContain(key);
+      expect(PLATFORM_PERMISSIONS, key).not.toContain(key);
+      expect(TENANT_READ_PERMISSIONS, key).not.toContain(key);
+      expect(PERMISSIONS.find((p) => p.key === key)!.description.length).toBeLessThanOrEqual(255);
+    }
+    // D24 / ADR-0075: no generic incident permission; access is per category.
+    expect(keys.filter((key) => key.startsWith('incident'))).toEqual([]);
+  });
+
+  it('keeps ato_detection off in every plan (step 8.4 D21, PO1)', () => {
+    expect(FEATURE_KEYS.at(-1)).toBe('ato_detection');
+    expect([...OPERATOR_ENABLED_FEATURE_KEYS]).toEqual(['ato_detection']);
+    for (const plan of PLANS) expect(plan.features.ato_detection, plan.code).toBe(false);
+    // The full plans still enable every other feature.
+    for (const code of ['enterprise', 'dedicated']) {
+      const plan = PLANS.find((p) => p.code === code)!;
+      for (const key of FEATURE_KEYS.filter((k) => k !== 'ato_detection')) {
+        expect(plan.features[key], `${code} ${key}`).toBe(true);
+      }
+    }
+  });
+
   it('has exactly the 8 system roles of D8 plus mailbox_user (5.3), each referencing existing permissions only', () => {
     expect(SYSTEM_ROLES.map((r) => r.key)).toEqual([...SYSTEM_ROLE_KEYS]);
     expect([...SYSTEM_ROLE_KEYS]).toEqual([
@@ -410,6 +475,7 @@ describe('seed catalog', () => {
         ...read,
         'audit:read',
         'threat_intel:read',
+        'ato:read',
       ],
       organization_admin: TENANT_PERMISSIONS,
       domain_admin: [
@@ -458,6 +524,9 @@ describe('seed catalog', () => {
         'webhook:read',
         'message:reveal',
         'archive:search',
+        'ato:read',
+        'ato:manage',
+        'ato:respond',
       ],
       quarantine_reviewer: [
         'organization:read',
@@ -484,6 +553,7 @@ describe('seed catalog', () => {
         'archive:search',
         'archive:retrieve',
         'ediscovery:manage',
+        'ato:read',
       ],
       read_only_user: read,
       mailbox_user: ['quarantine:self'],

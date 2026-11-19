@@ -321,6 +321,8 @@ describe('PrismaBecStore echo checks (§6)', () => {
       trustedSenders: [{ kind: 'domain', value: 'partner.test' }],
       suppressions: [{ reasonCode: 'bec.content.urgency', senderValue: 'bob@partner.test' }],
       urlSettingsRow: { version: 3 },
+      // Step 8.4 D6: no feature row = ATO off.
+      atoDetection: false,
     });
     await s.tenantData(ORG);
     expect(calls.filter((c) => c === 'domain.findMany')).toHaveLength(1);
@@ -351,9 +353,21 @@ describe('PrismaBecStore echo checks (§6)', () => {
         [{ organizationId: ORG, name: 'x.test', status: 'pending_verification', deletedAt: null }],
       ],
       ['scanEngineSetting', { organizationId: ORG, engine: 'bec', settings: {}, version: 1 }],
+      ['organizationFeature', { organizationId: 8n, featureKey: 'ato_detection', enabled: true }],
     ] as const) {
       expect(await read(store({ ...rows, [key]: bad }).tenantData(ORG))).toBe('tenant');
     }
+  });
+
+  it('reads the ato_detection feature with the tenant data (step 8.4 D6)', async () => {
+    const enabled = await store({
+      organizationFeature: { organizationId: ORG, featureKey: 'ato_detection', enabled: true },
+    }).tenantData(ORG);
+    expect(enabled.atoDetection).toBe(true);
+    const disabled = await store({
+      organizationFeature: { organizationId: ORG, featureKey: 'ato_detection', enabled: false },
+    }).tenantData(ORG);
+    expect(disabled.atoDetection).toBe(false);
   });
 
   it('history: organization, scope and requested key echo; infra parsed for sender rows', async () => {

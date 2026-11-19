@@ -75,6 +75,9 @@ export interface ExecutionLogFacts {
   actions: string[];
 }
 
+/** `ato_accounts.kind` (step 8.4). */
+export type AtoAccountKind = 'mailbox' | 'gateway_user' | 'smtp_connector';
+
 export interface DomainFacts {
   id: bigint;
   publicId: string;
@@ -522,5 +525,25 @@ export class FanoutReads {
       wrongRead(this.sink, 'domain', 'id, organization or public id');
     }
     return { id: row.id, publicId: row.publicId, name: row.name, status: row.status };
+  }
+
+  /**
+   * Step 8.4: the kind of a monitored account of the organization by public id (required: the
+   * account exists while its response actions exist; echo-checked like every fanout read).
+   */
+  async atoAccountKind(
+    tx: Prisma.TransactionClient,
+    organizationId: bigint,
+    accountPublicId: string,
+  ): Promise<AtoAccountKind> {
+    const row = await tx.atoAccount.findUnique({
+      where: { publicId: accountPublicId },
+      select: { organizationId: true, publicId: true, kind: true },
+    });
+    if (row === null) wrongRead(this.sink, 'ato_account', 'missing');
+    if (row.organizationId !== organizationId || row.publicId !== accountPublicId) {
+      wrongRead(this.sink, 'ato_account', 'organization or public id');
+    }
+    return row.kind;
   }
 }

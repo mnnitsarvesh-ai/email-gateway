@@ -1,0 +1,327 @@
+# promtool unit tests of rules/ato.rules.yml (step 8.4 D19), one test per alert:
+#   docker run --rm -v "$PWD/infrastructure/monitoring:/m:ro" --entrypoint promtool \
+#     prom/prometheus:v3.6.0 test rules /m/tests/ato.rules.test.yml
+rule_files:
+  - ../rules/ato.rules.yml
+evaluation_interval: 1m
+tests:
+  - name: worker down for 5 minutes
+    interval: 1m
+    input_series:
+      - series: up{job="ato-worker",instance="ato-detect-a"}
+        values: 1x3 0x10
+      - series: up{job="ato-worker",instance="ato-respond-b"}
+        values: 1x13
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: AtoWorkerDown
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: AtoWorkerDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: ato-worker
+              instance: ato-detect-a
+            exp_annotations:
+              summary: An ato-worker replica is down
+              description: Prometheus cannot scrape an ato-worker replica for 5 minutes. Account takeover detection, responses or maintenance of that Deployment are not progressing; mail flow is unaffected (ato.mail is lossy and the catch-up restores it).
+              runbook_url: docs/runbooks/account-takeover.md#atoworkerdown
+  - name: 'ato.events backlog: warning at 50000, critical at 500000 (topology vhost only)'
+    interval: 1m
+    input_series:
+      - series: rabbitmq_detailed_queue_messages_ready{job="rabbitmq-detailed",vhost="email-gateway",queue="ato.events"}
+        values: 1000x5 60000x15 600000x15
+      - series: rabbitmq_detailed_queue_messages_ready{job="rabbitmq-detailed",vhost="eg-it-1",queue="ato.events"}
+        values: 900000x35
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: AtoEventsBacklog
+        exp_alerts: []
+      - eval_time: 18m
+        alertname: AtoEventsBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations: &a1
+              summary: ato.events backlog above 50000
+              description: Authentication and SMTP telemetry events are waiting for the detect role. Detection lags behind; at 1000000 the queue rejects publishes and ATO events wait in the outbox (other aggregates are unaffected). Scale ato-detect or check its readiness.
+              runbook_url: docs/runbooks/account-takeover.md#atoeventsbacklog
+      - eval_time: 33m
+        alertname: AtoEventsBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations: *a1
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: ato.events backlog above 500000
+              description: ato.events is half way to its reject-publish bound (1000000). Scale ato-detect now or follow the runbook.
+              runbook_url: docs/runbooks/account-takeover.md#atoeventsbacklog
+  - name: ato.mail near its drop-head bound
+    interval: 1m
+    input_series:
+      - series: rabbitmq_detailed_queue_messages_ready{job="rabbitmq-detailed",vhost="email-gateway",queue="ato.mail"}
+        values: 100000x5 260000x15
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: AtoMailQueueNearBound
+        exp_alerts: []
+      - eval_time: 18m
+        alertname: AtoMailQueueNearBound
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: ato.mail is half way to its drop-head bound
+              description: More than 250000 scanned messages wait in the lossy ato.mail queue (bound 500000). Above the bound the oldest are dropped without dead letters; the catch-up restores them, but detection of outbound abuse is delayed.
+              runbook_url: docs/runbooks/account-takeover.md#atomailqueuenearbound
+  - name: detection lag p95 above 5 minutes for 15 minutes
+    interval: 1m
+    input_series:
+      - series: ato_detection_lag_seconds_bucket{job="ato-worker",source="outbound_message",le="60"}
+        values: 0+10x10 100x30
+      - series: ato_detection_lag_seconds_bucket{job="ato-worker",source="outbound_message",le="300"}
+        values: 0+10x10 100x30
+      - series: ato_detection_lag_seconds_bucket{job="ato-worker",source="outbound_message",le="600"}
+        values: 0+10x40
+      - series: ato_detection_lag_seconds_bucket{job="ato-worker",source="outbound_message",le="+Inf"}
+        values: 0+10x40
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: AtoDetectionLagHigh
+        exp_alerts: []
+      - eval_time: 22m
+        alertname: AtoDetectionLagHigh
+        exp_alerts: []
+      - eval_time: 38m
+        alertname: AtoDetectionLagHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Account takeover detection lags more than 5 minutes (p95)
+              description: The 95th percentile from a source event to the commit of its detection is above 300 seconds. Check the backlogs, the writer and Redis latency (ato_redis_operation_seconds, ato_db_query_seconds).
+              runbook_url: docs/runbooks/account-takeover.md#atodetectionlaghigh
+  - name: dead letters of ATO queues only
+    interval: 1m
+    input_series:
+      - series: amqp_consumer_dead_lettered_total{job="ato-worker",queue="ato.events",reason="payload_invalid"}
+        values: 0x5 3x10
+      - series: amqp_consumer_dead_lettered_total{job="email-worker",queue="scan.url",reason="x"}
+        values: 0+5x15
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: AtoDeadLetters
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: AtoDeadLetters
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: ATO events were dead-lettered
+              description: An ato-worker consumer dead-lettered events in the last 15 minutes (a malformed payload or retries exhausted). Inspect email.dead-letter by reason and replay after the cause is fixed.
+              runbook_url: docs/runbooks/account-takeover.md#atodeadletters
+  - name: SMTP telemetry dropped (recorded and flushed never count)
+    interval: 1m
+    input_series:
+      - series: smtp_ato_telemetry_total{job="smtp-adapter",kind="auth",result="flushed"}
+        values: 0+100x20
+      - series: smtp_ato_telemetry_total{job="smtp-adapter",kind="auth",result="dropped"}
+        values: 0x10 7x10
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: AtoSmtpTelemetryDropped
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: AtoSmtpTelemetryDropped
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: SMTP authentication or submission telemetry was dropped
+              description: The smtp-adapter dropped, expired or refused ATO telemetry in the last 15 minutes (buffer full or the outbox insert failing). SMTP brute force and connector attribution are blind for the lost entries; mail is unaffected.
+              runbook_url: docs/runbooks/account-takeover.md#atosmtptelemetrydropped
+  - name: restriction lookup errors page after 5 minutes
+    interval: 1m
+    input_series:
+      - series: smtp_ato_restriction_lookups_total{job="smtp-adapter",result="hit"}
+        values: 0+50x20
+      - series: smtp_ato_restriction_lookups_total{job="smtp-adapter",result="error"}
+        values: 0x5 0+4x15
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: AtoRestrictionLookupErrors
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: AtoRestrictionLookupErrors
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: ATO restriction lookups are failing (submissions tempfail)
+              description: The smtp-adapter cannot read ATO restrictions (Redis or MySQL); the lookup fails closed, so authenticated submissions answer temporary failures. Restore the dependency, or use the SMTP_ATO_ENFORCEMENT_ENABLED kill switch as an emergency measure.
+              runbook_url: docs/runbooks/account-takeover.md#atorestrictionlookuperrors
+  - name: policy fact read errors
+    interval: 1m
+    input_series:
+      - series: policy_ato_facts_total{job="policy-engine",result="resolved"}
+        values: 0+20x20
+      - series: policy_ato_facts_total{job="policy-engine",result="error"}
+        values: 0x10 2x10
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: AtoPolicyFactsErrors
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: AtoPolicyFactsErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Policy evaluations fail on ATO fact reads
+              description: The policy-engine failed to read ATO facts (ato_accounts, security_incidents) for outbound or internal rounds in the last 10 minutes; those evaluations fail and are retried by the consumer.
+              runbook_url: docs/runbooks/account-takeover.md#atopolicyfactserrors
+  - name: GeoIP database stale for an hour (per database)
+    interval: 1m
+    input_series:
+      - series: ato_geoip_database_age_seconds{job="ato-worker",instance="a",database="city"}
+        values: 3000000+600x150
+      - series: ato_geoip_database_age_seconds{job="ato-worker",instance="a",database="asn"}
+        values: 86400x150
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: AtoGeoIpDatabaseStale
+        exp_alerts: []
+      - eval_time: 120m
+        alertname: AtoGeoIpDatabaseStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              database: city
+            exp_annotations:
+              summary: A GeoIP database is older than 35 days
+              description: The loaded MaxMind database is older than ATO_GEOIP_MAX_AGE_DAYS (default 35); located auth events are marked stale. Check the geoipupdate sidecar and the MaxMind licence (the GeoLite2 EULA requires current copies).
+              runbook_url: docs/runbooks/account-takeover.md#atogeoipdatabasestale
+  - name: response failures
+    interval: 1m
+    input_series:
+      - series: ato_responses_total{job="ato-worker",action="restrict_smtp_sending",outcome="succeeded"}
+        values: 0+1x20
+      - series: ato_responses_total{job="ato-worker",action="revoke_sessions",outcome="failed"}
+        values: 0x10 1x10
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: AtoResponseFailures
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: AtoResponseFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: ATO response actions failed
+              description: At least one ATO response (an SMTP restriction or a provider action) ended failed or rollback_failed in the last hour. Nothing was claimed; the tenant was notified (response_failed). Check the action logs.
+              runbook_url: docs/runbooks/account-takeover.md#atoresponsefailures
+  - name: provider failures per provider
+    interval: 1m
+    input_series:
+      - series: ato_provider_operations_total{job="ato-worker",provider="fake",operation="ingest",outcome="failed"}
+        values: 0x5 0+1x20
+      - series: ato_provider_operations_total{job="ato-worker",provider="fake",operation="ingest",outcome="ok"}
+        values: 0+10x25
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: AtoProviderFailures
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AtoProviderFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              provider: fake
+            exp_annotations:
+              summary: Identity-provider operations are failing
+              description: More than 5 identity-provider operations failed in 30 minutes (ingestion, actions or confirmations). Integrations back off and move to error after the configured consecutive failures. Inactive until step 8.5 binds adapters.
+              runbook_url: docs/runbooks/account-takeover.md#atoproviderfailures
+  - name: false-positive rate above 50 % of at least 20 resolutions
+    interval: 1h
+    input_series:
+      - series: ato_incidents_resolved_total{job="ato-worker",resolution="false_positive"}
+        values: 0 6 6 15
+      - series: ato_incidents_resolved_total{job="ato-worker",resolution="remediated"}
+        values: 0 4 4 8
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: AtoFalsePositiveRateHigh
+        exp_alerts: []
+      - eval_time: 3h
+        alertname: AtoFalsePositiveRateHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: More than half of ATO incidents are false positives
+              description: Over 7 days more than 50 percent of at least 20 resolved account_takeover incidents were false positives. Review tenant thresholds and rule weights (calibration) before enabling automation.
+              runbook_url: docs/runbooks/account-takeover.md#atofalsepositiveratehigh
+  - name: credential attack campaign
+    interval: 1m
+    input_series:
+      - series: ato_ip_campaigns_flagged_total{job="ato-worker",instance="a"}
+        values: 0x10 1x10
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: AtoCredentialAttackCampaign
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: AtoCredentialAttackCampaign
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: A credential attack campaign was detected
+              description: An IP failed against many distinct accounts across the platform and was flagged as an attack source (spraying or stuffing). Successes from it raise strong signals; consider a network block at the edge.
+              runbook_url: docs/runbooks/account-takeover.md#atocredentialattackcampaign
+  - name: 'automation guards: hourly caps alert, tenant monitor mode does not'
+    interval: 1m
+    input_series:
+      - series: ato_automation_guard_total{job="ato-worker",reason="tenant_monitor_mode"}
+        values: 0+3x20
+      - series: ato_automation_guard_total{job="ato-worker",reason="tenant_hourly_cap"}
+        values: 0x10 2x10
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: AtoAutomationGuardTripped
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: AtoAutomationGuardTripped
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              reason: tenant_hourly_cap
+            exp_annotations:
+              summary: Automatic ATO responses were held by a platform guard
+              description: Automatic medium or high-impact responses were held for approval by an hourly cap or the platform switch in the last hour (a large attack or a false-positive storm). Pending approvals wait in the portal.
+              runbook_url: docs/runbooks/account-takeover.md#atoautomationguardtripped
+  - name: catch-up behind by more than an hour (leader max)
+    interval: 1m
+    input_series:
+      - series: ato_mail_catchup_lag_seconds{job="ato-worker",instance="leader"}
+        values: 600x10 5400x20
+      - series: ato_mail_catchup_lag_seconds{job="ato-worker",instance="other"}
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: AtoMailCatchupBehind
+        exp_alerts: []
+      - eval_time: 27m
+        alertname: AtoMailCatchupBehind
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: The ato.mail catch-up is more than an hour behind
+              description: The catch-up of the lossy mail feed has a full batch left and its cursor is more than an hour old. Outbound detection of the missed messages is delayed; check the maintenance leader and the writer.
+              runbook_url: docs/runbooks/account-takeover.md#atomailcatchupbehind

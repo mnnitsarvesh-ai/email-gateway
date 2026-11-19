@@ -2,6 +2,7 @@ import {
   EXCHANGE_NAMES,
   policyFor,
   policyKindOf,
+  policyOptionsOf,
   QUEUE_NAMES,
   queueDefinition,
   TOPOLOGY,
@@ -21,7 +22,8 @@ import { stack } from './support/env';
 /**
  * The provisioned vhost `email-gateway` matches the topology exactly (step 3.2 Q1, Q4, §3; v2:
  * step 3.3 L7; v3: step 4.1 S2; v4: step 4.2 A2; v5: step 4.3 U2; v6: step 4.4 B3; v7: step 4.5
- * D2; v8: step 4.6 X11; v9: step 5.2 P15; v10: step 5.3 Q27; v11: step 6.2 §4.3; v12: step 8.1 A26): checks through the management API. The prune case adds one stray binding to the dormant
+ * D2; v8: step 4.6 X11; v9: step 5.2 P15; v10: step 5.3 Q27; v11: step 6.2 §4.3; v12: step 8.1 A26;
+ * v13: step 8.4 §4.1): checks through the management API. The prune case adds one stray binding to the dormant
  * `scan.auth` and lets `init.mjs` remove it again.
  */
 /**
@@ -37,9 +39,11 @@ import { stack } from './support/env';
  * Q27): email.notifications adds one: 48. v11 (step 6.2 §4.3): email.webhooks adds nine (eight
  * event bindings + its retry binding) and email.notifications one (alert_requested.v1): 58 (53
  * queue + 5 exchange bindings). v12 (step 8.1 A26): email.archive turns from dormant into a lossy
- * work queue with the same two bindings: still 58.
+ * work queue with the same two bindings: still 58. v13 (step 8.4 §4.1): ato.events five (four
+ * events + retry), ato.mail two, ato.responses two, email.webhooks four and email.notifications
+ * one: 72 (67 queue + 5 exchange bindings).
  */
-const TOPOLOGY_BINDINGS = 58;
+const TOPOLOGY_BINDINGS = 72;
 const api = new ManagementApi();
 const vhost = stack.rabbitmqVhost();
 
@@ -71,8 +75,8 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
     }
   });
 
-  it('has exactly the twenty-one durable quorum queues, each under its policy eg.<queue>', () => {
-    expect(QUEUE_NAMES).toHaveLength(21);
+  it('has exactly the twenty-four durable quorum queues, each under its policy eg.<queue>', () => {
+    expect(QUEUE_NAMES).toHaveLength(24);
     expect(queues.map((q) => q.name).sort()).toEqual([...QUEUE_NAMES].sort());
     for (const queue of queues) {
       expect(queue.type, queue.name).toBe('quorum');
@@ -95,11 +99,14 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
           false,
         );
       }
-      expect(policy?.definition).toEqual(policyFor(policyKindOf(definition), definition.name));
-      const queue = queues.find((q) => q.name === definition.name);
-      expect(queue?.effective_policy_definition, definition.name).toEqual(
-        policyFor(policyKindOf(definition), definition.name),
+      const expected = policyFor(
+        policyKindOf(definition),
+        definition.name,
+        policyOptionsOf(definition),
       );
+      expect(policy?.definition).toEqual(expected);
+      const queue = queues.find((q) => q.name === definition.name);
+      expect(queue?.effective_policy_definition, definition.name).toEqual(expected);
     }
     expect(policies.filter((p) => p.name.startsWith('eg.'))).toHaveLength(QUEUE_NAMES.length);
   });
@@ -140,10 +147,10 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
     expect(bindings.filter((b) => b.destination_type === 'exchange')).toHaveLength(5);
   });
 
-  it('is topology v12: the vhost description and the rescan bindings (steps 4.1 S2, 4.2 A2, 4.3 U2, 4.4 B3, 4.5 D2, 4.6 X11, 5.2 P15, 5.3 Q27, 6.2, 8.1)', async () => {
-    expect(TOPOLOGY_VERSION).toBe(12);
+  it('is topology v13: the vhost description and the rescan bindings (steps 4.1 S2, 4.2 A2, 4.3 U2, 4.4 B3, 4.5 D2, 4.6 X11, 5.2 P15, 5.3 Q27, 6.2, 8.1, 8.4)', async () => {
+    expect(TOPOLOGY_VERSION).toBe(13);
     const info = await api.get<{ description?: string }>(`/vhosts/${encodeURIComponent(vhost)}`);
-    expect(info.description).toBe('email-gateway topology v12');
+    expect(info.description).toBe('email-gateway topology v13');
     const rescan = bindings
       .filter(
         (b) =>
@@ -564,6 +571,8 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
         'email.policy [org.*.mail.quarantine.notification_requested.v1]',
         // v11 (step 6.2 N2).
         'email.policy [org.*.notification.alert_requested.v1]',
+        // v13 (step 8.4 D16): account takeover notifications.
+        'email.security [org.*.ato.notification.requested.v1]',
         'email.policy [retry.email.notifications.#]',
       ].sort(),
     );
@@ -711,6 +720,11 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
         'email.events [org.*.mail.message.state_changed.v1]',
         'email.events [org.*.domain.status.changed.v1]',
         'email.events [org.*.domain.dns.records_changed.v1]',
+        // v13 (step 8.4 D16, D24).
+        'email.security [org.*.security.incident.created.v1]',
+        'email.security [org.*.security.incident.updated.v1]',
+        'email.security [org.*.ato.account.risk.updated.v1]',
+        'email.security [org.*.ato.response.completed.v1]',
         'email.events [retry.email.webhooks.#]',
       ].sort(),
     );
@@ -762,6 +776,90 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
       'email.dead-letter',
     ]);
     expect(onEvents('dead-letter.email.webhooks')).toEqual(['email.dead-letter']);
+  });
+
+  it('has the three ATO queues of v13 (step 8.4 D3) for the ato-worker (eg-ato) only', async () => {
+    expect(
+      Object.fromEntries(
+        ['ato.events', 'ato.mail', 'ato.responses'].map((name) => [name, bindingsOf(name)]),
+      ),
+    ).toEqual({
+      'ato.events': [
+        'email.events [org.*.auth.account.changed.v1]',
+        'email.events [org.*.auth.login.recorded.v1]',
+        'email.events [org.*.smtp.auth.recorded.v1]',
+        'email.events [org.*.smtp.submission.recorded.v1]',
+        'email.security [retry.ato.events.#]',
+      ],
+      'ato.mail': [
+        'email.security [org.*.mail.message.scanned.v1]',
+        'email.security [retry.ato.mail.#]',
+      ],
+      'ato.responses': [
+        'email.security [org.*.ato.response.requested.v1]',
+        'email.security [retry.ato.responses.#]',
+      ],
+    });
+    // ato.events and ato.responses never drop (work, reject-publish); ato.mail drops heads at
+    // 500 000 WITHOUT dead-lettering them (no dead-letter keys in its applied policy).
+    const effective = (name: string) =>
+      queues.find((q) => q.name === name)?.effective_policy_definition;
+    expect(effective('ato.events')).toEqual(policyFor('work', 'ato.events'));
+    expect(effective('ato.responses')).toEqual(policyFor('work', 'ato.responses'));
+    expect(effective('ato.mail')).toEqual({
+      'delivery-limit': 20,
+      overflow: 'drop-head',
+      'max-length': 500_000,
+    });
+    // The v12 lossy policies are unchanged.
+    expect(effective('email.archive')).toEqual(policyFor('work-lossy', 'email.archive'));
+    expect(effective('scan.url.inspect')).toEqual(policyFor('work-lossy', 'scan.url.inspect'));
+    expect(effective('scan.sandbox')).toEqual(policyFor('work-lossy', 'scan.sandbox'));
+    const reached = (exchange: string, key: string) =>
+      bindings
+        .filter((b) => b.source === exchange && topicMatches(b.routing_key, key))
+        .map((b) => `${b.destination_type}:${b.destination}`)
+        .sort();
+    // Sources published to email.events reach ato.events once; outputs reach their consumers.
+    expect(reached('email.events', 'org.42.auth.login.recorded.v1')).toEqual([
+      'queue:ato.events',
+      'queue:email.analytics',
+    ]);
+    expect(reached('email.security', 'org.42.mail.message.scanned.v1')).toEqual([
+      'exchange:email.events',
+      'queue:ato.mail',
+      'queue:email.policy.evaluate',
+      'queue:email.webhooks',
+    ]);
+    expect(reached('email.security', 'org.42.ato.response.requested.v1')).toEqual([
+      'exchange:email.events',
+      'queue:ato.responses',
+    ]);
+    expect(reached('email.security', 'org.42.ato.notification.requested.v1')).toEqual([
+      'exchange:email.events',
+      'queue:email.notifications',
+    ]);
+    expect(reached('email.security', 'org.42.ato.restriction.changed.v1')).toEqual([
+      'exchange:email.events',
+    ]);
+    // Hops: retries on email.security reach exactly their queue, dead letters email.dead-letter.
+    for (const [queue, type] of [
+      ['ato.events', 'auth.login.recorded.v1'],
+      ['ato.mail', 'mail.message.scanned.v1'],
+      ['ato.responses', 'ato.response.requested.v1'],
+    ] as const) {
+      expect(reached('email.security', `retry.${queue}.org.42.${type}`), queue).toEqual([
+        `queue:${queue}`,
+      ]);
+      expect(reached('email.events', `dead-letter.${queue}.org.42.${type}`), queue).toEqual([
+        'queue:email.dead-letter',
+      ]);
+    }
+    // Consumers (from WP4 on): the ato-worker role user only.
+    const worker = process.env.RABBITMQ_ATO_USER || 'eg-ato';
+    for (const queue of ['ato.events', 'ato.mail', 'ato.responses']) {
+      for (const user of await consumerUsers(queue)) expect(user, queue).toBe(worker);
+    }
   });
 
   it('init.mjs prunes a binding on a topology queue that the definitions do not have', async () => {

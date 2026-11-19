@@ -1,6 +1,7 @@
 import { Global, Module } from '@nestjs/common';
 import type { BlockList } from 'node:net';
 import { ADAPTER_CONFIG, INTERNAL_NETWORKS, type SmtpAdapterConfig } from '../config';
+import { AtoModule } from '../ato/ato.module';
 import { ConnectorsModule } from '../connectors/connectors.module';
 import {
   SASL_SERVER_OPTIONS,
@@ -15,7 +16,7 @@ import {
  */
 @Global()
 @Module({
-  imports: [ConnectorsModule],
+  imports: [ConnectorsModule, AtoModule],
   providers: [
     {
       provide: SASL_SERVER_OPTIONS,

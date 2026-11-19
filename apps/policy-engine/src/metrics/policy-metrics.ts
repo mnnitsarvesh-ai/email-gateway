@@ -27,7 +27,9 @@ export type PolicyRead =
   | 'lifecycle'
   | 'parse_structure'
   | 'message_urls'
-  | 'url_settings';
+  | 'url_settings'
+  | 'ato_settings'
+  | 'ato_accounts';
 
 /**
  * The policy-engine's series (step 5.2 P24; names fixed by the design, labels bounded enums,
@@ -49,6 +51,8 @@ export class PolicyMetrics {
   readonly bodyBanners: Counter<'result'>;
   readonly recipientSplit: Counter<'result'>;
   readonly riskMissing: Counter;
+  readonly atoFacts: Counter<'result'>;
+  readonly atoFactsSeconds: Histogram;
   readonly lifecycle: LifecycleMetrics;
 
   constructor(metrics: MetricsService) {
@@ -125,6 +129,20 @@ export class PolicyMetrics {
       'policy_risk_missing_total',
       'Scanned or scan-failed rounds evaluated without a revision-0 risk row (a step 5.1 defect; held by the floor)',
     );
+    this.atoFacts = metrics.counter(
+      'policy_ato_facts_total',
+      'ATO policy facts of evaluations (step 8.4 D23) by result: resolved, unknown_account, disabled (feature off or mode off), not_applicable (inbound, no authenticated sender), error',
+      ['result'],
+    );
+    this.atoFactsSeconds = metrics.histogram(
+      'policy_ato_facts_seconds',
+      'Duration of the ATO policy fact reads of one evaluation (two indexed point reads)',
+      [],
+      [0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25],
+    );
+    for (const result of ['resolved', 'unknown_account', 'disabled', 'not_applicable', 'error']) {
+      this.atoFacts.inc({ result }, 0);
+    }
     const transitions = metrics.counter(
       'lifecycle_transitions_total',
       'Message lifecycle transition requests by current state, target and result (applied, duplicate, stale, invalid)',

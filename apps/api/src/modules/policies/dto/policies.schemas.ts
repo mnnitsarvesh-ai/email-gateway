@@ -24,6 +24,7 @@ import {
   policyEvaluationViewSchema,
   policyTenantSettingsSchema,
   syntheticFactsSchema,
+  atoPolicyFactsSchema,
   WEEKDAYS,
 } from '@email-gateway/policy-dsl';
 import { z } from 'zod';
@@ -349,6 +350,38 @@ export const PolicySettingsUpdateDocSchema = PolicySettingsUpdateSchema.extend({
 const QUANTIFIERS = ['any', 'all'] as const;
 const Count = z.number().int().min(0);
 
+/**
+ * The `ato-policy-facts/1` block of an evaluation (step 8.4 D23): what the sender's account
+ * takeover state was when the evaluation ran (stored in `policy_execution_logs.ato_facts`).
+ */
+/**
+ * The additive step 8.4 response keys are always sent by this api; they are optional in the
+ * schema so clients generated before step 8.4 (and views of other modules that reuse these
+ * types) stay valid.
+ */
+const ADDITIVE_NOTE = ' (always present since step 8.4; optional for older clients)';
+
+export const AtoFactsViewSchema = atoPolicyFactsSchema
+  .nullable()
+  .optional()
+  .describe(
+    'Step 8.4 (D23): the ATO facts block the evaluation used (`ato-policy-facts/1`: ' +
+      'accountKnown, riskScore 0–100, riskLevel, incidentSeverity, incidentStatus); null when ' +
+      'the evaluation had none (inbound mail, no authenticated sender, ATO not enabled)' +
+      ADDITIVE_NOTE,
+  );
+
+export const ATO_FACTS_SOURCES = ['stored', 'current', 'none'] as const;
+const AtoFactsSourceSchema = z
+  .enum(ATO_FACTS_SOURCES)
+  .optional()
+  .describe(
+    'Step 8.4 (D23): where the round’s ATO facts came from: `stored` = the stored evaluation’s ' +
+      'block (reproducible); `current` = the sender’s account state now (no stored evaluation); ' +
+      '`none` = no ATO facts in the input' +
+      ADDITIVE_NOTE,
+  );
+
 export const PolicyCatalogFieldSchema = z.strictObject({
   name: z.string(),
   type: z.enum(POLICY_FIELD_TYPES),
@@ -358,6 +391,14 @@ export const PolicyCatalogFieldSchema = z.strictObject({
   authenticatedIdentity: z.boolean(),
   senderIdentity: z.enum(['raw', 'authenticated']).nullable(),
   aiDerived: z.boolean(),
+  strictOnly: z
+    .boolean()
+    .optional()
+    .describe(
+      'Step 8.4 (D23): the field may only make a decision stricter (never in exceptions, ALLOW ' +
+        'or override rules; `field_strict_only`)' +
+        ADDITIVE_NOTE,
+    ),
   directions: z.array(z.enum(POLICY_MESSAGE_DIRECTIONS)),
   values: z.array(z.string()).nullable(),
   ordered: z.boolean(),
@@ -387,9 +428,10 @@ export const PolicyCatalogFieldSchema = z.strictObject({
     })
     .describe(
       'Where the field may be used: every `when`; `exception` = rule `unless` and policy ' +
-        '`exceptions` (not raw sender identity, not AI-derived); `relaxingWhen` = the `when` of ' +
-        'ALLOW and override rules (not raw sender identity); `holdRule` = rules with ' +
-        'REQUIRE_APPROVAL, QUARANTINE or REJECT (not AI-derived)',
+        '`exceptions` (not raw sender identity, not AI-derived, not strict-only); ' +
+        '`relaxingWhen` = the `when` of ALLOW and override rules (not raw sender identity, not ' +
+        'strict-only); `holdRule` = rules with REQUIRE_APPROVAL, QUARANTINE or REJECT (not ' +
+        'AI-derived)',
     ),
 });
 
@@ -568,10 +610,16 @@ export const PolicyTestResponseSchema = z.strictObject({
 });
 export type PolicyTestResponse = z.output<typeof PolicyTestResponseSchema>;
 
+/** A stored evaluation as the api shows it: the library view plus its ATO facts (step 8.4). */
+export const StoredPolicyEvaluationSchema = policyEvaluationViewSchema.extend({
+  atoFacts: AtoFactsViewSchema,
+});
+
 export const PolicyDryRunResponseSchema = PolicyTestResponseSchema.extend({
-  stored: policyEvaluationViewSchema
-    .nullable()
-    .describe('The stored evaluation of the round; null when none is stored (yet)'),
+  atoFactsSource: AtoFactsSourceSchema,
+  stored: StoredPolicyEvaluationSchema.nullable().describe(
+    'The stored evaluation of the round; null when none is stored (yet)',
+  ),
   reproducible: z
     .boolean()
     .describe(
@@ -708,6 +756,7 @@ export const PolicySampleItemSchema = z.strictObject({
     })
     .nullable()
     .describe('The recomputed decision against the target; null unless `evaluated`'),
+  atoFactsSource: AtoFactsSourceSchema,
   dispositionChanged: z
     .boolean()
     .describe('The stored and recomputed message-level dispositions differ'),
@@ -833,6 +882,7 @@ export const PolicyExecutionSchema = z.strictObject({
   overrideApplied: z.boolean(),
   generation: Decimal,
   inputSha256: Sha256,
+  atoFacts: AtoFactsViewSchema,
   durationUs: z.number().int().min(0),
   evaluatedAt: IsoDate,
 });
@@ -847,7 +897,7 @@ export type PolicyExecutionPage = z.output<typeof PolicyExecutionPageSchema>;
 export const MessagePolicyEvaluationsSchema = z.strictObject({
   messageId: z.uuid(),
   data: z
-    .array(policyEvaluationViewSchema)
+    .array(StoredPolicyEvaluationSchema)
     .describe('Every stored evaluation of the message, newest round first'),
 });
 export type MessagePolicyEvaluations = z.output<typeof MessagePolicyEvaluationsSchema>;

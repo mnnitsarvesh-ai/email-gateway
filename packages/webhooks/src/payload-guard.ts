@@ -13,7 +13,8 @@ export const WEBHOOK_MAX_STRING_LENGTH = 1024;
  * Keys (case-insensitive) that never appear in a webhook envelope, whatever their value (W2):
  * message content, raw headers, storage keys, URLs, addresses, file names and secrets.
  * `recipients` is refused only when it carries a string or a list of strings (delivery counts
- * per outcome are an object of numbers).
+ * per outcome are an object of numbers). `subject` likewise (a mail subject is a string; the
+ * step 8.4 incident subject reference is the object `{ type, id }`, D16).
  */
 export const WEBHOOK_DENIED_KEYS: readonly string[] = Object.freeze([
   'subject',
@@ -41,6 +42,8 @@ export const WEBHOOK_DENIED_KEYS: readonly string[] = Object.freeze([
   'password',
 ]);
 const DENIED = new Set(WEBHOOK_DENIED_KEYS.map((key) => key.toLowerCase()));
+/** Denied keys that are refused only when they carry a string or a list of strings. */
+const DENIED_WHEN_TEXT: ReadonlySet<string> = new Set(['recipients', 'subject']);
 
 export type WebhookPayloadErrorCode =
   | ContentGuardCode
@@ -107,7 +110,7 @@ function walk(node: unknown, key: string | null, path: string): void {
   for (const [childKey, child] of Object.entries(node as Record<string, unknown>)) {
     const keyPath = childPath(path, childKey);
     const lower = childKey.toLowerCase();
-    if (DENIED.has(lower) && (lower !== 'recipients' || isStringList(child))) {
+    if (DENIED.has(lower) && (!DENIED_WHEN_TEXT.has(lower) || isStringList(child))) {
       throw new WebhookPayloadError('forbidden_key', keyPath);
     }
     walk(child, childKey, keyPath);

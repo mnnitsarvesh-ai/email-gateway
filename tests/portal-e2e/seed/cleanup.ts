@@ -11,6 +11,7 @@
 import { DeleteObjectsCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { PLATFORM_ORGANIZATION_SLUG, Prisma, type PrismaClient } from '@email-gateway/database';
 import { ARCHIVE_TABLES, cleanupArchiveStores } from './archive';
+import { ATO_PARTITION_COLUMNS, ATO_TABLES } from './ato';
 import { mailBucket } from './db';
 import { LATE_MESSAGE_AGE_DAYS } from './plan';
 
@@ -53,10 +54,14 @@ const PARTITION_COLUMN: Record<string, string> = {
   webhook_deliveries: 'event_occurred_at',
   webhook_delivery_attempts: 'attempted_at',
   webhook_events: 'occurred_at',
+  // Step 8.4: account takeover tables (seed/ato.ts).
+  ...ATO_PARTITION_COLUMNS,
 };
 
 /** Delete order (every table with `organization_id` except `audit_logs` and `organizations`). */
 const ORDER = [
+  // Step 8.4: account takeover and security incident rows (seed/ato.ts ATO_TABLES order).
+  ...ATO_TABLES,
   // Quarantine purge order (step 5.3 Q17).
   'quarantine_download_grants',
   'quarantine_approval_requests',

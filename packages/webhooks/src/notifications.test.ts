@@ -24,6 +24,10 @@ describe('kinds and permissions (N1, N3)', () => {
       'policy_alert',
       'quarantine_admin_alert',
       'quarantine_approval_requested',
+      // Step 8.4 D16 (account takeover e-mails).
+      'ato_incident',
+      'ato_approval_requested',
+      'ato_digest',
     ]);
     expect(ALERT_RECIPIENT_PERMISSION).toEqual({
       threat_detected: 'quarantine:approve',

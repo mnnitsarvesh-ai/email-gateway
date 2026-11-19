@@ -6,6 +6,7 @@ import { usePathname } from 'next/navigation';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { navItemForPath, visibleNavigation } from '@/lib/navigation';
 import { cn } from '@/lib/utils';
+import { AtoAttentionBadge } from './attention-badge';
 
 /** Permission-filtered navigation (design P11); `collapsed` renders the icon rail with tooltips. */
 export function SidebarNav({
@@ -53,7 +54,12 @@ export function SidebarNav({
                     />
                   ) : null}
                   <item.icon className="size-4 shrink-0" aria-hidden />
-                  <span className={cn('truncate', collapsed && 'sr-only')}>{item.label}</span>
+                  <span data-nav-label className={cn('truncate', collapsed && 'sr-only')}>
+                    {item.label}
+                  </span>
+                  {item.badge === 'ato-attention' ? (
+                    <AtoAttentionBadge collapsed={collapsed} />
+                  ) : null}
                 </Link>
               );
               return (

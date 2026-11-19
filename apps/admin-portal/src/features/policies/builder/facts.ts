@@ -72,6 +72,17 @@ export const outcomeOfTrigger = (trigger: string): string =>
   trigger === 'parse_failed' ? 'not_scanned' : trigger;
 
 /**
+ * Id of the "Outbound from a high-risk account" example; equal to the ATO library's
+ * `ATO_POLICY_PRESET`, which recommendations carry as `preset` (step 8.4 D13, D23).
+ */
+export const ATO_HIGH_RISK_PRESET_ID = 'outbound_high_risk_account';
+
+/** The example with this id (`null` for an unknown id). */
+export function factPresetById(id: string | null | undefined) {
+  return FACT_PRESETS.find((preset) => preset.id === id) ?? null;
+}
+
+/**
  * Example facts for the test panel (design B7): data only; what a policy decides for them is
  * the server's answer. Domains are reserved example names.
  */
@@ -182,6 +193,21 @@ export const FACT_PRESETS: ReadonlyArray<{
         { filename: 'setup.exe', typeFamily: 'executable', verdict: 'clean', sizeBytes: 1048576 },
       ],
       risk: { rev0: { score: 120, level: 'low', verdict: 'clean', recommendedAction: 'deliver' } },
+      scan: { verdict: 'clean' },
+    },
+  },
+  {
+    // Step 8.4 D23: linked by the ATO recommendation ("hold outbound mail of high-risk
+    // accounts") and the ATO settings' delivery-policy tab (`?testPreset=` on /policies/new).
+    id: ATO_HIGH_RISK_PRESET_ID,
+    label: 'Outbound from a high-risk account',
+    description:
+      'An outbound message sent by a mailbox whose account takeover risk is high (no active incident).',
+    facts: {
+      direction: 'outbound',
+      sender: { envelope: 'finance@corp.example', authenticated: true },
+      recipients: [{ address: 'payments@supplier.example' }],
+      ato: { riskScore: 65, riskLevel: 'high' },
       scan: { verdict: 'clean' },
     },
   },

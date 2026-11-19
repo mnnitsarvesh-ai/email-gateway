@@ -80,11 +80,16 @@ describe('navigation model (design P11)', () => {
       'messages',
       'quarantine',
       'mail-servers',
+      'incidents',
       'policies',
       'policy-builder',
       'threat-intelligence',
       'url-protection',
       'attachments',
+      'ato',
+      'ato-accounts',
+      'ato-responses',
+      'ato-settings',
       'archive',
       'retention',
       'legal-holds',
@@ -104,11 +109,16 @@ describe('navigation model (design P11)', () => {
       'messages',
       'quarantine',
       'mail-servers',
+      'incidents',
       'policies',
       'policy-builder',
       'threat-intelligence',
       'url-protection',
       'attachments',
+      'ato',
+      'ato-accounts',
+      'ato-responses',
+      'ato-settings',
       'retention',
       'domains',
       'users',
@@ -125,11 +135,16 @@ describe('navigation model (design P11)', () => {
       'messages',
       'quarantine',
       'mail-servers',
+      'incidents',
       'policies',
       'policy-builder',
       'threat-intelligence',
       'url-protection',
       'attachments',
+      'ato',
+      'ato-accounts',
+      'ato-responses',
+      'ato-settings',
       'archive',
       'retention',
       'legal-holds',
@@ -166,11 +181,16 @@ describe('navigation model (design P11)', () => {
       'messages',
       'quarantine',
       'mail-servers',
+      'incidents',
       'policies',
       'policy-builder',
       'threat-intelligence',
       'url-protection',
       'attachments',
+      'ato',
+      'ato-accounts',
+      'ato-responses',
+      'ato-settings',
       'archive',
       'retention',
       'domains',
@@ -198,10 +218,15 @@ describe('navigation model (design P11)', () => {
       'messages',
       'quarantine',
       'mail-servers',
+      'incidents',
       'policies',
       'policy-builder',
       'url-protection',
       'attachments',
+      'ato',
+      'ato-accounts',
+      'ato-responses',
+      'ato-settings',
       'archive',
       'retention',
       'legal-holds',
@@ -263,5 +288,15 @@ describe('navigation model (design P11)', () => {
     expect(gateForPath('/ediscovery/0193')).toEqual(['EdiscoveryCasesController_list_v1']);
     expect(gateForPath('/nowhere')).toBeNull();
     expect(passesGate('authenticated', [])).toBe(true);
+    // Step 8.4: account takeover pages and the generic incident list.
+    expect(navItemForPath('/ato')?.id).toBe('ato');
+    expect(navItemForPath('/ato/accounts/0193')?.id).toBe('ato-accounts');
+    expect(gateForPath('/ato/accounts/0193')).toEqual(['AtoAccountsController_get_v1']);
+    expect(gateForPath('/incidents/0193/report')).toEqual(['IncidentsController_get_v1']);
+    expect(navItemForPath('/ato/settings')?.id).toBe('ato-settings');
+  });
+
+  it('shows the account takeover badge only on the ATO dashboard item (step 8.4 D16)', () => {
+    expect(NAV_ITEMS.filter((item) => item.badge).map((item) => item.id)).toEqual(['ato']);
   });
 });

@@ -6,6 +6,8 @@ import {
   SANDBOX_INPUT_OUTCOMES,
 } from '@email-gateway/risk-scoring';
 import {
+  ATO_POLICY_FACTS_VERSION,
+  ATO_RISK_LEVELS,
   ATTACHMENT_VERDICTS,
   AUTH_OUTCOMES,
   BEC_AI_CODES,
@@ -24,6 +26,8 @@ import {
   REWRITE_SKIP_REASONS,
   reasonCodeSchema,
   SCAN_VERDICTS,
+  SECURITY_INCIDENT_ACTIVE_STATUSES,
+  SECURITY_INCIDENT_SEVERITIES,
   URL_HOST_KINDS,
   URL_VERDICTS,
 } from '@email-gateway/security-contracts';
@@ -110,6 +114,44 @@ export const SCAN_ENGINE_OUTCOMES = [...ENGINE_OUTCOMES, 'missing'] as const;
 export const ENGINE_FINAL_STATES = ['definite', 'skipped', 'failed', 'absent'] as const;
 export type EngineFinalState = (typeof ENGINE_FINAL_STATES)[number];
 export const TRUSTED_CODES = ['authenticated', 'unauthenticated', 'none'] as const;
+
+/**
+ * The ATO facts block of `policy-input/1` (step 8.4 D23, ADR-0073): the sending mailbox
+ * account's risk and active account takeover incident at evaluation time, read by the
+ * policy-engine from the ATO tables and stored with the evaluation
+ * (`policy_execution_logs.ato_facts`). Its own version, so the block can change without a new
+ * input version. An unmonitored sender of an ATO-enabled organization is `accountKnown: false`
+ * with score 0, level `low` and no incident.
+ */
+export const atoPolicyFactsSchema = z
+  .strictObject({
+    version: z.literal(ATO_POLICY_FACTS_VERSION),
+    accountKnown: z.boolean(),
+    riskScore: z.number().int().min(0).max(100),
+    riskLevel: z.enum(ATO_RISK_LEVELS),
+    incidentSeverity: z.enum(SECURITY_INCIDENT_SEVERITIES).nullable(),
+    incidentStatus: z.enum(SECURITY_INCIDENT_ACTIVE_STATUSES).nullable(),
+  })
+  .superRefine((facts, ctx) => {
+    if ((facts.incidentSeverity === null) !== (facts.incidentStatus === null)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['incidentStatus'],
+        message: 'An active incident has both a severity and a status',
+      });
+    }
+    if (
+      !facts.accountKnown &&
+      (facts.riskScore !== 0 || facts.riskLevel !== 'low' || facts.incidentSeverity !== null)
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['accountKnown'],
+        message: 'An unknown account has score 0, level low and no incident',
+      });
+    }
+  });
+export type AtoPolicyFacts = z.infer<typeof atoPolicyFactsSchema>;
 
 export const policyInputSchema = z.strictObject({
   version: z.literal(POLICY_INPUT_VERSION),
@@ -239,6 +281,13 @@ export const policyInputSchema = z.strictObject({
     })
     .nullable(),
   becFinal: z.enum(ENGINE_FINAL_STATES),
+  /**
+   * Step 8.4 D23: ATO facts of the sending mailbox account, **optional**: the key is absent for
+   * every input without ATO facts (inbound mail, organizations without ATO, every evaluation
+   * before step 8.4), so every stored `inputSha256` stays reproducible and
+   * `POLICY_INPUT_VERSION` stays `policy-input/1`.
+   */
+  ato: atoPolicyFactsSchema.optional(),
 });
 export type PolicyInput = z.infer<typeof policyInputSchema>;
 
@@ -332,6 +381,36 @@ export interface PolicyRoundRows {
     departmentsByAddress: Readonly<Record<string, readonly string[]>>;
     usersByAddress: Readonly<Record<string, readonly string[]>>;
   };
+  /**
+   * Step 8.4 D23: the ATO facts the policy-engine read (or the stored `ato_facts` of a dry-run);
+   * absent or null = no facts. Dropped for inbound mail; validated (malformed → PolicyInputError).
+   */
+  ato?: AtoPolicyFactsRow | null;
+}
+
+/** The ATO facts of one evaluation as read from the ATO tables (step 8.4 D23). */
+export interface AtoPolicyFactsRow {
+  accountKnown: boolean;
+  riskScore: number;
+  riskLevel: string;
+  incidentSeverity: string | null;
+  incidentStatus: string | null;
+}
+
+/** The `ato` block of a facts row (validated; the version is added here). */
+export function atoPolicyFactsOf(row: AtoPolicyFactsRow): AtoPolicyFacts {
+  return parseOrFail(
+    atoPolicyFactsSchema,
+    {
+      version: ATO_POLICY_FACTS_VERSION,
+      accountKnown: row.accountKnown,
+      riskScore: row.riskScore,
+      riskLevel: row.riskLevel,
+      incidentSeverity: row.incidentSeverity,
+      incidentStatus: row.incidentStatus,
+    },
+    'ATO facts',
+  );
 }
 
 /** Malformed rows (P8): a defect, never a partial input (the engine dead-letters the event). */
@@ -851,6 +930,9 @@ export function buildPolicyInput(rows: PolicyRoundRows): PolicyInput {
     dlpFinal: finalState(finals.get('dlp')?.outcome),
     bec,
     becFinal: finalState(finals.get('bec')?.outcome),
+    // Step 8.4 D23: only outbound/internal mail carries ATO facts; the key is never emitted
+    // without them (inputs without ATO facts hash exactly as before).
+    ...(rows.ato != null && direction !== 'inbound' ? { ato: atoPolicyFactsOf(rows.ato) } : {}),
   };
   return parseOrFail(policyInputSchema, input, 'policy input');
 }

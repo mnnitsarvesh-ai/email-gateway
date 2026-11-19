@@ -17,6 +17,7 @@ import { z } from 'zod';
 
 const int = z.coerce.number().int();
 const positiveInt = int.min(1);
+const flag = z.enum(['true', 'false', '1', '0']).transform((v) => v === 'true' || v === '1');
 const modelVersion = z
   .string()
   .trim()
@@ -106,6 +107,10 @@ export function becConfigShape() {
     BEC_MAX_EXECUTIVES: positiveInt.max(10_000).default(500),
     BEC_MAX_VENDORS: positiveInt.max(50_000).default(2_000),
     BEC_MAX_TRUSTED_SENDERS: positiveInt.max(50_000).default(1_000),
+
+    // Outbound observations for account takeover detection (step 8.4 D6): outbound and internal
+    // mail of organizations with the `ato_detection` feature; the verdict stays `skipped`.
+    BEC_OUTBOUND_OBSERVATIONS_ENABLED: flag.default(true),
   };
 }
 

@@ -1,3 +1,4 @@
+import type { OutboundObservations } from '@email-gateway/bec';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createBecJobs } from '../src/scanning/scanning.module';
 import { PrismaBecStore } from '../src/scanning/engines/bec/bec-store';
@@ -420,6 +421,54 @@ describe('tenant feedback, trust and history (B7, B11, B12)', () => {
     // An authenticated, clean message is counted.
     await scanCorpus(org, 'clean/clean-dkim-aligned.eml');
     expect((await bfx.historyRows(org)).map((r) => r.scope)).toEqual(['sender', 'pair']);
+  });
+});
+
+describe('outbound observations for account takeover (step 8.4 D6)', () => {
+  it('stores counts for an ATO-enabled organization (verdict skipped); none without the feature', async () => {
+    const on = await tenant('ato-obs-on');
+    const off = await tenant('ato-obs-off');
+    await bfx.prisma.organizationFeature.create({
+      data: { organizationId: on, featureKey: 'ato_detection', enabled: true, source: 'override' },
+    });
+    try {
+      const results = new Map<bigint, RoundResult>();
+      for (const org of [on, off]) {
+        const sender = `finance@${domains.get(org)!}`;
+        const eml = plainEml(
+          { From: `Finance <${sender}>`, To: 'billing@globex.example', Subject: 'Updated invoice' },
+          'Please make the payment today and buy gift cards, it is urgent. Keep this confidential. ' +
+            'New bank details: IBAN DE89 3704 0044 0532 0130 00, amount €2,500.',
+        );
+        const message = await bfx.message(org, eml, {
+          direction: 'outbound',
+          from: sender,
+          rcpt: ['billing@globex.example'],
+        });
+        results.set(org, await runRound(pipeline, message));
+      }
+      const observed = results.get(on)!.state.bec[0]!;
+      const plain = results.get(off)!.state.bec[0]!;
+      for (const row of [observed, plain]) {
+        expect(row.verdict).toBe('skipped');
+        expect(row.score).toBe(0);
+      }
+      expect(results.get(on)!.codes).toEqual(['bec.not_inbound']);
+      expect(results.get(off)!.codes).toEqual(['bec.not_inbound']);
+      expect(plain.outboundObservations).toBeNull();
+      const obs = observed.outboundObservations as unknown as OutboundObservations;
+      expect(obs.version).toBe('bec-outbound-obs/1');
+      expect(['complete', 'incomplete']).toContain(obs.status);
+      expect(obs.categories.payment_request).toBeGreaterThanOrEqual(1);
+      expect(obs.categories.gift_card).toBeGreaterThanOrEqual(1);
+      expect(obs.financialIdentifiers).toMatchObject({ iban: 1, amount: 1 });
+      expect(JSON.stringify(obs)).not.toMatch(/gift cards|DE89|globex|finance@/);
+      expect(await pipeline.text()).toMatch(
+        /scan_bec_outbound_observations_total\{status="(complete|incomplete)"[^}]*\} [1-9]/,
+      );
+    } finally {
+      await bfx.prisma.organizationFeature.deleteMany({ where: { organizationId: on } });
+    }
   });
 });
 

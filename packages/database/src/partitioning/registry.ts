@@ -52,12 +52,13 @@ const monthly = (
 });
 
 /**
- * The 35 partitioned tables: the 16 of D3, the two delivery tables of step 2.3 (§3), the parse
+ * The 39 partitioned tables: the 16 of D3, the two delivery tables of step 2.3 (§3), the parse
  * stage table of step 3.1 (§3), the authentication results table of step 4.1 (§3), the
  * per-attachment results and sandbox submissions of step 4.2 (§3), the five URL tables of
  * step 4.3 (§3), the BEC results table of step 4.4 (§3), the two DLP tables of step 4.5 (§3),
  * the risk scores table of step 5.1 (§3), the webhook events and delivery attempts of
- * step 6.2 (§3) and the archive capture intents and disposal log of step 8.1 (§3).
+ * step 6.2 (§3), the archive capture intents and disposal log of step 8.1 (§3) and the four
+ * account takeover tables of step 8.4 (§3.3, D22).
  */
 export const PARTITION_REGISTRY: readonly PartitionSpec[] = Object.freeze([
   monthly('email_messages', 'received_at', 6, 'core'),
@@ -133,6 +134,14 @@ export const PARTITION_REGISTRY: readonly PartitionSpec[] = Object.freeze([
   // redeliveries), attempts by the attempt instant.
   monthly('webhook_events', 'occurred_at', 2, 'operational'),
   monthly('webhook_delivery_attempts', 'attempted_at', 2, 'operational'),
+  // Step 8.4 (docs/plan/steps/24-account-takeover-core.md §3.3, D22): enriched authentication
+  // events are detail (3 months; login_audit_logs stays the 365-day system of record), the daily
+  // per-account aggregates feed the baselines (6 months), and signals and score history are kept
+  // 13 months so incidents of the last year keep their evidence.
+  monthly('ato_auth_events', 'occurred_at', 3, 'detail'),
+  monthly('ato_account_activity_daily', 'day_start', 6, 'core'),
+  monthly('ato_risk_signals', 'detected_at', 13, 'core'),
+  monthly('ato_risk_scores', 'computed_at', 13, 'core'),
   {
     table: 'message_outbox',
     column: 'created_at',

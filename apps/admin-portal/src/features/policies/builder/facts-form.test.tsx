@@ -24,13 +24,14 @@ function Harness({
 const OP = 'PolicyToolsController_test_v1';
 
 describe('FACT_PRESETS (design B7)', () => {
-  it('has the five presets of the design, facts data only', () => {
+  it('has the five presets of the design and the step 8.4 ATO preset, facts data only', () => {
     expect(FACT_PRESETS.map((p) => p.id)).toEqual([
       'clean-inbound',
       'outbound-confidential',
       'phishing-url',
       'malware-attachment',
       'executable-attachment',
+      'outbound_high_risk_account',
     ]);
     for (const preset of FACT_PRESETS) {
       expect(preset.description).not.toMatch(/quarantin|reject|allow|deliver|block/i);

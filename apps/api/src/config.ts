@@ -1053,6 +1053,28 @@ export const archiveApiConfigShape = {
   ARCHIVE_EXPORT_SIGNING_PREVIOUS_PUBLIC_KEYS: z.string().max(8192).optional(),
 };
 
+/**
+ * Step 8.4 (docs/plan/steps/24-account-takeover-core.md §4.2, D13, D16, D17): the api's account
+ * takeover keys. `API_ATO_OVERVIEW_CACHE_SECONDS` caches `GET /ato/overview` per organization and
+ * range; `API_ATO_REPORT_MAX_ITEMS` bounds the timeline, messages, signals and responses of an
+ * incident report. The response keys are shared with the ato-worker (same names and defaults):
+ * the approval window of medium/high-impact responses, the platform kill switch and cap of
+ * automated responses (reported by the settings view; the api never automates) and the most
+ * active SMTP restrictions per organization (enforced by the ATO store on approval).
+ */
+export const atoApiConfigShape = {
+  API_ATO_OVERVIEW_CACHE_SECONDS: int(1, 3600).default(60),
+  API_ATO_REPORT_MAX_ITEMS: int(1, 5000).default(500),
+  ATO_APPROVAL_TTL_HOURS: int(1, 168).default(24),
+  ATO_AUTOMATED_RESPONSES_ENABLED: bool.default(true),
+  ATO_MAX_AUTOMATED_RESPONSES_PER_ORG_PER_HOUR: int(0, 100).default(10),
+  ATO_MAX_ACTIVE_RESTRICTIONS_PER_ORG: int(1, 500).default(500),
+};
+
+export type AtoApiConfigKeys = {
+  [K in keyof typeof atoApiConfigShape]: z.output<(typeof atoApiConfigShape)[K]>;
+};
+
 export type ArchiveApiConfigKeys = {
   [K in keyof typeof archiveApiConfigShape]: z.output<(typeof archiveApiConfigShape)[K]>;
 };
@@ -1234,6 +1256,8 @@ export const apiConfigSchema = baseConfigSchema
   .extend(archiveStorageConfigSchema.shape)
   .extend({ ARCHIVE_TEST_DAY_SECONDS: archiveTestSeamFieldsSchema.shape.ARCHIVE_TEST_DAY_SECONDS })
   .extend(archiveApiConfigShape)
+  // Step 8.4 §4.2: account takeover overview cache, report bound and response safeguards.
+  .extend(atoApiConfigShape)
   .extend({
     /** Comma-separated allow-list of admin portal origins. */
     CORS_ORIGINS: z
