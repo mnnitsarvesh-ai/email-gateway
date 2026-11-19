@@ -185,6 +185,16 @@ const CATALOG: { key: string; description: string }[] = [
     key: 'webhook:read',
     description: 'View webhook subscriptions, event catalogue and delivery history (step 6.2)',
   },
+  {
+    key: 'integration:read',
+    description:
+      'View Microsoft 365 and Google Workspace connections, their health, validations and setup guides (step 8.2; never credentials)',
+  },
+  {
+    key: 'integration:manage',
+    description:
+      'Connect, consent, upload credentials, validate and change Microsoft 365 and Google Workspace connections (step 8.2)',
+  },
 ];
 
 export const PERMISSION_CATALOG = CATALOG.map((p) => ({

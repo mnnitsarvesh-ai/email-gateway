@@ -18,6 +18,8 @@ import {
   networksOverlap,
   type ParsedNetwork,
 } from '../domain/networks';
+import { CodedHttpException } from '../../../http/coded-exception';
+import { parseNetwork } from '../domain/networks';
 import { CreateConnectorSchema } from '../dto/smtp-connectors.schemas';
 import type {
   ConnectorInsert,
@@ -30,6 +32,8 @@ import { assertUpdateAllowed, SmtpConnectorsService } from './smtp-connectors.se
 
 interface StoredConnector extends ConnectorInsert {
   id: bigint;
+  /** Step 8.2: the managing provider connection of a `provider_relay` connector. */
+  providerConnectionPublicId?: string;
   publicId: string;
   organizationId: bigint;
   status: 'active' | 'disabled';
@@ -48,6 +52,8 @@ class FakeConnectors {
   networks: StoredNetwork[] = [];
   lockHeld = false;
   lockBusy = false;
+  /** Step 8.2 D7.6: active provider egress ranges (platform data). */
+  egress: ParsedNetwork[] = [];
   locksTaken = 0;
   private nextId = 1n;
 
@@ -59,6 +65,10 @@ class FakeConnectors {
       name: c.name,
       authType: c.authType,
       status: c.status,
+      providerConnection:
+        c.providerConnectionPublicId === undefined
+          ? null
+          : { publicId: c.providerConnectionPublicId },
       saslUsername: c.saslUsername,
       secretSetAt: c.secretSetAt,
       certFingerprintSha256: c.certFingerprintSha256,
@@ -144,6 +154,8 @@ class FakeConnectors {
     if (!this.lockHeld) throw new Error('overlap checked without the network lock');
     return Promise.resolve(this.networks.some((n) => networksOverlap(n, network)));
   };
+  overlapsProviderEgress = (_tx: unknown, network: ParsedNetwork) =>
+    Promise.resolve(this.egress.some((range) => networksOverlap(range, network)));
   deleteNetworks = (_tx: unknown, scope: TenantScope, connectorId: bigint) => {
     this.networks = this.networks.filter(
       (n) => !(n.organizationId === scope.organizationId && n.connectorId === connectorId),
@@ -460,5 +472,84 @@ describe('SmtpConnectorsService.update / rotate / remove', () => {
     await service.remove(principal, ORG_B, b.id, client);
     expect(repo.connectors).toHaveLength(0);
     expect(repo.networks).toHaveLength(0);
+  });
+});
+
+describe('step 8.2 §5.3: provider_relay connectors and shared provider networks', () => {
+  const codeOf = (e: unknown) => (e instanceof CodedHttpException ? e.code : String(e));
+
+  it('refuses source_ip networks overlapping an active provider egress range (422 with the index)', async () => {
+    const { repo, create, service } = setup();
+    repo.egress = [parseNetwork('40.107.0.0/16'), parseNetwork('2a01:111:f400::/48')];
+    const err = await create(ORG_A, {
+      name: 'Shared',
+      authType: 'source_ip',
+      networks: ['198.51.100.0/24', '40.107.12.0/24'],
+    }).catch((e: unknown) => e);
+    expect(codeOf(err)).toBe('network_shared_provider');
+    expect((err as CodedHttpException).getStatus()).toBe(422);
+    expect((err as CodedHttpException).details).toEqual({ index: 1 });
+    expect(repo.connectors).toHaveLength(0);
+
+    const ok = await create(ORG_A, {
+      name: 'Own',
+      authType: 'source_ip',
+      networks: ['198.51.100.0/24'],
+    });
+    const patched = await service
+      .update(principal, ORG_A, ok.id, { networks: ['2a01:111:f400:10::/64'] }, client)
+      .catch((e: unknown) => e);
+    expect(codeOf(patched)).toBe('network_shared_provider');
+    expect((await service.get(ORG_A, ok.id)).networks).toEqual([
+      { cidr: '198.51.100.0/24', ipVersion: 4 },
+    ]);
+  });
+
+  it('allows the same range on a client_certificate connector (the certificate authenticates)', async () => {
+    const { repo, create } = setup();
+    repo.egress = [parseNetwork('40.107.0.0/16')];
+    const created = await create(ORG_A, {
+      name: 'Cert',
+      authType: 'client_certificate',
+      certificateFingerprintSha256: 'a'.repeat(64),
+      networks: ['40.107.1.0/24'],
+    });
+    expect(created.networks).toEqual([{ cidr: '40.107.1.0/24', ipVersion: 4 }]);
+  });
+
+  it('answers 409 connector_managed_by_provider_connection to PATCH, rotate and DELETE', async () => {
+    const { repo, service } = setup();
+    const connectionId = randomUUID();
+    await repo.create({}, ORG_A, {
+      name: 'provider-relay-x',
+      authType: 'provider_relay',
+      saslUsername: null,
+      secretHash: null,
+      secretSetAt: null,
+      certFingerprintSha256: null,
+      requireTls: true,
+      createdByUserId: null,
+    });
+    repo.connectors[0]!.providerConnectionPublicId = connectionId;
+    const id = repo.connectors[0]!.publicId;
+    const view = await service.get(ORG_A, id);
+    expect(view).toMatchObject({ authType: 'provider_relay', providerConnectionId: connectionId });
+    for (const attempt of [
+      service.update(principal, ORG_A, id, { status: 'disabled' }, client),
+      service.rotateSecret(principal, ORG_A, id, client),
+      service.remove(principal, ORG_A, id, client),
+    ]) {
+      const err = await attempt.catch((e: unknown) => e);
+      expect(codeOf(err)).toBe('connector_managed_by_provider_connection');
+      expect((err as CodedHttpException).getStatus()).toBe(409);
+    }
+    expect(repo.connectors).toHaveLength(1);
+    expect(repo.connectors[0]!.status).toBe('active');
+  });
+
+  it('reads of ordinary connectors carry providerConnectionId null', async () => {
+    const { create } = setup();
+    const created = await create(ORG_A, { name: 's', authType: 'sasl' });
+    expect(created.providerConnectionId).toBeNull();
   });
 });

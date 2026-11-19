@@ -22,6 +22,13 @@ export interface HeaderMetadata {
   receivedCount: number;
   /** Every `X-Gateway-Trace` value (D14). */
   traces: string[];
+  /**
+   * Step 8.2 D8 (provider relay evidence; set only when such headers exist): every
+   * `X-MS-Exchange-CrossTenant-Id` value, trimmed and lower-cased (at most 32).
+   */
+  crossTenantIds?: string[];
+  /** Step 8.2 D8: every raw, unfolded `DKIM-Signature` value (at most 32, ≤ 8 KiB each). */
+  dkimSignatures?: string[];
   /** The empty line ending the header block was seen within the limit. */
   complete: boolean;
   /** The header block exceeded the limit; only complete lines within it were parsed. */
@@ -46,6 +53,10 @@ export function headerAddress(value: string): string {
   const match = /<([^<>]*)>/.exec(value);
   return (match ? match[1]! : value).trim();
 }
+
+/** Bounds of the provider relay evidence lists (step 8.2 D8). */
+export const MAX_RELAY_EVIDENCE_VALUES = 32;
+const MAX_DKIM_SIGNATURE_CHARS = 8192;
 
 const LF = 0x0a;
 
@@ -146,6 +157,18 @@ export class HeaderScanner {
           break;
         case 'x-gateway-trace':
           meta.traces.push(value);
+          break;
+        case 'x-ms-exchange-crosstenant-id':
+          meta.crossTenantIds ??= [];
+          if (meta.crossTenantIds.length < MAX_RELAY_EVIDENCE_VALUES) {
+            meta.crossTenantIds.push(value.trim().toLowerCase());
+          }
+          break;
+        case 'dkim-signature':
+          meta.dkimSignatures ??= [];
+          if (meta.dkimSignatures.length < MAX_RELAY_EVIDENCE_VALUES) {
+            meta.dkimSignatures.push(value.slice(0, MAX_DKIM_SIGNATURE_CHARS));
+          }
           break;
         default:
           break;

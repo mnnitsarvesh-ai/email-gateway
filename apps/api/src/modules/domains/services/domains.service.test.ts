@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { describe, expect, it, vi } from 'vitest';
 import { systemScope } from '../../../auth-contracts/tenant-scope';
+import { CodedHttpException } from '../../../http/coded-exception';
 import {
   apiKeyPrincipal,
   client,
@@ -166,6 +167,19 @@ describe('DomainsService.create', () => {
     expect(err).toBeInstanceOf(BadRequestException);
     expect(messageOf(err)).toEqual([message]);
     expect(bed.store.domains).toEqual([]);
+  });
+
+  it('refuses the provider probe domain and names under it with 422 domain_reserved (step 8.2)', async () => {
+    const bed = createDomainTestbed({ PROVIDER_PROBE_DOMAIN: 'probe.gateway-ops.test' });
+    for (const name of ['probe.gateway-ops.test', 'x.probe.gateway-ops.test']) {
+      const err = await createIn(bed, name).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(CodedHttpException);
+      expect((err as CodedHttpException).getStatus()).toBe(422);
+      expect((err as CodedHttpException).code).toBe('domain_reserved');
+    }
+    expect(bed.store.domains).toEqual([]);
+    expect(bed.service.normalizeName('gateway-ops.test')).toBe('gateway-ops.test');
+    expect(bed.service.normalizeName('aprobe.gateway-ops.test')).toBe('aprobe.gateway-ops.test');
   });
 
   it('rejects the gateway SPF include host and names under it', () => {

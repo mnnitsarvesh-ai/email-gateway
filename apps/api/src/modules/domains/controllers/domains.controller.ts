@@ -33,7 +33,9 @@ import type { Page } from '../../../http/pagination';
 import { RateLimit } from '../../../rate-limit/rate-limit.decorator';
 import { zodToOpenApi } from '../../../validation/zod-openapi';
 import { ZodValidationPipe } from '../../../validation/zod-validation.pipe';
+import { ApiCodedError } from '../../../http/coded-exception';
 import { ApiErrors } from '../../auth/api-docs';
+import { PROVIDER_ERROR_CODES } from '../../provider-connections/provider-connections.errors';
 import { Client } from '../../auth/client-context.decorator';
 import type { ClientContext } from '../../auth/services/session.service';
 import { ApiQueryFrom } from '../../organizations/api-docs';
@@ -72,11 +74,17 @@ export class DomainsController {
       '`max_domains`, and creates the ownership challenge, a DKIM key (RSA 2048, plus Ed25519 ' +
       'on request) and the DNS records to publish. `409` when the organization already has the ' +
       'name or another organization owns it. The first check runs about a minute later. At ' +
-      'most 60 per caller per minute (`429` with `Retry-After`).',
+      'most 60 per caller per minute (`429` with `Retry-After`). The platform probe domain ' +
+      '(`PROVIDER_PROBE_DOMAIN`, step 8.2) and names under it are `422 domain_reserved`.',
   })
   @ApiBody({ schema: zodToOpenApi(CreateDomainSchema, { io: 'input' }) })
   @ApiCreatedResponse({ schema: zodToOpenApi(CreatedDomainSchema) })
   @ApiErrors(400, 401, 403, 409, 429, 503)
+  @ApiCodedError(
+    422,
+    '`domain_reserved`: the platform probe domain or a name under it (step 8.2)',
+    [PROVIDER_ERROR_CODES.domainReserved],
+  )
   create(
     @CurrentPrincipal() principal: Principal,
     @CurrentScope() scope: TenantScope,

@@ -191,6 +191,9 @@ enum SmtpConnectorAuthType {
   sasl
   source_ip
   client_certificate
+  /// Step 8.2 D7 (ADR-0078): Microsoft 365 / Google Workspace outbound from the provider's shared
+  /// egress ranges, attributed by sender domain and proven at ingestion; one per connection.
+  provider_relay
 }
 
 enum SmtpConnectorStatus {
@@ -1624,6 +1627,7 @@ model Organization {
   atoResponseActions       AtoResponseAction[]
   atoSmtpRestrictions      AtoSmtpRestriction[]
   atoProviderIntegrations  AtoProviderIntegration[]
+  providerConnections      ProviderConnection[]
 
   @@index([status])
   @@index([status, purgeAfter])
@@ -1820,6 +1824,8 @@ model User {
   createdDepartmentMembers     TenantDepartmentMember[]    @relation("DepartmentMemberCreatedBy")
   assignedSecurityIncidents    SecurityIncident[]          @relation("SecurityIncidentAssignee")
   updatedAtoSettings           AtoSetting[]                @relation("AtoSettingsUpdatedBy")
+  createdProviderConnections   ProviderConnection[]        @relation("ProviderConnectionCreatedBy")
+  providerConsentStates        ProviderConsentState[]
 
   @@unique([organizationId, email])
   @@index([organizationId, status])
@@ -2061,14 +2067,15 @@ model Domain {
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
 
-  verifications  DomainVerification[]
-  dnsRecords     DomainDnsRecord[]
-  dkimKeys       DomainDkimKey[]
-  mxRecords      DomainMxRecord[]
-  mailServers    DomainMailServer[]
-  settings       DomainSetting?
-  deliveryRoutes DeliveryRoute[]
-  recipients     DomainRecipientAddress[]
+  verifications            DomainVerification[]
+  dnsRecords               DomainDnsRecord[]
+  dkimKeys                 DomainDkimKey[]
+  mxRecords                DomainMxRecord[]
+  mailServers              DomainMailServer[]
+  settings                 DomainSetting?
+  deliveryRoutes           DeliveryRoute[]
+  recipients               DomainRecipientAddress[]
+  providerConnectionDomain ProviderConnectionDomain?
 
   @@unique([organizationId, liveName])
   @@index([name])
@@ -2290,10 +2297,13 @@ model SmtpConnector {
   createdByUserId       BigInt?               @map("created_by_user_id") @db.UnsignedBigInt
   createdAt             DateTime              @default(now()) @map("created_at") @db.DateTime(3)
   updatedAt             DateTime              @updatedAt @map("updated_at") @db.DateTime(3)
+  /// provider_relay only (step 8.2 D7): the provider connection this relay connector serves.
+  providerConnectionId  BigInt?               @unique @map("provider_connection_id") @db.UnsignedBigInt
 
-  organization Organization           @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  createdBy    User?                  @relation(fields: [createdByUserId], references: [id], onDelete: SetNull)
-  networks     SmtpConnectorNetwork[]
+  organization       Organization           @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  createdBy          User?                  @relation(fields: [createdByUserId], references: [id], onDelete: SetNull)
+  networks           SmtpConnectorNetwork[]
+  providerConnection ProviderConnection?    @relation(fields: [providerConnectionId], references: [id], onDelete: Restrict)
 
   @@unique([organizationId, name])
   @@index([organizationId, status])
@@ -6812,4 +6822,457 @@ model MaintenanceWatermark {
   updatedAt DateTime @updatedAt @map("updated_at") @db.DateTime(3)
 
   @@map("maintenance_watermarks")
+}
+
+// ---------------------------------------------------------------------------------------------
+// Step 8.2: provider integrations (docs/plan/steps/25-m365-google-connectors.md §3)
+// Microsoft 365 / Google Workspace connections, grants per permission profile, consent states,
+// linked domains, validation runs, probe evidence, health, relay counters and the platform's
+// provider egress ranges (ADR-0076 .. ADR-0081). No table is partitioned; no message content.
+// ---------------------------------------------------------------------------------------------
+
+enum IntegrationProvider {
+  microsoft_365
+  google_workspace
+}
+
+enum ProviderConnectionStatus {
+  draft
+  connecting
+  configuring
+  active
+  disabled
+}
+
+enum ProviderOutboundMode {
+  off
+  probe_only
+  active
+  suspended
+}
+
+enum ProviderHealthStatus {
+  unknown
+  healthy
+  warning
+  critical
+}
+
+enum ProviderAuthMethod {
+  platform_app
+  customer_app_secret
+  platform_service_account
+  customer_service_account
+}
+
+enum ProviderGrantStatus {
+  pending_consent
+  verifying
+  active
+  error
+  revoked
+}
+
+enum ProviderDomainVerification {
+  unknown
+  verified
+  unverified
+  absent
+  alias
+}
+
+enum ProviderValidationKind {
+  full
+  credentials
+  inbound
+  outbound
+}
+
+enum ProviderValidationStatus {
+  queued
+  running
+  awaiting_probe
+  passed
+  warning
+  failed
+  expired
+  cancelled
+}
+
+enum ProviderCheckStatus {
+  pass
+  warn
+  fail
+  skipped
+  error
+}
+
+enum ProviderCheckSeverity {
+  info
+  warning
+  critical
+}
+
+enum ProviderTenantHeaderResult {
+  match
+  mismatch
+  absent
+  not_applicable
+}
+
+enum ProviderDkimResult {
+  aligned_pass
+  unaligned_pass
+  fail
+  none
+  temperror
+  replayed
+  stale
+}
+
+enum ProviderProofResult {
+  pass
+  fail
+  temperror
+}
+
+enum ProviderEgressSetStatus {
+  active
+  superseded
+}
+
+enum ProviderActorType {
+  user
+  system
+  api_key
+}
+
+/// One organization's link to one Microsoft 365 tenant or Google Workspace customer (step 8.2
+/// D1, D4, ADR-0076). `active_tenant_key` = `<provider>:<external_tenant_id>` while the status is
+/// not `disabled`, set by the integration-worker at verification in the transaction that checks
+/// it: a provider tenant binds to at most one non-disabled connection platform-wide (I10).
+/// `relay_proof` = `provider-relay-proof/1` (NULL = provider default); `attestations` =
+/// `provider-attestations/1` (≤ 32 `{ code, userId (public), at }`). CAS on `row_version`.
+/// `disabled_by_user_id` has no FK (the trail survives the user).
+model ProviderConnection {
+  id                       BigInt                   @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId                 String                   @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId           BigInt                   @map("organization_id") @db.UnsignedBigInt
+  provider                 IntegrationProvider
+  displayName              String                   @map("display_name") @db.VarChar(128)
+  status                   ProviderConnectionStatus @default(draft)
+  /// Microsoft tenant id (GUID) or Google customer id, verified by the worker (never trusted
+  /// from a consent redirect).
+  externalTenantId         String?                  @map("external_tenant_id") @db.VarChar(64)
+  externalTenantName       String?                  @map("external_tenant_name") @db.VarChar(256)
+  tenantVerifiedAt         DateTime?                @map("tenant_verified_at") @db.DateTime(3)
+  activeTenantKey          String?                  @unique @map("active_tenant_key") @db.VarChar(100)
+  outboundMode             ProviderOutboundMode     @default(off) @map("outbound_mode")
+  internalRouting          Boolean                  @default(false) @map("internal_routing")
+  relayProof               Json?                    @map("relay_proof")
+  /// Microsoft 365 internal-routing route token version (D9, ADR-0081); the pending version
+  /// becomes current after the administrator attests the updated transport rules.
+  routeTokenVersion        Int                      @default(1) @map("route_token_version") @db.UnsignedSmallInt
+  routeTokenPendingVersion Int?                     @map("route_token_pending_version") @db.UnsignedSmallInt
+  attestations             Json?
+  healthStatus             ProviderHealthStatus     @default(unknown) @map("health_status")
+  healthCheckedAt          DateTime?                @map("health_checked_at") @db.DateTime(3)
+  healthChangedAt          DateTime?                @map("health_changed_at") @db.DateTime(3)
+  nextHealthCheckAt        DateTime?                @map("next_health_check_at") @db.DateTime(3)
+  /// Lease of the integration-worker's health role.
+  healthClaimedUntil       DateTime?                @map("health_claimed_until") @db.DateTime(3)
+  /// Written by the smtp-adapter's relay counter flush.
+  lastRelayAcceptedAt      DateTime?                @map("last_relay_accepted_at") @db.DateTime(3)
+  createdByUserId          BigInt?                  @map("created_by_user_id") @db.UnsignedBigInt
+  disabledAt               DateTime?                @map("disabled_at") @db.DateTime(3)
+  disabledByUserId         BigInt?                  @map("disabled_by_user_id") @db.UnsignedBigInt
+  rowVersion               Int                      @default(1) @map("row_version") @db.UnsignedInt
+  createdAt                DateTime                 @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt                DateTime                 @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization      Organization               @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  createdByUser     User?                      @relation("ProviderConnectionCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  grants            ProviderConnectionGrant[]
+  consentStates     ProviderConsentState[]
+  domains           ProviderConnectionDomain[]
+  validationRuns    ProviderValidationRun[]
+  probeObservations ProviderProbeObservation[]
+  healthChecks      ProviderHealthCheck[]
+  healthEvents      ProviderHealthEvent[]
+  relayCounters     ProviderRelayCounter[]
+  smtpConnector     SmtpConnector?
+
+  @@unique([organizationId, displayName])
+  @@index([organizationId, status])
+  @@index([status, nextHealthCheckAt])
+  @@map("provider_connections")
+}
+
+/// One grant per permission profile of a connection (step 8.2 D1, D2, D5; ADR-0076, ADR-0077).
+/// `credential_ciphertext` = AES-256-GCM `v1.<kid>.<iv>.<tag>.<ct>` under
+/// PROVIDER_CREDENTIAL_ENCRYPTION_KEY with row-bound AAD; the api encrypts, only the
+/// integration-worker decrypts; never returned, logged or published (I5). `client_id` and
+/// `subject_email` are non-secret. Permission lists are JSON arrays of permission names.
+/// `consented_by_user_id` has no FK.
+model ProviderConnectionGrant {
+  id                    BigInt              @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId              String              @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId        BigInt              @map("organization_id") @db.UnsignedBigInt
+  connectionId          BigInt              @map("connection_id") @db.UnsignedBigInt
+  /// Permission profile key (`m365.mail_flow`, `google.mail_flow`; step 8.5 adds its own).
+  profile               String              @db.VarChar(48)
+  profileVersion        Int                 @map("profile_version") @db.UnsignedSmallInt
+  authMethod            ProviderAuthMethod  @map("auth_method")
+  status                ProviderGrantStatus @default(pending_consent)
+  clientId              String?             @map("client_id") @db.VarChar(128)
+  /// Google delegated administrator (domain-wide delegation subject).
+  subjectEmail          String?             @map("subject_email") @db.VarChar(320)
+  credentialCiphertext  String?             @map("credential_ciphertext") @db.Text
+  credentialKeyId       String?             @map("credential_key_id") @db.VarChar(8)
+  credentialVersion     Int                 @default(0) @map("credential_version") @db.UnsignedInt
+  /// Lower-case hex SHA-256 fingerprint of the credential (the only visible trace of it).
+  credentialFingerprint String?             @map("credential_fingerprint") @db.Char(64)
+  credentialSetAt       DateTime?           @map("credential_set_at") @db.DateTime(3)
+  credentialExpiresAt   DateTime?           @map("credential_expires_at") @db.DateTime(3)
+  requestedPermissions  Json                @map("requested_permissions")
+  observedPermissions   Json?               @map("observed_permissions")
+  missingPermissions    Json?               @map("missing_permissions")
+  excessPermissions     Json?               @map("excess_permissions")
+  /// Tenant named by the consent redirect; verified by the worker before it is trusted (D3).
+  claimedTenantId       String?             @map("claimed_tenant_id") @db.VarChar(64)
+  consentedAt           DateTime?           @map("consented_at") @db.DateTime(3)
+  consentedByUserId     BigInt?             @map("consented_by_user_id") @db.UnsignedBigInt
+  verifyRequestedAt     DateTime?           @map("verify_requested_at") @db.DateTime(3)
+  verifiedAt            DateTime?           @map("verified_at") @db.DateTime(3)
+  verifyClaimedUntil    DateTime?           @map("verify_claimed_until") @db.DateTime(3)
+  lastTokenAt           DateTime?           @map("last_token_at") @db.DateTime(3)
+  lastErrorCode         String?             @map("last_error_code") @db.VarChar(64)
+  consecutiveFailures   Int                 @default(0) @map("consecutive_failures") @db.UnsignedSmallInt
+  rowVersion            Int                 @default(1) @map("row_version") @db.UnsignedInt
+  createdAt             DateTime            @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt             DateTime            @updatedAt @map("updated_at") @db.DateTime(3)
+
+  connection    ProviderConnection     @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  consentStates ProviderConsentState[]
+
+  @@unique([connectionId, profile])
+  @@index([status, verifyRequestedAt])
+  @@index([organizationId, connectionId])
+  @@index([credentialKeyId])
+  @@map("provider_connection_grants")
+}
+
+/// Single-use admin-consent state (step 8.2 D3, D17): only the SHA-256 of the state is stored,
+/// bound to organization, user and grant, 10-minute TTL; deleted 24 h after expiry.
+model ProviderConsentState {
+  id             BigInt    @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId BigInt    @map("organization_id") @db.UnsignedBigInt
+  connectionId   BigInt    @map("connection_id") @db.UnsignedBigInt
+  grantId        BigInt    @map("grant_id") @db.UnsignedBigInt
+  userId         BigInt    @map("user_id") @db.UnsignedBigInt
+  stateSha256    String    @unique @map("state_sha256") @db.Char(64)
+  expiresAt      DateTime  @map("expires_at") @db.DateTime(3)
+  usedAt         DateTime? @map("used_at") @db.DateTime(3)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.DateTime(3)
+
+  connection ProviderConnection      @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  grant      ProviderConnectionGrant @relation(fields: [grantId], references: [id], onDelete: Cascade)
+  user       User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@map("provider_consent_states")
+}
+
+/// A TXT-verified gateway domain linked to a connection (step 8.2 D4): a domain belongs to at
+/// most one connection. `provider_verification` is evidence from the provider tenant, never a
+/// substitute for the gateway's TXT verification (I6). `inbound_applied_by_user_id` has no FK.
+model ProviderConnectionDomain {
+  id                     BigInt                     @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId         BigInt                     @map("organization_id") @db.UnsignedBigInt
+  connectionId           BigInt                     @map("connection_id") @db.UnsignedBigInt
+  domainId               BigInt                     @unique @map("domain_id") @db.UnsignedBigInt
+  providerVerification   ProviderDomainVerification @default(unknown) @map("provider_verification")
+  providerCheckedAt      DateTime?                  @map("provider_checked_at") @db.DateTime(3)
+  /// Microsoft 365: the tenant's MX target host as the provider reports it.
+  providerMxHost         String?                    @map("provider_mx_host") @db.VarChar(253)
+  inboundAppliedAt       DateTime?                  @map("inbound_applied_at") @db.DateTime(3)
+  inboundAppliedByUserId BigInt?                    @map("inbound_applied_by_user_id") @db.UnsignedBigInt
+  createdAt              DateTime                   @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt              DateTime                   @updatedAt @map("updated_at") @db.DateTime(3)
+
+  connection ProviderConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  domain     Domain             @relation(fields: [domainId], references: [id], onDelete: Cascade)
+
+  @@index([connectionId])
+  @@map("provider_connection_domains")
+}
+
+/// Validation run of a connection (step 8.2 D10, ADR-0079). `results` = `provider-validation/1`
+/// (≤ 64 entries, ≤ 64 KiB); `summary` = `{ pass, warn, fail, skipped, error }`. The outbound
+/// probe address is single-use: only its SHA-256 is stored. `requested_by_id` is a public id.
+/// Kept 180 days and at most the newest 50 per connection.
+model ProviderValidationRun {
+  id               BigInt                   @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId         String                   @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId   BigInt                   @map("organization_id") @db.UnsignedBigInt
+  connectionId     BigInt                   @map("connection_id") @db.UnsignedBigInt
+  kind             ProviderValidationKind
+  status           ProviderValidationStatus @default(queued)
+  requestedByType  ProviderActorType        @map("requested_by_type")
+  requestedById    String?                  @map("requested_by_id") @db.VarChar(64)
+  probeTokenSha256 String?                  @unique @map("probe_token_sha256") @db.Char(64)
+  probeExpiresAt   DateTime?                @map("probe_expires_at") @db.DateTime(3)
+  results          Json?
+  summary          Json?
+  claimedUntil     DateTime?                @map("claimed_until") @db.DateTime(3)
+  attempts         Int                      @default(0) @db.UnsignedSmallInt
+  startedAt        DateTime?                @map("started_at") @db.DateTime(3)
+  completedAt      DateTime?                @map("completed_at") @db.DateTime(3)
+  createdAt        DateTime                 @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt        DateTime                 @updatedAt @map("updated_at") @db.DateTime(3)
+
+  connection        ProviderConnection         @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  probeObservations ProviderProbeObservation[]
+
+  @@index([connectionId, createdAt])
+  @@index([status, createdAt])
+  @@map("provider_validation_runs")
+}
+
+/// Bounded, non-content evidence of one intercepted probe message (step 8.2 D10, I8), written by
+/// the smtp-adapter's LMTP ingestion; the message itself is never stored. `dkim_domains` = JSON
+/// array of ≤ 5 `d=` values. Idempotent per (token, Postfix queue id). Kept 30 days.
+model ProviderProbeObservation {
+  id                 BigInt                     @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId     BigInt                     @map("organization_id") @db.UnsignedBigInt
+  connectionId       BigInt                     @map("connection_id") @db.UnsignedBigInt
+  validationRunId    BigInt?                    @map("validation_run_id") @db.UnsignedBigInt
+  tokenSha256        String                     @map("token_sha256") @db.Char(64)
+  queueId            String                     @map("queue_id") @db.VarChar(32)
+  provider           IntegrationProvider
+  clientIp           String                     @map("client_ip") @db.VarChar(45)
+  tlsProtocol        String?                    @map("tls_protocol") @db.VarChar(16)
+  tlsCipher          String?                    @map("tls_cipher") @db.VarChar(64)
+  envelopeFromDomain String                     @map("envelope_from_domain") @db.VarChar(253)
+  headerFromDomain   String?                    @map("header_from_domain") @db.VarChar(253)
+  tenantHeader       ProviderTenantHeaderResult @map("tenant_header")
+  dkim               ProviderDkimResult
+  dkimDomains        Json                       @map("dkim_domains")
+  dkimAgeSeconds     Int?                       @map("dkim_age_seconds")
+  proofResult        ProviderProofResult        @map("proof_result")
+  failureCode        String?                    @map("failure_code") @db.VarChar(64)
+  receivedAt         DateTime                   @map("received_at") @db.DateTime(3)
+  createdAt          DateTime                   @default(now()) @map("created_at") @db.DateTime(3)
+
+  connection    ProviderConnection     @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  validationRun ProviderValidationRun? @relation(fields: [validationRunId], references: [id], onDelete: SetNull)
+
+  @@unique([tokenSha256, queueId])
+  @@index([connectionId, receivedAt])
+  @@map("provider_probe_observations")
+}
+
+/// Latest result per health check and subject of a connection (step 8.2 D11, ADR-0079).
+/// `subject` = a domain name, a profile key or '' (connection-wide); `evidence` ≤ 2 KiB.
+model ProviderHealthCheck {
+  id             BigInt                @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId BigInt                @map("organization_id") @db.UnsignedBigInt
+  connectionId   BigInt                @map("connection_id") @db.UnsignedBigInt
+  checkCode      String                @map("check_code") @db.VarChar(64)
+  subject        String                @default("") @db.VarChar(253)
+  status         ProviderCheckStatus
+  severity       ProviderCheckSeverity
+  evidence       Json?
+  firstFailedAt  DateTime?             @map("first_failed_at") @db.DateTime(3)
+  checkedAt      DateTime              @map("checked_at") @db.DateTime(3)
+  updatedAt      DateTime              @updatedAt @map("updated_at") @db.DateTime(3)
+
+  connection ProviderConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@unique([connectionId, checkCode, subject])
+  @@map("provider_health_checks")
+}
+
+/// Append-only health transitions of a connection (step 8.2 D11, D12): each row is audited and
+/// published as `integration.connection.health_changed.v1`. `failing_checks` = JSON array of ≤ 10
+/// check codes. Kept 365 days.
+model ProviderHealthEvent {
+  id             BigInt               @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId BigInt               @map("organization_id") @db.UnsignedBigInt
+  connectionId   BigInt               @map("connection_id") @db.UnsignedBigInt
+  fromStatus     ProviderHealthStatus @map("from_status")
+  toStatus       ProviderHealthStatus @map("to_status")
+  failingChecks  Json                 @map("failing_checks")
+  createdAt      DateTime             @default(now()) @map("created_at") @db.DateTime(3)
+
+  connection ProviderConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@index([connectionId, createdAt])
+  @@index([createdAt])
+  @@map("provider_health_events")
+}
+
+/// Hourly provider-relay counters per connection (step 8.2 D7, D18), upserted by the
+/// smtp-adapter's counter flush (additive). Kept 35 days.
+model ProviderRelayCounter {
+  id             BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId BigInt   @map("organization_id") @db.UnsignedBigInt
+  connectionId   BigInt   @map("connection_id") @db.UnsignedBigInt
+  /// UTC hour (minutes, seconds and milliseconds zero).
+  hourStart      DateTime @map("hour_start") @db.DateTime(3)
+  accepted       Int      @default(0) @db.UnsignedInt
+  proofFailed    Int      @default(0) @map("proof_failed") @db.UnsignedInt
+  tempFailed     Int      @default(0) @map("temp_failed") @db.UnsignedInt
+  probes         Int      @default(0) @db.UnsignedInt
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.DateTime(3)
+
+  connection ProviderConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@unique([connectionId, hourStart])
+  @@index([hourStart])
+  @@map("provider_relay_counters")
+}
+
+/// Platform: a versioned import of a provider's published egress ranges (step 8.2 D7, ADR-0078).
+/// One `active` set per provider; `published_at` = the provider's publication date of the data;
+/// `sha256` of the canonical sorted CIDR list. Seeded with a snapshot (`imported_by = 'seed'`)
+/// only when the provider has no set; operators import current data with the CLI. Superseded
+/// sets: the newest 5 per provider are kept.
+model ProviderEgressRangeSet {
+  id          BigInt                  @id @default(autoincrement()) @db.UnsignedBigInt
+  provider    IntegrationProvider
+  version     Int                     @db.UnsignedInt
+  status      ProviderEgressSetStatus
+  source      String                  @db.VarChar(512)
+  publishedAt DateTime?               @map("published_at") @db.DateTime(3)
+  sha256      String                  @db.Char(64)
+  rangeCount  Int                     @map("range_count") @db.UnsignedInt
+  importedBy  String                  @map("imported_by") @db.VarChar(64)
+  importedAt  DateTime                @default(now()) @map("imported_at") @db.DateTime(3)
+
+  ranges ProviderEgressRange[]
+
+  @@unique([provider, version])
+  @@index([provider, status])
+  @@map("provider_egress_range_sets")
+}
+
+/// Platform: one CIDR of an egress range set, with the same range encoding as
+/// smtp_connector_networks (4 or 16 bytes big-endian) for range lookups.
+model ProviderEgressRange {
+  id         BigInt              @id @default(autoincrement()) @db.UnsignedBigInt
+  setId      BigInt              @map("set_id") @db.UnsignedBigInt
+  provider   IntegrationProvider
+  /// Canonical CIDR text (network address, prefix).
+  cidr       String              @db.VarChar(49)
+  /// 4 or 6.
+  ipVersion  Int                 @map("ip_version") @db.UnsignedTinyInt
+  rangeStart Bytes               @map("range_start") @db.VarBinary(16)
+  rangeEnd   Bytes               @map("range_end") @db.VarBinary(16)
+
+  set ProviderEgressRangeSet @relation(fields: [setId], references: [id], onDelete: Cascade)
+
+  @@unique([setId, cidr])
+  @@index([provider, ipVersion, rangeStart])
+  @@map("provider_egress_ranges")
 }

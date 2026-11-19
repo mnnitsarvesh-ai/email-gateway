@@ -45,6 +45,8 @@ export class DeliveryMetrics {
   readonly reconcilerActions: Counter<'action'>;
   readonly inconsistentReads: Counter<'read'>;
   readonly contextMissing: Counter<'result'>;
+  /** Step 8.2 D9, D18: internal reinjections that carried `X-EG-Route-Token`. */
+  readonly routeTokenHeaders: Counter;
 
   constructor(metrics: MetricsService) {
     this.approvals = metrics.counter(
@@ -126,6 +128,10 @@ export class DeliveryMetrics {
       'delivery_reinjection_context_missing_total',
       'Reinjections whose message row was not found: retry (rescheduled with backoff) or failed (final attempt, deliveries failed with message_missing)',
       ['result'],
+    );
+    this.routeTokenHeaders = metrics.counter(
+      'delivery_route_token_headers_total',
+      'Internal reinjections to a domain of a Microsoft 365 connection with internal routing that carried the X-EG-Route-Token header (step 8.2 D9)',
     );
   }
 

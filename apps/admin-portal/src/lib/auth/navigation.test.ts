@@ -48,12 +48,16 @@ describe('navigation model (design P11)', () => {
     const inventoryRows = inventory.split('\n').filter((line) => /^\| \d+/.test(line));
     // Cells split on unescaped pipes (`\|` inside a cell is part of the text).
     const cells = (line: string) => line.split(/(?<!\\)\|/);
+    // Rows of 7.1 pages whose gate a later step changed are read from the inventory too:
+    // row 20 (Integrations) gained `integration:read` in step 8.2 (provider connections).
+    const changedLater = new Set([20]);
+    const fromInventory = (n: number) => n > 22 || changedLater.has(n);
     for (const item of NAV_ITEMS) {
       const row =
-        rows.find((r) => (cells(r)[2] ?? '').includes(`(\`${item.href}\``)) ??
         inventoryRows.find(
-          (r) => Number(cells(r)[1]) > 22 && (cells(r)[2] ?? '').includes(`\`${item.href}\``),
-        );
+          (r) =>
+            fromInventory(Number(cells(r)[1])) && (cells(r)[2] ?? '').includes(`\`${item.href}\``),
+        ) ?? rows.find((r) => (cells(r)[2] ?? '').includes(`(\`${item.href}\``));
       expect(row, `row for ${item.href}`).toBeDefined();
       // Parenthesised notes name per-tab gates inside the page (e.g. Policies: DLP and BEC tabs).
       const gateCell = (cells(row ?? '')[4] ?? '').replace(/\([^)]*tab[^)]*\)/g, '');

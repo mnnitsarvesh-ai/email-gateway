@@ -13,6 +13,10 @@ import {
 import { z } from 'zod';
 import { bouncesConfigShape } from './bounces/bounces.config';
 import { ingestionConfigShape } from './ingestion/ingestion.config';
+import {
+  assertProviderRelayConfig,
+  providerRelayConfigShape,
+} from './provider-relay/provider-relay.config';
 import { parseNetworkList } from './shared/internal-networks';
 
 const port = z.coerce.number().int().min(1).max(65535);
@@ -226,7 +230,9 @@ export const configSchema = baseConfigSchema
   .extend(ingestionConfigShape)
   .extend(bouncesConfigShape)
   .extend(routingConfigShape)
-  .extend(atoConfigShape);
+  .extend(atoConfigShape)
+  // Step 8.2 §4.4: provider relay keys (D7, D8, D10).
+  .extend(providerRelayConfigShape);
 
 export type SmtpAdapterConfig = z.infer<typeof configSchema>;
 
@@ -260,6 +266,7 @@ export const loadSmtpAdapterConfig = (
       'Invalid configuration: SMTP_ATO_USERNAME_HASH_KEY is required while SMTP_ATO_TELEMETRY_ENABLED=true',
     );
   }
+  assertProviderRelayConfig(config);
   if (env.SMTP_RECIPIENT_DELIMITER === '') {
     return Object.freeze({ ...config, SMTP_RECIPIENT_DELIMITER: '' });
   }

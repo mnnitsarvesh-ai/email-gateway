@@ -28,7 +28,8 @@ import { stack } from './support/env';
  * (19-webhooks-notifications.md §3), the explorer search keys, driver indexes and saved views
  * of step 7.2 (21-email-explorer-details.md §3.1) and the journaling and archiving tables and
  * columns of step 8.1 (23-journaling-archiving.md §3) and the security incident and account
- * takeover tables and columns of step 8.4 (24-account-takeover-core.md §3).
+ * takeover tables and columns of step 8.4 (24-account-takeover-core.md §3) and the provider
+ * integration tables and columns of step 8.2 (25-m365-google-connectors.md §3).
  */
 const prisma = new PrismaClient({ datasourceUrl: stack.databaseUrl() });
 
@@ -130,6 +131,9 @@ const NOT_TENANT_OWNED = [
   'scan_signature_versions',
   // Step 4.6 §3: artifacts of a (platform-level) sandbox analysis; reached through the analysis.
   'sandbox_artifacts',
+  // Step 8.2 §3.1: the platform snapshot of provider egress ranges.
+  'provider_egress_range_sets',
+  'provider_egress_ranges',
 ];
 
 /** Tenant-owned tables whose `organization_id` is nullable (platform-level rows), per D1. */
@@ -294,6 +298,16 @@ const TENANT_OWNED = [
   'ato_response_action_logs',
   'ato_smtp_restrictions',
   'ato_provider_integrations',
+  // Step 8.2 §3.1: Microsoft 365 and Google Workspace connections.
+  'provider_connections',
+  'provider_connection_grants',
+  'provider_consent_states',
+  'provider_connection_domains',
+  'provider_validation_runs',
+  'provider_probe_observations',
+  'provider_health_checks',
+  'provider_health_events',
+  'provider_relay_counters',
 ];
 
 const ALL_TABLES = [...NOT_TENANT_OWNED, ...TENANT_OWNED];
@@ -303,8 +317,8 @@ describe('MySQL schema', () => {
     const rows = await prisma.$queryRaw<{ name: string }[]>`
       SELECT TABLE_NAME AS name FROM information_schema.TABLES
       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'`;
-    expect(ALL_TABLES).toHaveLength(151);
-    expect(new Set(ALL_TABLES).size).toBe(151);
+    expect(ALL_TABLES).toHaveLength(162);
+    expect(new Set(ALL_TABLES).size).toBe(162);
     expect(rows.map((r) => r.name).sort()).toEqual([...ALL_TABLES, '_prisma_migrations'].sort());
   });
 
@@ -1058,8 +1072,9 @@ describe('SMTP gateway schema (step 2.2, §3)', () => {
       'domain_recipient_addresses',
     ]);
     const type = (table: string, column: string) => cols.get(`${table}.${column}`)?.columnType;
+    // Step 8.2 appended `provider_relay` (ADR-0078; created only by the provider wizard).
     expect(type('smtp_connectors', 'auth_type')).toBe(
-      "enum('sasl','source_ip','client_certificate')",
+      "enum('sasl','source_ip','client_certificate','provider_relay')",
     );
     expect(type('smtp_connectors', 'status')).toBe("enum('active','disabled')");
     expect(type('smtp_connectors', 'cert_fingerprint_sha256')).toBe('char(64)');
@@ -1091,6 +1106,8 @@ describe('SMTP gateway schema (step 2.2, §3)', () => {
       ['smtp_connector_networks', 'organization_id', 'organizations', 'RESTRICT'],
       ['smtp_connectors', 'created_by_user_id', 'users', 'SET NULL'],
       ['smtp_connectors', 'organization_id', 'organizations', 'RESTRICT'],
+      // Step 8.2: the relay connector of a provider connection (kept for history, D13).
+      ['smtp_connectors', 'provider_connection_id', 'provider_connections', 'RESTRICT'],
     ]);
   });
 

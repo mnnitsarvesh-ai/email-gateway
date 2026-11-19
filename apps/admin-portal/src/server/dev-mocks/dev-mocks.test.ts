@@ -47,6 +47,7 @@ describe('dev fixture layer (design P9)', () => {
         'archive',
         'ato',
         'incidents',
+        'provider-connections',
       ].sort(),
     );
     for (const name of Object.keys(FEATURE_FIXTURES)) {

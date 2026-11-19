@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { type Counter, type Histogram, MetricsService } from '@email-gateway/common';
 import type { Logger } from '@email-gateway/logger';
 import { AtoRestrictionService } from '../ato/restriction.service';
@@ -11,6 +11,7 @@ import {
   type ConnectorView,
 } from '../connectors/connector-resolver.service';
 import { DkimReadinessService } from '../outbound/dkim-readiness.service';
+import { ProviderRelayPolicy } from '../provider-relay/provider-relay-policy.service';
 import { SuppressionService } from '../outbound/suppression.service';
 import { FixedWindowLimiter } from '../rate-limit/fixed-window-limiter';
 import {
@@ -132,6 +133,8 @@ export class PolicyDecisionService {
     @Inject(ADAPTER_LOGGER) logger: Logger,
     private readonly restrictions: AtoRestrictionService,
     private readonly telemetry: AtoTelemetryRecorder,
+    // Step 8.2 D7/D8/D10 (provider relay); absent = step 2.2 behaviour.
+    @Optional() private readonly providerRelay?: ProviderRelayPolicy,
   ) {
     this.logger = logger.child({ component: 'policy-decision' });
     this.decisions = metrics.counter(
@@ -207,6 +210,8 @@ export class PolicyDecisionService {
       // (D13): no listener may accept mail for it, or a client could reach the bounce handler
       // through reinjection with a forged notice (review finding, §12.7).
       if (this.isBounceDomain(request.recipient)) return RELAY_DENIED;
+      // Step 8.2 D10: probe addresses exist only on provider-relay sessions.
+      if (this.providerRelay?.refusesProbeRecipient(request, context)) return UNKNOWN_USER;
       switch (context) {
         case 'inbound':
           return this.inboundRecipient(request, now);
@@ -223,7 +228,7 @@ export class PolicyDecisionService {
       state === 'END-OF-MESSAGE' &&
       (context === 'inbound' || context === 'submission' || context === 'relay')
     ) {
-      const action = await this.endOfMessage(request);
+      const action = await this.endOfMessage(request, context);
       if (action === DUNNO && context !== 'inbound') {
         // After the answer: the connector lookup (cached) never delays the reply.
         setImmediate(() => void this.recordSubmission(request, context, now));
@@ -289,6 +294,9 @@ export class PolicyDecisionService {
     now: Date,
   ): Promise<string> {
     const connector = await this.resolveConnector(request, context);
+    // Step 8.2 D7.4/D7.5: provider-relay answers (null = continue with the checks below).
+    const providerAnswer = this.providerRelay?.checkRecipient(request, context, connector);
+    if (providerAnswer) return providerAnswer;
     if (!connector) return RELAY_DENIED;
     if (context === 'relay' && connector.requireTls && !request.encryption_protocol) {
       return MUST_STARTTLS;
@@ -377,7 +385,9 @@ export class PolicyDecisionService {
     if (!this.telemetry.enabled) return;
     try {
       const connector = await this.resolveConnector(request, context);
-      if (!connector) return;
+      // Step 8.2 provider_relay connectors are shared provider infrastructure, not an account
+      // credential: the 8.4 submission event (SMTP_CONNECTOR_AUTH_TYPE_VALUES) does not cover them.
+      if (!connector || connector.authType === 'provider_relay') return;
       const recipients = Number(request.recipient_count ?? '0');
       this.telemetry.recordSubmission({
         occurredAt: now,
@@ -398,7 +408,17 @@ export class PolicyDecisionService {
     }
   }
 
-  /** Certificate wins over IP (D11). A certificate connector's networks restrict the client. */
+  /**
+   * Certificate wins over IP (D11). A certificate connector's networks restrict the client.
+   *
+   * Step 8.2 D7.3: the provider relay after certificate and source-IP connectors. A client in the
+   * provider egress ranges is shared infrastructure: Microsoft 365 and Google present one
+   * certificate and one address pool for every customer, so a certificate or source-IP connector
+   * matched there is not tenant-unique. Such a connector applies only to senders of its own
+   * organization; every other sender from those ranges is resolved by the provider relay (with
+   * its tenant and DKIM proof), so no organization can capture the provider traffic of another
+   * one by registering the provider's certificate fingerprint (review finding).
+   */
   private async resolveConnector(
     request: PolicyRequest,
     context: 'submission' | 'relay',
@@ -408,12 +428,33 @@ export class PolicyDecisionService {
       return username === '' ? null : this.connectors.bySaslUsername(username);
     }
     const ip = parseIpKey(request.client_address);
+    let matched: ConnectorView | null = null;
+    let byCertificate = false;
     for (const fingerprint of [request.ccert_fingerprint, request.ccert_pubkey_fingerprint]) {
       if (!fingerprint) continue;
-      const byCertificate = await this.connectors.byCertificateFingerprint(fingerprint);
-      if (byCertificate) return connectorAllowsIp(byCertificate, ip) ? byCertificate : null;
+      const connector = await this.connectors.byCertificateFingerprint(fingerprint);
+      if (connector) {
+        byCertificate = true;
+        matched = connectorAllowsIp(connector, ip) ? connector : null;
+        break;
+      }
     }
-    return ip ? this.connectors.byClientAddress(ip) : null;
+    if (!byCertificate) matched = ip ? await this.connectors.byClientAddress(ip) : null;
+    if (this.providerRelay?.isSharedProviderClient(request.client_address)) {
+      if (matched && (await this.senderOrganization(request)) === matched.organizationId) {
+        return matched;
+      }
+      return (await this.providerRelay.resolve(request)) ?? null;
+    }
+    if (byCertificate) return matched;
+    return matched ?? (await this.providerRelay?.resolve(request)) ?? null;
+  }
+
+  /** The organization of the envelope sender's domain (null: none, or not a tenant domain). */
+  private async senderOrganization(request: PolicyRequest): Promise<bigint | null> {
+    const sender = splitAddress(request.sender);
+    const domain = sender ? await this.domains.get(sender.domain) : null;
+    return domain?.organizationId ?? null;
   }
 
   /** D11 `reinject-inbound`: only to active tenant domains (never the Internet). */
@@ -441,11 +482,20 @@ export class PolicyDecisionService {
   }
 
   /** D4 END-OF-MESSAGE: the real size against the smallest limit recorded at RCPT. */
-  private async endOfMessage(request: PolicyRequest): Promise<string> {
+  private async endOfMessage(request: PolicyRequest, context: PolicyContext): Promise<string> {
     const instance = request.instance ?? '';
     if (!INSTANCE.test(instance)) throw new PolicyMisconfiguredError('missing instance attribute');
     const limit = await this.sizes.limit(instance);
-    return limit !== null && sizeOf(request) > limit ? TOO_BIG : DUNNO;
+    if (limit !== null && sizeOf(request) > limit) return TOO_BIG;
+    // Step 8.2 D8.1: the provider relay marker before DUNNO (a Redis error tempfails).
+    if (context === 'relay' && this.providerRelay) {
+      const answer = await this.providerRelay.endOfMessage(
+        request,
+        await this.resolveConnector(request, context),
+      );
+      if (answer !== null) return answer;
+    }
+    return DUNNO;
   }
 
   private async recordSizeLimit(request: PolicyRequest, limit: number): Promise<void> {

@@ -1,8 +1,16 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 
-/** Security alert kinds produced by the webhook-worker (N1, N2). */
-export const ALERT_KINDS = ['threat_detected', 'domain_dns_failed', 'webhook_disabled'] as const;
+/**
+ * Security alert kinds produced by the webhook-worker (N1, N2; step 8.2 D12 adds
+ * `integration_unhealthy`, requested when a provider connection's health becomes `critical`).
+ */
+export const ALERT_KINDS = [
+  'threat_detected',
+  'domain_dns_failed',
+  'webhook_disabled',
+  'integration_unhealthy',
+] as const;
 export type AlertKind = (typeof ALERT_KINDS)[number];
 
 /**
@@ -26,6 +34,19 @@ export const ALERT_RECIPIENT_PERMISSION: Readonly<Record<AlertKind, string>> = O
   threat_detected: 'quarantine:approve',
   domain_dns_failed: 'domain:manage',
   webhook_disabled: 'webhook:manage',
+  integration_unhealthy: 'integration:read',
+});
+
+/**
+ * Default throttle (minutes) of `integration_unhealthy` alerts per connection (step 8.2 D12). It
+ * is platform configuration (`INTEGRATION_ALERT_THROTTLE_MINUTES` of the webhook-worker), not a
+ * tenant setting: the kind is always enabled for the organization and opted out per user.
+ */
+export const INTEGRATION_ALERT_THROTTLE_MINUTES_DEFAULT = 60;
+/** Bounds of `INTEGRATION_ALERT_THROTTLE_MINUTES`. */
+export const INTEGRATION_ALERT_THROTTLE_BOUNDS = Object.freeze({
+  minThrottleMinutes: 5,
+  maxThrottleMinutes: 10_080,
 });
 
 /** `notification_alert_windows.scope_key` of kinds without a scope (`threat_detected`). */
@@ -141,12 +162,23 @@ export function resolveNotificationSettings(stored: unknown): NotificationSettin
   };
 }
 
-/** The settings of an alert kind (enabled and throttle window). */
+/**
+ * The settings of an alert kind (enabled and throttle window). `integration_unhealthy` has no
+ * tenant setting: always enabled, throttled by `platform.integrationThrottleMinutes`
+ * (`INTEGRATION_ALERT_THROTTLE_MINUTES`, default 60).
+ */
 export function alertKindSettings(
   settings: ResolvedNotificationSettings,
   kind: AlertKind,
+  platform: { integrationThrottleMinutes?: number } = {},
 ): { enabled: boolean; throttleMinutes: number } {
   switch (kind) {
+    case 'integration_unhealthy':
+      return {
+        enabled: true,
+        throttleMinutes:
+          platform.integrationThrottleMinutes ?? INTEGRATION_ALERT_THROTTLE_MINUTES_DEFAULT,
+      };
     case 'threat_detected':
       return settings.alerts.threatDetected;
     case 'domain_dns_failed':

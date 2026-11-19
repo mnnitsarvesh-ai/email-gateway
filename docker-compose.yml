@@ -50,6 +50,20 @@
 # reads archive metadata, decrypts archived content and searches through the tenant alias; both
 # hold ARCHIVE_ROOT_KEY. ARCHIVE_TEST_REPLICA_BUCKET is a test-only lock-enabled replica target.
 #
+# Provider integrations (step 8.2, docs/plan/steps/25-m365-google-connectors.md, ADR-0076..0081,
+# docs/deployment/provider-integrations.md): the `integration-worker` (apps profile, 3086: probes
+# and metrics only; roles INTEGRATION_WORKER_ROLES=tasks,health,maintenance) verifies grants,
+# runs validations (SMTP probes never send DATA) and health checks; MySQL writer + reader only
+# (no RabbitMQ, no Redis; events leave through the outbox). It alone DECRYPTS provider
+# credentials (the api encrypts) and holds the platform app secret. Locally every provider
+# endpoint points at the TEST-ONLY `provider-fake` (smtp-test profile, mailtest .72, host port
+# PROVIDER_FAKE_HOST_PORT; also the DNS responder of relay-proof.test that dns-sink forwards to):
+# nothing ever reaches Microsoft or Google. `provider-sender-m365` (.70) / `provider-sender-google`
+# (.71) are smtp-tools clients standing in for the providers' outbound hosts
+# (PROVIDER_EGRESS_EXTRA_RANGES). The smtp-adapter joins `mailtest` to resolve DKIM keys through
+# dns-sink (PROVIDER_RELAY_DNS_SERVERS).
+#   docker compose --profile smtp-test --profile apps up -d --wait
+#
 # Policy (step 5.2, docs/plan/steps/16-policy-engine.md, ADR-0043/0044/0045, topology v9): the
 # `policy-engine` consumes email.policy.evaluate as eg-policy-engine (RABBITMQ_POLICY_ENGINE_URL)
 # and is the ONLY automatic producer of delivery approvals: the delivery-worker's development
@@ -1028,7 +1042,9 @@ services:
     # Since step 4.3 (U19) also the URL corpus (url-test.hosts, mapped-v6.test, rebind.test
     # forwarded to url-test 172.31.250.60:5300 without cache) and published on 127.0.0.1 for
     # host-run suites (URL_DNS_SERVERS=127.0.0.1:${DNS_SINK_HOST_PORT}). Since step 6.2 also
-    # receiver.test (hooks, hooks2 -> webhook-receiver 203.0.113.20).
+    # receiver.test (hooks, hooks2 -> webhook-receiver 203.0.113.20). Since step 8.2 also
+    # relay-proof.test (forwarded without cache to provider-fake 172.31.250.72:5300: DKIM keys
+    # registered at runtime by the stack tests).
     profiles: [smtp-test]
     image: coredns/coredns:1.11.3
     restart: unless-stopped
@@ -1089,6 +1105,72 @@ services:
       mail-sink: { condition: service_healthy }
       dns-sink: { condition: service_started }
       test-pki: { condition: service_completed_successfully }
+
+  provider-fake:
+    # TEST-ONLY stand-in for the Microsoft identity platform, Microsoft Graph, the Google OAuth
+    # token endpoint and the Google Admin SDK (step 8.2 §10.3/§10.5): the library's
+    # FakeProviderServer (@email-gateway/provider-integrations `testing`) behind
+    # infrastructure/provider-fake/server.mjs. HTTP 8480 (host 127.0.0.1:PROVIDER_FAKE_HOST_PORT;
+    # admin API /_fake/* with Bearer PROVIDER_FAKE_ADMIN_TOKEN: tenants, domains, apps,
+    # service-account PUBLIC keys, consent, DNS TXT records), the admin-consent redirect, and the
+    # DNS responder of relay-proof.test on 5300 (reached through dns-sink, no cache). Registers
+    # the local platform Microsoft app (same keys as the integration-worker) at start. Never
+    # deployed; holds no gateway secret besides the local platform app's test secret.
+    profiles: [smtp-test]
+    build: { context: ., dockerfile: infrastructure/provider-fake/Dockerfile }
+    image: email-gateway/provider-fake:local
+    restart: unless-stopped
+    read_only: true
+    mem_limit: 128m
+    environment:
+      PROVIDER_FAKE_ADMIN_TOKEN: ${PROVIDER_FAKE_ADMIN_TOKEN:?append the provider integration keys from .env.example}
+      PROVIDER_FAKE_HTTP_PORT: 8480
+      PROVIDER_FAKE_DNS_PORT: 5300
+      PROVIDER_FAKE_DNS_ZONE: relay-proof.test
+      PROVIDER_M365_MAILFLOW_APP_CLIENT_ID: ${PROVIDER_M365_MAILFLOW_APP_CLIENT_ID:-}
+      PROVIDER_M365_MAILFLOW_APP_CLIENT_SECRET: ${PROVIDER_M365_MAILFLOW_APP_CLIENT_SECRET:-}
+    networks:
+      default: {}
+      mailtest: { ipv4_address: 172.31.250.72 }
+    ports: ['127.0.0.1:${PROVIDER_FAKE_HOST_PORT:-18093}:8480']
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:8480/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  provider-sender-m365:
+    # TEST-ONLY client standing in for Exchange Online's outbound hosts (step 8.2 §10.5): its
+    # fixed address is the Microsoft 365 entry of PROVIDER_EGRESS_EXTRA_RANGES, so swaks from here
+    # to postfix-outbound:25 is provider-relay traffic. docker compose exec provider-sender-m365 swaks …
+    profiles: [smtp-test]
+    # Same image as `smtp-tools` (built there; one build, never in parallel on the 8 GB VM).
+    image: email-gateway/smtp-tools:local
+    pull_policy: never
+    restart: unless-stopped
+    networks:
+      mailtest: { ipv4_address: 172.31.250.70 }
+    depends_on:
+      dns-sink: { condition: service_started }
+
+  provider-sender-google:
+    # TEST-ONLY client standing in for Gmail's outbound hosts (step 8.2 §10.5; the Google
+    # Workspace entry of PROVIDER_EGRESS_EXTRA_RANGES).
+    profiles: [smtp-test]
+    # Same image as `smtp-tools` (built there; one build, never in parallel on the 8 GB VM).
+    image: email-gateway/smtp-tools:local
+    pull_policy: never
+    restart: unless-stopped
+    networks:
+      mailtest: { ipv4_address: 172.31.250.71 }
+    depends_on:
+      dns-sink: { condition: service_started }
 
   # ---------------------------------------------------------------- applications (profile: apps)
   db-migrate:
@@ -1363,6 +1445,30 @@ services:
       ARCHIVE_CASE_MAX_CUSTODIANS: ${ARCHIVE_CASE_MAX_CUSTODIANS:-1000}
       ARCHIVE_CASE_MAX_ACTIVE_SEARCHES: ${ARCHIVE_CASE_MAX_ACTIVE_SEARCHES:-3}
       ARCHIVE_REVIEW_MAX_ITEMS: ${ARCHIVE_REVIEW_MAX_ITEMS:-500}
+      # Provider integrations (step 8.2 §4.4): the api ENCRYPTS customer credentials (only the
+      # integration-worker decrypts), signs impact tokens, derives route tokens for the guides and
+      # builds admin-consent URLs. The login URL is the one a BROWSER follows (the host port of
+      # provider-fake locally); the api never calls a provider endpoint itself.
+      PROVIDER_CREDENTIAL_ENCRYPTION_KEY: ${PROVIDER_CREDENTIAL_ENCRYPTION_KEY:?append the provider integration keys from .env.example}
+      PROVIDER_CREDENTIAL_ENCRYPTION_KEY_PREVIOUS: ${PROVIDER_CREDENTIAL_ENCRYPTION_KEY_PREVIOUS:-}
+      PROVIDER_IMPACT_TOKEN_KEY: ${PROVIDER_IMPACT_TOKEN_KEY:?append the provider integration keys from .env.example}
+      PROVIDER_ROUTE_TOKEN_KEY: ${PROVIDER_ROUTE_TOKEN_KEY:?append the provider integration keys from .env.example}
+      PROVIDER_M365_LOGIN_URL: http://127.0.0.1:${PROVIDER_FAKE_HOST_PORT:-18093}/m365/login
+      PROVIDER_M365_GRAPH_URL: http://provider-fake:8480/m365/graph
+      PROVIDER_GOOGLE_TOKEN_URL: http://provider-fake:8480/google/token
+      PROVIDER_ALLOW_HTTP_ENDPOINTS: ${PROVIDER_ALLOW_HTTP_ENDPOINTS:-true}
+      PROVIDER_M365_MAILFLOW_APP_CLIENT_ID: ${PROVIDER_M365_MAILFLOW_APP_CLIENT_ID:-}
+      PROVIDER_GOOGLE_MAILFLOW_SA_CLIENT_ID: ${PROVIDER_GOOGLE_MAILFLOW_SA_CLIENT_ID:-}
+      PROVIDER_CONSENT_REDIRECT_URL: ${PROVIDER_CONSENT_REDIRECT_URL:-http://localhost:3001/integrations/providers/consent-callback}
+      PROVIDER_CONSENT_STATE_TTL_SECONDS: ${PROVIDER_CONSENT_STATE_TTL_SECONDS:-600}
+      PROVIDER_IMPACT_TOKEN_TTL_SECONDS: ${PROVIDER_IMPACT_TOKEN_TTL_SECONDS:-900}
+      PROVIDER_MAX_CONNECTIONS_PER_ORG: ${PROVIDER_MAX_CONNECTIONS_PER_ORG:-10}
+      PROVIDER_MAX_DOMAINS_PER_CONNECTION: ${PROVIDER_MAX_DOMAINS_PER_CONNECTION:-500}
+      PROVIDER_PROBE_DOMAIN: ${PROVIDER_PROBE_DOMAIN:-probe.mail-gateway.test}
+      PROVIDER_PROBE_TTL_SECONDS: ${PROVIDER_PROBE_TTL_SECONDS:-86400}
+      GATEWAY_EGRESS_NETWORKS: ${GATEWAY_EGRESS_NETWORKS:-192.0.2.10/32}
+      GATEWAY_RELAY_HOSTS: ${GATEWAY_RELAY_HOSTS:-out.gateway.local}
+      GATEWAY_RELAY_TLS_NAME: ${GATEWAY_RELAY_TLS_NAME:-out.gateway.local}
     ports: ['127.0.0.1:${API_HOST_PORT:-3000}:3000']
     healthcheck:
       <<: *node-healthcheck
@@ -1451,6 +1557,24 @@ services:
       ROUTING_DENIED_DESTINATION_SUFFIXES: ${ROUTING_DENIED_DESTINATION_SUFFIXES:-}
       ROUTING_MAX_DESTINATIONS_PER_DOMAIN: ${ROUTING_MAX_DESTINATIONS_PER_DOMAIN:-10}
       ROUTING_ALLOWED_DESTINATION_PORTS: ${ROUTING_ALLOWED_DESTINATION_PORTS:-25,587,2525}
+      # Provider relay (step 8.2 D7/D8, ADR-0078): DKIM keys resolve through dns-sink only
+      # (relay-proof.test is forwarded to provider-fake); the provider-sender test clients' fixed
+      # addresses are extra egress ranges (TEST-ONLY, refused outside APP_ENV local/ci).
+      PROVIDER_RELAY_ENABLED: ${PROVIDER_RELAY_ENABLED:-true}
+      PROVIDER_RELAY_DNS_SERVERS: 172.31.250.53
+      PROVIDER_RELAY_DNS_TIMEOUT_MS: ${PROVIDER_RELAY_DNS_TIMEOUT_MS:-2000}
+      PROVIDER_RELAY_MARKER_TTL_SECONDS: ${PROVIDER_RELAY_MARKER_TTL_SECONDS:-432000}
+      PROVIDER_EGRESS_CACHE_SECONDS: ${PROVIDER_EGRESS_CACHE_SECONDS:-60}
+      PROVIDER_RELAY_COUNTER_FLUSH_SECONDS: ${PROVIDER_RELAY_COUNTER_FLUSH_SECONDS:-30}
+      PROVIDER_RELAY_DKIM_REPLAY_WINDOW_SECONDS: ${PROVIDER_RELAY_DKIM_REPLAY_WINDOW_SECONDS:-604800}
+      # .env: {"microsoft_365":["172.31.250.70/32"],"google_workspace":["172.31.250.71/32"]}
+      PROVIDER_EGRESS_EXTRA_RANGES: ${PROVIDER_EGRESS_EXTRA_RANGES:-}
+      PROVIDER_PROBE_DOMAIN: ${PROVIDER_PROBE_DOMAIN:-probe.mail-gateway.test}
+      PROVIDER_PROBE_TTL_SECONDS: ${PROVIDER_PROBE_TTL_SECONDS:-86400}
+    # Step 8.2: `mailtest` for dns-sink (PROVIDER_RELAY_DNS_SERVERS); dynamic upper-half address.
+    networks:
+      default: {}
+      mailtest: {}
     ports: ['127.0.0.1:${SMTP_ADAPTER_HOST_PORT:-3010}:3010']
     healthcheck:
       <<: *node-healthcheck
@@ -1835,6 +1959,8 @@ services:
       GATEWAY_TRACE_ID: ${GATEWAY_TRACE_ID:-gw-local}
       POSTFIX_OUTBOUND_MYHOSTNAME: ${POSTFIX_OUTBOUND_MYHOSTNAME:-out.gateway.local}
       INGEST_HEADER_MAX_BYTES: ${INGEST_HEADER_MAX_BYTES:-65536}
+      # Step 8.2 D9: X-EG-Route-Token for Microsoft 365 internal routing (shared with the api).
+      PROVIDER_ROUTE_TOKEN_KEY: ${PROVIDER_ROUTE_TOKEN_KEY:?append the provider integration keys from .env.example}
     # postfix-outbound's delivery log directory, read-only (the worker never writes it).
     volumes:
       - ${POSTFIX_OUTBOUND_LOG_DIR:-./.local/postfix-outbound-log}:/var/log/postfix-outbound:ro
@@ -2010,6 +2136,8 @@ services:
       WEBHOOK_TEST_ALLOW_CIDRS: 203.0.113.0/24
       WEBHOOK_TEST_DIAL_MAP: ''
       WEBHOOK_EXTRA_CA_PATH: /pki/ca/ca.pem
+      # Step 8.2 D12: throttle of the integration_unhealthy alert per connection.
+      INTEGRATION_ALERT_THROTTLE_MINUTES: ${INTEGRATION_ALERT_THROTTLE_MINUTES:-60}
     networks:
       default: {}
       mailtest: {}
@@ -2164,6 +2292,88 @@ services:
           'node',
           '-e',
           "fetch('http://127.0.0.1:3085/health/ready').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))",
+        ]
+
+  # Provider integrations (step 8.2 D11, ADR-0079): grant verification, validation runs, periodic
+  # health and maintenance. MySQL writer + reader only (no RabbitMQ, no Redis, no S3: x-node-env
+  # is not used on purpose). The only holder of the decryption key besides the api's encryption
+  # use, and of the platform app secret. Provider endpoints = provider-fake (container values);
+  # SMTP probes resolve through dns-sink and trust the test CA (both TEST-ONLY, local/ci only).
+  integration-worker:
+    profiles: [apps]
+    restart: unless-stopped
+    build:
+      {
+        context: .,
+        dockerfile: infrastructure/docker/node-service.Dockerfile,
+        args: { APP: integration-worker },
+      }
+    image: email-gateway/integration-worker:local
+    depends_on:
+      db-migrate: { condition: service_completed_successfully }
+      mysql-replica-setup: { condition: service_completed_successfully }
+    environment:
+      NODE_ENV: production
+      APP_ENV: local
+      DEPLOYMENT_MODE: ${DEPLOYMENT_MODE:-saas}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      SERVICE_VERSION: ${SERVICE_VERSION:-0.1.0-local}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      HTTP_HOST: 0.0.0.0
+      INTEGRATION_WORKER_HTTP_PORT: 3086
+      DATABASE_URL: mysql://${MYSQL_APP_USER:?}:${MYSQL_APP_PASSWORD:?}@mysql:3306/${MYSQL_DATABASE:?}
+      DATABASE_READ_URL: mysql://${MYSQL_READER_USER:?}:${MYSQL_READER_PASSWORD:?}@mysql-replica:3306/${MYSQL_DATABASE:?}
+      DATABASE_SOCKET_TIMEOUT_SECONDS: ${DATABASE_SOCKET_TIMEOUT_SECONDS:-0}
+      INTEGRATION_WORKER_ROLES: ${INTEGRATION_WORKER_ROLES:-tasks,health,maintenance}
+      PROVIDER_CREDENTIAL_ENCRYPTION_KEY: ${PROVIDER_CREDENTIAL_ENCRYPTION_KEY:?append the provider integration keys from .env.example}
+      PROVIDER_CREDENTIAL_ENCRYPTION_KEY_PREVIOUS: ${PROVIDER_CREDENTIAL_ENCRYPTION_KEY_PREVIOUS:-}
+      PROVIDER_M365_LOGIN_URL: http://provider-fake:8480/m365/login
+      PROVIDER_M365_GRAPH_URL: http://provider-fake:8480/m365/graph
+      PROVIDER_GOOGLE_TOKEN_URL: http://provider-fake:8480/google/token
+      PROVIDER_GOOGLE_ADMIN_URL: http://provider-fake:8480/google/admin
+      PROVIDER_ALLOW_HTTP_ENDPOINTS: ${PROVIDER_ALLOW_HTTP_ENDPOINTS:-true}
+      PROVIDER_M365_MAILFLOW_APP_CLIENT_ID: ${PROVIDER_M365_MAILFLOW_APP_CLIENT_ID:-}
+      PROVIDER_M365_MAILFLOW_APP_CLIENT_SECRET: ${PROVIDER_M365_MAILFLOW_APP_CLIENT_SECRET:-}
+      PROVIDER_M365_MAILFLOW_APP_CERT_THUMBPRINT: ${PROVIDER_M365_MAILFLOW_APP_CERT_THUMBPRINT:-}
+      PROVIDER_M365_ALLOW_PLATFORM_SECRET: ${PROVIDER_M365_ALLOW_PLATFORM_SECRET:-true}
+      PROVIDER_GOOGLE_MAILFLOW_SA_CLIENT_ID: ${PROVIDER_GOOGLE_MAILFLOW_SA_CLIENT_ID:-}
+      PROVIDER_PROBE_DOMAIN: ${PROVIDER_PROBE_DOMAIN:-probe.mail-gateway.test}
+      PROVIDER_PROBE_TTL_SECONDS: ${PROVIDER_PROBE_TTL_SECONDS:-86400}
+      PROVIDER_EGRESS_MAX_AGE_DAYS: ${PROVIDER_EGRESS_MAX_AGE_DAYS:-45}
+      INTEGRATION_TASK_POLL_MS: ${INTEGRATION_TASK_POLL_MS:-2000}
+      INTEGRATION_TASK_CONCURRENCY: ${INTEGRATION_TASK_CONCURRENCY:-4}
+      INTEGRATION_TX_TIMEOUT_MS: ${INTEGRATION_TX_TIMEOUT_MS:-120000}
+      INTEGRATION_HEALTH_TICK_SECONDS: ${INTEGRATION_HEALTH_TICK_SECONDS:-10}
+      INTEGRATION_HEALTH_INTERVAL_SECONDS: ${INTEGRATION_HEALTH_INTERVAL_SECONDS:-60}
+      INTEGRATION_HEALTH_ERROR_GRACE_MINUTES: ${INTEGRATION_HEALTH_ERROR_GRACE_MINUTES:-60}
+      INTEGRATION_RELAY_IDLE_WARN_HOURS: ${INTEGRATION_RELAY_IDLE_WARN_HOURS:-72}
+      INTEGRATION_HTTP_TIMEOUT_MS: ${INTEGRATION_HTTP_TIMEOUT_MS:-10000}
+      INTEGRATION_HTTP_MAX_RESPONSE_BYTES: ${INTEGRATION_HTTP_MAX_RESPONSE_BYTES:-1048576}
+      INTEGRATION_SMTP_PROBE_TIMEOUT_MS: ${INTEGRATION_SMTP_PROBE_TIMEOUT_MS:-5000}
+      INTEGRATION_PROBE_HELO: ${INTEGRATION_PROBE_HELO:-}
+      # Container values (not the host-run .env ones): dns-sink and the test CA of test-pki.
+      INTEGRATION_PROBE_DNS_SERVERS: 172.31.250.53
+      INTEGRATION_PROBE_CA_PATH: /pki/ca/ca.pem
+      GATEWAY_MX_HOSTS: ${GATEWAY_MX_HOSTS:?append the domain onboarding keys from .env.example}
+      GATEWAY_SPF_INCLUDE: ${GATEWAY_SPF_INCLUDE:?append the domain onboarding keys from .env.example}
+      POSTFIX_MYHOSTNAME: ${POSTFIX_MYHOSTNAME:-mx.gateway.local}
+      POSTFIX_OUTBOUND_MYHOSTNAME: ${POSTFIX_OUTBOUND_MYHOSTNAME:-out.gateway.local}
+      POSTFIX_BOUNCE_DOMAIN: ${POSTFIX_BOUNCE_DOMAIN:-bounces.gateway.internal}
+      ROUTING_ALLOW_NON_PUBLIC_DESTINATIONS: ${ROUTING_ALLOW_NON_PUBLIC_DESTINATIONS:-false}
+      ROUTING_DENIED_DESTINATION_SUFFIXES: ${ROUTING_DENIED_DESTINATION_SUFFIXES:-}
+    networks:
+      default: {}
+      mailtest: {}
+    volumes: ['test-pki:/pki:ro']
+    ports: ['127.0.0.1:${INTEGRATION_WORKER_HOST_PORT:-3086}:3086']
+    healthcheck:
+      <<: *node-healthcheck
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3086/health/ready').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))",
         ]
 
   # Time-of-click service (step 4.3 U14, ADR-0031): public 3080 (GET /c/:token), admin 3081
@@ -2638,8 +2848,10 @@ networks:
   # reinject-forwarder .30. Step 4.3: url-test .60 (rebinding DNS responder for dns-sink); the
   # email-worker, click-service and url-egress-proxy join it to resolve through dns-sink. Step
   # 6.2: notify-relay-sink .31; the webhook-worker (resolves through dns-sink), webhook-receiver
-  # and postfix-notify join it with dynamic addresses. Dynamic addresses come from the upper half
-  # only (ip_range), so they can never take one of the fixed addresses.
+  # and postfix-notify join it with dynamic addresses. Step 8.2: provider-sender-m365 .70,
+  # provider-sender-google .71, provider-fake .72 (its relay-proof.test DNS responder for
+  # dns-sink); the smtp-adapter and integration-worker join with dynamic addresses. Dynamic
+  # addresses come from the upper half only (ip_range), so they can never take a fixed address.
   mailtest:
     ipam:
       config:

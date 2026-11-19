@@ -44,6 +44,8 @@ export interface IngestCommit {
   recipients: readonly string[];
   /** `email_recipients.direction` per recipient, same order and length as `recipients`. */
   recipientDirections: readonly RoutedDirection[];
+  /** Step 8.2 D8: `details.providerRelay` of the `received` event (provider relay, proof pass). */
+  providerRelay?: { provider: string; connectionId: string; proof: 'pass' };
 }
 
 export interface CommittedMessage {
@@ -176,6 +178,7 @@ export class IngestionRepository {
               queueId: data.queueId,
               recipientCount: data.recipients.length,
               sizeBytes: data.sizeBytes,
+              ...(data.providerRelay ? { providerRelay: data.providerRelay } : {}),
             },
           },
           select: { id: true },

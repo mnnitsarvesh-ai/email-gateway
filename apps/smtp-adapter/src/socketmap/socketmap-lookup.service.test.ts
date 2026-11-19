@@ -8,6 +8,8 @@ import {
 } from '../../integration/in-session-support/fakes';
 import type { ConnectorResolver, ConnectorView } from '../connectors/connector-resolver.service';
 import type { DomainPolicyService, DomainPolicyView } from '../tenancy/domain-policy.service';
+import { ProviderEgressIndex, egressRangesFromCidrs } from '@email-gateway/mail-routing';
+import type { EgressIndexService } from '../provider-relay/egress-index.service';
 import { SocketmapLookupService } from './socketmap-lookup.service';
 
 const view = (name: string, overrides: Partial<DomainPolicyView> = {}): DomainPolicyView => ({
@@ -49,7 +51,11 @@ const PRESET_ROWS = [
   },
 ];
 
-function harness(env: Record<string, string> = {}, logger = silentLogger()) {
+function harness(
+  env: Record<string, string> = {},
+  logger = silentLogger(),
+  egress?: EgressIndexService,
+) {
   const views = new Map([
     ['tenant.test', view('tenant.test')],
     ['nomail.test', view('nomail.test', { inboundEnabled: false })],
@@ -105,6 +111,7 @@ function harness(env: Record<string, string> = {}, logger = silentLogger()) {
       ...env,
     }),
     logger,
+    egress,
   );
   return {
     service,
@@ -459,6 +466,27 @@ describe('SocketmapLookupService', () => {
     expect(h.connectors.byClientAddress).toHaveBeenCalledTimes(1);
     h.connectors.byClientAddress.mockResolvedValue(null);
     expect(await h.service.lookup('relay_client', '192.0.2.1')).toBe('NOTFOUND ');
+  });
+
+  it('relay_client: provider egress addresses reach the relay policy (step 8.2 D7), fail closed before the first load', async () => {
+    const index = ProviderEgressIndex.build([
+      ...egressRangesFromCidrs('microsoft_365', ['172.31.250.70/32']),
+      ...egressRangesFromCidrs('google_workspace', ['2001:db8:4860::/48']),
+    ]);
+    const loaded = { loaded: true, current: () => index } as unknown as EgressIndexService;
+    const h = harness({ PROVIDER_RELAY_ENABLED: 'true' }, silentLogger(), loaded);
+    expect(await h.service.lookup('relay_client', '172.31.250.70')).toBe('OK OK');
+    expect(await h.service.lookup('relay_client', '2001:db8:4860::25')).toBe('OK OK');
+    expect(await h.service.lookup('relay_client', '172.31.250.71')).toBe('NOTFOUND ');
+    const pending = { loaded: false, current: () => index } as unknown as EgressIndexService;
+    const cold = harness({ PROVIDER_RELAY_ENABLED: 'true' }, silentLogger(), pending);
+    expect(await cold.service.lookup('relay_client', '172.31.250.70')).toBe('TEMP Lookup failed');
+    const off = harness({ PROVIDER_RELAY_ENABLED: 'false' }, silentLogger(), loaded);
+    expect(await off.service.lookup('relay_client', '172.31.250.70')).toBe('NOTFOUND ');
+    // A source-IP connector still wins without touching the egress index.
+    const both = harness({ PROVIDER_RELAY_ENABLED: 'true' }, silentLogger(), pending);
+    both.connectors.byClientAddress.mockResolvedValueOnce(connector);
+    expect(await both.service.lookup('relay_client', '172.31.250.70')).toBe('OK OK');
   });
 
   it('relay_ccert: OK OK for an active certificate connector fingerprint', async () => {

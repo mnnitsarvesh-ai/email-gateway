@@ -17,6 +17,11 @@ export interface ReadMessageOptions {
    * reached): decide where the message goes. Null discards the bytes (nothing to store).
    */
   onHeaders(headers: HeaderMetadata): MessageSink | null;
+  /**
+   * Step 8.2 D8: receives every byte of a complete read, in order (the provider relay's DKIM
+   * verifier). Must not throw; it is never told about aborted or oversized reads.
+   */
+  tee?: { write(chunk: Buffer): Promise<void> } | null;
 }
 
 export type ReadOutcome = 'complete' | 'aborted' | 'too_large' | 'failed';
@@ -83,6 +88,7 @@ export async function readMessage(
       }
       // The loop body never throws: leaving a for-await early would destroy smtp-server's stream.
       try {
+        if (options.tee) await options.tee.write(chunk);
         if (!decided) {
           scanner.push(chunk);
           pending.push(chunk);

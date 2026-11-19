@@ -87,6 +87,17 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: ['ato-worker:3085']
+  # integration-worker (step 8.2 D18; apps profile): provider_token_requests_total,
+  # provider_api_*, provider_validation_runs_total, provider_connections{provider,status,health},
+  # provider_connections_outbound_active, provider_health_transitions_total,
+  # provider_egress_set_age_seconds, smtp_connector_shared_provider_networks (leader gauges: 0 on
+  # the other replicas), integration_worker_task_lag_seconds and the process series. Probes and
+  # metrics only on 3086. Alerts: rules/integrations.rules.yml (with the smtp-adapter's
+  # smtp_provider_* series of the job smtp-adapter).
+  - job_name: integration-worker
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['integration-worker:3086']
   # event-relay (step 3.2 §5.3): outbox relay (outbox_relay_*), outbox health (outbox_*),
   # reconciliation (reconcile_*), AMQP client (amqp_*).
   - job_name: event-relay

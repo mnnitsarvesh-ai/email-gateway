@@ -995,6 +995,94 @@ describe('route security (e2e, dependencies stubbed)', () => {
     }
   });
 
+  it('the step 8.2 provider-connection routes: exact permissions, limits, classes, keys and cursors (§5.2, D16, D17)', () => {
+    type Flags = {
+      cls?: string;
+      secret?: boolean;
+      rate?: string;
+      limit?: number;
+      cursor?: boolean;
+    };
+    const R = 'integration:read';
+    const M = 'integration:manage';
+    const P = '/api/v1/provider-connections';
+    const expected: Record<string, [string[], Flags?]> = {
+      'get /api/v1/provider-integrations/catalog': [[R]],
+      [`get ${P}`]: [[R], { cursor: true }],
+      [`post ${P}`]: [[M]],
+      [`get ${P}/:id`]: [[R]],
+      [`patch ${P}/:id`]: [[M]],
+      [`delete ${P}/:id`]: [[M, 'connector:manage'], { cls: 'sensitive' }],
+      [`get ${P}/:id/wizard`]: [[R]],
+      [`post ${P}/:id/grants`]: [[M], { cls: 'sensitive', secret: true }],
+      [`post ${P}/consent/complete`]: [[M], { cls: 'sensitive' }],
+      [`put ${P}/:id/grants/:profile/credentials`]: [[M], { cls: 'sensitive' }],
+      [`post ${P}/:id/grants/:profile/verify`]: [[M], { cls: 'sensitive' }],
+      [`delete ${P}/:id/grants/:profile`]: [[M], { cls: 'sensitive' }],
+      [`get ${P}/:id/domains`]: [[R]],
+      [`put ${P}/:id/domains`]: [[M]],
+      [`post ${P}/:id/mail-flow/preview`]: [[M]],
+      [`post ${P}/:id/mail-flow/apply`]: [[M], { limit: 30 }],
+      [`get ${P}/:id/mail-flow`]: [[R]],
+      [`post ${P}/:id/attestations`]: [[M]],
+      [`post ${P}/:id/validations`]: [[M], { cls: 'sensitive', secret: true, rate: 'validation' }],
+      [`get ${P}/:id/validations`]: [[R], { cursor: true }],
+      [`get ${P}/:id/validations/:runId`]: [[R]],
+      [`get ${P}/:id/health`]: [[R]],
+      [`post ${P}/:id/health/check`]: [[M], { rate: 'health_check' }],
+      [`get ${P}/:id/setup-guide`]: [[R]],
+    };
+    const providerRoutes = routes.filter((r) =>
+      /^\/api\/v1\/provider-(connections|integrations)(\/|$)/.test(r.path),
+    );
+    expect(providerRoutes.map((r) => `${r.method} ${r.path}`).sort()).toEqual(
+      Object.keys(expected).sort(),
+    );
+    expect(providerRoutes).toHaveLength(24);
+    for (const [key, [permissions, flags]] of Object.entries(expected)) {
+      const route = routes.find((r) => `${r.method} ${r.path}` === key)!;
+      expect(route.isPublic, key).toBe(false);
+      expect(route.requirement, key).toEqual({ mode: 'all', permissions });
+      // No step-up MFA and API keys allowed (the consent routes refuse API keys in the service).
+      expect(route.requireMfa, key).toBe(false);
+      expect(route.userOnly, key).toBe(false);
+      expect(route.rateClass, key).toBe(flags?.cls ?? null);
+      expect(route.returnsSecret, key).toBe(flags?.secret ?? false);
+      expect(route.secretRedactedReplay, key).toBe(flags?.secret ?? false);
+      expect(route.providerRate, key).toBe(flags?.rate ?? null);
+      expect(
+        route.rateLimits.map((l) => l.limit),
+        key,
+      ).toEqual(flags?.limit === undefined ? [] : [flags.limit]);
+      // Transactional keys (IdempotencyService), never the reservation interceptor.
+      expect(route.idempotency, key).toBeNull();
+      expect(route.cursor, key).toBe(flags?.cursor ? 'v1' : null);
+    }
+    // Only these two routes carry the per-connection limits.
+    expect(
+      routes
+        .filter((r) => r.providerRate !== null)
+        .map((r) => `${r.method} ${r.path}`)
+        .sort(),
+    ).toEqual([`post ${P}/:id/health/check`, `post ${P}/:id/validations`]);
+  });
+
+  it('the step 8.2 changes of existing routes: provider_relay connectors and shared ranges (§5.3)', () => {
+    // Unchanged authorization of the connector and domain routes that gained the coded refusals.
+    for (const key of [
+      'post /api/v1/smtp-connectors',
+      'patch /api/v1/smtp-connectors/:id',
+      'post /api/v1/smtp-connectors/:id/rotate-secret',
+      'delete /api/v1/smtp-connectors/:id',
+    ]) {
+      const route = routes.find((r) => `${r.method} ${r.path}` === key);
+      expect(route?.requirement, key).toEqual({ mode: 'all', permissions: ['connector:manage'] });
+    }
+    expect(
+      routes.find((r) => `${r.method} ${r.path}` === 'post /api/v1/domains')?.requirement,
+    ).toEqual({ mode: 'all', permissions: ['domain:manage'] });
+  });
+
   it('every §3.5 legacy sensitive mutation is @Idempotent (legacy) in the sensitive class (step 6.1 D9, D10)', () => {
     for (const [key, operation] of Object.entries(LEGACY_SENSITIVE)) {
       const route = routes.find((r) => `${r.method} ${r.path}` === key);
@@ -1037,7 +1125,15 @@ describe('route security (e2e, dependencies stubbed)', () => {
         .filter((r) => r.secretRedactedReplay)
         .map((r) => `${r.method} ${r.path}`)
         .sort(),
-    ).toEqual(['post /api/v1/webhooks', 'post /api/v1/webhooks/:webhookId/rotate-secret']);
+    ).toEqual(
+      [
+        'post /api/v1/webhooks',
+        'post /api/v1/webhooks/:webhookId/rotate-secret',
+        // Step 8.2: the consent URL and the probe address (ADR-0057 redacted replay).
+        'post /api/v1/provider-connections/:id/grants',
+        'post /api/v1/provider-connections/:id/validations',
+      ].sort(),
+    );
     expect(routes.filter((r) => r.secretRedactedReplay && !r.returnsSecret)).toEqual([]);
     expect(routes.filter((r) => r.returnsSecret && r.idempotency !== null)).toEqual([]);
   });

@@ -101,6 +101,7 @@ export class FanoutModule {
               metrics,
               logger: logger.child({ component: 'webhook-fanout' }),
               txTimeoutMs: config.WEBHOOK_FANOUT_TX_TIMEOUT_MS,
+              integrationAlertThrottleMinutes: config.INTEGRATION_ALERT_THROTTLE_MINUTES,
             });
           },
           inject: [PrismaService, WebhookMetrics],

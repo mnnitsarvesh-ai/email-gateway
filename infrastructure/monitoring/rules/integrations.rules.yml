@@ -1,0 +1,143 @@
+# Provider integration alerts (step 8.2 D18, docs/plan/steps/25-m365-google-connectors.md;
+# ADR-0078, ADR-0079). Series: the integration-worker's provider_* / integration_worker_* /
+# smtp_connector_shared_provider_networks series (job `integration-worker`) and the smtp-adapter's
+# smtp_provider_* series (job `smtp-adapter`). Labels are bounded enums only (provider, status,
+# health, rule, result): never a tenant, connection, domain or address. The platform gauges
+# (provider_connections, provider_connections_outbound_active, provider_egress_set_age_seconds,
+# smtp_connector_shared_provider_networks) are written by the maintenance leader only (GET_LOCK)
+# and stay 0 on the other replicas: they are aggregated with max() over the replicas.
+# Health never changes mail flow automatically (I1): these alerts ask an operator or the tenant's
+# administrator to act. Every alert links its section of docs/runbooks/provider-integrations.md.
+# Validate with `promtool check rules` and `promtool test rules tests/integrations.rules.test.yml`.
+groups:
+  - name: integrations
+    rules:
+      - alert: IntegrationWorkerDown
+        expr: up{job="integration-worker"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: An integration-worker replica is down
+          description: >-
+            Prometheus cannot scrape an integration-worker replica for 5 minutes. Grant
+            verifications, validation runs and connection health checks of that replica are not
+            progressing (other replicas take over expired claims); mail flow is unaffected (I1).
+          runbook_url: docs/runbooks/provider-integrations.md#integrationworkerdown
+      - alert: ProviderEgressRangesStale
+        # PROVIDER_EGRESS_MAX_AGE_DAYS (45 days = 3888000 s); keep both in step.
+        expr: max by (provider) (provider_egress_set_age_seconds) > 3888000
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: 'The active {{ $labels.provider }} egress range set is older than 45 days'
+          description: >-
+            The active provider egress range set was published more than 45 days ago. The relay
+            keeps using it, but mail from new provider addresses is relay-denied. Import the
+            provider's current list with the egress-import CLI.
+          runbook_url: docs/runbooks/provider-integrations.md#provideregressrangesstale
+      - alert: ProviderEgressRangesEmpty
+        # Connections with outbound active exist, but an smtp-adapter replica has no range loaded
+        # for that provider (or none reports the provider at all): provider mail tempfails there.
+        expr: >-
+          max by (provider) (provider_connections_outbound_active) > 0
+          unless on (provider)
+          (min by (provider) (smtp_provider_egress_ranges) > 0)
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'No {{ $labels.provider }} egress ranges loaded while outbound relay is active'
+          description: >-
+            Organizations route outbound mail through the gateway from this provider, but at
+            least one smtp-adapter replica has loaded 0 egress ranges for it: their relayed mail
+            is deferred (fail closed). Check smtp_provider_egress_load_errors_total and the active
+            provider_egress_range_sets row; import the ranges if the set is empty.
+          runbook_url: docs/runbooks/provider-integrations.md#provideregressrangesempty
+      - alert: ProviderRelayProofFailuresHigh
+        # Proof failures per relayed message, from the per-rule counter: the denominator is the
+        # rule evaluated most often (every message evaluates the tenant header or aligned DKIM
+        # rule); the numerator counts failed rule evaluations, so a message failing two rules
+        # counts twice (the alert can fire slightly early, never late).
+        expr: >-
+          (
+            sum by (provider) (increase(smtp_provider_proof_total{result="fail"}[30m]))
+            /
+            max by (provider) (sum by (provider, rule) (increase(smtp_provider_proof_total[30m])))
+          ) > 0.2
+          and on (provider)
+          max by (provider) (sum by (provider, rule) (increase(smtp_provider_proof_total[30m]))) >= 50
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'More than 20 % of {{ $labels.provider }} relayed messages fail the proof'
+          description: >-
+            Over the last 30 minutes more than 20 % of at least 50 messages relayed from this
+            provider failed the tenant proof (tenant header or aligned DKIM) and were refused with
+            550 5.7.26. Either a tenant's DKIM signing broke, a connection's tenant changed, or
+            someone abuses the shared provider infrastructure.
+          runbook_url: docs/runbooks/provider-integrations.md#providerrelayprooffailureshigh
+      - alert: ProviderConnectionsCritical
+        # A ticket, not a page: the organization's administrators get the integration_unhealthy
+        # alert and webhook; this tells the operator that connections stay critical. Disabled
+        # connections are excluded: the health role no longer evaluates them, so their last status
+        # is frozen and would otherwise alert forever after a disconnect.
+        expr: max by (provider) (provider_connections{health="critical",status!="disabled"}) > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ $labels.provider }} connections critical for 30 minutes'
+          description: >-
+            At least one provider connection has been in health "critical" for 30 minutes (its
+            failing checks are listed on the connection's health tab and in the
+            integration.health_changed webhook). Mail flow is unchanged (I1); open a ticket with
+            the organization if it persists.
+          runbook_url: docs/runbooks/provider-integrations.md#providerconnectionscritical
+      - alert: ProviderTokenFailures
+        expr: >-
+          (
+            sum by (provider) (increase(provider_token_requests_total{result!~"ok|cache_hit"}[30m]))
+            /
+            sum by (provider) (increase(provider_token_requests_total{result!="cache_hit"}[30m]))
+          ) > 0.5
+          and on (provider)
+          sum by (provider) (increase(provider_token_requests_total{result!="cache_hit"}[30m])) >= 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'More than half of the {{ $labels.provider }} token requests fail'
+          description: >-
+            Over 30 minutes more than 50 % of the access-token requests to this provider failed
+            (result = a classified error code). Several tenants failing at once points at the
+            platform app or service account (expired certificate, deleted app, endpoint outage)
+            rather than at single tenants.
+          runbook_url: docs/runbooks/provider-integrations.md#providertokenfailures
+      - alert: SmtpConnectorOnSharedProviderRange
+        expr: max(smtp_connector_shared_provider_networks) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: source_ip SMTP connector networks overlap provider egress ranges
+          description: >-
+            Active source_ip SMTP connectors accept mail from networks that belong to Microsoft 365
+            or Google Workspace shared infrastructure: any tenant of that provider could relay as
+            the connector's organization. Move the organization to a provider connection (relay
+            proof) and disable the source_ip connector.
+          runbook_url: docs/runbooks/provider-integrations.md#smtpconnectoronsharedproviderrange
+      - alert: IntegrationTaskBacklog
+        expr: max(integration_worker_task_lag_seconds) > 300
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Integration tasks wait more than 5 minutes
+          description: >-
+            The oldest pending grant verification or queued validation run has waited more than
+            300 s for 15 minutes: the tasks role is down, saturated (INTEGRATION_TASK_CONCURRENCY)
+            or its provider calls time out.
+          runbook_url: docs/runbooks/provider-integrations.md#integrationtaskbacklog

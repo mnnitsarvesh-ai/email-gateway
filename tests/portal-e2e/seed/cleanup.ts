@@ -62,6 +62,16 @@ const PARTITION_COLUMN: Record<string, string> = {
 const ORDER = [
   // Step 8.4: account takeover and security incident rows (seed/ato.ts ATO_TABLES order).
   ...ATO_TABLES,
+  // Step 8.2: provider connection rows (ProviderTenantDataRepository purge order, design §3.3);
+  // `provider_connections` itself follows `smtp_connectors` (relay connectors reference it).
+  'provider_relay_counters',
+  'provider_probe_observations',
+  'provider_health_events',
+  'provider_health_checks',
+  'provider_validation_runs',
+  'provider_consent_states',
+  'provider_connection_domains',
+  'provider_connection_grants',
   // Quarantine purge order (step 5.3 Q17).
   'quarantine_download_grants',
   'quarantine_approval_requests',
@@ -117,6 +127,7 @@ const ORDER = [
   'api_keys',
   'smtp_connector_networks',
   'smtp_connectors',
+  'provider_connections',
   'domain_recipient_addresses',
   'domain_mail_servers',
   'domain_mx_records',

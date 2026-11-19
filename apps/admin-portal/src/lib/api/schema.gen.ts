@@ -2132,7 +2132,7 @@ export interface paths {
     put?: never;
     /**
      * Add a domain
-     * @description Normalizes the name (IDN → punycode, lower case, one trailing dot ignored), enforces `max_domains`, and creates the ownership challenge, a DKIM key (RSA 2048, plus Ed25519 on request) and the DNS records to publish. `409` when the organization already has the name or another organization owns it. The first check runs about a minute later. At most 60 per caller per minute (`429` with `Retry-After`).
+     * @description Normalizes the name (IDN → punycode, lower case, one trailing dot ignored), enforces `max_domains`, and creates the ownership challenge, a DKIM key (RSA 2048, plus Ed25519 on request) and the DNS records to publish. `409` when the organization already has the name or another organization owns it. The first check runs about a minute later. At most 60 per caller per minute (`429` with `Retry-After`). The platform probe domain (`PROVIDER_PROBE_DOMAIN`, step 8.2) and names under it are `422 domain_reserved`.
      */
     post: operations['DomainsController_create_v1'];
     delete?: never;
@@ -4072,6 +4072,406 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/api/v1/provider-connections': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List provider connections
+     * @description Your organization’s Microsoft 365 / Google Workspace connections, newest first, with status, tenant name, outbound mode, internal routing, health and the number of linked domains. Pages follow the v1 list contract (signed cursor bound to the filters and your organization). From the read replica.
+     */
+    get: operations['ProviderConnectionsController_list_v1'];
+    put?: never;
+    /**
+     * Create a provider connection
+     * @description `{ provider, displayName }` → a `draft` connection; grant access next (`POST …/grants`). At most PROVIDER_MAX_CONNECTIONS_PER_ORG live connections (`409 connection_limit`); the name is unique in your organization (`409 connection_name_exists`). Audited `integration.connection_created`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`).
+     */
+    post: operations['ProviderConnectionsController_create_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/provider-connections/{id}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get a provider connection
+     * @description The connection with its grants (status, method, client id, the masked delegated administrator, the 12-character credential fingerprint, credential dates, missing and excess permissions, last error code — never a credential), linked domains, the relay connector id, the relay proof policy, attestations, health and `rowVersion`. From the read replica.
+     */
+    get: operations['ProviderConnectionsController_get_v1'];
+    put?: never;
+    post?: never;
+    /**
+     * Disconnect a provider connection
+     * @description `{ impactToken, confirm: true }` with the token of `POST …/mail-flow/preview { change: { kind: "disable" } }`. In one writer transaction: grants revoked and their credentials wiped, the relay connector disabled (kept for history), outbound and internal routing off, status `disabled`, the tenant binding released. Inbound destinations are KEPT (removing them would break inbound mail; change them on the domain’s destinations page). Returns the provider-side cleanup steps. `409 impact_changed` when the connection changed since the preview. Audited `integration.connection_disconnected`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`).
+     */
+    delete: operations['ProviderConnectionsController_disconnect_v1'];
+    options?: never;
+    head?: never;
+    /**
+     * Rename a provider connection
+     * @description `{ displayName, rowVersion }` only (`409 connection_version_conflict` with `currentRowVersion`); mail-flow fields change through preview → apply. Audited `integration.connection_updated`.
+     */
+    patch: operations['ProviderConnectionsController_update_v1'];
+    trace?: never;
+  };
+  '/api/v1/provider-connections/{id}/attestations': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Record an attestation of a customer-side step
+     * @description `{ code, attested }` with a code of the provider’s setup guide (`422 attestation_unknown`); `false` withdraws it. Attestations are statements by your administrator, not proofs (the gateway cannot observe customer-side configuration). Attesting `m365.internal_routing_rules_updated` during a route-token rotation switches to the new token. Audited `integration.attestation_recorded`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`).
+     */
+    post: operations['ProviderAttestationsController_record_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/provider-connections/{id}/domains': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List the linked domains of a connection
+     * @description Name, gateway status, provider verification (evidence: gateway ownership stays TXT verification), the tenant’s MX target (Microsoft 365), the provider of the current destinations, when inbound was applied and the stored MX/SPF/DKIM record statuses.
+     */
+    get: operations['ProviderDomainsController_list_v1'];
+    /**
+     * Replace the linked domains of a connection
+     * @description `{ domainIds }` replaces the set (≤ PROVIDER_MAX_DOMAINS_PER_CONNECTION). Each domain must be yours (`404 domain_not_in_organization`), `active` at the gateway (`422 domain_not_verified`) and not linked to another connection (`409 domain_linked_elsewhere`); unlinking needs outbound off (`409 outbound_active`). The integration-worker checks the new domains in the provider tenant on its next health run (requested now). Audited `integration.domains_linked`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`).
+     */
+    put: operations['ProviderDomainsController_replace_v1'];
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/provider-connections/{id}/grants': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Grant read-only access to the provider tenant
+     * @description `{ profile, authMethod }` → a `pending_consent` grant (one per profile: `409 grant_exists`; a revoked grant is reused). `platform_app` (Microsoft 365, user sessions only): `consent.consentUrl`, the admin-consent URL of the operator’s read-only app with a single-use state (10 minutes; only its SHA-256 is stored). `platform_service_account` (Google): `delegation` with the client id and scopes to authorize under domain-wide delegation, then `POST …/grants/{profile}/verify { subjectEmail }`. Customer methods: upload the credential next (`PUT …/grants/{profile}/credentials`). Platform methods need the operator’s app (`422 auth_method_unavailable`); the method must belong to the profile and provider (`422 auth_method_not_allowed`). Audited `integration.grant_created`. `consent.consentUrl` is shown ONLY in this response: the stored response under the Idempotency-Key carries `consent.consentUrl: null`, so a replay returns it redacted (ADR-0057). Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`).
+     */
+    post: operations['ProviderGrantsController_create_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/provider-connections/{id}/grants/{profile}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    /**
+     * Revoke a grant
+     * @description The grant becomes `revoked` and its credential ciphertext is wiped; open consent states are closed; a connection without a live grant releases its tenant binding. Refused while outbound routing is on (`409 outbound_active`: turn it off first). The gateway cannot revoke consent at the provider (it holds no write permission): the response lists the provider-side removal steps. Audited `integration.grant_revoked`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`).
+     */
+    delete: operations['ProviderGrantsController_revoke_v1'];
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/provider-connections/{id}/grants/{profile}/credentials': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    /**
+     * Upload the credential of a customer-owned app or service account
+     * @description Customer methods only (`422 auth_method_not_allowed`). Microsoft 365 (`customer_app_secret`): `{ tenantId, clientId, clientSecret, expiresAt? }`; Google (`customer_service_account`): `{ serviceAccountKey, subjectEmail }` (unknown key fields are dropped; `token_uri` must be the platform’s Google token URL; RSA ≥ 2048 bits). The credential is validated (`422 credential_invalid` naming the field, never the value), encrypted with AES-256-GCM under the dedicated provider key bound to this grant and version (ADR-0077), never returned, logged or audited; the response shows only a 12-character fingerprint and dates. The grant goes `verifying` (the integration-worker verifies it). Redacted replay (ADR-0057): the stored response never contains the credential and the request fingerprint is an HMAC of it. Audited `integration.grant_credentials_set`. Rate class `sensitive`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`).
+     */
+    put: operations['ProviderGrantsController_setCredentials_v1'];
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/provider-connections/{id}/grants/{profile}/verify': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Verify a grant again
+     * @description Asks the integration-worker to verify the grant (`verifying`): token acquisition for the tenant, tenant identity and granted permissions. Google platform service account: `{ subjectEmail }` (the delegated administrator) is required the first time (it confirms the delegation). A customer grant needs its credential, a Microsoft platform grant its consent (`422 credential_invalid`). Audited `integration.grant_consented` (delegation confirmed) or `integration.grant_verification_requested`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`).
+     */
+    post: operations['ProviderGrantsController_verify_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/provider-connections/{id}/health': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get the health of a connection
+     * @description The status (worst failing check), the latest result of every check (code, title, subject, status, severity, bounded non-secret evidence) and the last 20 transitions. Health never changes mail flow automatically.
+     */
+    get: operations['ProviderHealthController_get_v1'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/provider-connections/{id}/health/check': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Check the health of a connection now
+     * @description Asks the integration-worker to run the periodic checks now (`next_health_check_at = now`); `202`. At most 6 per connection per hour (`429 rate_limited`, `scope: route`). Audited `integration.health_check_requested`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`).
+     */
+    post: operations['ProviderHealthController_checkNow_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/provider-connections/{id}/mail-flow': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get the mail flow of a connection
+     * @description Desired vs observed: per linked domain its destination servers and stored MX/SPF statuses, the outbound mode, internal routing, the relay proof policy, the relay connector, the relay activity of the last 24 hours (accepted, proof failures, temporary failures, probes) and, for Microsoft 365, the route token version (its value only with `integration:manage`, otherwise masked).
+     */
+    get: operations['ProviderMailFlowController_get_v1'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/provider-connections/{id}/mail-flow/apply': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Apply a previewed mail-flow change
+     * @description `{ change, impactToken, confirm: true }`. In ONE writer transaction with the connection locked: the change set is recomputed and the impact token verified (constant time; `409 impact_changed` when it expired, belongs to another user or the change set changed: preview again), then destinations (with their own audit rows and `domain.routing.changed.v1`), the relay connector and the connection columns are written. Audited `integration.mail_flow_applied` with the change set. At most 30 per caller per minute. Change kinds: `inbound { domainIds, microsoftHosts? }` (deliver inbound mail of linked domains to the provider preset; needs `domain:routing_manage`), `outbound { mode: "probe_only" }` (create or re-enable the provider relay connector; probes only, other mail `451`), `activate { outboundMode, internalRouting }` (needs a passed validation and, for `active`, a passed outbound probe within 7 days: `409 validation_required`), `proof { relayProof }` (provider-relay-proof/1 within the provider bounds: Microsoft 365 `tenantHeader: "off"` needs `dkimAligned: "required"`, `dkimMaxAgeSeconds` and `dkimReplayMax`; Google always keeps all three; `422 proof_policy_invalid`), `suspend`, `disable_outbound` and `disable` (disconnect, applied by `DELETE /provider-connections/{id}`); all but `inbound` need `connector:manage`. Every change needs a bound connection (`409 connection_not_bound`) except `proof`, `suspend`, `disable_outbound` and `disable`. Customer-side configuration is never changed by the gateway (it holds no write permission). Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`).
+     */
+    post: operations['ProviderMailFlowController_apply_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/provider-connections/{id}/mail-flow/preview': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Preview a mail-flow change
+     * @description `{ change }` → the concrete change set (per domain: current vs proposed destination servers; connector action; connection fields from → to; grants revoked) with warning codes and an `impactToken` (HMAC bound to your organization, the connection’s row version, the change set, your user and a PROVIDER_IMPACT_TOKEN_TTL_SECONDS expiry). Nothing changes; audited `integration.mail_flow_previewed` (kind and counts only). Change kinds: `inbound { domainIds, microsoftHosts? }` (deliver inbound mail of linked domains to the provider preset; needs `domain:routing_manage`), `outbound { mode: "probe_only" }` (create or re-enable the provider relay connector; probes only, other mail `451`), `activate { outboundMode, internalRouting }` (needs a passed validation and, for `active`, a passed outbound probe within 7 days: `409 validation_required`), `proof { relayProof }` (provider-relay-proof/1 within the provider bounds: Microsoft 365 `tenantHeader: "off"` needs `dkimAligned: "required"`, `dkimMaxAgeSeconds` and `dkimReplayMax`; Google always keeps all three; `422 proof_policy_invalid`), `suspend`, `disable_outbound` and `disable` (disconnect, applied by `DELETE /provider-connections/{id}`); all but `inbound` need `connector:manage`. Every change needs a bound connection (`409 connection_not_bound`) except `proof`, `suspend`, `disable_outbound` and `disable`. Customer-side configuration is never changed by the gateway (it holds no write permission).
+     */
+    post: operations['ProviderMailFlowController_preview_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/provider-connections/{id}/setup-guide': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get the setup guide of a connection
+     * @description The customer-specific setup guide (`setup-guide/1`) generated from the connection’s own values: what the gateway will never do, the read-only access grant, domains, inbound (MX, destination, Exchange inbound partner connector and Enhanced Filtering, or the Gmail inbound gateway), outbound (DKIM, SPF, the outbound connector or Gmail host and routing rule, SMTP relay service), internal routing (Microsoft 365 transport rules with the route token), validation, failover and disconnection, with attestation codes. `?format=markdown` returns `text/markdown` as a download (`setup-<provider>-<name>.md`). The route token is masked (`••••` + last 4) without `integration:manage`. No secret-shaped value is ever included.
+     */
+    get: operations['ProviderGuideController_get_v1'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/provider-connections/{id}/validations': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List the validation runs of a connection
+     * @description Newest first with kind, status and the result summary (v1 list; the cursor is bound to the connection). From the read replica.
+     */
+    get: operations['ProviderValidationsController_list_v1'];
+    put?: never;
+    /**
+     * Start a validation run
+     * @description `{ kind }` (`full`, `credentials`, `inbound`, `outbound`) → a `queued` run the integration-worker executes (token, permissions, tenant, domains, DNS, SMTP reachability without DATA, recent deliveries, loops, attestations). An `outbound`/`full` run of a connection whose outbound mode is not `off` gets a single-use `probeAddress` (expires after PROVIDER_PROBE_TTL_SECONDS): send one message to it through the provider (Exchange admin center “Validate connector”, or any message from a linked domain for Google); only its SHA-256 is stored. At most 10 per connection per hour (`429 rate_limited`). Audited `integration.validation_requested`. `probeAddress` is shown ONLY in this response: the stored response under the Idempotency-Key carries `probeAddress: null`, so a replay returns it redacted (ADR-0057). Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`).
+     */
+    post: operations['ProviderValidationsController_create_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/provider-connections/{id}/validations/{runId}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get a validation run
+     * @description The run with its check results (`provider-validation/1`: code, subject, status, severity, bounded non-secret evidence, remediation anchor of the setup guide) and the probe observations (TLS, tenant header and DKIM results; never the probe token or any message content).
+     */
+    get: operations['ProviderValidationsController_get_v1'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/provider-connections/{id}/wizard': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get the setup wizard of a connection
+     * @description The six steps (`connect`, `domains`, `inbound`, `outbound`, `validate`, `activate`) with their status (`not_started`, `in_progress`, `done`, `blocked`, `skipped`), blocker codes and the next action, computed from the stored rows (never a stored pointer, ADR-0080).
+     */
+    get: operations['ProviderConnectionsController_wizard_v1'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/provider-connections/consent/complete': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Complete a Microsoft admin consent
+     * @description Posted by the portal’s consent callback page with the values of the redirect in the JSON body (never as query parameters): `{ state, tenant, adminConsent }` or `{ state, error, errorDescription }`. The state is single-use, expires after PROVIDER_CONSENT_STATE_TTL_SECONDS and is bound to your organization, your user and the grant (`404 consent_state_invalid` otherwise; API keys `403 user_principal_required`). The tenant of the redirect is only a claim: the integration-worker verifies it with a token for that tenant (grant `verifying`, then `active`) and binds the connection to it only when a linked, TXT-verified domain of your organization is verified in that tenant (until then the connection shows no tenant id or name). A declined consent sets the grant `error` (`consent_declined`). Returns the connection id for the redirect. Audited `integration.grant_consented` (≤ 256 sanitized characters of a provider error description; never the state). Rate class `sensitive`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`).
+     */
+    post: operations['ProviderGrantsController_completeConsent_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/provider-integrations/catalog': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get the Microsoft 365 / Google Workspace catalogue
+     * @description The providers, their read-only permission profiles (key, version, permissions, the authentication methods and which of them this deployment offers: platform methods need the operator’s app or service account), the attestation codes of each provider’s guide, the probe domain, the gateway values used by the setup guides and the active provider egress range set per provider. Never a secret.
+     */
+    get: operations['ProviderCatalogController_get_v1'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/api/v1/quarantine/approvals': {
     parameters: {
       query?: never;
@@ -5081,7 +5481,7 @@ export interface paths {
     put?: never;
     /**
      * Create an outbound SMTP connector
-     * @description One authentication method per connector. `sasl`: SMTP AUTH on port 587 after STARTTLS; the username (`egc-…`) and a random password are generated and returned **once** in `credentials` (only an Argon2id hash is stored; rotate it if it is lost). `source_ip`: 1–20 networks (IPv4 ≥ /16, IPv6 ≥ /48) on the port 25 relay listener; networks must be publicly routable (private, loopback, link-local, shared, documentation, multicast and reserved ranges are `400` unless the deployment sets `SMTP_CONNECTOR_ALLOW_NON_PUBLIC_NETWORKS`) and may not overlap any network of any connector (`409 Network overlaps an existing connector network`). `client_certificate`: the SHA-256 fingerprint of the client certificate presented on port 25 (globally unique, `409`), optionally restricted to networks. `requireTls` (default true) only applies to `source_ip`; the other types always need TLS. At most `SMTP_CONNECTORS_MAX_PER_ORGANIZATION` (default 50) per organization (`409`). At most 20 per caller per minute (`429`).
+     * @description One authentication method per connector. `sasl`: SMTP AUTH on port 587 after STARTTLS; the username (`egc-…`) and a random password are generated and returned **once** in `credentials` (only an Argon2id hash is stored; rotate it if it is lost). `source_ip`: 1–20 networks (IPv4 ≥ /16, IPv6 ≥ /48) on the port 25 relay listener; networks must be publicly routable (private, loopback, link-local, shared, documentation, multicast and reserved ranges are `400` unless the deployment sets `SMTP_CONNECTOR_ALLOW_NON_PUBLIC_NETWORKS`) and may not overlap any network of any connector (`409 Network overlaps an existing connector network`). `client_certificate`: the SHA-256 fingerprint of the client certificate presented on port 25 (globally unique, `409`), optionally restricted to networks. `requireTls` (default true) only applies to `source_ip`; the other types always need TLS. At most `SMTP_CONNECTORS_MAX_PER_ORGANIZATION` (default 50) per organization (`409`). At most 20 per caller per minute (`429`). `source_ip` networks that overlap the shared sending ranges of Microsoft 365 or Google Workspace are `422 network_shared_provider` (`index`): connect the provider as a provider connection instead (step 8.2). `provider_relay` connectors cannot be created here.
      *
      *     **Warning:** never use `source_ip` connectors for shared-IP mail platforms such as Microsoft 365 or Google Workspace: every customer of that platform sends from the same addresses and could then send as your organization. Use `sasl` or `client_certificate` connectors for them.
      */
@@ -5108,14 +5508,14 @@ export interface paths {
     post?: never;
     /**
      * Delete an SMTP connector
-     * @description Hard delete; its networks are removed with it and free for other connectors.
+     * @description Hard delete; its networks are removed with it and free for other connectors. `provider_relay` connectors are removed by disconnecting their provider connection (`409 connector_managed_by_provider_connection`).
      */
     delete: operations['SmtpConnectorsController_remove_v1'];
     options?: never;
     head?: never;
     /**
      * Update an SMTP connector
-     * @description Rename, enable/disable (`status`), change `requireTls` (source_ip only) or replace the networks atomically (same rules as on create, `409` on overlap). A disabled connector authorizes nothing; the change reaches the mail path within the adapter cache TTL (about 30 s).
+     * @description Rename, enable/disable (`status`), change `requireTls` (source_ip only) or replace the networks atomically (same rules as on create, `409` on overlap, `422 network_shared_provider` for a provider sending range). `provider_relay` connectors are managed by their provider connection: `409 connector_managed_by_provider_connection`. A disabled connector authorizes nothing; the change reaches the mail path within the adapter cache TTL (about 30 s).
      *
      *     **Warning:** never use `source_ip` connectors for shared-IP mail platforms such as Microsoft 365 or Google Workspace: every customer of that platform sends from the same addresses and could then send as your organization. Use `sasl` or `client_certificate` connectors for them.
      */
@@ -5133,7 +5533,7 @@ export interface paths {
     put?: never;
     /**
      * Rotate the SASL password of a connector
-     * @description `sasl` connectors only (`409` otherwise). Returns a new password **once**; the previous password stops working immediately. At most 10 per caller per minute (`429`).
+     * @description `sasl` connectors only (`409` otherwise; `409 connector_managed_by_provider_connection` for `provider_relay`). Returns a new password **once**; the previous password stops working immediately. At most 10 per caller per minute (`429`).
      */
     post: operations['SmtpConnectorsController_rotateSecret_v1'];
     delete?: never;
@@ -33745,6 +34145,30 @@ export interface operations {
           };
         };
       };
+      /** @description `domain_reserved`: the platform probe domain or a name under it (step 8.2) */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'domain_reserved';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
       /** @description Rate limited (`Retry-After` header when known) */
       429: {
         headers: {
@@ -52291,6 +52715,7 @@ export interface operations {
               | 'threat_detected'
               | 'domain_dns_failed'
               | 'webhook_disabled'
+              | 'integration_unhealthy'
               | 'policy_alert'
               | 'quarantine_admin_alert'
               | 'quarantine_approval_requested'
@@ -52302,6 +52727,7 @@ export interface operations {
               | 'threat_detected'
               | 'domain_dns_failed'
               | 'webhook_disabled'
+              | 'integration_unhealthy'
               | 'policy_alert'
               | 'quarantine_admin_alert'
               | 'quarantine_approval_requested'
@@ -52423,6 +52849,7 @@ export interface operations {
             | 'threat_detected'
             | 'domain_dns_failed'
             | 'webhook_disabled'
+            | 'integration_unhealthy'
             | 'policy_alert'
             | 'quarantine_admin_alert'
             | 'quarantine_approval_requested'
@@ -52454,6 +52881,7 @@ export interface operations {
               | 'threat_detected'
               | 'domain_dns_failed'
               | 'webhook_disabled'
+              | 'integration_unhealthy'
               | 'policy_alert'
               | 'quarantine_admin_alert'
               | 'quarantine_approval_requested'
@@ -52465,6 +52893,7 @@ export interface operations {
               | 'threat_detected'
               | 'domain_dns_failed'
               | 'webhook_disabled'
+              | 'integration_unhealthy'
               | 'policy_alert'
               | 'quarantine_admin_alert'
               | 'quarantine_approval_requested'
@@ -65356,6 +65785,6247 @@ export interface operations {
           'application/json': {
             /** @enum {string} */
             code: 'inconsistent_read';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ProviderConnectionsController_list_v1: {
+    parameters: {
+      query?: {
+        /** @description `nextCursor` of the previous page */
+        cursor?: string;
+        /** @description `unknown`, `healthy`, `warning`, `critical`; comma list */
+        health?: string;
+        /** @description Page size, 1-100 (default 25) */
+        limit?: string;
+        /** @description `microsoft_365`, `google_workspace`; comma list */
+        provider?: string;
+        /** @description `-id` (the only order: newest first) */
+        sort?: '-id';
+        /** @description `draft`, `connecting`, `configuring`, `active`, `disabled`; comma list */
+        status?: string;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            data: {
+              /** Format: date-time */
+              createdAt: string;
+              displayName: string;
+              domainCount: number;
+              /** @enum {string} */
+              health: 'unknown' | 'healthy' | 'warning' | 'critical';
+              /** Format: date-time */
+              healthChangedAt: string | null;
+              /** Format: uuid */
+              id: string;
+              internalRouting: boolean;
+              /** @enum {string} */
+              outboundMode: 'off' | 'probe_only' | 'active' | 'suspended';
+              /** @enum {string} */
+              provider: 'microsoft_365' | 'google_workspace';
+              /** @enum {string} */
+              status: 'draft' | 'connecting' | 'configuring' | 'active' | 'disabled';
+              tenantName: string | null;
+            }[];
+            nextCursor: string | null;
+          };
+        };
+      };
+      /** @description Validation failed (`validation_failed`: unknown parameter or operator, wrong type, too many values, range too long; `message` lists `"<path>: <issue>"`) or the cursor is invalid, expired or belongs to other filters, another sort or another caller (`cursor_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'cursor_invalid';
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Authenticated but not allowed (permission, MFA, enrollment restriction) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ProviderConnectionsController_create_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @description Display name, unique in your organization (1-128; control characters removed) */
+          displayName: string;
+          /** @enum {string} */
+          provider: 'microsoft_365' | 'google_workspace';
+        };
+      };
+    };
+    responses: {
+      /** @description Created */
+      201: {
+        headers: {
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @description Statements, not proofs */
+            attestations: {
+              /** Format: date-time */
+              at: string;
+              code: string;
+              userId: string | null;
+            }[];
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            disabledAt: string | null;
+            displayName: string;
+            domainCount: number;
+            domains: {
+              /** Format: uuid */
+              id: string;
+              name: string;
+              /** @enum {string} */
+              providerVerification: 'unknown' | 'verified' | 'unverified' | 'absent' | 'alias';
+            }[];
+            grants: {
+              /** @enum {string} */
+              authMethod:
+                | 'platform_app'
+                | 'customer_app_secret'
+                | 'platform_service_account'
+                | 'customer_service_account';
+              /** @description Application / OAuth client id (not a secret) */
+              clientId: string | null;
+              /** Format: date-time */
+              consentedAt: string | null;
+              /** Format: date-time */
+              createdAt: string;
+              /** Format: date-time */
+              credentialExpiresAt: string | null;
+              /** @description First 12 hex characters of the credential fingerprint (never the credential) */
+              credentialFingerprint: string | null;
+              /** Format: date-time */
+              credentialSetAt: string | null;
+              credentialVersion: number;
+              excessPermissions: string[] | null;
+              /** Format: uuid */
+              id: string;
+              lastErrorCode: string | null;
+              missingPermissions: string[] | null;
+              observedPermissions: string[] | null;
+              profile: string;
+              profileVersion: number;
+              requestedPermissions: string[];
+              /** @enum {string} */
+              status: 'pending_consent' | 'verifying' | 'active' | 'error' | 'revoked';
+              /** @description Google delegated administrator, masked */
+              subjectEmail: string | null;
+              /** Format: date-time */
+              updatedAt: string;
+              /** Format: date-time */
+              verifiedAt: string | null;
+              /** Format: date-time */
+              verifyRequestedAt: string | null;
+            }[];
+            /** @enum {string} */
+            health: 'unknown' | 'healthy' | 'warning' | 'critical';
+            /** Format: date-time */
+            healthChangedAt: string | null;
+            /** Format: date-time */
+            healthCheckedAt: string | null;
+            /** Format: uuid */
+            id: string;
+            internalRouting: boolean;
+            /** Format: date-time */
+            nextHealthCheckAt: string | null;
+            /** @enum {string} */
+            outboundMode: 'off' | 'probe_only' | 'active' | 'suspended';
+            /** @enum {string} */
+            provider: 'microsoft_365' | 'google_workspace';
+            /** Format: uuid */
+            relayConnectorId: string | null;
+            /** @description provider-relay-proof/1 in effect */
+            relayProof: {
+              [key: string]: unknown;
+            };
+            relayProofIsDefault: boolean;
+            routeTokenPendingVersion: number | null;
+            routeTokenVersion: number;
+            rowVersion: number;
+            /** @enum {string} */
+            status: 'draft' | 'connecting' | 'configuring' | 'active' | 'disabled';
+            /** @description Verified provider tenant / customer id */
+            tenantId: string | null;
+            tenantName: string | null;
+            /** Format: date-time */
+            tenantVerifiedAt: string | null;
+            /** Format: date-time */
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`, `message` lists the issues), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Authenticated but not allowed (permission, MFA, enrollment restriction) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description `connection_limit`, `connection_name_exists`. `idempotency_request_in_progress` when the same key is still running (not stored under the key). */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'connection_limit' | 'connection_name_exists' | 'idempotency_request_in_progress';
+            correlationId?: string;
+            currentRowVersion?: number;
+            /** Format: uuid */
+            domainId?: string;
+            error: string;
+            limit?: number;
+            message: string;
+            outboundMode?: string;
+            reason?: string;
+            /** Format: uuid */
+            requestId?: string;
+            status?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description `idempotency_key_reused` when the key was used for another request */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            authMethod?: string;
+            /** @enum {string} */
+            code: 'idempotency_key_reused';
+            correlationId?: string;
+            /** Format: uuid */
+            domainId?: string;
+            error: string;
+            field?: string;
+            issues?: number;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ProviderConnectionsController_get_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Provider connection public id (UUID) */
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @description Statements, not proofs */
+            attestations: {
+              /** Format: date-time */
+              at: string;
+              code: string;
+              userId: string | null;
+            }[];
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            disabledAt: string | null;
+            displayName: string;
+            domainCount: number;
+            domains: {
+              /** Format: uuid */
+              id: string;
+              name: string;
+              /** @enum {string} */
+              providerVerification: 'unknown' | 'verified' | 'unverified' | 'absent' | 'alias';
+            }[];
+            grants: {
+              /** @enum {string} */
+              authMethod:
+                | 'platform_app'
+                | 'customer_app_secret'
+                | 'platform_service_account'
+                | 'customer_service_account';
+              /** @description Application / OAuth client id (not a secret) */
+              clientId: string | null;
+              /** Format: date-time */
+              consentedAt: string | null;
+              /** Format: date-time */
+              createdAt: string;
+              /** Format: date-time */
+              credentialExpiresAt: string | null;
+              /** @description First 12 hex characters of the credential fingerprint (never the credential) */
+              credentialFingerprint: string | null;
+              /** Format: date-time */
+              credentialSetAt: string | null;
+              credentialVersion: number;
+              excessPermissions: string[] | null;
+              /** Format: uuid */
+              id: string;
+              lastErrorCode: string | null;
+              missingPermissions: string[] | null;
+              observedPermissions: string[] | null;
+              profile: string;
+              profileVersion: number;
+              requestedPermissions: string[];
+              /** @enum {string} */
+              status: 'pending_consent' | 'verifying' | 'active' | 'error' | 'revoked';
+              /** @description Google delegated administrator, masked */
+              subjectEmail: string | null;
+              /** Format: date-time */
+              updatedAt: string;
+              /** Format: date-time */
+              verifiedAt: string | null;
+              /** Format: date-time */
+              verifyRequestedAt: string | null;
+            }[];
+            /** @enum {string} */
+            health: 'unknown' | 'healthy' | 'warning' | 'critical';
+            /** Format: date-time */
+            healthChangedAt: string | null;
+            /** Format: date-time */
+            healthCheckedAt: string | null;
+            /** Format: uuid */
+            id: string;
+            internalRouting: boolean;
+            /** Format: date-time */
+            nextHealthCheckAt: string | null;
+            /** @enum {string} */
+            outboundMode: 'off' | 'probe_only' | 'active' | 'suspended';
+            /** @enum {string} */
+            provider: 'microsoft_365' | 'google_workspace';
+            /** Format: uuid */
+            relayConnectorId: string | null;
+            /** @description provider-relay-proof/1 in effect */
+            relayProof: {
+              [key: string]: unknown;
+            };
+            relayProofIsDefault: boolean;
+            routeTokenPendingVersion: number | null;
+            routeTokenVersion: number;
+            rowVersion: number;
+            /** @enum {string} */
+            status: 'draft' | 'connecting' | 'configuring' | 'active' | 'disabled';
+            /** @description Verified provider tenant / customer id */
+            tenantId: string | null;
+            tenantName: string | null;
+            /** Format: date-time */
+            tenantVerifiedAt: string | null;
+            /** Format: date-time */
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description Validation failed (`message` lists `"<path>: <issue>"`) or the token is invalid/expired */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Authenticated but not allowed (permission, MFA, enrollment restriction) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Unknown connection, or a connection of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'connection_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ProviderConnectionsController_disconnect_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path: {
+        /** @description Provider connection public id (UUID) */
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /**
+           * @description Explicit confirmation (ADR-0080)
+           * @enum {boolean}
+           */
+          confirm: true;
+          /** @description `impactToken` of the preview of the `disable` change */
+          impactToken: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Disconnected */
+      200: {
+        headers: {
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            connection: {
+              /** @description Statements, not proofs */
+              attestations: {
+                /** Format: date-time */
+                at: string;
+                code: string;
+                userId: string | null;
+              }[];
+              /** Format: date-time */
+              createdAt: string;
+              /** Format: date-time */
+              disabledAt: string | null;
+              displayName: string;
+              domainCount: number;
+              domains: {
+                /** Format: uuid */
+                id: string;
+                name: string;
+                /** @enum {string} */
+                providerVerification: 'unknown' | 'verified' | 'unverified' | 'absent' | 'alias';
+              }[];
+              grants: {
+                /** @enum {string} */
+                authMethod:
+                  | 'platform_app'
+                  | 'customer_app_secret'
+                  | 'platform_service_account'
+                  | 'customer_service_account';
+                /** @description Application / OAuth client id (not a secret) */
+                clientId: string | null;
+                /** Format: date-time */
+                consentedAt: string | null;
+                /** Format: date-time */
+                createdAt: string;
+                /** Format: date-time */
+                credentialExpiresAt: string | null;
+                /** @description First 12 hex characters of the credential fingerprint (never the credential) */
+                credentialFingerprint: string | null;
+                /** Format: date-time */
+                credentialSetAt: string | null;
+                credentialVersion: number;
+                excessPermissions: string[] | null;
+                /** Format: uuid */
+                id: string;
+                lastErrorCode: string | null;
+                missingPermissions: string[] | null;
+                observedPermissions: string[] | null;
+                profile: string;
+                profileVersion: number;
+                requestedPermissions: string[];
+                /** @enum {string} */
+                status: 'pending_consent' | 'verifying' | 'active' | 'error' | 'revoked';
+                /** @description Google delegated administrator, masked */
+                subjectEmail: string | null;
+                /** Format: date-time */
+                updatedAt: string;
+                /** Format: date-time */
+                verifiedAt: string | null;
+                /** Format: date-time */
+                verifyRequestedAt: string | null;
+              }[];
+              /** @enum {string} */
+              health: 'unknown' | 'healthy' | 'warning' | 'critical';
+              /** Format: date-time */
+              healthChangedAt: string | null;
+              /** Format: date-time */
+              healthCheckedAt: string | null;
+              /** Format: uuid */
+              id: string;
+              internalRouting: boolean;
+              /** Format: date-time */
+              nextHealthCheckAt: string | null;
+              /** @enum {string} */
+              outboundMode: 'off' | 'probe_only' | 'active' | 'suspended';
+              /** @enum {string} */
+              provider: 'microsoft_365' | 'google_workspace';
+              /** Format: uuid */
+              relayConnectorId: string | null;
+              /** @description provider-relay-proof/1 in effect */
+              relayProof: {
+                [key: string]: unknown;
+              };
+              relayProofIsDefault: boolean;
+              routeTokenPendingVersion: number | null;
+              routeTokenVersion: number;
+              rowVersion: number;
+              /** @enum {string} */
+              status: 'draft' | 'connecting' | 'configuring' | 'active' | 'disabled';
+              /** @description Verified provider tenant / customer id */
+              tenantId: string | null;
+              tenantName: string | null;
+              /** Format: date-time */
+              tenantVerifiedAt: string | null;
+              /** Format: date-time */
+              updatedAt: string;
+            };
+            /**
+             * @description Inbound destinations are kept (removing them would break inbound mail)
+             * @enum {boolean}
+             */
+            destinationsKept: true;
+            providerCleanupSteps: string[];
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`, `message` lists the issues), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Authenticated but not allowed (permission, MFA, enrollment restriction) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Unknown connection, or a connection of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'connection_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description `impact_changed` (preview again), `connection_disabled`. `idempotency_request_in_progress` when the same key is still running (not stored under the key). */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              | 'impact_changed'
+              | 'connection_disabled'
+              | 'connection_version_conflict'
+              | 'idempotency_request_in_progress';
+            correlationId?: string;
+            currentRowVersion?: number;
+            /** Format: uuid */
+            domainId?: string;
+            error: string;
+            limit?: number;
+            message: string;
+            outboundMode?: string;
+            reason?: string;
+            /** Format: uuid */
+            requestId?: string;
+            status?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description `idempotency_key_reused` when the key was used for another request */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            authMethod?: string;
+            /** @enum {string} */
+            code: 'idempotency_key_reused';
+            correlationId?: string;
+            /** Format: uuid */
+            domainId?: string;
+            error: string;
+            field?: string;
+            issues?: number;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ProviderConnectionsController_update_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Provider connection public id (UUID) */
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @description Display name, unique in your organization (1-128; control characters removed) */
+          displayName: string;
+          /** @description `rowVersion` of the connection as last read (`409 connection_version_conflict`) */
+          rowVersion: number;
+        };
+      };
+    };
+    responses: {
+      200: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @description Statements, not proofs */
+            attestations: {
+              /** Format: date-time */
+              at: string;
+              code: string;
+              userId: string | null;
+            }[];
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            disabledAt: string | null;
+            displayName: string;
+            domainCount: number;
+            domains: {
+              /** Format: uuid */
+              id: string;
+              name: string;
+              /** @enum {string} */
+              providerVerification: 'unknown' | 'verified' | 'unverified' | 'absent' | 'alias';
+            }[];
+            grants: {
+              /** @enum {string} */
+              authMethod:
+                | 'platform_app'
+                | 'customer_app_secret'
+                | 'platform_service_account'
+                | 'customer_service_account';
+              /** @description Application / OAuth client id (not a secret) */
+              clientId: string | null;
+              /** Format: date-time */
+              consentedAt: string | null;
+              /** Format: date-time */
+              createdAt: string;
+              /** Format: date-time */
+              credentialExpiresAt: string | null;
+              /** @description First 12 hex characters of the credential fingerprint (never the credential) */
+              credentialFingerprint: string | null;
+              /** Format: date-time */
+              credentialSetAt: string | null;
+              credentialVersion: number;
+              excessPermissions: string[] | null;
+              /** Format: uuid */
+              id: string;
+              lastErrorCode: string | null;
+              missingPermissions: string[] | null;
+              observedPermissions: string[] | null;
+              profile: string;
+              profileVersion: number;
+              requestedPermissions: string[];
+              /** @enum {string} */
+              status: 'pending_consent' | 'verifying' | 'active' | 'error' | 'revoked';
+              /** @description Google delegated administrator, masked */
+              subjectEmail: string | null;
+              /** Format: date-time */
+              updatedAt: string;
+              /** Format: date-time */
+              verifiedAt: string | null;
+              /** Format: date-time */
+              verifyRequestedAt: string | null;
+            }[];
+            /** @enum {string} */
+            health: 'unknown' | 'healthy' | 'warning' | 'critical';
+            /** Format: date-time */
+            healthChangedAt: string | null;
+            /** Format: date-time */
+            healthCheckedAt: string | null;
+            /** Format: uuid */
+            id: string;
+            internalRouting: boolean;
+            /** Format: date-time */
+            nextHealthCheckAt: string | null;
+            /** @enum {string} */
+            outboundMode: 'off' | 'probe_only' | 'active' | 'suspended';
+            /** @enum {string} */
+            provider: 'microsoft_365' | 'google_workspace';
+            /** Format: uuid */
+            relayConnectorId: string | null;
+            /** @description provider-relay-proof/1 in effect */
+            relayProof: {
+              [key: string]: unknown;
+            };
+            relayProofIsDefault: boolean;
+            routeTokenPendingVersion: number | null;
+            routeTokenVersion: number;
+            rowVersion: number;
+            /** @enum {string} */
+            status: 'draft' | 'connecting' | 'configuring' | 'active' | 'disabled';
+            /** @description Verified provider tenant / customer id */
+            tenantId: string | null;
+            tenantName: string | null;
+            /** Format: date-time */
+            tenantVerifiedAt: string | null;
+            /** Format: date-time */
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description Validation failed (`message` lists `"<path>: <issue>"`) or the token is invalid/expired */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Authenticated but not allowed (permission, MFA, enrollment restriction) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Unknown connection, or a connection of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'connection_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description `connection_version_conflict` (`currentRowVersion`), `connection_name_exists`, `connection_disabled` */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'connection_version_conflict' | 'connection_name_exists' | 'connection_disabled';
+            correlationId?: string;
+            currentRowVersion?: number;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ProviderAttestationsController_record_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path: {
+        /** @description Provider connection public id (UUID) */
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @description `true` records the statement, `false` withdraws it */
+          attested: boolean;
+          /** @description An attestation code of the provider’s setup guide */
+          code: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Recorded */
+      200: {
+        headers: {
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            attestations: {
+              /** Format: date-time */
+              at: string;
+              code: string;
+              userId: string | null;
+            }[];
+            /** Format: uuid */
+            connectionId: string;
+            rowVersion: number;
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`, `message` lists the issues), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Authenticated but not allowed (permission, MFA, enrollment restriction) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Unknown connection, or a connection of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'connection_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description `connection_disabled`. `idempotency_request_in_progress` when the same key is still running (not stored under the key). */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              | 'connection_disabled'
+              | 'connection_version_conflict'
+              | 'idempotency_request_in_progress';
+            correlationId?: string;
+            currentRowVersion?: number;
+            /** Format: uuid */
+            domainId?: string;
+            error: string;
+            limit?: number;
+            message: string;
+            outboundMode?: string;
+            reason?: string;
+            /** Format: uuid */
+            requestId?: string;
+            status?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description `attestation_unknown`; `idempotency_key_reused` when the key was used for another request */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            authMethod?: string;
+            /** @enum {string} */
+            code: 'attestation_unknown' | 'idempotency_key_reused';
+            correlationId?: string;
+            /** Format: uuid */
+            domainId?: string;
+            error: string;
+            field?: string;
+            issues?: number;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ProviderDomainsController_list_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Provider connection public id (UUID) */
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            data: {
+              /** @enum {string|null} */
+              destinationProvider: 'custom' | 'microsoft_365' | 'google_workspace' | null;
+              dns: {
+                dkim: string | null;
+                mx: string | null;
+                spf: string | null;
+              };
+              gatewayStatus: string;
+              /** Format: uuid */
+              id: string;
+              /** Format: date-time */
+              inboundAppliedAt: string | null;
+              name: string;
+              /** Format: date-time */
+              providerCheckedAt: string | null;
+              providerMxHost: string | null;
+              /** @enum {string} */
+              providerVerification: 'unknown' | 'verified' | 'unverified' | 'absent' | 'alias';
+            }[];
+          };
+        };
+      };
+      /** @description Validation failed (`message` lists `"<path>: <issue>"`) or the token is invalid/expired */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Authenticated but not allowed (permission, MFA, enrollment restriction) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Unknown connection, or a connection of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'connection_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ProviderDomainsController_replace_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path: {
+        /** @description Provider connection public id (UUID) */
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @description The gateway domains to link (public ids; replaces the set; at most PROVIDER_MAX_DOMAINS_PER_CONNECTION). Each must be an `active` (TXT-verified) domain of your organization not linked to another connection */
+          domainIds: string[];
+        };
+      };
+    };
+    responses: {
+      /** @description The linked domains */
+      200: {
+        headers: {
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            data: {
+              /** @enum {string|null} */
+              destinationProvider: 'custom' | 'microsoft_365' | 'google_workspace' | null;
+              dns: {
+                dkim: string | null;
+                mx: string | null;
+                spf: string | null;
+              };
+              gatewayStatus: string;
+              /** Format: uuid */
+              id: string;
+              /** Format: date-time */
+              inboundAppliedAt: string | null;
+              name: string;
+              /** Format: date-time */
+              providerCheckedAt: string | null;
+              providerMxHost: string | null;
+              /** @enum {string} */
+              providerVerification: 'unknown' | 'verified' | 'unverified' | 'absent' | 'alias';
+            }[];
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`, `message` lists the issues), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Authenticated but not allowed (permission, MFA, enrollment restriction) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Unknown connection, or a connection of another organization (also: `domain_not_in_organization`) */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'connection_not_found' | 'domain_not_in_organization';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description `domain_linked_elsewhere` (`domainId`), `outbound_active`, `connection_disabled`. `idempotency_request_in_progress` when the same key is still running (not stored under the key). */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              | 'domain_linked_elsewhere'
+              | 'outbound_active'
+              | 'connection_disabled'
+              | 'connection_version_conflict'
+              | 'idempotency_request_in_progress';
+            correlationId?: string;
+            currentRowVersion?: number;
+            /** Format: uuid */
+            domainId?: string;
+            error: string;
+            limit?: number;
+            message: string;
+            outboundMode?: string;
+            reason?: string;
+            /** Format: uuid */
+            requestId?: string;
+            status?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description `domain_not_verified` (`domainId`); `idempotency_key_reused` when the key was used for another request */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            authMethod?: string;
+            /** @enum {string} */
+            code: 'domain_not_verified' | 'idempotency_key_reused';
+            correlationId?: string;
+            /** Format: uuid */
+            domainId?: string;
+            error: string;
+            field?: string;
+            issues?: number;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ProviderGrantsController_create_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path: {
+        /** @description Provider connection public id (UUID) */
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @enum {string} */
+          authMethod:
+            | 'platform_app'
+            | 'customer_app_secret'
+            | 'platform_service_account'
+            | 'customer_service_account';
+          /** @description Permission profile key (`m365.mail_flow`, `google.mail_flow`) */
+          profile: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Created; `consent.consentUrl` is shown only here (`null` on a replay) */
+      201: {
+        headers: {
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @description `platform_app` only */
+            consent: {
+              /** @description Microsoft admin consent URL with a single-use state: shown ONLY in this response */
+              consentUrl: string | null;
+              /** Format: date-time */
+              expiresAt: string | null;
+            } | null;
+            /** @description `platform_service_account` only: what to authorize under domain-wide delegation */
+            delegation: {
+              adminConsoleSteps: string[];
+              clientId: string;
+              scopes: string[];
+            } | null;
+            grant: {
+              /** @enum {string} */
+              authMethod:
+                | 'platform_app'
+                | 'customer_app_secret'
+                | 'platform_service_account'
+                | 'customer_service_account';
+              /** @description Application / OAuth client id (not a secret) */
+              clientId: string | null;
+              /** Format: date-time */
+              consentedAt: string | null;
+              /** Format: date-time */
+              createdAt: string;
+              /** Format: date-time */
+              credentialExpiresAt: string | null;
+              /** @description First 12 hex characters of the credential fingerprint (never the credential) */
+              credentialFingerprint: string | null;
+              /** Format: date-time */
+              credentialSetAt: string | null;
+              credentialVersion: number;
+              excessPermissions: string[] | null;
+              /** Format: uuid */
+              id: string;
+              lastErrorCode: string | null;
+              missingPermissions: string[] | null;
+              observedPermissions: string[] | null;
+              profile: string;
+              profileVersion: number;
+              requestedPermissions: string[];
+              /** @enum {string} */
+              status: 'pending_consent' | 'verifying' | 'active' | 'error' | 'revoked';
+              /** @description Google delegated administrator, masked */
+              subjectEmail: string | null;
+              /** Format: date-time */
+              updatedAt: string;
+              /** Format: date-time */
+              verifiedAt: string | null;
+              /** Format: date-time */
+              verifyRequestedAt: string | null;
+            };
+            /** @enum {string} */
+            next: 'consent' | 'delegation' | 'credentials';
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`, `message` lists the issues), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Missing permission, or an API key with `platform_app` */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'user_principal_required';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown connection, or a connection of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'connection_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description `grant_exists` (`status`), `connection_disabled`. `idempotency_request_in_progress` when the same key is still running (not stored under the key). */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              | 'grant_exists'
+              | 'connection_disabled'
+              | 'connection_version_conflict'
+              | 'idempotency_request_in_progress';
+            correlationId?: string;
+            currentRowVersion?: number;
+            /** Format: uuid */
+            domainId?: string;
+            error: string;
+            limit?: number;
+            message: string;
+            outboundMode?: string;
+            reason?: string;
+            /** Format: uuid */
+            requestId?: string;
+            status?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description `auth_method_unavailable`, `auth_method_not_allowed` (`authMethod`); `idempotency_key_reused` when the key was used for another request */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            authMethod?: string;
+            /** @enum {string} */
+            code: 'auth_method_unavailable' | 'auth_method_not_allowed' | 'idempotency_key_reused';
+            correlationId?: string;
+            /** Format: uuid */
+            domainId?: string;
+            error: string;
+            field?: string;
+            issues?: number;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ProviderGrantsController_revoke_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path: {
+        /** @description Provider connection public id (UUID) */
+        id: string;
+        /** @description Permission profile key (`m365.mail_flow`, `google.mail_flow`) */
+        profile: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Revoked */
+      200: {
+        headers: {
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            grant: {
+              /** @enum {string} */
+              authMethod:
+                | 'platform_app'
+                | 'customer_app_secret'
+                | 'platform_service_account'
+                | 'customer_service_account';
+              /** @description Application / OAuth client id (not a secret) */
+              clientId: string | null;
+              /** Format: date-time */
+              consentedAt: string | null;
+              /** Format: date-time */
+              createdAt: string;
+              /** Format: date-time */
+              credentialExpiresAt: string | null;
+              /** @description First 12 hex characters of the credential fingerprint (never the credential) */
+              credentialFingerprint: string | null;
+              /** Format: date-time */
+              credentialSetAt: string | null;
+              credentialVersion: number;
+              excessPermissions: string[] | null;
+              /** Format: uuid */
+              id: string;
+              lastErrorCode: string | null;
+              missingPermissions: string[] | null;
+              observedPermissions: string[] | null;
+              profile: string;
+              profileVersion: number;
+              requestedPermissions: string[];
+              /** @enum {string} */
+              status: 'pending_consent' | 'verifying' | 'active' | 'error' | 'revoked';
+              /** @description Google delegated administrator, masked */
+              subjectEmail: string | null;
+              /** Format: date-time */
+              updatedAt: string;
+              /** Format: date-time */
+              verifiedAt: string | null;
+              /** Format: date-time */
+              verifyRequestedAt: string | null;
+            };
+            providerRemovalSteps: string[];
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`, `message` lists the issues), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Authenticated but not allowed (permission, MFA, enrollment restriction) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Unknown connection, or a connection of another organization (also: `grant_not_found`) */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'connection_not_found' | 'grant_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description `outbound_active`, `connection_disabled`. `idempotency_request_in_progress` when the same key is still running (not stored under the key). */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              | 'outbound_active'
+              | 'connection_disabled'
+              | 'connection_version_conflict'
+              | 'idempotency_request_in_progress';
+            correlationId?: string;
+            currentRowVersion?: number;
+            /** Format: uuid */
+            domainId?: string;
+            error: string;
+            limit?: number;
+            message: string;
+            outboundMode?: string;
+            reason?: string;
+            /** Format: uuid */
+            requestId?: string;
+            status?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description `idempotency_key_reused` when the key was used for another request */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            authMethod?: string;
+            /** @enum {string} */
+            code: 'idempotency_key_reused';
+            correlationId?: string;
+            /** Format: uuid */
+            domainId?: string;
+            error: string;
+            field?: string;
+            issues?: number;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ProviderGrantsController_setCredentials_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path: {
+        /** @description Provider connection public id (UUID) */
+        id: string;
+        /** @description Permission profile key (`m365.mail_flow`, `google.mail_flow`) */
+        profile: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json':
+          | {
+              /** @description Application (client) id of your app registration */
+              clientId: string;
+              /** @description Client secret value: encrypted at rest, never shown, logged or audited again */
+              clientSecret: string;
+              /**
+               * Format: date-time
+               * @description When the secret expires (expiry warnings at 30 / 7 days)
+               */
+              expiresAt?: string;
+              /** @description Directory (tenant) id of your Microsoft 365 tenant (lower-case GUID) */
+              tenantId: string;
+            }
+          | {
+              /** @description The service account JSON key file (object). Kept: type, client_email, private_key, private_key_id, token_uri (must equal the platform Google token URL), client_id; every other field is dropped. Encrypted at rest, never shown again */
+              serviceAccountKey: {
+                [key: string]: unknown;
+              };
+              /** @description The delegated administrator the service account acts as (domain-wide delegation) */
+              subjectEmail: string;
+            };
+      };
+    };
+    responses: {
+      /** @description Stored, verifying */
+      200: {
+        headers: {
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            authMethod:
+              | 'platform_app'
+              | 'customer_app_secret'
+              | 'platform_service_account'
+              | 'customer_service_account';
+            /** @description Application / OAuth client id (not a secret) */
+            clientId: string | null;
+            /** Format: date-time */
+            consentedAt: string | null;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            credentialExpiresAt: string | null;
+            /** @description First 12 hex characters of the credential fingerprint (never the credential) */
+            credentialFingerprint: string | null;
+            /** Format: date-time */
+            credentialSetAt: string | null;
+            credentialVersion: number;
+            excessPermissions: string[] | null;
+            /** Format: uuid */
+            id: string;
+            lastErrorCode: string | null;
+            missingPermissions: string[] | null;
+            observedPermissions: string[] | null;
+            profile: string;
+            profileVersion: number;
+            requestedPermissions: string[];
+            /** @enum {string} */
+            status: 'pending_consent' | 'verifying' | 'active' | 'error' | 'revoked';
+            /** @description Google delegated administrator, masked */
+            subjectEmail: string | null;
+            /** Format: date-time */
+            updatedAt: string;
+            /** Format: date-time */
+            verifiedAt: string | null;
+            /** Format: date-time */
+            verifyRequestedAt: string | null;
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`, `message` lists the issues), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Authenticated but not allowed (permission, MFA, enrollment restriction) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Unknown connection, or a connection of another organization (also: `grant_not_found`) */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'connection_not_found' | 'grant_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description `connection_disabled`. `idempotency_request_in_progress` when the same key is still running (not stored under the key). */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              | 'connection_disabled'
+              | 'connection_version_conflict'
+              | 'idempotency_request_in_progress';
+            correlationId?: string;
+            currentRowVersion?: number;
+            /** Format: uuid */
+            domainId?: string;
+            error: string;
+            limit?: number;
+            message: string;
+            outboundMode?: string;
+            reason?: string;
+            /** Format: uuid */
+            requestId?: string;
+            status?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description `credential_invalid` (`field`), `auth_method_not_allowed`; `idempotency_key_reused` when the key was used for another request */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            authMethod?: string;
+            /** @enum {string} */
+            code: 'credential_invalid' | 'auth_method_not_allowed' | 'idempotency_key_reused';
+            correlationId?: string;
+            /** Format: uuid */
+            domainId?: string;
+            error: string;
+            field?: string;
+            issues?: number;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ProviderGrantsController_verify_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path: {
+        /** @description Provider connection public id (UUID) */
+        id: string;
+        /** @description Permission profile key (`m365.mail_flow`, `google.mail_flow`) */
+        profile: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @description Google platform service account: the delegated administrator (required the first time) */
+          subjectEmail?: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Verification requested */
+      200: {
+        headers: {
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            authMethod:
+              | 'platform_app'
+              | 'customer_app_secret'
+              | 'platform_service_account'
+              | 'customer_service_account';
+            /** @description Application / OAuth client id (not a secret) */
+            clientId: string | null;
+            /** Format: date-time */
+            consentedAt: string | null;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            credentialExpiresAt: string | null;
+            /** @description First 12 hex characters of the credential fingerprint (never the credential) */
+            credentialFingerprint: string | null;
+            /** Format: date-time */
+            credentialSetAt: string | null;
+            credentialVersion: number;
+            excessPermissions: string[] | null;
+            /** Format: uuid */
+            id: string;
+            lastErrorCode: string | null;
+            missingPermissions: string[] | null;
+            observedPermissions: string[] | null;
+            profile: string;
+            profileVersion: number;
+            requestedPermissions: string[];
+            /** @enum {string} */
+            status: 'pending_consent' | 'verifying' | 'active' | 'error' | 'revoked';
+            /** @description Google delegated administrator, masked */
+            subjectEmail: string | null;
+            /** Format: date-time */
+            updatedAt: string;
+            /** Format: date-time */
+            verifiedAt: string | null;
+            /** Format: date-time */
+            verifyRequestedAt: string | null;
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`, `message` lists the issues), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Authenticated but not allowed (permission, MFA, enrollment restriction) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Unknown connection, or a connection of another organization (also: `grant_not_found`) */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'connection_not_found' | 'grant_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description `connection_disabled`. `idempotency_request_in_progress` when the same key is still running (not stored under the key). */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              | 'connection_disabled'
+              | 'connection_version_conflict'
+              | 'idempotency_request_in_progress';
+            correlationId?: string;
+            currentRowVersion?: number;
+            /** Format: uuid */
+            domainId?: string;
+            error: string;
+            limit?: number;
+            message: string;
+            outboundMode?: string;
+            reason?: string;
+            /** Format: uuid */
+            requestId?: string;
+            status?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description `credential_invalid` (`field`), `auth_method_not_allowed`; `idempotency_key_reused` when the key was used for another request */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            authMethod?: string;
+            /** @enum {string} */
+            code: 'credential_invalid' | 'auth_method_not_allowed' | 'idempotency_key_reused';
+            correlationId?: string;
+            /** Format: uuid */
+            domainId?: string;
+            error: string;
+            field?: string;
+            issues?: number;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ProviderHealthController_get_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Provider connection public id (UUID) */
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** Format: date-time */
+            changedAt: string | null;
+            /** Format: date-time */
+            checkedAt: string | null;
+            checks: {
+              /** Format: date-time */
+              checkedAt: string;
+              code: string;
+              evidence: {
+                [key: string]: unknown;
+              } | null;
+              /** Format: date-time */
+              firstFailedAt: string | null;
+              /** @enum {string} */
+              severity: 'info' | 'warning' | 'critical';
+              /** @enum {string} */
+              status: 'pass' | 'warn' | 'fail' | 'skipped' | 'error';
+              subject: string;
+              title: string;
+            }[];
+            /** Format: uuid */
+            connectionId: string;
+            /** Format: date-time */
+            nextCheckAt: string | null;
+            /** @enum {string} */
+            status: 'unknown' | 'healthy' | 'warning' | 'critical';
+            transitions: {
+              /** Format: date-time */
+              at: string;
+              failingChecks: string[];
+              /** @enum {string} */
+              from: 'unknown' | 'healthy' | 'warning' | 'critical';
+              /** @enum {string} */
+              to: 'unknown' | 'healthy' | 'warning' | 'critical';
+            }[];
+          };
+        };
+      };
+      /** @description Validation failed (`message` lists `"<path>: <issue>"`) or the token is invalid/expired */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Authenticated but not allowed (permission, MFA, enrollment restriction) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Unknown connection, or a connection of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'connection_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ProviderHealthController_checkNow_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path: {
+        /** @description Provider connection public id (UUID) */
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Requested */
+      202: {
+        headers: {
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** Format: uuid */
+            connectionId: string;
+            /** Format: date-time */
+            nextHealthCheckAt: string;
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`, `message` lists the issues), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Authenticated but not allowed (permission, MFA, enrollment restriction) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Unknown connection, or a connection of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'connection_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description `connection_disabled`. `idempotency_request_in_progress` when the same key is still running (not stored under the key). */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              | 'connection_disabled'
+              | 'connection_version_conflict'
+              | 'idempotency_request_in_progress';
+            correlationId?: string;
+            currentRowVersion?: number;
+            /** Format: uuid */
+            domainId?: string;
+            error: string;
+            limit?: number;
+            message: string;
+            outboundMode?: string;
+            reason?: string;
+            /** Format: uuid */
+            requestId?: string;
+            status?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description `idempotency_key_reused` when the key was used for another request */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            authMethod?: string;
+            /** @enum {string} */
+            code: 'idempotency_key_reused';
+            correlationId?: string;
+            /** Format: uuid */
+            domainId?: string;
+            error: string;
+            field?: string;
+            issues?: number;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ProviderMailFlowController_get_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Provider connection public id (UUID) */
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** Format: uuid */
+            connectionId: string;
+            domains: {
+              destinations: {
+                /** @enum {string|null} */
+                provider: 'custom' | 'microsoft_365' | 'google_workspace' | null;
+                servers: {
+                  host: string;
+                  port: number;
+                  priority: number;
+                  tlsMode: string;
+                }[];
+              };
+              dns: {
+                mx: string | null;
+                spf: string | null;
+              };
+              /** Format: uuid */
+              id: string;
+              /** Format: date-time */
+              inboundAppliedAt: string | null;
+              name: string;
+            }[];
+            internalRouting: boolean;
+            /** @enum {string} */
+            outboundMode: 'off' | 'probe_only' | 'active' | 'suspended';
+            relayActivity24h: {
+              accepted: number;
+              /** Format: date-time */
+              lastAcceptedAt: string | null;
+              probes: number;
+              proofFailed: number;
+              tempFailed: number;
+            };
+            relayConnector: {
+              /** Format: uuid */
+              id: string;
+              status: string;
+            } | null;
+            relayProof: {
+              [key: string]: unknown;
+            };
+            relayProofIsDefault: boolean;
+            /** @description Microsoft 365 only */
+            routeToken: {
+              masked: string;
+              pendingVersion: number | null;
+              /** @description Only with `integration:manage` */
+              value: string | null;
+              version: number;
+            } | null;
+          };
+        };
+      };
+      /** @description Validation failed (`message` lists `"<path>: <issue>"`) or the token is invalid/expired */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Authenticated but not allowed (permission, MFA, enrollment restriction) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Unknown connection, or a connection of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'connection_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ProviderMailFlowController_apply_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path: {
+        /** @description Provider connection public id (UUID) */
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          change:
+            | {
+                domainIds: string[];
+                /** @enum {string} */
+                kind: 'inbound';
+                /** @description Microsoft 365 only: the destination host per domain id (default: the MX target the tenant reports, else `<domain>.mail.protection.outlook.com`) */
+                microsoftHosts?: {
+                  [key: string]: string;
+                };
+              }
+            | {
+                /** @enum {string} */
+                kind: 'outbound';
+                /** @enum {string} */
+                mode: 'probe_only';
+              }
+            | {
+                internalRouting: boolean;
+                /** @enum {string} */
+                kind: 'activate';
+                /** @enum {string} */
+                outboundMode: 'active' | 'off';
+              }
+            | {
+                /** @enum {string} */
+                kind: 'proof';
+                relayProof: {
+                  /** @enum {string} */
+                  dkimAligned: 'required' | 'off';
+                  dkimMaxAgeSeconds?: number;
+                  dkimReplayMax?: number;
+                  /** @enum {string} */
+                  tenantHeader?: 'required' | 'off';
+                };
+              }
+            | {
+                /** @enum {string} */
+                kind: 'suspend';
+              }
+            | {
+                /** @enum {string} */
+                kind: 'disable_outbound';
+              }
+            | {
+                /** @enum {string} */
+                kind: 'disable';
+              };
+          /**
+           * @description Explicit confirmation (ADR-0080)
+           * @enum {boolean}
+           */
+          confirm: true;
+          /** @description `impactToken` of the preview of exactly this change (15 minutes, your user only) */
+          impactToken: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Applied */
+      200: {
+        headers: {
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** Format: date-time */
+            appliedAt: string;
+            changeSet: {
+              connection: {
+                /** @enum {string} */
+                field: 'status' | 'outboundMode' | 'internalRouting' | 'relayProof';
+                from: unknown;
+                to: unknown;
+              }[];
+              connector: {
+                /** @enum {string} */
+                action: 'create' | 'enable' | 'disable' | 'none';
+                /** Format: uuid */
+                id: string | null;
+              } | null;
+              domains: {
+                changed: boolean;
+                current: {
+                  /** @enum {string|null} */
+                  provider: 'custom' | 'microsoft_365' | 'google_workspace' | null;
+                  servers: {
+                    host: string;
+                    port: number;
+                    priority: number;
+                    tlsMode: string;
+                  }[];
+                };
+                /** Format: uuid */
+                domainId: string;
+                name: string;
+                proposed: {
+                  /** @enum {string|null} */
+                  provider: 'custom' | 'microsoft_365' | 'google_workspace' | null;
+                  servers: {
+                    host: string;
+                    port: number;
+                    priority: number;
+                    tlsMode: string;
+                  }[];
+                };
+              }[];
+              grantsRevoked: number;
+              /** @enum {string} */
+              kind:
+                | 'inbound'
+                | 'outbound'
+                | 'activate'
+                | 'proof'
+                | 'suspend'
+                | 'disable_outbound'
+                | 'disable';
+            };
+            connection: {
+              /** @description Statements, not proofs */
+              attestations: {
+                /** Format: date-time */
+                at: string;
+                code: string;
+                userId: string | null;
+              }[];
+              /** Format: date-time */
+              createdAt: string;
+              /** Format: date-time */
+              disabledAt: string | null;
+              displayName: string;
+              domainCount: number;
+              domains: {
+                /** Format: uuid */
+                id: string;
+                name: string;
+                /** @enum {string} */
+                providerVerification: 'unknown' | 'verified' | 'unverified' | 'absent' | 'alias';
+              }[];
+              grants: {
+                /** @enum {string} */
+                authMethod:
+                  | 'platform_app'
+                  | 'customer_app_secret'
+                  | 'platform_service_account'
+                  | 'customer_service_account';
+                /** @description Application / OAuth client id (not a secret) */
+                clientId: string | null;
+                /** Format: date-time */
+                consentedAt: string | null;
+                /** Format: date-time */
+                createdAt: string;
+                /** Format: date-time */
+                credentialExpiresAt: string | null;
+                /** @description First 12 hex characters of the credential fingerprint (never the credential) */
+                credentialFingerprint: string | null;
+                /** Format: date-time */
+                credentialSetAt: string | null;
+                credentialVersion: number;
+                excessPermissions: string[] | null;
+                /** Format: uuid */
+                id: string;
+                lastErrorCode: string | null;
+                missingPermissions: string[] | null;
+                observedPermissions: string[] | null;
+                profile: string;
+                profileVersion: number;
+                requestedPermissions: string[];
+                /** @enum {string} */
+                status: 'pending_consent' | 'verifying' | 'active' | 'error' | 'revoked';
+                /** @description Google delegated administrator, masked */
+                subjectEmail: string | null;
+                /** Format: date-time */
+                updatedAt: string;
+                /** Format: date-time */
+                verifiedAt: string | null;
+                /** Format: date-time */
+                verifyRequestedAt: string | null;
+              }[];
+              /** @enum {string} */
+              health: 'unknown' | 'healthy' | 'warning' | 'critical';
+              /** Format: date-time */
+              healthChangedAt: string | null;
+              /** Format: date-time */
+              healthCheckedAt: string | null;
+              /** Format: uuid */
+              id: string;
+              internalRouting: boolean;
+              /** Format: date-time */
+              nextHealthCheckAt: string | null;
+              /** @enum {string} */
+              outboundMode: 'off' | 'probe_only' | 'active' | 'suspended';
+              /** @enum {string} */
+              provider: 'microsoft_365' | 'google_workspace';
+              /** Format: uuid */
+              relayConnectorId: string | null;
+              /** @description provider-relay-proof/1 in effect */
+              relayProof: {
+                [key: string]: unknown;
+              };
+              relayProofIsDefault: boolean;
+              routeTokenPendingVersion: number | null;
+              routeTokenVersion: number;
+              rowVersion: number;
+              /** @enum {string} */
+              status: 'draft' | 'connecting' | 'configuring' | 'active' | 'disabled';
+              /** @description Verified provider tenant / customer id */
+              tenantId: string | null;
+              tenantName: string | null;
+              /** Format: date-time */
+              tenantVerifiedAt: string | null;
+              /** Format: date-time */
+              updatedAt: string;
+            };
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`, `message` lists the issues), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Missing permission: `integration:manage` and the change’s own permission (`domain:routing_manage` for `inbound`, `connector:manage` for the other kinds) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown connection, or a connection of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'connection_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description `impact_changed`, `connection_not_bound`, `validation_required` (`reason`), `change_not_applicable` (`reason`), `connection_disabled`, or the SMTP connector limit. `idempotency_request_in_progress` when the same key is still running (not stored under the key). */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              | 'impact_changed'
+              | 'connection_not_bound'
+              | 'validation_required'
+              | 'change_not_applicable'
+              | 'connection_disabled'
+              | 'connection_version_conflict'
+              | 'idempotency_request_in_progress';
+            correlationId?: string;
+            currentRowVersion?: number;
+            /** Format: uuid */
+            domainId?: string;
+            error: string;
+            limit?: number;
+            message: string;
+            outboundMode?: string;
+            reason?: string;
+            /** Format: uuid */
+            requestId?: string;
+            status?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description `domain_not_linked`, `proof_policy_invalid`, or a refused destination host; `idempotency_key_reused` when the key was used for another request */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            authMethod?: string;
+            /** @enum {string} */
+            code: 'domain_not_linked' | 'proof_policy_invalid' | 'idempotency_key_reused';
+            correlationId?: string;
+            /** Format: uuid */
+            domainId?: string;
+            error: string;
+            field?: string;
+            issues?: number;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ProviderMailFlowController_preview_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Provider connection public id (UUID) */
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          change:
+            | {
+                domainIds: string[];
+                /** @enum {string} */
+                kind: 'inbound';
+                /** @description Microsoft 365 only: the destination host per domain id (default: the MX target the tenant reports, else `<domain>.mail.protection.outlook.com`) */
+                microsoftHosts?: {
+                  [key: string]: string;
+                };
+              }
+            | {
+                /** @enum {string} */
+                kind: 'outbound';
+                /** @enum {string} */
+                mode: 'probe_only';
+              }
+            | {
+                internalRouting: boolean;
+                /** @enum {string} */
+                kind: 'activate';
+                /** @enum {string} */
+                outboundMode: 'active' | 'off';
+              }
+            | {
+                /** @enum {string} */
+                kind: 'proof';
+                relayProof: {
+                  /** @enum {string} */
+                  dkimAligned: 'required' | 'off';
+                  dkimMaxAgeSeconds?: number;
+                  dkimReplayMax?: number;
+                  /** @enum {string} */
+                  tenantHeader?: 'required' | 'off';
+                };
+              }
+            | {
+                /** @enum {string} */
+                kind: 'suspend';
+              }
+            | {
+                /** @enum {string} */
+                kind: 'disable_outbound';
+              }
+            | {
+                /** @enum {string} */
+                kind: 'disable';
+              };
+        };
+      };
+    };
+    responses: {
+      200: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            change: {
+              [key: string]: unknown;
+            };
+            changeSet: {
+              connection: {
+                /** @enum {string} */
+                field: 'status' | 'outboundMode' | 'internalRouting' | 'relayProof';
+                from: unknown;
+                to: unknown;
+              }[];
+              connector: {
+                /** @enum {string} */
+                action: 'create' | 'enable' | 'disable' | 'none';
+                /** Format: uuid */
+                id: string | null;
+              } | null;
+              domains: {
+                changed: boolean;
+                current: {
+                  /** @enum {string|null} */
+                  provider: 'custom' | 'microsoft_365' | 'google_workspace' | null;
+                  servers: {
+                    host: string;
+                    port: number;
+                    priority: number;
+                    tlsMode: string;
+                  }[];
+                };
+                /** Format: uuid */
+                domainId: string;
+                name: string;
+                proposed: {
+                  /** @enum {string|null} */
+                  provider: 'custom' | 'microsoft_365' | 'google_workspace' | null;
+                  servers: {
+                    host: string;
+                    port: number;
+                    priority: number;
+                    tlsMode: string;
+                  }[];
+                };
+              }[];
+              grantsRevoked: number;
+              /** @enum {string} */
+              kind:
+                | 'inbound'
+                | 'outbound'
+                | 'activate'
+                | 'proof'
+                | 'suspend'
+                | 'disable_outbound'
+                | 'disable';
+            };
+            /** Format: date-time */
+            expiresAt: string;
+            impactToken: string;
+            /** @description Warning codes (e.g. `domain_not_provider_verified`) */
+            warnings: string[];
+          };
+        };
+      };
+      /** @description Validation failed (`message` lists `"<path>: <issue>"`) or the token is invalid/expired */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Missing permission: `integration:manage` and the change’s own permission (`domain:routing_manage` for `inbound`, `connector:manage` for the other kinds) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown connection, or a connection of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'connection_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description `connection_not_bound`, `connection_disabled`, `validation_required` (`reason`), `change_not_applicable` (`reason`) */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              | 'connection_not_bound'
+              | 'connection_disabled'
+              | 'validation_required'
+              | 'change_not_applicable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            reason?: string;
+            /** Format: uuid */
+            requestId?: string;
+            status?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description `domain_not_linked` (`domainId`), `proof_policy_invalid` (`issues`), or a refused destination host (`reason`, `field`) */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'domain_not_linked' | 'proof_policy_invalid';
+            correlationId?: string;
+            domainId?: string;
+            error: string;
+            issues?: number;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ProviderGuideController_get_v1: {
+    parameters: {
+      query?: {
+        /** @description `json` (default) or `markdown` */
+        format?: 'json' | 'markdown';
+      };
+      header?: never;
+      path: {
+        /** @description Provider connection public id (UUID) */
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The guide (JSON) or its Markdown rendering */
+      200: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          /**
+           * @example {
+           *       "schema": "setup-guide/1",
+           *       "provider": "microsoft_365",
+           *       "connection": {
+           *         "id": "0192f0c4-d466-7173-8c84-6f708192a3b4",
+           *         "displayName": "Contoso tenant",
+           *         "tenantId": "11111111-2222-3333-4444-555555555555",
+           *         "tenantName": "Contoso Ltd"
+           *       },
+           *       "generatedAt": "2026-11-18T09:00:00.000Z",
+           *       "notice": "Attestations are statements by your administrator, not proofs.",
+           *       "sections": [
+           *         {
+           *           "id": "overview",
+           *           "number": 1,
+           *           "title": "Overview",
+           *           "paragraphs": [
+           *             "The gateway never changes your Microsoft 365 configuration."
+           *           ],
+           *           "steps": []
+           *         }
+           *       ]
+           *     }
+           */
+          'application/json': {
+            connection: {
+              displayName: string;
+              /** Format: uuid */
+              id: string;
+              tenantId: string | null;
+              tenantName: string | null;
+            };
+            /** Format: date-time */
+            generatedAt: string;
+            notice: string;
+            /** @enum {string} */
+            provider: 'microsoft_365' | 'google_workspace';
+            /** @enum {string} */
+            schema: 'setup-guide/1';
+            sections: {
+              id: string;
+              number: number;
+              paragraphs: string[];
+              steps: {
+                attestation?: {
+                  attested: boolean;
+                  attestedAt: string | null;
+                  code: string;
+                  statement: string;
+                };
+                commands?: {
+                  code: string;
+                  /** @enum {string} */
+                  language: 'powershell' | 'dns' | 'text';
+                }[];
+                id: string;
+                paragraphs: string[];
+                title: string;
+                values?: {
+                  label: string;
+                  value: string;
+                }[];
+                warning?: string;
+              }[];
+              title: string;
+            }[];
+          };
+          /** @example # Microsoft 365 setup: Contoso tenant */
+          'text/markdown': string;
+        };
+      };
+      /** @description Validation failed (`message` lists `"<path>: <issue>"`) or the token is invalid/expired */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Authenticated but not allowed (permission, MFA, enrollment restriction) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Unknown connection, or a connection of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'connection_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ProviderValidationsController_list_v1: {
+    parameters: {
+      query?: {
+        /** @description `nextCursor` of the previous page */
+        cursor?: string;
+        /** @description `full`, `credentials`, `inbound`, `outbound`; comma list */
+        kind?: string;
+        /** @description Page size, 1-100 (default 25) */
+        limit?: string;
+        /** @description `-id` (the only order: newest first) */
+        sort?: '-id';
+        /** @description `queued`, `running`, `awaiting_probe`, `passed`, `warning`, `failed`, `expired`, `cancelled`; comma list */
+        status?: string;
+      };
+      header?: never;
+      path: {
+        /** @description Provider connection public id (UUID) */
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            data: {
+              /** Format: date-time */
+              completedAt: string | null;
+              /** Format: date-time */
+              createdAt: string;
+              /** Format: uuid */
+              id: string;
+              /** @enum {string} */
+              kind: 'full' | 'credentials' | 'inbound' | 'outbound';
+              /** Format: date-time */
+              probeExpiresAt: string | null;
+              requestedBy: {
+                id: string | null;
+                type: string;
+              };
+              /** Format: date-time */
+              startedAt: string | null;
+              /** @enum {string} */
+              status:
+                | 'queued'
+                | 'running'
+                | 'awaiting_probe'
+                | 'passed'
+                | 'warning'
+                | 'failed'
+                | 'expired'
+                | 'cancelled';
+              summary: {
+                error: number;
+                fail: number;
+                pass: number;
+                skipped: number;
+                warn: number;
+              } | null;
+            }[];
+            nextCursor: string | null;
+          };
+        };
+      };
+      /** @description Validation failed (`validation_failed`: unknown parameter or operator, wrong type, too many values, range too long; `message` lists `"<path>: <issue>"`) or the cursor is invalid, expired or belongs to other filters, another sort or another caller (`cursor_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'cursor_invalid';
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Authenticated but not allowed (permission, MFA, enrollment restriction) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Unknown connection, or a connection of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'connection_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ProviderValidationsController_create_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path: {
+        /** @description Provider connection public id (UUID) */
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @enum {string} */
+          kind: 'full' | 'credentials' | 'inbound' | 'outbound';
+        };
+      };
+    };
+    responses: {
+      /** @description Queued; `probeAddress` is shown only here (`null` on a replay) */
+      201: {
+        headers: {
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** Format: date-time */
+            completedAt: string | null;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: uuid */
+            id: string;
+            /** @enum {string} */
+            kind: 'full' | 'credentials' | 'inbound' | 'outbound';
+            /** @description Single-use probe address (outbound/full runs with outbound mode not `off`): shown ONLY in this response; only its SHA-256 is stored */
+            probeAddress: string | null;
+            /** Format: date-time */
+            probeExpiresAt: string | null;
+            requestedBy: {
+              id: string | null;
+              type: string;
+            };
+            /** Format: date-time */
+            startedAt: string | null;
+            /** @enum {string} */
+            status:
+              | 'queued'
+              | 'running'
+              | 'awaiting_probe'
+              | 'passed'
+              | 'warning'
+              | 'failed'
+              | 'expired'
+              | 'cancelled';
+            summary: {
+              error: number;
+              fail: number;
+              pass: number;
+              skipped: number;
+              warn: number;
+            } | null;
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`, `message` lists the issues), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Authenticated but not allowed (permission, MFA, enrollment restriction) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Unknown connection, or a connection of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'connection_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description `connection_disabled`. `idempotency_request_in_progress` when the same key is still running (not stored under the key). */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'connection_disabled' | 'idempotency_request_in_progress';
+            correlationId?: string;
+            currentRowVersion?: number;
+            /** Format: uuid */
+            domainId?: string;
+            error: string;
+            limit?: number;
+            message: string;
+            outboundMode?: string;
+            reason?: string;
+            /** Format: uuid */
+            requestId?: string;
+            status?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description `idempotency_key_reused` when the key was used for another request */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            authMethod?: string;
+            /** @enum {string} */
+            code: 'idempotency_key_reused';
+            correlationId?: string;
+            /** Format: uuid */
+            domainId?: string;
+            error: string;
+            field?: string;
+            issues?: number;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ProviderValidationsController_get_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Provider connection public id (UUID) */
+        id: string;
+        /** @description Validation run public id (UUID) */
+        runId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** Format: date-time */
+            completedAt: string | null;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: uuid */
+            id: string;
+            /** @enum {string} */
+            kind: 'full' | 'credentials' | 'inbound' | 'outbound';
+            /** Format: date-time */
+            probeExpiresAt: string | null;
+            probeObservations: {
+              clientIp: string;
+              dkim: string;
+              dkimDomains: string[];
+              envelopeFromDomain: string;
+              failureCode: string | null;
+              headerFromDomain: string | null;
+              proofResult: string;
+              /** Format: date-time */
+              receivedAt: string;
+              tenantHeader: string;
+              tlsProtocol: string | null;
+            }[];
+            requestedBy: {
+              id: string | null;
+              type: string;
+            };
+            results: {
+              code: string;
+              evidence: {
+                [key: string]: unknown;
+              };
+              remediation: string | null;
+              /** @enum {string} */
+              severity: 'info' | 'warning' | 'critical';
+              /** @enum {string} */
+              status: 'pass' | 'warn' | 'fail' | 'skipped' | 'error';
+              subject: string;
+            }[];
+            /** Format: date-time */
+            startedAt: string | null;
+            /** @enum {string} */
+            status:
+              | 'queued'
+              | 'running'
+              | 'awaiting_probe'
+              | 'passed'
+              | 'warning'
+              | 'failed'
+              | 'expired'
+              | 'cancelled';
+            summary: {
+              error: number;
+              fail: number;
+              pass: number;
+              skipped: number;
+              warn: number;
+            } | null;
+          };
+        };
+      };
+      /** @description Validation failed (`message` lists `"<path>: <issue>"`) or the token is invalid/expired */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Authenticated but not allowed (permission, MFA, enrollment restriction) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Unknown connection, or a connection of another organization (also: `validation_run_not_found`) */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'connection_not_found' | 'validation_run_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ProviderConnectionsController_wizard_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Provider connection public id (UUID) */
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** Format: uuid */
+            connectionId: string;
+            /** @enum {string} */
+            connectionStatus: 'draft' | 'connecting' | 'configuring' | 'active' | 'disabled';
+            missingAttestations: string[];
+            /** @description The first step that is not done, with an action code */
+            nextAction: {
+              action: string;
+              /** @enum {string} */
+              step: 'connect' | 'domains' | 'inbound' | 'outbound' | 'validate' | 'activate';
+            } | null;
+            /** @enum {string} */
+            provider: 'microsoft_365' | 'google_workspace';
+            steps: {
+              /** @description Blocker codes (empty when done) */
+              blockers: string[];
+              /** @enum {string} */
+              status: 'not_started' | 'in_progress' | 'done' | 'blocked' | 'skipped';
+              /** @enum {string} */
+              step: 'connect' | 'domains' | 'inbound' | 'outbound' | 'validate' | 'activate';
+            }[];
+          };
+        };
+      };
+      /** @description Validation failed (`message` lists `"<path>: <issue>"`) or the token is invalid/expired */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Authenticated but not allowed (permission, MFA, enrollment restriction) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Unknown connection, or a connection of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'connection_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ProviderGrantsController_completeConsent_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @description `admin_consent=True` of the redirect */
+          adminConsent?: boolean;
+          /** @description `error` of the redirect (consent declined) */
+          error?: string;
+          /** @description `error_description` of the redirect (≤ 256 sanitized characters are audited) */
+          errorDescription?: string;
+          /** @description The `state` of the consent redirect (single use, 10 minutes, your session only) */
+          state: string;
+          /** @description The `tenant` of the redirect (a claim: verified by the worker before any use) */
+          tenant?: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Recorded */
+      200: {
+        headers: {
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** Format: uuid */
+            connectionId: string;
+            /** Format: uuid */
+            grantId: string;
+            /** @enum {string} */
+            status: 'pending_consent' | 'verifying' | 'active' | 'error' | 'revoked';
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`, `message` lists the issues), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Missing permission, or an API key (`user_principal_required`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'user_principal_required';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description `consent_state_invalid`: unknown, expired, used or another user’s state */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'consent_state_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description `connection_disabled`. `idempotency_request_in_progress` when the same key is still running (not stored under the key). */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              | 'connection_disabled'
+              | 'connection_version_conflict'
+              | 'idempotency_request_in_progress';
+            correlationId?: string;
+            currentRowVersion?: number;
+            /** Format: uuid */
+            domainId?: string;
+            error: string;
+            limit?: number;
+            message: string;
+            outboundMode?: string;
+            reason?: string;
+            /** Format: uuid */
+            requestId?: string;
+            status?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description `credential_invalid` (`field: tenant`); `idempotency_key_reused` when the key was used for another request */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            authMethod?: string;
+            /** @enum {string} */
+            code: 'credential_invalid' | 'idempotency_key_reused';
+            correlationId?: string;
+            /** Format: uuid */
+            domainId?: string;
+            error: string;
+            field?: string;
+            issues?: number;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ProviderCatalogController_get_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            gateway: {
+              egressNetworks: string[];
+              mxHosts: string[];
+              relayHosts: string[];
+              relayTlsName: string;
+              spfInclude: string;
+            };
+            probeDomain: string;
+            providers: {
+              attestations: {
+                code: string;
+                phase: string;
+                requiredFor: string | null;
+                statement: string;
+              }[];
+              displayName: string;
+              egressSet: {
+                /** Format: date-time */
+                importedAt: string;
+                /** Format: date-time */
+                publishedAt: string | null;
+                rangeCount: number;
+                version: number;
+              } | null;
+              profiles: {
+                authMethods: (
+                  | 'platform_app'
+                  | 'customer_app_secret'
+                  | 'platform_service_account'
+                  | 'customer_service_account'
+                )[];
+                availableAuthMethods: (
+                  | 'platform_app'
+                  | 'customer_app_secret'
+                  | 'platform_service_account'
+                  | 'customer_service_account'
+                )[];
+                description: string;
+                key: string;
+                permissions: string[];
+                purpose: string;
+                readOnly: boolean;
+                title: string;
+                version: number;
+              }[];
+              /** @enum {string} */
+              provider: 'microsoft_365' | 'google_workspace';
+            }[];
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Authenticated but not allowed (permission, MFA, enrollment restriction) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
             correlationId?: string;
             error: string;
             message: string;
@@ -83975,7 +90645,7 @@ export interface operations {
   SmtpConnectorsController_list_v1: {
     parameters: {
       query?: {
-        authType?: 'sasl' | 'source_ip' | 'client_certificate';
+        authType?: 'sasl' | 'source_ip' | 'client_certificate' | 'provider_relay';
         cursor?: string;
         limit?: number;
         status?: 'active' | 'disabled';
@@ -83998,8 +90668,11 @@ export interface operations {
         content: {
           'application/json': {
             data: {
-              /** @enum {string} */
-              authType: 'sasl' | 'source_ip' | 'client_certificate';
+              /**
+               * @description `provider_relay` connectors are managed by a Microsoft 365 / Google Workspace connection (read-only here; step 8.2)
+               * @enum {string}
+               */
+              authType: 'sasl' | 'source_ip' | 'client_certificate' | 'provider_relay';
               /** @description client_certificate only; lower-case hex */
               certificateFingerprintSha256: string | null;
               /** Format: date-time */
@@ -84012,6 +90685,11 @@ export interface operations {
                 cidr: string;
                 ipVersion: 4 | 6;
               }[];
+              /**
+               * Format: uuid
+               * @description provider_relay only: the id of the managing provider connection
+               */
+              providerConnectionId: string | null;
               requireTls: boolean;
               /** @description sasl only */
               saslUsername: string | null;
@@ -84165,8 +90843,11 @@ export interface operations {
         };
         content: {
           'application/json': {
-            /** @enum {string} */
-            authType: 'sasl' | 'source_ip' | 'client_certificate';
+            /**
+             * @description `provider_relay` connectors are managed by a Microsoft 365 / Google Workspace connection (read-only here; step 8.2)
+             * @enum {string}
+             */
+            authType: 'sasl' | 'source_ip' | 'client_certificate' | 'provider_relay';
             /** @description client_certificate only; lower-case hex */
             certificateFingerprintSha256: string | null;
             /** Format: date-time */
@@ -84185,6 +90866,11 @@ export interface operations {
               cidr: string;
               ipVersion: 4 | 6;
             }[];
+            /**
+             * Format: uuid
+             * @description provider_relay only: the id of the managing provider connection
+             */
+            providerConnectionId: string | null;
             requireTls: boolean;
             /** @description sasl only */
             saslUsername: string | null;
@@ -84276,6 +90962,31 @@ export interface operations {
           };
         };
       };
+      /** @description `network_shared_provider`: a `source_ip` network overlaps a Microsoft 365 / Google Workspace sending range (`index` of the network) */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'network_shared_provider';
+            correlationId?: string;
+            error: string;
+            index?: number;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
       /** @description Rate limited (`Retry-After` header when known) */
       429: {
         headers: {
@@ -84354,8 +91065,11 @@ export interface operations {
         };
         content: {
           'application/json': {
-            /** @enum {string} */
-            authType: 'sasl' | 'source_ip' | 'client_certificate';
+            /**
+             * @description `provider_relay` connectors are managed by a Microsoft 365 / Google Workspace connection (read-only here; step 8.2)
+             * @enum {string}
+             */
+            authType: 'sasl' | 'source_ip' | 'client_certificate' | 'provider_relay';
             /** @description client_certificate only; lower-case hex */
             certificateFingerprintSha256: string | null;
             /** Format: date-time */
@@ -84368,6 +91082,11 @@ export interface operations {
               cidr: string;
               ipVersion: 4 | 6;
             }[];
+            /**
+             * Format: uuid
+             * @description provider_relay only: the id of the managing provider connection
+             */
+            providerConnectionId: string | null;
             requireTls: boolean;
             /** @description sasl only */
             saslUsername: string | null;
@@ -84604,6 +91323,30 @@ export interface operations {
           };
         };
       };
+      /** @description Conflicts with the current state; `connector_managed_by_provider_connection` for a `provider_relay` connector (change it through its provider connection) */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'connector_managed_by_provider_connection';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
       /** @description Too many requests (rate_limited, with scope and Retry-After) */
       429: {
         headers: {
@@ -84684,8 +91427,11 @@ export interface operations {
         };
         content: {
           'application/json': {
-            /** @enum {string} */
-            authType: 'sasl' | 'source_ip' | 'client_certificate';
+            /**
+             * @description `provider_relay` connectors are managed by a Microsoft 365 / Google Workspace connection (read-only here; step 8.2)
+             * @enum {string}
+             */
+            authType: 'sasl' | 'source_ip' | 'client_certificate' | 'provider_relay';
             /** @description client_certificate only; lower-case hex */
             certificateFingerprintSha256: string | null;
             /** Format: date-time */
@@ -84698,6 +91444,11 @@ export interface operations {
               cidr: string;
               ipVersion: 4 | 6;
             }[];
+            /**
+             * Format: uuid
+             * @description provider_relay only: the id of the managing provider connection
+             */
+            providerConnectionId: string | null;
             requireTls: boolean;
             /** @description sasl only */
             saslUsername: string | null;
@@ -84789,7 +91540,7 @@ export interface operations {
           };
         };
       };
-      /** @description Conflicts with the current state */
+      /** @description Conflicts with the current state; `connector_managed_by_provider_connection` for a `provider_relay` connector (change it through its provider connection) */
       409: {
         headers: {
           'RateLimit-Limit': components['headers']['RateLimit-Limit'];
@@ -84801,10 +91552,40 @@ export interface operations {
         };
         content: {
           'application/json': {
+            /** @enum {string} */
+            code: 'conflict' | 'connector_managed_by_provider_connection';
             correlationId?: string;
             error: string;
-            message: string | string[];
-            statusCode: number;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description `network_shared_provider`: a `source_ip` network overlaps a Microsoft 365 / Google Workspace sending range (`index` of the network) */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'network_shared_provider';
+            correlationId?: string;
+            error: string;
+            index?: number;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
           };
         };
       };
@@ -84970,7 +91751,7 @@ export interface operations {
           };
         };
       };
-      /** @description Conflicts with the current state */
+      /** @description Conflicts with the current state; `connector_managed_by_provider_connection` for a `provider_relay` connector (change it through its provider connection) */
       409: {
         headers: {
           'RateLimit-Limit': components['headers']['RateLimit-Limit'];
@@ -84982,10 +91763,15 @@ export interface operations {
         };
         content: {
           'application/json': {
+            /** @enum {string} */
+            code: 'conflict' | 'connector_managed_by_provider_connection';
             correlationId?: string;
             error: string;
-            message: string | string[];
-            statusCode: number;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 409;
           };
         };
       };
@@ -87850,6 +94636,7 @@ export interface operations {
                 | 'security.incident.updated'
                 | 'ato.account.risk_changed'
                 | 'ato.response.completed'
+                | 'integration.health_changed'
               )[];
               /** Format: date-time */
               failingSince: string | null;
@@ -88038,6 +94825,7 @@ export interface operations {
             | 'security.incident.updated'
             | 'ato.account.risk_changed'
             | 'ato.response.completed'
+            | 'integration.health_changed'
           )[];
           filters?: {
             directions?: ('inbound' | 'outbound' | 'internal')[];
@@ -88107,6 +94895,7 @@ export interface operations {
               | 'security.incident.updated'
               | 'ato.account.risk_changed'
               | 'ato.response.completed'
+              | 'integration.health_changed'
             )[];
             /** Format: date-time */
             failingSince: string | null;
@@ -88395,6 +95184,7 @@ export interface operations {
               | 'security.incident.updated'
               | 'ato.account.risk_changed'
               | 'ato.response.completed'
+              | 'integration.health_changed'
             )[];
             /** Format: date-time */
             failingSince: string | null;
@@ -88817,6 +95607,7 @@ export interface operations {
             | 'security.incident.updated'
             | 'ato.account.risk_changed'
             | 'ato.response.completed'
+            | 'integration.health_changed'
           )[];
           /** @description `rowVersion` of the webhook as last read (`409 webhook_version_conflict`) */
           expectedRowVersion: number;
@@ -88881,6 +95672,7 @@ export interface operations {
               | 'security.incident.updated'
               | 'ato.account.risk_changed'
               | 'ato.response.completed'
+              | 'integration.health_changed'
             )[];
             /** Format: date-time */
             failingSince: string | null;
@@ -89876,6 +96668,7 @@ export interface operations {
             | 'security.incident.updated'
             | 'ato.account.risk_changed'
             | 'ato.response.completed'
+            | 'integration.health_changed'
           )[];
           /**
            * Format: date-time

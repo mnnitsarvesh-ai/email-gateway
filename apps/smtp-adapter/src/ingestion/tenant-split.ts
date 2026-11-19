@@ -1,7 +1,14 @@
 import { normalizeDomainName } from '@email-gateway/database';
 import { countGatewayPasses } from '@email-gateway/common';
 import type { RoutedDirection } from '@email-gateway/mail-routing';
-import { FROM_MISMATCH, LMTP_OK, LMTP_TEMPFAIL, LOOP, type SmtpReply } from '../shared/replies';
+import {
+  FROM_MISMATCH,
+  LMTP_OK,
+  LMTP_TEMPFAIL,
+  LOOP,
+  PROVIDER_PROOF_FAILED,
+  type SmtpReply,
+} from '../shared/replies';
 import type { IngestDirection } from './ingestion-keys';
 
 /** An accepted LMTP recipient with its owning organization (D7 step 1). */
@@ -194,7 +201,14 @@ export function fromMatchesSender(fromValues: readonly string[], envelopeFrom: s
 }
 
 /** Final outcome of one organization of a message. */
-export type OrganizationOutcome = 'stored' | 'duplicate' | 'tempfail' | 'loop' | 'from_mismatch';
+export type OrganizationOutcome =
+  | 'stored'
+  | 'duplicate'
+  | 'tempfail'
+  | 'loop'
+  | 'from_mismatch'
+  // Step 8.2 D8: the provider relay proof failed (ADR-0078).
+  | 'provider_proof_failed';
 
 const REPLY_BY_OUTCOME: Record<OrganizationOutcome, SmtpReply> = {
   stored: LMTP_OK,
@@ -202,6 +216,7 @@ const REPLY_BY_OUTCOME: Record<OrganizationOutcome, SmtpReply> = {
   tempfail: LMTP_TEMPFAIL,
   loop: LOOP,
   from_mismatch: FROM_MISMATCH,
+  provider_proof_failed: PROVIDER_PROOF_FAILED,
 };
 
 /** D7 step 7: one reply per recipient in RCPT order, from its organization's outcome. */

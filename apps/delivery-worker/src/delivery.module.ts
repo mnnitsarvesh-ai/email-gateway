@@ -35,6 +35,7 @@ import { DeliveryReconciler } from './reconciler/delivery-reconciler';
 import { ReinjectionScheduler } from './reinjection/reinjection-scheduler';
 import { ReinjectionStore } from './reinjection/reinjection-store';
 import { Reinjector } from './reinjection/reinjector';
+import { RouteTokenRepository } from './routing/route-token.repository';
 import { PostfixLogTailer } from './status/postfix-log-tailer';
 import { StatusSignalApplier } from './status/status-signal-applier';
 import { WorkerLifecycle } from './worker-lifecycle';
@@ -160,6 +161,8 @@ export class DeliveryModule {
             logger,
             config,
             txTimeoutMs: txBudgetMs,
+            // Step 8.2 D9: route token of Microsoft 365 internal routing.
+            routeTokens: new RouteTokenRepository(txPrisma, config.PROVIDER_ROUTE_TOKEN_KEY),
           });
           return new ReinjectionScheduler(store, reinjector, config, logger);
         },

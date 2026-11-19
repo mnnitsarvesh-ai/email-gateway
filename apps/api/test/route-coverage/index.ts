@@ -11,7 +11,8 @@
  * - `explorer.ts` (step 7.2): saved views (WP1), headers and reveal (WP2);
  * - `policy-builder.ts` (step 7.3): policy validation and the sample dry-run;
  * - `archive.ts` (step 8.1): archive, legal hold and eDiscovery operations;
- * - `ato.ts` and `incidents.ts` (step 8.4): account takeover and security incident operations.
+ * - `ato.ts` and `incidents.ts` (step 8.4): account takeover and security incident operations;
+ * - `provider-connections.ts` (step 8.2): Microsoft 365 and Google Workspace connections.
  *
  * Consumed by `test/route-inventory.e2e.test.ts`, which fails when a served route has no entry,
  * when an entry names a route that does not exist, or when a named test file is missing or does
@@ -25,6 +26,7 @@ import { COVERAGE as INSIGHTS } from './insights';
 import { COVERAGE as LEGACY } from './legacy';
 import { COVERAGE as MESSAGES } from './messages';
 import { COVERAGE as POLICY_BUILDER } from './policy-builder';
+import { COVERAGE as PROVIDER_CONNECTIONS } from './provider-connections';
 import { COVERAGE as WEBHOOKS } from './webhooks';
 
 /** The §3.8 manifest entry (each manifest declares the same structure). */
@@ -50,7 +52,8 @@ export type CoverageArea =
   | 'policy-builder'
   | 'archive'
   | 'ato'
-  | 'incidents';
+  | 'incidents'
+  | 'provider-connections';
 
 export const COVERAGE_BY_AREA: Readonly<Record<CoverageArea, readonly RouteCoverage[]>> =
   Object.freeze({
@@ -63,6 +66,7 @@ export const COVERAGE_BY_AREA: Readonly<Record<CoverageArea, readonly RouteCover
     archive: ARCHIVE,
     ato: ATO,
     incidents: INCIDENTS,
+    'provider-connections': PROVIDER_CONNECTIONS,
   });
 
 export const COVERAGE: readonly RouteCoverage[] = Object.freeze([
@@ -75,4 +79,5 @@ export const COVERAGE: readonly RouteCoverage[] = Object.freeze([
   ...ARCHIVE,
   ...ATO,
   ...INCIDENTS,
+  ...PROVIDER_CONNECTIONS,
 ]);

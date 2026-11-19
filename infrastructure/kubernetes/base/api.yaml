@@ -155,6 +155,28 @@ spec:
               valueFrom:
                 secretKeyRef:
                   { name: email-gateway-webhook-secret-key, key: previous-key, optional: true }
+            # Provider integrations (step 8.2 §4.4, ADR-0077, ADR-0080, ADR-0081): the api ENCRYPTS
+            # customer provider credentials (the integration-worker decrypts), signs mail-flow
+            # impact tokens and derives Microsoft 365 route tokens (the delivery-worker holds the
+            # same route-token key). Each key is its own Secret; the previous credential key
+            # (rotation, decryption only, not used by the api for encryption) is optional.
+            # Non-secret keys (endpoints, client ids, redirect URL, bounds) are in the ConfigMap.
+            - {
+                name: PROVIDER_CREDENTIAL_ENCRYPTION_KEY_FILE,
+                value: /var/run/secrets/provider-credential-key/key,
+              }
+            - name: PROVIDER_CREDENTIAL_ENCRYPTION_KEY_PREVIOUS
+              valueFrom:
+                secretKeyRef:
+                  { name: email-gateway-provider-credential-key, key: previous-key, optional: true }
+            - {
+                name: PROVIDER_IMPACT_TOKEN_KEY_FILE,
+                value: /var/run/secrets/provider-impact-token-key/key,
+              }
+            - {
+                name: PROVIDER_ROUTE_TOKEN_KEY_FILE,
+                value: /var/run/secrets/provider-route-token-key/key,
+              }
             # Trusted client-IP forwarder (step 7.1 P5, ADR-0060): the secret shared with the
             # admin portal BFF only (its own Secret, mounted in api and admin-portal only). With
             # it, X-EG-Client-IP from the portal becomes the request's client IP. Rotation:
@@ -232,6 +254,21 @@ spec:
                 readOnly: true,
               }
             - {
+                name: provider-credential-key,
+                mountPath: /var/run/secrets/provider-credential-key,
+                readOnly: true,
+              }
+            - {
+                name: provider-impact-token-key,
+                mountPath: /var/run/secrets/provider-impact-token-key,
+                readOnly: true,
+              }
+            - {
+                name: provider-route-token-key,
+                mountPath: /var/run/secrets/provider-route-token-key,
+                readOnly: true,
+              }
+            - {
                 name: archive-root-key,
                 mountPath: /var/run/secrets/archive-root-key,
                 readOnly: true,
@@ -290,6 +327,20 @@ spec:
           secret:
             secretName: email-gateway-api-trusted-forwarder
             items: [{ key: token, path: token }]
+        # Step 8.2: the credential key (the api encrypts only), the impact-token key (api only)
+        # and the route-token key (api and delivery-worker).
+        - name: provider-credential-key
+          secret:
+            secretName: email-gateway-provider-credential-key
+            items: [{ key: key, path: key }]
+        - name: provider-impact-token-key
+          secret:
+            secretName: email-gateway-provider-impact-token-key
+            items: [{ key: key, path: key }]
+        - name: provider-route-token-key
+          secret:
+            secretName: email-gateway-provider-route-token-key
+            items: [{ key: key, path: key }]
         # Step 8.1: only the items the api needs (never the export signing PRIVATE key, which only
         # the archive-jobs Deployment mounts).
         - name: archive-root-key

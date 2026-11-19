@@ -14,6 +14,10 @@
 #                                  and 127.0.0.1 with TTL 0 (DNS rebinding suite)
 #   receiver.test                  step 6.2: hooks / hooks2 → webhook-receiver (203.0.113.20),
 #                                  resolved by the webhook-worker (WEBHOOK_DNS_SERVERS)
+#   relay-proof.test               step 8.2: forwarded WITHOUT cache to the provider-fake DNS
+#                                  responder (172.31.250.72:5300): DKIM public keys of the provider
+#                                  relay stack tests, registered at runtime (smtp-adapter
+#                                  PROVIDER_RELAY_DNS_SERVERS, integration-worker probes)
 # Published on 127.0.0.1:${DNS_SINK_HOST_PORT:-1053} (udp+tcp) for host-run suites (step 4.3).
 sink.test:53 {
     file /etc/coredns/sink.test.db
@@ -78,6 +82,14 @@ rebind.test:53 {
 # Step 6.2 (docs/plan/steps/19-webhooks-notifications.md §4.5): the webhook test receiver.
 receiver.test:53 {
     file /etc/coredns/receiver.test.db
+    errors
+    log
+}
+
+# Step 8.2 (docs/plan/steps/25-m365-google-connectors.md §10.5): provider relay DKIM keys. No
+# `cache` plugin, so a key registered through the provider-fake admin API is visible at once.
+relay-proof.test:53 {
+    forward . 172.31.250.72:5300
     errors
     log
 }

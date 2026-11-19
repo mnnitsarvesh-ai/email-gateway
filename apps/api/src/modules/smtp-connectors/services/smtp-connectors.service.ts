@@ -27,6 +27,10 @@ import type {
   UpdateConnectorInput,
 } from '../dto/smtp-connectors.schemas';
 import {
+  connectorManagedByProviderConnection,
+  networkSharedProvider,
+} from '../../provider-connections/provider-connections.errors';
+import {
   ConnectorAuditAction,
   CONNECTOR_RESOURCE_TYPE,
   NETWORK_LOCK_TIMEOUT_SECONDS,
@@ -105,6 +109,7 @@ export class SmtpConnectorsService {
           if (fingerprint !== null && (await this.connectors.fingerprintTaken(tx, fingerprint))) {
             throw fingerprintExists();
           }
+          if (input.authType === 'source_ip') await this.refuseSharedProviderNetworks(tx, networks);
           const saslUsername = input.authType === 'sasl' ? await this.allocateUsername(tx) : null;
           const now = new Date();
           const created = await this.connectors.create(tx, scope, {
@@ -189,6 +194,7 @@ export class SmtpConnectorsService {
       await this.transactions.run(async (tx) => {
         const row = await this.connectors.lockByPublicId(tx, scope, publicId);
         if (!row) throw connectorNotFound();
+        assertNotProviderManaged(row);
         assertUpdateAllowed(row, input);
 
         const write: ConnectorWrite = {};
@@ -212,6 +218,9 @@ export class SmtpConnectorsService {
           const before = row.networks.map((n) => n.cidr);
           const after = networks.map((n) => n.cidr);
           if (!sameSet(before, after)) {
+            if (row.authType === 'source_ip') {
+              await this.refuseSharedProviderNetworks(tx, networks);
+            }
             await this.writeNetworks(tx, scope, row.id, networks, true);
             changes.networks = { from: before, to: after };
           }
@@ -243,6 +252,7 @@ export class SmtpConnectorsService {
   ): Promise<RotatedSecret> {
     const found = await this.connectors.findByPublicId(scope, publicId);
     if (!found) throw connectorNotFound();
+    assertNotProviderManaged(found);
     if (found.authType !== 'sasl') throw new ConflictException(NOT_SASL);
     const password = generateSaslSecret();
     const secretHash = await this.hasher.hash(password);
@@ -282,6 +292,7 @@ export class SmtpConnectorsService {
     await this.transactions.run(async (tx) => {
       const row = await this.connectors.lockByPublicId(tx, scope, publicId);
       if (!row) throw connectorNotFound();
+      assertNotProviderManaged(row);
       await this.connectors.delete(tx, scope, row.id);
       await this.record(tx, principal, scope, client, ConnectorAuditAction.Deleted, publicId, {
         name: row.name,
@@ -313,6 +324,28 @@ export class SmtpConnectorsService {
     );
     if (refused.length > 0) throw new BadRequestException(refused);
     return networks;
+  }
+
+  /**
+   * Step 8.2 D7.6 (enforces step 2.2 D10): a `source_ip` network may not overlap an active
+   * Microsoft 365 / Google Workspace egress range (`422 network_shared_provider` with the index);
+   * shared provider infrastructure is accepted only through a provider connection's
+   * `provider_relay` connector, which proves the tenant per message (ADR-0078).
+   */
+  private async refuseSharedProviderNetworks(
+    tx: Client,
+    networks: readonly ParsedNetwork[],
+  ): Promise<void> {
+    for (const [index, network] of networks.entries()) {
+      if (await this.connectors.overlapsProviderEgress(tx, network)) {
+        this.logger.warn({
+          message: 'Connector network refused: overlaps a provider egress range',
+          ipVersion: network.ipVersion,
+          prefix: network.prefix,
+        });
+        throw networkSharedProvider(index);
+      }
+    }
   }
 
   /**
@@ -380,6 +413,15 @@ export class SmtpConnectorsService {
       tx,
     );
   }
+}
+
+/**
+ * Step 8.2 §5.3: a `provider_relay` connector is created, enabled and disabled only by its
+ * provider connection's mail-flow apply (D13); PATCH, rotate and DELETE answer `409
+ * connector_managed_by_provider_connection`.
+ */
+export function assertNotProviderManaged(row: Pick<ConnectorRow, 'authType'>): void {
+  if (row.authType === 'provider_relay') throw connectorManagedByProviderConnection();
 }
 
 /** Rules of D10 that depend on the stored connector (`400` with the field path). */

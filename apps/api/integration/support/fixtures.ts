@@ -78,6 +78,7 @@ export class Fixtures {
   private readonly platformUsers = new Set<bigint>();
   private readonly emails = new Set<string>();
   private readonly cleanups: Array<() => Promise<unknown>> = [];
+  private readonly conflictCleanups: Array<() => Promise<unknown>> = [];
   private readonly lastStep = new Map<string, number>();
   private platform: FixtureOrganization | undefined;
 
@@ -296,14 +297,21 @@ export class Fixtures {
     this.platformUsers.add(id);
   }
 
-  /** Runs before the built-in deletes (e.g. domains or policies a suite inserted). */
-  registerCleanup(fn: () => Promise<unknown>): void {
+  /**
+   * Runs before the built-in deletes (e.g. domains or policies a suite inserted). With
+   * `rerunOnConflict`, the (idempotent) function runs again before each retry of the organization
+   * delete: for rows a live worker of the stack can still write for a fixture organization after
+   * the first pass (the ato-worker records a fixture user's last sign-in asynchronously).
+   */
+  registerCleanup(fn: () => Promise<unknown>, options: { rerunOnConflict?: boolean } = {}): void {
     this.cleanups.push(fn);
+    if (options.rerunOnConflict) this.conflictCleanups.push(fn);
   }
 
   async cleanup(): Promise<void> {
     for (const fn of this.cleanups.reverse()) await fn();
     this.cleanups.length = 0;
+    const conflictCleanups = this.conflictCleanups.splice(0);
     const orgs = [...this.organizations];
     const users = [...this.platformUsers];
     const emails = [...this.emails];
@@ -355,7 +363,8 @@ export class Fixtures {
     // The notification-worker's quarantine digest scheduler (step 5.3) can create a
     // quarantine_digest_runs row (FK RESTRICT) for any organization at any moment, including a
     // fixture organization between this delete and the organization delete. Delete them and
-    // retry the organization delete a few times when that race happens.
+    // retry the organization delete a few times when that race happens. The cleanups registered
+    // with `rerunOnConflict` run again before each retry (late rows of other live workers).
     for (let attempt = 0; ; attempt++) {
       await p.quarantineDigestRun.deleteMany({ where: { organizationId: { in: orgs } } });
       try {
@@ -366,6 +375,8 @@ export class Fixtures {
       } catch (error) {
         const code = (error as { code?: string }).code;
         if (code !== 'P2003' || attempt >= 4) throw error;
+        await new Promise((r) => setTimeout(r, 1_000));
+        for (const fn of conflictCleanups) await fn();
       }
     }
     this.organizations.clear();

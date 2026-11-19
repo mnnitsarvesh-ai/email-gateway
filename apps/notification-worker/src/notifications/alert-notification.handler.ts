@@ -235,6 +235,43 @@ export class AlertNotificationHandler {
           },
         };
       }
+      case 'integration_unhealthy': {
+        // Step 8.2 D12: the stored `integration.health_changed` event and the connection row.
+        const { webhookEventId, connectionId } = p.refs;
+        if (!webhookEventId || !connectionId) return this.deadLetter(p.kind, 'alert_refs_missing');
+        const stored = await this.storedEvent(
+          tx,
+          organization,
+          webhookEventId,
+          window,
+          'integration.health_changed',
+          p.kind,
+        );
+        const data = stored.envelope.data as WebhookEventData<'integration.health_changed'>;
+        if (data.connection.id !== connectionId) {
+          return this.deadLetter(p.kind, 'webhook_event_mismatch');
+        }
+        const connection = await this.reads.providerConnection(tx, organizationId, connectionId);
+        if (connection === null) return this.deadLetter(p.kind, 'connection_not_found');
+        return {
+          scopeKey: alertScopeKey(p.kind, { connectionPublicId: connection.publicId }),
+          facts: {
+            kind: p.kind,
+            severity: stored.severity,
+            ...counts,
+            integration: {
+              connectionPublicId: connection.publicId,
+              name: connection.displayName,
+              provider: data.connection.provider,
+              previousStatus: data.previousStatus,
+              status: data.status,
+              statusNow: connection.healthStatus,
+              failingChecks: [...data.failingChecks],
+              changedAt: data.changedAt,
+            },
+          },
+        };
+      }
       case 'webhook_disabled': {
         const { subscriptionId } = p.refs;
         if (!subscriptionId) return this.deadLetter(p.kind, 'alert_refs_missing');
@@ -267,7 +304,7 @@ export class AlertNotificationHandler {
     organization: AlertOrganization,
     eventId: string,
     window: { from: Date; to: Date },
-    type: 'email.threat.detected' | 'domain.dns.failed',
+    type: 'email.threat.detected' | 'domain.dns.failed' | 'integration.health_changed',
     kind: AlertKind,
   ): Promise<StoredAlertEvent> {
     const stored = await this.reads.webhookEvent(tx, organization.id, eventId, window);

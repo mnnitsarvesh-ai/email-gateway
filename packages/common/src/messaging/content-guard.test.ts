@@ -28,8 +28,9 @@ function refusal(value: unknown): { code: ContentGuardCode; path: string } {
 describe('assertMetadataOnly: valid envelopes pass', () => {
   const types = Object.keys(EVENT_REGISTRY) as RegisteredEventType[];
 
-  it('covers all thirty-seven registered event types (two added by step 3.3, one by step 4.2, three by step 4.3, one by step 4.4, one by step 4.5, three by step 4.6, two by step 5.2, two by step 5.3, two by step 6.2, eleven by step 8.4)', () => {
-    expect(types).toHaveLength(37);
+  it('covers all thirty-eight registered event types (two added by step 3.3, one by step 4.2, three by step 4.3, one by step 4.4, one by step 4.5, three by step 4.6, two by step 5.2, two by step 5.3, two by step 6.2, eleven by step 8.4, one by step 8.2)', () => {
+    expect(types).toHaveLength(38);
+    expect(types).toContain('integration.connection.health_changed.v1');
     expect(types).toContain('mail.message.dlp_incident.v1');
     expect(types).toEqual(
       expect.arrayContaining([

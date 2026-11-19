@@ -44,7 +44,7 @@ The manifests expect an `email-gateway-secrets` Secret (managed by External Secr
 | Secret key               | Read as                                                     | Used by                      | Points at                                                                                          |
 | ------------------------ | ----------------------------------------------------------- | ---------------------------- | -------------------------------------------------------------------------------------------------- |
 | `database-url`           | `DATABASE_URL_FILE`                                         | every service                | MySQL **writer**: the RDS instance endpoint, or the Aurora cluster (writer) endpoint (DML account) |
-| `database-read-url`      | `DATABASE_READ_URL_FILE`                                    | `api` only                   | MySQL **reader**: an RDS read replica endpoint, or the Aurora reader endpoint (reader account)     |
+| `database-read-url`      | `DATABASE_READ_URL_FILE`                                    | `api`, `integration-worker`  | MySQL **reader**: an RDS read replica endpoint, or the Aurora reader endpoint (reader account)     |
 | `migration-database-url` | `MIGRATION_DATABASE_URL` (migration Job, not in `base` yet) | `db-migrate`                 | MySQL writer, migrator (DDL) account                                                               |
 | `rabbitmq-url`           | `RABBITMQ_URL_FILE`                                         | every service                | Amazon MQ / RabbitMQ                                                                               |
 | `redis-url`              | `REDIS_URL_FILE`                                            | every service                | ElastiCache Redis                                                                                  |
@@ -53,7 +53,7 @@ The manifests expect an `email-gateway-secrets` Secret (managed by External Secr
 | `data-encryption-key`    | `DATA_ENCRYPTION_KEY_FILE`                                  | `api` only                   | AES-256-GCM key, exactly 64 hex characters (application-encrypted columns such as MFA secrets)     |
 | `notify-smtp-password`   | `NOTIFY_SMTP_PASSWORD_FILE`                                 | `api`, `notification-worker` | Password of the transactional-email relay (SES SMTP or similar); optional                          |
 
-`database-read-url` is **required** by the `api` Deployment: a missing file fails startup. An environment without a replica sets it to the writer URL; the api then reports `writer-fallback` (`not a replica`) and reads from the writer. The ConfigMap carries `DATABASE_READ_MAX_LAG_SECONDS` (`'10'`) and `DATABASE_READ_LAG_CHECK_INTERVAL_MS` (`'5000'`). Data-plane Deployments get no reader URL: they are writer-only by design.
+`database-read-url` is **required** by the `api` and `integration-worker` Deployments (the worker reads only delivery statistics from it, step 8.2): a missing file fails startup. An environment without a replica sets it to the writer URL; the api then reports `writer-fallback` (`not a replica`) and reads from the writer. The ConfigMap carries `DATABASE_READ_MAX_LAG_SECONDS` (`'10'`) and `DATABASE_READ_LAG_CHECK_INTERVAL_MS` (`'5000'`). Data-plane Deployments get no reader URL: they are writer-only by design.
 
 ### MySQL on RDS / Aurora
 
@@ -112,6 +112,10 @@ The `webhook-worker` image runs as two Deployments: `webhook-fanout` (consumes `
 ### Journaling and compliance archiving (step 8.1)
 
 The `archive-worker` image runs as two Deployments: `archive-worker` (roles `capture,index`: consumes `email.archive` as `eg-archive`, runs the journal completeness sweep and the policy reconciler, captures encrypted copies into the Object-Lock archive bucket and keeps the OpenSearch metadata index in sync; HPA) and `archive-jobs` (roles `lifecycle,ediscovery`: expiry, review, holds, the disposal pipeline across S3 versions, replica buckets, OpenSearch and MySQL, the root key re-wrap, case searches and signed encrypted exports; the **only** holder of the export signing key and of the S3 version-delete permissions). Rollout order (migration → topology v12 + `eg-archive` → archive bucket with Object Lock → OpenSearch domain and FGAC users → api → archive-worker → archive-jobs), the archive bucket and its CRR target, IAM per role, Amazon OpenSearch roles, the Secrets `email-gateway-archive-root-key`, `email-gateway-archive-search-worker`, `email-gateway-archive-export-signing` and the Secret key `rabbitmq-archive-url`, KMS and the MinIO/AWS differences: [archive.md](archive.md). Runbook: [archive](../runbooks/archive.md).
+
+### Microsoft 365 and Google Workspace connectors (step 8.2)
+
+The `integration-worker` Deployment (roles `tasks,health,maintenance` in every replica; maintenance leader-elected with `GET_LOCK`) verifies provider grants, runs connector validations (SMTP probes never send DATA) and periodic connection health; MySQL writer + reader only, egress HTTPS and SMTP 25 to public addresses. It is the **only** workload that decrypts customer provider credentials (`email-gateway-provider-credential-key`; the api only encrypts) and holds the platform Microsoft app certificate and Google service-account key (`email-gateway-provider-platform`). Registering the multi-tenant Entra app and the service account with exactly the read-only profile permissions, the shared ConfigMap keys, the probe domain, the egress-range import CLI and the verification of the seeded snapshot, rollout order and the local provider-fake: [provider-integrations.md](provider-integrations.md). Runbook: [provider-integrations](../runbooks/provider-integrations.md).
 
 ## Terraform
 

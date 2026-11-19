@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react';
 import { HttpResponse } from 'msw';
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import {
   apiErrorJson,
   currentTestUrl,
@@ -86,7 +86,14 @@ const delivery = (i: number, overrides: Record<string, unknown> = {}) => ({
 });
 
 describe('IntegrationsPage', () => {
-  it('shows webhooks, link cards and the unavailable connectors to an organization admin (axe clean)', async () => {
+  beforeEach(() => {
+    // Step 8.2: the page also lists the Microsoft 365 / Google Workspace connections.
+    mockApi({
+      ProviderConnectionsController_list_v1: () => okJson({ data: [], nextCursor: null }),
+    });
+  });
+
+  it('shows webhooks, provider connections and link cards to an organization admin (axe clean)', async () => {
     mockApi({ WebhooksController_list_v1: () => okJson({ data: [hook()], nextCursor: null }) });
     const { container } = renderWithProviders(<IntegrationsPage />, { route: '/integrations' });
     expect(await screen.findByRole('link', { name: 'SIEM feed' })).toHaveAttribute(
@@ -104,8 +111,17 @@ describe('IntegrationsPage', () => {
       'href',
       '/mail-servers?tab=connectors',
     );
-    expect(screen.getByText('Arrives in step 8.2')).toBeInTheDocument();
+    // Step 8.2 replaced the "arrives in 8.2" card with the provider connections section.
+    expect(screen.queryByText('Arrives in step 8.2')).not.toBeInTheDocument();
     expect(screen.queryByText('Arrives in step 8.1')).not.toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: 'Microsoft 365 and Google Workspace' }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Connect' })).toHaveAttribute(
+      'href',
+      '/integrations/providers/new',
+    );
+    expect(await screen.findByText('No connections')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Archive settings' })).toHaveAttribute(
       'href',
       '/settings?tab=archive',

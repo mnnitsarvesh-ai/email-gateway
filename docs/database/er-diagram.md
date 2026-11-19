@@ -82,6 +82,12 @@ flowchart LR
     archive_encryption_keys
     ediscovery_cases[ediscovery_cases, custodians, searches, hits, exports]
   end
+  subgraph integrations[Provider integrations]
+    provider_connections
+    provider_connection_grants[provider_connection_grants, provider_consent_states, provider_connection_domains]
+    provider_health[provider_validation_runs, provider_probe_observations, provider_health_checks, provider_health_events, provider_relay_counters]
+    provider_egress[provider_egress_range_sets, provider_egress_ranges]
+  end
   subgraph ops[Platform operations]
     message_outbox[(message_outbox P)]
     audit_logs[(audit_logs P)]
@@ -96,6 +102,8 @@ flowchart LR
   organizations --> roles
   organizations --> domains
   organizations --> smtp_connectors
+  organizations --> provider_connections
+  provider_connections --> smtp_connectors
   organizations --> email_policies
   organizations --> message_identities
   message_identities -.-> email_messages
@@ -1357,6 +1365,113 @@ erDiagram
     bigint id PK
     char subject_hash "UQ with organization_id, active_marker"
     tinyint active_marker "GENERATED STORED"
+  }
+```
+
+## Provider integrations
+
+Step 8.2 ([design §3](../plan/steps/25-m365-google-connectors.md#3-data-model-one-forward-migration-provider_integrations-wp1), ADR-0076–0081). None of these tables is partitioned, so every reference is a real foreign key. Tenant children of a connection carry `organization_id` without a foreign key (always the parent connection's); the two egress tables are platform data (no `organization_id`). Credentials are stored only as AES-256-GCM ciphertext (ADR-0077); probe evidence holds no message content.
+
+```mermaid
+erDiagram
+  organizations ||--o{ provider_connections : "RESTRICT"
+  users |o--o{ provider_connections : "created_by SET NULL"
+  provider_connections ||--o{ provider_connection_grants : "CASCADE"
+  provider_connections ||--o{ provider_consent_states : "CASCADE"
+  provider_connection_grants ||--o{ provider_consent_states : "CASCADE"
+  users ||--o{ provider_consent_states : "CASCADE"
+  provider_connections ||--o{ provider_connection_domains : "CASCADE"
+  domains ||--o| provider_connection_domains : "UQ domain_id, CASCADE"
+  provider_connections ||--o{ provider_validation_runs : "CASCADE"
+  provider_connections ||--o{ provider_probe_observations : "CASCADE"
+  provider_validation_runs |o--o{ provider_probe_observations : "SET NULL"
+  provider_connections ||--o{ provider_health_checks : "CASCADE"
+  provider_connections ||--o{ provider_health_events : "CASCADE"
+  provider_connections ||--o{ provider_relay_counters : "CASCADE"
+  provider_connections |o--o| smtp_connectors : "provider_relay connector, UQ, RESTRICT"
+  provider_egress_range_sets ||--o{ provider_egress_ranges : "CASCADE"
+  provider_connections {
+    bigint id PK
+    char public_id UK
+    bigint organization_id FK
+    enum provider "microsoft_365, google_workspace"
+    enum status "draft ... disabled"
+    varchar external_tenant_id
+    varchar active_tenant_key UK "provider:tenant while not disabled"
+    enum outbound_mode "off, probe_only, active, suspended"
+    enum health_status
+  }
+  provider_connection_grants {
+    bigint id PK
+    char public_id UK
+    bigint connection_id FK "UQ with profile"
+    varchar profile
+    enum auth_method
+    enum status
+    text credential_ciphertext "AES-256-GCM, never returned"
+  }
+  provider_consent_states {
+    bigint id PK
+    bigint grant_id FK
+    bigint user_id FK
+    char state_sha256 UK
+    datetime expires_at
+  }
+  provider_connection_domains {
+    bigint id PK
+    bigint connection_id FK
+    bigint domain_id FK,UK
+    enum provider_verification
+  }
+  provider_validation_runs {
+    bigint id PK
+    char public_id UK
+    bigint connection_id FK
+    enum kind
+    enum status
+    char probe_token_sha256 UK
+  }
+  provider_probe_observations {
+    bigint id PK
+    bigint connection_id FK
+    bigint validation_run_id FK
+    char token_sha256 "UQ with queue_id"
+    enum proof_result
+  }
+  provider_health_checks {
+    bigint id PK
+    bigint connection_id FK "UQ with check_code, subject"
+    enum status
+    enum severity
+  }
+  provider_health_events {
+    bigint id PK
+    bigint connection_id FK
+    enum from_status
+    enum to_status
+  }
+  provider_relay_counters {
+    bigint id PK
+    bigint connection_id FK "UQ with hour_start"
+    datetime hour_start
+  }
+  provider_egress_range_sets {
+    bigint id PK
+    enum provider "UQ with version"
+    int version
+    enum status "active, superseded"
+  }
+  provider_egress_ranges {
+    bigint id PK
+    bigint set_id FK "UQ with cidr"
+    tinyint ip_version
+    varbinary range_start
+    varbinary range_end
+  }
+  smtp_connectors {
+    bigint id PK
+    enum auth_type "+ provider_relay (8.2)"
+    bigint provider_connection_id FK,UK
   }
 ```
 

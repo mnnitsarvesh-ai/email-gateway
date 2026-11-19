@@ -28,6 +28,7 @@
     "@email-gateway/mail-safety": "workspace:*",
     "@email-gateway/message-lifecycle": "workspace:*",
     "@email-gateway/policy-dsl": "workspace:*",
+    "@email-gateway/provider-integrations": "workspace:*",
     "@email-gateway/quarantine": "workspace:*",
     "@email-gateway/risk-scoring": "workspace:*",
     "@email-gateway/rspamd": "workspace:*",

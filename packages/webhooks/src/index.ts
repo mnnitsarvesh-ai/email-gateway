@@ -1,6 +1,7 @@
 export * from './catalogue';
 export * from './envelope';
 export * from './filters';
+export * from './integration-checks';
 export * from './notifications';
 export * from './payload-guard';
 export * from './retry';

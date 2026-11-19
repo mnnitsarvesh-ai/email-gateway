@@ -41,6 +41,32 @@ function envelopeOf(pe: PublicEvent) {
 }
 
 describe('public event builders (W3, §5)', () => {
+  it('integration.health_changed (step 8.2 D12): metadata from the payload, no read', async () => {
+    const facts = fakeFacts();
+    const spies = Object.fromEntries(
+      Object.keys(facts)
+        .filter((name) => typeof facts[name as keyof typeof facts] === 'function')
+        .map((name) => [name, vi.spyOn(facts, name as never)]),
+    );
+    const [pe, ...rest] = await build(EventTypes.IntegrationHealthChanged, {}, facts);
+    expect(rest).toEqual([]);
+    expect(pe!.type).toBe('integration.health_changed');
+    expect(pe!.data).toEqual({
+      connection: { id: '01890a5d-ac96-774b-bcce-b302099a80a0', provider: 'microsoft_365' },
+      previousStatus: 'healthy',
+      status: 'critical',
+      failingChecks: ['token.acquire', 'domain.provider_verified'],
+      changedAt: '2026-11-17T09:00:00.000Z',
+    });
+    expect(pe!.severity).toBe('high');
+    expect(pe!.connectionPublicId).toBe('01890a5d-ac96-774b-bcce-b302099a80a0');
+    expect(pe!.domainId).toBeNull();
+    expect(pe!.message).toBeNull();
+    expect(pe!.matchable).toEqual({ type: 'integration.health_changed', severity: 'high' });
+    for (const spy of Object.values(spies)) expect(spy).not.toHaveBeenCalled();
+    expect(envelopeOf(pe!).envelope.type).toBe('integration.health_changed');
+  });
+
   it('email.received carries the §5.1 message and no content', async () => {
     const [pe] = await build(EventTypes.MessageReceived);
     const built = envelopeOf(pe!);

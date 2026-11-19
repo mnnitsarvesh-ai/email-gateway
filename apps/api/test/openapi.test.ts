@@ -211,8 +211,9 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     // two reveal operations of step 7.2 WP2: 277; plus the validate and sample dry-run routes of
     // step 7.3 (docs/plan/steps/22-policy-builder.md §4.4): 279; step 8.1
     // (docs/plan/steps/23-journaling-archiving.md §4.4): 320; step 8.4
-    // (docs/plan/steps/24-account-takeover-core.md §5.1, §5.2): 354, all under /api/v1.
-    expect(count).toBe(354);
+    // (docs/plan/steps/24-account-takeover-core.md §5.1, §5.2): 354; plus the 24 provider-connection operations of step 8.2
+    // (docs/plan/steps/25-m365-google-connectors.md §5.2): 378, all under /api/v1.
+    expect(count).toBe(378);
   });
 
   it('gives every /api/v1 operation a tag', () => {
@@ -918,8 +919,9 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     // §3.5: 13 transactional since 3.3/5.3, 2 new transactional, 22 legacy (interceptor);
     // step 6.2: 5 transactional webhook routes (create, delete, rotate, replay, range replay);
     // step 8.1: 15 transactional archive, legal hold and eDiscovery mutations; step 8.4: 14
-    // transactional account takeover and incident mutations.
-    expect(keyed).toHaveLength(71);
+    // transactional account takeover and incident mutations; step 8.2: 12 transactional
+    // provider-connection mutations.
+    expect(keyed).toHaveLength(83);
   });
 
   it('documents the 17 step 6.2 routes with their tags, permissions and the redacted replay (§6.1, ADR-0057)', () => {

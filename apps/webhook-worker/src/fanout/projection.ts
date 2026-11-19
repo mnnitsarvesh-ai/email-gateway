@@ -7,6 +7,7 @@ import {
   type DomainStatusChangedV1,
   type EventEnvelope,
   EventTypes,
+  type IntegrationHealthChangedV1,
   type MessageReceivedV1,
   type MessageScannedV1,
   type MessageStateChangedV1,
@@ -32,8 +33,9 @@ import {
  */
 
 /**
- * The twelve internal events bound to `email.webhooks`: the eight of topology v11 (§4.3) and the
- * four security incident / account takeover events of topology v13 (step 8.4 D16).
+ * The thirteen internal events bound to `email.webhooks`: the eight of topology v11 (§4.3), the
+ * four security incident / account takeover events of topology v13 (step 8.4 D16) and
+ * `integration.connection.health_changed.v1` of topology v14 (step 8.2 D12).
  */
 export const FANOUT_SOURCE_TYPES = [
   EventTypes.MessageReceived,
@@ -48,6 +50,7 @@ export const FANOUT_SOURCE_TYPES = [
   EventTypes.SecurityIncidentUpdated,
   EventTypes.AtoAccountRiskUpdated,
   EventTypes.AtoResponseCompleted,
+  EventTypes.IntegrationHealthChanged,
 ] as const;
 export type FanoutSourceType = (typeof FANOUT_SOURCE_TYPES)[number];
 
@@ -72,7 +75,8 @@ export type CandidateRule =
   | 'incident_created'
   | 'incident_updated'
   | 'ato_risk_changed'
-  | 'ato_response_completed';
+  | 'ato_response_completed'
+  | 'integration_health_changed';
 
 /** One public event an internal event may yield (W3 table row). */
 export interface Candidate {
@@ -145,6 +149,13 @@ export function rejectionOf(
 const QUARANTINING_ACTIONS: readonly string[] = ['quarantine', 'require_approval', 'partial'];
 /** DNS record purposes whose failure is `high` (§5.2). */
 const CRITICAL_PURPOSES: readonly string[] = ['mx', 'spf', 'dkim', 'dmarc'];
+/** `integration.health_changed` severities (§5.2 rule of the catalogue). */
+const HEALTH_SEVERITY: Readonly<Record<IntegrationHealthChangedV1['status'], Severity>> = {
+  unknown: 'info',
+  healthy: 'info',
+  warning: 'medium',
+  critical: 'high',
+};
 
 /** The changes of a `domain.dns.records_changed.v1` that are failures (valid → invalid/missing). */
 export function failingRecords(
@@ -383,6 +394,20 @@ export function projectCandidates(event: EventEnvelope<unknown>): Candidate[] {
           subKey: p.phase,
           severity: p.status === 'failed' || p.status === 'rollback_failed' ? 'medium' : 'info',
           alert: null,
+        },
+      ];
+    }
+    case EventTypes.IntegrationHealthChanged: {
+      // Step 8.2 D12: every transition is a public event; becoming `critical` requests the
+      // `integration_unhealthy` alert (throttled per connection).
+      const p = event.payload as IntegrationHealthChangedV1;
+      return [
+        {
+          rule: 'integration_health_changed',
+          type: 'integration.health_changed',
+          subKey: '',
+          severity: HEALTH_SEVERITY[p.status],
+          alert: p.status === 'critical' ? 'integration_unhealthy' : null,
         },
       ];
     }

@@ -20,7 +20,7 @@ const ok = (type: WebhookEnvelopeType, data: unknown): boolean =>
   dataSchemas[type].safeParse(data).success;
 
 describe('catalogue (§5)', () => {
-  it('lists exactly the fourteen subscribable types plus the ping (6.2 and 8.4 D16)', () => {
+  it('lists exactly the fifteen subscribable types plus the ping (6.2, 8.4 D16 and 8.2 D12)', () => {
     expect([...WEBHOOK_EVENT_TYPES]).toEqual([
       'email.received',
       'email.scanned',
@@ -36,8 +36,9 @@ describe('catalogue (§5)', () => {
       'security.incident.updated',
       'ato.account.risk_changed',
       'ato.response.completed',
+      'integration.health_changed',
     ]);
-    expect(WEBHOOK_EVENT_TYPES).toHaveLength(14);
+    expect(WEBHOOK_EVENT_TYPES).toHaveLength(15);
     expect(WEBHOOK_PING_TYPE).toBe('webhook.ping');
     expect(WEBHOOK_ENVELOPE_TYPES).toEqual([...WEBHOOK_EVENT_TYPES, 'webhook.ping']);
     expect(webhookEventTypeSchema.safeParse('webhook.ping').success).toBe(false);
@@ -88,7 +89,37 @@ describe('catalogue (§5)', () => {
         'minSeverity',
       ]);
     }
+    expect(WEBHOOK_EVENT_CATALOGUE['integration.health_changed'].appliesFilters).toEqual([
+      'minSeverity',
+    ]);
     expect(WEBHOOK_EVENT_CATALOGUE['webhook.ping'].appliesFilters).toEqual([]);
+  });
+
+  it('integration.health_changed (step 8.2 D12): metadata only, a real transition, bounded codes', () => {
+    const base = clone(WEBHOOK_EXAMPLE_DATA['integration.health_changed']);
+    const type = 'integration.health_changed' as const;
+    expect(ok(type, base)).toBe(true);
+    expect(ok(type, { ...base, previousStatus: 'critical' })).toBe(false);
+    expect(ok(type, { ...base, status: 'broken' })).toBe(false);
+    expect(ok(type, { ...base, connection: { ...base.connection, provider: 'yahoo' } })).toBe(
+      false,
+    );
+    expect(ok(type, { ...base, connection: { ...base.connection, tenantId: 'x' } })).toBe(false);
+    expect(ok(type, { ...base, failingChecks: ['Routing.Loops'] })).toBe(false);
+    expect(ok(type, { ...base, failingChecks: ['routing.loops', 'routing.loops'] })).toBe(false);
+    expect(
+      ok(type, {
+        ...base,
+        failingChecks: Array.from({ length: 11 }, (_, i) => `check.code_${i}`),
+      }),
+    ).toBe(false);
+    expect(ok(type, { ...base, failingChecks: [] })).toBe(true);
+    const severity = (status: string, previousStatus = 'unknown') =>
+      eventSeverity(type, { ...base, previousStatus, status } as never);
+    expect(severity('critical')).toBe('high');
+    expect(severity('warning')).toBe('medium');
+    expect(severity('healthy')).toBe('info');
+    expect(severity('unknown', 'healthy')).toBe('info');
   });
 
   it('rejects an extra key at the top, in the shared message and in every type object', () => {

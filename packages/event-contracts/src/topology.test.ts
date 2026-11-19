@@ -44,13 +44,13 @@ const mutableQueue = (topology: { queues: QueueDefinition[] }, name: QueueName) 
   return queue;
 };
 
-describe('TOPOLOGY v13', () => {
+describe('TOPOLOGY v14', () => {
   it('satisfies every invariant of design §3', () => {
     expect(validateTopology(TOPOLOGY)).toEqual([]);
   });
 
-  it('declares exactly the six exchanges and twenty-four queues (v13)', () => {
-    expect(TOPOLOGY_VERSION).toBe(13);
+  it('declares exactly the six exchanges and twenty-four queues (v14)', () => {
+    expect(TOPOLOGY_VERSION).toBe(14);
     expect(DEFAULT_VHOST).toBe('email-gateway');
     expect([...TOPOLOGY.exchanges]).toEqual([
       'email.ingestion',
@@ -278,6 +278,8 @@ describe('TOPOLOGY v13', () => {
         'email.security org.*.security.incident.updated.v1',
         'email.security org.*.ato.account.risk.updated.v1',
         'email.security org.*.ato.response.completed.v1',
+        // v14 (step 8.2 D12): provider connection health transitions.
+        'email.events org.*.integration.connection.health_changed.v1',
         'email.events retry.email.webhooks.#',
       ],
       // v13 (step 8.4 D3): the ato-worker's three queues (home exchange email.security).
@@ -1116,6 +1118,11 @@ describe('routing (topic semantics)', () => {
       'email.notifications',
     ]);
     expect(route('ato.restriction.changed.v1')).toEqual(['email.analytics']);
+    // Topology v14 (step 8.2 D12): health transitions reach only the fanout and the firehose.
+    expect(route('integration.connection.health_changed.v1')).toEqual([
+      'email.analytics',
+      'email.webhooks',
+    ]);
   });
 
   it('keeps the retry hops of dot-prefixed queue names apart (v5 scan.url, scan.url.*)', () => {
@@ -1238,7 +1245,8 @@ describe('routing (topic semantics)', () => {
     );
     expect(eventTypesBoundTo('email.delivery.retry')).toEqual([]);
     expect(eventTypesBoundTo('email.dead-letter')).toEqual([]);
-    // v11 (step 6.2 §4.3, W3): the eight source events of the projection.
+    // v11 (step 6.2 §4.3, W3): the eight source events of the projection; v14 (step 8.2 D12)
+    // adds the provider connection health transitions.
     expect(eventTypesBoundTo('email.webhooks')).toEqual(
       [
         'mail.message.received.v1',
@@ -1254,6 +1262,7 @@ describe('routing (topic semantics)', () => {
         'security.incident.updated.v1',
         'ato.account.risk.updated.v1',
         'ato.response.completed.v1',
+        'integration.connection.health_changed.v1',
       ].sort(),
     );
     expect(eventTypesBoundTo('email.notifications')).toEqual([
@@ -1525,7 +1534,7 @@ describe('toRabbitDefinitions (Q5)', () => {
   const definitions = toRabbitDefinitions(TOPOLOGY, { vhost: DEFAULT_VHOST });
 
   it('declares topic exchanges and quorum queues with no other argument', () => {
-    expect(definitions.topology_version).toBe(13);
+    expect(definitions.topology_version).toBe(14);
     expect(definitions.exchanges).toHaveLength(6);
     for (const exchange of definitions.exchanges) {
       expect(exchange).toEqual({
@@ -1569,8 +1578,9 @@ describe('toRabbitDefinitions (Q5)', () => {
     // one (alert_requested.v1): 53 queue + 5 exchange = 58. v12 (step 8.1 A26): email.archive
     // keeps its two bindings (dormant → work): still 58. v13 (step 8.4 §4.1): ato.events five
     // (four events + retry), ato.mail two, ato.responses two, email.webhooks four,
-    // email.notifications one: 67 queue + 5 exchange = 72.
-    expect(definitions.bindings).toHaveLength(72);
+    // email.notifications one: 67 queue + 5 exchange = 72. v14 (step 8.2 D12): email.webhooks adds
+    // one (integration.connection.health_changed.v1): 68 queue + 5 exchange = 73.
+    expect(definitions.bindings).toHaveLength(73);
     const keys = definitions.bindings.map(
       (b) => `${b.source}|${b.destination_type}|${b.destination}|${b.routing_key}`,
     );

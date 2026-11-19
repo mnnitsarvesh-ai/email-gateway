@@ -1,6 +1,8 @@
 'use client';
 
 import { CableIcon, PlusIcon } from 'lucide-react';
+import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useMemo, useState } from 'react';
 import { z } from 'zod';
 import { ConfirmDialog } from '@/components/confirm-dialog';
@@ -39,22 +41,45 @@ import { FilterSelect, FormDialog, MutationError, splitList } from '@/features/d
 
 type Connector = ListItem<'SmtpConnectorsController_list_v1'>;
 type AuthType = Connector['authType'];
+/** Auth types a user can create; `provider_relay` connectors are created by the provider wizard. */
+type CreatableAuthType = Exclude<AuthType, 'provider_relay'>;
 
-const AUTH_TYPES: readonly AuthType[] = ['sasl', 'source_ip', 'client_certificate'];
+const AUTH_TYPES: readonly CreatableAuthType[] = ['sasl', 'source_ip', 'client_certificate'];
+const FILTER_AUTH_TYPES: readonly AuthType[] = [...AUTH_TYPES, 'provider_relay'];
 export const AUTH_LABEL: Record<AuthType, string> = {
   sasl: 'SMTP AUTH (username and password)',
   source_ip: 'Source IP networks',
   client_certificate: 'Client certificate',
+  provider_relay: 'Microsoft 365 / Google Workspace provider relay',
 };
 const AUTH_SHORT: Record<AuthType, string> = {
   sasl: 'SMTP AUTH',
   source_ip: 'Source IP',
   client_certificate: 'Client certificate',
+  provider_relay: 'Provider relay',
 };
+
+/**
+ * A `provider_relay` connector (step 8.2 D7) belongs to a Microsoft 365 or Google Workspace
+ * connection: the api refuses edits, rotation and deletion here (`409
+ * connector_managed_by_provider_connection`), so the tab shows it read-only with a link.
+ */
+export function isProviderManaged(connector: Pick<Connector, 'authType'>): boolean {
+  return connector.authType === 'provider_relay';
+}
+
+export function providerConnectionHref(connector: Pick<Connector, 'providerConnectionId'>) {
+  return connector.providerConnectionId
+    ? `/integrations/providers/${connector.providerConnectionId}`
+    : null;
+}
 
 const URL_SHAPE = {
   cstatus: z.enum(['active', 'disabled']).optional().catch(undefined),
-  authType: z.enum(['sasl', 'source_ip', 'client_certificate']).optional().catch(undefined),
+  authType: z
+    .enum(['sasl', 'source_ip', 'client_certificate', 'provider_relay'])
+    .optional()
+    .catch(undefined),
 };
 
 const name = z
@@ -148,7 +173,7 @@ function ConnectorForm({
   const form = useZodForm(connectorCreateSchema, {
     defaultValues: {
       name: connector?.name ?? '',
-      authType: connector?.authType ?? 'sasl',
+      authType: connector && connector.authType !== 'provider_relay' ? connector.authType : 'sasl',
       networks: connector?.networks.map((n) => n.cidr).join('\n') ?? '',
       certificateFingerprintSha256: connector?.certificateFingerprintSha256 ?? '',
       requireTls: connector?.requireTls ?? true,
@@ -317,6 +342,16 @@ function StatusBadge({ status }: { status: Connector['status'] }) {
 }
 
 function Identity({ connector }: { connector: Connector }) {
+  if (isProviderManaged(connector)) {
+    const href = providerConnectionHref(connector);
+    return href ? (
+      <Link href={href} className="text-xs underline underline-offset-4">
+        Managed by its provider connection
+      </Link>
+    ) : (
+      <span className="text-xs text-muted-foreground">Provider connection removed</span>
+    );
+  }
   if (connector.authType === 'sasl')
     return (
       <code className="font-mono text-xs">{connector.saslUsername ?? 'username not set'}</code>
@@ -338,6 +373,7 @@ function Identity({ connector }: { connector: Connector }) {
 
 /** SMTP connectors (`/smtp-connectors`): relay authorization of the tenant's own servers. */
 export function ConnectorsTab() {
+  const router = useRouter();
   const [filters, setFilters] = useUrlState(URL_SHAPE);
   const canManage = useCan('SmtpConnectorsController_update_v1');
   const list = useCursorList('SmtpConnectorsController_list_v1', {
@@ -379,7 +415,15 @@ export function ConnectorsTab() {
         id: 'authType',
         header: 'Authentication',
         meta: { label: 'Authentication' },
-        cell: ({ row }) => AUTH_SHORT[row.original.authType],
+        cell: ({ row }) =>
+          isProviderManaged(row.original) ? (
+            <span className="inline-flex flex-wrap items-center gap-2">
+              {AUTH_SHORT[row.original.authType]}
+              <ToneBadge tone="info">Read-only</ToneBadge>
+            </span>
+          ) : (
+            AUTH_SHORT[row.original.authType]
+          ),
       },
       {
         id: 'status',
@@ -457,15 +501,21 @@ export function ConnectorsTab() {
               label="Authentication"
               value={filters.authType}
               onChange={(authType) => setFilters({ authType: authType as AuthType | undefined })}
-              options={AUTH_TYPES.map((t) => ({ value: t, label: AUTH_SHORT[t] }))}
+              options={FILTER_AUTH_TYPES.map((t) => ({ value: t, label: AUTH_SHORT[t] }))}
             />
           </>
         }
         isFiltered={Boolean(filters.cstatus || filters.authType)}
         onClearFilters={() => setFilters({ cstatus: undefined, authType: undefined })}
-        rowActions={
-          canManage
-            ? (row) => [
+        rowActions={(row) => {
+          if (isProviderManaged(row)) {
+            const href = providerConnectionHref(row);
+            return href
+              ? [{ label: 'Open provider connection', onSelect: () => router.push(href) }]
+              : [];
+          }
+          return canManage
+            ? [
                 { label: 'Edit', onSelect: () => setEditing(row) },
                 {
                   label: row.status === 'active' ? 'Disable' : 'Enable',
@@ -476,8 +526,8 @@ export function ConnectorsTab() {
                   : []),
                 { label: 'Delete', destructive: true, onSelect: () => setDeleting(row) },
               ]
-            : undefined
-        }
+            : [];
+        }}
         emptyState={
           <EmptyState
             icon={CableIcon}

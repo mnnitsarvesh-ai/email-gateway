@@ -580,4 +580,12 @@ export const EXAMPLE_EVENT_PAYLOADS: Readonly<Record<RegisteredEventType, unknow
     digestPeriod: null,
     requestedAt: '2026-11-18T08:01:01.000Z',
   },
+  'integration.connection.health_changed.v1': {
+    connectionId: '01890a5d-ac96-774b-bcce-b302099a80a0',
+    provider: 'microsoft_365',
+    previousStatus: 'healthy',
+    status: 'critical',
+    changedAt: '2026-11-17T09:00:00.000Z',
+    failingChecks: ['token.acquire', 'domain.provider_verified'],
+  },
 };

@@ -105,8 +105,9 @@ describe('webhooks schemas', () => {
     }
   });
 
-  it('builds a valid example envelope for each of the 15 envelope types (14 types since step 8.4 plus the ping)', () => {
-    expect(EVENT_TYPES_VIEW.data).toHaveLength(15);
+  it('builds a valid example envelope for each of the 16 envelope types (14 types since step 8.4 plus the ping, plus `integration.health_changed` of step 8.2)', () => {
+    expect(EVENT_TYPES_VIEW.data).toHaveLength(16);
+    expect(EVENT_TYPES_VIEW.data.map((e) => e.type)).toContain('integration.health_changed');
     for (const entry of EVENT_TYPES_VIEW.data)
       expect(entry.example).toMatchObject({ type: entry.type, version: 1 });
   });

@@ -19,6 +19,7 @@ import {
 import { API_GLOBAL_PREFIX } from '../../src/http/configure-api-app';
 import type { IdempotentOptions } from '../../src/http/idempotency/idempotency.interceptor';
 import { ARCHIVE_RATE_LIMIT_KEY } from '../../src/modules/archive/archive-rate-limit';
+import { PROVIDER_RATE_LIMIT_KEY } from '../../src/modules/provider-connections/provider-connections-rate-limit';
 import { MESSAGE_REVEAL_RATE_LIMIT_KEY } from '../../src/modules/messages/message-reveal-rate-limit';
 import { POLICY_SAMPLE_DRY_RUN_RATE_LIMIT_KEY } from '../../src/modules/policies/policy-sample-dry-run-rate-limit';
 import { QUARANTINE_RATE_LIMIT_KEY } from '../../src/modules/quarantine/quarantine-rate-limit';
@@ -53,6 +54,8 @@ export interface DiscoveredRoute {
   policySampleRate: string | null;
   /** Config-driven archive route limit kind (step 8.1 §4.4), if any. */
   archiveRate: string | null;
+  /** Step 8.2 D17: the per-connection limit (`validation`, `health_check`), if any. */
+  providerRate: string | null;
   /** `@RateClass()` of the route (step 6.1 D8), if any. */
   rateClass: RateClass | null;
   /** `@Idempotent()` options (step 6.1 D9), if any. */
@@ -116,6 +119,8 @@ export function discoverRoutes(app: INestApplication): DiscoveredRoute[] {
               null,
             archiveRate:
               (Reflect.getMetadata(ARCHIVE_RATE_LIMIT_KEY, handler) as string | undefined) ?? null,
+            providerRate:
+              (Reflect.getMetadata(PROVIDER_RATE_LIMIT_KEY, handler) as string | undefined) ?? null,
             policySampleRate:
               (Reflect.getMetadata(POLICY_SAMPLE_DRY_RUN_RATE_LIMIT_KEY, handler) as
                 string | undefined) ?? null,

@@ -42,6 +42,7 @@ import {
   DomainsRepository,
   isUniqueViolation,
 } from '../repositories/domains.repository';
+import { domainReserved } from '../../provider-connections/provider-connections.errors';
 import { VerificationsRepository } from '../repositories/verifications.repository';
 import { DomainConfigurationService } from './domain-configuration.service';
 import { DomainEventsService } from './domain-events.service';
@@ -53,6 +54,7 @@ export type DomainsConfig = Pick<
   | 'GATEWAY_MX_HOSTS'
   | 'GATEWAY_SPF_INCLUDE'
   | 'DOMAIN_VERIFICATION_LABEL'
+  | 'PROVIDER_PROBE_DOMAIN'
 >;
 
 /** The `max_domains` organization limit (step 1.3 D12). */
@@ -81,6 +83,8 @@ export class DomainsService {
   private readonly allowTestNames: boolean;
   /** Names customers may not add: configured suffixes and the platform's own DNS names (D2). */
   private readonly reservedNames: readonly string[];
+  /** Step 8.2 §4.4: the platform's probe domain (validation probe addresses live under it). */
+  private readonly probeDomain: string;
   /** Names longer than this would give record hosts over 253 characters (D2, D6). */
   private readonly maxNameLength: number;
 
@@ -104,6 +108,7 @@ export class DomainsService {
       config.GATEWAY_SPF_INCLUDE,
     ].map((name) => name.toLowerCase().replace(/\.$/, ''));
     this.maxNameLength = maxDomainNameLength(config.DOMAIN_VERIFICATION_LABEL);
+    this.probeDomain = config.PROVIDER_PROBE_DOMAIN.toLowerCase().replace(/\.$/, '');
   }
 
   /** Normalized ASCII name, or `400` with the D2 error code in the message. */
@@ -117,6 +122,9 @@ export class DomainsService {
       }
       throw err;
     }
+    // Step 8.2 §4.4 (ADR-0079): the probe domain and names under it are intercepted by the
+    // provider relay; a tenant may never own (add, hence verify) one: `422 domain_reserved`.
+    if (isDomainAtOrUnder(ascii, this.probeDomain)) throw domainReserved();
     const reserved = this.reservedNames.find((suffix) => isDomainAtOrUnder(ascii, suffix));
     if (reserved !== undefined) {
       throw new BadRequestException([`name: Domain name is reserved (${reserved}) (reserved)`]);

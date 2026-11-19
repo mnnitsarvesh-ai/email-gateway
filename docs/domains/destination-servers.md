@@ -111,16 +111,11 @@ Then turn on **Enhanced Filtering for Connectors** (Microsoft Defender portal �
 
 Mail that reaches Microsoft directly (anyone can connect to your `*.mail.protection.outlook.com` host, whatever your MX says) bypasses the gateway. Lock it down with a **mail flow (transport) rule** that rejects or quarantines messages from outside your organization that were not received from the gateway's IP addresses, following Microsoft's guidance for third-party filtering services.
 
-### 4. Optional: send outbound mail through the gateway
+### 4. Optional: send outbound and internal mail through the gateway
 
-The gateway accepts mail from your organization only through an **SMTP connector** of your organization that proves who is sending: **SMTP AUTH** on the submission port, or a **client certificate** that only you hold. It never trusts a sending IP address that other customers share.
+_Superseded in step 8.2:_ Exchange Online's outbound and internal mail **can** now be routed through the gateway with a **Microsoft 365 connection** (**Integrations → Microsoft 365 and Google Workspace → Connect**). The gateway still never trusts Microsoft's shared certificate or IP ranges alone: it accepts relayed mail from Microsoft's published ranges only for a sender domain linked to your connection, over TLS, and only when each message proves it comes from **your** tenant (Exchange Online's tenant header equals your tenant id, plus an aligned DKIM signature of your domain); anything else is refused ([ADR-0078](../architecture/adr/0078-provider-relay-tenant-attribution.md)). The connection's setup wizard previews every gateway-side change and asks for explicit confirmation, and the setup guide gives you the outbound connector, DKIM, SPF and internal-routing transport rules with your own values: see [Microsoft 365 through the gateway](../integrations/microsoft-365.md).
 
-That is a limitation with Exchange Online today: its connectors cannot use SMTP AUTH, and towards partner servers it identifies itself with Microsoft's certificate (subject `mail.protection.outlook.com`), which is the same for every Microsoft 365 customer, and from shared Microsoft IP ranges. A connector based on that certificate or those addresses would let any Microsoft 365 customer send as your domain. **Do not route Exchange Online's outbound mail to the gateway with such a connector.** Options:
-
-- Send outbound mail from systems that can authenticate (applications, devices, an on-premises or hybrid Exchange server with its own certificate) through an SMTP connector with SMTP AUTH or your own client certificate.
-- Keep Microsoft 365's outbound mail on Microsoft and use the gateway for inbound protection. Mail between your domains is then delivered by Microsoft as well.
-
-Contact support if you need Exchange Online outbound through the gateway; it requires a sender proof that is unique to your organization.
+**Do not** create an Exchange Online outbound connector to the gateway outside that workflow (for example an SMTP connector of type "source IP" for Microsoft's ranges): the gateway refuses `source_ip` networks that overlap a provider's shared ranges (`422 network_shared_provider`), because any Microsoft 365 customer could send as your domain through them. Systems that can authenticate (applications, devices, an on-premises or hybrid Exchange server with its own certificate) can still relay through an SMTP connector with SMTP AUTH or your own client certificate.
 
 ## Google Workspace
 
@@ -144,9 +139,9 @@ In the **Google Admin console → Apps → Google Workspace → Gmail → Spam, 
 4. Leave "Message is considered spam if the following header regexp matches" empty unless the gateway is configured to add a spam header for you.
 5. Save. Changes can take up to an hour.
 
-### 3. Optional: send outbound mail through the gateway
+### 3. Optional: send outbound and internal mail through the gateway
 
-Gmail can route outgoing mail to another server (**Apps → Google Workspace → Gmail → Routing**, or the **Outbound gateway** setting). Point it at the gateway's submission host and port shown in the portal and require TLS. The gateway accepts it only through an **SMTP connector** of your organization that authenticates with **SMTP AUTH** (or a client certificate unique to your organization). Check that your Gmail routing option can authenticate that way: a route identified only by Google's sending IP addresses is refused, because those addresses are shared by all Google customers and would let anyone send as your domain. If your edition cannot authenticate the route, keep outbound mail on Google and use the gateway for inbound protection.
+_Superseded in step 8.2:_ Gmail's outbound and internal mail is routed through the gateway with a **Google Workspace connection** (**Integrations → Microsoft 365 and Google Workspace → Connect**), not with an SMTP connector. The gateway accepts mail from Google's published ranges only for a sender domain linked to your connection, over TLS, and only with a fresh, aligned DKIM signature of your domain that has not been replayed ([ADR-0078](../architecture/adr/0078-provider-relay-tenant-attribution.md)); a route identified only by Google's shared sending addresses is never enough. The setup guide gives you the **Hosts**, **Routing** / **Outbound gateway** and **SMTP relay service** settings with your own values: see [Google Workspace through the gateway](../integrations/google-workspace.md). Applications and devices that can authenticate may still relay through an SMTP connector with SMTP AUTH or a client certificate.
 
 ## Link protection rewrites messages: trust the gateway
 

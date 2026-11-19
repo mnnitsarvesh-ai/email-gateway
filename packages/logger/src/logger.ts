@@ -36,6 +36,13 @@ const SECRET_FIELDS = [
   // Webhook signing secrets at rest (step 6.2 W7).
   'secretCiphertext',
   'previousSecretCiphertext',
+  // Provider credentials and admin-consent state (step 8.2 D17, ADR-0077): customer client
+  // secrets, Google service-account keys (also their `private_key` field) and the single-use
+  // consent `state` value. No service logs a field called `state` for anything else.
+  'clientSecret',
+  'serviceAccountKey',
+  'private_key',
+  'state',
 ];
 
 /**

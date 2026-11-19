@@ -12,9 +12,16 @@ import {
 
 export const ConnectorIdParamSchema = z.uuid();
 
+/** The auth types a client may create (step 2.2 D10). */
 export const CONNECTOR_AUTH_TYPES = ['sasl', 'source_ip', 'client_certificate'] as const;
 export const ConnectorAuthTypeSchema = z.enum(CONNECTOR_AUTH_TYPES);
 export type ConnectorAuthType = z.infer<typeof ConnectorAuthTypeSchema>;
+/**
+ * The auth types a connector may have (reads and filters): step 8.2 D7 adds `provider_relay`,
+ * created and changed only by a Microsoft 365 / Google Workspace connection (read-only here).
+ */
+export const CONNECTOR_VIEW_AUTH_TYPES = [...CONNECTOR_AUTH_TYPES, 'provider_relay'] as const;
+export const ConnectorViewAuthTypeSchema = z.enum(CONNECTOR_VIEW_AUTH_TYPES);
 export const ConnectorStatusSchema = z.enum(['active', 'disabled']);
 
 const NameSchema = z
@@ -152,7 +159,7 @@ export type UpdateConnectorInput = z.output<typeof UpdateConnectorSchema>;
 
 export const ListConnectorsQuerySchema = PageQuerySchema.extend({
   status: ConnectorStatusSchema.optional(),
-  authType: ConnectorAuthTypeSchema.optional(),
+  authType: ConnectorViewAuthTypeSchema.optional(),
 }).strict();
 export type ListConnectorsQuery = z.output<typeof ListConnectorsQuerySchema>;
 
@@ -168,8 +175,15 @@ export const ConnectorNetworkSchema = z.object({
 export const ConnectorSchema = z.object({
   id: z.uuid(),
   name: z.string(),
-  authType: ConnectorAuthTypeSchema,
+  authType: ConnectorViewAuthTypeSchema.describe(
+    '`provider_relay` connectors are managed by a Microsoft 365 / Google Workspace connection ' +
+      '(read-only here; step 8.2)',
+  ),
   status: ConnectorStatusSchema,
+  providerConnectionId: z
+    .uuid()
+    .nullable()
+    .describe('provider_relay only: the id of the managing provider connection'),
   saslUsername: z.string().nullable().describe('sasl only'),
   certificateFingerprintSha256: z
     .string()

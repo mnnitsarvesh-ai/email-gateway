@@ -281,6 +281,7 @@ export const NAVIGATION: readonly NavSection[] = [
           'WebhooksController_list_v1',
           'ApiKeysController_list_v1',
           'SmtpConnectorsController_list_v1',
+          'ProviderConnectionsController_list_v1',
         ],
       },
       {

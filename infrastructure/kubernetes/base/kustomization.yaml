@@ -53,6 +53,10 @@ resources:
   # MaxMind GeoIP databases are optional: components/ato-geoip adds the geoipupdate sidecar.
   - ato-detect.yaml
   - ato-respond.yaml
+  # Provider integrations (step 8.2 D11, docs/deployment/provider-integrations.md): grant
+  # verification, validation runs, health and maintenance; the only workload that decrypts
+  # customer provider credentials and holds the platform app/service-account keys.
+  - integration-worker.yaml
   # Outbox relay and reconciliation (step 3.2, ADR-0023).
   - event-relay.yaml
   - admin-portal.yaml

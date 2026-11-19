@@ -140,6 +140,15 @@ export const deliveryConfigShape = {
   POSTFIX_OUTBOUND_MYHOSTNAME: hostName.default('out.gateway.local'),
   /** Header block read cap before connecting (R8 step 2). */
   INGEST_HEADER_MAX_BYTES: z.coerce.number().int().min(1024).max(1_048_576).default(65_536),
+  /**
+   * Step 8.2 D9 (ADR-0081): HMAC key of the Microsoft 365 internal-routing route token (64 hex).
+   * Never logged. Unset: an internal delivery that needs the token is retried, never sent
+   * without it.
+   */
+  PROVIDER_ROUTE_TOKEN_KEY: z
+    .string()
+    .regex(/^[0-9a-fA-F]{64}$/, 'must be 64 hexadecimal characters')
+    .optional(),
 };
 
 /** Cross-field rules. */

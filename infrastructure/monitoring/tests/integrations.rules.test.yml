@@ -1,0 +1,256 @@
+# promtool unit tests of rules/integrations.rules.yml (step 8.2 D18):
+#   docker run --rm -v "$PWD/infrastructure/monitoring:/m:ro" --entrypoint promtool \
+#     prom/prometheus:v3.6.0 test rules /m/tests/integrations.rules.test.yml
+rule_files:
+  - ../rules/integrations.rules.yml
+evaluation_interval: 1m
+tests:
+  - name: integration-worker down
+    interval: 1m
+    input_series:
+      - series: up{job="integration-worker",instance="integration-worker:3086"}
+        values: 1x5 0x10
+      - series: up{job="integration-worker",instance="integration-worker-2:3086"}
+        values: 1x15
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: IntegrationWorkerDown
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: IntegrationWorkerDown
+        exp_alerts:
+          - exp_labels:
+              job: integration-worker
+              instance: integration-worker:3086
+              severity: warning
+            exp_annotations:
+              summary: An integration-worker replica is down
+              description:
+                Prometheus cannot scrape an integration-worker replica for 5 minutes. Grant
+                verifications, validation runs and connection health checks of that replica are not
+                progressing (other replicas take over expired claims); mail flow is unaffected (I1).
+              runbook_url: docs/runbooks/provider-integrations.md#integrationworkerdown
+  - name: egress ranges stale (leader gauge, max over replicas)
+    interval: 1m
+    input_series:
+      - series: provider_egress_set_age_seconds{job="integration-worker",instance="a",provider="microsoft_365"}
+        values: 3900000x90
+      - series: provider_egress_set_age_seconds{job="integration-worker",instance="b",provider="microsoft_365"}
+        values: '0x90'
+      - series: provider_egress_set_age_seconds{job="integration-worker",instance="a",provider="google_workspace"}
+        values: 86400x90
+    alert_rule_test:
+      - eval_time: 59m
+        alertname: ProviderEgressRangesStale
+        exp_alerts: []
+      - eval_time: 61m
+        alertname: ProviderEgressRangesStale
+        exp_alerts:
+          - exp_labels:
+              provider: microsoft_365
+              severity: warning
+            exp_annotations:
+              summary: The active microsoft_365 egress range set is older than 45 days
+              description:
+                The active provider egress range set was published more than 45 days ago. The relay
+                keeps using it, but mail from new provider addresses is relay-denied. Import the
+                provider's current list with the egress-import CLI.
+              runbook_url: docs/runbooks/provider-integrations.md#provideregressrangesstale
+  - name: egress ranges empty on one adapter replica while outbound is active
+    interval: 1m
+    input_series:
+      - series: provider_connections_outbound_active{job="integration-worker",instance="a",provider="microsoft_365"}
+        values: 2x30
+      - series: provider_connections_outbound_active{job="integration-worker",instance="b",provider="microsoft_365"}
+        values: '0x30'
+      - series: provider_connections_outbound_active{job="integration-worker",instance="a",provider="google_workspace"}
+        values: 1x30
+      - series: smtp_provider_egress_ranges{job="smtp-adapter",instance="s1",provider="microsoft_365"}
+        values: 8x30
+      - series: smtp_provider_egress_ranges{job="smtp-adapter",instance="s2",provider="microsoft_365"}
+        values: '0x30'
+      - series: smtp_provider_egress_ranges{job="smtp-adapter",instance="s1",provider="google_workspace"}
+        values: 27x30
+      - series: smtp_provider_egress_ranges{job="smtp-adapter",instance="s2",provider="google_workspace"}
+        values: 27x30
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: ProviderEgressRangesEmpty
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: ProviderEgressRangesEmpty
+        exp_alerts:
+          - exp_labels:
+              provider: microsoft_365
+              severity: critical
+            exp_annotations:
+              summary: No microsoft_365 egress ranges loaded while outbound relay is active
+              description:
+                'Organizations route outbound mail through the gateway from this provider, but at least
+                one smtp-adapter replica has loaded 0 egress ranges for it: their relayed mail is
+                deferred (fail closed). Check smtp_provider_egress_load_errors_total and the active
+                provider_egress_range_sets row; import the ranges if the set is empty.'
+              runbook_url: docs/runbooks/provider-integrations.md#provideregressrangesempty
+  - name: egress ranges never reported for a provider with outbound active; none without outbound
+    interval: 1m
+    input_series:
+      - series: provider_connections_outbound_active{job="integration-worker",instance="a",provider="google_workspace"}
+        values: 1x30
+      - series: provider_connections_outbound_active{job="integration-worker",instance="a",provider="microsoft_365"}
+        values: '0x30'
+      - series: smtp_provider_egress_ranges{job="smtp-adapter",instance="s1",provider="microsoft_365"}
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: ProviderEgressRangesEmpty
+        exp_alerts:
+          - exp_labels:
+              provider: google_workspace
+              severity: critical
+            exp_annotations:
+              summary: No google_workspace egress ranges loaded while outbound relay is active
+              description:
+                'Organizations route outbound mail through the gateway from this provider, but at least
+                one smtp-adapter replica has loaded 0 egress ranges for it: their relayed mail is
+                deferred (fail closed). Check smtp_provider_egress_load_errors_total and the active
+                provider_egress_range_sets row; import the ranges if the set is empty.'
+              runbook_url: docs/runbooks/provider-integrations.md#provideregressrangesempty
+  - name: relay proof failures above 20 % of at least 50 messages
+    interval: 1m
+    input_series:
+      - series: smtp_provider_proof_total{job="smtp-adapter",instance="s1",provider="google_workspace",rule="dkim_aligned",result="pass"}
+        values: 0+3x60
+      - series: smtp_provider_proof_total{job="smtp-adapter",instance="s1",provider="google_workspace",rule="dkim_aligned",result="fail"}
+        values: 0+1x60
+      - series: smtp_provider_proof_total{job="smtp-adapter",instance="s1",provider="microsoft_365",rule="tenant_header",result="pass"}
+        values: 0+10x60
+      - series: smtp_provider_proof_total{job="smtp-adapter",instance="s1",provider="microsoft_365",rule="dkim_aligned",result="pass"}
+        values: 0+10x60
+      - series: smtp_provider_proof_total{job="smtp-adapter",instance="s2",provider="microsoft_365",rule="dkim_aligned",result="fail"}
+        values: 0+1x60
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ProviderRelayProofFailuresHigh
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: ProviderRelayProofFailuresHigh
+        exp_alerts:
+          - exp_labels:
+              provider: google_workspace
+              severity: warning
+            exp_annotations:
+              summary: More than 20 % of google_workspace relayed messages fail the proof
+              description:
+                Over the last 30 minutes more than 20 % of at least 50 messages relayed from this
+                provider failed the tenant proof (tenant header or aligned DKIM) and were refused
+                with 550 5.7.26. Either a tenant's DKIM signing broke, a connection's tenant
+                changed, or someone abuses the shared provider infrastructure.
+              runbook_url: docs/runbooks/provider-integrations.md#providerrelayprooffailureshigh
+  - name: connections critical for 30 minutes
+    interval: 1m
+    input_series:
+      - series: provider_connections{job="integration-worker",instance="a",provider="microsoft_365",status="active",health="critical"}
+        values: 0x5 1x40
+      - series: provider_connections{job="integration-worker",instance="b",provider="microsoft_365",status="active",health="critical"}
+        values: '0x45'
+      - series: provider_connections{job="integration-worker",instance="a",provider="google_workspace",status="active",health="warning"}
+        values: 3x45
+      # A disconnected connection keeps its last health (no longer evaluated): never alerts.
+      - series: provider_connections{job="integration-worker",instance="a",provider="google_workspace",status="disabled",health="critical"}
+        values: 1x45
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: ProviderConnectionsCritical
+        exp_alerts: []
+      - eval_time: 37m
+        alertname: ProviderConnectionsCritical
+        exp_alerts:
+          - exp_labels:
+              provider: microsoft_365
+              severity: warning
+            exp_annotations:
+              summary: microsoft_365 connections critical for 30 minutes
+              description:
+                At least one provider connection has been in health "critical" for 30 minutes (its
+                failing checks are listed on the connection's health tab and in the
+                integration.health_changed webhook). Mail flow is unchanged (I1); open a ticket with
+                the organization if it persists.
+              runbook_url: docs/runbooks/provider-integrations.md#providerconnectionscritical
+  - name: token failures above half of the requests (cache hits excluded)
+    interval: 1m
+    input_series:
+      - series: provider_token_requests_total{job="integration-worker",instance="a",provider="google_workspace",method="customer_service_account",result="consent_missing"}
+        values: 0+2x60
+      - series: provider_token_requests_total{job="integration-worker",instance="a",provider="google_workspace",method="customer_service_account",result="ok"}
+        values: 0+1x60
+      - series: provider_token_requests_total{job="integration-worker",instance="a",provider="google_workspace",method="customer_service_account",result="cache_hit"}
+        values: 0+50x60
+      - series: provider_token_requests_total{job="integration-worker",instance="a",provider="microsoft_365",method="platform_app",result="ok"}
+        values: 0+5x60
+      - series: provider_token_requests_total{job="integration-worker",instance="a",provider="microsoft_365",method="platform_app",result="invalid_client"}
+        values: 0+1x60
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ProviderTokenFailures
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ProviderTokenFailures
+        exp_alerts:
+          - exp_labels:
+              provider: google_workspace
+              severity: warning
+            exp_annotations:
+              summary: More than half of the google_workspace token requests fail
+              description:
+                Over 30 minutes more than 50 % of the access-token requests to this provider failed
+                (result = a classified error code). Several tenants failing at once points at the
+                platform app or service account (expired certificate, deleted app, endpoint outage)
+                rather than at single tenants.
+              runbook_url: docs/runbooks/provider-integrations.md#providertokenfailures
+  - name: source_ip connector on a shared provider range
+    interval: 1m
+    input_series:
+      - series: smtp_connector_shared_provider_networks{job="integration-worker",instance="a"}
+        values: 0x5 2x30
+      - series: smtp_connector_shared_provider_networks{job="integration-worker",instance="b"}
+        values: '0x35'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: SmtpConnectorOnSharedProviderRange
+        exp_alerts: []
+      - eval_time: 22m
+        alertname: SmtpConnectorOnSharedProviderRange
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: source_ip SMTP connector networks overlap provider egress ranges
+              description:
+                "Active source_ip SMTP connectors accept mail from networks that belong to Microsoft
+                365 or Google Workspace shared infrastructure: any tenant of that provider could
+                relay as the connector's organization. Move the organization to a provider
+                connection (relay proof) and disable the source_ip connector."
+              runbook_url: docs/runbooks/provider-integrations.md#smtpconnectoronsharedproviderrange
+  - name: integration task backlog
+    interval: 1m
+    input_series:
+      - series: integration_worker_task_lag_seconds{job="integration-worker",instance="a"}
+        values: 10x5 400x30
+      - series: integration_worker_task_lag_seconds{job="integration-worker",instance="b"}
+        values: '0x35'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: IntegrationTaskBacklog
+        exp_alerts: []
+      - eval_time: 22m
+        alertname: IntegrationTaskBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Integration tasks wait more than 5 minutes
+              description:
+                'The oldest pending grant verification or queued validation run has waited more than
+                300 s for 15 minutes: the tasks role is down, saturated
+                (INTEGRATION_TASK_CONCURRENCY) or its provider calls time out.'
+              runbook_url: docs/runbooks/provider-integrations.md#integrationtaskbacklog

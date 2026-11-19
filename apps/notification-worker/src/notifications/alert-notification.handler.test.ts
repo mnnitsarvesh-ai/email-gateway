@@ -20,6 +20,7 @@ const SOURCE_EVENT = '0190f0f0-0000-7000-8000-00000000e300';
 const MESSAGE_PUBLIC = WEBHOOK_EXAMPLE_DATA['email.threat.detected'].message.id;
 const DOMAIN_PUBLIC = WEBHOOK_EXAMPLE_DATA['domain.dns.failed'].domain.id;
 const SUBSCRIPTION = '0192f0c4-aaaa-7bbb-8ccc-000000000001';
+const CONNECTION = WEBHOOK_EXAMPLE_DATA['integration.health_changed'].connection.id;
 const RECEIVED = '2026-11-13T09:14:02.481Z';
 const WINDOW = { from: '2026-11-13T09:00:00.000Z', to: '2026-11-13T10:00:00.000Z' };
 
@@ -47,7 +48,9 @@ function alert(
       ? { webhookEventId: threatStored().eventId, messageId: '501', receivedAt: RECEIVED }
       : kind === 'domain_dns_failed'
         ? { webhookEventId: dnsStored().eventId, domainId: '31' }
-        : { subscriptionId: SUBSCRIPTION };
+        : kind === 'integration_unhealthy'
+          ? { webhookEventId: integrationStored().eventId, connectionId: CONNECTION }
+          : { subscriptionId: SUBSCRIPTION };
   return {
     eventId: EVENT_ID,
     eventType: 'notification.alert_requested.v1',
@@ -106,6 +109,26 @@ function dnsStored(): StoredAlertEvent {
   };
 }
 
+function integrationStored(): StoredAlertEvent {
+  const built = buildEnvelope({
+    type: 'integration.health_changed',
+    occurredAt: '2026-11-13T09:30:00.000Z',
+    organizationPublicId: ORG_PUBLIC,
+    sourceEventId: SOURCE_EVENT,
+    data: WEBHOOK_EXAMPLE_DATA['integration.health_changed'],
+  });
+  return {
+    eventId: built.envelope.id,
+    eventType: 'integration.health_changed',
+    occurredAt: new Date('2026-11-13T09:30:00.000Z'),
+    severity: 'high',
+    messageId: null,
+    messageReceivedAt: null,
+    domainId: null,
+    envelope: built.envelope,
+  };
+}
+
 interface SetupOptions {
   configured?: boolean;
   fail?: boolean;
@@ -122,6 +145,7 @@ const HOLDERS: Record<string, Array<{ id: bigint; email: string }>> = {
   ],
   'domain:manage': [{ id: 13n, email: 'dom@acme.example' }],
   'webhook:manage': [{ id: 14n, email: 'hook@acme.example' }],
+  'integration:read': [{ id: 15n, email: 'ops@acme.example' }],
 };
 
 function setup(options: SetupOptions = {}) {
@@ -159,11 +183,8 @@ function setup(options: SetupOptions = {}) {
     ),
     windowEventCount: vi.fn(() => Promise.resolve(5)),
     webhookEvent: vi.fn((_tx: unknown, _org: bigint, eventId: string) => {
-      const threat = threatStored();
-      const dns = dnsStored();
-      return Promise.resolve(
-        eventId === threat.eventId ? threat : eventId === dns.eventId ? dns : null,
-      );
+      const stored = [threatStored(), dnsStored(), integrationStored()];
+      return Promise.resolve(stored.find((e) => e.eventId === eventId) ?? null);
     }),
     messageIdentity: vi.fn(() =>
       Promise.resolve({ publicId: MESSAGE_PUBLIC, receivedAt: new Date(RECEIVED) }),
@@ -182,6 +203,24 @@ function setup(options: SetupOptions = {}) {
         disabledAt: new Date('2026-11-13T09:00:00.000Z'),
         disabledReason: 'sustained_failure',
       }),
+    ),
+    providerConnection: vi.fn(
+      (_tx: unknown, _org: bigint, publicId: string) =>
+        Promise.resolve(
+          publicId === CONNECTION
+            ? {
+                publicId: CONNECTION,
+                displayName: 'Contoso tenant',
+                provider: 'microsoft_365',
+                healthStatus: 'critical',
+              }
+            : null,
+        ) as Promise<{
+          publicId: string;
+          displayName: string;
+          provider: string;
+          healthStatus: string;
+        } | null>,
     ),
   };
   const counts: Array<Record<string, string>> = [];
@@ -209,6 +248,71 @@ function setup(options: SetupOptions = {}) {
 const resolve = (stored: unknown) => resolveNotificationSettings(stored ?? null).settings;
 
 describe('AlertNotificationHandler (step 6.2 N3, N4)', () => {
+  it('integration_unhealthy (step 8.2 D12): integration:read holders, check titles, health link', async () => {
+    const s = setup();
+    expect(await s.handler.handle(alert('integration_unhealthy'), tx)).toBe('sent');
+    expect(s.reads.holders).toHaveBeenCalledWith(tx, 7n, 'integration:read', 50, null);
+    expect(s.reads.providerConnection).toHaveBeenCalledWith(tx, 7n, CONNECTION);
+    const mail = s.sent[0]!;
+    expect(mail.recipients).toEqual(['ops@acme.example', 'secops@acme.example']);
+    expect(mail.subject).toBe(
+      '[Email Gateway] Security alert (high): mail platform connection unhealthy',
+    );
+    expect(mail.text).toContain('Provider: Microsoft 365');
+    expect(mail.text).toContain(`Connection: Contoso tenant (${CONNECTION})`);
+    expect(mail.text).toContain('Health: healthy -> critical at 2026-11-13T09:30:00.000Z');
+    expect(mail.text).toContain(
+      '- Linked domains are verified in the provider tenant (domains.provider_verified)',
+    );
+    expect(mail.text).toContain(
+      '- No mail loops for linked domains in the last 24 hours (routing.loops)',
+    );
+    expect(mail.text).toContain(
+      `https://portal.example/integrations/providers/${CONNECTION}?tab=health`,
+    );
+    expect(mail.text).not.toContain('@');
+    expect(s.reads.windowEventCount).toHaveBeenCalledWith(
+      tx,
+      7n,
+      'integration_unhealthy',
+      CONNECTION,
+      new Date(WINDOW.from),
+    );
+    expect(s.counts).toEqual([{ kind: 'integration_unhealthy', result: 'sent' }]);
+  });
+
+  it('integration_unhealthy: refs missing, a foreign connection or a mismatched event dead-letter', async () => {
+    const s = setup();
+    await expect(
+      s.handler.handle(alert('integration_unhealthy', { refs: { connectionId: CONNECTION } }), tx),
+    ).rejects.toThrow(NonRetryableError);
+    await expect(
+      s.handler.handle(
+        alert('integration_unhealthy', {
+          refs: {
+            webhookEventId: integrationStored().eventId,
+            connectionId: '0192f0c4-ffff-7fff-8fff-000000000099',
+          },
+        }),
+        tx,
+      ),
+    ).rejects.toThrow('webhook_event_mismatch');
+    s.reads.providerConnection.mockResolvedValueOnce(null);
+    await expect(s.handler.handle(alert('integration_unhealthy'), tx)).rejects.toThrow(
+      'connection_not_found',
+    );
+    expect(s.sent).toEqual([]);
+  });
+
+  it('integration_unhealthy: a user who opted out is left out', async () => {
+    const s = setup();
+    preferenceRows = [
+      { organizationId: 7n, userId: 15n, preferences: { optOut: ['integration_unhealthy'] } },
+    ];
+    expect(await s.handler.handle(alert('integration_unhealthy'), tx)).toBe('sent');
+    expect(s.sent[0]!.recipients).toEqual(['secops@acme.example']);
+  });
+
   it('threat_detected: one mail to quarantine:approve holders + the organization contact, Bcc', async () => {
     const s = setup();
     expect(await s.handler.handle(alert('threat_detected'), tx)).toBe('sent');

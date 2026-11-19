@@ -32,9 +32,11 @@ import type { TenantScope } from '../../../auth-contracts/tenant-scope';
 import { ACCESS_TOKEN_SCHEME, API_KEY_SCHEME } from '../../../http/openapi';
 import type { Page } from '../../../http/pagination';
 import { RateLimit } from '../../../rate-limit/rate-limit.decorator';
+import { ApiCodedError } from '../../../http/coded-exception';
 import { zodToOpenApi } from '../../../validation/zod-openapi';
 import { ZodValidationPipe } from '../../../validation/zod-validation.pipe';
 import { ApiErrors } from '../../auth/api-docs';
+import { PROVIDER_ERROR_CODES } from '../../provider-connections/provider-connections.errors';
 import { Client } from '../../auth/client-context.decorator';
 import type { ClientContext } from '../../auth/services/session.service';
 import { ApiQueryFrom } from '../../organizations/api-docs';
@@ -66,6 +68,16 @@ import { SmtpConnectorsService } from '../services/smtp-connectors.service';
  * Outbound SMTP connectors of the caller's organization (step 2.2 §4.1, D10). The tenant
  * always comes from the credential; responses never contain a secret hash.
  */
+/** Step 8.2 §5.3: the two coded refusals of provider-related connector changes. */
+const MANAGED_409 =
+  'Conflicts with the current state; `connector_managed_by_provider_connection` for a ' +
+  '`provider_relay` connector (change it through its provider connection)';
+const MANAGED_CODES = ['conflict', PROVIDER_ERROR_CODES.connectorManagedByProviderConnection];
+const SHARED_PROVIDER_422 =
+  '`network_shared_provider`: a `source_ip` network overlaps a Microsoft 365 / Google Workspace ' +
+  'sending range (`index` of the network)';
+const INDEX_DETAIL = { index: { type: 'integer' as const } };
+
 @ApiTags('smtp-connectors')
 @ApiBearerAuth(ACCESS_TOKEN_SCHEME)
 @ApiSecurity(API_KEY_SCHEME)
@@ -92,12 +104,21 @@ export class SmtpConnectorsController {
       'presented on port 25 (globally unique, `409`), optionally restricted to networks. ' +
       '`requireTls` (default true) only applies to `source_ip`; the other types always need ' +
       `TLS. At most \`SMTP_CONNECTORS_MAX_PER_ORGANIZATION\` (default 50) per organization (\`409\`). ` +
-      'At most 20 per caller per minute (`429`).\n\n' +
+      'At most 20 per caller per minute (`429`). `source_ip` networks that overlap the shared ' +
+      'sending ranges of Microsoft 365 or Google Workspace are `422 network_shared_provider` ' +
+      '(`index`): connect the provider as a provider connection instead (step 8.2). ' +
+      '`provider_relay` connectors cannot be created here.\n\n' +
       SHARED_IP_WARNING,
   })
   @ApiBody({ schema: zodToOpenApi(CreateConnectorSchema, { io: 'input' }) })
   @ApiCreatedResponse({ schema: zodToOpenApi(CreatedConnectorSchema) })
   @ApiErrors(400, 401, 403, 409, 429, 503)
+  @ApiCodedError(
+    422,
+    SHARED_PROVIDER_422,
+    [PROVIDER_ERROR_CODES.networkSharedProvider],
+    INDEX_DETAIL,
+  )
   create(
     @CurrentPrincipal() principal: Principal,
     @CurrentScope() scope: TenantScope,
@@ -143,7 +164,10 @@ export class SmtpConnectorsController {
     summary: 'Update an SMTP connector',
     description:
       'Rename, enable/disable (`status`), change `requireTls` (source_ip only) or replace the ' +
-      'networks atomically (same rules as on create, `409` on overlap). A disabled connector ' +
+      'networks atomically (same rules as on create, `409` on overlap, `422 ' +
+      'network_shared_provider` for a provider sending range). `provider_relay` connectors are ' +
+      'managed by their provider connection: `409 connector_managed_by_provider_connection`. ' +
+      'A disabled connector ' +
       'authorizes nothing; the change reaches the mail path within the adapter cache TTL ' +
       '(about 30 s).\n\n' +
       SHARED_IP_WARNING,
@@ -151,7 +175,14 @@ export class SmtpConnectorsController {
   @ApiConnectorId()
   @ApiBody({ schema: zodToOpenApi(UpdateConnectorSchema, { io: 'input' }) })
   @ApiOkResponse({ schema: zodToOpenApi(ConnectorSchema) })
-  @ApiErrors(400, 401, 403, 404, 409, 503)
+  @ApiErrors(400, 401, 403, 404, 503)
+  @ApiCodedError(409, MANAGED_409, MANAGED_CODES)
+  @ApiCodedError(
+    422,
+    SHARED_PROVIDER_422,
+    [PROVIDER_ERROR_CODES.networkSharedProvider],
+    INDEX_DETAIL,
+  )
   update(
     @CurrentPrincipal() principal: Principal,
     @CurrentScope() scope: TenantScope,
@@ -170,12 +201,14 @@ export class SmtpConnectorsController {
   @ApiOperation({
     summary: 'Rotate the SASL password of a connector',
     description:
-      '`sasl` connectors only (`409` otherwise). Returns a new password **once**; the previous ' +
+      '`sasl` connectors only (`409` otherwise; `409 connector_managed_by_provider_connection` ' +
+      'for `provider_relay`). Returns a new password **once**; the previous ' +
       'password stops working immediately. At most 10 per caller per minute (`429`).',
   })
   @ApiConnectorId()
   @ApiOkResponse({ schema: zodToOpenApi(RotatedSecretSchema) })
-  @ApiErrors(400, 401, 403, 404, 409, 429)
+  @ApiErrors(400, 401, 403, 404, 429)
+  @ApiCodedError(409, MANAGED_409, MANAGED_CODES)
   rotateSecret(
     @CurrentPrincipal() principal: Principal,
     @CurrentScope() scope: TenantScope,
@@ -190,11 +223,15 @@ export class SmtpConnectorsController {
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({
     summary: 'Delete an SMTP connector',
-    description: 'Hard delete; its networks are removed with it and free for other connectors.',
+    description:
+      'Hard delete; its networks are removed with it and free for other connectors. ' +
+      '`provider_relay` connectors are removed by disconnecting their provider connection ' +
+      '(`409 connector_managed_by_provider_connection`).',
   })
   @ApiConnectorId()
   @ApiNoContentResponse({ description: 'Deleted' })
   @ApiErrors(400, 401, 403, 404)
+  @ApiCodedError(409, MANAGED_409, [PROVIDER_ERROR_CODES.connectorManagedByProviderConnection])
   remove(
     @CurrentPrincipal() principal: Principal,
     @CurrentScope() scope: TenantScope,

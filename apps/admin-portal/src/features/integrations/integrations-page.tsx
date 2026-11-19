@@ -3,16 +3,16 @@
 import { ArchiveIcon, CableIcon, KeyRoundIcon } from 'lucide-react';
 import Link from 'next/link';
 import { PageHeader } from '@/components/page-header';
-import { UnavailableState } from '@/components/states/unavailable-state';
 import { Button } from '@/components/ui/button';
 import { useCan } from '@/lib/auth/me';
 import { RouteGate } from '@/lib/auth/route-gate';
 import { Section } from '@/features/domains/kit';
+import { ProvidersSection } from './providers/providers-section';
 import { WebhooksSection } from './webhooks-section';
 
 /**
- * `/integrations`: webhooks (full list), API keys and SMTP connectors (link cards), and the
- * archive link card (step 8.1) and the honest unavailable state of the connectors of step 8.2.
+ * `/integrations`: webhooks (full list), the Microsoft 365 and Google Workspace connections
+ * (step 8.2 §6), API keys and SMTP connectors (link cards) and the archive link card (step 8.1).
  */
 export function IntegrationsPage() {
   return (
@@ -21,6 +21,7 @@ export function IntegrationsPage() {
         'WebhooksController_list_v1',
         'ApiKeysController_list_v1',
         'SmtpConnectorsController_list_v1',
+        'ProviderConnectionsController_list_v1',
       ]}
     >
       <Integrations />
@@ -32,14 +33,16 @@ function Integrations() {
   const canWebhooks = useCan('WebhooksController_list_v1');
   const canKeys = useCan('ApiKeysController_list_v1');
   const canConnectors = useCan('SmtpConnectorsController_list_v1');
+  const canProviders = useCan('ProviderConnectionsController_list_v1');
   const canArchiveSettings = useCan('ArchiveAdminController_get_v1');
   const canArchiveSearch = useCan('ArchiveMessagesController_list_v1');
   return (
     <div className="grid min-w-0 gap-6 [&>*]:min-w-0">
       <PageHeader
         title="Integrations"
-        description="Connect the gateway to your systems: webhooks for events, API keys for the REST API, SMTP connectors for relaying."
+        description="Connect the gateway to your systems: Microsoft 365 and Google Workspace mail flow, webhooks for events, API keys for the REST API, SMTP connectors for relaying."
       />
+      {canProviders ? <ProvidersSection /> : null}
       {canWebhooks ? <WebhooksSection /> : null}
       <div className="grid min-w-0 gap-6 md:grid-cols-2 [&>*]:min-w-0">
         {canKeys ? (
@@ -68,11 +71,6 @@ function Integrations() {
             </Button>
           </Section>
         ) : null}
-        <UnavailableState
-          step="8.2"
-          title="Microsoft 365 and Google Workspace"
-          description="API-based connectors for Microsoft 365 and Google Workspace mailboxes are not available yet."
-        />
         {canArchiveSettings || canArchiveSearch ? (
           <Section
             title="Archive and journaling"

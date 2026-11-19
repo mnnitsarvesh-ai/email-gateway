@@ -267,6 +267,24 @@ export const PERMISSIONS = Object.freeze([
     description:
       'Configure account takeover detection, scoring, notifications and automation (step 8.4)',
   },
+  // Step 8.2 (docs/plan/steps/25-m365-google-connectors.md D16): Microsoft 365 and Google
+  // Workspace connections. organization_admin and super_admin hold both through
+  // TENANT_PERMISSIONS / ALL_PERMISSIONS; domain_admin gets both and security_analyst
+  // integration:read, explicitly. integration:read is in TENANT_READ_PERMISSIONS (read_only_user,
+  // platform_admin, compliance_auditor; Q11): no credential is ever visible. Mail-flow applies
+  // additionally need domain:routing_manage or connector:manage (D13).
+  {
+    key: 'integration:read',
+    description:
+      'View Microsoft 365 and Google Workspace connections, their health, validations and setup ' +
+      'guides (step 8.2; never credentials)',
+  },
+  {
+    key: 'integration:manage',
+    description:
+      'Connect, consent, upload credentials, validate and change Microsoft 365 and Google ' +
+      'Workspace connections (step 8.2)',
+  },
 ] as const satisfies readonly PermissionDef[]);
 
 /** Every permission key of the catalog. */
@@ -303,6 +321,7 @@ export const TENANT_READ_PERMISSIONS: readonly PermissionKey[] = Object.freeze([
   'archive:read',
   'connector:read',
   'delivery:read',
+  'integration:read',
 ]);
 
 /** Keys of the 9 built-in system roles (D8; `mailbox_user` added in step 5.3 Q15). */
@@ -402,6 +421,8 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'delivery:suppression_manage',
       'quarantine:read',
       'report:read',
+      'integration:read',
+      'integration:manage',
     ],
   },
   {
@@ -441,6 +462,7 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'ato:read',
       'ato:manage',
       'ato:respond',
+      'integration:read',
     ],
   },
   {

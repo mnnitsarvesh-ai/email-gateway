@@ -6,6 +6,7 @@ import type {
   DomainDnsRecordsChangedV1,
   DomainStatusChangedV1,
   EventEnvelope,
+  IntegrationHealthChangedV1,
   MessageReceivedV1,
   MessageScannedV1,
   MessageStateChangedV1,
@@ -78,6 +79,8 @@ export interface PublicEvent {
   domainId: bigint | null;
   /** The public id of the alert scope (domain events) — N2 `scope_key`. */
   domainPublicId: string | null;
+  /** The provider connection public id (step 8.2 `integration.health_changed`), else null. */
+  connectionPublicId: string | null;
 }
 
 const iso = (date: Date): string => date.toISOString();
@@ -161,6 +164,7 @@ export async function buildPublicEvents(
       domainId?: bigint | null;
       domainPublicId?: string | null;
       verdict?: ScanVerdict;
+      connectionPublicId?: string;
     },
   ): void => {
     const severity = eventSeverity(candidate.type, data as never);
@@ -184,6 +188,7 @@ export async function buildPublicEvents(
       message: m?.key ?? null,
       domainId: m !== null ? m.domainId : (attributes.domainId ?? null),
       domainPublicId: m !== null ? m.domainPublicId : (attributes.domainPublicId ?? null),
+      connectionPublicId: attributes.connectionPublicId ?? null,
     });
   };
 
@@ -516,6 +521,23 @@ export async function buildPublicEvents(
             account: { id: p.accountPublicId, kind },
           },
           { message: null },
+        );
+        break;
+      }
+      case 'integration_health_changed': {
+        // Metadata only, from the payload alone (the integration-worker wrote it from the
+        // connection row in the transition's transaction): no read is needed.
+        const p = event.payload as IntegrationHealthChangedV1;
+        push(
+          candidate,
+          {
+            connection: { id: p.connectionId, provider: p.provider },
+            previousStatus: p.previousStatus,
+            status: p.status,
+            failingChecks: [...new Set(p.failingChecks)].slice(0, 10),
+            changedAt: p.changedAt,
+          },
+          { message: null, connectionPublicId: p.connectionId },
         );
         break;
       }

@@ -1,4 +1,8 @@
-import type { AlertKind } from '@email-gateway/webhooks';
+import {
+  type AlertKind,
+  INTEGRATION_PROVIDER_NAMES,
+  integrationCheckTitle,
+} from '@email-gateway/webhooks';
 import { type RenderedNotice, safeText } from './templates';
 
 /**
@@ -7,7 +11,9 @@ import { type RenderedNotice, safeText } from './templates';
  * far, events suppressed before it) and per kind: threat → verdict, detection stage, the message
  * public id and received time of the first event and `PORTAL_PUBLIC_URL/messages/<id>`; DNS → the
  * tenant's own domain name, the failing record purposes and `/domains/<id>`; webhook disabled →
- * the subscription name (sanitized, ≤ 80), its failure counters and `/webhooks/<id>`.
+ * the subscription name (sanitized, ≤ 80), its failure counters and `/webhooks/<id>`;
+ * integration unhealthy (step 8.2 D12) → the provider, the connection name (sanitized, ≤ 80), the
+ * transition, the failing check titles and `/integrations/providers/<id>?tab=health`.
  *
  * **Never** a subject, a body, a sender or recipient address, a URL found in mail, a file name,
  * an endpoint URL or a secret. Free text from the database (organization and subscription names)
@@ -66,18 +72,37 @@ export interface WebhookDisabledAlertFacts extends AlertCommonFacts {
   };
 }
 
-export type AlertFacts = ThreatAlertFacts | DnsAlertFacts | WebhookDisabledAlertFacts;
+export interface IntegrationAlertFacts extends AlertCommonFacts {
+  kind: 'integration_unhealthy';
+  integration: {
+    connectionPublicId: string;
+    name: string;
+    provider: string;
+    previousStatus: string;
+    status: string;
+    /** The connection's health when the alert is sent. */
+    statusNow: string;
+    /** Failing check codes of the transition (≤ 10). */
+    failingChecks: string[];
+    changedAt: string;
+  };
+}
+
+export type AlertFacts =
+  ThreatAlertFacts | DnsAlertFacts | WebhookDisabledAlertFacts | IntegrationAlertFacts;
 
 const KIND_TITLE: Readonly<Record<AlertKind, string>> = {
   threat_detected: 'Threat detected',
   domain_dns_failed: 'Domain DNS check failed',
   webhook_disabled: 'Webhook endpoint disabled',
+  integration_unhealthy: 'Microsoft 365 / Google Workspace connection unhealthy',
 };
 
 const KIND_SUBJECT: Readonly<Record<AlertKind, string>> = {
   threat_detected: 'threat detected',
   domain_dns_failed: 'domain DNS check failed',
   webhook_disabled: 'webhook endpoint disabled',
+  integration_unhealthy: 'mail platform connection unhealthy',
 };
 
 const CODE = /^[a-z][a-z0-9_]{0,63}$/;
@@ -111,6 +136,13 @@ const domainName = (value: string): string => {
   const name = value.trim().toLowerCase().replace(/\.$/, '');
   return /^[a-z0-9.-]{1,253}$/.test(name) ? name : '';
 };
+
+/** A dotted lower-case check code, or `unknown`. */
+const CHECK_CODE = /^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$/;
+const checkLine = (value: string): string =>
+  CHECK_CODE.test(value) && value.length <= 64
+    ? `- ${integrationCheckTitle(value)} (${value})`
+    : '- unknown';
 
 const list = (values: readonly string[]): string =>
   values.length === 0 ? 'none' : [...new Set(values.map(code))].join(', ');
@@ -169,6 +201,22 @@ function body(facts: AlertFacts): string[] {
         '',
         'Deliveries to this endpoint are paused until an administrator re-enables it.',
         ...(id ? [`Details: ${facts.portalUrl}/webhooks/${id}`] : []),
+      ];
+    }
+    case 'integration_unhealthy': {
+      const c = facts.integration;
+      const id = publicId(c.connectionPublicId);
+      const checks = [...new Set(c.failingChecks)].slice(0, 10);
+      return [
+        `Provider: ${INTEGRATION_PROVIDER_NAMES[c.provider] ?? 'unknown'}`,
+        `Connection: ${displayName(c.name, 80) || '(name not shown)'} (${id || 'unknown'})`,
+        `Health: ${code(c.previousStatus)} -> ${code(c.status)} at ${instant(c.changedAt)}`,
+        `Health now: ${code(c.statusNow)}`,
+        'Failing checks:',
+        ...(checks.length === 0 ? ['- none reported'] : checks.map(checkLine)),
+        '',
+        'Mail flow is not changed automatically: review the checks and the setup guide.',
+        ...(id ? [`Details: ${facts.portalUrl}/integrations/providers/${id}?tab=health`] : []),
       ];
     }
   }

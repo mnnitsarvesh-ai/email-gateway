@@ -90,6 +90,8 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'ato:manage',
     'ato:respond',
     'ato:configure',
+    'integration:read',
+    'integration:manage',
   ],
   platform_admin: [
     'organization:read',
@@ -114,6 +116,7 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'platform:scan_rescan',
     'threat_intel:read',
     'ato:read',
+    'integration:read',
   ],
   organization_admin: [
     'organization:read',
@@ -177,6 +180,8 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'ato:manage',
     'ato:respond',
     'ato:configure',
+    'integration:read',
+    'integration:manage',
   ],
   domain_admin: [
     'organization:read',
@@ -193,6 +198,8 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'domain:routing_manage',
     'delivery:read',
     'delivery:suppression_manage',
+    'integration:read',
+    'integration:manage',
   ],
   security_analyst: [
     'organization:read',
@@ -227,6 +234,7 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'ato:read',
     'ato:manage',
     'ato:respond',
+    'integration:read',
   ],
   quarantine_reviewer: [
     'organization:read',
@@ -265,6 +273,7 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'archive:retrieve',
     'ediscovery:manage',
     'ato:read',
+    'integration:read',
   ],
   read_only_user: [
     'organization:read',
@@ -279,6 +288,7 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'archive:read',
     'connector:read',
     'delivery:read',
+    'integration:read',
   ],
   mailbox_user: ['quarantine:self'],
 };

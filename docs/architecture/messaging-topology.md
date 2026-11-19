@@ -1,8 +1,15 @@
-# Messaging topology (RabbitMQ, topology v13)
+# Messaging topology (RabbitMQ, topology v14)
 
 The reference for the RabbitMQ broker objects of the gateway: exchanges, queues, bindings, routing keys, headers, policies, dead-letter paths, retry hops, the dormant-queue rule, users and permissions, and provisioning. Decisions: [ADR-0024](adr/0024-rabbitmq-topology-retry-dead-letter.md) (topology, retry, dead-letter, replay, least privilege; supersedes ADR-0005) and [ADR-0023](adr/0023-outbox-relay-and-reconciliation.md) (outbox relay and reconciliation). Design: [step 3.2](../plan/steps/07-rabbitmq.md) (§ and Q references below point there).
 
 ## Status
+
+**Topology v14 (step 8.2, [design §4.1, D12](../plan/steps/25-m365-google-connectors.md#41-topology-v14-wp1), [ADR-0079](adr/0079-connector-validation-probes-and-health.md)).** `TOPOLOGY_VERSION = 14` = v13 + step 8.2's binding (serialized merge onto step 8.4); six exchanges, **twenty-four** quorum queues, **73** bindings (68 queue + 5 exchange; v13: 72), 24 policies.
+
+- **`email.webhooks`** gains the binding `email.events` `org.*.integration.connection.health_changed.v1` (provider connection health transitions; same consumer `webhook-worker.fanout`, which projects them to the public webhook `integration.health_changed` and the alert `integration_unhealthy`).
+- **Event** ([below](#integration-events-step-82)): new **`integration.connection.health_changed.v1`** (exchange `email.events`, aggregate **`provider_connection`**, new: `aggregate_id` = the decimal `provider_connections.id`; producer the integration-worker's health role through the outbox, only on a health transition).
+- No exchange, queue, policy or broker user is added: the integration-worker publishes only through `message_outbox` and consumes no queue.
+- Upgrading a broker: `pnpm rabbitmq:init` (or the Compose `rabbitmq-init`) adds the binding and sets the vhost description `email-gateway topology v14`; `init.mjs` needs no change (bindings are declarative).
 
 **Topology v13 (step 8.4, [design D2, D3, §4.1](../plan/steps/24-account-takeover-core.md#d3-where-detection-runs-a-new-ato-worker-never-on-the-mail-path-adr-0070), [ADR-0070](adr/0070-ato-account-and-event-model.md)).** `TOPOLOGY_VERSION = 13`; six exchanges, **twenty-four** quorum queues (+3), **72** bindings (+14: 67 queue + 5 exchange), **24** policies (+3), **12** role users (+ `eg-ato`). The consumers (the `ato-worker`) are built in later work packages of 8.4; until then the three queues exist without a consumer and nothing publishes the eleven new event types.
 
@@ -180,6 +187,8 @@ Twenty-four quorum queues (durable, `x-queue-type: quorum` is the **only** queue
 | `email.analytics`          | dormant          | `email.events`    | `email.events`: `org.#` (the firehose: every event of every exchange)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | ClickHouse ingestion (ADR-0009), **not scheduled yet**                                                                                                                                                            | hold, 5, 1 s–60 s, 24 h                                  |
 | `email.dead-letter`        | dead-letter      | `email.events`    | none; internal binding `email.events`: `dead-letter.#`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | none: operators replay through the api (Q9, step 3.2 WP4)                                                                                                                                                         | –                                                        |
 
+v14 (step 8.2): `email.webhooks` also binds `email.events`: `org.*.integration.connection.health_changed.v1` (provider connection health transitions).
+
 Plus, on every work and dormant queue, exactly one **retry binding** `retry.<queue>.#` on its home exchange (v5: `scan.url` has the qualified `retry.scan.url.org.#`, because it is a dot-prefix of `scan.url.inspect` and `scan.url.results`; v8: `scan.sandbox` has `retry.scan.sandbox.org.#` for the same reason with `scan.sandbox.submissions` and `scan.sandbox.results`). 48 bindings in total (v1: 32, v2: 37, v3/v4: 35, v5: 39, v6/v7: 41, v8: 45, v9: 47, v10: 48): 43 queue bindings and the five exchange-to-exchange bindings `email.{ingestion,security,policy,delivery,archive}` → `email.events` (`org.#`).
 
 Where each event lands (`routeMessage`, asserted by `topology.test.ts`):
@@ -215,6 +224,7 @@ Where each event lands (`routeMessage`, asserted by `topology.test.ts`):
 | `security.incident.created.v1`, `security.incident.updated.v1`, `ato.account.risk.updated.v1`, `ato.response.completed.v1` | `email.webhooks`, `email.analytics` (v13)                                                           |
 | `ato.notification.requested.v1`                                                                                            | `email.notifications`, `email.analytics` (v13)                                                      |
 | `ato.restriction.changed.v1`                                                                                               | `email.analytics` (v13; no queue binding: smtp-adapter outbox tail)                                 |
+| `integration.connection.health_changed.v1`                                                                                 | `email.webhooks`, `email.analytics` (v14, step 8.2)                                                 |
 
 ```mermaid
 flowchart LR
@@ -280,6 +290,14 @@ flowchart LR
   QSP -.->|"dead-letter.scan.spam"| XE
   classDef p fill:#eef,stroke:#88a
 ```
+
+### Integration events (step 8.2)
+
+Registered in `EVENT_REGISTRY` (example in `examples.ts`, tests in `packages/event-contracts/src/integration-events.test.ts`); strict, ids, codes and times only ([contracts §33](contracts.md#33-provider-integrations-step-82)).
+
+| Event                                      | Exchange       | Aggregate                                                          | Bound to                                 | Payload (strict)                                                                                                                                                                                                                                                                                                                                                                       |
+| ------------------------------------------ | -------------- | ------------------------------------------------------------------ | ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `integration.connection.health_changed.v1` | `email.events` | **`provider_connection`** (new; decimal `provider_connections.id`) | `email.webhooks` (webhook-worker fanout) | `connectionId` (public UUID), `provider` (`microsoft_365`/`google_workspace`), `previousStatus`, `status` (`unknown`/`healthy`/`warning`/`critical`, previous ≠ status), `changedAt`, `failingChecks` (≤ 10 unique codes `^[a-z0-9_.]{1,64}$`). Producer: the integration-worker's health role, only on a transition; no tenant id or name, domain, evidence, error text or credential |
 
 ### Webhook and alert events (step 6.2)
 

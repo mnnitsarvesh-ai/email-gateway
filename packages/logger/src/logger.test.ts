@@ -185,6 +185,47 @@ describe('redaction of webhook secret ciphertexts (step 6.2 W7)', () => {
   });
 });
 
+describe('redaction of provider credentials and consent state (step 8.2 D17)', () => {
+  it.each(['clientSecret', 'serviceAccountKey', 'private_key', 'state'])(
+    'censors %s at the top level and one level down',
+    (field) => {
+      const out = capture();
+      const logger = createLogger({ service: 'test-svc', destination: out.stream });
+      const top = `${field}-top-value-0001`;
+      const nested = `${field}-nested-value-0002`;
+      logger.info({ [field]: top, body: { connectionId: 'conn-1', [field]: nested } }, 'provider');
+      const line = out.lines()[0]!;
+      const serialized = JSON.stringify(line);
+      expect(serialized).not.toContain(top);
+      expect(serialized).not.toContain(nested);
+      expect(line[field]).toBe('[REDACTED]');
+      expect((line.body as Record<string, unknown>).connectionId).toBe('conn-1');
+    },
+  );
+
+  it('censors a whole service-account key object', () => {
+    const out = capture();
+    const logger = createLogger({ service: 'test-svc', destination: out.stream });
+    logger.info(
+      {
+        body: {
+          serviceAccountKey: { client_email: 'sa@example.com', private_key: 'pk-value-0003' },
+        },
+      },
+      'upload',
+    );
+    expect(JSON.stringify(out.lines()[0])).not.toContain('pk-value-0003');
+  });
+
+  it('lists the paths and their *. variants', () => {
+    expect(REDACT_PATHS).toEqual(
+      expect.arrayContaining(
+        ['clientSecret', 'serviceAccountKey', 'private_key', 'state'].flatMap((f) => [f, `*.${f}`]),
+      ),
+    );
+  });
+});
+
 describe('redaction of mail content (step 3.1 M15)', () => {
   const fields = [
     'subject',

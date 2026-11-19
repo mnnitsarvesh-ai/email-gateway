@@ -38,5 +38,13 @@ export const TEST_DOMAIN_ENV: Record<string, string> = {
   ARCHIVE_ROOT_KEY: randomBytes(32).toString('hex'),
   ARCHIVE_DOWNLOAD_TOKEN_KEY: randomBytes(32).toString('hex'),
   ARCHIVE_EXPORT_SIGNING_PUBLIC_KEY: generateExportSigningKeyPair().publicKey,
+  // Step 8.2 §4.4: the provider credential, impact-token and route-token keys are required (fresh
+  // per test process) and the setup-guide gateway values have no default (documentation values).
+  PROVIDER_CREDENTIAL_ENCRYPTION_KEY: randomBytes(32).toString('hex'),
+  PROVIDER_IMPACT_TOKEN_KEY: randomBytes(32).toString('hex'),
+  PROVIDER_ROUTE_TOKEN_KEY: randomBytes(32).toString('hex'),
+  GATEWAY_EGRESS_NETWORKS: '192.0.2.10/32,2001:db8::10/128',
+  GATEWAY_RELAY_HOSTS: 'out1.mail-gateway.test,out2.mail-gateway.test',
+  GATEWAY_RELAY_TLS_NAME: 'out.mail-gateway.test',
   ...TEST_GENEROUS_RATE_LIMITS,
 };

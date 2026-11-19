@@ -7,11 +7,11 @@ import {
 } from './registry';
 
 /**
- * RabbitMQ topology v13 as data (step 3.2 §3, ADR-0024; v2: step 3.3 L7, ADR-0025; v3: step 4.1
+ * RabbitMQ topology v14 as data (step 3.2 §3, ADR-0024; v2: step 3.3 L7, ADR-0025; v3: step 4.1
  * S2, ADR-0026; v4: step 4.2 A2, ADR-0028; v5: step 4.3 U2, ADR-0029; v6: step 4.4 B3,
  * ADR-0033; v7: step 4.5 D2, ADR-0036; v8: step 4.6 X11, ADR-0040; v9: step 5.2 P15, ADR-0044;
  * v10: step 5.3 Q27, ADR-0046; v11: step 6.2 §4.3, ADR-0055; v12: step 8.1 A26, ADR-0064; v13:
- * step 8.4 D3, ADR-0070): exactly six topic exchanges and twenty-four quorum queues in the vhost
+ * step 8.4 D3, ADR-0070; v14: step 8.2 D12, ADR-0079): exactly six topic exchanges and twenty-four quorum queues in the vhost
  * `email-gateway`. v2 added the bindings of `mail.message.rescan_requested.v1`
  * (`email.security`) to the five scan queues, and `mail.message.state_changed.v1`
  * (`email.events`) reaches only the `email.analytics` firehose. v3 makes `scan.spam` a work queue
@@ -145,6 +145,13 @@ import {
  * exchange; +14) and twenty-four policies (+3); the other queues' policies are byte-identical to
  * v12.
  *
+ * v14 (step 8.2 D12, §4.1, ADR-0079) routes provider connection health transitions to the
+ * webhook fanout: `email.webhooks` binds `org.*.integration.connection.health_changed.v1` on
+ * `email.events` (producer integration-worker through the outbox; the fanout projects it to the
+ * public webhook `integration.health_changed` and the alert `integration_unhealthy`). v14 = v13 +
+ * step 8.2's binding: one binding more (seventy-three: 68 queue + 5 exchange); no exchange,
+ * queue, policy or broker user is added.
+ *
  * `infrastructure/rabbitmq/definitions.json` is
  * generated from `TOPOLOGY` (`pnpm --filter @email-gateway/event-contracts topology:export`) and
  * imported by `infrastructure/rabbitmq/init.mjs`; services never declare, they verify passively.
@@ -153,7 +160,7 @@ import {
  * target, overflow, length limits) is a per-queue policy `eg.<queue>` (Q4), so it changes without
  * re-declaring a queue.
  */
-export const TOPOLOGY_VERSION = 13;
+export const TOPOLOGY_VERSION = 14;
 export const DEFAULT_VHOST = 'email-gateway';
 
 /** The six exchanges of the topology (ADR-0024): all topic, durable, not internal. */
@@ -955,6 +962,8 @@ export const TOPOLOGY: Topology = {
         eventBinding('email.security', 'security.incident.updated.v1'),
         eventBinding('email.security', 'ato.account.risk.updated.v1'),
         eventBinding('email.security', 'ato.response.completed.v1'),
+        // v14 (step 8.2 D12, ADR-0079): provider connection health transitions.
+        eventBinding('email.events', 'integration.connection.health_changed.v1'),
         retryBinding('email.events', 'email.webhooks'),
       ],
       consumer: {
@@ -971,7 +980,7 @@ export const TOPOLOGY: Topology = {
       },
       policy: policyFor('work', 'email.webhooks'),
       description:
-        'Internal events projected to public webhook events and security alerts by the webhook-worker (step 6.2; security incidents and account takeover since step 8.4)',
+        'Internal events projected to public webhook events and security alerts by the webhook-worker (step 6.2; security incidents and account takeover since step 8.4; integration health, step 8.2)',
     },
     {
       // v13 (step 8.4 D2, D3, ADR-0070): the ato-worker's `detect` role consumes the

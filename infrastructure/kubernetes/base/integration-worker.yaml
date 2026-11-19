@@ -1,0 +1,241 @@
+# Integration worker (step 8.2 D11, docs/plan/steps/25-m365-google-connectors.md; ADR-0076..0079;
+# docs/deployment/provider-integrations.md). Roles INTEGRATION_WORKER_ROLES=tasks,health,maintenance
+# in every replica: tasks (grant verifications, provider domain checks, validation runs, probe
+# completion) and health (periodic connection health) claim rows with FOR UPDATE SKIP LOCKED and
+# leases, so every replica works; maintenance (retention, consent/probe expiry, credential
+# re-encryption after a key rotation, platform gauges) is leader-elected with
+# GET_LOCK('eg:integration:maintenance'). MySQL writer (claims, updates, audit, outbox) and reader
+# (delivery statistics); no RabbitMQ, no Redis, no S3. Egress: HTTPS to the Microsoft identity
+# platform / Graph and Google OAuth / Admin SDK, SMTP port 25 to customer destination hosts
+# (reachability probes: EHLO, STARTTLS, RCPT, never DATA).
+#
+# Custody (ADR-0077): the ONLY workload that decrypts customer provider credentials
+# (PROVIDER_CREDENTIAL_ENCRYPTION_KEY; the api only encrypts) and the only holder of the platform
+# Microsoft app's certificate (or secret) and the platform Google service-account key.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: integration-worker
+  labels: { app.kubernetes.io/name: integration-worker, app.kubernetes.io/part-of: email-gateway }
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels: { app.kubernetes.io/name: integration-worker }
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  template:
+    metadata:
+      labels:
+        { app.kubernetes.io/name: integration-worker, app.kubernetes.io/part-of: email-gateway }
+    spec:
+      serviceAccountName: integration-worker
+      automountServiceAccountToken: false
+      # A validation run's SMTP probes (15 s each) and provider calls (10 s) finish within the
+      # grace; an interrupted claim is taken over after its lease (120 s).
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile: { type: RuntimeDefault }
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app.kubernetes.io/name: integration-worker }
+      containers:
+        - name: integration-worker
+          image: email-gateway/integration-worker:latest
+          ports:
+            - { name: http, containerPort: 3086 }
+          envFrom:
+            - configMapRef: { name: email-gateway-config }
+          env:
+            # /health/live, /health/ready and /metrics only (D11).
+            - { name: INTEGRATION_WORKER_HTTP_PORT, value: '3086' }
+            - { name: INTEGRATION_WORKER_ROLES, value: 'tasks,health,maintenance' }
+            # Worker tunables (§4.4); shared keys (endpoints, probe domain, egress age, client ids)
+            # come from the ConfigMap.
+            - { name: INTEGRATION_TASK_POLL_MS, value: '2000' }
+            - { name: INTEGRATION_TASK_CONCURRENCY, value: '4' }
+            - { name: INTEGRATION_TX_TIMEOUT_MS, value: '120000' }
+            - { name: INTEGRATION_HEALTH_TICK_SECONDS, value: '60' }
+            - { name: INTEGRATION_HEALTH_INTERVAL_SECONDS, value: '900' }
+            - { name: INTEGRATION_HEALTH_ERROR_GRACE_MINUTES, value: '60' }
+            - { name: INTEGRATION_RELAY_IDLE_WARN_HOURS, value: '72' }
+            - { name: INTEGRATION_HTTP_TIMEOUT_MS, value: '10000' }
+            - { name: INTEGRATION_HTTP_MAX_RESPONSE_BYTES, value: '1048576' }
+            - { name: INTEGRATION_SMTP_PROBE_TIMEOUT_MS, value: '15000' }
+            # Empty = the pod's resolver (VPC resolver); empty HELO = POSTFIX_OUTBOUND_MYHOSTNAME.
+            # INTEGRATION_PROBE_CA_PATH is TEST-ONLY (refused outside local/ci): never set here.
+            - { name: INTEGRATION_PROBE_DNS_SERVERS, value: '' }
+            - { name: POSTFIX_OUTBOUND_MYHOSTNAME, value: out.replace-per-environment.invalid }
+            - { name: POSTFIX_MYHOSTNAME, value: mx.replace-per-environment.invalid }
+            # The platform Microsoft app authenticates with its CERTIFICATE in production (D2);
+            # a client secret is refused unless this is true.
+            - { name: PROVIDER_M365_ALLOW_PLATFORM_SECRET, value: 'false' }
+            # Secrets are mounted as files by External Secrets and read via the <KEY>_FILE convention.
+            - { name: DATABASE_URL_FILE, value: /var/run/secrets/gateway/database-url }
+            - { name: DATABASE_READ_URL_FILE, value: /var/run/secrets/gateway/database-read-url }
+            # Credential key (decrypt; the previous key only during a rotation, docs/runbooks/
+            # provider-integrations.md#credential-key-rotation).
+            - {
+                name: PROVIDER_CREDENTIAL_ENCRYPTION_KEY_FILE,
+                value: /var/run/secrets/provider-credential-key/key,
+              }
+            - name: PROVIDER_CREDENTIAL_ENCRYPTION_KEY_PREVIOUS
+              valueFrom:
+                secretKeyRef:
+                  { name: email-gateway-provider-credential-key, key: previous-key, optional: true }
+            # Platform credentials of the mail-flow profiles (the recommended methods, §15 Q1;
+            # docs/deployment/provider-integrations.md). Plain file paths (_PATH) into the Secret
+            # email-gateway-provider-platform. A deployment that does not offer a platform method
+            # removes its entries with an overlay patch (an unset path or client id = that method
+            # unavailable; customer-owned methods remain); a set path whose file is missing stops
+            # the worker at start (fail closed, never a silent fallback).
+            - {
+                name: PROVIDER_M365_MAILFLOW_APP_CERT_PATH,
+                value: /var/run/secrets/provider-platform/m365-mailflow-cert.pem,
+              }
+            - name: PROVIDER_M365_MAILFLOW_APP_CERT_THUMBPRINT
+              valueFrom:
+                secretKeyRef:
+                  { name: email-gateway-provider-platform, key: m365-mailflow-cert-thumbprint }
+            - {
+                name: PROVIDER_GOOGLE_MAILFLOW_SA_KEY_PATH,
+                value: /var/run/secrets/provider-platform/google-mailflow-sa-key.json,
+              }
+          volumeMounts:
+            - { name: secrets, mountPath: /var/run/secrets/gateway, readOnly: true }
+            - {
+                name: provider-credential-key,
+                mountPath: /var/run/secrets/provider-credential-key,
+                readOnly: true,
+              }
+            - {
+                name: provider-platform,
+                mountPath: /var/run/secrets/provider-platform,
+                readOnly: true,
+              }
+            - { name: tmp, mountPath: /tmp }
+          # Readiness: mysql (the replica's state is reported, never fatal). Provider endpoints are
+          # deliberately not readiness checks (I1: an outage degrades health, not the worker).
+          readinessProbe:
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /health/live, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          startupProbe:
+            httpGet: { path: /health/live, port: http }
+            periodSeconds: 5
+            failureThreshold: 24
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+      volumes:
+        - name: secrets
+          secret:
+            secretName: email-gateway-secrets
+            items:
+              - { key: database-url, path: database-url }
+              - { key: database-read-url, path: database-read-url }
+        - name: provider-credential-key
+          secret:
+            secretName: email-gateway-provider-credential-key
+            items: [{ key: key, path: key }]
+        # The platform Microsoft app's certificate + private key (PEM) and the platform Google
+        # service account's JSON key (see the env comment for deployments without them).
+        - name: provider-platform
+          secret:
+            secretName: email-gateway-provider-platform
+            items:
+              - { key: m365-mailflow-cert.pem, path: m365-mailflow-cert.pem }
+              - { key: google-mailflow-sa-key.json, path: google-mailflow-sa-key.json }
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: integration-worker
+  # No cloud permissions: MySQL credentials and keys come from Secrets.
+---
+# Metrics (/metrics) and health on the http port.
+apiVersion: v1
+kind: Service
+metadata:
+  name: integration-worker
+  labels: { app.kubernetes.io/name: integration-worker }
+spec:
+  selector: { app.kubernetes.io/name: integration-worker }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: integration-worker
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: integration-worker }
+---
+# Egress: MySQL, DNS, OTLP, HTTPS and SMTP (25) to public addresses only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: integration-worker
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: integration-worker }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # Metrics and probes only (Prometheus; the kubelet's probes are not subject to policies).
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: observability }
+          podSelector:
+            matchLabels: { app.kubernetes.io/name: prometheus }
+      ports: [{ protocol: TCP, port: 3086 }]
+  egress:
+    # MySQL writer and reader (RDS/Aurora subnet).
+    - to: [{ ipBlock: { cidr: 10.0.32.0/20 } }]
+      ports: [{ protocol: TCP, port: 3306 }]
+    # Cluster DNS.
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }]
+    # OTLP traces / logs to the collector.
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: observability }
+      ports: [{ protocol: TCP, port: 4318 }]
+    # Provider APIs (HTTPS) and SMTP reachability probes (25) to public addresses only; the
+    # worker also re-validates every destination host (validateDestinationHost) before a probe.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 0.0.0.0/8
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.0.0.0/24
+              - 192.168.0.0/16
+              - 198.18.0.0/15
+              - 224.0.0.0/4
+              - 240.0.0.0/4
+      ports: [{ protocol: TCP, port: 443 }, { protocol: TCP, port: 25 }]

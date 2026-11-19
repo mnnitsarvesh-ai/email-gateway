@@ -74,6 +74,9 @@ export function alertEnabled(
       return settings.alerts.domainDnsFailed.enabled;
     case 'webhook_disabled':
       return settings.alerts.webhookDisabled.enabled;
+    case 'integration_unhealthy':
+      // Step 8.2 D12: no tenant setting (always on; users opt out by preference).
+      return true;
   }
 }
 

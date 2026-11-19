@@ -97,6 +97,11 @@ export const configSchema = baseConfigSchema
     /** Budget of one fanout transaction (≥ 120 s, the 4.2 §6 rule). */
     WEBHOOK_FANOUT_TX_TIMEOUT_MS: int(120_000, 600_000).default(120_000),
     WEBHOOK_SUBSCRIPTION_CACHE_SECONDS: int(1, 60).default(5),
+    /**
+     * Step 8.2 D12: throttle (minutes) of `integration_unhealthy` alerts per provider connection
+     * (`notification_alert_windows`); platform configuration, not a tenant setting.
+     */
+    INTEGRATION_ALERT_THROTTLE_MINUTES: int(5, 10_080).default(60),
 
     // Delivery loop (W8).
     WEBHOOK_DELIVERY_POLL_INTERVAL_MS: int(100, 10_000).default(500),

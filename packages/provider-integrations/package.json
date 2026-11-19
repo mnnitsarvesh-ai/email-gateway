@@ -1,0 +1,27 @@
+{
+  "name": "@email-gateway/provider-integrations",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint --no-error-on-unmatched-pattern src integration",
+    "test": "vitest run --passWithNoTests",
+    "test:integration": "vitest run --config vitest.integration.config.ts --passWithNoTests"
+  },
+  "dependencies": {
+    "@email-gateway/database": "workspace:*",
+    "@email-gateway/logger": "workspace:*",
+    "@email-gateway/mail-routing": "workspace:*",
+    "jose": "^5.10.0",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.4"
+  }
+}

@@ -47,6 +47,7 @@ import {
 import { isPlatformDefaultId, POLICY_PLATFORM_DEFAULTS } from '@email-gateway/policy-dsl';
 import { validateQuarantinePlatformBounds } from '@email-gateway/quarantine';
 import { isPlatformProfileId, RISK_PLATFORM_PROFILE_IDS } from '@email-gateway/risk-scoring';
+import { isIP } from 'node:net';
 import { z } from 'zod';
 import {
   checkDohUrl,
@@ -1224,6 +1225,167 @@ function validateScanConfig(
   }
 }
 
+/** `GATEWAY_EGRESS_NETWORKS`: 1–64 canonical-looking CIDRs (`ip/prefix`; a bare IP is /32 or /128). */
+const egressNetworks = z.string().transform((value, ctx): string[] => {
+  const entries = splitList(value);
+  const ok = entries.every((entry) => {
+    const [ip, prefix, extra] = entry.split('/');
+    const version = isIP(ip ?? '');
+    if (version === 0 || extra !== undefined) return false;
+    if (prefix === undefined) return true;
+    if (!/^\d{1,3}$/.test(prefix)) return false;
+    return Number(prefix) <= (version === 4 ? 32 : 128);
+  });
+  if (!ok || entries.length < 1 || entries.length > 64) {
+    ctx.addIssue({ code: 'custom', message: 'must be a comma-separated list of 1-64 CIDRs' });
+    return z.NEVER;
+  }
+  return entries;
+});
+
+/** `GATEWAY_RELAY_HOSTS`: 1–10 DNS names (normalized). */
+const relayHosts = z.string().transform((value, ctx): string[] => {
+  const names = splitList(value).map(normalizeDnsName);
+  if (names.length < 1 || names.length > 10 || names.some((name) => !isDnsName(name))) {
+    ctx.addIssue({ code: 'custom', message: 'must be a comma-separated list of 1-10 DNS names' });
+    return z.NEVER;
+  }
+  return names;
+});
+
+/** A DNS name with at least two labels (normalized). */
+const multiLabelDnsName = z.string().transform((value, ctx) => {
+  const name = normalizeDnsName(value);
+  if (!isDnsName(name) || !name.includes('.')) {
+    ctx.addIssue({ code: 'custom', message: 'must be a DNS name with at least two labels' });
+    return z.NEVER;
+  }
+  return name;
+});
+
+/** An absolute provider endpoint URL (scheme checked by `validateProviderConfig`). */
+const providerUrl = (fallback: string) =>
+  z
+    .url({ protocol: /^https?$/ })
+    .transform((v) => v.replace(/\/+$/, ''))
+    .default(fallback);
+
+/**
+ * Microsoft 365 and Google Workspace connections, api side (step 8.2 §4.4,
+ * docs/plan/steps/25-m365-google-connectors.md D2, D3, D5, D13, D14; ADR-0076, ADR-0077, ADR-0080):
+ * the AES-256-GCM key that ENCRYPTS customer provider credentials (the api never decrypts; the
+ * previous key is validated here, used only by the integration-worker), the impact-token and
+ * route-token HMAC keys, the Microsoft login origin of admin-consent URLs (the api never calls a
+ * provider: no request is ever sent to these URLs from the api), the Google token URL an uploaded
+ * service-account key must name, the operator's platform client ids (never their secrets), the
+ * consent redirect target, lifetimes and bounds, the reserved probe domain and the gateway values
+ * of the setup guides. Start-up errors name the key, never the value.
+ */
+export const providerApiConfigShape = {
+  PROVIDER_CREDENTIAL_ENCRYPTION_KEY: aesKey,
+  /** Decryption-only key of the integration-worker while rotating; validated here, never used. */
+  PROVIDER_CREDENTIAL_ENCRYPTION_KEY_PREVIOUS: aesKey.optional(),
+  PROVIDER_IMPACT_TOKEN_KEY: aesKey,
+  PROVIDER_ROUTE_TOKEN_KEY: aesKey,
+  PROVIDER_M365_LOGIN_URL: providerUrl('https://login.microsoftonline.com'),
+  PROVIDER_M365_GRAPH_URL: providerUrl('https://graph.microsoft.com'),
+  PROVIDER_GOOGLE_TOKEN_URL: providerUrl('https://oauth2.googleapis.com/token'),
+  /** `http:` provider endpoints (the local provider-fake); refused outside APP_ENV local/ci. */
+  PROVIDER_ALLOW_HTTP_ENDPOINTS: bool.default(false),
+  /** Client id (GUID) of the operator's `m365.mail_flow` app; empty = platform app unavailable. */
+  PROVIDER_M365_MAILFLOW_APP_CLIENT_ID: z
+    .string()
+    .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/, 'must be a GUID')
+    .optional(),
+  /** OAuth client id of the operator's `google.mail_flow` service account; empty = unavailable. */
+  PROVIDER_GOOGLE_MAILFLOW_SA_CLIENT_ID: z
+    .string()
+    .regex(/^[0-9]{6,32}$/, 'must be a numeric OAuth client id')
+    .optional(),
+  /** Admin-consent redirect (the portal callback page); default `${PORTAL_PUBLIC_URL}/…`. */
+  PROVIDER_CONSENT_REDIRECT_URL: z.url({ protocol: /^https?$/ }).optional(),
+  PROVIDER_CONSENT_STATE_TTL_SECONDS: int(60, 3600).default(600),
+  PROVIDER_IMPACT_TOKEN_TTL_SECONDS: int(60, 3600).default(900),
+  PROVIDER_MAX_CONNECTIONS_PER_ORG: int(1, 100).default(10),
+  PROVIDER_MAX_DOMAINS_PER_CONNECTION: int(1, 5000).default(500),
+  /** Reserved domain of probe addresses; tenant domains equal to or under it are refused. */
+  PROVIDER_PROBE_DOMAIN: multiLabelDnsName.default('probe.mail-gateway.test'),
+  PROVIDER_PROBE_TTL_SECONDS: int(300, 604_800).default(86_400),
+  /** Setup-guide values (no default: every deployment states its own). */
+  GATEWAY_EGRESS_NETWORKS: egressNetworks,
+  GATEWAY_RELAY_HOSTS: relayHosts,
+  GATEWAY_RELAY_TLS_NAME: multiLabelDnsName,
+};
+
+export type ProviderApiConfigKeys = {
+  [K in keyof typeof providerApiConfigShape]: z.output<(typeof providerApiConfigShape)[K]>;
+};
+
+/**
+ * Cross-field rules of the provider keys (step 8.2 §4.4): `http:` endpoints only with
+ * PROVIDER_ALLOW_HTTP_ENDPOINTS, which is refused outside APP_ENV local/ci; https otherwise; a
+ * previous credential key that differs from the current one.
+ */
+export function validateProviderConfig(
+  cfg: Pick<
+    ProviderApiConfigKeys,
+    | 'PROVIDER_ALLOW_HTTP_ENDPOINTS'
+    | 'PROVIDER_M365_LOGIN_URL'
+    | 'PROVIDER_M365_GRAPH_URL'
+    | 'PROVIDER_GOOGLE_TOKEN_URL'
+    | 'PROVIDER_CREDENTIAL_ENCRYPTION_KEY'
+  > & {
+    PROVIDER_CONSENT_REDIRECT_URL?: string | undefined;
+    PROVIDER_CREDENTIAL_ENCRYPTION_KEY_PREVIOUS?: string | undefined;
+    APP_ENV: string;
+  },
+  ctx: z.RefinementCtx,
+): void {
+  const testEnv = cfg.APP_ENV === 'local' || cfg.APP_ENV === 'ci';
+  if (cfg.PROVIDER_ALLOW_HTTP_ENDPOINTS && !testEnv) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['PROVIDER_ALLOW_HTTP_ENDPOINTS'],
+      message: 'is a test seam and is refused outside APP_ENV local/ci',
+    });
+  }
+  const urls = {
+    PROVIDER_M365_LOGIN_URL: cfg.PROVIDER_M365_LOGIN_URL,
+    PROVIDER_M365_GRAPH_URL: cfg.PROVIDER_M365_GRAPH_URL,
+    PROVIDER_GOOGLE_TOKEN_URL: cfg.PROVIDER_GOOGLE_TOKEN_URL,
+  };
+  for (const [key, value] of Object.entries(urls)) {
+    if (value.startsWith('http://') && !cfg.PROVIDER_ALLOW_HTTP_ENDPOINTS) {
+      ctx.addIssue({
+        code: 'custom',
+        path: [key],
+        message: 'must be an https:// URL unless PROVIDER_ALLOW_HTTP_ENDPOINTS (local/ci)',
+      });
+    }
+  }
+  if (
+    cfg.PROVIDER_CONSENT_REDIRECT_URL?.startsWith('http://') &&
+    (cfg.APP_ENV === 'staging' || cfg.APP_ENV === 'production')
+  ) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['PROVIDER_CONSENT_REDIRECT_URL'],
+      message: 'must be an https:// URL when APP_ENV is staging or production',
+    });
+  }
+  if (
+    cfg.PROVIDER_CREDENTIAL_ENCRYPTION_KEY_PREVIOUS !== undefined &&
+    cfg.PROVIDER_CREDENTIAL_ENCRYPTION_KEY_PREVIOUS.toLowerCase() ===
+      cfg.PROVIDER_CREDENTIAL_ENCRYPTION_KEY.toLowerCase()
+  ) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['PROVIDER_CREDENTIAL_ENCRYPTION_KEY_PREVIOUS'],
+      message: 'must differ from PROVIDER_CREDENTIAL_ENCRYPTION_KEY',
+    });
+  }
+}
+
 export const apiConfigSchema = baseConfigSchema
   .extend(httpConfigSchema(3000).shape)
   .extend(databaseConfigSchema.shape)
@@ -1258,6 +1420,8 @@ export const apiConfigSchema = baseConfigSchema
   .extend(archiveApiConfigShape)
   // Step 8.4 §4.2: account takeover overview cache, report bound and response safeguards.
   .extend(atoApiConfigShape)
+  // Step 8.2 §4.4: provider connections (api encrypts credentials; never calls a provider).
+  .extend(providerApiConfigShape)
   .extend({
     /** Comma-separated allow-list of admin portal origins. */
     CORS_ORIGINS: z
@@ -1286,6 +1450,7 @@ export const apiConfigSchema = baseConfigSchema
     validateArchiveSearchConfig(cfg, ctx);
     validateArchiveTestSeam(cfg, ctx);
     validateArchiveApiConfig(cfg, ctx);
+    validateProviderConfig(cfg, ctx);
     if (cfg.AUTH_SESSION_MAX_AGE_SECONDS < cfg.AUTH_REFRESH_TOKEN_TTL_SECONDS) {
       ctx.addIssue({
         code: 'custom',

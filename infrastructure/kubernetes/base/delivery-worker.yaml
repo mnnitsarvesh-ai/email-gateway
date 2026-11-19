@@ -46,8 +46,20 @@ spec:
                 value: /var/run/secrets/gateway/rabbitmq-delivery-worker-url,
               }
             - { name: REDIS_URL_FILE, value: /var/run/secrets/gateway/redis-url }
+            # Microsoft 365 internal routing (step 8.2 D9, ADR-0081): the route-token key, the
+            # same value as the api's. A qualifying internal delivery without it is retried,
+            # never sent without the header.
+            - {
+                name: PROVIDER_ROUTE_TOKEN_KEY_FILE,
+                value: /var/run/secrets/provider-route-token-key/key,
+              }
           volumeMounts:
             - { name: secrets, mountPath: /var/run/secrets/gateway, readOnly: true }
+            - {
+                name: provider-route-token-key,
+                mountPath: /var/run/secrets/provider-route-token-key,
+                readOnly: true,
+              }
             - { name: tmp, mountPath: /tmp }
           readinessProbe:
             httpGet: { path: /health/ready, port: http }
@@ -71,6 +83,10 @@ spec:
       volumes:
         - name: secrets
           secret: { secretName: email-gateway-secrets }
+        - name: provider-route-token-key
+          secret:
+            secretName: email-gateway-provider-route-token-key
+            items: [{ key: key, path: key }]
         - name: tmp
           emptyDir: {}
 ---

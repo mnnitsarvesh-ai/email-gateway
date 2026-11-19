@@ -21,6 +21,7 @@ import {
   domainRoutingChangedV1,
   domainStatusChangedV1,
   EventTypes,
+  integrationHealthChangedV1,
   messageArchiveRequestedV1,
   messageDlpIncidentV1,
   messageParsedV1,
@@ -65,6 +66,9 @@ import type { ExchangeName } from './topology';
  * telemetry batch), `ato_account` (`ato_accounts.id`), `security_incident`
  * (`security_incidents.id`), `ato_response` (`ato_response_actions.id`), `ato_restriction`
  * (`ato_smtp_restrictions.id`), `ato_notification` (the organization id).
+ *
+ * `provider_connection` (step 8.2 §4.2): a provider connection's health transition
+ * (`aggregate_id` = the decimal `provider_connections.id`).
  */
 export type AggregateType =
   | 'message'
@@ -80,7 +84,8 @@ export type AggregateType =
   | 'security_incident'
   | 'ato_response'
   | 'ato_restriction'
-  | 'ato_notification';
+  | 'ato_notification'
+  | 'provider_connection';
 
 export interface EventDefinition<S extends z.ZodType = z.ZodType> {
   type: string;
@@ -381,6 +386,14 @@ export const EVENT_REGISTRY = {
     'email.security',
     atoNotificationRequestedV1,
     'ato_notification',
+  ),
+  // Step 8.2 D12, §4.2: producer integration-worker (health role) through the outbox, only on
+  // health transitions; bound to email.webhooks (consumer: webhook-worker fanout, topology v14).
+  [EventTypes.IntegrationHealthChanged]: define(
+    EventTypes.IntegrationHealthChanged,
+    'email.events',
+    integrationHealthChangedV1,
+    'provider_connection',
   ),
 } as const satisfies Record<string, EventDefinition>;
 

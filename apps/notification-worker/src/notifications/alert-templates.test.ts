@@ -179,3 +179,53 @@ describe('security alert templates (step 6.2 N4)', () => {
     expect(securityAlertMessageId(id, 'nobody')).toBe(`<security-alert.${id}@nobody>`);
   });
 });
+
+describe('integration_unhealthy template (step 8.2 D12)', () => {
+  const CONNECTION = '0192f0c4-d466-7173-8c84-6f708192a3b4';
+  const integration: AlertFacts = {
+    ...common,
+    kind: 'integration_unhealthy',
+    integration: {
+      connectionPublicId: CONNECTION,
+      name: 'https://evil.example/token',
+      provider: 'google_workspace',
+      previousStatus: 'warning',
+      status: 'critical',
+      statusNow: 'critical',
+      failingChecks: ['outbound.relay_activity', 'Bad Code', 'ato.unknown_check'],
+      changedAt: '2026-11-13T09:30:00.000Z',
+    },
+  };
+
+  it('names the provider, hides URL-looking names, titles known checks and links the health tab', () => {
+    const { subject, text } = renderSecurityAlert(integration);
+    expect(subject).toBe(
+      '[Email Gateway] Security alert (high): mail platform connection unhealthy',
+    );
+    expect(text).toContain('Provider: Google Workspace');
+    expect(text).toContain(`Connection: (name not shown) (${CONNECTION})`);
+    expect(text).not.toContain('evil.example');
+    expect(text).toContain(
+      '- Outbound mail arrives through the provider relay and passes the tenant proof (outbound.relay_activity)',
+    );
+    expect(text).toContain('- unknown');
+    expect(text).toContain('- ato.unknown_check (ato.unknown_check)');
+    expect(text).toContain(`${PORTAL}/integrations/providers/${CONNECTION}?tab=health`);
+    expect(text).toContain('Mail flow is not changed automatically');
+  });
+
+  it('renders an empty failing-check list and an unknown provider safely', () => {
+    const { text } = renderSecurityAlert({
+      ...integration,
+      integration: {
+        ...integration.integration,
+        provider: 'other',
+        name: 'Contoso',
+        failingChecks: [],
+      },
+    });
+    expect(text).toContain('Provider: unknown');
+    expect(text).toContain('- none reported');
+    expect(text).toContain('Connection: Contoso');
+  });
+});

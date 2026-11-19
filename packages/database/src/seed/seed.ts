@@ -12,6 +12,20 @@ import {
   SYSTEM_SETTINGS,
   permissionCategory,
 } from './catalog';
+import { seedProviderEgress } from './provider-egress';
+
+// Step 8.2 (§3.2): the provider egress range snapshot and its helpers, re-exported for the
+// import CLI (WP2) and tests.
+export {
+  PROVIDER_EGRESS_SNAPSHOT,
+  compareEgressRanges,
+  egressSetSha256,
+  parseEgressCidr,
+  seedProviderEgress,
+  type EgressRange,
+  type EgressSnapshotDef,
+  type ProviderEgressSeedSummary,
+} from './provider-egress';
 
 /**
  * Idempotent seeding (D7). Everything is an upsert on a natural unique key, or a find-then-
@@ -49,6 +63,8 @@ export interface CatalogSummary {
   systemSettings: number;
   /** Destination provider presets upserted (step 2.3 R2). */
   destinationPresets: number;
+  /** Providers whose egress range snapshot was inserted by this run (step 8.2 §3.2). */
+  providerEgressSetsCreated: string[];
   platformOrganizationId: bigint;
 }
 
@@ -158,6 +174,10 @@ export async function seedCatalog(
       });
     }
 
+    // Provider egress range snapshot (step 8.2 §3.2): only for a provider without any set, so
+    // an operator import is never overwritten.
+    const egress = await seedProviderEgress(tx);
+
     const platformOrganizationId = await ensurePlatformOrganization(tx, environment);
 
     return {
@@ -169,6 +189,7 @@ export async function seedCatalog(
       plans: PLANS.length,
       systemSettings: SYSTEM_SETTINGS.length,
       destinationPresets: MAIL_DESTINATION_PRESETS.length,
+      providerEgressSetsCreated: egress.created,
       platformOrganizationId,
     };
   }, TX_OPTIONS);

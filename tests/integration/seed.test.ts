@@ -17,7 +17,7 @@ import { stack } from './support/env';
 
 /**
  * db:seed (step 1.1 D7, step 1.2/1.3 D8 and D10) against the dev schema, with the DML account:
- * the catalog (68 permissions since step 8.4, the 9 system roles incl. mailbox_user (step 5.3 Q25), the platform organization, the step 2.3
+ * the catalog (70 permissions since step 8.2, 68 since step 8.4, the 9 system roles incl. mailbox_user (step 5.3 Q25), the platform organization, the step 2.3
  * destination provider presets), the retired
  * role-key remap, and idempotency (running it twice leaves the same row counts). The seeded
  * rows are dev data and are deliberately left in place.
@@ -116,7 +116,7 @@ describe('db:seed', () => {
     expect(await counts()).toEqual(afterFirst);
 
     expect(afterFirst).toMatchObject({
-      permissions: 68,
+      permissions: 70,
       systemRoles: 9,
       destinationPresets: 2,
       plans: expect.any(Number) as unknown,
@@ -377,7 +377,7 @@ describe('db:seed', () => {
     );
   });
 
-  it('seeds exactly the 68 permissions and the 9 system roles (D8 + mailbox_user, 5.3), with their permissions', async () => {
+  it('seeds exactly the 70 permissions and the 9 system roles (D8 + mailbox_user, 5.3), with their permissions', async () => {
     expect(seed().status).toBe(0);
     const permissions = await prisma.permission.findMany({ select: { key: true } });
     expect(permissions.map((p) => p.key).sort()).toEqual(PERMISSIONS.map((p) => p.key).sort());

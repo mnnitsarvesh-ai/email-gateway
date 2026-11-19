@@ -1586,3 +1586,78 @@ describe('loadApiConfig: email explorer and details (step 7.2 §2 E16)', () => {
     });
   });
 });
+
+describe('loadApiConfig: Microsoft 365 and Google Workspace connections (step 8.2 §4.4)', () => {
+  it('defaults the endpoints, lifetimes, bounds and probe domain', () => {
+    const cfg = loadApiConfig(valid);
+    expect(cfg).toMatchObject({
+      PROVIDER_M365_LOGIN_URL: 'https://login.microsoftonline.com',
+      PROVIDER_M365_GRAPH_URL: 'https://graph.microsoft.com',
+      PROVIDER_GOOGLE_TOKEN_URL: 'https://oauth2.googleapis.com/token',
+      PROVIDER_ALLOW_HTTP_ENDPOINTS: false,
+      PROVIDER_CONSENT_STATE_TTL_SECONDS: 600,
+      PROVIDER_IMPACT_TOKEN_TTL_SECONDS: 900,
+      PROVIDER_MAX_CONNECTIONS_PER_ORG: 10,
+      PROVIDER_MAX_DOMAINS_PER_CONNECTION: 500,
+      PROVIDER_PROBE_DOMAIN: 'probe.mail-gateway.test',
+      PROVIDER_PROBE_TTL_SECONDS: 86_400,
+    });
+    expect(cfg.PROVIDER_M365_MAILFLOW_APP_CLIENT_ID).toBeUndefined();
+    expect(cfg.GATEWAY_RELAY_HOSTS).toEqual(['out1.mail-gateway.test', 'out2.mail-gateway.test']);
+    expect(cfg.GATEWAY_EGRESS_NETWORKS).toEqual(['192.0.2.10/32', '2001:db8::10/128']);
+  });
+
+  it('requires the three keys and names them, never their values', () => {
+    for (const key of [
+      'PROVIDER_CREDENTIAL_ENCRYPTION_KEY',
+      'PROVIDER_IMPACT_TOKEN_KEY',
+      'PROVIDER_ROUTE_TOKEN_KEY',
+    ]) {
+      expect(rejection({ ...valid, [key]: undefined })).toContain(key);
+      const short = 'ab'.repeat(16);
+      const message = rejection({ ...valid, [key]: short });
+      expect(message).toContain(key);
+      expect(message).not.toContain(short);
+    }
+    expect(
+      rejection({
+        ...valid,
+        PROVIDER_CREDENTIAL_ENCRYPTION_KEY_PREVIOUS:
+          TEST_DOMAIN_ENV.PROVIDER_CREDENTIAL_ENCRYPTION_KEY,
+      }),
+    ).toContain('PROVIDER_CREDENTIAL_ENCRYPTION_KEY_PREVIOUS');
+  });
+
+  it('refuses http endpoints unless the local/ci test seam allows them', () => {
+    const http = { PROVIDER_M365_LOGIN_URL: 'http://provider-fake:8480/m365/login' };
+    expect(rejection({ ...valid, ...http })).toContain('PROVIDER_M365_LOGIN_URL');
+    expect(
+      loadApiConfig({ ...valid, ...http, PROVIDER_ALLOW_HTTP_ENDPOINTS: 'true', APP_ENV: 'local' })
+        .PROVIDER_M365_LOGIN_URL,
+    ).toBe('http://provider-fake:8480/m365/login');
+    expect(
+      rejection({ ...valid, PROVIDER_ALLOW_HTTP_ENDPOINTS: 'true', APP_ENV: 'production' }),
+    ).toContain('PROVIDER_ALLOW_HTTP_ENDPOINTS');
+  });
+
+  it('validates the client ids, the gateway values and the probe domain', () => {
+    expect(rejection({ ...valid, PROVIDER_M365_MAILFLOW_APP_CLIENT_ID: 'not-a-guid' })).toContain(
+      'PROVIDER_M365_MAILFLOW_APP_CLIENT_ID',
+    );
+    expect(rejection({ ...valid, PROVIDER_GOOGLE_MAILFLOW_SA_CLIENT_ID: 'abc' })).toContain(
+      'PROVIDER_GOOGLE_MAILFLOW_SA_CLIENT_ID',
+    );
+    expect(rejection({ ...valid, GATEWAY_EGRESS_NETWORKS: '192.0.2.10/33' })).toContain(
+      'GATEWAY_EGRESS_NETWORKS',
+    );
+    expect(rejection({ ...valid, GATEWAY_RELAY_HOSTS: 'bad host' })).toContain(
+      'GATEWAY_RELAY_HOSTS',
+    );
+    expect(rejection({ ...valid, PROVIDER_PROBE_DOMAIN: 'localhost' })).toContain(
+      'PROVIDER_PROBE_DOMAIN',
+    );
+    expect(rejection({ ...valid, GATEWAY_RELAY_TLS_NAME: undefined })).toContain(
+      'GATEWAY_RELAY_TLS_NAME',
+    );
+  });
+});

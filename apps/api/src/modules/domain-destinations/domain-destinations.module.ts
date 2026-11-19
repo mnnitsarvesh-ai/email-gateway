@@ -16,5 +16,7 @@ import { DomainDestinationsService } from './services/domain-destinations.servic
   imports: [DomainsModule],
   controllers: [DestinationProvidersController, DomainDestinationsController],
   providers: [DomainDestinationsRepository, DomainDestinationsService],
+  // Step 8.2 D13: the provider wizard applies destinations inside its own transaction.
+  exports: [DomainDestinationsService],
 })
 export class DomainDestinationsModule {}

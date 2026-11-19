@@ -284,3 +284,38 @@ data:
   ARCHIVE_EXPORT_MAX_ITEMS: '10000'
   ARCHIVE_EXPORT_MAX_BYTES: '2147483648'
   ARCHIVE_EXPORT_TTL_HOURS: '168'
+  # Provider integrations (step 8.2 §4.4, docs/plan/steps/25-m365-google-connectors.md;
+  # docs/deployment/provider-integrations.md). Shared by the api (consent URLs, guides, bounds),
+  # the smtp-adapter (probe domain) and the integration-worker. Endpoints are configuration,
+  # never tenant input; https only (PROVIDER_ALLOW_HTTP_ENDPOINTS is a local/ci seam). Secrets are
+  # NOT here: PROVIDER_CREDENTIAL_ENCRYPTION_KEY (+ _PREVIOUS) is the Secret
+  # email-gateway-provider-credential-key (api: encrypt, integration-worker: decrypt);
+  # PROVIDER_IMPACT_TOKEN_KEY (api; Secret email-gateway-provider-impact-token-key) and
+  # PROVIDER_ROUTE_TOKEN_KEY (api, delivery-worker; email-gateway-provider-route-token-key) are
+  # their own Secrets; the platform app certificate / service-account key live only in
+  # email-gateway-provider-platform (integration-worker).
+  PROVIDER_M365_LOGIN_URL: https://login.microsoftonline.com
+  PROVIDER_M365_GRAPH_URL: https://graph.microsoft.com
+  PROVIDER_GOOGLE_TOKEN_URL: https://oauth2.googleapis.com/token
+  PROVIDER_GOOGLE_ADMIN_URL: https://admin.googleapis.com
+  PROVIDER_ALLOW_HTTP_ENDPOINTS: 'false'
+  # Client ids of the operator's multi-tenant Entra app / Google service account (mail-flow
+  # profile). Empty = the platform method is unavailable. Set per overlay.
+  PROVIDER_M365_MAILFLOW_APP_CLIENT_ID: ''
+  PROVIDER_GOOGLE_MAILFLOW_SA_CLIENT_ID: ''
+  # The portal's consent callback (https; registered as the app's redirect URI). Set per overlay.
+  PROVIDER_CONSENT_REDIRECT_URL: https://portal.replace-per-environment.invalid/integrations/providers/consent-callback
+  PROVIDER_CONSENT_STATE_TTL_SECONDS: '600'
+  PROVIDER_IMPACT_TOKEN_TTL_SECONDS: '900'
+  PROVIDER_MAX_CONNECTIONS_PER_ORG: '10'
+  PROVIDER_MAX_DOMAINS_PER_CONNECTION: '500'
+  # An operator-owned subdomain no tenant uses (§15 Q9). Set per overlay.
+  PROVIDER_PROBE_DOMAIN: probe.replace-per-environment.invalid
+  PROVIDER_PROBE_TTL_SECONDS: '86400'
+  PROVIDER_EGRESS_MAX_AGE_DAYS: '45'
+  # The gateway's real egress CIDRs and relay host names (setup guides). Set per overlay.
+  GATEWAY_EGRESS_NETWORKS: 192.0.2.10/32
+  GATEWAY_RELAY_HOSTS: out.replace-per-environment.invalid
+  GATEWAY_RELAY_TLS_NAME: out.replace-per-environment.invalid
+  # webhook-worker: throttle of the integration_unhealthy alert per connection.
+  INTEGRATION_ALERT_THROTTLE_MINUTES: '60'

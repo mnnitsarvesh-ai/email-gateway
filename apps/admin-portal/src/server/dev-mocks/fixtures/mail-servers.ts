@@ -4,6 +4,7 @@ import { SeededRandom, paginate, stableUuid } from '../generator';
 import { apiError, noContent, ok, type FixtureHandlers, type FixtureResponse } from '../types';
 import { DAY, HOUR, MINUTE, bodyOf, domainsOf, guarded, idempotent, isoAgo } from './domains';
 import { maskAddress } from './message-dataset';
+import { providerConnectionFixtureId } from './provider-connections';
 
 export { DEV_MOCK_MARKER } from '../types';
 
@@ -39,6 +40,14 @@ const state: MailServerState = (globalState.__egDevFixtureMailServers ??= {
 /** Manual + unsubscribe entries allowed per organization (RECIPIENT_SUPPRESSIONS_MAX_MANUAL). */
 const MAX_MANUAL = 60;
 
+function managedByProviderConnection(): FixtureResponse {
+  return apiError(
+    409,
+    'connector_managed_by_provider_connection',
+    'This connector is managed by its Microsoft 365 or Google Workspace connection',
+  );
+}
+
 function fakePassword(): string {
   return `dev-fixture-sasl-${crypto.randomUUID().replace(/-/g, '')}`;
 }
@@ -50,6 +59,8 @@ function seed(organizationId: string): OrgState {
     { name: 'Datacenter relay', authType: 'source_ip' as const },
     { name: 'Scanner appliance', authType: 'client_certificate' as const },
     { name: 'Legacy CRM relay', authType: 'sasl' as const },
+    // Created by the Microsoft 365 wizard (step 8.2 D7): read-only here, linked to its connection.
+    { name: 'Microsoft 365 relay: Contoso production', authType: 'provider_relay' as const },
   ].map((c, i) => {
     const created = isoAgo((i + 2) * 9 * DAY);
     return {
@@ -68,6 +79,8 @@ function seed(organizationId: string): OrgState {
           : [],
       requireTls: true,
       secretSetAt: c.authType === 'sasl' ? created : null,
+      providerConnectionId:
+        c.authType === 'provider_relay' ? providerConnectionFixtureId(organizationId, 0) : null,
       createdAt: created,
       updatedAt: created,
     };
@@ -203,6 +216,7 @@ export const fixtures: FixtureHandlers = {
         networks,
         requireTls: body.requireTls ?? true,
         secretSetAt: authType === 'sasl' ? now : null,
+        providerConnectionId: null,
         createdAt: now,
         updatedAt: now,
       };
@@ -226,6 +240,7 @@ export const fixtures: FixtureHandlers = {
       const index = org.connectors.findIndex((c) => c.id === request.params.id);
       const current = org.connectors[index];
       if (!current) return connectorNotFound();
+      if (current.authType === 'provider_relay') return managedByProviderConnection();
       const body = bodyOf<RequestBody<'SmtpConnectorsController_update_v1'>>(request);
       if (body.networks !== undefined && current.authType === 'sasl')
         return apiError(400, 'validation_failed', ['networks: not allowed for sasl connectors']);
@@ -248,6 +263,8 @@ export const fixtures: FixtureHandlers = {
     'SmtpConnectorsController_remove_v1',
     (request, p) => {
       const org = orgState(p.organizationId);
+      const target = org.connectors.find((c) => c.id === request.params.id);
+      if (target?.authType === 'provider_relay') return managedByProviderConnection();
       const before = org.connectors.length;
       org.connectors = org.connectors.filter((c) => c.id !== request.params.id);
       return org.connectors.length < before ? noContent() : connectorNotFound();
@@ -260,6 +277,7 @@ export const fixtures: FixtureHandlers = {
         (c) => c.id === request.params.id,
       );
       if (!connector) return connectorNotFound();
+      if (connector.authType === 'provider_relay') return managedByProviderConnection();
       if (connector.authType !== 'sasl')
         return apiError(409, 'conflict', 'Only sasl connectors have a secret');
       connector.secretSetAt = new Date().toISOString();

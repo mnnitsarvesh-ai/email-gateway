@@ -59,6 +59,14 @@ export interface AlertSubscription {
   disabledReason: string | null;
 }
 
+/** A provider connection of the organization (step 8.2 D12): display fields only. */
+export interface AlertProviderConnection {
+  publicId: string;
+  displayName: string;
+  provider: string;
+  healthStatus: string;
+}
+
 /**
  * The writer reads of the security alerts (step 6.2 N3, N4), inside the consumer's idempotency
  * transaction, each scoped to the envelope's organization and echo-checked (4.2 §6, D15 of 6.1):
@@ -252,12 +260,43 @@ export class SecurityAlertReads {
       disabledReason: row.disabledReason,
     };
   }
+
+  /**
+   * A provider connection of the organization by public id (step 8.2 D12): its name, provider and
+   * current health only — never the tenant id, grants, credentials or attestations.
+   */
+  async providerConnection(
+    tx: Tx,
+    organizationId: bigint,
+    publicId: string,
+  ): Promise<AlertProviderConnection | null> {
+    const row = await tx.providerConnection.findFirst({
+      where: { publicId, organizationId },
+      select: {
+        publicId: true,
+        organizationId: true,
+        displayName: true,
+        provider: true,
+        healthStatus: true,
+      },
+    });
+    if (row === null) return null;
+    if (row.publicId !== publicId || row.organizationId !== organizationId) {
+      throw new InconsistentNotificationReadError('provider_connection');
+    }
+    return {
+      publicId: row.publicId,
+      displayName: row.displayName,
+      provider: row.provider,
+      healthStatus: row.healthStatus,
+    };
+  }
 }
 
 /** `notification_alert_windows.scope_key` of an alert (N2). */
 export function alertScopeKey(
   kind: AlertKind,
-  scope: { domainPublicId?: string; subscriptionPublicId?: string },
+  scope: { domainPublicId?: string; subscriptionPublicId?: string; connectionPublicId?: string },
 ): string {
   switch (kind) {
     case 'threat_detected':
@@ -266,5 +305,7 @@ export function alertScopeKey(
       return scope.domainPublicId ?? ALERT_SCOPE_NONE;
     case 'webhook_disabled':
       return scope.subscriptionPublicId ?? ALERT_SCOPE_NONE;
+    case 'integration_unhealthy':
+      return scope.connectionPublicId ?? ALERT_SCOPE_NONE;
   }
 }

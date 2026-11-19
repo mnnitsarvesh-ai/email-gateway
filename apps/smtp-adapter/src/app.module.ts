@@ -21,6 +21,7 @@ import {
 import { INGESTION_HEALTH_INDICATORS, IngestionModule } from './ingestion/ingestion.module';
 import { PolicyModule } from './policy/policy.module';
 import { PolicyServerService } from './policy/policy-server.service';
+import { ProviderRelayModule } from './provider-relay/provider-relay.module';
 import { SaslModule } from './sasl/sasl.module';
 import { SaslServerService } from './sasl/sasl-server.service';
 import { parseNetworkList } from './shared/internal-networks';
@@ -88,6 +89,8 @@ export class AppModule {
         S3Module.forRoot(config),
         MetricsModule.forRoot({ service: SERVICE_NAME }),
         SmtpSharedModule,
+        // Step 8.2 D7/D8/D10: provider relay (before the policy and ingestion that use it).
+        ProviderRelayModule,
         PolicyModule,
         SocketmapModule,
         SaslModule,

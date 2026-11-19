@@ -8,6 +8,7 @@ import { DomainsRepository } from './domains.repository';
 import { MessagesRepository } from './messages.repository';
 import { PoliciesRepository } from './policies.repository';
 import { PolicyTenantDataRepository } from './policy-tenant-data.repository';
+import { ProviderTenantDataRepository } from './provider-tenant-data.repository';
 import { QuarantineRepository } from './quarantine.repository';
 import { QuarantineTenantDataRepository } from './quarantine-tenant-data.repository';
 import { RiskTenantDataRepository } from './risk-tenant-data.repository';
@@ -22,7 +23,9 @@ import { RiskTenantDataRepository } from './risk-tenant-data.repository';
  * PolicyTenantDataRepository its policy evaluations, policies, settings and departments; step
  * 5.3: QuarantineTenantDataRepository its quarantine tables (refused under an active legal hold);
  * step 8.1: ArchiveTenantDataRepository its archive (disposal decisions, then the archive and
- * eDiscovery rows and the tenant keys; refused under an active hold or running retention).
+ * eDiscovery rows and the tenant keys; refused under an active hold or running retention); step
+ * 8.2: ProviderTenantDataRepository its Microsoft 365 / Google Workspace connection rows (purge
+ * order of §3.3) and their tenant data export (never credential material).
  */
 @Module({
   providers: [
@@ -38,6 +41,7 @@ import { RiskTenantDataRepository } from './risk-tenant-data.repository';
     QuarantineTenantDataRepository,
     ArchiveRecordsRepository,
     ArchiveTenantDataRepository,
+    ProviderTenantDataRepository,
   ],
   exports: [
     DomainsRepository,
@@ -50,6 +54,7 @@ import { RiskTenantDataRepository } from './risk-tenant-data.repository';
     PolicyTenantDataRepository,
     QuarantineTenantDataRepository,
     ArchiveTenantDataRepository,
+    ProviderTenantDataRepository,
   ],
 })
 export class TenantDataModule {}

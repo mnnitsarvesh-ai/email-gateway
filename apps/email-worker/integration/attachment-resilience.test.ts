@@ -137,7 +137,13 @@ describe('inspector limits with real child processes (A4)', () => {
       logger: silentLogger,
       onKill: (reason) => kills.push(reason),
     });
-    await instance.start();
+    try {
+      await instance.start();
+    } catch (error) {
+      // A pool that cannot start (required rlimits without prlimit) leaves no scratch directory.
+      rmSync(tmp, { recursive: true, force: true });
+      throw error;
+    }
     return {
       instance,
       kills,

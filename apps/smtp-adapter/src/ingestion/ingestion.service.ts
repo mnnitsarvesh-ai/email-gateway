@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { PrismaService } from '@email-gateway/common';
 import { type DomainOwner, resolveDomainOwner } from '@email-gateway/database';
 import { createLogger, type Logger } from '@email-gateway/logger';
@@ -11,6 +11,10 @@ import type { SMTPServerDataStream } from 'smtp-server';
 import type { LmtpClientInfo, LmtpHandler } from '../lmtp/lmtp-listener';
 import { LmtpReplyException } from '../lmtp/lmtp-reply';
 import { withTimeout } from '../lmtp/timeout';
+import {
+  type ProviderRelayEventDetails,
+  ProviderRelayIngestion,
+} from '../provider-relay/provider-relay-ingestion.service';
 import { LMTP_TEMPFAIL, type SmtpReply } from '../shared/replies';
 import { EmlStore } from './eml-store';
 import type { HeaderMetadata } from './header-scanner';
@@ -41,6 +45,8 @@ export interface IngestTransaction {
   clientName: string | null;
   /** Owner lookups of this transaction by domain (one query per domain). */
   owners: Map<string, Promise<DomainOwner | null>>;
+  /** Step 8.2 D8: set once the provider relay proof passed (`received` event details). */
+  providerRelay?: ProviderRelayEventDetails | null;
 }
 
 const MAX_ENVELOPE_FROM = 320;
@@ -66,6 +72,8 @@ export class IngestionService {
     private readonly repository: IngestionRepository,
     private readonly store: EmlStore,
     private readonly metrics: IngestionMetrics,
+    // Step 8.2 D8/D10 (provider relay proof and probes); absent = step 2.2 behaviour.
+    @Optional() private readonly providerRelay?: ProviderRelayIngestion,
   ) {
     this.logger = createLogger({ service: 'smtp-adapter', level: options.logLevel }).child({
       component: 'lmtp-ingestion',
@@ -205,7 +213,11 @@ export class IngestionService {
     const { ref } = transaction;
     const startedAt = process.hrtime.bigint();
     const attemptAt = new Date();
-    const groups = groupByOrganization(recipients);
+    // Step 8.2 D8: a provider-relay transaction (marker present) proves its tenant before storage.
+    const relay = this.providerRelay
+      ? await this.providerRelay.begin(transaction, recipients)
+      : null;
+    const groups = relay ? relay.groups() : groupByOrganization(recipients);
     const outcomes = new Map<bigint, OrganizationOutcome>();
     // Set while reading (the closure below), read afterwards.
     const plan: { primary: OrganizationGroup | null; primaryKey: string } = {
@@ -215,7 +227,9 @@ export class IngestionService {
 
     const read = await readMessage(stream, {
       headerMaxBytes: config.INGEST_HEADER_MAX_BYTES,
+      tee: relay?.tee ?? null,
       onHeaders: (headers) => {
+        relay?.onHeaders(headers);
         this.screen(transaction, groups, headers, outcomes);
         const primary = groups.find((group) => !outcomes.has(group.organizationId)) ?? null;
         plan.primary = primary;
@@ -235,6 +249,8 @@ export class IngestionService {
       for (const group of storeGroups) outcomes.set(group.organizationId, outcome);
     };
     const deletions: string[] = [];
+    const proof = relay ? await relay.conclude(read.outcome === 'complete') : 'pass';
+    if (relay) transaction.providerRelay = relay.eventDetails;
 
     if (read.outcome !== 'complete') {
       if (read.outcome === 'failed') {
@@ -246,6 +262,11 @@ export class IngestionService {
         );
       }
       failAll('tempfail');
+    } else if (proof !== 'pass') {
+      // Step 8.2 D8: nothing of a message without proof is kept (the upload is discarded).
+      read.sink?.abort(new Error('provider relay proof did not pass'));
+      if (plan.primary !== null) deletions.push(plan.primaryKey);
+      failAll(proof === 'fail' ? 'provider_proof_failed' : 'tempfail');
     } else if (storeGroups.length > 0 && read.sink !== null && read.headers !== null) {
       let uploaded = false;
       try {
@@ -320,7 +341,8 @@ export class IngestionService {
         );
       }
     }
-    return repliesFor(recipients.length, groups, outcomes);
+    const replies = repliesFor(recipients.length, groups, outcomes);
+    return relay ? relay.finish(replies, outcomes) : replies;
   }
 
   /** D7 steps 4–5 (before anything is stored): loop check per organization, outbound From. */
@@ -431,6 +453,7 @@ export class IngestionService {
             queueId: ref.queueId,
             recipients: group.recipients.map((recipient) => recipient.address),
             recipientDirections: group.recipients.map((recipient) => recipient.direction),
+            ...(transaction.providerRelay ? { providerRelay: transaction.providerRelay } : {}),
           },
           config.INGEST_DB_TIMEOUT_MS,
         ),

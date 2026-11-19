@@ -64,7 +64,7 @@ const statusByAddress = async (message: MessageFixture) => {
 };
 
 describe('reinjection (R8) into a fake postfix-outbound listener', () => {
-  it('queues an outbound group from the 250: XFORWARD with the original client and the token, DSN parameters, one trace header', async () => {
+  it('queues an outbound group from the 250: XFORWARD with the original client and the token, DSN parameters, exactly one trace header and no route token', async () => {
     const message = await planned({
       direction: 'outbound',
       envelopeFrom: 'alice@sender.example',
@@ -95,8 +95,11 @@ describe('reinjection (R8) into a fake postfix-outbound listener', () => {
         orcpt: 'rfc822;carol+x@ext-q.test',
       }, // xtext-decoded by the server,
     ]);
-    // Exactly one prepended trace (d=out for the organization), the EML otherwise unchanged.
+    // Exactly one prepended trace (d=out for the organization), the EML otherwise unchanged. The
+    // step 8.2 route token is added only to internal deliveries to a Microsoft 365 domain with
+    // internal routing (integration/route-token.test.ts), never to outbound ones.
     const text = tx.data.toString('utf8');
+    expect(text).not.toMatch(/X-EG-Route-Token/i);
     const [first, ...rest] = text.split('\r\n');
     expect(first).toMatch(/^X-Gateway-Trace: v=1; g=/);
     expect(

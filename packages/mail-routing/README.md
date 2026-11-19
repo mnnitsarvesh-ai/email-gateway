@@ -22,6 +22,13 @@ Only from `delivery_pending` / `delivery_retry`; a message in any other state (e
 
 Removed in step 3.3: `aggregateMessageStatus`, `markMessageDeliveryQueued`, `MessageVersionConflictError`, the `QUEUEABLE` list and the recorder's direct status writes (the planner applies `approved → delivery_pending` itself, L8.4).
 
+## Provider relay and route token (step 8.2)
+
+[Design](../../docs/plan/steps/25-m365-google-connectors.md) D7–D10, [ADR-0078](../../docs/architecture/adr/0078-provider-relay-tenant-attribution.md), [ADR-0081](../../docs/architecture/adr/0081-provider-mail-flow-loop-prevention-and-failover.md). Pure rules, no I/O:
+
+- `provider-relay.ts`: `ProviderEgressIndex` (merged ranges per provider and IP version, binary search), `egressRangesFromCidrs`; the `provider-relay-proof/1` policy (`providerRelayProofPolicySchema`, `providerRelayProofIssues`, `parseProviderRelayProofPolicy`, `DEFAULT_PROVIDER_RELAY_PROOF`); `evaluateProviderProof` (tenant header: every `X-MS-Exchange-CrossTenant-Id` equal to the connection's tenant; aligned DKIM pass: `pass`, `d=` the From domain or a parent, linked to the connection, no `l=`, `h=` covers `from`, `rsa-sha256`/`ed25519-sha256`, RSA ≥ 1024 bits; Google freshness `[now − max, now + 300 s]` and replay count), `dkimReplayCandidates`; probe addresses (`probeTokenOf`, `isProbeAddress`, `isProbeDomain`, `probeTokenSha256` = SHA-256 hex of the 26-character token text, `generateProbeToken`, `probeAddress`).
+- `route-token.ts`: `deriveRouteToken(keyHex, connectionPublicId, version)` = the first 32 characters of lower-case RFC 4648 base32 (no padding) of `HMAC-SHA256(hex-decoded PROVIDER_ROUTE_TOKEN_KEY, "route-token:v1:<id>:<version>")`, `ROUTE_TOKEN_HEADER` (`X-EG-Route-Token`), `routeTokenHeaderLine`.
+
 ## Tests
 
 - `pnpm --filter @email-gateway/mail-routing test`: unit tests, including the exhaustive table-versus-oracle test.

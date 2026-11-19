@@ -18,11 +18,26 @@ const summary = (eventType: string, overrides: Record<string, unknown> = {}) =>
   }));
 
 describe('projection rules (W3)', () => {
-  it('covers exactly the twelve event types bound to email.webhooks (v11 eight + 8.4 four)', () => {
+  it('covers exactly the thirteen event types bound to email.webhooks (v11 eight + 8.4 four + 8.2 one, topology v14)', () => {
     expect([...FANOUT_SOURCE_TYPES].sort()).toEqual(
       [...eventTypesBoundTo('email.webhooks')].sort(),
     );
   });
+
+  it.each([
+    ['critical', 'high', 'integration_unhealthy'],
+    ['warning', 'medium', null],
+    ['healthy', 'info', null],
+    ['unknown', 'info', null],
+  ])(
+    'integration.connection.health_changed.v1 → integration.health_changed (%s → %s, alert %s)',
+    (status, severity, alert) => {
+      const previousStatus = status === 'healthy' ? 'critical' : 'healthy';
+      expect(summary(EventTypes.IntegrationHealthChanged, { status, previousStatus })).toEqual([
+        { type: 'integration.health_changed', subKey: '', severity, alert },
+      ]);
+    },
+  );
 
   it('mail.message.received.v1 → email.received (info, direction from the payload)', () => {
     const [c] = projectCandidates(

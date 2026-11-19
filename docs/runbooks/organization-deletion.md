@@ -151,6 +151,21 @@ The future job (a scheduled worker, one instance at a time under a lock) must ap
    SELECT version, status, wrapped_key IS NULL AS destroyed FROM archive_encryption_keys WHERE organization_id = ?;
    ```
 
+   **Microsoft 365 and Google Workspace connections (step 8.2, [§3.3](../plan/steps/25-m365-google-connectors.md#33-retention-maintenance-role)).** `ProviderTenantDataRepository.purgeOrganization(systemScope(org))` (api `tenant-data`, `PROVIDER_PURGE_ORDER`) deletes, per connection of the organization and in batches of 500 (`DELETE … WHERE connection_id = ? AND organization_id = ? ORDER BY id LIMIT 500`, resumable, idempotent), in this order: `provider_relay_counters`, `provider_probe_observations`, `provider_health_events`, `provider_health_checks`, `provider_validation_runs`, `provider_consent_states`, `provider_connection_domains`, `provider_connection_grants` (the encrypted customer credentials go with their rows; no key material is kept anywhere else); then it sets `smtp_connectors.provider_connection_id = NULL` on the organization's `provider_relay` connectors (that column is `RESTRICT`; the connectors themselves are deleted by the organization's connector purge) and finally deletes the `provider_connections` rows (`organization_id` `RESTRICT`). It returns the count per table plus `smtp_connectors_detached` for the `organization.purged` audit row. Run it **before** the domains and connectors are deleted (`provider_connection_domains.domain_id` cascades, but the explicit order keeps the statements short). The rows hold provider tenant ids and names, domain names, permission names, check results and counts; no message content and no S3 object. The gateway cannot remove its consent or delegation inside the customer's Microsoft 365 or Google Workspace tenant (step 8.2 I3): tell the customer to delete the enterprise application / domain-wide delegation entry (the disconnect response and the setup guide list the steps). `ProviderTenantDataRepository.exportOrganization` returns the tenant data export section `provider-tenant-export/1` (connections, grants **without** ciphertext, key id or credential, linked domains, validation runs without probe-token hashes, health transitions). Verify with:
+
+   ```sql
+   SELECT 'provider_relay_counters' t, COUNT(*) FROM provider_relay_counters WHERE organization_id = ?
+   UNION ALL SELECT 'provider_probe_observations', COUNT(*) FROM provider_probe_observations WHERE organization_id = ?
+   UNION ALL SELECT 'provider_health_events', COUNT(*) FROM provider_health_events WHERE organization_id = ?
+   UNION ALL SELECT 'provider_health_checks', COUNT(*) FROM provider_health_checks WHERE organization_id = ?
+   UNION ALL SELECT 'provider_validation_runs', COUNT(*) FROM provider_validation_runs WHERE organization_id = ?
+   UNION ALL SELECT 'provider_consent_states', COUNT(*) FROM provider_consent_states WHERE organization_id = ?
+   UNION ALL SELECT 'provider_connection_domains', COUNT(*) FROM provider_connection_domains WHERE organization_id = ?
+   UNION ALL SELECT 'provider_connection_grants', COUNT(*) FROM provider_connection_grants WHERE organization_id = ?
+   UNION ALL SELECT 'provider_connections', COUNT(*) FROM provider_connections WHERE organization_id = ?
+   UNION ALL SELECT 'smtp_connectors (provider-linked)', COUNT(*) FROM smtp_connectors WHERE organization_id = ? AND provider_connection_id IS NOT NULL;
+   ```
+
 5. **Free verified domain names:** deleting the organization's `domains` rows releases `domains.verified_name` (the generated unique column), so the domain can be verified by another organization. This must happen only in the purge, never at confirmation, so a cancelled deletion keeps its domains.
 6. Keep `audit_logs` (append-only, retained by policy) and `login_audit_logs` until their own retention ends; write `organization.purged` with counts, then hard-delete or tombstone the `organizations` row (keep the slug reserved for a period to avoid confusion).
 7. Make every step resumable: a crash mid-purge must leave the organization `deleted` and be safe to re-run.

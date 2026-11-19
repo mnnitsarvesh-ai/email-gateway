@@ -24,6 +24,8 @@ const connectorSelect = {
   requireTls: true,
   createdAt: true,
   updatedAt: true,
+  // Step 8.2 D7: the managing provider connection of a `provider_relay` connector.
+  providerConnection: { select: { publicId: true } },
   networks: {
     select: { id: true, cidr: true, ipVersion: true },
     orderBy: [{ ipVersion: 'asc' }, { rangeStart: 'asc' }],
@@ -252,6 +254,27 @@ export class SmtpConnectorsRepository {
     const candidate = rows[0];
     if (!candidate) return false;
     return Buffer.compare(Buffer.from(candidate.rangeEnd), network.rangeStart) >= 0;
+  }
+
+  /**
+   * Step 8.2 D7.6 (ADR-0078): true when `network` shares an address with a range of an ACTIVE
+   * provider egress set (Microsoft 365 / Google Workspace shared sending infrastructure). A
+   * `source_ip` connector on such a range would let every tenant of that provider relay as this
+   * organization. Platform data, no tenant filter; egress ranges may overlap each other, so the
+   * check is a plain interval intersection.
+   */
+  async overlapsProviderEgress(
+    tx: Client,
+    network: Pick<ParsedNetwork, 'ipVersion' | 'rangeStart' | 'rangeEnd'>,
+  ): Promise<boolean> {
+    const rows = await tx.$queryRaw<Array<{ id: bigint }>>`
+      SELECT r.id FROM provider_egress_ranges r
+      JOIN provider_egress_range_sets s ON s.id = r.set_id AND s.status = 'active'
+      WHERE r.ip_version = ${network.ipVersion}
+        AND r.range_start <= ${network.rangeEnd}
+        AND r.range_end >= ${network.rangeStart}
+      LIMIT 1`;
+    return rows.length > 0;
   }
 
   async deleteNetworks(tx: Client, scope: TenantScope, connectorId: bigint): Promise<void> {

@@ -8,6 +8,7 @@ export function toConnectorView(row: ConnectorRow): ConnectorView {
     name: row.name,
     authType: row.authType,
     status: row.status,
+    providerConnectionId: row.providerConnection?.publicId ?? null,
     saslUsername: row.saslUsername,
     certificateFingerprintSha256: row.certFingerprintSha256,
     networks: row.networks.map((n) => ({ cidr: n.cidr, ipVersion: n.ipVersion === 6 ? 6 : 4 })),

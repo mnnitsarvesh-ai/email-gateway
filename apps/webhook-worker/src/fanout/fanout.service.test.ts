@@ -66,6 +66,7 @@ function harness(
     windowInsert?: number;
     pendingCount?: number;
     maxPending?: number;
+    integrationAlertThrottleMinutes?: number;
   } = {},
 ): Harness {
   const statements: SeenSql[] = [];
@@ -143,6 +144,9 @@ function harness(
     logger: silentLogger,
     txTimeoutMs: 120_000,
     now: () => new Date('2026-11-01T10:15:40.000Z'),
+    ...(options.integrationAlertThrottleMinutes !== undefined && {
+      integrationAlertThrottleMinutes: options.integrationAlertThrottleMinutes,
+    }),
   });
   return h;
 }
@@ -321,6 +325,60 @@ describe('FanoutService (W1, W3, W5, N2)', () => {
     expect(notificationAlertRequestedV1.parse(h.outbox[0]!.payload).refs).toMatchObject({
       domainId: '77',
     });
+  });
+
+  it('a critical connection requests integration_unhealthy scoped to the connection (step 8.2 D12)', async () => {
+    const h = harness({
+      index: orgIndex({ subscriptions: [] }),
+      integrationAlertThrottleMinutes: 30,
+    });
+    await h.service.handle(sourceEvent(EventTypes.IntegrationHealthChanged));
+    const [event] = inserts(h, 'webhook_events');
+    expect(event?.values).toEqual(expect.arrayContaining(['integration.health_changed', 'high']));
+    expect(inserts(h, 'webhook_deliveries')).toEqual([]);
+    const [window] = inserts(h, 'notification_alert_windows');
+    expect(window?.values).toEqual(
+      expect.arrayContaining([
+        'integration_unhealthy',
+        '01890a5d-ac96-774b-bcce-b302099a80a0',
+        // The 30-minute platform throttle window containing the event time (10:15:32).
+        new Date('2026-11-01T10:00:00.000Z'),
+      ]),
+    );
+    const alert = notificationAlertRequestedV1.parse(h.outbox[0]!.payload);
+    expect(alert.kind).toBe('integration_unhealthy');
+    expect(alert.refs).toEqual({
+      webhookEventId: expect.any(String),
+      connectionId: '01890a5d-ac96-774b-bcce-b302099a80a0',
+    });
+    expect(alert.window).toEqual({
+      from: '2026-11-01T10:00:00.000Z',
+      to: '2026-11-01T10:30:00.000Z',
+    });
+  });
+
+  it('a non-critical health transition is delivered to subscribers without an alert', async () => {
+    const quiet = harness({ index: orgIndex({ subscriptions: [] }) });
+    await quiet.service.handle(
+      sourceEvent(EventTypes.IntegrationHealthChanged, {
+        previousStatus: 'critical',
+        status: 'healthy',
+        failingChecks: [],
+      }),
+    );
+    expect(quiet.transactions).toBe(0);
+    const h = harness({
+      index: orgIndex({ subscriptions: [SUB({ eventTypes: ['integration.health_changed'] })] }),
+    });
+    await h.service.handle(
+      sourceEvent(EventTypes.IntegrationHealthChanged, {
+        previousStatus: 'healthy',
+        status: 'warning',
+      }),
+    );
+    expect(inserts(h, 'webhook_deliveries')).toHaveLength(1);
+    expect(inserts(h, 'notification_alert_windows')).toEqual([]);
+    expect(h.outbox).toEqual([]);
   });
 
   it('dead-letters a payload the guard refuses (webhook_payload_unsafe)', async () => {

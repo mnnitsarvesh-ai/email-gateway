@@ -516,6 +516,21 @@ export const OPENAPI_TAGS: ReadonlyArray<{ name: string; description: string }> 
       'categories.',
   },
   {
+    name: 'provider-connections',
+    description:
+      'Step 8.2: Microsoft 365 and Google Workspace connections. The catalogue of read-only ' +
+      'permission profiles, connections with grants (Microsoft admin consent with a single-use ' +
+      'state, Google domain-wide delegation, or encrypted customer credentials that are never ' +
+      'returned), linked TXT-verified domains, the server-computed setup wizard, preview → ' +
+      'impact token → apply for every gateway-side mail-flow change (inbound destinations, the ' +
+      'provider relay connector, outbound activation, proof policy, suspension, disconnection), ' +
+      'attestations of customer-side steps, validation runs with single-use probe addresses, ' +
+      'health, and customer-specific setup guides (JSON or Markdown). The gateway never writes ' +
+      'to a customer tenant and the api never calls Microsoft or Google (provider traffic runs in ' +
+      'the integration-worker). Not offered: automatic configuration of Exchange Online or ' +
+      'Gmail, customer certificate credentials, automatic outbound suspension on health.',
+  },
+  {
     name: 'platform',
     description:
       'Platform staff only: overrides (1.3), dead letters (3.2), scan training (4.1), threat ' +

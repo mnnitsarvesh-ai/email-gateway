@@ -38,6 +38,13 @@
  * (docs/plan/steps/24-account-takeover-core.md §5) adds the 26 account takeover and 8 security
  * incident operations (`NEW_IN_8_4`, examples required, every list v1, the ato and incidents
  * manifests): 14 transactional keyed mutations (`sensitive`), the expensive overview and report.
+ * Step 8.2 (docs/plan/steps/25-m365-google-connectors.md §5.2) adds the 24 Microsoft 365 and
+ * Google Workspace connection operations (`NEW_IN_8_2`, examples required, both lists v1, the
+ * provider-connections manifest): 12 transactional keyed mutations — the grant, consent and
+ * disconnect mutations `sensitive` (D17; grant creation and validation creation are ADR-0057
+ * redacted-replay secret-bearing routes: the consent URL and the probe address), the other five
+ * keyed without a class (`KEYED_8_2`; the apply and the per-connection routes have their own
+ * limits).
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -58,6 +65,18 @@ import {
   CreateWebhookBodySchema,
   RotateSecretBodySchema,
 } from '../src/modules/webhooks/webhooks.schemas';
+import {
+  ApplyBodySchema,
+  AttestationBodySchema,
+  CompleteConsentBodySchema,
+  CreateConnectionBodySchema,
+  CreateGrantBodySchema,
+  CreateValidationBodySchema,
+  DisconnectBodySchema,
+  ReplaceDomainsBodySchema,
+  SetCredentialsBodySchema,
+  VerifyGrantBodySchema,
+} from '../src/modules/provider-connections/dto/provider-connections.schemas';
 import { isStrictRequestSchema } from '../src/validation/strict-schema';
 import { ZodValidationPipe } from '../src/validation/zod-validation.pipe';
 import { COVERAGE, COVERAGE_BY_AREA, type RouteCoverage } from './route-coverage';
@@ -160,6 +179,9 @@ const NEW_IN_6_2 = [
 const SECRET_BEARING_REDACTED_REPLAY = [
   'post /api/v1/webhooks',
   'post /api/v1/webhooks/:webhookId/rotate-secret',
+  // Step 8.2: the admin-consent URL (its single-use state) and the single-use probe address.
+  'post /api/v1/provider-connections/:id/grants',
+  'post /api/v1/provider-connections/:id/validations',
 ];
 
 /** §3.5: sensitive mutations keyed transactionally (IdempotencyService.execute). */
@@ -214,6 +236,28 @@ const SENSITIVE_TRANSACTIONAL = [
   'post /api/v1/incidents',
   'patch /api/v1/incidents/:incidentId',
   'post /api/v1/incidents/:incidentId/notes',
+  // Step 8.2 D17 (the grant, consent and disconnect mutations; ADR-0057 for grant creation and
+  // validation creation).
+  'delete /api/v1/provider-connections/:id',
+  'post /api/v1/provider-connections/:id/grants',
+  'post /api/v1/provider-connections/consent/complete',
+  'put /api/v1/provider-connections/:id/grants/:profile/credentials',
+  'post /api/v1/provider-connections/:id/grants/:profile/verify',
+  'delete /api/v1/provider-connections/:id/grants/:profile',
+  'post /api/v1/provider-connections/:id/validations',
+];
+
+/**
+ * Step 8.2 §5.1: keyed transactional mutations without a rate class (the connection create, the
+ * domain links, the mail-flow apply with its own 30/min limit, attestations and the per-connection
+ * health check with its own 6/hour limit).
+ */
+const KEYED_8_2 = [
+  'post /api/v1/provider-connections',
+  'put /api/v1/provider-connections/:id/domains',
+  'post /api/v1/provider-connections/:id/mail-flow/apply',
+  'post /api/v1/provider-connections/:id/attestations',
+  'post /api/v1/provider-connections/:id/health/check',
 ];
 
 /** §3.5: the legacy sensitive mutations keyed by the reservation interceptor (`@Idempotent`). */
@@ -364,6 +408,38 @@ const NEW_IN_8_4 = [
   'get /api/v1/incidents/:incidentId/report',
 ];
 
+/**
+ * Step 8.2 §5.2 (docs/plan/steps/25-m365-google-connectors.md): the 24 Microsoft 365 and Google
+ * Workspace connection operations (examples required, lists v1, exactly the provider-connections
+ * manifest).
+ */
+const NEW_IN_8_2 = [
+  'get /api/v1/provider-integrations/catalog',
+  'get /api/v1/provider-connections',
+  'post /api/v1/provider-connections',
+  'get /api/v1/provider-connections/:id',
+  'patch /api/v1/provider-connections/:id',
+  'delete /api/v1/provider-connections/:id',
+  'get /api/v1/provider-connections/:id/wizard',
+  'post /api/v1/provider-connections/:id/grants',
+  'post /api/v1/provider-connections/consent/complete',
+  'put /api/v1/provider-connections/:id/grants/:profile/credentials',
+  'post /api/v1/provider-connections/:id/grants/:profile/verify',
+  'delete /api/v1/provider-connections/:id/grants/:profile',
+  'get /api/v1/provider-connections/:id/domains',
+  'put /api/v1/provider-connections/:id/domains',
+  'post /api/v1/provider-connections/:id/mail-flow/preview',
+  'post /api/v1/provider-connections/:id/mail-flow/apply',
+  'get /api/v1/provider-connections/:id/mail-flow',
+  'post /api/v1/provider-connections/:id/attestations',
+  'post /api/v1/provider-connections/:id/validations',
+  'get /api/v1/provider-connections/:id/validations',
+  'get /api/v1/provider-connections/:id/validations/:runId',
+  'get /api/v1/provider-connections/:id/health',
+  'post /api/v1/provider-connections/:id/health/check',
+  'get /api/v1/provider-connections/:id/setup-guide',
+];
+
 /** Step 8.1: binary downloads (`application/octet-stream`; no JSON example applies). */
 const BINARY_DOWNLOADS = ['get /api/v1/archive/downloads/:token'];
 
@@ -428,6 +504,17 @@ const BODY_PARSED_IN_SERVICE = new Map<string, z.ZodType>([
   ['WebhooksController.rotate', RotateSecretBodySchema],
   ['WebhookDeliveriesController.createReplay', CreateReplayBodySchema],
   ['NotificationsController.putSettings', SettingsUpdateBodySchema],
+  // Step 8.2: the keyed provider-connection mutations parse after the key checks.
+  ['ProviderConnectionsController.create', CreateConnectionBodySchema],
+  ['ProviderConnectionsController.disconnect', DisconnectBodySchema],
+  ['ProviderGrantsController.create', CreateGrantBodySchema],
+  ['ProviderGrantsController.completeConsent', CompleteConsentBodySchema],
+  ['ProviderGrantsController.setCredentials', SetCredentialsBodySchema],
+  ['ProviderGrantsController.verify', VerifyGrantBodySchema],
+  ['ProviderDomainsController.replace', ReplaceDomainsBodySchema],
+  ['ProviderMailFlowController.apply', ApplyBodySchema],
+  ['ProviderAttestationsController.record', AttestationBodySchema],
+  ['ProviderValidationsController.create', CreateValidationBodySchema],
 ]);
 
 const BODY: number = RouteParamtypes.BODY;
@@ -560,14 +647,14 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     await api?.close();
   });
 
-  it('discovers every route once (354 operations under /api/v1 plus the 3 internal endpoints)', () => {
+  it('discovers every route once (378 operations under /api/v1 plus the 3 internal endpoints)', () => {
     expect(facts.length).toBe(byKey.size);
     // 249 after step 6.1, plus the 17 routes of step 6.2, plus the 3 reports of step 7.1, plus
     // the 5 saved views routes (WP1) and the headers and two reveal routes (WP2) of step 7.2,
     // plus the validate and sample dry-run routes of step 7.3, plus the 41 archive, legal hold
     // and eDiscovery operations of step 8.1, plus the 26 account takeover and 8 security incident
-    // operations of step 8.4.
-    expect(facts.filter((f) => f.key.includes(' /api/v1/')).length).toBe(354);
+    // operations of step 8.4, plus the 24 provider-connection operations of step 8.2.
+    expect(facts.filter((f) => f.key.includes(' /api/v1/')).length).toBe(378);
     expect(
       facts
         .filter((f) => isInternal(f.key))
@@ -662,7 +749,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     }
   });
 
-  it('gives every route new in 6.1, 6.2, 7.1, 7.2, 7.3, 8.1 and 8.4 explicit response examples (D14)', () => {
+  it('gives every route new in 6.1, 6.2, 7.1, 7.2, 7.3, 8.1, 8.4 and 8.2 explicit response examples (D14)', () => {
     const failures: string[] = [];
     for (const key of [
       ...NEW_IN_6_1,
@@ -672,6 +759,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
       ...NEW_IN_7_3,
       ...NEW_IN_8_1,
       ...NEW_IN_8_4,
+      ...NEW_IN_8_2,
     ]) {
       const op = operation(key);
       if (!op) {
@@ -730,6 +818,11 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     ).toEqual([...NEW_IN_8_4].sort());
     expect(COVERAGE_BY_AREA.ato).toHaveLength(26);
     expect(COVERAGE_BY_AREA.incidents).toHaveLength(8);
+    // NEW_IN_8_2 is exactly the step 8.2 provider-connections manifest (24 operations).
+    expect(COVERAGE_BY_AREA['provider-connections'].map((c) => c.route).sort()).toEqual(
+      [...NEW_IN_8_2].sort(),
+    );
+    expect(NEW_IN_8_2).toHaveLength(24);
   });
 
   it('has one coverage entry per served route and none for a route that does not exist (§3.8)', () => {
@@ -748,6 +841,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
       expect(NEW_IN_7_3.includes(route), route).toBe(false);
       expect(NEW_IN_8_1.includes(route), route).toBe(false);
       expect(NEW_IN_8_4.includes(route), route).toBe(false);
+      expect(NEW_IN_8_2.includes(route), route).toBe(false);
     }
   });
 
@@ -797,10 +891,11 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
           NEW_IN_7_2.includes(key) ||
           NEW_IN_7_3.includes(key) ||
           NEW_IN_8_1.includes(key) ||
-          NEW_IN_8_4.includes(key)) &&
+          NEW_IN_8_4.includes(key) ||
+          NEW_IN_8_2.includes(key)) &&
         route.cursor === 'v0'
       )
-        failures.push(`${key}: 6.1/6.2/7.1/7.2/7.3/8.1/8.4 list on v0`);
+        failures.push(`${key}: 6.1/6.2/7.1/7.2/7.3/8.1/8.4/8.2 list on v0`);
       if (route.cursor !== null && operation(key)!['x-eg-cursor'] !== route.cursor) {
         failures.push(`${key}: x-eg-cursor not documented`);
       }
@@ -810,8 +905,8 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     for (const { route } of facts) if (route.cursor) counts[route.cursor] += 1;
     // 33 pre-6.1 lists keep the unsigned v0 cursors; the 9 lists of 6.1, the 2 of 6.2
     // (webhooks, deliveries), the saved views list of 7.2, the 10 lists of 8.1 and the 11 lists
-    // of 8.4 (8 ato, 3 incidents) are signed v1.
-    expect(counts).toEqual({ v0: 33, v1: 33 });
+    // of 8.4 (8 ato, 3 incidents) and the 2 of 8.2 (connections, validation runs) are signed v1.
+    expect(counts).toEqual({ v0: 33, v1: 35 });
   });
 
   it('every body and query schema of every route is strict at every object node (D1)', () => {
@@ -865,15 +960,27 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
       .map((f) => f.key)
       .sort();
     expect(keyed).toEqual(
-      [...SENSITIVE_TRANSACTIONAL, ...SENSITIVE_LEGACY, ...EXPENSIVE_TRANSACTIONAL].sort(),
+      [
+        ...SENSITIVE_TRANSACTIONAL,
+        ...SENSITIVE_LEGACY,
+        ...EXPENSIVE_TRANSACTIONAL,
+        ...KEYED_8_2,
+      ].sort(),
     );
+    for (const key of KEYED_8_2) {
+      const fact = byKey.get(key);
+      expect(fact?.transactional, key).not.toBeNull();
+      expect(fact?.route.rateClass ?? null, key).toBeNull();
+      expect(operation(key)?.['x-eg-idempotency'], key).toBe('required');
+    }
     const operations = facts.flatMap((f) =>
       [f.route.idempotency?.operation, f.transactional?.operation].filter(Boolean),
     );
     expect(new Set(operations).size).toBe(operations.length);
     // 42 before step 8.1, plus its 15 keyed archive, legal hold and eDiscovery mutations, plus
-    // the 14 keyed ATO and incident mutations of step 8.4.
-    expect(operations).toHaveLength(71);
+    // the 14 keyed ATO and incident mutations of step 8.4, plus the 12 keyed provider-connection
+    // mutations of step 8.2.
+    expect(operations).toHaveLength(83);
   });
 
   it('no route is both @Idempotent() and @ReturnsSecret(); secret-bearing and expensive routes carry their class (D8, D9, ADR-0057)', () => {

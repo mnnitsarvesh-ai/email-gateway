@@ -283,6 +283,9 @@ importers:
       '@email-gateway/policy-dsl':
         specifier: workspace:*
         version: link:../../packages/policy-dsl
+      '@email-gateway/provider-integrations':
+        specifier: workspace:*
+        version: link:../../packages/provider-integrations
       '@email-gateway/quarantine':
         specifier: workspace:*
         version: link:../../packages/quarantine
@@ -843,6 +846,73 @@ importers:
         specifier: ^1.5.7
         version: 1.6.0(@swc/core@1.16.21)(esbuild@0.28.2)(rollup@4.67.4)(vite@7.3.7(@types/node@22.20.5)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.51.2)(tsx@4.23.15)(yaml@2.9.1))(webpack@5.106.2(@swc/core@1.16.21)(esbuild@0.28.2)(lightningcss@1.32.0))
 
+  apps/integration-worker:
+    dependencies:
+      '@email-gateway/common':
+        specifier: workspace:*
+        version: link:../../packages/common
+      '@email-gateway/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+      '@email-gateway/database':
+        specifier: workspace:*
+        version: link:../../packages/database
+      '@email-gateway/event-contracts':
+        specifier: workspace:*
+        version: link:../../packages/event-contracts
+      '@email-gateway/logger':
+        specifier: workspace:*
+        version: link:../../packages/logger
+      '@email-gateway/mail-routing':
+        specifier: workspace:*
+        version: link:../../packages/mail-routing
+      '@email-gateway/provider-integrations':
+        specifier: workspace:*
+        version: link:../../packages/provider-integrations
+      '@email-gateway/shared-types':
+        specifier: workspace:*
+        version: link:../../packages/shared-types
+      '@nestjs/common':
+        specifier: ^11.1.6
+        version: 11.2.8(reflect-metadata@0.2.2)(rxjs@7.8.2)
+      '@nestjs/core':
+        specifier: ^11.1.6
+        version: 11.2.8(@nestjs/common@11.2.8(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/platform-express@11.2.8)(reflect-metadata@0.2.2)(rxjs@7.8.2)
+      '@nestjs/platform-express':
+        specifier: ^11.1.6
+        version: 11.2.8(@nestjs/common@11.2.8(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.2.8)
+      nodemailer:
+        specifier: ^10.3.1
+        version: 10.3.1
+      reflect-metadata:
+        specifier: ^0.2.2
+        version: 0.2.2
+      rxjs:
+        specifier: ^7.8.2
+        version: 7.8.2
+      zod:
+        specifier: ^4.1.5
+        version: 4.6.7
+    devDependencies:
+      '@nestjs/cli':
+        specifier: ^11.0.10
+        version: 11.0.24(@swc/core@1.16.21)(@types/node@22.20.5)(esbuild@0.28.2)(lightningcss@1.32.0)(prettier@3.9.10)
+      '@nestjs/testing':
+        specifier: ^11.1.6
+        version: 11.2.8(@nestjs/common@11.2.8(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.2.8)(@nestjs/platform-express@11.2.8)
+      '@swc/core':
+        specifier: ^1.13.5
+        version: 1.16.21
+      '@types/express':
+        specifier: ^5.0.3
+        version: 5.0.6
+      '@types/nodemailer':
+        specifier: ^8.0.2
+        version: 8.0.2
+      unplugin-swc:
+        specifier: ^1.5.7
+        version: 1.6.0(@swc/core@1.16.21)(esbuild@0.28.2)(rollup@4.67.4)(vite@7.3.7(@types/node@22.20.5)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.51.2)(tsx@4.23.15)(yaml@2.9.1))(webpack@5.106.2(@swc/core@1.16.21)(esbuild@0.28.2)(lightningcss@1.32.0))
+
   apps/notification-worker:
     dependencies:
       '@email-gateway/common':
@@ -1103,6 +1173,9 @@ importers:
       ioredis:
         specifier: ^5.8.0
         version: 5.11.1
+      mailauth:
+        specifier: ^7.3.1
+        version: 7.3.1
       mailparser:
         specifier: ^3.9.46
         version: 3.9.46
@@ -1643,6 +1716,28 @@ importers:
       prettier:
         specifier: ^3.6.2
         version: 3.9.10
+
+  packages/provider-integrations:
+    dependencies:
+      '@email-gateway/database':
+        specifier: workspace:*
+        version: link:../database
+      '@email-gateway/logger':
+        specifier: workspace:*
+        version: link:../logger
+      '@email-gateway/mail-routing':
+        specifier: workspace:*
+        version: link:../mail-routing
+      jose:
+        specifier: ^5.10.0
+        version: 5.10.0
+      zod:
+        specifier: ^4.1.5
+        version: 4.6.7
+    devDependencies:
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/node@22.20.5)(jiti@2.7.0)(jsdom@29.1.1(@noble/hashes@1.8.0))(lightningcss@1.32.0)(msw@2.15.0(@types/node@22.20.5)(typescript@5.9.3))(terser@5.51.2)(tsx@4.23.15)(yaml@2.9.1)
 
   packages/quarantine:
     dependencies:

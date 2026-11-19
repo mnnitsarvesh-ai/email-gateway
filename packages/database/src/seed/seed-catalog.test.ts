@@ -74,7 +74,7 @@ describe('seed catalog', () => {
   const sorted = (list: readonly string[]) => [...list].sort();
   const role = (key: string) => SYSTEM_ROLES.find((r) => r.key === key)!.permissions;
 
-  it('contains the 68 permissions of D7, D8, steps 2.1 D14, 2.2, 2.3, 3.2, 3.3, 4.1, 4.2, 4.4, 4.5, 5.3, 6.1, 6.2, 7.2, 8.1 and 8.4, without duplicates', () => {
+  it('contains the 70 permissions of D7, D8, steps 2.1 D14, 2.2, 2.3, 3.2, 3.3, 4.1, 4.2, 4.4, 4.5, 5.3, 6.1, 6.2, 7.2, 8.1, 8.4 and 8.2, without duplicates', () => {
     expect(new Set(keys).size).toBe(keys.length);
     expect(sorted(keys)).toEqual(
       sorted([
@@ -146,14 +146,16 @@ describe('seed catalog', () => {
         'ato:manage',
         'ato:respond',
         'ato:configure',
+        'integration:read',
+        'integration:manage',
       ]),
     );
-    expect(keys).toHaveLength(68);
+    expect(keys).toHaveLength(70);
     // Step 3.3 placed message:rescan next to the other message permissions (design §3.3); the
     // seed upserts by key, so on an existing database it simply gets the next id.
     expect(keys.indexOf('message:rescan')).toBe(keys.indexOf('message:read_content') + 1);
     // Otherwise appended in catalog order (permission ids follow it on a fresh database).
-    expect(keys.slice(-36)).toEqual([
+    expect(keys.slice(-38)).toEqual([
       'connector:read',
       'connector:manage',
       'domain:routing_manage',
@@ -190,6 +192,8 @@ describe('seed catalog', () => {
       'ato:manage',
       'ato:respond',
       'ato:configure',
+      'integration:read',
+      'integration:manage',
     ]);
     // `resource:action`; the resource may contain underscores since step 6.1 (`threat_intel`).
     for (const key of keys) expect(key).toMatch(/^[a-z]+(?:_[a-z]+)*:[a-z_]+$/);
@@ -224,6 +228,7 @@ describe('seed catalog', () => {
         'archive:read',
         'connector:read',
         'delivery:read',
+        'integration:read',
       ]),
     );
   });
@@ -421,6 +426,46 @@ describe('seed catalog', () => {
     }
   });
 
+  it('grants the step 8.2 integration permissions exactly as D16 says', () => {
+    const holders = (permission: string) =>
+      SYSTEM_ROLES.filter((r) => (r.permissions as readonly string[]).includes(permission))
+        .map((r) => r.key)
+        .sort();
+    const description = (key: string) => PERMISSIONS.find((p) => p.key === key)?.description;
+    expect(description('integration:read')).toBe(
+      'View Microsoft 365 and Google Workspace connections, their health, validations and setup ' +
+        'guides (step 8.2; never credentials)',
+    );
+    expect(description('integration:manage')).toBe(
+      'Connect, consent, upload credentials, validate and change Microsoft 365 and Google ' +
+        'Workspace connections (step 8.2)',
+    );
+    expect(holders('integration:read')).toEqual(
+      [
+        'compliance_auditor',
+        'domain_admin',
+        'organization_admin',
+        'platform_admin',
+        'read_only_user',
+        'security_analyst',
+        'super_admin',
+      ].sort(),
+    );
+    expect(holders('integration:manage')).toEqual(
+      ['domain_admin', 'organization_admin', 'super_admin'].sort(),
+    );
+    expect(TENANT_READ_PERMISSIONS).toContain('integration:read');
+    expect(TENANT_READ_PERMISSIONS).not.toContain('integration:manage');
+    for (const key of ['integration:read', 'integration:manage']) {
+      expect(TENANT_PERMISSIONS, key).toContain(key);
+      expect(PLATFORM_PERMISSIONS, key).not.toContain(key);
+      expect(PERMISSIONS.find((p) => p.key === key)!.description.length).toBeLessThanOrEqual(255);
+    }
+    // Neither quarantine_reviewer nor mailbox_user sees integrations.
+    expect(role('quarantine_reviewer')).not.toContain('integration:read');
+    expect(role('mailbox_user')).not.toContain('integration:read');
+  });
+
   it('has exactly the 8 system roles of D8 plus mailbox_user (5.3), each referencing existing permissions only', () => {
     expect(SYSTEM_ROLES.map((r) => r.key)).toEqual([...SYSTEM_ROLE_KEYS]);
     expect([...SYSTEM_ROLE_KEYS]).toEqual([
@@ -493,6 +538,8 @@ describe('seed catalog', () => {
         'delivery:suppression_manage',
         'quarantine:read',
         'report:read',
+        'integration:read',
+        'integration:manage',
       ],
       security_analyst: [
         'organization:read',
@@ -527,6 +574,7 @@ describe('seed catalog', () => {
         'ato:read',
         'ato:manage',
         'ato:respond',
+        'integration:read',
       ],
       quarantine_reviewer: [
         'organization:read',

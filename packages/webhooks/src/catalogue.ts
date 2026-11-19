@@ -22,8 +22,8 @@ import {
 import { z } from 'zod';
 
 /**
- * The public webhook event catalogue (step 6.2 §5, ADR-0054; step 8.4 D16): fourteen
- * subscribable types, all version 1, plus the test-only `webhook.ping`. Every `data` schema is
+ * The public webhook event catalogue (step 6.2 §5, ADR-0054; step 8.4 D16; step 8.2 D12
+ * adds `integration.health_changed`): fifteen subscribable types, all version 1, plus the test-only `webhook.ping`. Every `data` schema is
  * strict: a payload carries public ids, the tenant's own domain names, codes, counts and times
  * only — never a subject, an address (local part or full), an IP address, a person's or
  * connector's name, a body, an attachment, a file name, an S3 key, a URL found in mail or a
@@ -51,6 +51,8 @@ export const WEBHOOK_EVENT_TYPES = [
   'security.incident.updated',
   'ato.account.risk_changed',
   'ato.response.completed',
+  // Step 8.2 D12 (docs/plan/steps/25-m365-google-connectors.md, ADR-0079).
+  'integration.health_changed',
 ] as const;
 export type WebhookEventType = (typeof WEBHOOK_EVENT_TYPES)[number];
 
@@ -505,6 +507,43 @@ const atoResponseCompletedData = z.strictObject({
   account: atoAccount,
 });
 
+/** `provider_connections.provider` (step 8.2). */
+export const INTEGRATION_PROVIDERS = ['microsoft_365', 'google_workspace'] as const;
+/** `provider_connections.health_status` (step 8.2). */
+export const INTEGRATION_HEALTH_STATUSES = ['unknown', 'healthy', 'warning', 'critical'] as const;
+export type IntegrationHealthStatus = (typeof INTEGRATION_HEALTH_STATUSES)[number];
+/** Most failing check codes carried by one `integration.health_changed` event. */
+export const INTEGRATION_MAX_FAILING_CHECKS = 10;
+const integrationHealthStatus = z.enum(INTEGRATION_HEALTH_STATUSES);
+/** A health check code (`credentials.token`, `routing.loops`, …). */
+const integrationCheckCode = z
+  .string()
+  .max(64)
+  .regex(/^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$/, 'Expected a dotted lower-case check code');
+
+/**
+ * `integration.health_changed` (step 8.2 D12): metadata only — the connection's public id and
+ * provider, the transition and the failing check codes. Never a tenant id, a domain list, a
+ * credential, a token or provider error text.
+ */
+const integrationHealthChangedData = z
+  .strictObject({
+    connection: z.strictObject({ id: uuid, provider: z.enum(INTEGRATION_PROVIDERS) }),
+    previousStatus: integrationHealthStatus,
+    status: integrationHealthStatus,
+    failingChecks: uniqueArray(integrationCheckCode, 0, INTEGRATION_MAX_FAILING_CHECKS),
+    changedAt: iso,
+  })
+  .superRefine((data, ctx) => {
+    if (data.previousStatus === data.status) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['status'],
+        message: 'A health transition changes the status',
+      });
+    }
+  });
+
 const webhookPingData = z.strictObject({ subscriptionId: uuid, requestedAt: iso });
 
 /** Strict `data` schema of every envelope type (§5.2). */
@@ -523,6 +562,7 @@ export const dataSchemas = {
   'security.incident.updated': securityIncidentUpdatedData,
   'ato.account.risk_changed': atoAccountRiskChangedData,
   'ato.response.completed': atoResponseCompletedData,
+  'integration.health_changed': integrationHealthChangedData,
   [WEBHOOK_PING_TYPE]: webhookPingData,
 } as const satisfies Record<WebhookEnvelopeType, z.ZodType>;
 
@@ -543,6 +583,13 @@ const VERDICT_SEVERITY: Readonly<Record<(typeof SCAN_VERDICTS)[number], Severity
 };
 /** DNS record purposes whose failure is `high` (mail flow and authentication). */
 const CRITICAL_RECORD_PURPOSES: readonly string[] = ['mx', 'spf', 'dkim', 'dmarc'];
+
+/** `integration.health_changed` severity: critical → high, warning → medium, otherwise info. */
+export function integrationHealthSeverity(status: IntegrationHealthStatus): Severity {
+  if (status === 'critical') return 'high';
+  if (status === 'warning') return 'medium';
+  return 'info';
+}
 
 /**
  * Step 8.4 D16: the public severity of an incident severity or an ATO risk level (critical and
@@ -603,6 +650,10 @@ export function eventSeverity<T extends WebhookEnvelopeType>(
       )
         ? 'medium'
         : 'info';
+    case 'integration.health_changed':
+      return integrationHealthSeverity(
+        (data as WebhookEventData<'integration.health_changed'>).status,
+      );
     case 'email.received':
     case 'email.released':
     case 'email.delivered':
@@ -638,6 +689,8 @@ const VERDICT_FILTERS = ['directions', 'domainIds', 'minSeverity', 'verdicts'] a
 const DOMAIN_FILTERS = ['domainIds', 'minSeverity'] as const;
 /** Step 8.4: incident and ATO events carry no direction, domain or verdict. */
 const SEVERITY_FILTERS = ['minSeverity'] as const;
+/** Connection events name no domain or message: only the severity filter applies. */
+const INTEGRATION_FILTERS = ['minSeverity'] as const;
 
 const exampleMessage: WebhookMessage = {
   id: '0192f0c4-8a11-7c2e-9d3f-1a2b3c4d5e6f',
@@ -808,6 +861,13 @@ export const WEBHOOK_EXAMPLE_DATA: { readonly [T in WebhookEnvelopeType]: Webhoo
     incident: { id: exampleIncidentId },
     account: exampleAccount,
   },
+  'integration.health_changed': {
+    connection: { id: '0192f0c4-d466-7173-8c84-6f708192a3b4', provider: 'microsoft_365' },
+    previousStatus: 'healthy',
+    status: 'critical',
+    failingChecks: ['domains.provider_verified', 'routing.loops'],
+    changedAt: '2026-11-13T09:30:00.000Z',
+  },
   [WEBHOOK_PING_TYPE]: {
     subscriptionId: '0192f0c4-c355-7062-9b73-5e6f708192a3',
     requestedAt: '2026-11-13T09:20:00.000Z',
@@ -923,6 +983,12 @@ export const WEBHOOK_EVENT_CATALOGUE: Readonly<Record<WebhookEnvelopeType, Webho
       'failed/rollback_failed → medium, otherwise info',
       SEVERITY_FILTERS,
     ),
+    'integration.health_changed': entry(
+      'integration.health_changed',
+      'The health of a Microsoft 365 or Google Workspace connection changed (step 8.2): the connection id, provider, previous and new status and the failing check codes.',
+      'critical → high, warning → medium, healthy/unknown → info',
+      INTEGRATION_FILTERS,
+    ),
     [WEBHOOK_PING_TYPE]: entry(
       WEBHOOK_PING_TYPE,
       'Test event sent by POST /webhooks/{id}/test; not subscribable.',
@@ -931,12 +997,12 @@ export const WEBHOOK_EVENT_CATALOGUE: Readonly<Record<WebhookEnvelopeType, Webho
     ),
   });
 
-/** True for the fourteen subscribable types (never `webhook.ping`). */
+/** True for the fifteen subscribable types (never `webhook.ping`). */
 export function isWebhookEventType(value: string): value is WebhookEventType {
   return (WEBHOOK_EVENT_TYPES as readonly string[]).includes(value);
 }
 
-/** True for the fourteen types and the ping. */
+/** True for the fifteen types and the ping. */
 export function isWebhookEnvelopeType(value: string): value is WebhookEnvelopeType {
   return (WEBHOOK_ENVELOPE_TYPES as readonly string[]).includes(value);
 }

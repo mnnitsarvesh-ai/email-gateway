@@ -74,6 +74,16 @@ export const LMTP_BOUNCE_SENDER_REFUSED: SmtpReply = Object.freeze({
   text: '5.7.1 Sender address rejected: not allowed for bounce notices',
 });
 
+/**
+ * Step 8.2 D8 (ADR-0078 amending ADR-0019 d5): a provider-relay message whose proof failed
+ * (tenant header or aligned DKIM): every recipient of the transaction, a post-queue DSN to the
+ * envelope sender of the organization's own domain.
+ */
+export const PROVIDER_PROOF_FAILED: SmtpReply = Object.freeze({
+  code: 550,
+  text: '5.7.26 Sender not authenticated by the linked provider tenant',
+});
+
 // --- Policy delegation actions (D4, D11) -------------------------------------------------------
 
 /** Pass: hand the decision back to Postfix's own restrictions. The adapter never answers OK. */

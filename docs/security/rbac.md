@@ -85,8 +85,10 @@ The `permissions` table is seeded from `PERMISSIONS` in `packages/database/src/s
 | `ato:manage`                   | Triage account takeover incidents, notes, overrides and trusted contexts (step 8.4)                                                      |
 | `ato:respond`                  | Request, approve and roll back account takeover responses (step 8.4)                                                                     |
 | `ato:configure`                | Configure account takeover detection, scoring, notifications and automation (step 8.4)                                                   |
+| `integration:read`             | View Microsoft 365 and Google Workspace connections, health, validations and setup guides; never credentials (step 8.2)                  |
+| `integration:manage`           | Connect, consent, upload credentials, validate and change Microsoft 365 and Google Workspace connections (step 8.2)                      |
 
-The catalog has **68** permissions (64 before step 8.4, 60 before step 8.1, 59 before step 7.2, 58 before step 6.2, 55 before step 6.1, 49 before step 5.3). There is no generic `incident:*` permission: access to security incidents is per category (see [Account takeover and security incidents](#account-takeover-and-security-incidents-step-84)).
+The catalog has **70** permissions (68 before step 8.2, 64 before step 8.4, 60 before step 8.1, 59 before step 7.2, 58 before step 6.2, 55 before step 6.1, 49 before step 5.3). There is no generic `incident:*` permission: access to security incidents is per category (see [Account takeover and security incidents](#account-takeover-and-security-incidents-step-84)).
 
 `GET /permissions` lists `platform:*` keys only to users of the platform organization who are not under an override; customer users and API keys see the tenant permissions only.
 
@@ -179,6 +181,8 @@ Generated from the seed catalog (`SYSTEM_ROLES`); if the catalog changes, regene
 | `ato:manage`                   |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |
 | `ato:respond`                  |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |
 | `ato:configure`                |  ✓  |     |  ✓  |     |     |     |     |     |     |
+| `integration:read`             |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |  ✓  |  ✓  |     |
+| `integration:manage`           |  ✓  |     |  ✓  |  ✓  |     |     |     |     |     |
 
 **Platform roles** are the roles that hold any `platform:*` permission: `super_admin` and `platform_admin` (`PLATFORM_ROLE_KEYS`). They can be assigned only to users of the platform organization (`kind = platform`); assigning one in a customer organization is `400`. Customer organizations never see platform roles in `GET /roles` or `GET /roles/{key}` (`404`). Domain Admin is organization-wide; per-domain scoping of roles is out of scope for now.
 
@@ -506,6 +510,24 @@ Design [24-account-takeover-core.md](../plan/steps/24-account-takeover-core.md) 
 **Role matrix excerpt** (seed catalog): super_admin and organization_admin all four; security_analyst `ato:read`, `ato:manage`, `ato:respond` (not `ato:configure`: the analyst who investigates does not change detection); compliance_auditor and platform_admin `ato:read`; quarantine_reviewer, domain_admin, read_only_user and mailbox_user none. Auditors therefore read ATO incidents and export their reports but cannot triage them.
 
 **Audited reads.** The first page of an account's authentication events (`ato.auth_events.viewed`: account, range, filter names; no IP addresses) and every incident report (`security_incident.report_exported`). Every mutation is audited by the ATO and incident stores (actor, changed paths or states, never values of secrets).
+
+## Microsoft 365 and Google Workspace connections (step 8.2)
+
+Design [25-m365-google-connectors.md](../plan/steps/25-m365-google-connectors.md) D13, D16, D17, §5. Permissions: `integration:read` (catalogue, connections, wizard, linked domains, mail-flow state, validation runs, health, setup guides; never a credential, consent state or probe token) and `integration:manage` (create, rename, grants and consent, credential uploads, verification, revocation, domain links, attestations, validation runs, check now, previews and applies). `integration:read` is part of `TENANT_READ_PERMISSIONS`.
+
+| Route                                                                                                                                                                                                                                | Permission(s)                                                                                                | Principals                                                                 | Override |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------- | -------- |
+| `GET /provider-integrations/catalog`, `GET /provider-connections[/{id}]`, `…/wizard`, `…/domains`, `…/mail-flow`, `…/validations[/{runId}]`, `…/health`, `…/setup-guide`                                                             | `integration:read` (the Microsoft 365 route token is shown only with `integration:manage`, masked otherwise) | users, API keys                                                            | yes      |
+| `POST /provider-connections`, `PATCH …/{id}`, `PUT …/domains`, `POST …/attestations`, `POST …/validations`, `POST …/health/check`, grant routes (`POST …/grants`, `PUT …/credentials`, `POST …/verify`, `DELETE …/grants/{profile}`) | `integration:manage`                                                                                         | users, API keys (admin consent: users only, `403 user_principal_required`) | yes      |
+| `POST /provider-connections/consent/complete`                                                                                                                                                                                        | `integration:manage`; the state is bound to the user and organization that created it                        | users only                                                                 | yes      |
+| `POST …/mail-flow/preview`, `POST …/mail-flow/apply`                                                                                                                                                                                 | `integration:manage` **and** `domain:routing_manage` (`inbound`) or `connector:manage` (every other change)  | users, API keys                                                            | yes      |
+| `DELETE /provider-connections/{id}` (disconnect)                                                                                                                                                                                     | `integration:manage` + `connector:manage`                                                                    | users, API keys                                                            | yes      |
+
+**Explicit authorization (ADR-0080).** Every gateway-side mail-flow change needs a preview, its impact token (HMAC bound to organization, connection version, change set, the requesting principal and a 15-minute expiry) and `confirm: true`; a token of another user or API key, or of a changed connection, is `409 impact_changed`. The gateway never changes anything in the customer's Microsoft 365 or Google Workspace tenant: every permission it requests there is read-only.
+
+**Role matrix excerpt** (seed catalog): super_admin and organization_admin both; domain_admin both (with its `domain:routing_manage` and `connector:manage` it can run the whole wizard); security_analyst, compliance_auditor, read_only_user and platform_admin `integration:read`; quarantine_reviewer and mailbox_user none.
+
+**Rate limits (D17).** Grant, consent, credential, verification, revocation, disconnect and validation creation are `sensitive`; validation runs are limited to 10 per hour and "check now" to 6 per hour per connection; applies to 30 per minute per principal.
 
 ## Custom roles
 

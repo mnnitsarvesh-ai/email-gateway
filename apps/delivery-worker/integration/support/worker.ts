@@ -1,3 +1,4 @@
+import type { S3Client } from '@aws-sdk/client-s3';
 import { RedisService, withTransactionDefaults } from '@email-gateway/common';
 import { processOnce } from '@email-gateway/database';
 import type { DeliveryApprovedV1, EventEnvelope } from '@email-gateway/event-contracts';
@@ -9,6 +10,7 @@ import { DeliveryReconciler } from '../../src/reconciler/delivery-reconciler';
 import { ReinjectionScheduler } from '../../src/reinjection/reinjection-scheduler';
 import { ReinjectionStore } from '../../src/reinjection/reinjection-store';
 import { Reinjector } from '../../src/reinjection/reinjector';
+import { RouteTokenRepository } from '../../src/routing/route-token.repository';
 import { type Fixtures, newMetrics, silentLogger } from './fixtures';
 
 export interface TestWorker {
@@ -37,7 +39,15 @@ export interface TestWorker {
 export function buildWorker(
   fx: Fixtures,
   config: Readonly<WorkerConfig>,
-  options: { redisUrl?: string; logSourcePrefix?: string; now?: () => Date } = {},
+  options: {
+    redisUrl?: string;
+    logSourcePrefix?: string;
+    now?: () => Date;
+    /** Replaces MinIO for EML reads (step 8.2 suites that must not write object storage). */
+    s3?: Pick<S3Client, 'send'>;
+    /** Replaces the route token repository (step 8.2 D9), e.g. a failing one. */
+    routeTokens?: Pick<RouteTokenRepository, 'headerFor'>;
+  } = {},
 ): TestWorker {
   // As DeliveryModule: one transaction budget for every data-plane transaction (§6.2 F2).
   const txBudgetMs = config.DELIVERY_DB_TX_TIMEOUT_MS;
@@ -54,13 +64,16 @@ export function buildWorker(
   const reinjector = new Reinjector({
     prisma,
     store,
-    s3: fx.s3.client,
+    s3: options.s3 ?? fx.s3.client,
     bucket: fx.s3.mailBucket,
     limiter: new OutboundRateLimiter(prisma, redis.client, config),
     metrics,
     logger: silentLogger,
     config,
     txTimeoutMs: txBudgetMs,
+    // As DeliveryModule (step 8.2 D9).
+    routeTokens:
+      options.routeTokens ?? new RouteTokenRepository(prisma, config.PROVIDER_ROUTE_TOKEN_KEY),
     ...(options.now ? { now: options.now } : {}),
   });
   const scope = { organizationIds: fx.organizationIds };

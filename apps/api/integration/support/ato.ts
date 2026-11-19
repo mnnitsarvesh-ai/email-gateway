@@ -94,7 +94,10 @@ export class AtoSeeder {
     readonly ctx: IntegrationApp,
     readonly fx: Fixtures,
   ) {
-    fx.registerCleanup(() => deleteAtoRows(ctx.prisma, this.orgIds));
+    // The live ato-worker records the fixture users' sign-ins (auth event, gateway_user account)
+    // asynchronously, possibly after this delete ran: rerun it when the organization delete
+    // conflicts.
+    fx.registerCleanup(() => deleteAtoRows(ctx.prisma, this.orgIds), { rerunOnConflict: true });
   }
 
   get stores(): IncidentStores {

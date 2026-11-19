@@ -1,5 +1,5 @@
 {
-  "topology_version": 13,
+  "topology_version": 14,
   "exchanges": [
     {
       "name": "email.ingestion",
@@ -409,6 +409,14 @@
       "destination": "email.webhooks",
       "destination_type": "queue",
       "routing_key": "org.*.domain.status.changed.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.events",
+      "vhost": "email-gateway",
+      "destination": "email.webhooks",
+      "destination_type": "queue",
+      "routing_key": "org.*.integration.connection.health_changed.v1",
       "arguments": {}
     },
     {

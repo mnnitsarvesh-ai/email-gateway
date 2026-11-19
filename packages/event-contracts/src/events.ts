@@ -2056,6 +2056,8 @@ export const NOTIFICATION_ALERT_KIND_VALUES = [
   'threat_detected',
   'domain_dns_failed',
   'webhook_disabled',
+  // Step 8.2 D12: a provider connection's health became `critical`.
+  'integration_unhealthy',
 ] as const;
 /** Public event severities (step 6.2 §5). */
 export const NOTIFICATION_ALERT_SEVERITY_VALUES = ['info', 'low', 'medium', 'high'] as const;
@@ -2067,6 +2069,7 @@ const NOTIFICATION_ALERT_REQUIRED_REFS: Readonly<
   threat_detected: ['webhookEventId', 'messageId', 'receivedAt'],
   domain_dns_failed: ['webhookEventId', 'domainId'],
   webhook_disabled: ['subscriptionId'],
+  integration_unhealthy: ['webhookEventId', 'connectionId'],
 };
 
 /**
@@ -2092,6 +2095,8 @@ export const notificationAlertRequestedV1 = z
       receivedAt: z.iso.datetime().optional(),
       domainId: decimalIdSchema.optional(),
       subscriptionId: z.uuid().optional(),
+      /** Step 8.2: the provider connection public id (`integration_unhealthy`). */
+      connectionId: z.uuid().optional(),
     }),
     window: z.strictObject({ from: z.iso.datetime(), to: z.iso.datetime() }),
     counts: z.strictObject({ suppressedBefore: z.number().int().min(0).max(4_294_967_295) }),
@@ -2120,6 +2125,69 @@ export const notificationAlertRequestedV1 = z
     }
   });
 export type NotificationAlertRequestedV1 = z.infer<typeof notificationAlertRequestedV1>;
+
+/** `provider_connections.provider` values (IntegrationProvider, step 8.2 §3). */
+export const INTEGRATION_PROVIDER_VALUES = ['microsoft_365', 'google_workspace'] as const;
+
+/** `provider_connections.health_status` values (ProviderHealthStatus, step 8.2 §3). */
+export const INTEGRATION_HEALTH_STATUS_VALUES = [
+  'unknown',
+  'healthy',
+  'warning',
+  'critical',
+] as const;
+
+/** At most this many failing check codes in one `integration.connection.health_changed.v1`. */
+export const INTEGRATION_HEALTH_MAX_FAILING_CHECKS = 10;
+
+/** A health check code (`@email-gateway/provider-integrations` registry), e.g. `token.acquire`. */
+export const INTEGRATION_CHECK_CODE_PATTERN = /^[a-z0-9_.]{1,64}$/;
+
+/**
+ * A provider connection's health transition (step 8.2 D11, D12, §4.2, ADR-0079): written by the
+ * integration-worker's health role through `message_outbox` (`aggregate_type =
+ * 'provider_connection'`, `aggregate_id` = the decimal connection id) in the transaction that
+ * stores the `provider_health_events` row, only when the evaluated status changes. Published to
+ * `email.events`; consumed by the webhook-worker fanout (`email.webhooks`, topology v14), which
+ * projects it to the public webhook `integration.health_changed` and the alert
+ * `integration_unhealthy`.
+ *
+ * Strict: the connection's public id, the provider, both statuses, the time and the failing
+ * check codes only — no tenant id or name, domain, permission, evidence, error text or
+ * credential. `previousStatus` ≠ `status`; check codes are unique.
+ */
+export const integrationHealthChangedV1 = z
+  .strictObject({
+    connectionId: z.uuid(),
+    provider: z.enum(INTEGRATION_PROVIDER_VALUES),
+    previousStatus: z.enum(INTEGRATION_HEALTH_STATUS_VALUES),
+    status: z.enum(INTEGRATION_HEALTH_STATUS_VALUES),
+    changedAt: z.iso.datetime(),
+    failingChecks: z
+      .array(z.string().regex(INTEGRATION_CHECK_CODE_PATTERN, 'Expected a check code'))
+      .max(INTEGRATION_HEALTH_MAX_FAILING_CHECKS),
+  })
+  .superRefine((payload, ctx) => {
+    if (payload.previousStatus === payload.status) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['status'],
+        message: 'A health transition has previousStatus ≠ status',
+      });
+    }
+    const seen = new Set<string>();
+    payload.failingChecks.forEach((code, index) => {
+      if (seen.has(code)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['failingChecks', index],
+          message: 'Duplicate check code',
+        });
+      }
+      seen.add(code);
+    });
+  });
+export type IntegrationHealthChangedV1 = z.infer<typeof integrationHealthChangedV1>;
 
 export const EventTypes = {
   MessageReceived: 'mail.message.received.v1',
@@ -2161,4 +2229,5 @@ export const EventTypes = {
   AtoResponseCompleted: 'ato.response.completed.v1',
   AtoRestrictionChanged: 'ato.restriction.changed.v1',
   AtoNotificationRequested: 'ato.notification.requested.v1',
+  IntegrationHealthChanged: 'integration.connection.health_changed.v1',
 } as const;

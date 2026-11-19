@@ -46,6 +46,8 @@ const EVENT_TYPES = [
   'security.incident.updated',
   'ato.account.risk_changed',
   'ato.response.completed',
+  // Step 8.2 D12.
+  'integration.health_changed',
 ] as const;
 
 /**

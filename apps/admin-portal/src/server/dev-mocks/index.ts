@@ -15,6 +15,7 @@ import { fixtures as mailServers } from './fixtures/mail-servers';
 import { fixtures as messages } from './fixtures/messages';
 import { fixtures as organizations } from './fixtures/organizations';
 import { fixtures as policies } from './fixtures/policies';
+import { fixtures as providerConnections } from './fixtures/provider-connections';
 import { fixtures as quarantine } from './fixtures/quarantine';
 import { fixtures as reports } from './fixtures/reports';
 import { fixtures as roles } from './fixtures/roles';
@@ -43,7 +44,8 @@ export type { FixtureHandler, FixtureHandlers };
  * (e.g. `OrganizationsController_list_v1`) in its own file. `dlp-bec` (step 7.3 WP5) comes last:
  * its DLP and BEC handlers (with writes) replace the read-only lists of `policies`; `archive`
  * (step 8.1 WP5) adds the 41 archive and eDiscovery operations; `ato` and `incidents` (step 8.4
- * WP6) the 26 account takeover and 8 security incident operations.
+ * WP6) the 26 account takeover and 8 security incident operations; `provider-connections`
+ * (step 8.2 WP6) the 24 Microsoft 365 and Google Workspace connection operations.
  */
 export const FEATURE_FIXTURES: Readonly<Record<string, FixtureHandlers>> = {
   session,
@@ -67,6 +69,7 @@ export const FEATURE_FIXTURES: Readonly<Record<string, FixtureHandlers>> = {
   archive,
   ato,
   incidents,
+  'provider-connections': providerConnections,
   'dlp-bec': dlpBec,
 };
 

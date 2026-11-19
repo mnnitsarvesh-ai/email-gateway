@@ -21,6 +21,7 @@ import {
 import type { DeliveryMetrics, ReinjectionOutcome } from '../metrics/delivery-metrics';
 import { SOURCE_SERVICE } from '../planning/delivery-planner';
 import { maxChunk, type OutboundRateLimiter } from '../rate-limit/outbound-rate-limiter';
+import type { RouteTokenRepository } from '../routing/route-token.repository';
 import { nextWindowStart, retryDelayMs } from '../shared/backoff';
 import { ContentMissingError, type EmlStream, ForeignObjectKeyError, openEml } from './eml-source';
 import {
@@ -63,6 +64,8 @@ export interface ReinjectorDeps {
   txTimeoutMs: number;
   now?: () => Date;
   random?: () => number;
+  /** Step 8.2 D9: `X-EG-Route-Token` of Microsoft 365 internal routing (absent = never). */
+  routeTokens?: Pick<RouteTokenRepository, 'headerFor'>;
 }
 
 /** Final RCPT classification of one recipient in a session. */
@@ -536,6 +539,28 @@ export class Reinjector {
       now: this.now(),
     });
     const prefix = `${GATEWAY_TRACE_HEADER}: ${trace}\r\n`;
+    // Step 8.2 D9 (ADR-0081): the route token right after the trace (streamed ahead of the EML;
+    // the client's prefix stays the one trace line), only for qualifying internal deliveries; a
+    // lookup failure retries the row (never sent without the header).
+    let routeLine: string | null = null;
+    if (this.deps.routeTokens) {
+      let routeToken: string | null;
+      try {
+        routeToken = await this.deps.routeTokens.headerFor(row);
+      } catch (err) {
+        this.logger.warn({ ...ids, err }, 'route token lookup failed; retried');
+        await this.retry(row, active, {
+          errorClass: 'reinjection_error',
+          error: 'route token lookup failed',
+          outcome: 'retry',
+        });
+        return 'retry';
+      }
+      if (routeToken !== null) {
+        routeLine = `${routeToken}\r\n`;
+        this.deps.metrics.routeTokenHeaders.inc();
+      }
+    }
     let result: SessionResult;
     try {
       const { client, greeting } = await SmtpClient.connect({
@@ -553,6 +578,7 @@ export class Reinjector {
           token,
           notify: path.notify,
           prefix,
+          routeLine,
         });
       } finally {
         await client.quit();
@@ -610,7 +636,13 @@ export class Reinjector {
     context: ReinjectionContext,
     active: ActiveDelivery[],
     eml: EmlStream,
-    options: { token: string; notify: 'NEVER' | 'FAILURE,DELAY'; prefix: string },
+    options: {
+      token: string;
+      notify: 'NEVER' | 'FAILURE,DELAY';
+      prefix: string;
+      /** Step 8.2 D9: `X-EG-Route-Token: …` CRLF, sent between the trace and the EML. */
+      routeLine?: string | null;
+    },
   ): Promise<SessionResult> {
     if (greeting.code !== 220) return { stage: 'pre_rcpt', reply: greeting, command: 'greeting' };
     const ehlo = await client.ehlo(this.deps.config.DELIVERY_REINJECT_HELO);
@@ -649,7 +681,11 @@ export class Reinjector {
     }
     const dsn = client.has('DSN');
     const size =
-      eml.size === null ? undefined : eml.size + Buffer.byteLength(options.prefix, 'utf8');
+      eml.size === null
+        ? undefined
+        : eml.size +
+          Buffer.byteLength(options.prefix, 'utf8') +
+          Buffer.byteLength(options.routeLine ?? '', 'utf8');
     const mail = await client.mail(context.envelopeFrom, {
       ...(client.has('SIZE') && size !== undefined ? { size } : {}),
       ...(dsn ? { ret: 'HDRS' as const, envid: options.token } : {}),
@@ -671,7 +707,10 @@ export class Reinjector {
       else refused.push(entry);
     }
     if (accepted.length === 0) return { stage: 'rcpt', accepted, deferred, refused };
-    const data = await client.data(options.prefix, eml.body);
+    const data = await client.data(
+      options.prefix,
+      options.routeLine ? withLeadingLine(options.routeLine, eml.body) : eml.body,
+    );
     return { stage: 'data', accepted, deferred, refused, data };
   }
 
@@ -1050,3 +1089,12 @@ export class Reinjector {
 }
 
 type SignalPart = Omit<DeliverySignal, 'match' | 'occurredAt' | 'source'>;
+
+/** The body with one header line (step 8.2 route token) streamed ahead of it. */
+async function* withLeadingLine(
+  line: string,
+  body: AsyncIterable<Uint8Array>,
+): AsyncGenerator<Uint8Array> {
+  yield Buffer.from(line, 'utf8');
+  yield* body;
+}

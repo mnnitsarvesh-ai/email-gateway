@@ -16,7 +16,7 @@
  */
 import { Writable } from 'node:stream';
 import type { INestApplication, ModuleMetadata } from '@nestjs/common';
-import { Test } from '@nestjs/testing';
+import { Test, type TestingModuleBuilder } from '@nestjs/testing';
 import { configureHttpApp, NestPinoLogger, PrismaService } from '@email-gateway/common';
 import { PLATFORM_ORGANIZATION_SLUG } from '@email-gateway/database';
 import { createLogger } from '@email-gateway/logger';
@@ -47,6 +47,11 @@ export interface IntegrationApp {
 export interface IntegrationAppOptions {
   /** Extra modules, e.g. a test-only controller module of one suite (never production code). */
   imports?: ModuleMetadata['imports'];
+  /**
+   * Further provider overrides on the testing module builder (a suite that must not touch a
+   * shared store, e.g. step 8.2's provider suite with Redis replaced by an in-memory store).
+   */
+  override?: (builder: TestingModuleBuilder) => TestingModuleBuilder;
 }
 
 export async function createIntegrationApp(
@@ -65,12 +70,13 @@ export async function createIntegrationApp(
     ...envOverrides,
   });
   const emails = new RecordingEmailSender();
-  const moduleRef = await Test.createTestingModule({
+  let builder = Test.createTestingModule({
     imports: [AppModule.forRoot(config), ...(options.imports ?? [])],
   })
     .overrideProvider(EmailSender)
-    .useValue(emails)
-    .compile();
+    .useValue(emails);
+  if (options.override) builder = options.override(builder);
+  const moduleRef = await builder.compile();
 
   const logs: string[] = [];
   const destination = new Writable({

@@ -58,6 +58,7 @@ describe('step 6.2 vocabularies', () => {
       'threat_detected',
       'domain_dns_failed',
       'webhook_disabled',
+      'integration_unhealthy',
     ]);
     expect(NOTIFICATION_ALERT_SEVERITY_VALUES).toEqual(['info', 'low', 'medium', 'high']);
   });
@@ -185,6 +186,27 @@ describe('notification.alert_requested.v1 (N2, §4.1)', () => {
       true,
     );
     expect(okAlert({ ...base, kind: 'webhook_disabled', refs: {} })).toBe(false);
+    // Step 8.2 D12: integration_unhealthy names the stored public event and the connection.
+    expect(
+      okAlert({
+        ...base,
+        kind: 'integration_unhealthy',
+        refs: { webhookEventId: uuid, connectionId: uuid },
+      }),
+    ).toBe(true);
+    expect(
+      okAlert({ ...base, kind: 'integration_unhealthy', refs: { webhookEventId: uuid } }),
+    ).toBe(false);
+    expect(okAlert({ ...base, kind: 'integration_unhealthy', refs: { connectionId: uuid } })).toBe(
+      false,
+    );
+    expect(
+      okAlert({
+        ...base,
+        kind: 'integration_unhealthy',
+        refs: { webhookEventId: uuid, connectionId: 'not-a-uuid' },
+      }),
+    ).toBe(false);
     // messageId and receivedAt go together, whatever the kind.
     expect(
       okAlert({

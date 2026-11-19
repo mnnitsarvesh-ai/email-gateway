@@ -176,43 +176,74 @@ export class DomainDestinationsService {
     input: PutDestinationsInput,
     client: ClientContext,
   ): Promise<DomainDestinationsView> {
-    const max = this.config.ROUTING_MAX_DESTINATIONS_PER_DOMAIN;
-    if (input.provider === 'custom' && input.servers.length > max) {
-      throw new BadRequestException([
-        `servers: at most ${max} servers (ROUTING_MAX_DESTINATIONS_PER_DOMAIN)`,
-      ]);
-    }
-    return this.transactions.run(async (tx) => {
-      const domain = await this.lockWritable(tx, scope, publicId);
-      const plan = planDestinations(input, await this.destinations.presets(tx), this.rules);
-      if (!plan.ok) throw new DestinationRefusedException(plan.reason, plan.field);
-      const shared = await this.destinations.lockSharedDestinations(
-        tx,
-        scope,
-        hostsOf(plan.servers.filter((server) => server.provider === 'custom')),
-      );
-      const conflict = tlsConflictIndex(plan.servers, shared);
-      if (conflict !== -1) {
-        throw new DestinationRefusedException(
-          'destination_tls_conflict',
-          `servers.${conflict}.tlsMode`,
-        );
-      }
-      const servers = inDeliveryOrder(plan.servers);
-      const current = await this.destinations.listServers(scope, domain.id, tx);
-      if (sameServers(current, servers)) return toDestinationsView(current);
+    this.assertServerCount(input);
+    return this.transactions.run(
+      async (tx) =>
+        (await this.replaceInTransaction(tx, principal, scope, publicId, input, client)).view,
+    );
+  }
 
-      await this.destinations.replaceServers(tx, scope, domain.id, plan.servers);
-      const hosts = hostsOf(plan.servers);
-      await this.record(tx, principal, scope, client, domain, DestinationAuditAction.Replaced, {
-        provider: plan.provider,
-        hosts,
-        count: plan.servers.length,
-        previous: { provider: current[0]?.provider ?? null, hosts: hostsOf(current) },
-      });
-      await this.event(tx, scope, domain, [...hosts, ...hostsOf(current)]);
-      return toDestinationsView(await this.destinations.listServers(scope, domain.id, tx));
+  /**
+   * The rows `input` would write, in delivery order, validated by the R3 host rules and the
+   * presets (`422` DestinationRefusedException otherwise); nothing is written. Step 8.2 D13: the
+   * provider wizard computes its change set (preview) with it.
+   */
+  async plan(input: PutDestinationsInput, client?: Client): Promise<PlannedServer[]> {
+    const plan = planDestinations(input, await this.destinations.presets(client), this.rules);
+    if (!plan.ok) throw new DestinationRefusedException(plan.reason, plan.field);
+    return inDeliveryOrder(plan.servers);
+  }
+
+  /**
+   * The atomic replacement of `PUT /domains/{id}/destinations` inside the CALLER's writer
+   * transaction (step 8.2 D13: the provider wizard's apply writes destinations, its connector
+   * rows and connection columns in one transaction). Same rules, audit row and
+   * `domain.routing.changed.v1` event as `replace`; `changed: false` when the body equals the
+   * stored rows (nothing written).
+   */
+  async replaceInTransaction(
+    tx: Client,
+    principal: Principal,
+    scope: TenantScope,
+    publicId: string,
+    input: PutDestinationsInput,
+    client: ClientContext,
+  ): Promise<{ changed: boolean; view: DomainDestinationsView }> {
+    this.assertServerCount(input);
+    const domain = await this.lockWritable(tx, scope, publicId);
+    const plan = planDestinations(input, await this.destinations.presets(tx), this.rules);
+    if (!plan.ok) throw new DestinationRefusedException(plan.reason, plan.field);
+    const shared = await this.destinations.lockSharedDestinations(
+      tx,
+      scope,
+      hostsOf(plan.servers.filter((server) => server.provider === 'custom')),
+    );
+    const conflict = tlsConflictIndex(plan.servers, shared);
+    if (conflict !== -1) {
+      throw new DestinationRefusedException(
+        'destination_tls_conflict',
+        `servers.${conflict}.tlsMode`,
+      );
+    }
+    const servers = inDeliveryOrder(plan.servers);
+    const current = await this.destinations.listServers(scope, domain.id, tx);
+    if (sameServers(current, servers)) {
+      return { changed: false, view: toDestinationsView(current) };
+    }
+
+    await this.destinations.replaceServers(tx, scope, domain.id, plan.servers);
+    const hosts = hostsOf(plan.servers);
+    await this.record(tx, principal, scope, client, domain, DestinationAuditAction.Replaced, {
+      provider: plan.provider,
+      hosts,
+      count: plan.servers.length,
+      previous: { provider: current[0]?.provider ?? null, hosts: hostsOf(current) },
     });
+    await this.event(tx, scope, domain, [...hosts, ...hostsOf(current)]);
+    return {
+      changed: true,
+      view: toDestinationsView(await this.destinations.listServers(scope, domain.id, tx)),
+    };
   }
 
   /**
@@ -238,6 +269,16 @@ export class DomainDestinationsService {
       });
       await this.event(tx, scope, domain, hosts);
     });
+  }
+
+  /** `400` for more custom servers than ROUTING_MAX_DESTINATIONS_PER_DOMAIN (before any read). */
+  private assertServerCount(input: PutDestinationsInput): void {
+    const max = this.config.ROUTING_MAX_DESTINATIONS_PER_DOMAIN;
+    if (input.provider === 'custom' && input.servers.length > max) {
+      throw new BadRequestException([
+        `servers: at most ${max} servers (ROUTING_MAX_DESTINATIONS_PER_DOMAIN)`,
+      ]);
+    }
   }
 
   private async lockWritable(

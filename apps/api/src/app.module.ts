@@ -48,6 +48,7 @@ import { ThreatIntelligenceModule } from './modules/threat-intelligence/threat-i
 import { UrlProtectionModule } from './modules/url-protection/url-protection.module';
 import { UsageModule } from './modules/usage/usage.module';
 import { UsersModule } from './modules/users/users.module';
+import { ProviderConnectionsModule } from './modules/provider-connections/provider-connections.module';
 import { WebhooksModule } from './modules/webhooks/webhooks.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
 import { SavedViewsModule } from './modules/saved-views/saved-views.module';
@@ -137,6 +138,9 @@ export class AppModule {
         // responses, restrictions, settings, rules).
         IncidentsModule,
         AtoModule,
+        // Step 8.2: Microsoft 365 and Google Workspace connections (wizard, grants, mail flow,
+        // validation, health, setup guides; the api never calls a provider).
+        ProviderConnectionsModule,
       ],
       providers: [{ provide: API_CONFIG, useValue: config }],
       exports: [API_CONFIG],

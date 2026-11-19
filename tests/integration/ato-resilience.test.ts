@@ -42,17 +42,24 @@ let sink = '';
  * smtp-tools address, and suites running in parallel authenticate from the same address, so a
  * submission may get the temporary `450 4.7.1 … too many AUTH commands`. A real client retries a
  * 4xx later; the burst does the same after the anvil window (the limit itself is not changed).
+ * Stack suites run one after another and the next one may authenticate from the same address at
+ * once (`smtp-fail-closed` expects its first AUTH answer to be the SASL one), so `afterAll` waits
+ * until the window of the last AUTH has passed: the suite returns the budget it used.
  */
 const AUTH_RATE_REPLY = /\b450 4\.7\.1 [^\n]*too many AUTH commands/;
+const AUTH_RATE_WINDOW_MS = 65_000;
+let lastAuthAt = 0;
 async function submitWithinAuthRate(options: Parameters<typeof swaks>[0]) {
   let sent = await swaks(options);
+  lastAuthAt = Date.now();
   for (
     let retry = 0;
     retry < 3 && !sent.queueId && AUTH_RATE_REPLY.test(sent.transcript);
     retry++
   ) {
-    await new Promise((r) => setTimeout(r, 65_000));
+    await new Promise((r) => setTimeout(r, AUTH_RATE_WINDOW_MS));
     sent = await swaks(options);
+    lastAuthAt = Date.now();
   }
   return sent;
 }
@@ -89,6 +96,11 @@ afterAll(async () => {
   await purgeAtoQueues(mgmt, vhost);
   await purgeDormantQueues(mgmt, vhost);
   await fx.prisma.$disconnect();
+  // Return the shared AUTH budget of the smtp-tools address before the next suite runs.
+  const authWindowLeft = lastAuthAt + AUTH_RATE_WINDOW_MS - Date.now();
+  if (lastAuthAt > 0 && authWindowLeft > 0) {
+    await new Promise((r) => setTimeout(r, authWindowLeft));
+  }
 }, 300_000);
 
 describe.skipIf(gate.skip)('ato stack: worker killed during a burst', { timeout: 900_000 }, () => {

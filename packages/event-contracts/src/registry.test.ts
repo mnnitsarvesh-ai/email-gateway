@@ -80,6 +80,8 @@ describe('EVENT_REGISTRY', () => {
       'ato.response.completed.v1': ['email.security', 'ato_response'],
       'ato.restriction.changed.v1': ['email.security', 'ato_restriction'],
       'ato.notification.requested.v1': ['email.security', 'ato_notification'],
+      // Step 8.2 §4.2: provider connection health transitions (aggregate provider_connection).
+      'integration.connection.health_changed.v1': ['email.events', 'provider_connection'],
     });
     for (const definition of Object.values(EVENT_REGISTRY)) {
       expect(EXCHANGE_NAMES).toContain(definition.exchange);

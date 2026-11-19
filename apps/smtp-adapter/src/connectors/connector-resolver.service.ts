@@ -170,7 +170,10 @@ function connectorSelect(withNetworks: boolean) {
   } as const;
 }
 
-function usable(row: ConnectorRow | null, authType: SmtpConnectorAuthType): ConnectorDto | null {
+/** Auth types this resolver serves (`provider_relay` is resolved by step 8.2's resolver). */
+type ResolvedAuthType = ConnectorDto['authType'];
+
+function usable(row: ConnectorRow | null, authType: ResolvedAuthType): ConnectorDto | null {
   if (
     !row ||
     row.authType !== authType ||
@@ -183,7 +186,7 @@ function usable(row: ConnectorRow | null, authType: SmtpConnectorAuthType): Conn
     id: row.id.toString(),
     publicId: row.publicId,
     organizationId: row.organizationId.toString(),
-    authType: row.authType,
+    authType,
     requireTls: row.requireTls,
     networks: (row.networks ?? []).flatMap((network) =>
       network.ipVersion === 4 || network.ipVersion === 6

@@ -91,6 +91,8 @@ export interface FanoutOptions {
   txTimeoutMs: number;
   /** Ledger consumer name (default `webhook-worker.fanout`; integration tests use their own). */
   consumer?: string;
+  /** INTEGRATION_ALERT_THROTTLE_MINUTES (step 8.2 D12; default 60). */
+  integrationAlertThrottleMinutes?: number;
   now?: () => Date;
 }
 
@@ -288,15 +290,24 @@ export class FanoutService {
             messageId: pe.message!.messageId.toString(),
             receivedAt: pe.message!.receivedAt.toISOString(),
           }
-        : { webhookEventId, domainId: (pe.domainId ?? 0n).toString() };
+        : kind === 'integration_unhealthy'
+          ? { webhookEventId, connectionId: pe.connectionPublicId! }
+          : { webhookEventId, domainId: (pe.domainId ?? 0n).toString() };
+    const scopeKey =
+      kind === 'threat_detected'
+        ? ALERT_SCOPE_NONE
+        : kind === 'integration_unhealthy'
+          ? (pe.connectionPublicId ?? ALERT_SCOPE_NONE)
+          : (pe.domainPublicId ?? ALERT_SCOPE_NONE);
     return requestAlert(tx, {
       organizationId: index.organizationId,
       kind,
       severity: pe.severity,
-      scopeKey:
-        kind === 'threat_detected' ? ALERT_SCOPE_NONE : (pe.domainPublicId ?? ALERT_SCOPE_NONE),
+      scopeKey,
       occurredAt,
-      throttleMinutes: alertKindSettings(index.settings, kind).throttleMinutes,
+      throttleMinutes: alertKindSettings(index.settings, kind, {
+        integrationThrottleMinutes: this.options.integrationAlertThrottleMinutes,
+      }).throttleMinutes,
       sourceEventId: event.eventId,
       correlationId: event.correlationId,
       refs,

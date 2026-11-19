@@ -330,6 +330,7 @@ export const KIND_LABELS: Record<Kind, string> = {
   threat_detected: 'Threat detected',
   domain_dns_failed: 'Domain DNS check failed',
   webhook_disabled: 'Webhook disabled',
+  integration_unhealthy: 'Microsoft 365 or Google Workspace connection unhealthy',
   policy_alert: 'Policy alerts',
   quarantine_admin_alert: 'Quarantine administrator alerts',
   quarantine_approval_requested: 'Quarantine release approval requested',
@@ -346,6 +347,7 @@ export const preferencesSchema = z
           'threat_detected',
           'domain_dns_failed',
           'webhook_disabled',
+          'integration_unhealthy',
           'policy_alert',
           'quarantine_admin_alert',
           'quarantine_approval_requested',
@@ -354,7 +356,7 @@ export const preferencesSchema = z
           'ato_digest',
         ]),
       )
-      .max(9),
+      .max(10),
     quarantineDigestOptOut: z.boolean(),
   })
   .strict();

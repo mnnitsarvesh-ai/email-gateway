@@ -6,6 +6,7 @@ import {
   alertWindow,
   alertWindowStart,
   canonicalSettings,
+  INTEGRATION_ALERT_THROTTLE_MINUTES_DEFAULT,
   NOTIFICATION_SETTINGS_DEFAULTS,
   notificationPreferencesSchema,
   notificationSettingsSchema,
@@ -16,11 +17,17 @@ import {
 
 describe('kinds and permissions (N1, N3)', () => {
   it('lists the alert and preference kinds and the recipient permissions', () => {
-    expect([...ALERT_KINDS]).toEqual(['threat_detected', 'domain_dns_failed', 'webhook_disabled']);
+    expect([...ALERT_KINDS]).toEqual([
+      'threat_detected',
+      'domain_dns_failed',
+      'webhook_disabled',
+      'integration_unhealthy',
+    ]);
     expect([...PREFERENCE_KINDS]).toEqual([
       'threat_detected',
       'domain_dns_failed',
       'webhook_disabled',
+      'integration_unhealthy',
       'policy_alert',
       'quarantine_admin_alert',
       'quarantine_approval_requested',
@@ -33,7 +40,35 @@ describe('kinds and permissions (N1, N3)', () => {
       threat_detected: 'quarantine:approve',
       domain_dns_failed: 'domain:manage',
       webhook_disabled: 'webhook:manage',
+      integration_unhealthy: 'integration:read',
     });
+  });
+
+  it('integration_unhealthy (step 8.2 D12): always enabled, platform throttle, opt-out per user', () => {
+    const { settings } = resolveNotificationSettings({
+      alerts: { threatDetected: { enabled: false } },
+    });
+    expect(alertKindSettings(settings, 'integration_unhealthy')).toEqual({
+      enabled: true,
+      throttleMinutes: INTEGRATION_ALERT_THROTTLE_MINUTES_DEFAULT,
+    });
+    expect(
+      alertKindSettings(settings, 'integration_unhealthy', { integrationThrottleMinutes: 15 }),
+    ).toEqual({ enabled: true, throttleMinutes: 15 });
+    // The platform throttle never changes the tenant kinds.
+    expect(
+      alertKindSettings(settings, 'domain_dns_failed', { integrationThrottleMinutes: 15 }),
+    ).toEqual({ enabled: true, throttleMinutes: 360 });
+    expect(
+      notificationPreferencesSchema.safeParse({ optOut: ['integration_unhealthy'] }).success,
+    ).toBe(true);
+    expect(resolveNotificationPreferences({ optOut: ['integration_unhealthy'] }).optOut).toEqual([
+      'integration_unhealthy',
+    ]);
+    // Not a tenant setting: the settings document has no key for it.
+    expect(
+      notificationSettingsSchema.safeParse({ alerts: { integrationUnhealthy: {} } }).success,
+    ).toBe(false);
   });
 });
 
@@ -173,5 +208,18 @@ describe('alertWindowStart (N2)', () => {
     });
     expect(() => alertWindowStart(at, 0)).toThrow();
     expect(() => alertWindowStart(at, 1.5)).toThrow();
+  });
+});
+
+describe('integration check titles (step 8.2 D12)', () => {
+  it('titles known codes and falls back to the code', async () => {
+    const { integrationCheckTitle, INTEGRATION_PROVIDER_NAMES } =
+      await import('./integration-checks');
+    expect(integrationCheckTitle('routing.loops')).toBe(
+      'No mail loops for linked domains in the last 24 hours',
+    );
+    expect(integrationCheckTitle('ato.future_check')).toBe('ato.future_check');
+    expect(integrationCheckTitle('toString')).toBe('toString');
+    expect(INTEGRATION_PROVIDER_NAMES.google_workspace).toBe('Google Workspace');
   });
 });

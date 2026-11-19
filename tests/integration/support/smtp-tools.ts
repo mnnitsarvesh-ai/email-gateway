@@ -42,6 +42,11 @@ export interface SwaksOptions {
   /** Extra raw swaks arguments (each one argv element). */
   extra?: readonly string[];
   timeoutMs?: number;
+  /**
+   * The Compose service swaks runs in (default `smtp-tools`); step 8.2 sends from the
+   * provider-relay test clients `provider-sender-m365` / `provider-sender-google`.
+   */
+  service?: string;
 }
 
 const COMMAND = /^ {1,2}(?:->|~>) {1,2}(\S+)/;
@@ -76,7 +81,7 @@ export async function swaks(options: SwaksOptions): Promise<SwaksResult> {
   if (options.data !== undefined) args.push('--data', '-');
   if (options.quitAfter) args.push('--quit-after', options.quitAfter);
   args.push('--timeout', '60', ...(options.extra ?? []));
-  const result = await composeExec(TOOLS, args, {
+  const result = await composeExec(options.service ?? TOOLS, args, {
     input: options.data !== undefined ? toCrlf(options.data) : undefined,
     timeoutMs: options.timeoutMs ?? 120_000,
   });

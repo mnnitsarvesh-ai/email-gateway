@@ -35,8 +35,11 @@ export interface ApiSession {
   put(path: string, body: unknown, headers?: Record<string, string>): Promise<ApiResponse>;
   post(path: string, body: unknown, headers?: Record<string, string>): Promise<ApiResponse>;
   patch(path: string, body: unknown): Promise<ApiResponse>;
-  /** DELETE; `headers` e.g. an `Idempotency-Key` (step 6.2 `DELETE /webhooks/{id}`). */
-  delete(path: string, headers?: Record<string, string>): Promise<ApiResponse>;
+  /**
+   * DELETE; `headers` e.g. an `Idempotency-Key` (step 6.2 `DELETE /webhooks/{id}`); `body` for
+   * deletes that carry one (step 8.2 disconnect: `{ impactToken, confirm }`).
+   */
+  delete(path: string, headers?: Record<string, string>, body?: unknown): Promise<ApiResponse>;
   /**
    * Fresh re-authentication material (step 5.3 Q12 download grants): the password and, for an
    * MFA user, a TOTP code of a 30-second step not used before by this session (the api's TOTP
@@ -190,7 +193,7 @@ export async function apiSession(
     put: (path, body, headers) => call('PUT', path, body, headers),
     post: (path, body, headers) => call('POST', path, body, headers),
     patch: (path, body) => call('PATCH', path, body),
-    delete: (path, headers) => call('DELETE', path, undefined, headers),
+    delete: (path, headers, body) => call('DELETE', path, body, headers),
     reauth: async () => ({
       password,
       ...(mfaKey ? { totpCode: await nextTotp(mfaKey) } : {}),

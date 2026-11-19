@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { PrismaService } from '@email-gateway/common';
 import type { MailDestinationProvider, TlsMode } from '@email-gateway/database';
 import type { Logger } from '@email-gateway/logger';
@@ -22,9 +22,11 @@ import {
 } from '../config';
 import { parseIpKey } from '../connectors/addresses';
 import { ConnectorResolver } from '../connectors/connector-resolver.service';
+import { EgressIndexService } from '../provider-relay/egress-index.service';
 import {
   SOCKETMAP_NOTFOUND,
   SOCKETMAP_RELAY_DOMAIN_OK,
+  SOCKETMAP_TEMPFAIL,
   SOCKETMAP_UNKNOWN_MAP,
   TRANSPORT_DESTINATION_NOT_CONFIGURED,
 } from '../shared/replies';
@@ -96,6 +98,7 @@ type TlsDto = z.infer<typeof tlsDto>;
 export type SocketmapLookupConfig = Pick<
   SmtpAdapterConfig,
   | 'SMTP_DOMAIN_CACHE_TTL_SECONDS'
+  | 'PROVIDER_RELAY_ENABLED'
   | 'SMTP_NEGATIVE_CACHE_TTL_SECONDS'
   | 'GATEWAY_MX_HOSTS'
   | 'POSTFIX_MYHOSTNAME'
@@ -152,6 +155,8 @@ export class SocketmapLookupService {
     private readonly cache: RedisJsonCache,
     @Inject(ADAPTER_CONFIG) private readonly config: SocketmapLookupConfig,
     @Inject(ADAPTER_LOGGER) logger: Logger,
+    // Step 8.2 D7: provider egress ranges (global ProviderRelayModule; absent in old wiring).
+    @Optional() private readonly egress?: EgressIndexService,
   ) {
     this.logger = logger.child({ component: 'socketmap' });
     this.hostOptions = destinationHostOptions(config);
@@ -382,10 +387,23 @@ export class SocketmapLookupService {
   }
 
   /** Port 25 `check_client_access`: full IP inside an active source_ip connector network. */
+  /**
+   * Port 25 `check_client_access`: an active source-IP connector, or (step 8.2 D7, ADR-0078) an
+   * address inside a provider's active egress ranges. The latter only lets the session reach the
+   * RCPT policy (`policy_context=relay`), which resolves the provider relay from the linked
+   * sender domain and answers `Relay access denied` for everything else (D7.7); without it
+   * Postfix's relay restrictions refused every provider session before the policy ran. Before the
+   * first egress load the answer is a temporary failure (fail closed, D-WP3-5).
+   */
   private async relayClient(key: string): Promise<string> {
     const ip = parseIpKey(key);
     if (!ip) return SOCKETMAP_NOTFOUND;
-    return (await this.connectors.byClientAddress(ip)) ? SOCKETMAP_ACCESS_OK : SOCKETMAP_NOTFOUND;
+    if (await this.connectors.byClientAddress(ip)) return SOCKETMAP_ACCESS_OK;
+    if (!this.egress || !this.config.PROVIDER_RELAY_ENABLED) return SOCKETMAP_NOTFOUND;
+    if (!this.egress.loaded) return SOCKETMAP_TEMPFAIL;
+    return this.egress.current().providersFor(ip).length > 0
+      ? SOCKETMAP_ACCESS_OK
+      : SOCKETMAP_NOTFOUND;
   }
 
   /** Port 25 `check_ccert_access`: fingerprint of an active client_certificate connector. */
